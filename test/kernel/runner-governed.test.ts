@@ -1897,6 +1897,34 @@ describe('W2.3 reserve-then-settle', () => {
     }
   });
 
+  test('A12c: dependents of advisory-refused jobs re-mark budget-exhausted transitively, not fabricated failed', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    const plan: Plan = {
+      id: 'w23-a12c-chain',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor }, // unattended, no escape — both dispatches refuse
+    );
+    expect(calls).toEqual([]);
+    // j1: the refusal row IS its terminal budget verdict. j2: blocked by j1,
+    // and the CAUSE is the advisory refusal → re-marked budget-exhausted
+    // (ADR §2.9), never a fabricated `failed` row.
+    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
+    expect(report.counts['budget-exhausted']).toBe(2);
+    expect(report.counts.blocked).toBe(0);
+    // The stop gated j2's undispatched work — the honest-stop claim holds.
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+  });
+
   test('A12b: an unresolved reservation charges IN FULL and QUARANTINES the job (never re-run)', async () => {
     // Run 1 "crashes" mid-dispatch: run-started v2 (capped), job-started,
     // reservation-opened — no settle, no finish. The resumed run must charge
@@ -2042,6 +2070,21 @@ describe('W2.3 reserve-then-settle', () => {
     // Ledger: 2 (the never-refunded crash charge) + 0.5 (the new dispatch).
     expect(governor3.usdSpent).toBeCloseTo(2.5);
     void hash;
+
+    // Run 4 (NO release passed): the journalled release from run 3 LIFTS the
+    // standing quarantine — j1 runs (or replays) normally, needs-human never
+    // returns. The run-1 charge stays in the ledger forever.
+    const calls4: string[] = [];
+    const governor4 = createGovernor({ maxUsd: 5 });
+    const report4 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', countingOp(calls4))),
+      { governor: governor4, allowAdvisory: true },
+    );
+    expect(report4.jobs[0]?.result.status).toBe('ok'); // replayed from run 3's verified ok
+    expect(calls4).toEqual([]); // zero invocation — the replay skip, not a refusal
+    expect(governor4.usdSpent).toBeCloseTo(2.5); // the crash charge + run 3's spend, still held
   });
 
   test('A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch', async () => {
@@ -2162,6 +2205,96 @@ describe('W2.3 reserve-then-settle', () => {
       type: 'budget-tripped',
       tripKind: 'exhausted',
     });
+  });
+
+  test('dispatch-closed guard: late evidence from a killed op is dropped (usdSpent equals the journal charged)', async () => {
+    // A local virtual clock (the governor suite owns the shared one): the
+    // kill rungs must fire deterministically for the detached-promise test.
+    let nowMs = 1_000_000;
+    const timers: Array<{ at: number; fn: () => void }> = [];
+    const clock = {
+      now: () => nowMs,
+      setTimeout(fn: () => void, ms: number) {
+        const timer = { at: nowMs + ms, fn };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout(handle: unknown) {
+        const index = timers.indexOf(handle as { at: number; fn: () => void });
+        if (index >= 0) timers.splice(index, 1);
+      },
+      advance(ms: number) {
+        const target = nowMs + ms;
+        for (;;) {
+          const due = timers.filter((timer) => timer.at <= target).sort((a, b) => a.at - b.at)[0];
+          if (due === undefined) break;
+          nowMs = due.at;
+          timers.splice(timers.indexOf(due), 1);
+          due.fn();
+        }
+        nowMs = target;
+      },
+    };
+    const pump = async (promise: Promise<unknown>): Promise<void> => {
+      let settled = false;
+      void promise.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      for (let i = 0; i < 1000 && !settled; i++) {
+        clock.advance(10);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      if (!settled) throw new Error('pump: run did not settle');
+    };
+    const calls: string[] = [];
+    let held: ReturnType<typeof currentJobContext>;
+    let runReport: RunReport | undefined;
+    const hangThenReport = async (raw: unknown): Promise<OpResult<unknown>> => {
+      const jobId = (raw as { jobId: string }).jobId;
+      calls.push(jobId);
+      held = currentJobContext();
+      await new Promise<never>(() => {}); // hangs — killed at the final rung
+      return okOp(raw); // unreachable
+    };
+    const governor = createGovernor(
+      { maxUsd: 5, perJobWallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
+      clock,
+    );
+    const plan: Plan = { id: 'w23-late', jobs: [{ id: 'j1', op: 'hang', input: { jobId: 'j1' } }] };
+    await pump(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('hang', hangThenReport)),
+        { governor, allowAdvisory: true },
+      ).then((report) => {
+        runReport = report;
+      }),
+    );
+    // The kill settled the dispatch: basis 'full', charged = the whole
+    // reservation (the fair share C/concurrency = 5/1).
+    const report = runReport as RunReport;
+    expect(report.jobs[0]?.result.status).toBe('budget-exhausted');
+    const events = await openRunLog(w3dir).read(report.runId);
+    const settles = events.filter(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
+    expect(settles).toHaveLength(1);
+    const journalCharged = settles[0]?.charged ?? 0;
+    expect(journalCharged).toBeGreaterThan(0);
+    expect(governor.usdSpent).toBeCloseTo(journalCharged);
+    // LATE evidence from the detached promise: DROPPED — the ledger does not
+    // move past the journal, and no usage event lands.
+    const eventsBefore = governor.events.length;
+    held?.reportResult({ usage: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 }, costUSD: 9 });
+    expect(governor.usdSpent).toBeCloseTo(journalCharged);
+    expect(governor.events.length).toBe(eventsBefore);
   });
 
   test('a capless governed run over capped history inherits C_prev conservatively and journals the inheritance', async () => {

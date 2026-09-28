@@ -1144,6 +1144,13 @@ export async function runPlan(
       let reservation: BudgetReservation | undefined;
       let settledCharge: { charged: number; basis: 'observed' | 'full' } | undefined;
       let outcome: LadderOutcome<OpResult<unknown>> | undefined;
+      // The dispatch-closed guard: once the ladder settles, the dispatch's
+      // evidence window is CLOSED — a detached (killed) op promise's late
+      // reportResult calls are DROPPED, so the live ledger and the journal's
+      // reservation-settled.charged / job-finished rollups stay exactly
+      // equal (a post-settle fold would move the ledger with no journal
+      // backing, and the next fold would silently undercount it).
+      let dispatchClosed = false;
 
       // The queued-dispatch refusal (the trip KIND decides the verdict): a
       // budget trip leaves the row budget-exhausted, but a SIGNAL trip is a
@@ -1263,6 +1270,7 @@ export async function runPlan(
                 governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
               },
               onResult: (evidence) => {
+                if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
                 // The transitional reportResult channel: sanitize (a lying
                 // measurement is ZERO evidence, never a throw), mark the
                 // once-only flags for the completion fold below, apply
@@ -1281,7 +1289,9 @@ export async function runPlan(
           // whether the charge is 'observed' (definitive verdict) or 'full'
           // (killed / indeterminate / threw — unknown status).
           outcome = ladderOutcome;
-          return interpretOutcome(ladderOutcome, attempt);
+          const interpreted = interpretOutcome(ladderOutcome, attempt);
+          dispatchClosed = true; // close the evidence window BEFORE the settle reads it
+          return interpreted;
       };
 
       try {
@@ -1328,6 +1338,7 @@ export async function runPlan(
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
+              dispatchClosed = true; // a 'threw' outcome escapes interpretOutcome — closed here
               result = { status: 'failed', error: messageOf(err) };
             }
           }
@@ -1338,6 +1349,7 @@ export async function runPlan(
           try {
             result = await runDispatchLadder(admission.attempt);
           } catch (err) {
+            dispatchClosed = true; // same as above
             result = { status: 'failed', error: messageOf(err) };
           }
         }
@@ -1538,8 +1550,17 @@ export async function runPlan(
         const dispatchQuotaRefused = governor.events.some(
           (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
         );
+        // A12c advisory refusals are ADMISSION refusals too (ADR §2.9): the
+        // refused job's own row is its terminal budget verdict, and rows
+        // whose non-dispatch is transitively caused by it re-mark like any
+        // other admission refusal — never fabricated `failed` rows.
+        const advisoryRefused = governor.events.some(
+          (event) => event.kind === 'short-circuited' && event.reason === 'advisory-lane',
+        );
         const budgetFamilyStop =
-          (governor.tripped && governor.tripKind !== 'signal') || dispatchQuotaRefused;
+          (governor.tripped && governor.tripKind !== 'signal') ||
+          dispatchQuotaRefused ||
+          advisoryRefused;
         if (budgetFamilyStop) {
           // Is this job's non-execution attributable to the budget
           // (transitively)? Memoized per jobId: a diamond dependency must

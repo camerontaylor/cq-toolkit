@@ -1520,9 +1520,18 @@ export class BudgetGovernor {
     const openStarts = new Set<string>();
     // Reservation-era opens, by exact reservation id and by (run, job) for
     // the corruption check below.
-    const openReservations = new Map<string, { jobId: string; usd: number }>();
+    const openReservations = new Map<string, { jobId: string; usd: number; foldIndex: number }>();
     const openByRunJob = new Map<string, string>();
+    // Journalled releases (W2.3): the last fold index at which each job was
+    // explicitly released (provenance 'call'). A release LIFTS the standing
+    // quarantine for unresolved reservations that opened BEFORE it — the
+    // full charge stays (never refunded), and the operator does not have to
+    // repeat --release-quarantine on every later resume. A NEWER unresolved
+    // reservation (a crash AFTER the release) re-quarantines.
+    const releasedAtIndex = new Map<string, number>();
+    let foldIndex = 0;
     for (const event of events) {
+      foldIndex += 1;
       if (event.type === 'job-started') {
         jobIds.add(event.jobId);
         startsByJob.set(event.jobId, (startsByJob.get(event.jobId) ?? 0) + 1);
@@ -1531,8 +1540,16 @@ export class BudgetGovernor {
         continue;
       }
       if (event.type === 'reservation-opened') {
-        openReservations.set(event.reservationId, { jobId: event.jobId, usd: event.usd });
+        openReservations.set(event.reservationId, {
+          jobId: event.jobId,
+          usd: event.usd,
+          foldIndex,
+        });
         openByRunJob.set(`${event.runId}:${event.jobId}`, event.reservationId);
+        continue;
+      }
+      if (event.type === 'quarantine-released') {
+        releasedAtIndex.set(event.jobId, foldIndex);
         continue;
       }
       if (event.type === 'reservation-settled') {
@@ -1619,6 +1636,10 @@ export class BudgetGovernor {
     for (const [reservationId, open] of openReservations) {
       assertValidUsd('unresolved reservation', open.usd);
       this.usdSpentN += open.usd;
+      const released = releasedAtIndex.get(open.jobId);
+      if (released !== undefined && released > open.foldIndex) {
+        continue; // released AFTER this reservation opened: charged, not quarantined
+      }
       this.quarantinedN.set(open.jobId, { reservationId, usd: open.usd });
       quarantined.push({ jobId: open.jobId, reservationId, usd: open.usd });
     }
