@@ -26,7 +26,7 @@
 // without a governor, and the LEDGER refusals: a run over governed history
 // without governance, the ungoverned marker on a plan with no governed
 // history, a governed run over v1 journals with unaccounted dispatches, a
-// cap raise over the last governed cap) or 'journal: ' (the runId filename-safety assert: a
+// cap raise over the last governed cap) or 'journal: runId must match ' (the filename-safety assert: a
 // PlanSchema-valid plan whose id cannot become a journal file name, e.g.
 // 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
 // is set — the plan id is still the defective input). RUNTIME throws are
@@ -244,7 +244,7 @@ export function parseRunPlanInput<T>(
  * by run-plan (a plan FILE) and the plan subcommands (a registry floor plan);
  * see run-plan.ts's header for the shared error taxonomy.
  *
- * Kernel-input-class throws (`runPlan: `/`journal: `/`topoOrder: `) are
+ * Kernel-input-class throws (`runPlan: `/`journal: runId must match `/`topoOrder: `) are
  * narrated exits 2; any other throw propagates to the caller's catch → 1.
  */
 export async function runPlanThroughKernel(
@@ -314,7 +314,7 @@ export async function runPlanThroughKernel(
     // raise over the last governed cap: each names the operator's
     // resolution, an opt-in or a flag change, so the invocation is the
     // defective input), messages
-    // starting 'journal: ' — the runId filename-safety assert
+    // starting 'journal: runId must match ' — the filename-safety assert
     // (assertSafeRunId, via makeRunId inside runPlan) fires on a
     // PlanSchema-valid plan whose id is journal-unsafe ('bad/id'): the id
     // would become `<runId>.ndjson`, so the defect is still the plan INPUT,
@@ -327,7 +327,7 @@ export async function runPlanThroughKernel(
     const message = messageOf(err);
     if (
       message.startsWith('runPlan: ') ||
-      message.startsWith('journal: ') ||
+      message.startsWith('journal: runId must match ') ||
       message.startsWith('topoOrder: ')
     ) {
       narrateIfHuman(io, mode, `invalid input for '${commandName}': ${message}`);

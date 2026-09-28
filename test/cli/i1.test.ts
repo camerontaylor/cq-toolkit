@@ -16,7 +16,7 @@
 //      FILE CONTENT, and the kernel's own input-validation class ('runPlan: '
 //      — duplicate job ids, resume without a journal dir, caps without
 //      governance, and the ledger refusals: governed history without
-//      governance, unaccounted v1 dispatches, a cap raise; 'journal: ' — the
+//      governance, unaccounted v1 dispatches, a cap raise; 'journal: runId must match ' — the
 //      runId filename-safety assert on a schema-valid but journal-unsafe plan
 //      id, e.g. 'bad/id', under --journal-dir) — while genuine RUNTIME throws
 //      (a journal-dir pointing at a regular file) narrate 'run-plan threw:'
@@ -1220,7 +1220,7 @@ describe('run-plan through the governed kernel', () => {
     // name (`<runId>.ndjson`), so makeRunId → assertSafeRunId throws
     // `journal: …` from inside runPlan for a schema-valid plan like
     // id 'bad/id'. The plan id is still the defective INPUT, so the
-    // 'journal: ' classifier maps it to the usage path: exit 2, stdout empty,
+    // filename-safety classifier maps it to the usage path: exit 2, stdout empty,
     // stderr naming the journal assert — never the thrown-class exit 1.
     const { planPath, journalDir } = await writePlanFile({
       id: 'bad/id',
@@ -1236,6 +1236,27 @@ describe('run-plan through the governed kernel', () => {
     expect(out).toBe('');
     expect(err).toMatch(/invalid input for 'run-plan': journal: /);
     expect(err).toMatch(/runId must match/);
+  });
+
+  test('claimed sequence without a run journal is runtime corruption (1), not usage (2)', async () => {
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    await mkdir(journalDir);
+    await writeFile(join(journalDir, 'i1-plan.seq.1'), '');
+    const argv = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--max-tokens=100',
+    ];
+    const human = await capture(argv);
+    expect(human.code).toBe(1);
+    expect(human.out).toBe('');
+    expect(human.err).toMatch(/run-plan threw: journal: corrupt.*seq gap/);
+    expect(human.err).not.toContain('invalid input');
+
+    const machine = await capture([...argv, '--json']);
+    expect(machine).toEqual({ code: 1, out: '', err: '' });
   });
 
   test('duplicate job ids: PlanSchema-valid file, kernel input-class throw → exit 2', async () => {
