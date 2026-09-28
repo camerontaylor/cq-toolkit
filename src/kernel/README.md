@@ -428,6 +428,16 @@ from `reserve` to `settle`.
   unattended-by-design product paths (review-loop's sweep, self-merge-prs)
   pass the escape explicitly; an embedder withholding it refuses every
   dispatch on unattended runs — that is the gate working, not a bug.
+  Recorded gap: the journalled `governance` block validates provenance ONLY
+  in the direction it needs for safety — provenance without the escape is
+  refused, but the escape WITHOUT provenance is accepted, so a library
+  caller can persist an unattributed lane (both in-diff product paths stamp
+  theirs: the CLI `'operator'`, self-merge-prs `'product'`). The honest
+  closure is to make the unattributed escape unrepresentable — either the
+  inverse check plus a migration of every `{ allowAdvisory: true }` caller
+  to pass provenance, or distinct operator/product entry points that derive
+  it — not a footnote: this schema IS the durable record, so the check
+  belongs where the record is written. Recorded here for that change.
 - **Capless governed runs inherit C_prev.** A governed run without a cap
   over capped history conservatively inherits the predecessor cap
   (`governor.inheritCapUsd`) and journals
