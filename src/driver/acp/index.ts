@@ -114,13 +114,33 @@
 // channel (vendor-specific REQUEST transport — the OBSERVED value is what
 // binds, and it is never substituted into the result).
 //
-// STRUCTURED OUTPUT vs DD-4 (strategy §4, prompt-directed JSON): no ACP
-// structured-output carrier exists. When the constructor's outputSchema is
-// set, the driver APPENDS the JSON schema + a reply-with-only-JSON
-// instruction to the prompt, assembles the final text from the
-// agent_message_chunk stream, and validates post-settle with zod. A
-// payload that fails to parse or validate is DROPPED to narration —
-// structuredOutput stays absent, the verdict stays what the wire said.
+// STRUCTURED OUTPUT (seam v2, ADR-0002 §2.3 — prompt-directed JSON, strategy
+// §4): no ACP structured-output carrier exists, so the schema rides the
+// prompt. The schema source is the INVOCATION (`OpInvocation.outputSchema` —
+// a plain `OutputSchema` {name, schema: JsonSchema document}); the
+// constructor's zod `outputSchema` option still works during migration (a
+// later slice deletes it): it is converted once at construction via
+// `toOutputSchema('constructor', zodSchema)` so BOTH schema sources share one
+// validator and one verdict rule; when both are present the INVOCATION wins.
+// The prompt APPENDS the EXACT seam document + a reply-with-only-JSON
+// instruction; the final text is assembled from the agent_message_chunk
+// stream and judged post-settle by the SHARED validator
+// (`validateStructured` from ../common/structured.js) over that same
+// document. Verdict table (ADR §2.3):
+//   - object obtained and it validates  → 'complete', structuredOutput =
+//     the validated plain JSON;
+//   - object missing / unparseable / schema-invalid → 'error', errorClass
+//     'output-invalid', usage and derived cost KEPT, the rejection in the
+//     bounded error text. This lane takes NO repair turn (the ADR's MAY):
+//     the wire settles ONE prompt turn and the child is terminated at
+//     settle, so a follow-up turn would rework the settle path — the miss
+//     settles output-invalid directly. The old "complete with the payload
+//     dropped to narration" behaviour is DELETED — consumers read
+//     errorClass, never `[structured-output-miss]`-style text tokens.
+//   - a cap or the signal stopped the run first → 'budget' / 'aborted'
+//     (the missing object is a consequence, not the cause);
+//   - no schema requested → structuredOutput is ABSENT even when the reply
+//     text looks like JSON.
 //
 // I6 ISOLATION via the harness session store — EXACTLY the other lanes:
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
@@ -204,12 +224,30 @@
 //   5. stopReason 'end_turn'                             → 'complete'
 //      stopReason 'max_tokens' | 'max_turn_requests'     → 'budget' (a stop ON a cap)
 //      stopReason 'refusal' | anything else              → 'error'
+// A structured-output miss under a schema in force converts a 'complete'
+// into 'error'/'output-invalid' (§2.3 unification — the block above).
 // Once spawned, run() NEVER throws: every failure lands in an honest
 // verdict carrying the sessionId + denials gathered so far. Only
 // PRE-DISPATCH validation throws (absent binary / unknown endpoint, a
 // missing envNames entry, unknown sessionRef, a workspace binding that is
 // not an absolute existing directory or disagrees with the resumed record's
 // realpath — a DispatchError('config'); a non-positive Budget.maxTokens).
+//
+// ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
+// `errorClass` — the producer rule — and nothing else does. Classified ONLY
+// from structured signals (protocol fields; the JSON-RPC error shape; the
+// wire stopReason enum): a failed connection, the enforcement failures
+// (never-asks / denied-executed / unanswerable-or-unwritable permission
+// answer) and every handshake failure are LOCAL → 'harness'; a vendor JSON-RPC
+// error on the prompt and the stopReason 'refusal' are provider-reported →
+// 'provider-error'; a structured-output miss → 'output-invalid'; a reported
+// usage that failed the wire gate is a protocol break → 'harness'; an
+// unrecognized vendor stopReason is unresolved → 'unknown', NEVER a guessed
+// 'transient'. Abort-shaped runs are excluded (they are 'aborted', not
+// errors). `providerSignals` is deliberately NEVER emitted on this lane:
+// the ACP wire exposes no rate-limit/quota structure (usage_update is
+// context telemetry; PromptResponse.usage is token counts) — signals are
+// protocol fields only, never invented.
 //
 // COST (DD-2, derived-only): costUSD via the `pricing` constructor lookup
 // (default: computeCostUSD over the vendored models.dev table) keyed by
@@ -225,25 +263,27 @@ import { isAbsolute, join } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
-import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { currentJobContext } from '../../kernel/governor.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
-import { describeError, redactSensitiveText } from '../error-text.js';
+import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { toOutputSchema, validateStructured } from '../common/structured.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
   RunOptions,
   SandboxLevel,
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
   WorkspaceBinding,
 } from '../types.js';
@@ -340,11 +380,16 @@ export interface AcpDriverOptions {
    */
   modelEnv?: string;
   /**
-   * Structured-output schema (prompt-directed JSON, strategy §4 — ACP has
-   * no native carrier). When set, the prompt carries the JSON schema +
-   * a reply-with-only-JSON instruction, and the assembled agent text is
-   * validated against THIS schema post-settle (a payload that fails is
-   * dropped to narration, never trusted).
+   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
+   * it in a later slice): converted once at construction via
+   * `toOutputSchema('constructor', schema)` so the constructor path shares
+   * the invocation path's judge and verdict rule. When the invocation also
+   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
+   * the prompt carries the JSON schema + a reply-with-only-JSON instruction
+   * (prompt-directed JSON, strategy §4 — ACP has no native carrier), and the
+   * assembled agent text must validate over the SAME document before it
+   * lands in WorkerResult.structuredOutput; a miss settles the uniform
+   * error/'output-invalid' verdict.
    */
   outputSchema?: ZodType;
   /** Root under which fresh temp workspaces are created. Default: the harness default (os.tmpdir()/cq-harness). */
@@ -748,7 +793,8 @@ export class AcpDriver implements Driver {
   private readonly endpointTable: AcpEndpointTable;
   private readonly envNames: readonly string[];
   private readonly modelEnv: string | undefined;
-  private readonly outputSchema: ZodType | undefined;
+  /** The migration-only constructor schema, normalized to the seam shape. */
+  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly workspaceRoot: string | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly pricingOverride:
@@ -765,7 +811,15 @@ export class AcpDriver implements Driver {
     this.endpointTable = options.endpointTable ?? defaultAcpEndpointTable();
     this.envNames = Object.freeze([...(options.envNames ?? [])]);
     this.modelEnv = options.modelEnv;
-    this.outputSchema = options.outputSchema;
+    // zod→seam schema at CONSTRUCTION (the migration-only source): an
+    // unrepresentable schema is a loud config error before any run, not a
+    // mid-dispatch surprise. The seam document is retained — the settle-time
+    // judge (`validateStructured`) re-derives its schema from THIS document,
+    // the same one the prompt carried.
+    this.constructorOutputSchema =
+      options.outputSchema === undefined
+        ? undefined
+        : toOutputSchema('constructor', options.outputSchema);
     this.workspaceRoot = options.workspaceRoot;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;
@@ -809,7 +863,13 @@ export class AcpDriver implements Driver {
     for (const name of extraNames) {
       const value = process.env[name];
       if (value === undefined || value === '') {
-        throw new Error(`acp driver: envNames entry '${name}' is not set in the environment`);
+        // Pre-dispatch misconfiguration carries its class as structured data
+        // (ADR-0002 §2.2): errorClassOf → 'config' — the same posture as the
+        // subprocess lane's missing route-key throw.
+        throw new DispatchError(
+          'config',
+          `acp driver: envNames entry '${name}' is not set in the environment`,
+        );
       }
     }
     const childEnv = buildChildEnv(process.env, undefined, extraNames);
@@ -869,7 +929,16 @@ export class AcpDriver implements Driver {
       } catch {
         // deliberately swallowed — the honest verdict outranks the record
       }
-      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'error' };
+      // Producer rule (ADR-0002 §2.2): every error verdict carries its class
+      // — a synchronous spawn failure is a LOCAL failure.
+      return {
+        usage: zeroUsage(),
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'error',
+        error: boundedErrorText(`acp driver: spawn failed — ${messageOf(err)}`),
+        errorClass: 'harness',
+      };
     }
 
     let signalFired = false;
@@ -1455,15 +1524,26 @@ export class AcpDriver implements Driver {
       }
     }
 
+    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
+    // wins when both sources are present; the constructor schema is the
+    // migration-only fallback. Both normalize to the same plain-data
+    // OutputSchema, so ONE validator judges the payload whichever source
+    // carried it.
+    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+
     // --- The one prompt: fire-and-settle.
     let promptResponse: PromptResponse | undefined;
     let promptFailure: string | undefined;
+    // True when the prompt request rejected with an AcpRpcError — the vendor
+    // ANSWERED with a JSON-RPC error (a provider-reported failure, vs a child
+    // death or a closed pipe, which are local).
+    let promptRpcError = false;
     if (handshakeFailure === undefined && !signalFired && acpSessionId !== undefined) {
       promptDispatched = true;
       try {
         const responseRaw = await wire.request(ACP_METHODS.sessionPrompt, {
           sessionId: acpSessionId,
-          prompt: [{ type: 'text', text: composePrompt(prompt, this.outputSchema) }],
+          prompt: [{ type: 'text', text: composePrompt(prompt, outputSchema) }],
         });
         const parsedResponse = PromptResponseSchema.safeParse(responseRaw);
         if (parsedResponse.success) {
@@ -1473,6 +1553,7 @@ export class AcpDriver implements Driver {
         }
       } catch (err) {
         promptFailure = messageOf(err);
+        promptRpcError = err instanceof AcpRpcError;
       }
     }
 
@@ -1538,50 +1619,90 @@ export class AcpDriver implements Driver {
       );
     }
 
-    // --- Prompt-directed JSON (§4): parse + validate the assembled text;
-    // a failing payload is dropped to narration, never trusted.
-    let structured: unknown;
-    const transcriptText = observation.transcript.join('');
-    if (this.outputSchema !== undefined && transcriptText !== '') {
-      let parsedJson: unknown;
-      let unparseable = false;
-      try {
-        parsedJson = JSON.parse(transcriptText);
-      } catch {
-        unparseable = true;
-      }
-      if (unparseable) {
-        observation.narration.push(
-          JSON.stringify({
-            cq: 'structured-output-unparseable',
-            note: 'the assembled agent text is not JSON — dropped (strategy §4)',
-          }),
-        );
-      } else {
-        const check = this.outputSchema.safeParse(parsedJson);
-        if (check.success) {
-          structured = check.data;
-        } else {
-          observation.narration.push(
-            JSON.stringify({
-              cq: 'structured-output-rejected',
-              issues: check.error.issues.length,
-              paths: check.error.issues.map((issue) => issue.path.map(String).join('.')),
-            }),
-          );
-        }
-      }
-    }
-
     // A failed connection (the oversized-frame path) pins the verdict
     // 'error' even when a prompt response had already arrived — the wire's
     // integrity broke mid-run, and 'complete' would hide that (the
-    // answerWriteFailed mirror). The measured usage still folds.
+    // answerWriteFailed mirror). The measured usage still folds. Read BEFORE
+    // the structured judgment: a broken wire voids the payload outright.
     const connectionFailure = wire.connectionFailure;
     if (connectionFailure !== undefined) {
       observation.narration.push(
         JSON.stringify({ cq: 'connection-failed', message: connectionFailure.message }),
       );
+    }
+
+    // The measured usage and the malformed-reported-usage verdict input
+    // (hoisted: the structured carve-out below reads them).
+    const measuredUsage =
+      promptResponse === undefined ? undefined : mapWireUsage(promptResponse.usage);
+    // PR #97 review (Codex P1): a response that CARRIES a usage the wire
+    // gate rejects (negative/fractional/non-finite counts) is MALFORMED
+    // REPORTED usage — not absent usage. Without the distinction, verdict()
+    // substitutes zeros and classifies the run 'complete', erasing token
+    // accounting and bypassing the unpriced-usage check under maxUsd; a
+    // broken or malicious harness must not be able to buy a free run.
+    const malformedUsage =
+      promptResponse !== undefined &&
+      promptResponse.usage !== null &&
+      promptResponse.usage !== undefined &&
+      measuredUsage === undefined;
+
+    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared validator
+    // judges the assembled text over the SAME document the prompt carried.
+    // A miss settles the uniform error/'output-invalid' verdict (usage and
+    // cost kept, the rejection in the bounded error text) — the old
+    // "complete with the payload dropped to narration" behaviour is
+    // DELETED. This lane takes NO repair turn (the ADR's MAY): the wire
+    // settles ONE prompt turn and the child is terminated at settle, so a
+    // follow-up turn would rework the settle path — the miss settles
+    // output-invalid directly. Carve-outs: a cap or the signal stopped the
+    // run first → the missing object is the stop's consequence (the
+    // budget/aborted verdict stands); enforcement pins, a broken wire or a
+    // malformed reported usage VOID the payload outright — output produced
+    // on a broken run is not a model outcome.
+    let structured: unknown;
+    let structuredMiss: string | undefined;
+    if (
+      outputSchema !== undefined &&
+      !signalFired &&
+      !answerWriteFailed &&
+      !permissionAnswerFailed &&
+      !malformedUsage &&
+      connectionFailure === undefined &&
+      ungatedToolCallIds.length === 0 &&
+      deniedButCompletedIds.length === 0 &&
+      promptResponse !== undefined &&
+      promptResponse.stopReason === 'end_turn'
+    ) {
+      const transcriptText = observation.transcript.join('');
+      if (transcriptText === '') {
+        structuredMiss = 'the turn produced no text (the harness never sent the required object)';
+      } else {
+        let parsedJson: unknown;
+        let unparseable = false;
+        try {
+          parsedJson = JSON.parse(transcriptText);
+        } catch {
+          unparseable = true;
+        }
+        if (unparseable) {
+          structuredMiss =
+            'the assembled agent text is not JSON — the harness never produced the required object';
+        } else {
+          const check = validateStructured(outputSchema, parsedJson);
+          if (check.ok) {
+            structured = check.value;
+          } else {
+            structuredMiss = `the reply does not validate against schema '${outputSchema.name}' — ${check.reason}`;
+          }
+        }
+      }
+      if (structuredMiss !== undefined) {
+        // Evidence in narration; the VERDICT is the contract (errorClass).
+        observation.narration.push(
+          JSON.stringify({ cq: 'structured-output-miss', reason: structuredMiss }),
+        );
+      }
     }
 
     // --- Failure records land in narration BEFORE persistence (evidence,
@@ -1601,12 +1722,7 @@ export class AcpDriver implements Driver {
 
     // Malformed REPORTED usage marker — BEFORE persistence so the record
     // carries the evidence (PR #97 review, Codex P1).
-    if (
-      promptResponse !== undefined &&
-      promptResponse.usage !== null &&
-      promptResponse.usage !== undefined &&
-      mapWireUsage(promptResponse.usage) === undefined
-    ) {
+    if (malformedUsage) {
       observation.narration.push(
         JSON.stringify({
           cq: 'malformed-reported-usage',
@@ -1622,31 +1738,22 @@ export class AcpDriver implements Driver {
       // deliberately swallowed — the honest verdict outranks the record
     }
 
-    const measuredUsage =
-      promptResponse === undefined ? undefined : mapWireUsage(promptResponse.usage);
-    // PR #97 review (Codex P1): a response that CARRIES a usage the wire
-    // gate rejects (negative/fractional/non-finite counts) is MALFORMED
-    // REPORTED usage — not absent usage. Without the distinction, verdict()
-    // substitutes zeros and classifies the run 'complete', erasing token
-    // accounting and bypassing the unpriced-usage check under maxUsd; a
-    // broken or malicious harness must not be able to buy a free run.
-    const malformedUsage =
-      promptResponse !== undefined &&
-      promptResponse.usage !== null &&
-      promptResponse.usage !== undefined &&
-      measuredUsage === undefined;
     return this.verdict(modelSpec, budget, observation, record.sessionId, {
       structured,
+      structuredMiss,
       signalFired,
       answerWriteFailed,
       permissionAnswerFailed,
-      connectionFailed: connectionFailure !== undefined,
+      connectionFailure: connectionFailure?.message,
       deniedRan: deniedButCompletedIds.length > 0,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
       malformedUsage,
       ungated: ungatedToolCallIds.length > 0,
+      handshakeFailure,
+      promptFailure,
+      promptRpcError,
     });
   }
 
@@ -1659,33 +1766,27 @@ export class AcpDriver implements Driver {
    * error enforcement failure the vendor settled past; unmeasured
    * verdicts (abort, handshake failure, child death) report zeros and
    * NEVER a cost.
+   *
+   * ERROR CLASSES (seam v2, ADR-0002 §2.2): every 'error' verdict carries
+   * `errorClass` — the producer rule — and nothing else does. Cut order in
+   * {@link classifyFailure}. Abort/budget carve-outs carry no class: the
+   * missing object is their consequence, not their cause. The cause text is
+   * derived (issue #208 posture, mirroring the sibling lanes) so a 0-token
+   * failure is diagnosable from the journal instead of a bare 'error'.
    */
   private verdict(
     modelSpec: ModelSpec,
     budget: OpInvocation['budget'],
     observation: RunObservation,
     sessionId: string,
-    inputs: {
-      structured: unknown;
-      signalFired: boolean;
-      answerWriteFailed: boolean;
-      permissionAnswerFailed: boolean;
-      connectionFailed: boolean;
-      deniedRan: boolean;
-      promptStopReason: string | undefined;
-      responded: boolean;
-      measuredUsage: Usage | undefined;
-      /** True when the response CARRIED a usage the wire gate rejected — malformed REPORTED usage, never zeros (PR #97 review, Codex P1). */
-      malformedUsage: boolean;
-      ungated: boolean;
-    },
+    inputs: VerdictInputs,
   ): WorkerResult {
     const usage = inputs.measuredUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
       permissionAnswerFailed: inputs.permissionAnswerFailed,
-      connectionFailed: inputs.connectionFailed,
+      connectionFailed: inputs.connectionFailure !== undefined,
       malformedUsage: inputs.malformedUsage,
       deniedRan: inputs.deniedRan,
       ungated: inputs.ungated,
@@ -1694,6 +1795,30 @@ export class AcpDriver implements Driver {
       promptStopReason: inputs.promptStopReason,
       responded: inputs.responded,
     });
+    // §2.3 verdict unification: a structured-output miss is an ERROR verdict
+    // — except when a cap or the signal stopped the run first (the missing
+    // object is its consequence, not its cause: the budget/aborted carve-out).
+    const missIsError = inputs.structuredMiss !== undefined && stopReason === 'complete';
+    const effectiveStopReason: WorkerResult['stopReason'] = missIsError ? 'error' : stopReason;
+    let error: string | undefined;
+    let errorClass: WorkerErrorClass | undefined;
+    if (effectiveStopReason === 'error') {
+      errorClass = classifyFailure({
+        connectionFailed: inputs.connectionFailure !== undefined,
+        enforcementFailed:
+          inputs.answerWriteFailed ||
+          inputs.permissionAnswerFailed ||
+          inputs.deniedRan ||
+          inputs.ungated,
+        handshakeFailed: inputs.handshakeFailure !== undefined,
+        structuredMiss: inputs.structuredMiss,
+        promptRpcError: inputs.promptRpcError,
+        responded: inputs.responded,
+        malformedUsage: inputs.malformedUsage,
+        promptStopReason: inputs.promptStopReason,
+      });
+      error = boundedErrorText(errorCauseOf(inputs));
+    }
     // Derived-only cost (DD-2), keyed by the OBSERVED model ONLY (PR #37
     // review, Codex P2): when the harness reported measured usage but
     // never echoed the post-materialization model, the cost stays ABSENT —
@@ -1702,7 +1827,8 @@ export class AcpDriver implements Driver {
     // Under a configured maxUsd the absent cost then trips the governor's
     // unpriced-usage check (DD-9: fail loud, never silently mispriced).
     // The result's `model` field follows the same rule above — observed
-    // only, never requested.
+    // only, never requested. The structured-output miss keeps the
+    // measurement and its derived cost (a real turn was spent, §2.3).
     const cost =
       inputs.measuredUsage === undefined || observation.servedModel === undefined
         ? {}
@@ -1714,14 +1840,17 @@ export class AcpDriver implements Driver {
     return {
       // The observed served model: the POST-MATERIALIZATION value the
       // harness reported, never the requested id (the remap-detection
-      // fact, leg m; header).
+      // fact, leg m; header). RAW id only — the `builtin:<provider>`
+      // normalization is the S4 served-model wrapper's job, not this lane's.
       ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
       ...(inputs.structured !== undefined ? { structuredOutput: inputs.structured } : {}),
       usage,
       ...cost,
       sessionId,
       denials: observation.denials,
-      stopReason,
+      stopReason: effectiveStopReason,
+      ...(error !== undefined ? { error } : {}),
+      ...(errorClass !== undefined ? { errorClass } : {}),
     };
   }
 
@@ -1901,16 +2030,19 @@ export function decidePermission(
 
 /**
  * THE PROMPT: the caller's prompt verbatim, or — when a structured-output
- * schema is configured — the prompt PLUS the JSON schema and a
+ * schema is in force — the prompt PLUS the JSON schema and a
  * reply-with-only-JSON instruction (prompt-directed JSON, strategy §4;
- * ours truncates nothing: caller data never rides a budget).
+ * ours truncates nothing: caller data never rides a budget). The embedded
+ * document is the EXACT seam document the after-settle judge
+ * (`validateStructured`) re-derives its schema from — the verdict is over
+ * what the vendor was shown, whichever source carried the schema.
  */
 const STRUCTURED_OUTPUT_INSTRUCTION =
   'Reply with ONLY a JSON value conforming to this JSON Schema — no prose, no code fences:';
 
-export function composePrompt(prompt: string, outputSchema: ZodType | undefined): string {
+export function composePrompt(prompt: string, outputSchema: OutputSchema | undefined): string {
   if (outputSchema === undefined) return prompt;
-  return `${prompt}\n\n${STRUCTURED_OUTPUT_INSTRUCTION}\n${JSON.stringify(z.toJSONSchema(outputSchema))}`;
+  return `${prompt}\n\n${STRUCTURED_OUTPUT_INSTRUCTION}\n${JSON.stringify(outputSchema.schema)}`;
 }
 
 /**
@@ -2190,6 +2322,129 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
   if (inputs.promptStopReason === 'max_tokens' || inputs.promptStopReason === 'max_turn_requests')
     return 'budget';
   return 'error'; // refusal, an unknown vendor reason, or an unshapeable response
+}
+
+// ---------------------------------------------------------------------------
+// Error-class classifier (seam v2, ADR-0002 §2.2) + the error CAUSE
+// ---------------------------------------------------------------------------
+
+/** Everything the settle observed, plain data — the verdict fold's input. */
+interface VerdictInputs {
+  /** The validated structured payload, when a schema was in force and it validated. */
+  structured: unknown;
+  /** Why no valid object was obtained (a schema in force, a clean end_turn) — the output-invalid trigger. */
+  structuredMiss: string | undefined;
+  signalFired: boolean;
+  answerWriteFailed: boolean;
+  permissionAnswerFailed: boolean;
+  /** The failed connection's reason (the oversized-frame path), when the wire broke. */
+  connectionFailure: string | undefined;
+  deniedRan: boolean;
+  promptStopReason: string | undefined;
+  responded: boolean;
+  measuredUsage: Usage | undefined;
+  /** True when the response CARRIED a usage the wire gate rejected — malformed REPORTED usage, never zeros (PR #97 review, Codex P1). */
+  malformedUsage: boolean;
+  ungated: boolean;
+  /** The handshake failure's cause text (protocol mismatch / init / session / mode-pin failure). */
+  handshakeFailure: string | undefined;
+  /** The prompt request's failure text (child death, closed pipe, unshapeable response). */
+  promptFailure: string | undefined;
+  /** True when the prompt request rejected with an AcpRpcError — the vendor ANSWERED with a JSON-RPC error. */
+  promptRpcError: boolean;
+}
+
+/** Inputs to the acp failure classifier — structured signals only. */
+export interface FailureClassInputs {
+  /** The wire's integrity broke (the oversized-frame connection failure). */
+  connectionFailed: boolean;
+  /** The tool policy could not be enforced (never-asks / denied-executed / unanswerable-or-unwritable permission answer). */
+  enforcementFailed: boolean;
+  /** initialize / session establishment / the mode pin failed — the run never reached a prompt. */
+  handshakeFailed: boolean;
+  /** A schema was in force and no valid object was obtained. */
+  structuredMiss: string | undefined;
+  /** The vendor ANSWERED the prompt request with a JSON-RPC error (AcpRpcError). */
+  promptRpcError: boolean;
+  /** A wellshaped prompt response arrived. */
+  responded: boolean;
+  /** The response CARRIED a usage the wire gate rejected — a protocol break. */
+  malformedUsage: boolean;
+  /** The wire stopReason, when a wellshaped prompt response arrived. */
+  promptStopReason: string | undefined;
+}
+
+/**
+ * The class of an acp failure (header cut order). STRUCTURED signals only —
+ * the connection/enforcement/handshake flags, the JSON-RPC error shape, the
+ * wire stopReason enum; there is no free-text matching on this wire because
+ * the protocol exposes the causes structurally. Unresolved → 'unknown',
+ * NEVER a guessed 'transient'. Abort-shaped runs never reach this function
+ * (they are 'aborted', not errors).
+ *
+ *   1. a failed connection is a local protocol break → 'harness';
+ *   2. an enforcement failure is local → 'harness';
+ *   3. a handshake failure is local → 'harness';
+ *   4. a structured-output miss → 'output-invalid';
+ *   5. a vendor JSON-RPC error on the prompt is provider-reported →
+ *      'provider-error';
+ *   6. a responded turn: a malformed reported usage is a protocol break →
+ *      'harness'; the stopReason 'refusal' is the checklist's
+ *      provider-reported row → 'provider-error'; any UNRECOGNIZED vendor
+ *      stopReason is unresolved → 'unknown';
+ *   7. no response at all (child death, closed pipe) → 'harness'.
+ */
+export function classifyFailure(inputs: FailureClassInputs): WorkerErrorClass {
+  if (inputs.connectionFailed) return 'harness';
+  if (inputs.enforcementFailed) return 'harness';
+  if (inputs.handshakeFailed) return 'harness';
+  if (inputs.structuredMiss !== undefined) return 'output-invalid';
+  if (inputs.promptRpcError) return 'provider-error';
+  if (inputs.responded) {
+    if (inputs.malformedUsage) return 'harness';
+    if (inputs.promptStopReason === 'refusal') return 'provider-error';
+    return 'unknown'; // an unrecognized vendor stopReason — unresolved, never guessed
+  }
+  return 'harness'; // the child died / the wire closed before any response
+}
+
+/**
+ * The error CAUSE for an 'error' verdict (issue #208 posture, mirroring the
+ * sibling lanes): what actually went wrong, in precedence order — the
+ * structured-output miss; the handshake; the failed connection; the prompt
+ * request's failure; the enforcement pins; the malformed reported usage; the
+ * wire stopReason. The caller bounds + redacts the result
+ * (`boundedErrorText`), so a 0-token failure is diagnosable from the journal
+ * instead of a bare 'error'.
+ */
+function errorCauseOf(inputs: VerdictInputs): string {
+  if (inputs.structuredMiss !== undefined) {
+    return `acp driver: structured output invalid — ${inputs.structuredMiss}`;
+  }
+  if (inputs.handshakeFailure !== undefined) {
+    return `acp driver: handshake failure — ${inputs.handshakeFailure}`;
+  }
+  if (inputs.connectionFailure !== undefined) {
+    return `acp driver: connection failure — ${inputs.connectionFailure}`;
+  }
+  if (inputs.promptFailure !== undefined) {
+    return `acp driver: prompt failure — ${inputs.promptFailure}`;
+  }
+  const enforcement: string[] = [];
+  if (inputs.permissionAnswerFailed) enforcement.push('the permission ask could not be answered');
+  if (inputs.answerWriteFailed) enforcement.push('the permission-answer write failed');
+  if (inputs.deniedRan) enforcement.push('a denied tool executed anyway');
+  if (inputs.ungated) enforcement.push('a tool executed without any permission gate');
+  if (enforcement.length > 0) {
+    return `acp driver: tool policy unenforceable — ${enforcement.join('; ')}`;
+  }
+  if (inputs.malformedUsage) {
+    return 'acp driver: the prompt response carried a usage the wire gate rejected';
+  }
+  if (inputs.responded && inputs.promptStopReason !== undefined) {
+    return `acp driver: the harness ended the turn with stopReason '${inputs.promptStopReason}'`;
+  }
+  return 'acp driver: the run failed without a cause';
 }
 
 /** Best-effort error message (an unknown throw shape is still evidence). */
