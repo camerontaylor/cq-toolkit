@@ -13,21 +13,21 @@ permissions:
 
 jobs:
   validate:
-    name: stage-3-after-cycle-2-final
+    name: pr235-after-policy-integration
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
     env:
-      VALIDATION_SUBJECT: 1cf93b6840f2d82cf16e65438f0930e5f6311e4d
-      VALIDATION_BASE: 130f77d2a6abf13b41f92e91c0e8abb3c3ef3c19
-      VALIDATION_STAGE: stage-3-after-cycle-2-final
+      VALIDATION_SUBJECT: 350e996bb86c9dc00e2d607ac2c73cdf8279ad25
+      VALIDATION_BASE: ce2f8e9db6d0d18715010d47206828f0cc276b8e
+      VALIDATION_STAGE: pr235-after-policy-integration
     steps:
       - name: Check out source subject
         id: source-checkout
         uses: actions/checkout@v4
         with:
-          ref: 1cf93b6840f2d82cf16e65438f0930e5f6311e4d
+          ref: 350e996bb86c9dc00e2d607ac2c73cdf8279ad25
           fetch-depth: 0
           persist-credentials: false
       - name: Verify exact subject and clean checkout
