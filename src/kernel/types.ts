@@ -192,6 +192,31 @@ export interface GovernanceRecord {
   capTokens?: number;
   /** Operator-declared attendance (P8 default false; declared, never verified). */
   attended: boolean;
+  /**
+   * Present when the operator passed the ADVISORY escape (W2.3, A12c): the
+   * run may dispatch ADVISORY-classified work unattended. Recorded so the
+   * journal shows WHY an unattended run was allowed to spend on lanes no
+   * conformance leg has proven HARD.
+   */
+  allowAdvisory?: boolean;
+  /**
+   * WHO set `allowAdvisory` (W2.3 fix round): 'operator' for the CLI's
+   * `--allow-advisory-budget`, 'product' for an unattended-by-design
+   * product path (review-loop, self-merge-prs). Present only alongside
+   * `allowAdvisory: true` — the journal distinguishes an operator's escape
+   * from the product's own posture, so a future HARD row's C_max breach is
+   * attributable (ADR-0003 §2.3 puts allowAdvisory admissions OUTSIDE the
+   * bound).
+   */
+  allowAdvisoryProvenance?: 'operator' | 'product';
+  /**
+   * Present when a CAPLESS governed run inherited the previous governed
+   * run's `capUsd` (W2.3): the ledger's C never silently disappears between
+   * runs — the uncapped run reserves against the inherited cap and journals
+   * the inheritance. The inherited value stays the predecessor cap for the
+   * raise refusal (an inheritance does not move C).
+   */
+  inheritedCapUsd?: number;
   /** Present iff `budget.legacyJournal=reset` was honoured: which v1 runs the spend bound excludes. Sticky for the named files. */
   legacyJournal?: { mode: 'reset'; v1RunIds: string[] };
   /** Present iff `budget.raiseCap` was honoured: the raised-from → raised-to cap (USD) transition. */
@@ -241,8 +266,11 @@ export interface JobStartedJournalEvent {
  * record verbatim — `opId` + `inputsHash` + `result` — which identifies the
  * op and its input and reproduces the outcome on resume. The optional
  * `usage`/`costUSD` rollups let a resumed run keep per-job spend accounting
- * (v1.1: a governed runner writes them — journal v2, ADR-0003 annex §2;
- * `charged` arrives with the reservation slice).
+ * (v1.1: a governed runner writes them — journal v2, ADR-0003 annex §2).
+ * `charged` (W2.3, reservation-era runs) is the job's reservation-side
+ * charge — Σ `reservation-settled.charged` over the job's dispatches this
+ * run — the ledger truth that includes a full reservation charge behind an
+ * abort, which the modeled `costUSD` rollup cannot see.
  */
 export interface JobFinishedJournalEvent {
   type: 'job-finished';
@@ -256,6 +284,131 @@ export interface JobFinishedJournalEvent {
   usage?: Usage;
   /** Per-job modeled USD rollup (costBasis 'modeled'), when cost was observed. */
   costUSD?: number;
+  /** Per-job reservation charge (Σ settled charged), written by reservation-era governed runs (W2.3). */
+  charged?: number;
+}
+
+/** Which budget class a reserved dispatch was admitted under (ADR-0003 §2.4). */
+export type ReservationClass = 'hard' | 'advisory';
+
+/** Why the invocation gate refused to open a reservation (ADR-0003 §2.2 step 2). */
+export type ReservationRefusalReason = 'advisory-lane';
+
+/**
+ * Journal (v2, W2.3): a reservation was OPENED write-ahead, before the
+ * dispatch. Durably appended (fdatasync) BEFORE the op runs — an unresolved
+ * `reservation-opened` (its settle lost to a hard crash) is exactly the
+ * spend-behind-a-crashed-dispatch fact W2.2 could not see: the resume fold
+ * charges it IN FULL and quarantines the job (A12b). `usd` is the reserved
+ * amount r; `proposedUsd` rides only when the reservation was shrunk to the
+ * remaining capacity (r < the fair-share proposal).
+ */
+export interface ReservationOpenedJournalEvent {
+  type: 'reservation-opened';
+  runId: string;
+  at: string;
+  jobId: string;
+  op: string;
+  attempt: number;
+  /** `${runId}:${jobId}:${attempt}:${seq}` — unique across the plan's history. */
+  reservationId: string;
+  /** The reserved USD amount r (the ledger holds this until settle). */
+  usd: number;
+  /** The budget class the dispatch was admitted under (v1.1: always 'advisory'). */
+  class: ReservationClass;
+  /** The fair-share proposal p, when r was shrunk below it (capacity). */
+  proposedUsd?: number;
+}
+
+/**
+ * How a settled reservation's charge was determined (kernel charge rule,
+ * W2.3). The driver-stream basis (billed-then-failed attempt frames, ADR
+ * N2) arrives with W2.1's settlement evidence and will extend this union.
+ */
+export type ReservationChargeBasis = 'observed' | 'full';
+
+/**
+ * Journal (v2, W2.3): a reservation settled — durably appended BEFORE the
+ * job's outcome is journalled. `charged` is the ledger truth for the
+ * dispatch: the invocation's observed modeled spend, or the FULL reservation
+ * `usd` when the dispatch ended in unknown status (killed, or an
+ * `indeterminate` verdict — spend may have happened that no evidence fold
+ * can see). `charged > usd` is a breach (the reservation undersold the
+ * work) and trips the run. The structured driver-seam channel
+ * (`errorClass`/`providerSignals`/`failedAttemptsObserved`, ADR-0003 §2.2
+ * step 9) arrives with the driver slices (W2.1/W3.3) — this kernel slice
+ * journals the usage rollup only.
+ */
+export interface ReservationSettledJournalEvent {
+  type: 'reservation-settled';
+  runId: string;
+  at: string;
+  jobId: string;
+  reservationId: string;
+  /** The amount actually charged to the ledger (≤ usd except on a breach). */
+  charged: number;
+  /** How `charged` was determined. */
+  basis: ReservationChargeBasis;
+  /**
+   * PRICE PRESENCE (H2/DD-9): true when the dispatch's channel observed a
+   * `costUSD` — a legitimate ZERO included (a zero-priced/subscription
+   * lane). The resume fold needs this to tell "priced at zero" from
+   * "unpriced": the `charged` sum alone would reclassify the former as the
+   * latter and hard-stop every resume over it. Absent (an older in-flight
+   * journal) folds as unpriced — fail loud, never fail open.
+   */
+  priced?: boolean;
+  /** The invocation's observed usage rollup, when any evidence folded. */
+  usage?: Usage;
+}
+
+/**
+ * Journal (v2, W2.3): the invocation gate refused to open a reservation —
+ * nothing was dispatched. W2.3's reason is `advisory-lane` (A12c: an
+ * ADVISORY-classified dispatch refused unattended without the
+ * `allowAdvisory` escape). The refusal is terminal budget evidence ON THE
+ * JOB (its row is budget-exhausted); dependents re-mark transitively.
+ */
+export interface ReservationRefusedJournalEvent {
+  type: 'reservation-refused';
+  runId: string;
+  at: string;
+  jobId: string;
+  op: string;
+  reason: ReservationRefusalReason;
+}
+
+/**
+ * Journal (v2, W2.3): a job is QUARANTINED over an unresolved reservation —
+ * charged in full at the resume fold (A12b), never dispatched, reported
+ * `needs-human`, re-attested every subsequent run until an explicit per-call
+ * `releaseQuarantine` (which never refunds the charge). Written by the run
+ * that observes and enforces the quarantine.
+ */
+export interface JobQuarantinedJournalEvent {
+  type: 'job-quarantined';
+  runId: string;
+  at: string;
+  jobId: string;
+  /** The unresolved reservation behind the quarantine. */
+  reservationId: string;
+  /** The full charge the fold took for it (never refunded). */
+  chargedUsd: number;
+  reason: 'unresolved-reservation';
+}
+
+/**
+ * Journal (v2, W2.3): an explicit per-call `releaseQuarantine` released a
+ * job. Provenance is always 'call' (P7 — no env or profile releases). The
+ * reservation charge STAYS: a release re-enables dispatch, it does not
+ * un-spend.
+ */
+export interface QuarantineReleasedJournalEvent {
+  type: 'quarantine-released';
+  runId: string;
+  at: string;
+  jobId: string;
+  provenance: 'call';
 }
 
 /** Journal: run finished (all jobs terminal, or stopped early). */
@@ -265,6 +418,32 @@ export interface RunFinishedJournalEvent {
   at: string;
   stoppedEarly: boolean;
   earlyStopReason?: RunEarlyStopReason;
+  /**
+   * The run file's total event count, INCLUDING this line and the
+   * run-started — written by the runner so the resume fold can detect a
+   * line DELETED from a surviving run file (the corruption the paired-line
+   * checks cannot see: deleting a `reservation-opened` of a crashed
+   * dispatch would silently drop its full charge and quarantine). Absent on
+   * v1 runs and when no journal dir was configured; a torn tail loses
+   * `run-finished` itself, so the check is skipped exactly where the crash
+   * windows live.
+   */
+  eventCount?: number;
+}
+
+/**
+ * Journal (v2, W2.3): the run's budget tripped (ADR-0003 §2.8). Emitted once
+ * per run, just before `run-finished`, with the trip kind and the governor's
+ * reason — the durable evidence for the honest stop the report claims.
+ * `signal` trips are recorded too: the event carries the truth; the
+ * honest-stop CLAIM (budget vs signal) is the run-finished taxonomy's job.
+ */
+export interface BudgetTrippedJournalEvent {
+  type: 'budget-tripped';
+  runId: string;
+  at: string;
+  tripKind: 'exhausted' | 'token-cap' | 'breach' | 'signal';
+  reason: string;
 }
 
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
@@ -272,7 +451,13 @@ export type JournalEvent =
   | RunStartedJournalEvent
   | JobStartedJournalEvent
   | JobFinishedJournalEvent
-  | RunFinishedJournalEvent;
+  | RunFinishedJournalEvent
+  | ReservationOpenedJournalEvent
+  | ReservationSettledJournalEvent
+  | ReservationRefusedJournalEvent
+  | JobQuarantinedJournalEvent
+  | QuarantineReleasedJournalEvent
+  | BudgetTrippedJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is

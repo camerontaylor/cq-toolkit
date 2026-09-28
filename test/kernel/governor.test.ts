@@ -61,6 +61,7 @@ import { decideRescue, rescueInputFromJournal } from '../../src/kernel/rescue.js
 import { runPlan } from '../../src/kernel/runner.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GovernorEvent, JobGovernance, LadderRungMarker } from '../../src/kernel/governor.js';
+import type { Usage } from '../../src/driver/types.js';
 import type {
   JournalEvent,
   Op,
@@ -507,7 +508,7 @@ describe('the wall-clock ladder through the governed runner (ws-a item 1)', () =
         independentPlan('async-errors', 1, 'hang'),
         { concurrency: 1, stopOnError: false },
         viewWith(entry('hang', hangOp)),
-        { governor },
+        { governor, allowAdvisory: true },
       ),
       clock,
     );
@@ -554,7 +555,10 @@ describe('the wall-clock ladder through the governed runner (ws-a item 1)', () =
     const registry = viewWith(entry('hang', hangOp), entry('ok', countingOk));
 
     const report = await pumped(
-      runPlan(plan, { concurrency: 1, stopOnError: false }, registry, { governor }),
+      runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
+        governor,
+        allowAdvisory: true,
+      }),
       clock,
     );
 
@@ -601,6 +605,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // report (the deleted withBudgetStop post-pass is gone).
     const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
 
     // I9 honesty, both directions: the trip gated NO undispatched work —
@@ -654,6 +659,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // re-marks it, transitively with d.
     const report = await runPlan(plan, { concurrency: 1, stopOnError: true }, registry, {
       governor,
+      allowAdvisory: true,
     });
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
     expect(report.jobs[3]?.result).toEqual({ status: 'budget-exhausted' });
@@ -689,6 +695,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     const registry = viewWith(entry('spendy', spendyOp), entry('ok', okOp));
     const report = await runPlan(plan, { concurrency: 1, stopOnError: true }, registry, {
       governor,
+      allowAdvisory: true,
     });
     // ALL of d, b, c AND the diamond root a are budget-caused — the memoized
     // verdict is reused for the second branch instead of dropping it.
@@ -729,6 +736,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     const registry = viewWith(entry('fail', failOp), entry('spendy', spendyOp), entry('ok', okOp));
     const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
     // Only s3 and s4 move (queued → budget-exhausted). f2 keeps its real
     // verdict AND its blocked count — the honest-stop pass re-marks only
@@ -805,6 +813,7 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
 
     const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
 
     // The run did NOT continue past the cap: j1 folded 120 tokens (under),
@@ -843,7 +852,7 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
     governor.observeResult('j1', { usage: UNPRICED_USAGE, costUSD: 0.6 });
     expect(governor.tripped).toBe(true);
     expect(governor.tripReason).toMatch(/usd rollup 0\.6 exceeded cap 0\.5/);
-    expect(governor.usdSpent).toBe(0.6);
+    expect(governor.usdSpent).toBeCloseTo(0.6);
     expect(governor.usage).toEqual(UNPRICED_USAGE);
   });
 
@@ -1002,7 +1011,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying', lyingOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(report.jobs[0]?.result.status).toBe('failed');
     expect(report.jobs[0]?.result).toMatchObject({
@@ -1035,7 +1044,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
         independentPlan('plan-cost-lying', 1, 'costly'),
         { concurrency: 1, stopOnError: false },
         viewWith(entry('costly', costlyOp)),
-        { governor: costGovernor },
+        { governor: costGovernor, allowAdvisory: true },
       );
       expect(costGovernor.usage).toBeUndefined(); // the WHOLE lying result folded nothing
       expect(costGovernor.usdSpent).toBe(0); // no cost claimed
@@ -1121,7 +1130,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('worker', workerOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     // The op never called reportUsage/reportCost — the RETURNED value is the
     // budget evidence, folded through the governed completed branch.
@@ -1147,7 +1156,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('unpriced', unpricedWorkerOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0);
@@ -1176,7 +1185,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('double', doubleEvidenceOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE); // once — not {input: 200, output: 100, …}
     expect(governor.usdSpent).toBe(0.02); // the cost folded (once)
@@ -1201,7 +1210,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('mapped', mappedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0.03);
@@ -1221,7 +1230,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('mapped-unpriced', mappedUnpricedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0);
@@ -1248,7 +1257,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying-report', lyingOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toBeUndefined();
     expect(governor.usdSpent).toBe(0);
@@ -1301,7 +1310,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('mirror-lying', mirrorLyingOp)),
-        { governor },
+        { governor, allowAdvisory: true },
       );
       expect(governor.usage).toBeUndefined(); // every measurement dropped
       expect(governor.usdSpent).toBe(0); // no cost folds off unschemable usage
@@ -1357,7 +1366,7 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
     expect(governor.tripped).toBe(true); // the seed alone trips — never fail open
     expect(governor.tripReason).toMatch(/prior usage/);
     expect(governor.tripReason).toMatch(/cannot be fully priced/);
-    expect(governor.tripReason).toMatch(/maxUsd 1 cannot bind/);
+    expect(governor.tripReason).toMatch(/USD cap 1 cannot bind/);
     expect(governor.tripReason).toMatch(/DD-9/);
     expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
   });
@@ -1593,7 +1602,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 6, stopOnError: false },
       viewWith(entry('fake', gatedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     await waitFor(() => entered.length === 2, 'ceiling to admit exactly 2');
     expect(highWater).toBe(2);
@@ -1615,7 +1624,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', gatedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     await waitFor(() => entered.length === 2, 'the pool to admit exactly 2');
     expect(highWater).toBe(2);
@@ -1637,7 +1646,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toHaveLength(4); // the quota, exactly
     expect(governor.dispatchCount).toBe(4);
@@ -1688,7 +1697,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('flaky', flaky)),
-        { governor: createGovernor({ maxAttemptsPerJob: 2 }) },
+        { governor: createGovernor({ maxAttemptsPerJob: 2 }), allowAdvisory: true },
       );
       expect(calls).toEqual(['j1']);
       const events1 = await log.read(run1.runId);
@@ -1709,7 +1718,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('flaky', flaky)),
-        { governor: governor2 },
+        { governor: governor2, allowAdvisory: true },
       );
       expect(calls).toEqual(['j1', 'j1']); // attempt 2 happened
       expect(
@@ -1743,7 +1752,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('flaky', flaky)),
-        { governor: governor3 },
+        { governor: governor3, allowAdvisory: true },
       );
       expect(calls).toEqual(['j1', 'j1']); // UNCHANGED — no third dispatch
       expect(run3.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -1817,7 +1826,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOk)),
-        { governor },
+        { governor, allowAdvisory: true },
       );
       expect(calls).toEqual([]); // a third dispatch never runs the op
       expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -2086,7 +2095,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual(['c2']); // the interrupted job re-dispatched (and completed)
     expect(report.counts).toEqual({
@@ -2183,7 +2192,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor: runGovernor },
+      { governor: runGovernor, allowAdvisory: true },
     );
     expect(runGovernor.tripReason).toMatch(/seeded usd rollup 1\.5 exceeded cap 1/);
     expect(runGovernor.usdSpent).toBe(1.5);
@@ -2259,7 +2268,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual([]); // zero further dispatches
     expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -2301,7 +2310,7 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
           plan,
           { concurrency: 1, stopOnError: false, journalDir: dir },
           viewWith(entry('hang', hangOp), entry('ok', okOp)),
-          { governor },
+          { governor, allowAdvisory: true },
         ),
         clock,
       );
@@ -2365,6 +2374,16 @@ describe('src/index.ts barrel', () => {
     expect(typeof toolkit.attemptsFromJournal).toBe('function');
     expect(typeof toolkit.rescueInputFromJournal).toBe('function');
     expect(toolkit.CONSERVATIVE_RESCUE_POLICY).toEqual({ rows: [] });
+    // The W2.3 journal-event schemas ride the barrel next to every
+    // preexisting journal event schema — consumers name and validate the
+    // new variants through the supported API, never unpublished internals
+    // (Codex P2, the fix round).
+    expect(toolkit.ReservationOpenedJournalEventSchema).toBeDefined();
+    expect(toolkit.ReservationSettledJournalEventSchema).toBeDefined();
+    expect(toolkit.ReservationRefusedJournalEventSchema).toBeDefined();
+    expect(toolkit.JobQuarantinedJournalEventSchema).toBeDefined();
+    expect(toolkit.QuarantineReleasedJournalEventSchema).toBeDefined();
+    expect(toolkit.BudgetTrippedJournalEventSchema).toBeDefined();
   });
 
   test('public consumers can CONSTRUCT a governor from the barrel (review VB1B)', () => {
@@ -2376,5 +2395,743 @@ describe('src/index.ts barrel', () => {
     expect(governor.admit('k')).toEqual({ decision: 'admit', attempt: 1 });
     expect(governor.dispatchCount).toBe(1);
     expect(governor.tripped).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W2.3 — reserve-then-settle (ADR-0003 §2.2/§2.3): the capacity gate, the
+// settle-side ledger, breach, cap inheritance, and the reservation-aware
+// seed (A12b's unresolved-reservation charge + quarantine).
+// ---------------------------------------------------------------------------
+
+describe('W2.3 reserve-then-settle', () => {
+  test('reserve WAITS FIFO while outstanding exist and shrinks only when nothing is (ADR §2.2 step 3, r1 H1)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    expect(first.outcome).toBe('reserved');
+    if (first.outcome !== 'reserved') return;
+    expect(first.reservation.usd).toBe(0.25);
+    expect(first.reservation.proposedUsd).toBeUndefined();
+    expect(governor.outstandingUsd).toBe(0.25);
+    // Outstanding 0.25 → capacity 0.75; a 1.0 proposal with O > 0 must WAIT
+    // FIFO (ADR §2.2 step 3), not shrink: a bookkeeping shrink to 0.75
+    // would undersize `r` against the proposal, and the dispatch's real
+    // charge would then breach `charged > r` — aborting healthy in-flight
+    // work for a bookkeeping artifact.
+    let second: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
+    const pending = governor.reserve('j2', 1, 1.0, 'advisory').then((r) => {
+      second = r;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(second).toBeUndefined();
+    expect(governor.tripped).toBe(false);
+    // Settling j1 at its full observed charge leaves O = 0: NOW the gate
+    // shrinks (no settle can free capacity anymore) and grants the head at
+    // `C − S = 0.75`, journalling the ask as proposedUsd. The invariant
+    // S + O + r = 0.25 + 0.75 ≤ 1.0 holds, and a real charge of up to 0.75
+    // can never breach.
+    governor.observeCost('j1', 0.25);
+    governor.settle(first.reservation, { basis: 'observed' });
+    await pending;
+    expect(second?.outcome).toBe('reserved');
+    if (second?.outcome !== 'reserved') return;
+    expect(second.reservation.usd).toBe(0.75);
+    expect(second.reservation.proposedUsd).toBe(1.0);
+    expect(governor.usdSpent).toBe(0.25);
+    expect(governor.outstandingUsd).toBe(0.75);
+  });
+
+  test('a proposal within capacity grants in full; zero capacity with outstanding parks FIFO', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    // Capacity 0.75 covers the proposal: full grant, no shrink, no park.
+    const second = await governor.reserve('j2', 1, 0.75, 'advisory');
+    expect(second.outcome).toBe('reserved');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    expect(second.reservation.usd).toBe(0.75);
+    expect(second.reservation.proposedUsd).toBeUndefined();
+    expect(governor.outstandingUsd).toBe(1.0);
+    // Capacity zero with an outstanding holder → the next reserve parks
+    // FIFO; it does NOT trip and does not grant while capacity is zero.
+    let third: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
+    const pending = governor.reserve('j3', 1, 0.25, 'advisory').then((r) => {
+      third = r;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(third).toBeUndefined();
+    expect(governor.tripped).toBe(false);
+    // Folding 0.3 of observed evidence against the second reservation, then
+    // settling it, frees capacity → the FIFO head is woken and reserves what
+    // is left (its 0.25 proposal fits under the freed 0.3). The fold moves
+    // the ledger; the settle's remainder is 0.
+    governor.observeCost('j2', 0.3);
+    governor.settle(second.reservation, { basis: 'observed' });
+    await pending;
+    expect(third?.outcome).toBe('reserved');
+    expect(governor.usdSpent).toBe(0.3);
+    expect(governor.outstandingUsd).toBe(0.5);
+    // Settling the first reservation with its own observed evidence.
+    governor.observeCost('j1', 0.1);
+    governor.settle(first.reservation, { basis: 'observed' });
+    expect(governor.usdSpent).toBeCloseTo(0.4);
+    expect(governor.outstandingUsd).toBeCloseTo(0.25);
+  });
+
+  test('a second grant for a job that already holds an open reservation throws (r1 L2)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    // Unreachable from the runner (one dispatch per job per run; settle or
+    // abandon deletes the openByJob entry before the job can be admitted
+    // again) — if it ever fires, the state machine is corrupt and the throw
+    // keeps the first reservation's fold attribution from being orphaned.
+    await expect(governor.reserve('j1', 2, 0.1, 'advisory')).rejects.toThrow(
+      /already holds an open reservation/,
+    );
+    // The first reservation is untouched by the refused overwrite.
+    expect(governor.outstandingUsd).toBe(0.25);
+  });
+
+  test('settle carries the PRICE-PRESENCE fact: an observed costUSD — zero included — prices the dispatch (r1 H2)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    // No cost evidence ever observed on the channel: priced false — the
+    // journal will fold this settle as unpriced if it settles zero with
+    // usage.
+    let settled = governor.settle(first.reservation, { basis: 'observed' });
+    expect(settled.priced).toBe(false);
+    expect(settled.charged).toBe(0);
+    // A legitimate ZERO price is still price evidence: the folded 0 rides
+    // observeCost, the settle journals `priced: true`, and the resume fold's
+    // DD-9 check (`charged === 0 && usage > 0 && !priced`) leaves it alone.
+    const second = await governor.reserve('j2', 1, 0.25, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    governor.observeCost('j2', 0);
+    settled = governor.settle(second.reservation, { basis: 'observed' });
+    expect(settled.charged).toBe(0);
+    expect(settled.priced).toBe(true);
+    // The governor's own observation stream carries the same fact.
+    const events = governor.events.filter((event) => event.kind === 'reservation-settled');
+    expect(
+      events.map((event) => (event.kind === 'reservation-settled' ? event.priced : null)),
+    ).toEqual([false, true]);
+  });
+
+  test('a full-charge settle frees nothing and the FIFO head then trips exhausted — no waiter hangs', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const spent = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (spent.outcome !== 'reserved') throw new Error('expected reservation');
+    governor.observeCost('j1', 0.5);
+    governor.settle(spent.reservation, { basis: 'observed' });
+    expect(governor.usdSpent).toBe(0.5);
+    // 0.5 left: take it as an outstanding reservation.
+    const held = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (held.outcome !== 'reserved') throw new Error('expected reservation');
+    // Capacity 0 with an outstanding holder → a third dispatch parks.
+    const parked = governor.reserve('j3', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Releasing the outstanding at FULL charge frees nothing (r − charged =
+    // 0): the parked head must still be woken, re-evaluate, and — capacity
+    // gone with nothing left outstanding — trip exhausted instead of
+    // hanging forever.
+    const settled = governor.settle(held.reservation, { basis: 'full' });
+    expect(settled.charged).toBe(0.5);
+    await expect(parked).resolves.toEqual({ outcome: 'tripped' });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+  });
+
+  test('FIFO holds: the head is granted first, a later waiter waits for a settle, and a newcomer never jumps the queue', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    // Two outstanding reservations consume the cap; two dispatches park.
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const w1 = governor.reserve('w1', 1, 0.25, 'advisory');
+    const w2 = governor.reserve('w2', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Settle j1 at FULL charge: frees nothing, so the head (w1) is never
+    // even woken — grant-from-head means a waiter is woken only WITH its
+    // grant or with a trip (the cycle-1 "wake and re-park" design is
+    // gone).
+    governor.settle(first.reservation, { basis: 'full' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.tripped).toBe(false);
+
+    // Settle j2 UNDER its r: capacity frees. The head w1 is granted first
+    // (0.25 fits the freed 0.3). w2 now faces capacity 0.05 with a 0.25
+    // proposal and an outstanding holder — it WAITS FIFO for a settle (ADR
+    // §2.2 step 3); it never shrinks below its proposal while O > 0.
+    governor.observeCost('j2', 0.2);
+    governor.settle(second.reservation, { basis: 'observed' });
+    const w1r = await w1;
+    if (w1r.outcome !== 'reserved') throw new Error('expected w1 reservation');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.events.filter((event) => event.kind === 'reserved').length).toBe(3); // w2 still parked
+    // Settling w1 under its own r frees the rest of the cap → w2 is
+    // granted, still in FIFO order.
+    governor.observeCost('w1', 0.05);
+    governor.settle(w1r.reservation, { basis: 'observed' });
+    const w2r = await w2;
+    if (w2r.outcome !== 'reserved') throw new Error('expected w2 reservation');
+    const order = governor.events
+      .filter((event) => event.kind === 'reserved')
+      .map((event) => (event.kind === 'reserved' ? event.jobKey : ''));
+    expect(order).toEqual(['j1', 'j2', 'w1', 'w2']);
+  });
+
+  test('a newcomer parks behind parked waiters and waits for a settle when capacity cannot cover its proposal (no queue jumping)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const w1 = governor.reserve('w1', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // j2 settles UNDER r: capacity frees and w1 (the head) is granted —
+    // its continuation is now queued as a microtask. A NEWCOMER arriving
+    // in this window must never take the room ahead of w1 (it cannot:
+    // drainWaiters granted the head synchronously) and — its 0.1 proposal
+    // exceeding the 0.05 left with O > 0 — must WAIT FIFO for a settle
+    // rather than shrink (ADR §2.2 step 3).
+    governor.observeCost('j2', 0.2);
+    governor.settle(second.reservation, { basis: 'observed' });
+    const w1r = await w1;
+    if (w1r.outcome !== 'reserved') throw new Error('expected w1 reservation');
+    const newcomer = governor.reserve('newcomer', 1, 0.1, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.events.filter((event) => event.kind === 'reserved').length).toBe(3); // the newcomer is still parked — no shrink-while-outstanding
+    // Settling w1 under its r frees room; the newcomer is admitted IN
+    // ORDER, behind the head that was granted first.
+    governor.observeCost('w1', 0.05);
+    governor.settle(w1r.reservation, { basis: 'observed' });
+    await newcomer;
+    const order = governor.events
+      .filter((event) => event.kind === 'reserved')
+      .map((event) => (event.kind === 'reserved' ? event.jobKey : ''));
+    expect(order).toEqual(['j1', 'j2', 'w1', 'newcomer']);
+  });
+
+  test('abandonReservation releases the hold with no charge and no settle — capacity returns to waiters', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const parked = governor.reserve('w1', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // The write-ahead journal write failed: abandon the grant, no charge.
+    // The returned capacity is granted to the FIFO head SYNCHRONOUSLY
+    // inside the abandon (grant-from-head — no microtask window).
+    governor.abandonReservation(second.reservation);
+    expect(governor.usdSpent).toBe(0);
+    expect(governor.outstandingUsd).toBe(0.75); // j1 0.5 + w1's fresh 0.25 grant
+    // The parked waiter got the returned capacity.
+    await parked;
+    const last = governor.events.at(-1);
+    expect(last).toMatchObject({ kind: 'reserved', jobKey: 'w1', usd: 0.25 });
+    // Abandoning an unknown/settled reservation is a no-op.
+    expect(() => governor.abandonReservation(second.reservation)).not.toThrow();
+  });
+
+  test('a zero cap admits nothing: the first reserve trips exhausted before any dispatch', async () => {
+    const governor = createGovernor({ maxUsd: 0 });
+    await expect(governor.reserve('j1', 1, 0, 'advisory')).resolves.toEqual({ outcome: 'tripped' });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+  });
+
+  test('charged over the reservation trips breach; the charge still lands in the ledger', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const open = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (open.outcome !== 'reserved') throw new Error('expected reservation');
+    governor.observeCost('j1', 0.6);
+    const settledRes = governor.settle(open.reservation, { basis: 'observed' });
+    expect(settledRes.charged).toBe(0.6);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('breach');
+    expect(governor.usdSpent).toBeCloseTo(0.6);
+    expect(governor.events.at(-2)).toMatchObject({
+      kind: 'reservation-settled',
+      charged: 0.6,
+      basis: 'observed',
+    });
+  });
+
+  test('settle for an unknown reservation throws; a full-basis settle charges max(r, folded)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const fake = {
+      id: 'j1:1:99',
+      jobKey: 'j1',
+      attempt: 1,
+      usd: 0.5,
+      class: 'advisory' as const,
+    };
+    expect(() => governor.settle(fake, { basis: 'observed' })).toThrow(/unknown reservation/);
+    const open = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (open.outcome !== 'reserved') throw new Error('expected reservation');
+    // The dispatch overshot its reservation before being killed: the full
+    // basis charges the overshoot, not just r.
+    governor.observeCost('j1', 0.4);
+    const settled = governor.settle(open.reservation, { basis: 'full' });
+    expect(settled.charged).toBe(0.4);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('breach');
+    // Unknown status with NO evidence charges the full reservation r.
+    const governor2 = createGovernor({ maxUsd: 1.0 });
+    const open2 = await governor2.reserve('j9', 1, 0.5, 'advisory');
+    if (open2.outcome !== 'reserved') throw new Error('expected reservation');
+    const settled2 = governor2.settle(open2.reservation, { basis: 'full' });
+    expect(settled2.charged).toBe(0.5);
+    expect(governor2.usdSpent).toBe(0.5);
+    expect(governor2.tripped).toBe(false);
+  });
+
+  test('reserve requires a cap — an uncapped run is reservation-less', async () => {
+    const governor = createGovernor({});
+    await expect(governor.reserve('j1', 1, 0.5, 'advisory')).rejects.toThrow(/requires a USD cap/);
+  });
+
+  test('a tripped governor refuses reserve immediately (no new reservations on a trip)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    governor.trip('token-cap', 'test trip');
+    await expect(governor.reserve('j1', 1, 0.5, 'advisory')).resolves.toEqual({
+      outcome: 'tripped',
+    });
+  });
+
+  test('inheritCapUsd gives a capless governor the predecessor cap and never overrides an explicit one', () => {
+    const capless = createGovernor({});
+    expect(capless.capUsd).toBeUndefined();
+    expect(capless.inheritCapUsd(5)).toBe(true);
+    expect(capless.capUsd).toBe(5);
+    expect(capless.events.some((event) => event.kind === 'cap-inherited')).toBe(true);
+    // The inherited cap binds reserve.
+    expect(capless.outstandingUsd).toBe(0);
+    // An explicit config cap is never overridden.
+    const capped = createGovernor({ maxUsd: 2 });
+    expect(capped.inheritCapUsd(5)).toBe(false);
+    expect(capped.capUsd).toBe(2);
+    // A re-inheritance of the same cap is idempotent.
+    expect(capless.inheritCapUsd(5)).toBe(true);
+  });
+
+  test('the inherited cap binds the seeded-overrun trip: a capless resume over spend past C_prev trips', () => {
+    const dir35 = null; // no journal needed — the seed API takes events
+    void dir35;
+    const governor = createGovernor({});
+    governor.inheritCapUsd(1.0);
+    governor.seedFromJournal([
+      {
+        type: 'run-started',
+        runId: 'p--k--a',
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'p',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 1.0, attended: false },
+      },
+      {
+        type: 'job-started',
+        runId: 'p--k--a',
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'op',
+        attempt: 1,
+      },
+      {
+        type: 'job-finished',
+        runId: 'p--k--a',
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        opId: 'op',
+        inputsHash: 'h',
+        result: { status: 'ok', value: 1 },
+        costUSD: 1.5,
+      },
+    ]);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    expect(governor.usdSpent).toBe(1.5);
+  });
+
+  // --- USD float drift (CodeRabbit Major, review 5337184110): every money
+  // verdict in the reservation gate compares through USD_EPSILON, because
+  // IEEE-754 accumulation drift must never buy an extra dispatch from
+  // ~1e-16 of phantom capacity, park a dispatch on a dust shortfall, or
+  // trip a spurious breach/cap verdict on dust. ---
+
+  test('drift cannot buy an 11th dispatch: ten 0.1 reserve-fold-settle cycles against a 1.0 cap refuse the next reserve as exhausted', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    for (let i = 1; i <= 10; i++) {
+      const r = await governor.reserve(`j${i}`, 1, 0.1, 'advisory');
+      if (r.outcome !== 'reserved') throw new Error(`cycle ${i} refused: ${r.outcome}`);
+      governor.observeCost(`j${i}`, 0.1);
+      governor.settle(r.reservation, { basis: 'observed' });
+    }
+    // Ten 0.1 folds accumulate to 0.9999999999999999, NOT 1.0 — the cap is
+    // spent to within ~1.1e-16. Under a raw `capacity <= 0` gate that dust
+    // admitted an 11th dispatch with r ≈ 1.1e-16 (whose real charge would
+    // then breach).
+    expect(governor.usdSpent).toBe(0.9999999999999999);
+    expect(governor.tripped).toBe(false);
+    const eleventh = await governor.reserve('j11', 1, 0.1, 'advisory');
+    expect(eleventh.outcome).toBe('tripped');
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    expect(governor.tripReason).toMatch(/reservation capacity exhausted/);
+  });
+
+  test('drift cannot buy a PARKED waiter either: drainWaiters refuses dust capacity and trips exhausted', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 1.0, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    let second: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
+    const pending = governor.reserve('j2', 1, 0.5, 'advisory').then((r) => {
+      second = r;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(second).toBeUndefined(); // parked FIFO at exactly-zero capacity
+    // Ten 0.1 folds into the open reservation drift to 0.9999999999999999;
+    // the settle charges them (under r — no breach) and drainWaiters
+    // recomputes capacity as 1.0 − 0.9999999999999999 ≈ 1.1e-16. That is
+    // dust, not a grant: the head waiter is refused exhausted with the
+    // nothing-outstanding trip, never woken with an r ≈ 1.1e-16 reservation.
+    for (let i = 0; i < 10; i++) governor.observeCost('j1', 0.1);
+    governor.settle(first.reservation, { basis: 'observed' });
+    await pending;
+    expect(second?.outcome).toBe('tripped');
+    expect(governor.tripKind).toBe('exhausted');
+    expect(governor.tripReason).toMatch(/reservation capacity exhausted/);
+  });
+
+  test('a settle charging its exact reservation never breaches on fold dust', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const reserved = await governor.reserve('j1', 1, 0.3, 'advisory');
+    if (reserved.outcome !== 'reserved') throw new Error('expected reservation');
+    governor.observeCost('j1', 0.1);
+    governor.observeCost('j1', 0.2); // 0.1 + 0.2 = 0.30000000000000004 in IEEE-754
+    const settled = governor.settle(reserved.reservation, { basis: 'observed' });
+    expect(settled.charged).toBe(0.30000000000000004); // dust over the 0.3 reservation
+    // A raw `charged > r` read that 4e-17 of drift as a real overshoot and
+    // tripped breach — aborting a dispatch that charged exactly its ask.
+    expect(governor.tripped).toBe(false);
+    expect(governor.tripKind).toBeUndefined();
+  });
+
+  test('the inclusive cap holds at exact 1.0: fold dust does not trip the rollup, and admission still closes behind it', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    // The folds' exact decimal values sum to 1.0; the accumulator lands at
+    // 1.0000000000000002 (0.2 + 0.4 + 0.3 + 0.1 in this order). A raw
+    // `spent > cap` tripped exhausted MID-FLIGHT on that dust — aborting a
+    // run that never exceeded an inclusive cap.
+    governor.observeCost('a', 0.2);
+    governor.observeCost('b', 0.4);
+    governor.observeCost('c', 0.3);
+    governor.observeCost('d', 0.1);
+    expect(governor.usdSpent).toBe(1.0000000000000002);
+    expect(governor.tripped).toBe(false);
+    // Admission still closes: the remaining −2.2e-16 is through the epsilon
+    // a spent cap — the next reserve refuses exhausted instead of granting
+    // phantom room.
+    const next = await governor.reserve('next', 1, 0.1, 'advisory');
+    expect(next.outcome).toBe('tripped');
+    expect(governor.tripKind).toBe('exhausted');
+  });
+
+  test('a proposal within dust of capacity grants instead of parking, and its real charge does not breach', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    governor.observeCost('a', 0.1);
+    governor.observeCost('b', 0.2); // accumulated spent: 0.30000000000000004
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    // capacity = 1.0 − 0.30000000000000004 − 0.25 = 0.44999999999999996 —
+    // dust UNDER the 0.45 proposal. A raw `proposedUsd > capacity` parked
+    // the dispatch behind a settle that had no new room to bring; through
+    // the epsilon it grants.
+    const pending = governor.reserve('j2', 1, 0.45, 'advisory').then((r) => {
+      if (r.outcome !== 'reserved') throw new Error('dust shortfall must not park');
+      return r;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const second = await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined))),
+    ]);
+    if (second?.outcome !== 'reserved') {
+      throw new Error('expected j2 reservation — dust shortfall must not park');
+    }
+    expect(second.reservation.usd).toBe(0.44999999999999996); // shrunk by dust only
+    // The dispatch's real 0.45 charge exceeds its dust-shrunk r by 4e-17 —
+    // overshoot inside the epsilon is not a breach.
+    governor.observeCost('j2', 0.45);
+    governor.settle(second.reservation, { basis: 'observed' });
+    expect(governor.tripped).toBe(false);
+    expect(governor.tripKind).toBeUndefined();
+    await pending;
+  });
+});
+
+describe('W2.3 seed fold — reservation-era spend, A12b quarantine', () => {
+  const STARTED = (runId: string, seq: number, capUsd?: number): JournalEvent => ({
+    type: 'run-started',
+    runId,
+    at: '2026-01-01T00:00:00.000Z',
+    planId: 'p',
+    journalVersion: 2,
+    seq,
+    governance: { ...(capUsd !== undefined ? { capUsd } : {}), attended: false },
+  });
+  const JOB_STARTED = (runId: string, jobId: string, attempt: number): JournalEvent => ({
+    type: 'job-started',
+    runId,
+    at: '2026-01-01T00:00:01.000Z',
+    jobId,
+    op: 'op',
+    attempt,
+  });
+  const OPENED = (
+    runId: string,
+    jobId: string,
+    attempt: number,
+    reservationId: string,
+    usd: number,
+  ): JournalEvent => ({
+    type: 'reservation-opened',
+    runId,
+    at: '2026-01-01T00:00:01.500Z',
+    jobId,
+    op: 'op',
+    attempt,
+    reservationId,
+    usd,
+    class: 'advisory',
+  });
+  const SETTLED = (
+    runId: string,
+    jobId: string,
+    reservationId: string,
+    charged: number,
+    opts?: { priced?: boolean; usage?: Usage },
+  ): JournalEvent => ({
+    type: 'reservation-settled',
+    runId,
+    at: '2026-01-01T00:00:02.000Z',
+    jobId,
+    reservationId,
+    charged,
+    basis: 'observed',
+    ...(opts?.priced !== undefined ? { priced: opts.priced } : {}),
+    ...(opts?.usage !== undefined ? { usage: opts.usage } : {}),
+  });
+
+  test('reservation-era spend folds from settles (charges), not finish costUSD — no double-count', () => {
+    const governor = createGovernor({ maxUsd: 10 });
+    governor.seedFromJournal([
+      STARTED('p--a--1', 1, 10),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.5),
+      SETTLED('p--a--1', 'j1', 'p--a--1:j1:1:1', 0.3),
+      {
+        type: 'job-finished',
+        runId: 'p--a--1',
+        at: '2026-01-01T00:00:03.000Z',
+        jobId: 'j1',
+        opId: 'op',
+        inputsHash: 'h',
+        result: { status: 'ok', value: 1 },
+        costUSD: 0.3,
+        charged: 0.3,
+      },
+    ]);
+    // 0.3 once — the finish's restated costUSD is ignored for spend.
+    expect(governor.usdSpent).toBe(0.3);
+    expect(governor.quarantinedJobs.size).toBe(0);
+    expect(governor.tripped).toBe(false);
+  });
+
+  test('a zero-priced lane (costUSD 0 OBSERVED) never trips the seed DD-9 — a settle without observed price does (r1 H2)', () => {
+    const USAGE: Usage = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
+    // The zero-priced/subscription lane: the dispatch observed a real
+    // `costUSD: 0` (priced: true rides the settle), so `charged: 0` is a
+    // LEGITIMATE zero price — the resumed run must dispatch, not hard-stop.
+    const pricedFree = createGovernor({ maxUsd: 10 });
+    pricedFree.seedFromJournal([
+      STARTED('p--a--1', 1, 10),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.5),
+      SETTLED('p--a--1', 'j1', 'p--a--1:j1:1:1', 0, { priced: true, usage: USAGE }),
+    ]);
+    expect(pricedFree.usdSpent).toBe(0);
+    expect(pricedFree.tripped).toBe(false); // W2.2's rule would not have tripped this either
+    // The SAME fold with NO observed price (priced absent/falsy) is
+    // unpriced spend: the seed trips `exhausted` BEFORE the resumed run
+    // admits anything (DD-9, fail loud).
+    const unpriced = createGovernor({ maxUsd: 10 });
+    unpriced.seedFromJournal([
+      STARTED('p--a--2', 1, 10),
+      JOB_STARTED('p--a--2', 'j1', 1),
+      OPENED('p--a--2', 'j1', 1, 'p--a--2:j1:1:1', 0.5),
+      SETTLED('p--a--2', 'j1', 'p--a--2:j1:1:1', 0, { usage: USAGE }),
+    ]);
+    expect(unpriced.tripped).toBe(true);
+    expect(unpriced.tripKind).toBe('exhausted');
+  });
+
+  test('A12b: an unresolved reservation charges IN FULL and quarantines the job', () => {
+    const governor = createGovernor({ maxUsd: 10 });
+    governor.seedFromJournal([
+      STARTED('p--a--1', 1, 10),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      // The crash window: opened, never settled, no finish.
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.75),
+    ]);
+    expect(governor.usdSpent).toBe(0.75);
+    expect([...governor.quarantinedJobs.keys()]).toEqual(['j1']);
+    expect(governor.quarantinedJobs.get('j1')).toEqual({
+      reservationId: 'p--a--1:j1:1:1',
+      usd: 0.75,
+    });
+    expect(governor.events.some((event) => event.kind === 'quarantined')).toBe(true);
+  });
+
+  test('A12b: the full charge of an unresolved reservation can trip the seeded cap', () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal([
+      STARTED('p--a--1', 1, 1.0),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 1.5),
+    ]);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    expect(governor.usdSpent).toBe(1.5);
+  });
+
+  test('a W2.2-era run (no reservations) still seeds from job-finished costUSD', () => {
+    const governor = createGovernor({ maxUsd: 10 });
+    governor.seedFromJournal([
+      STARTED('p--a--0', 1, 10),
+      JOB_STARTED('p--a--0', 'j1', 1),
+      {
+        type: 'job-finished',
+        runId: 'p--a--0',
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        opId: 'op',
+        inputsHash: 'h',
+        result: { status: 'ok', value: 1 },
+        costUSD: 0.4,
+      },
+    ]);
+    expect(governor.usdSpent).toBe(0.4);
+    expect(governor.quarantinedJobs.size).toBe(0);
+  });
+
+  test('mixed-era history: each run spends by its own era (W2.2 finish + W2.3 settles)', () => {
+    const governor = createGovernor({ maxUsd: 10 });
+    governor.seedFromJournal([
+      // Run 1: W2.2-era governed (costUSD on the finish).
+      STARTED('p--a--0', 1, 10),
+      JOB_STARTED('p--a--0', 'j1', 1),
+      {
+        type: 'job-finished',
+        runId: 'p--a--0',
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        opId: 'op',
+        inputsHash: 'h',
+        result: { status: 'ok', value: 1 },
+        costUSD: 0.4,
+      },
+      // Run 2: reservation-era (settled charge; the finish restates it).
+      STARTED('p--a--1', 2, 10),
+      JOB_STARTED('p--a--1', 'j2', 1),
+      OPENED('p--a--1', 'j2', 1, 'p--a--1:j2:1:1', 0.5),
+      SETTLED('p--a--1', 'j2', 'p--a--1:j2:1:1', 0.2),
+      {
+        type: 'job-finished',
+        runId: 'p--a--1',
+        at: '2026-01-01T00:00:05.000Z',
+        jobId: 'j2',
+        opId: 'op',
+        inputsHash: 'h',
+        result: { status: 'ok', value: 2 },
+        costUSD: 0.2,
+        charged: 0.2,
+      },
+    ]);
+    expect(governor.usdSpent).toBeCloseTo(0.6);
+    expect(governor.quarantinedJobs.size).toBe(0);
+  });
+
+  test('reservation-era corruption throws: a settle without an open, a finish over an unsettled reservation', () => {
+    const orphanSettle = createGovernor({ maxUsd: 10 });
+    expect(() =>
+      orphanSettle.seedFromJournal([
+        STARTED('p--a--1', 1, 10),
+        SETTLED('p--a--1', 'j1', 'p--a--1:j1:1:1', 0.3),
+      ]),
+    ).toThrow(/no matching reservation-opened/);
+    const finishOverOpen = createGovernor({ maxUsd: 10 });
+    expect(() =>
+      finishOverOpen.seedFromJournal([
+        STARTED('p--a--1', 1, 10),
+        JOB_STARTED('p--a--1', 'j1', 1),
+        OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.5),
+        {
+          type: 'job-finished',
+          runId: 'p--a--1',
+          at: '2026-01-01T00:00:03.000Z',
+          jobId: 'j1',
+          opId: 'op',
+          inputsHash: 'h',
+          result: { status: 'ok', value: 1 },
+        },
+      ]),
+    ).toThrow(/unsettled/);
+  });
+
+  test('a reservation-era settle with usage and zero charge is unpriced spend (DD-9 trips at seed)', () => {
+    const governor = createGovernor({ maxUsd: 10 });
+    governor.seedFromJournal([
+      STARTED('p--a--1', 1, 10),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.5),
+      {
+        type: 'reservation-settled',
+        runId: 'p--a--1',
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        reservationId: 'p--a--1:j1:1:1',
+        charged: 0,
+        basis: 'observed',
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+      },
+    ]);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+  });
+
+  test('attempt and dispatch seeds fold from job-started in BOTH eras', () => {
+    const governor = createGovernor({ maxUsd: 10, runDispatchQuota: 5 });
+    governor.seedFromJournal([
+      // W2.2-era run: two starts of j1 and one of j2.
+      STARTED('p--a--0', 1, 10),
+      JOB_STARTED('p--a--0', 'j1', 1),
+      JOB_STARTED('p--a--0', 'j1', 2),
+      JOB_STARTED('p--a--0', 'j2', 1),
+      // Reservation-era run: one start of j1 (crashed, quarantined).
+      STARTED('p--a--1', 2, 10),
+      JOB_STARTED('p--a--1', 'j1', 3),
+      OPENED('p--a--1', 'j1', 3, 'p--a--1:j1:3:1', 0.5),
+    ]);
+    expect(governor.attemptsFor('j1')).toBe(3);
+    expect(governor.attemptsFor('j2')).toBe(1);
+    expect(governor.dispatchCount).toBe(4);
   });
 });

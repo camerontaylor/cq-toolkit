@@ -585,6 +585,11 @@ const runLoop = async (
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
+    // The A12c escape is EXPLICIT and defaults OFF (r1 M4): these tests
+    // exercise dispatched fix runs, so they opt in — the shipped sweep does
+    // the same (unattended by design), and the journal records
+    // allowAdvisoryProvenance: 'product'.
+    allowAdvisoryBudget: true,
     nowMs: NOW,
     dispatchLogPath: o.dispatchLogPath ?? join(scratch, 'dispatch.jsonl'),
     worktreeRoot: scratch,

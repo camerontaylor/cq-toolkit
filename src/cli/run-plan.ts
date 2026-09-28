@@ -122,6 +122,32 @@ export const RunPlanInputSchema = z
         z.array(z.enum(GOVERNANCE_OPT_IN_KEYS)),
       )
       .default([]),
+    /**
+     * The ADVISORY escape (W2.3, A12c; flag: --allow-advisory-budget): the
+     * governed run may dispatch ADVISORY-classified work unattended. Every
+     * lane is ADVISORY at v1.1 (no conformance leg has proven one HARD), so
+     * an unattended governed run refuses every dispatch WITHOUT this flag —
+     * recorded on run-started.governance.allowAdvisory.
+     */
+    allowAdvisoryBudget: z.boolean().default(false),
+    /**
+     * Job ids to release from reservation quarantine (W2.3, A12b; flag:
+     * --release-quarantine, comma-separated). A release re-enables dispatch;
+     * the full charge the quarantine took is never refunded. Journalled with
+     * provenance 'call' (P7).
+     */
+    releaseQuarantine: z
+      .preprocess(
+        (value) =>
+          typeof value === 'string'
+            ? value
+                .split(',')
+                .map((key) => key.trim())
+                .filter((key) => key !== '')
+            : value,
+        z.array(z.string().min(1)),
+      )
+      .default([]),
   })
   .strict();
 
@@ -288,14 +314,32 @@ export async function runPlanThroughKernel(
     ...(input.resume ? { resume: true } : {}),
   };
   const governance: Governance | undefined =
-    input.maxUsd !== undefined || input.maxTokens !== undefined || input.optIn.length > 0
+    input.maxUsd !== undefined ||
+    input.maxTokens !== undefined ||
+    input.optIn.length > 0 ||
+    input.allowAdvisoryBudget ||
+    input.releaseQuarantine.length > 0
       ? // A capped run governs with a FRESH per-run governor: the runner's
         // fold over the journal dir seeds it (resume or not), so a cumulative
         // cap continues its ledger — construction order is irrelevant here,
-        // seeding happens inside runPlan, before anything is admitted.
+        // seeding happens inside runPlan, before anything is admitted. The
+        // W2.3 flags need the handle to ride too: the ADVISORY escape gates
+        // dispatch, and a release names jobs the seed quarantined.
         {
           governor: createGovernor(governorConfig(runOptions, {})),
           ...(input.optIn.length > 0 ? { optIn: input.optIn } : {}),
+          ...(input.allowAdvisoryBudget
+            ? {
+                allowAdvisory: true,
+                // The CLI flag is the OPERATOR surface (r1 M4): the journal
+                // stamps provenance 'operator', distinguishing this escape
+                // from an unattended-by-design product path's ('product').
+                allowAdvisoryProvenance: 'operator' as const,
+              }
+            : {}),
+          ...(input.releaseQuarantine.length > 0
+            ? { releaseQuarantine: input.releaseQuarantine }
+            : {}),
         }
       : undefined;
   let report: RunReport;

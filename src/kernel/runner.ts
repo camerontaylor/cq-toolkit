@@ -154,7 +154,15 @@ import {
   type FoldRun,
   type RunLog,
 } from './journal.js';
-import { runLadder, validSpendEvidence, workerResultOfValue, type Governance } from './governor.js';
+import {
+  runLadder,
+  validSpendEvidence,
+  workerResultOfValue,
+  type BudgetReservation,
+  type Governance,
+  type LadderOutcome,
+} from './governor.js';
+import { classifyDispatch } from './lanes.js';
 import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultSchema } from './schema.js';
 import type { Usage } from '../driver/types.js';
@@ -188,7 +196,7 @@ export interface OpRegistryView {
 }
 
 /** Why a job's outcome entered the report without a fresh dispatch this run. */
-type EntryOrigin = 'executed' | 'replayed' | 'blocked' | 'queued';
+type EntryOrigin = 'executed' | 'replayed' | 'blocked' | 'queued' | 'quarantined';
 
 interface OutcomeEntry {
   result: OpResult<unknown>;
@@ -381,10 +389,22 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * importer, a contract-violating return, a non-serializable return — becomes
  * an honest `failed` OpResult. This function never throws, so a bad op (or a
  * bad registry) can never corrupt the journal or kill the run.
+ *
+ * `onDispatchUnknown` marks every post-invocation failure the returned
+ * verdict cannot carry: the op BODY rejecting, or a body that RESOLVED to
+ * something that is not an `OpResult` at all. Both happened AFTER the
+ * dispatch was entered, so spend may exist that no evidence fold will ever
+ * see. executeOp turns each into a `failed` result, so without this signal
+ * the caller settles the reservation `observed` and charges zero. The
+ * pre-dispatch failures below it — a throwing registry lookup, an unknown
+ * op, a schema violation, a throwing importer — provably spent nothing and
+ * deliberately do NOT signal, and neither does a well-formed result whose
+ * VALUE the journal refuses (the evidence guard's lying-measurement case).
  */
 async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
+  onDispatchUnknown?: () => void,
 ): Promise<OpResult<unknown>> {
   // The lookup itself is guarded: a registry.get that throws must fail THIS
   // job, not reject the whole run.
@@ -408,11 +428,23 @@ async function executeOp(
   }
   try {
     const op = await entry.importer();
-    const raw: OpResult<unknown> = await op(parsed as never);
+    let raw: OpResult<unknown>;
+    try {
+      raw = await op(parsed as never);
+    } catch (err) {
+      // The op BODY rejected: the dispatch was entered, so spend may exist
+      // that no evidence fold will ever see. Signal it, then fall into the
+      // shared handler below (the never-throws contract is unchanged).
+      onDispatchUnknown?.();
+      throw err;
+    }
     // Validate before journaling: the journal only accepts real OpResults, so
     // a contract-violating return must be caught HERE, not blow up the append.
     const checked = OpResultSchema.safeParse(raw);
     if (!checked.success) {
+      // Post-invocation like the rejection above: the body RAN (and may have
+      // spent), then resolved to something that is not an OpResult.
+      onDispatchUnknown?.();
       return {
         status: 'failed',
         error: `op '${job.op}' violated the op contract: did not return an OpResult`,
@@ -442,6 +474,14 @@ async function executeOp(
       }
       assertJsonLossless(checked.data);
     } catch (err) {
+      // NOT a post-invocation unknown: the body resolved to a WELL-FORMED
+      // OpResult (an 'ok' WorkerResult here) whose VALUE the journal cannot
+      // take. The evidence guard already judged that value — a lying
+      // measurement (NaN/negative cost) folds nothing by design, and a
+      // full-reservation charge here would let a bad number invent spend
+      // the folds never saw (pinned: test/kernel/governor.test.ts (b2), a
+      // lying cost claims nothing). The lossy/unsupported value keeps the
+      // 'observed' basis, charging exactly what the folds saw.
       return {
         status: 'failed',
         error: `op '${job.op}' returned a non-serializable result: ${messageOf(err)}`,
@@ -559,8 +599,25 @@ export async function runPlan(
   // mode-independent by construction.
   const journalDir = opts.journalDir;
   const runLog: RunLog | undefined = journalDir !== undefined ? openRunLog(journalDir) : undefined;
+  // THE LINE-COUNT LEDGER (W2.3 fix round, comp 2): every emitted event is
+  // counted and the total rides run-finished as `eventCount`, so the resume
+  // fold's line-count check (journal.foldOrderRuns) can detect a line
+  // DELETED from a surviving run file — the corruption shape the
+  // paired-line throws cannot see (a deleted `reservation-opened` would
+  // silently drop a crashed dispatch's full charge and its quarantine).
+  let journalledCount = 0;
   const emit = async (event: JournalEvent): Promise<void> => {
+    journalledCount += 1;
     if (runLog) await runLog.append(runId, event);
+  };
+  // The WRITE-AHEAD channel (W2.3): reservation-opened must be durable
+  // BEFORE the dispatch runs and reservation-settled BEFORE the outcome is
+  // journalled — the fdatasync'd facts that make a hard crash between them
+  // VISIBLE as an unresolved reservation (charged in full + quarantined on
+  // resume, A12b) instead of silent lost spend.
+  const emitDurable = async (event: JournalEvent): Promise<void> => {
+    journalledCount += 1;
+    if (runLog) await runLog.append(runId, event, { durable: true });
   };
 
   // --- Fold: EVERY prior run of this plan, v1-then-v2 ----------------------
@@ -655,6 +712,15 @@ export async function runPlan(
       if (opts.resume === true) {
         for (const event of prior.events) {
           if (event.type === 'job-finished') replay.set(event.jobId, event);
+          // A journalled release invalidates every replay record for that
+          // job from BEFORE it (runs fold in order, events in journal
+          // order): the release contract is a re-run, so only a
+          // post-release finish is fresh evidence. When the release run
+          // produces no replacement finish (a sibling's stopOnError halts
+          // it first), the next resume would otherwise rebuild this map
+          // with the pre-crash ok and replay-skip the released job forever
+          // — --release-quarantine a silent permanent no-op across runs.
+          else if (event.type === 'quarantine-released') replay.delete(event.jobId);
         }
       }
     }
@@ -725,7 +791,20 @@ export async function runPlan(
   // refusals (b)/(c) are ledger gates.
 
   // --- Governed ledger continuity: seed the governor from the fold ---------
+  // A CAPLESS governed run's conservative inheritance of C_prev (journalled
+  // on run-started below); declared here so the run-started emit sees it.
+  let inheritedCapUsd: number | undefined;
   if (governedDispatch && governor !== undefined) {
+    // A CAPLESS governed run over capped history inherits the predecessor
+    // cap (W2.3): the ledger's C never silently disappears between runs —
+    // this run reserves against C_prev and journals the inheritance. The
+    // predecessor cap for the raise refusal does not move (an inheritance
+    // is not a raise).
+    if (!ungovernedMarked && governor.config.maxUsd === undefined && prevCapUsd !== undefined) {
+      if (governor.inheritCapUsd(prevCapUsd)) {
+        inheritedCapUsd = prevCapUsd;
+      }
+    }
     // LEDGER POLICY (recorded): attempts and the dispatch count seed from
     // ALL runs — attempts are spent regardless of who paid — but SPEND (a
     // job-finished's usage/costUSD) seeds only from runs inside the bound:
@@ -765,17 +844,13 @@ export async function runPlan(
   let removeSignalListener: (() => void) | undefined;
   const runSignal = gov?.signal;
   if (governedDispatch && governor !== undefined && runSignal !== undefined) {
-    if (runSignal.aborted) {
-      governor.tripSignal('run signal already aborted before dispatch');
-    } else {
-      const onAbort = (): void => {
-        governor.tripSignal();
-      };
-      runSignal.addEventListener('abort', onAbort, { once: true });
-      removeSignalListener = (): void => {
-        runSignal.removeEventListener('abort', onAbort);
-      };
-    }
+    // The governor OWNS the cancel binding (I8): an abort trips it with trip
+    // kind 'signal', which aborts the governor's trip signal — the one
+    // signal every dispatch ladder composes.
+    governor.bindRunSignal(runSignal);
+    removeSignalListener = (): void => {
+      governor.unbindRunSignal();
+    };
   }
 
   try {
@@ -818,6 +893,19 @@ export async function runPlan(
           governance: {
             ...(config.maxUsd !== undefined ? { capUsd: config.maxUsd } : {}),
             ...(config.maxTokens !== undefined ? { capTokens: config.maxTokens } : {}),
+            ...(inheritedCapUsd !== undefined ? { inheritedCapUsd } : {}),
+            ...(gov.allowAdvisory === true
+              ? {
+                  allowAdvisory: true,
+                  // WHO set the escape (review r1 M4): 'operator' via the
+                  // CLI flag, 'product' via an unattended-by-design product
+                  // path — the journal distinguishes an operator's escape
+                  // from the product's own posture.
+                  ...(gov.allowAdvisoryProvenance !== undefined
+                    ? { allowAdvisoryProvenance: gov.allowAdvisoryProvenance }
+                    : {}),
+                }
+              : {}),
             attended: gov.attended ?? false,
             ...(legacyResetHonoured
               ? { legacyJournal: { mode: 'reset' as const, v1RunIds: [...unaccountedV1] } }
@@ -851,6 +939,57 @@ export async function runPlan(
         state: 'blocked',
         origin: 'blocked',
       });
+    }
+
+    // --- Quarantine enforcement (W2.3, A12b) ---------------------------------
+    // Jobs the seed fold found BEHIND an unresolved reservation are
+    // quarantined: never dispatched, reported needs-human, re-attested each
+    // run until an explicit per-call releaseQuarantine (which never refunds
+    // the full charge the seed took). Journalled here so every run's
+    // evidence shows the quarantine standing; dependents block through the
+    // ordinary dependency rule below (a quarantined row is not a done dep).
+    if (governedDispatch && governor !== undefined && !ungovernedMarked) {
+      const releases = new Set(gov?.releaseQuarantine ?? []);
+      for (const job of manifest.jobs) {
+        if (unschedulable.has(job.id)) continue;
+        const quarantined = governor.quarantinedJobs.get(job.id);
+        if (quarantined === undefined) continue;
+        if (releases.has(job.id)) {
+          await emit({
+            type: 'quarantine-released',
+            runId,
+            at: now(),
+            jobId: job.id,
+            provenance: 'call',
+          });
+          // A release RE-RUNS the job (that is its whole contract — the
+          // dispatch behind the crash died in UNKNOWN status, so any older
+          // verified ok is stale evidence from before the unknown effects).
+          // Drop the replay record so the wave loop's replay-skip cannot
+          // mark the released job done without dispatching it (Codex P1 on
+          // the fix round: run 1 ok → run 2 crashes after opening its
+          // reservation → run 3 resumes WITH the release).
+          replay.delete(job.id);
+          continue;
+        }
+        await emit({
+          type: 'job-quarantined',
+          runId,
+          at: now(),
+          jobId: job.id,
+          reservationId: quarantined.reservationId,
+          chargedUsd: quarantined.usd,
+          reason: 'unresolved-reservation',
+        });
+        entries.set(job.id, {
+          result: {
+            status: 'needs-human',
+            reason: `quarantined: unresolved reservation '${quarantined.reservationId}' (charged ${quarantined.usd} USD in full — the dispatch behind a hard crash may have spent it); release with --release-quarantine ${job.id} to re-run (the charge is never refunded)`,
+          },
+          state: 'blocked', // the frozen-state friction mapping for needs-human (header counts policy)
+          origin: 'quarantined',
+        });
+      }
     }
 
     // --- Execute waves through one pool, EXACTLY opts.concurrency in flight
@@ -941,6 +1080,66 @@ export async function runPlan(
       // p-limit start re-check (same rule as the plain path).
       if (stop.requested) return;
 
+      // A12c (W2.3): an ADVISORY-classified dispatch is refused UNATTENDED
+      // without an explicit escape (`attended: true`, or `allowAdvisory`).
+      // At v1.1 EVERY dispatch classifies ADVISORY (lanes.ts ships no HARD
+      // rows — no conformance leg has demonstrated one), so an unattended
+      // governed run dispatches nothing unless the operator escapes. The
+      // refusal is terminal budget evidence ON THE JOB (ADR §2.9: advisory-*
+      // rows stay budget-exhausted on themselves; dependents re-mark
+      // transitively), journalled finish-only with the `reservation-refused`
+      // fact — nothing was dispatched, no attempt is spent. The gate sits
+      // BEHIND the trip check (`!governor.tripped`): on an already-tripped
+      // run the REAL cause of a refusal is the trip, and the durable
+      // `reservation-refused{reason:'advisory-lane'}` line would name the
+      // wrong bound (review r1 M1) — a tripped run falls through to
+      // `governor.admit`, whose refusal journals the trip as the cause.
+      if (
+        gov !== undefined &&
+        !governor.tripped &&
+        gov.attended !== true &&
+        gov.allowAdvisory !== true &&
+        classifyDispatch() === 'advisory'
+      ) {
+        governor.record({
+          kind: 'short-circuited',
+          op: job.op,
+          jobKey: job.id,
+          reason: 'advisory-lane',
+          atMs: governor.now(),
+        });
+        if (opts.stopOnError) stop.requested = true;
+        // (With stopOnError the halt is the OPERATOR's stop policy, never a
+        // governor trip: the honest-stop pass below therefore does not
+        // re-mark the undispatched rows budget-exhausted — they stay
+        // `queued`, re-runnable, and the run claims no budget stop the
+        // journal cannot back with a budget-tripped fact.)
+        await emit({
+          type: 'reservation-refused',
+          runId,
+          at: now(),
+          jobId: job.id,
+          op: job.op,
+          reason: 'advisory-lane',
+        });
+        const advisoryRefused: OpResult<unknown> = { status: 'budget-exhausted' };
+        await emit({
+          type: 'job-finished',
+          runId,
+          at: now(),
+          jobId: job.id,
+          opId: job.op,
+          inputsHash: job.inputsHash,
+          result: advisoryRefused,
+        });
+        entries.set(job.id, {
+          result: advisoryRefused,
+          state: 'budget-exhausted',
+          origin: 'executed',
+        });
+        return;
+      }
+
       const admission = governor.admit(job.id);
       if (admission.decision === 'reject') {
         // admit() answers reason 'budget' for EVERY tripped kind, so a
@@ -1017,137 +1216,299 @@ export async function runPlan(
 
       await governor.acquireSlot();
       let result: OpResult<unknown>;
-      try {
-        // The budget can trip while this dispatch waited for a slot; a queued
-        // dispatch that can no longer be paid for does not run (I9: honest).
-        // The trip KIND decides the verdict: a budget trip leaves the row
-        // budget-exhausted, but a SIGNAL trip is a cancel, not a budget
-        // event — the row is indeterminate (never ran; resume re-runs it)
-        // and the event names the cancel, keeping the trip taxonomy's rule
-        // that a signal stop never claims a budget exhaustion.
-        if (governor.tripped) {
-          const cancelled = governor.tripKind === 'signal';
+      // W2.3 reserve-then-settle: the dispatch's open reservation (undefined
+      // on an uncapped run — reservation-less), the settle's returned charge
+      // (journalled on the job-finished as `charged`), the ladder outcome
+      // (the settle's basis reads the dispatch's ending), and the composed
+      // dispatch signal's cleanup.
+      let reservation: BudgetReservation | undefined;
+      let settledCharge:
+        | { charged: number; basis: 'observed' | 'full'; priced: boolean }
+        | undefined;
+      let outcome: LadderOutcome<OpResult<unknown>> | undefined;
+      // The op body's own rejection, or a post-invocation value the contract
+      // rejects — the UNKNOWN-status endings executeOp's contract flattens
+      // into a `failed` verdict. The settle's basis reads the signal; the
+      // ladder's 'threw' outcome cannot, because executeOp never rejects.
+      let dispatchUnknown = false;
+      // The dispatch-closed guard: once the ladder settles, the dispatch's
+      // evidence window is CLOSED — a detached (killed) op promise's late
+      // reportResult calls are DROPPED, so the live ledger and the journal's
+      // reservation-settled.charged / job-finished rollups stay exactly
+      // equal (a post-settle fold would move the ledger with no journal
+      // backing, and the next fold would silently undercount it).
+      let dispatchClosed = false;
+
+      // The queued-dispatch refusal (the trip KIND decides the verdict): a
+      // budget trip leaves the row budget-exhausted, but a SIGNAL trip is a
+      // cancel, not a budget event — the row is indeterminate (never ran;
+      // resume re-runs it) and the event names the cancel, keeping the trip
+      // taxonomy's rule that a signal stop never claims a budget exhaustion.
+      const queuedRefusal = (cancelled: boolean): OpResult<unknown> => {
+        governor.record({
+          kind: 'short-circuited',
+          op: job.op,
+          jobKey: job.id,
+          reason: cancelled ? 'cancelled-while-queued' : 'budget-while-queued',
+          atMs: governor.now(),
+        });
+        return cancelled
+          ? {
+              status: 'indeterminate',
+              detail:
+                'cancelled: the run-level signal tripped the governor before this queued dispatch ran',
+            }
+          : { status: 'budget-exhausted' };
+      };
+
+      // Interpret ONE ladder outcome into the job's verdict: the completion
+      // record, the DD-9 completion-time evidence fold, the kill verdict. A
+      // 'threw' outcome re-throws so the caller's catch keeps the runner's
+      // failure semantics in charge.
+      const interpretOutcome = (
+        ladderOutcome: LadderOutcome<OpResult<unknown>>,
+        attempt: number,
+      ): OpResult<unknown> => {
+        if (ladderOutcome.outcome === 'completed') {
+          const opResult = ladderOutcome.value;
           governor.record({
-            kind: 'short-circuited',
+            kind: 'completed',
             op: job.op,
             jobKey: job.id,
-            reason: cancelled ? 'cancelled-while-queued' : 'budget-while-queued',
+            attempt,
+            status: opResult.status,
+            elapsedMs: ladderOutcome.elapsedMs,
             atMs: governor.now(),
           });
-          result = cancelled
-            ? {
-                status: 'indeterminate',
-                detail:
-                  'cancelled: the run-level signal tripped the governor before this queued dispatch ran',
-              }
-            : { status: 'budget-exhausted' };
-        } else {
-          const attempt = admission.attempt;
-          const ladderSignal = gov?.signal;
-          try {
-            const outcome = await runLadder(
-              () => executeOp(job, (name) => registry.get(name)),
-              governor.ladderSpec,
-              { op: job.op, jobKey: job.id, attempt },
-              {
-                // ONE time source: the governor's own clock timestamps the
-                // ladder AND every recorded event — an override here would
-                // run the ladder in a different time domain from the event
-                // stream (review thread). Virtualize at createGovernor.
-                clock: governor.clock,
-                // The external run-level signal composes INTO the ladder's
-                // controller (governor.runLadder): ops see the abort through
-                // currentJobContext().signal.
-                ...(ladderSignal !== undefined ? { signal: ladderSignal } : {}),
-                onRung: (marker) => {
-                  // Keep the marker identity: async delivery failures arrive
-                  // after onRung and must remain visible in the recorded event.
-                  governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
-                },
-                onResult: (evidence) => {
-                  // The transitional reportResult channel: sanitize (a lying
-                  // measurement is ZERO evidence, never a throw), mark the
-                  // once-only flags for the completion fold below, apply
-                  // DD-9, and accumulate the per-job sums.
-                  const sanitized = validSpendEvidence(evidence);
-                  if (sanitized.usage !== undefined && usageTokens(sanitized.usage) > 0) {
-                    reportedUsage = true;
-                  }
-                  if (sanitized.costUSD !== undefined) reportedCost = true;
-                  governor.observeResult(job.id, sanitized);
-                  foldIntoJobSums(sanitized);
-                },
+          // DD-9 evidence fold: a completed 'ok' OpResult whose value is
+          // WorkerResult-shaped carries this invocation's budget evidence —
+          // fold it ONCE, skipping whatever the op already streamed (the
+          // flags above).
+          if (opResult.status === 'ok') {
+            const worker = workerResultOfValue(opResult.value);
+            if (worker !== undefined) {
+              const counts = {
+                usageAlreadyCounted: reportedUsage,
+                costAlreadyCounted: reportedCost,
+              };
+              // Mirror-strict exactly like the streamed channel above: a
+              // returned WorkerResult the journal/report mirror would
+              // reject (fractional counts, extra keys) folds as ZERO
+              // evidence — otherwise it lands raw in the per-job sums
+              // and trades the defensive guard for a post-record
+              // job-finished append throw (review thread).
+              const spend = validSpendEvidence(worker);
+              governor.observeResult(job.id, spend, counts);
+              foldIntoJobSums(spend, counts);
+            }
+          }
+          return opResult;
+        }
+        if (ladderOutcome.outcome === 'threw') {
+          governor.record({
+            kind: 'completed',
+            op: job.op,
+            jobKey: job.id,
+            attempt,
+            status: 'threw',
+            elapsedMs: ladderOutcome.elapsedMs,
+            atMs: governor.now(),
+          });
+          // The runner's failure semantics stay in charge: convert the
+          // unexpected throw (executeOp itself never throws) into the
+          // honest per-job failure so the run continues.
+          throw ladderOutcome.error;
+        }
+        // Rung 3 fired: the op was killed — detached in-process with
+        // its rejections suppressed — and the honest known-cause
+        // verdict is recorded in its place (I9).
+        governor.record({
+          kind: 'completed',
+          op: job.op,
+          jobKey: job.id,
+          attempt,
+          status: 'budget-exhausted',
+          elapsedMs: ladderOutcome.elapsedMs,
+          atMs: governor.now(),
+        });
+        return { status: 'budget-exhausted' };
+      };
+
+      // ONE dispatch ladder, shared by the capped and uncapped paths: the
+      // ladder composes the governor's TRIP SIGNAL (aborted by any trip —
+      // cancel included, via bindRunSignal — abort-on-trip, W2.3), so an
+      // in-flight op sees the abort through currentJobContext().signal. The
+      // ladder removes its listener when it settles (governor.runLadder).
+      const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
+        const ladderOutcome = await runLadder(
+          () => {
+            dispatchUnknown = false;
+            return executeOp(
+              job,
+              (name) => registry.get(name),
+              () => {
+                dispatchUnknown = true;
               },
             );
-            if (outcome.outcome === 'completed') {
-              const opResult = outcome.value;
-              governor.record({
-                kind: 'completed',
-                op: job.op,
-                jobKey: job.id,
-                attempt,
-                status: opResult.status,
-                elapsedMs: outcome.elapsedMs,
-                atMs: governor.now(),
-              });
-              // DD-9 evidence fold: a completed 'ok' OpResult whose value is
-              // WorkerResult-shaped carries this invocation's budget
-              // evidence — fold it ONCE, skipping whatever the op already
-              // streamed (the flags above).
-              if (opResult.status === 'ok') {
-                const worker = workerResultOfValue(opResult.value);
-                if (worker !== undefined) {
-                  const counts = {
-                    usageAlreadyCounted: reportedUsage,
-                    costAlreadyCounted: reportedCost,
-                  };
-                  // Mirror-strict exactly like the streamed channel above: a
-                  // returned WorkerResult the journal/report mirror would
-                  // reject (fractional counts, extra keys) folds as ZERO
-                  // evidence — otherwise it lands raw in the per-job sums
-                  // and trades the defensive guard for a post-record
-                  // job-finished append throw (review thread).
-                  const spend = validSpendEvidence(worker);
-                  governor.observeResult(job.id, spend, counts);
-                  foldIntoJobSums(spend, counts);
-                }
+          },
+          governor.ladderSpec,
+          { op: job.op, jobKey: job.id, attempt },
+          {
+            // ONE time source: the governor's own clock timestamps the
+            // ladder AND every recorded event — an override here would
+            // run the ladder in a different time domain from the event
+            // stream (review thread). Virtualize at createGovernor.
+            clock: governor.clock,
+            signal: governor.tripAbortSignal,
+            onRung: (marker) => {
+              // Keep the marker identity: async delivery failures arrive
+              // after onRung and must remain visible in the recorded event.
+              governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
+            },
+            onResult: (evidence) => {
+              if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
+              // The transitional reportResult channel: sanitize (a lying
+              // measurement is ZERO evidence, never a throw), mark the
+              // once-only flags for the completion fold below, apply
+              // DD-9, and accumulate the per-job sums.
+              const sanitized = validSpendEvidence(evidence);
+              if (sanitized.usage !== undefined && usageTokens(sanitized.usage) > 0) {
+                reportedUsage = true;
               }
-              result = opResult;
-            } else if (outcome.outcome === 'threw') {
-              governor.record({
-                kind: 'completed',
-                op: job.op,
-                jobKey: job.id,
-                attempt,
-                status: 'threw',
-                elapsedMs: outcome.elapsedMs,
-                atMs: governor.now(),
-              });
-              // The runner's failure semantics stay in charge: convert the
-              // unexpected throw (executeOp itself never throws) into the
-              // honest per-job failure so the run continues.
-              throw outcome.error;
-            } else {
-              // Rung 3 fired: the op was killed — detached in-process with
-              // its rejections suppressed — and the honest known-cause
-              // verdict is recorded in its place (I9).
-              governor.record({
-                kind: 'completed',
-                op: job.op,
-                jobKey: job.id,
-                attempt,
-                status: 'budget-exhausted',
-                elapsedMs: outcome.elapsedMs,
-                atMs: governor.now(),
-              });
-              result = { status: 'budget-exhausted' };
+              if (sanitized.costUSD !== undefined) reportedCost = true;
+              governor.observeResult(job.id, sanitized);
+              foldIntoJobSums(sanitized);
+            },
+          },
+        );
+        // Captured for the settle's basis: the dispatch's ENDING decides
+        // whether the charge is 'observed' (definitive verdict) or 'full'
+        // (killed / indeterminate / threw — unknown status).
+        outcome = ladderOutcome;
+        const interpreted = interpretOutcome(ladderOutcome, attempt);
+        dispatchClosed = true; // close the evidence window BEFORE the settle reads it
+        return interpreted;
+      };
+
+      try {
+        if (governor.tripped) {
+          result = queuedRefusal(governor.tripKind === 'signal');
+        } else if (governor.capUsd !== undefined) {
+          // RESERVE-THEN-SETTLE (W2.3): the dispatch holds a reservation —
+          // `settled + outstanding + reserved ≤ C` from the gate's grant
+          // until settle. The proposal is the fair share C/concurrency; the
+          // gate shrinks it to the remaining capacity or parks FIFO behind
+          // outstanding settles.
+          const capUsd = governor.capUsd;
+          const reserved = await governor.reserve(
+            job.id,
+            admission.attempt,
+            capUsd / opts.concurrency,
+            classifyDispatch(),
+          );
+          if (reserved.outcome === 'tripped') {
+            // A trip while parked on reservation capacity: the same refusal
+            // shape as the slot-wait refusal, decided by the trip kind.
+            result = queuedRefusal(governor.tripKind === 'signal');
+          } else {
+            const granted = reserved.reservation;
+            // WRITE-AHEAD (A12b): the reservation is DURABLE before the op
+            // runs. A hard crash after this line and before the settle is
+            // exactly the spend-behind-a-crash window W2.2 could not see —
+            // the next fold charges the reservation in full and quarantines
+            // the job. If the write FAILS, the write-ahead fact never
+            // landed: the dispatch never starts, the governor-side hold is
+            // abandoned (no charge, no settle journal entry — nothing ran),
+            // and the journal failure propagates (a hole in the write-ahead
+            // sequence is a loud run stop, never a silent dispatch).
+            await emitDurable({
+              type: 'reservation-opened',
+              runId,
+              at: now(),
+              jobId: job.id,
+              op: job.op,
+              attempt: admission.attempt,
+              reservationId: `${runId}:${granted.id}`,
+              usd: granted.usd,
+              class: granted.class,
+              ...(granted.proposedUsd !== undefined ? { proposedUsd: granted.proposedUsd } : {}),
+            }).catch((err: unknown) => {
+              governor.abandonReservation(granted);
+              throw err;
+            });
+            reservation = granted;
+            try {
+              result = await runDispatchLadder(admission.attempt);
+            } catch (err) {
+              dispatchClosed = true; // a 'threw' outcome escapes interpretOutcome — closed here
+              result = { status: 'failed', error: messageOf(err) };
             }
+          }
+        } else {
+          // UNCAPPED (reservation-less): the W2.2 dispatch unchanged —
+          // evidence folds roll the ledger and the token cap binds; there is
+          // no USD capacity to hold a reservation against.
+          try {
+            result = await runDispatchLadder(admission.attempt);
           } catch (err) {
+            dispatchClosed = true; // same as above
             result = { status: 'failed', error: messageOf(err) };
           }
         }
       } finally {
-        governor.releaseSlot();
+        if (reservation !== undefined) {
+          // SETTLE — durable BEFORE the job's outcome is journalled. The
+          // basis is 'full' when the dispatch ended in UNKNOWN status
+          // (killed with its detached promise, an indeterminate verdict, a
+          // defensive throw — spend may exist that no fold saw): the charge
+          // is at least the full reservation. Definitive verdicts settle
+          // 'observed' — the charge is exactly what the evidence folds saw
+          // (a pre-dispatch failure like an unknown op folds nothing and
+          // settles 0). A pre-dispatch failure and a POST-invocation
+          // failure (a rejecting op body, or one resolving to a value the
+          // contract rejects) read identically from the verdict alone —
+          // executeOp flattens both into `failed` — so the dispatch signal
+          // is what keeps the second out of this branch. The slot is held
+          // until the settle LANDS — and a
+          // failed settle or durable write must still release it (a leaked
+          // slot would hang every waiter forever on a run that is already
+          // stopping loudly).
+          const basis: 'observed' | 'full' =
+            outcome === undefined ||
+            outcome.outcome === 'killed' ||
+            outcome.outcome === 'threw' ||
+            dispatchUnknown ||
+            (outcome.outcome === 'completed' && outcome.value.status === 'indeterminate')
+              ? 'full'
+              : 'observed';
+          try {
+            settledCharge = governor.settle(reservation, {
+              basis,
+              ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+            });
+            await emitDurable({
+              type: 'reservation-settled',
+              runId,
+              at: now(),
+              jobId: job.id,
+              reservationId: `${runId}:${reservation.id}`,
+              charged: settledCharge.charged,
+              basis,
+              // PRICE PRESENCE (H2/DD-9): the journal distinguishes a
+              // legitimate zero-priced lane (costUSD: 0 observed) from
+              // unpriced spend, so the resume fold's DD-9 seed check
+              // `charged === 0 && usage > 0 && !priced` never hard-stops a
+              // priced-at-zero history.
+              ...(settledCharge.priced ? { priced: true } : {}),
+              ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+            });
+          } finally {
+            reservation = undefined;
+            governor.releaseSlot();
+          }
+        } else {
+          governor.releaseSlot();
+        }
       }
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
@@ -1161,6 +1522,7 @@ export async function runPlan(
         result,
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
         ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
+        ...(settledCharge !== undefined ? { charged: settledCharge.charged } : {}),
       });
       entries.set(job.id, {
         result,
@@ -1177,6 +1539,9 @@ export async function runPlan(
       if (stop.requested) break;
       const submissions: Array<Promise<void>> = [];
       for (const job of wave) {
+        // Already classified (quarantined this run — W2.3): never dispatched,
+        // the row stands as the quarantine pass set it.
+        if (entries.has(job.id)) continue;
         // Ready iff every dependency ended ok (skipped-replayed jobs count as
         // done — they carry a verified prior ok).
         const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
@@ -1307,8 +1672,30 @@ export async function runPlan(
         const dispatchQuotaRefused = governor.events.some(
           (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
         );
+        // A12c advisory refusals are ADMISSION refusals too (ADR §2.9): the
+        // refused job's own row is its terminal budget verdict, and rows
+        // whose non-dispatch is transitively caused by it re-mark like any
+        // other admission refusal — never fabricated `failed` rows.
+        const advisoryRefused = governor.events.some(
+          (event) => event.kind === 'short-circuited' && event.reason === 'advisory-lane',
+        );
+        // The ADMISSION-refusal terms contribute to a budget stop, with ONE
+        // gate (composition review comp 1): the advisory-lane term counts
+        // only while the run was NOT halted by stopOnError. A classification
+        // refusal is a per-row terminal verdict, not a governor trip, so
+        // when the operator's stopOnError policy halted the run on it,
+        // re-marking the un-dispatched rows budget-exhausted and claiming
+        // `earlyStopReason: 'budget'` would report a budget stop the
+        // journal has NO budget-tripped fact for — $0 spent, no bound fired,
+        // and the sibling rows would lose their re-runnable `queued` state.
+        // With stopOnError false (the default) the term stands: dependents
+        // re-mark transitively per ADR §2.9. The dispatch-QUOTA term is
+        // W2.2's pinned budget-family semantic (its own refusal rows are
+        // durable terminal evidence) and is unchanged here.
         const budgetFamilyStop =
-          (governor.tripped && governor.tripKind !== 'signal') || dispatchQuotaRefused;
+          (governor.tripped && governor.tripKind !== 'signal') ||
+          dispatchQuotaRefused ||
+          (advisoryRefused && !stop.requested);
         if (budgetFamilyStop) {
           // Is this job's non-execution attributable to the budget
           // (transitively)? Memoized per jobId: a diamond dependency must
@@ -1380,12 +1767,30 @@ export async function runPlan(
       }
     }
 
+    // The trip EVIDENCE (ADR-0003 §2.8 budget-tripped), emitted once per run
+    // just before run-finished — the durable record of which bound fired and
+    // why (the honest-stop CLAIM above is the report's; this is the journal's
+    // fact).
+    if (governedDispatch && governor !== undefined && governor.tripped) {
+      await emit({
+        type: 'budget-tripped',
+        runId,
+        at: now(),
+        tripKind: governor.tripKind ?? 'exhausted',
+        reason: governor.tripReason ?? 'budget trip',
+      });
+    }
+
     await emit({
       type: 'run-finished',
       runId,
       at: now(),
       stoppedEarly,
       ...(earlyStopReason !== undefined ? { earlyStopReason } : {}),
+      // The line-count check's writer half (journal.foldOrderRuns verifies).
+      // +1: this run-finished line is itself part of the total — the spread
+      // above is evaluated before emit() increments the counter.
+      ...(runLog !== undefined ? { eventCount: journalledCount + 1 } : {}),
     });
 
     // --- Report ---------------------------------------------------------------

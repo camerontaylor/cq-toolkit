@@ -186,9 +186,11 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   when the rollup EXCEEDS it). The kernel never derives cost itself. Trips
   carry a kind (`TripKind`: `exhausted` / `token-cap` / `signal`) — a
   `signal` trip is a run-level CANCEL (`Governance.signal`), not a budget
-  verdict. Tripping gates admission only — in-flight jobs were admitted
-  before the trip and their outcomes stay real evidence (abort-on-trip is
-  the reservation slice's, W2.3).
+  verdict. Since W2.3's reserve-then-settle a trip stops NEW reservations,
+  refuses every capacity waiter, and ABORTS IN-FLIGHT work: the governor
+  owns the run's trip signal (`tripAbortSignal`; every dispatch ladder
+  composes it), and each aborted dispatch's reservation settles when it
+  returns — the slot is held until then.
 - **Honest stop (I9).** The runner claims the stop itself — no post-pass:
   a budget-family trip (or a per-run dispatch-quota refusal) re-marks the
   never-dispatched rows whose non-execution is transitively budget-caused
@@ -225,7 +227,11 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   `job.id`, which the PLAN controls — a plan that renames its job ids
   between runs presents as fresh jobs and resets its per-job attempt
   lineage (rename evasion); stable identity needs a plan-external job
-  identity, which is not in v1.1.
+  identity, which is not in v1.1. The SAME keying bounds the A12b
+  quarantine: it keys on `job.id` too, so a rename does not merely reset
+  the attempt lineage — it ESCAPES a standing quarantine (the renamed job
+  re-dispatches while the unresolved charge stays; named in the P1
+  table's quarantine row — a plan-external identity closes both).
   The fold's corruption checks are loud on DUPLICATES (two v2 runs sharing
   one `seq`) and on GAPS: a `claimSeq` tombstone (`<planId>.seq.<n>`)
   beyond the highest folded run-started `seq` throws
@@ -234,7 +240,11 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   crash between claimSeq and the first append — safe to resolve by deleting
   the named tombstone, which the error says). This maximum-sequence check
   catches claims trailing the folded history; it does not detect a deleted
-  interior run when a higher sequence still folds. The refusals guard the
+  interior run when a higher sequence still folds. A surviving run file's LINE
+  COUNT is checked too: `run-finished.eventCount` (the writer's total) must
+  match the folded line count, so deleting a single line — a crashed
+  dispatch's `reservation-opened`, which would otherwise silently drop the
+  run out of the reservation era — throws instead of folding. The refusals guard the
   ledger: governed history refuses an ungoverned run (opt-in
   `budget.ungovernedOverGoverned` marks the run ungoverned on its v2
   record instead — and the marker is honoured ONLY over actual governed
@@ -271,6 +281,190 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
     was rejected for W2.2 because a crashed holder would wedge the plan
     (fail-closed with no stale-lock recovery), which is a worse operational
     failure than the documented race.
+
+## Reserve-then-settle (W2.3, ADR-0003 §2.2/§2.3)
+
+A governed dispatch under a USD cap holds a RESERVATION — the admission
+invariant is `settled + outstanding + reserved ≤ C`, held synchronously
+from `reserve` to `settle`.
+
+- **Write-ahead (A12b).** `reservation-opened` is fdatasync'd BEFORE the op
+  runs; `reservation-settled` BEFORE the outcome is journalled. A hard
+  crash between them is exactly the spend-behind-a-crashed-dispatch window
+  W2.2 could not see: the resume fold charges the reservation IN FULL
+  (`usdSpent` includes it, so a crash that spent the cap trips the seeded
+  overrun check) and QUARANTINES the job — never dispatched, reported
+  `needs-human`, dependents blocked, re-attested every run until an
+  explicit per-call `releaseQuarantine` (CLI `--release-quarantine`),
+  which re-runs the job but NEVER refunds the charge. A crash BEFORE
+  `reservation-opened` cannot have spent anything: the job re-runs on
+  resume with no charge (an open `job-started` alone proves no dispatch
+  started — that ordering IS the undercount fix). The third window sits
+  between the two facts above: a crash AFTER the durable settle but BEFORE
+  `job-finished` leaves the spend counted and the job with an open
+  `job-started`, so the next run RE-DISPATCHES it at a fresh full
+  reservation — the cap is charged twice for one unit of work (the bound
+  holds: the cap is the cap; attempt accounting stays correct), recorded
+  as a residual, not a break. Line-deletion corruption in a SURVIVING run
+  file is loud: `run-finished` carries the file's total `eventCount`, and
+  the resume fold throws on a mismatch (a deleted `reservation-opened`
+  would otherwise drop the run out of the reservation era — its full
+  charge vanishing and its quarantine never firing). Recorded residual: the
+  CLI's release surface is a comma-separated flag whose empty segments are
+  dropped (`--release-quarantine`, `src/cli/run-plan.ts`), so a job whose
+  `id` is the empty string — a degenerate but schema-valid plan — can be
+  quarantined and never named on that surface. The honest closure is on the
+  PLAN side (`JobSchema.id` requiring `min(1)`), a frozen input-contract
+  change outside this slice; recorded here rather than papered over.
+- **Sizing.** The proposal is the fair share `C / concurrency` — ADR §2.2
+  step 3's `inv.budget.maxUsd` proposal term is NOT implementable at today's
+  kernel op seam (no per-invocation budget crosses it; the term lands with
+  the W3.3 reservation surface), so only the fair-share half exists. When
+  the proposal exceeds remaining capacity, ADR §2.2 step 3 decides: with any
+  reservation OUTSTANDING the dispatch WAITS FIFO for a settle (a bookkeeping
+  shrink there would undersize `r` and the dispatch's real charge would trip
+  `breach`, aborting healthy in-flight work); with NOTHING outstanding the
+  gate shrinks to `C − S` (`proposedUsd` journalled when shrunk), because no
+  settle can free capacity anymore. That shrink carries the SAME
+  under-sizing exposure as the park it contrasts with — the dispatch's real
+  charge is still unknown at the gate, and one that outruns `C − S` trips
+  `breach`: the recorded post-hoc detector, not prevention. Parked waiters
+  keep their queue
+  position (grant-from-head: a settle that frees nothing never wakes the
+  head at all — a waiter is woken only WITH its grant or with a trip), a
+  newcomer never jumps the queue, and a
+  tripped waiter short-circuits at its wake with the budget verdict
+  (`budget-exhausted`; `cancelled` under a signal trip) rather than being
+  refused at trip time. No `W_max`
+  floor exists at the kernel seam — sizing is honest-share, not
+  demonstrated-worst-case; the floor machinery is W2.1/W3.5's (HARD rows).
+  A zero cap admits nothing: the first reserve trips `exhausted` before any
+  dispatch (a zero budget that dispatches anyway is the lie the cap
+  prevents). Uncapped governed runs are reservation-less (there is no bound
+  to hold capacity against; their ledger folds observed evidence exactly as
+  W2.2). Token caps are not a reservation dimension — USD is the ledger's
+  binding unit (the W2.2 `prevCapTokens` record); the token rollup binds
+  through the DD-9 folds unchanged.
+- **Charges.** Evidence folds attribute to the job's open reservation.
+  Definitive verdicts settle basis `observed` — the charge is exactly what
+  the folds saw (a pre-dispatch failure like an unknown op settles 0). A
+  dispatch ending in UNKNOWN status — ladder kill, `indeterminate` verdict,
+  a defensive throw, or a post-invocation failure — settles basis `full`:
+  charged = max(r, folded), at
+  least the whole reservation (spend may exist that no fold saw). The
+  post-invocation case is INVISIBLE in the verdict — `executeOp` never
+  rejects and flattens every such failure into a `failed` result (by the
+  frozen contract), so the dispatch signals it out of band and the settle
+  reads that signal. It covers a body that REJECTED and a body that RESOLVED
+  to something that is not an `OpResult` at all: both RAN the op, so both
+  may have spent. The PRE-dispatch failures — a throwing registry lookup, an
+  unknown op, a schema violation, a throwing importer — provably dispatched
+  nothing and settle `observed` zero. A body that resolved to a WELL-FORMED
+  result whose VALUE the journal refuses is deliberately NOT in the signal:
+  that is the evidence guard's lying-measurement case (a `NaN`/negative
+  `costUSD` folds nothing by design), and a full-reservation charge there
+  would let a bad number invent spend no fold ever saw. Recorded residual:
+  a dispatch whose ONLY evidence is such an uns journallable value settles
+  `observed` at zero. The
+  journal's `reservation-settled.charged` and the live ledger agree exactly
+  (the settle adds only the un-counted remainder), and the event carries
+  `priced` — whether a `costUSD`, ZERO included, was observed on the
+  channel — so the resume fold's DD-9 check (`charged === 0 && usage > 0 &&
+!priced`) never mistakes a legitimate zero-priced/subscription lane for
+  unpriced spend. `charged > r` trips
+  `breach`. That trip is a post-hoc DETECTOR, recorded as such: it fires at
+  SETTLE — after the overshoot already spent — because the gate holds no
+  pre-dispatch floor at this seam (no `W_max`); the ADR's floor machinery
+  (W2.1/W3.5) is the closure, and until then breach is evidence of
+  underselling, not prevention. Residuals, recorded: post-settle folds from
+  a detached (killed) op promise are suppressed at the runner — the `full`
+  charge covers them — but a misbehaving op streaming evidence after a
+  NORMAL settle would move the live ledger without journal backing (the
+  driver-side report-on-every-exit-path guard, W2.1, is the real closure);
+  and a durable `reservation-settled` WRITE failure after the in-memory
+  settle leaves the journal's reservation open while the live ledger took
+  the charge — the next fold charges `r` in full where the live run charged
+  possibly-less (conservative, but permanent divergence with no abandon
+  path; the write-ahead OPEN side has one, the settle side has none).
+- **The structured driver-seam settle channel** (`errorClass`,
+  `providerSignals`, `failedAttemptsObserved`, ADR-0003 §2.2 step 9) rides
+  `reservation-settled` from W2.1/W3.3 outward; this slice journals the
+  usage rollup only. The driver-seam `BudgetReservation` /
+  `RunOptions.reservation` types are W3.3's (one types bump on the last P2
+  PR) — the kernel's reservation is internal.
+- **Abort-on-trip.** A trip (any kind) aborts the run's trip signal; every
+  dispatch ladder composes it, so in-flight ops see the abort through
+  `currentJobContext()` and settle. The governor owns this signal (I8 —
+  `bindRunSignal`/`tripAbortSignal`; the kernel keeps ONE cancellation-root
+  owner, pinned by test/kernel/driver-hygiene.test.ts).
+- **A12c — the ADVISORY gate.** Every dispatch classifies through
+  `src/kernel/lanes.ts` (`classifyDispatch`): the table ships EMPTY — no
+  conformance leg has proven a lane HARD, so every dispatch is ADVISORY at
+  v1.1 — and a 'hard' row without `evidence` throws (HARD is demonstrated,
+  never declared). A NON-EMPTY table with no dispatch key throws too — a
+  HARD row silently failing to match (the gate refusing as ADVISORY while
+  the table promises HARD) is the inert-gate failure this module never
+  hides. ADVISORY + unattended (`attended` defaults false, P8) +
+  no escape → refused per dispatch: `reservation-refused
+{reason:'advisory-lane'}` journalled, the row budget-exhausted ON ITSELF,
+  dependents re-marked transitively, nothing dispatched. The gate sits
+  behind the trip check: on an already-tripped run the refusal names the
+  TRIP as the cause (`governor.admit`), never a mis-attributed
+  `advisory-lane`. One refusal yields two honest-stop shapes, split on the
+  runner's `advisoryRefused && !stop.requested` gate: with stopOnError false
+  the refusal counts as a budget-family stop (`earlyStopReason: 'budget'`
+  claimed, dependents re-marked transitively), while under stopOnError the
+  rows stay re-runnable `queued` and NO `earlyStopReason: 'budget'` is
+  claimed — the journal holds a per-row refusal, not a budget-tripped fact,
+  so claiming a budget stop would assert a $0-spent bound the run never
+  fired. The escapes:
+  `Governance.allowAdvisory` (CLI `--allow-advisory-budget`) or
+  `attended: true`, and the escape is ROUTED, never hardcoded: product
+  paths turn it on through their own explicit options (default OFF at the
+  library surface), and the journal records WHO set it —
+  `allowAdvisoryProvenance: 'operator' | 'product'` — because ADR-0003
+  §2.3 puts allowAdvisory admissions OUTSIDE the C_max bound, so a future
+  HARD row's breach must be attributable. Recorded posture (v1.1): the
+  unattended-by-design product paths (review-loop's sweep, self-merge-prs)
+  pass the escape explicitly; an embedder withholding it refuses every
+  dispatch on unattended runs — that is the gate working, not a bug.
+  Recorded gap: the journalled `governance` block validates provenance ONLY
+  in the direction it needs for safety — provenance without the escape is
+  refused, but the escape WITHOUT provenance is accepted, so a library
+  caller can persist an unattributed lane (both in-diff product paths stamp
+  theirs: the CLI `'operator'`, self-merge-prs `'product'`). The honest
+  closure is to make the unattributed escape unrepresentable — either the
+  inverse check plus a migration of every `{ allowAdvisory: true }` caller
+  to pass provenance, or distinct operator/product entry points that derive
+  it — not a footnote: this schema IS the durable record, so the check
+  belongs where the record is written. Recorded here for that change.
+- **Capless governed runs inherit C_prev.** A governed run without a cap
+  over capped history conservatively inherits the predecessor cap
+  (`governor.inheritCapUsd`) and journals
+  `run-started.governance.inheritedCapUsd` — the ledger's C never silently
+  disappears between runs. The inheritance does NOT move the raise
+  refusal's predecessor cap. Recorded residual: the inherited value reads
+  the same journalled `capUsd` the raise refusal reads, so a hand-edited
+  journal can inflate it the same way it could inflate a predecessor cap —
+  trusted-by-possession, no new trust assumption — and an inherited cap
+  BINDS like a configured one (it arms the DD-9 unpriced trip and the
+  seeded-overrun check on a run that set no `maxUsd` of its own; the trip
+  message names the inheritance).
+- **Fold eras.** A run with any `reservation-opened` folds its spend from
+  reservation events (`Σ settled.charged + Σ r(unresolved)`); a W2.2-era
+  governed run (no reservations) folds from `job-finished.costUSD` with the
+  per-(run, job) close rule — the composite-key hardening the cycle-3
+  rejection noted, which M2 landed and this fold preserves. Corruption is
+  loud: a settle without an open, or a finish over an unsettled
+  reservation, throws (writer order + durable-before-issued makes both
+  unreachable from an honest writer).
+- **`budget-tripped`** is journalled once per run, just before
+  `run-finished` — the durable fact of which bound fired and why; the
+  honest-stop CLAIM stays the report's taxonomy.
+- **Human-approval quarantine interaction (W4.3 note):** a job refused or
+  quarantined never burns its approval token — consumption happens only at
+  exercise (the annex's refusal-is-non-burning rule already composes with
+  this slice's refusals).
 
 ## Governor config
 
@@ -429,7 +623,8 @@ composition harness for that arrives with the op families (T1.4+).
   open start — an orphan finish in a multi-run journal is a replay
   re-attestation of an already-counted dispatch, and counting it again would
   double the rollup.
-- **Trip gates admission only**: in-flight jobs complete; their evidence
+- **Trip gates admission only** _(T1.3's decision — superseded by W2.3's
+  abort-on-trip, see "Reserve-then-settle" above)_: in-flight jobs complete; their evidence
   stays real.
 - **USD is observed, never derived**: cost arrives from the op's evidence
   folds (a priced driver result carries `costUSD` labeled

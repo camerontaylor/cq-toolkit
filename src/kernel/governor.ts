@@ -36,7 +36,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import { prepareProcessSignalCleanup } from './process-signals.js';
-import type { GovernanceOptIn, JournalEvent, Limits, OpResult, RunOptions } from './types.js';
+import type {
+  GovernanceOptIn,
+  JournalEvent,
+  Limits,
+  OpResult,
+  ReservationChargeBasis,
+  ReservationClass,
+  RunOptions,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // Clock — the injectable time source (tests advance virtual time)
@@ -91,6 +99,31 @@ export interface Governance {
   signal?: AbortSignal;
   /** Operator-declared attendance (journalled on run-started; P8 default false). */
   attended?: boolean;
+  /**
+   * The ADVISORY escape (W2.3, A12c): when true, an unattended run may
+   * dispatch ADVISORY-classified work. The kernel refuses ADVISORY
+   * dispatches unattended by default — every lane is ADVISORY at v1.1 (no
+   * conformance leg has proven a lane HARD) — so an unattended governed run
+   * without this flag (or `attended: true`) dispatches nothing.
+   * Journalled on run-started.governance.allowAdvisory.
+   */
+  allowAdvisory?: boolean;
+  /**
+   * WHO set `allowAdvisory` (W2.3 fix round, r1 M4): 'operator' when the
+   * CLI flag passed it, 'product' when an unattended-by-design product path
+   * (review-loop, self-merge-prs) set it through its own explicit option.
+   * Journalled alongside `allowAdvisory` so the durable record attributes
+   * the escape — ADR-0003 §2.3 puts allowAdvisory admissions OUTSIDE the
+   * C_max bound, so a future HARD row's breach must be attributable.
+   */
+  allowAdvisoryProvenance?: 'operator' | 'product';
+  /**
+   * Job ids to release from reservation quarantine (W2.3, A12b), journalled
+   * with provenance 'call' (P7 — per-call by explicit key only). A release
+   * re-enables dispatch; the full charge the quarantine took is NEVER
+   * refunded.
+   */
+  releaseQuarantine?: readonly string[];
   /** Per-call opt-ins (ADR-0003 §2.5), e.g. `budget.legacyJournal=reset`. */
   optIn?: readonly GovernanceOptIn[];
 }
@@ -604,21 +637,29 @@ export function governorConfig(
 export type GovernedOutcomeStatus = OpResult<unknown>['status'] | 'threw' | 'invalid';
 
 /** Why a governed invocation was refused without running the op. */
+/**
+ * Why a governed invocation was refused without running the op.
+ * `advisory-lane` (W2.3, A12c): the ADVISORY-classified dispatch was refused
+ * unattended without the `allowAdvisory` escape.
+ */
 export type ShortCircuitReason =
   | 'budget'
   | 'dispatch-quota'
   | 'attempt-cap'
   | 'budget-while-queued'
-  | 'cancelled-while-queued';
+  | 'cancelled-while-queued'
+  | 'advisory-lane';
 
 /**
  * WHICH bound tripped (ADR-0003 §2.3 honest-stop taxonomy): `exhausted` — a
- * USD rollup crossed maxUsd (or the unpriced fail-loud rule fired under one);
- * `token-cap` — the DD-9 token rollup crossed maxTokens; `signal` — a
- * run-level cancel (not a budget event; the runner reports it as
- * earlyStopReason 'signal', never re-marking rows budget-exhausted).
+ * USD rollup crossed maxUsd, the unpriced fail-loud rule fired under one, or
+ * reservation capacity reached the cap; `token-cap` — the DD-9 token rollup
+ * crossed maxTokens; `breach` — a settle charged more than its reservation
+ * held (the reservation undersold the work; W2.3); `signal` — a run-level
+ * cancel (not a budget event; the runner reports it as earlyStopReason
+ * 'signal', never re-marking rows budget-exhausted).
  */
-export type TripKind = 'exhausted' | 'token-cap' | 'signal';
+export type TripKind = 'exhausted' | 'token-cap' | 'breach' | 'signal';
 
 /**
  * The governor's event stream (BudgetGovernor.events): every admission,
@@ -655,7 +696,12 @@ export type GovernorEvent =
       elapsedMs: number;
       atMs: number;
     }
-  | { kind: 'usage'; jobKey: string; usd?: number; atMs: number }
+  | {
+      kind: 'usage';
+      jobKey: string;
+      usd?: number;
+      atMs: number;
+    }
   | { kind: 'budget-tripped'; tripKind: TripKind; reason: string; atMs: number }
   | { kind: 'seeded'; jobs: number; attempts: number; atMs: number }
   /**
@@ -665,7 +711,44 @@ export type GovernorEvent =
    * §3 rule 7). The CLI surfaces it as
    * `cq: bound excludes ungoverned runs <runIds>`; runIds are in fold order.
    */
-  | { kind: 'bound-excluded-ungoverned'; runIds: string[]; atMs: number };
+  | { kind: 'bound-excluded-ungoverned'; runIds: string[]; atMs: number }
+  /**
+   * W2.3 reserve-then-settle: a reservation was opened against the cap
+   * (settled + outstanding + reserved ≤ cap held at that instant). The
+   * write-ahead journal event is the runner's; this is the governor's own
+   * observation.
+   */
+  | {
+      kind: 'reserved';
+      jobKey: string;
+      reservationId: string;
+      usd: number;
+      class: ReservationClass;
+      atMs: number;
+    }
+  /** W2.3: a reservation settled — the ledger's spend truth for one dispatch. */
+  | {
+      kind: 'reservation-settled';
+      jobKey: string;
+      reservationId: string;
+      charged: number;
+      basis: ReservationChargeBasis;
+      /** A `costUSD` (zero included) was observed on the channel (H2/DD-9). */
+      priced: boolean;
+      atMs: number;
+    }
+  /**
+   * W2.3 (A12b): jobs quarantined at the resume fold over unresolved
+   * reservations, each charged IN FULL (never refunded, never re-run until
+   * an explicit `releaseQuarantine`).
+   */
+  | {
+      kind: 'quarantined';
+      jobs: ReadonlyArray<{ jobId: string; reservationId: string; usd: number }>;
+      atMs: number;
+    }
+  /** W2.3: a capless governed run conservatively inherited the previous governed run's cap. */
+  | { kind: 'cap-inherited'; usd: number; atMs: number };
 
 /** The admission gate's verdict for one dispatch. */
 export type AdmissionDecision =
@@ -674,6 +757,36 @@ export type AdmissionDecision =
       decision: 'reject';
       reason: Exclude<ShortCircuitReason, 'budget-while-queued'>;
     };
+
+/**
+ * An OPEN reservation against the run's USD cap (W2.3 reserve-then-settle):
+ * the cap holds `settled + outstanding + reserved ≤ C` from the instant
+ * `reserve` resolves until `settle` lands. Kernel-internal by design — the
+ * driver-seam `RunOptions.reservation` surface is W3.3's (one types bump on
+ * the last P2 PR).
+ */
+export interface BudgetReservation {
+  /**
+   * `${jobKey}:${attempt}:${seq}` — unique within the run; the runner's
+   * journal events compose it with the runId
+   * (`${runId}:${jobKey}:${attempt}:${seq}`, the ADR's cross-run format).
+   */
+  readonly id: string;
+  readonly jobKey: string;
+  readonly attempt: number;
+  /** The reserved USD amount r (≥ the settled charge except on a breach). */
+  readonly usd: number;
+  /** The budget class the dispatch was admitted under. */
+  readonly class: ReservationClass;
+  /** The fair-share proposal p, present only when r was shrunk below it. */
+  readonly proposedUsd?: number;
+}
+
+/** Why a reserve attempt did not open a reservation. */
+export type ReserveOutcome =
+  | { outcome: 'reserved'; reservation: BudgetReservation }
+  /** A trip (any kind) landed before capacity was granted — the caller refuses per `governor.tripKind`. */
+  | { outcome: 'tripped' };
 
 /**
  * FIFO slot pool for the in-flight ceiling. Slots transfer 1:1 from a
@@ -739,6 +852,18 @@ function addUsage(a: Usage, b: Usage): Usage {
 function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
+
+/**
+ * Absolute USD tolerance for every money comparison that turns a verdict
+ * (admission, parking, breach, rollup-exceeded): IEEE-754 accumulation
+ * drifts — ten 0.1 folds sum to 0.9999999999999999, leaving ~1.1e-16 of
+ * phantom capacity that a raw `capacity <= 0` admits as a real dispatch,
+ * and dust-order overages trip spurious breach/cap verdicts. 1e-9 is the
+ * repo's absolute money tolerance (DD-2's fold-agreement threshold; the
+ * ratchet's half-up rounding rescue). Real overspend at or above it still
+ * trips; sub-nanodollar dust never decides a verdict.
+ */
+const USD_EPSILON = 1e-9;
 
 /**
  * USD observations must be a finite number >= 0, validated BEFORE any
@@ -834,6 +959,14 @@ export class BudgetGovernor {
   readonly clock: Clock;
   /** The observation stream — every event, in fire order (tests assert here). */
   readonly events: GovernorEvent[] = [];
+  // W2.3 abort-on-trip: the run's ONE cancellation root the governor owns
+  // (I8 — the governor decides WHEN to abort). Aborted the moment the
+  // governor trips, any kind; the runner hands `tripAbortSignal` to every
+  // dispatch ladder, so in-flight ops see the abort through
+  // currentJobContext().signal and settle (their reservations settle when
+  // they return; slots are held until then).
+  private readonly tripAbort = new AbortController();
+  private unbindRunSignalN: (() => void) | undefined;
 
   private dispatchedCount = 0;
   private readonly attemptsByJob = new Map<string, number>();
@@ -843,6 +976,35 @@ export class BudgetGovernor {
   private tripReasonN?: string;
   private tripKindN?: TripKind;
   private readonly slots: SlotPool | undefined;
+  // --- W2.3 reserve-then-settle state --------------------------------------
+  /** The outstanding (open) reservations by id — the O in `S + O + r ≤ C` — with the evidence folds attributed to each. */
+  private readonly outstanding = new Map<
+    string,
+    { reservation: BudgetReservation; foldedUsd: number; priced: boolean }
+  >();
+  /** jobKey → open reservation id (a job holds at most one open reservation: one dispatch at a time). */
+  private readonly openByJob = new Map<string, string>();
+  private outstandingUsdN = 0;
+  private reservationSeqN = 0;
+  /**
+   * FIFO waiters for reservation capacity, each carrying its grant request.
+   * Capacity is GRANTED FROM THE HEAD synchronously inside settle /
+   * abandonReservation (drainWaiters — consuming capacity at grant time), so
+   * a waiter is never woken without its grant or a trip: it can never lose
+   * its queue position, and a newcomer can never jump the queue during a
+   * microtask window.
+   */
+  private readonly reserveWaiters: Array<{
+    jobKey: string;
+    attempt: number;
+    proposedUsd: number;
+    class_: ReservationClass;
+    resolve: (outcome: ReserveOutcome) => void;
+  }> = [];
+  /** A capless governed run's conservative inheritance of the previous governed run's cap. */
+  private inheritedCapUsdN: number | undefined;
+  /** Jobs quarantined at the resume fold over unresolved reservations (A12b). */
+  private readonly quarantinedN = new Map<string, { reservationId: string; usd: number }>();
 
   constructor(config: GovernorConfig, clock: Clock = realClock) {
     validateConfig(config);
@@ -887,6 +1049,70 @@ export class BudgetGovernor {
   /** Governed invocations currently holding an in-flight slot. */
   get inFlight(): number {
     return this.slots?.held ?? 0;
+  }
+
+  /**
+   * The EFFECTIVE USD cap (W2.3): the configured cap, or — on a capless
+   * governed run over capped history — the conservatively inherited
+   * predecessor cap (`inheritCapUsd`). Undefined = no USD bound: dispatches
+   * are reservation-less and the ledger folds observed evidence directly.
+   */
+  get capUsd(): number | undefined {
+    return this.config.maxUsd ?? this.inheritedCapUsdN;
+  }
+
+  /** The run's trip signal: aborted the moment the governor trips (any kind). Distinct from the `tripSignal()` METHOD, which TRIPS with kind 'signal'. */
+  get tripAbortSignal(): AbortSignal {
+    return this.tripAbort.signal;
+  }
+
+  /**
+   * Bind the run-level cancel signal (ADR §2.3): an abort trips the governor
+   * with trip kind `signal` (a CANCEL, not a budget event). One binding per
+   * run; a pre-aborted signal trips immediately. Release with
+   * `unbindRunSignal` when the run ends — no trip can outlive it.
+   */
+  bindRunSignal(signal: AbortSignal, detail?: string): void {
+    if (this.unbindRunSignalN !== undefined) {
+      throw new Error('governor: run signal already bound');
+    }
+    if (signal.aborted) {
+      this.tripSignal(detail ?? 'run signal already aborted before dispatch');
+      return;
+    }
+    const onAbort = (): void => {
+      this.tripSignal();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    this.unbindRunSignalN = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+  }
+
+  /** Release the run-level cancel binding (idempotent). */
+  unbindRunSignal(): void {
+    this.unbindRunSignalN?.();
+    this.unbindRunSignalN = undefined;
+  }
+
+  /** USD currently held by OPEN reservations (the O in `S + O + r ≤ C`). */
+  get outstandingUsd(): number {
+    return this.outstandingUsdN;
+  }
+
+  /** Open reservation count. */
+  get outstandingCount(): number {
+    return this.outstanding.size;
+  }
+
+  /**
+   * Jobs quarantined at the resume fold (A12b): keyed by jobId, each with
+   * the unresolved reservation that charged it in full. Populated by
+   * `seedFromJournal`; the governed runner refuses these jobs dispatch and
+   * reports them `needs-human` until an explicit `releaseQuarantine`.
+   */
+  get quarantinedJobs(): ReadonlyMap<string, { reservationId: string; usd: number }> {
+    return this.quarantinedN;
   }
 
   /** The ladder spec this run enforces (grace defaults applied). */
@@ -951,6 +1177,280 @@ export class BudgetGovernor {
     this.slots?.release();
   }
 
+  // --- Reservations (W2.3 reserve-then-settle, ADR-0003 §2.2/§2.3) ----------
+
+  /**
+   * THE RESERVATION GATE. Admits one dispatch against the USD cap under the
+   * reserve-then-settle invariant `settled + outstanding + reserved ≤ C`:
+   *
+   *   capacity = C − S − O;  r = min(proposedUsd, capacity)
+   *
+   * When the proposal exceeds capacity, ADR-0003 §2.2 step 3 decides: with
+   * any reservation OUTSTANDING (`O > 0`) the dispatch WAITS FIFO for a
+   * settle — the full proposal is admitted once room frees; with NOTHING
+   * outstanding (`O = 0`) the reservation SHRINKS to what is left
+   * (`r = C − S`; `proposedUsd` records the ask), because no settle can
+   * ever free capacity again. Any trip wakes and refuses every waiter. The
+   * caller opens the write-ahead journal event after this resolves and
+   * dispatches only then — `settled` completes the cycle and frees capacity
+   * for the next waiter.
+   *
+   * The invariant holds synchronously: reserve/settle mutate S and O in one
+   * synchronous critical section, so two dispatches can never interleave a
+   * capacity check. `charged ≤ r` at settle keeps the sum from ever growing
+   * past C (a `charged > r` settle trips `breach`). Every money verdict on
+   * this gate compares through USD_EPSILON: IEEE-754 accumulation drift (ten
+   * 0.1 folds sum to 0.9999999999999999) must never buy an extra dispatch
+   * from ~1e-16 of phantom capacity, nor trip a spurious breach on dust.
+   *
+   * Call only when `capUsd` is defined — an uncapped run is reservation-less
+   * (its ledger folds observed evidence directly; there is no bound to hold
+   * capacity against).
+   */
+  async reserve(
+    jobKey: string,
+    attempt: number,
+    proposedUsd: number,
+    class_: ReservationClass,
+  ): Promise<ReserveOutcome> {
+    const cap = this.capUsd;
+    if (cap === undefined) {
+      throw new Error(
+        'governor: reserve requires a USD cap (capUsd) — uncapped runs are reservation-less',
+      );
+    }
+    assertValidUsd('proposed reservation', proposedUsd);
+    if (this.trippedFlag) {
+      return { outcome: 'tripped' };
+    }
+    if (this.reserveWaiters.length === 0) {
+      const granted = this.tryGrant({ jobKey, attempt, proposedUsd, class_ });
+      if (granted !== undefined) {
+        return { outcome: 'reserved', reservation: granted };
+      }
+    }
+    if (this.trippedFlag) {
+      return { outcome: 'tripped' };
+    }
+    if (this.outstanding.size === 0 && this.reserveWaiters.length === 0) {
+      // Capacity gone with nothing outstanding to settle and nobody parked
+      // ahead: the cap is spent. Tripping wakes every waiter — each refuses
+      // (budget family).
+      this.trip(
+        'exhausted',
+        `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+      );
+      return { outcome: 'tripped' };
+    }
+    // Park (behind any waiters already queued — FIFO admission, never a
+    // queue jump). The grant arrives synchronously from a settle or an
+    // abandon (drainWaiters): a waiter is never woken without its grant or
+    // a trip, so it can never lose its queue position.
+    return new Promise<ReserveOutcome>((resolve) => {
+      this.reserveWaiters.push({ jobKey, attempt, proposedUsd, class_, resolve });
+    });
+  }
+
+  /** Grant the head waiter when capacity allows; chain while capacity and waiters remain. */
+  private drainWaiters(): void {
+    while (this.reserveWaiters.length > 0) {
+      if (this.trippedFlag) {
+        const waiters = this.reserveWaiters.splice(0);
+        for (const waiter of waiters) waiter.resolve({ outcome: 'tripped' });
+        return;
+      }
+      const cap = this.capUsd;
+      const capacity = cap === undefined ? 0 : cap - this.usdSpentN - this.outstandingUsdN;
+      if (capacity <= USD_EPSILON) {
+        if (this.outstanding.size === 0) {
+          // Capacity gone for good with nothing left to settle: trip (which
+          // wakes every waiter via the tripped branch on re-entry).
+          this.trip(
+            'exhausted',
+            `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+          );
+          return;
+        }
+        break; // outstanding reservations may still settle under r — wait
+      }
+      const head = this.reserveWaiters[0];
+      if (head === undefined) break;
+      const granted = this.tryGrant(head);
+      if (granted === undefined) break;
+      this.reserveWaiters.shift();
+      head.resolve({ outcome: 'reserved', reservation: granted });
+    }
+  }
+
+  /** The synchronous grant for one waiter (capacity is consumed HERE). */
+  private tryGrant(waiter: {
+    jobKey: string;
+    attempt: number;
+    proposedUsd: number;
+    class_: ReservationClass;
+  }): BudgetReservation | undefined {
+    const cap = this.capUsd;
+    if (cap === undefined) return undefined;
+    const capacity = cap - this.usdSpentN - this.outstandingUsdN;
+    if (capacity <= USD_EPSILON) return undefined;
+    // ADR-0003 §2.2 step 3, both branches (`r > C − S − O`): with any
+    // reservation OUTSTANDING the dispatch WAITS FIFO for a settle — a
+    // bookkeeping shrink here would undersize `r` against the proposal and
+    // the dispatch's real charge would then breach `charged > r`, aborting
+    // healthy in-flight work. The gate shrinks to `C − S` only when NOTHING
+    // is outstanding (no settle can free capacity anymore). The comparison
+    // tolerates USD_EPSILON: a proposal within drift dust of capacity GRANTS
+    // (parking on ~1e-16 of phantom shortfall just delays the dispatch for a
+    // settle that changes nothing).
+    if (waiter.proposedUsd > capacity + USD_EPSILON && this.outstanding.size > 0) {
+      return undefined;
+    }
+    const usd = Math.min(waiter.proposedUsd, capacity);
+    // One live reservation per job (the W2.4 pre-dispatch fence will lean
+    // on this): a second grant for the same jobKey would orphan the first
+    // reservation's fold attribution. Unreachable from the runner (one
+    // dispatch per job per run; settle/abandon deletes the entry before
+    // the job can be admitted again) — if it ever fires, the state machine
+    // is corrupt and the run must stop loudly BEFORE any state moves.
+    if (this.openByJob.has(waiter.jobKey)) {
+      throw new Error(
+        `governor: job '${waiter.jobKey}' already holds an open reservation — refusing to overwrite fold attribution`,
+      );
+    }
+    const id = `${waiter.jobKey}:${waiter.attempt}:${++this.reservationSeqN}`;
+    const reservation: BudgetReservation = {
+      id,
+      jobKey: waiter.jobKey,
+      attempt: waiter.attempt,
+      usd,
+      class: waiter.class_,
+      ...(usd < waiter.proposedUsd ? { proposedUsd: waiter.proposedUsd } : {}),
+    };
+    this.outstanding.set(id, { reservation, foldedUsd: 0, priced: false });
+    this.openByJob.set(waiter.jobKey, id);
+    this.outstandingUsdN += usd;
+    this.record({
+      kind: 'reserved',
+      jobKey: waiter.jobKey,
+      reservationId: id,
+      usd,
+      class: waiter.class_,
+      atMs: this.now(),
+    });
+    return reservation;
+  }
+
+  /**
+   * ABANDON a granted reservation whose write-ahead journal event never
+   * landed (the `reservation-opened` append failed): the dispatch never
+   * started, so nothing is charged and NO settle is journalled — the
+   * governor-side hold simply releases, returning capacity to the waiters.
+   * The journal failure itself propagates at the call site: a hole in the
+   * write-ahead sequence is a loud run stop, never a silent dispatch.
+   */
+  abandonReservation(reservation: BudgetReservation): void {
+    const held = this.outstanding.get(reservation.id);
+    if (held === undefined || held.reservation !== reservation) {
+      return; // never granted, or already settled — nothing to abandon
+    }
+    this.outstanding.delete(reservation.id);
+    this.openByJob.delete(reservation.jobKey);
+    this.outstandingUsdN -= held.reservation.usd;
+    this.drainWaiters();
+  }
+
+  /**
+   * SETTLE one open reservation: the dispatch's charge closes here (ADR §2.2
+   * step 9 — "the gate is the only writer of spend"). The charge is computed
+   * by the GOVERNOR from its own fold attribution, never trusted from the
+   * caller:
+   *
+   *   - basis 'observed' — the invocation ended in a definitive verdict:
+   *     charged = the evidence folds attributed to this reservation (the
+   *     invocation's observed modeled spend, 0 when nothing folded).
+   *   - basis 'full' — the dispatch ended in UNKNOWN status (killed,
+   *     indeterminate, unreturned): charged = max(r, folded) — at least the
+   *     full reservation (spend may exist that no fold saw), and at least
+   *     what actually folded (a dispatch that overshot its reservation pays
+   *     the overshoot, and the overshoot trips breach below).
+   *
+   * The LEDGER move is only the remainder `charged − folded` (never
+   * negative): the folds already entered the rollup as they arrived
+   * (`observeCost`), so live ledger and the journaled `charged` sum each
+   * dispatch exactly once. `charged > r` is a BREACH — the reservation
+   * undersold the work — and trips the run. Returns the charge for the
+   * runner's `reservation-settled` journal event, plus the PRICE-PRESENCE
+   * fact (`priced`: a `costUSD`, zero included, was observed on the
+   * channel) the journal carries so the resume fold never mistakes a
+   * legitimate zero-priced lane for unpriced spend (H2/DD-9).
+   */
+  settle(
+    reservation: BudgetReservation,
+    charge: { basis: ReservationChargeBasis; usage?: Usage },
+  ): { charged: number; basis: ReservationChargeBasis; priced: boolean } {
+    if (charge.usage !== undefined) {
+      assertValidUsage('settled usage', charge.usage);
+    }
+    const held = this.outstanding.get(reservation.id);
+    if (held === undefined || held.reservation !== reservation) {
+      throw new Error(`governor: settle for unknown reservation '${reservation.id}'`);
+    }
+    const folded = held.foldedUsd;
+    const priced = held.priced;
+    const charged = charge.basis === 'observed' ? folded : Math.max(held.reservation.usd, folded);
+    this.outstanding.delete(reservation.id);
+    this.openByJob.delete(held.reservation.jobKey);
+    this.outstandingUsdN -= held.reservation.usd;
+    const remainder = Math.max(0, charged - folded);
+    this.usdSpentN += remainder;
+    this.record({
+      kind: 'reservation-settled',
+      jobKey: held.reservation.jobKey,
+      reservationId: held.reservation.id,
+      charged,
+      basis: charge.basis,
+      priced,
+      atMs: this.now(),
+    });
+    if (charged > held.reservation.usd + USD_EPSILON) {
+      this.trip(
+        'breach',
+        `charged ${charged} exceeds reservation ${held.reservation.usd} (${charge.basis} basis) — the reservation undersold the work`,
+      );
+    } else if (this.capUsd !== undefined && this.usdSpentN > this.capUsd + USD_EPSILON) {
+      // Belt-and-braces: the fold-time trip usually lands first; kept so a
+      // settle-side remainder can never silently push the ledger past the cap.
+      this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${this.capUsd}`);
+    }
+    // Hand freed capacity to the FIFO head (grant-from-head: a full-charge
+    // settle frees nothing, so the head stays parked — but if the settle
+    // tripped above, or capacity is gone for good, drainWaiters refuses or
+    // trips it instead of leaving it parked forever).
+    this.drainWaiters();
+    return { charged, basis: charge.basis, priced };
+  }
+
+  /**
+   * A capless governed run over capped history conservatively INHERITS the
+   * predecessor cap (W2.3): the ledger's C never silently disappears between
+   * runs — the uncapped run reserves against the inherited cap and journals
+   * the inheritance on run-started.governance.inheritedCapUsd. An explicit
+   * config cap is never overridden (returns false); the predecessor cap for
+   * the raise refusal does not move (an inheritance is not a raise).
+   */
+  inheritCapUsd(cap: number): boolean {
+    if (this.config.maxUsd !== undefined) {
+      return false;
+    }
+    assertValidUsd('inherited cap', cap);
+    if (this.inheritedCapUsdN !== undefined) {
+      return this.inheritedCapUsdN === cap;
+    }
+    this.inheritedCapUsdN = cap;
+    this.record({ kind: 'cap-inherited', usd: cap, atMs: this.now() });
+    return true;
+  }
+
   // --- Observation ------------------------------------------------------------
 
   /**
@@ -977,18 +1477,35 @@ export class BudgetGovernor {
   }
 
   /**
-   * Observe USD cost for one governed invocation and check the run cap. The
-   * cap is inclusive: the trip fires when the rollup EXCEEDS maxUsd. The
-   * observation is validated BEFORE the rollup mutates: a NaN/negative
-   * value throws instead of poisoning the cap (I9 — fail loud, never fail
-   * open).
+   * Observe USD cost EVIDENCE for one governed invocation and check the run
+   * cap. The cap is inclusive: the trip fires when the rollup EXCEEDS maxUsd
+   * (W2.2 semantics, unchanged — on an ADVISORY lane this fold-time trip is
+   * the only mid-flight guard a runaway dispatch can trip). The observation
+   * is validated BEFORE the rollup mutates: a NaN/negative value throws
+   * instead of poisoning the cap (I9 — fail loud, never fail open). When the
+   * job holds an OPEN reservation, the evidence is attributed to it: the
+   * settle (below) charges only the remainder up to the reservation's
+   * charge, so live folds and the journaled `charged` sum exactly once.
    */
   observeCost(jobKey: string, usd: number): void {
     assertValidUsd('observed cost', usd);
     this.usdSpentN += usd;
+    const openId = this.openByJob.get(jobKey);
+    if (openId !== undefined) {
+      const open = this.outstanding.get(openId);
+      if (open !== undefined) {
+        open.foldedUsd += usd;
+        // PRICE EVIDENCE (H2): a present costUSD — INCLUDING a legitimate
+        // zero — is pricing proof for the job's open reservation. The settle
+        // journals this fact, so the resume fold can tell "priced at zero"
+        // (a zero-priced/subscription lane, bound trivially at 0) from
+        // "unpriced" (DD-9's fail-loud case).
+        open.priced = true;
+      }
+    }
     this.record({ kind: 'usage', jobKey, usd, atMs: this.now() });
-    const cap = this.config.maxUsd;
-    if (cap !== undefined && this.usdSpentN > cap) {
+    const cap = this.capUsd;
+    if (cap !== undefined && this.usdSpentN > cap + USD_EPSILON) {
       this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
   }
@@ -1029,25 +1546,23 @@ export class BudgetGovernor {
       if (counts?.costAlreadyCounted !== true) {
         this.observeCost(jobKey, costUSD);
       }
-    } else if (
-      hasRealUsage &&
-      this.config.maxUsd !== undefined &&
-      counts?.costAlreadyCounted !== true
-    ) {
+    } else if (hasRealUsage && this.capUsd !== undefined && counts?.costAlreadyCounted !== true) {
       this.trip(
         'exhausted',
-        'unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
+        'unpriced usage under a USD cap — the effective USD cap cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
       );
     }
   }
 
   /**
-   * Trip the budget cap (idempotent — the first reason is kept). Tripping
-   * gates ADMISSION ONLY: in-flight jobs were admitted before the trip and
-   * their outcomes stay real evidence (documented decision, README). The
-   * kind records WHICH bound fired (`exhausted` for USD-rollup and the
-   * unpriced fail-loud rule, `token-cap` for the DD-9 rollup, `signal` via
-   * `tripSignal`).
+   * Trip the budget cap (idempotent — the first reason is kept). Under W2.3
+   * reserve-then-settle a trip stops NEW reservations, wakes and refuses
+   * every capacity waiter, and — through `onTrip` — aborts the run's
+   * in-flight invocations (their reservations settle when each returns; the
+   * slot is held until then). The kind records WHICH bound fired
+   * (`exhausted` for USD-rollup/capacity and the unpriced fail-loud rule,
+   * `token-cap` for the DD-9 rollup, `breach` for a charged-over-reservation
+   * settle, `signal` via `tripSignal`).
    */
   trip(tripKind: TripKind, reason: string): void {
     if (this.trippedFlag) {
@@ -1057,6 +1572,11 @@ export class BudgetGovernor {
     this.tripReasonN = reason;
     this.tripKindN = tripKind;
     this.record({ kind: 'budget-tripped', tripKind, reason, atMs: this.now() });
+    // Any trip refuses every capacity waiter (ADR §2.2 step 3)...
+    this.drainWaiters();
+    // ...and aborts the in-flight ladders composing `tripAbortSignal`, so
+    // the abort reaches every current op.
+    this.tripAbort.abort();
   }
 
   /**
@@ -1087,7 +1607,21 @@ export class BudgetGovernor {
    * chained dispatches from earlier runs vanish — silently resetting the
    * budget this method promises to continue.
    *
-   * costUSD seeding (journal v2): a CLOSING job-finished that carries
+   * SPEND FOLDS BY RUN ERA (W2.3). A run whose events contain any
+   * `reservation-opened` is RESERVATION-ERA: its ledger spend is
+   * `Σ reservation-settled.charged + Σ r(unresolved)` (ADR §2.5's resume
+   * fold) and its job-finished costUSD lines are IGNORED for spend (they
+   * restate the settled charges; folding both would double-count). A run
+   * WITHOUT reservation events is a W2.2-era governed run: no reservations
+   * exist for its dispatches, so its spend folds from job-finished costUSD
+   * exactly as in W2.2 — only a finish that CLOSES an open start
+   * (keyed PER (run, job), so a finish-only re-attestation can never close
+   * and double-charge a dead run's start) counts. A12b lives here: an
+   * UNRESOLVED reservation (opened, never settled — the hard-crash window)
+   * is charged IN FULL and its job is QUARANTINED (`quarantinedJobs`), the
+   * crash-spend undercount W2.2 recorded closed.
+   *
+   * costUSD seeding (W2.2-era): a CLOSING job-finished that carries
    * `costUSD` folds into the USD rollup, validated like every seeded
    * measurement (finite >= 0, fail loud at construction time). v1 journals
    * carry no costUSD — the governed runner refuses them when they have
@@ -1098,7 +1632,12 @@ export class BudgetGovernor {
     const startsByJob = new Map<string, number>();
     let totalStarts = 0;
     let unpricedClosingUsage = false;
-    // Usage/USD dedupe: only a finish that closes an open start represents a
+    // Era per run: any reservation-opened makes the whole run reservation-era.
+    const reservationEra = new Set<string>();
+    for (const event of events) {
+      if (event.type === 'reservation-opened') reservationEra.add(event.runId);
+    }
+    // W2.2-era dedupe: only a finish that closes an open start represents a
     // dispatch's own spend; an orphan finish (re-attestation) restates an
     // already-counted dispatch and is skipped. Keyed PER (run, job): a
     // finish closes only its OWN run's start. A jobId-only key would let run
@@ -1106,9 +1645,23 @@ export class BudgetGovernor {
     // died before its finish — charging the re-attested (already-counted)
     // spend a second time and, when the re-attestation carried usage without
     // costUSD, tripping a spurious DD-9 `exhausted` at the next seed
-    // (review r1).
+    // (review r1; the composite key is the cycle-3 hardening M2 landed and
+    // this rework preserves).
     const openStarts = new Set<string>();
+    // Reservation-era opens, by exact reservation id and by (run, job) for
+    // the corruption check below.
+    const openReservations = new Map<string, { jobId: string; usd: number; foldIndex: number }>();
+    const openByRunJob = new Map<string, string>();
+    // Journalled releases (W2.3): the last fold index at which each job was
+    // explicitly released (provenance 'call'). A release LIFTS the standing
+    // quarantine for unresolved reservations that opened BEFORE it — the
+    // full charge stays (never refunded), and the operator does not have to
+    // repeat --release-quarantine on every later resume. A NEWER unresolved
+    // reservation (a crash AFTER the release) re-quarantines.
+    const releasedAtIndex = new Map<string, number>();
+    let foldIndex = 0;
     for (const event of events) {
+      foldIndex += 1;
       if (event.type === 'job-started') {
         jobIds.add(event.jobId);
         startsByJob.set(event.jobId, (startsByJob.get(event.jobId) ?? 0) + 1);
@@ -1116,10 +1669,69 @@ export class BudgetGovernor {
         openStarts.add(`${event.runId}:${event.jobId}`);
         continue;
       }
+      if (event.type === 'reservation-opened') {
+        openReservations.set(event.reservationId, {
+          jobId: event.jobId,
+          usd: event.usd,
+          foldIndex,
+        });
+        openByRunJob.set(`${event.runId}:${event.jobId}`, event.reservationId);
+        continue;
+      }
+      if (event.type === 'quarantine-released') {
+        releasedAtIndex.set(event.jobId, foldIndex);
+        continue;
+      }
+      if (event.type === 'reservation-settled') {
+        const open = openReservations.get(event.reservationId);
+        if (open === undefined) {
+          // Writer order is opened → settled within one run and the fold is
+          // run-ordered, so a settle without an open is not a torn write (a
+          // torn tail can only lose the LAST line) — it is evidence rot.
+          throw new Error(
+            `journal: corrupt — reservation-settled for '${event.reservationId}' (run '${event.runId}') has no matching reservation-opened`,
+          );
+        }
+        openReservations.delete(event.reservationId);
+        openByRunJob.delete(`${event.runId}:${event.jobId}`);
+        assertValidUsd('seeded reservation charge', event.charged);
+        this.usdSpentN += event.charged;
+        if (event.usage !== undefined) {
+          assertValidUsage('seeded reservation usage', event.usage);
+          this.usageN =
+            this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
+          if (event.charged === 0 && totalTokensOf(event.usage) > 0 && event.priced !== true) {
+            // A settled dispatch with real usage and ZERO charge and NO
+            // observed price is UNPRICED spend (an unpriced model) — the
+            // reservation-era twin of the W2.2-era usage-without-costUSD
+            // rule below. A settle that OBSERVED a `costUSD: 0` (a
+            // zero-priced/subscription lane; `priced: true` on the event)
+            // is legitimately priced at zero — the bound holds trivially —
+            // and must never trip this (H2: the charged sum alone cannot
+            // carry the distinction, so the journal does).
+            unpricedClosingUsage = true;
+          }
+        }
+        continue;
+      }
       if (event.type !== 'job-finished') {
         continue;
       }
       jobIds.add(event.jobId);
+      if (reservationEra.has(event.runId)) {
+        // Reservation-era finish: its spend folded from the reservations.
+        // A finish while THIS job's reservation is still open is impossible
+        // from an honest writer (settle is durable BEFORE the finish is
+        // even issued) — the settle line was lost under an intact finish:
+        // evidence rot, never silently folded.
+        const stillOpen = openByRunJob.get(`${event.runId}:${event.jobId}`);
+        if (stillOpen !== undefined) {
+          throw new Error(
+            `journal: corrupt — job-finished for '${event.jobId}' (run '${event.runId}') while reservation '${stillOpen}' is unsettled`,
+          );
+        }
+        continue;
+      }
       const closed = openStarts.delete(`${event.runId}:${event.jobId}`); // any finish closes ITS OWN RUN's start
       if (!closed) {
         continue;
@@ -1147,6 +1759,27 @@ export class BudgetGovernor {
         this.usdSpentN += event.costUSD;
       }
     }
+    // A12b (ADR §2.5): every reservation still open at fold end is an
+    // UNRESOLVED dispatch — charged IN FULL (its real spend is unknowable,
+    // the full reservation is the honest ceiling within the bound) and its
+    // job is QUARANTINED: never re-run, reported needs-human, dependents
+    // blocked, re-attested each run until an explicit `releaseQuarantine`
+    // — which never refunds. The charge lands in the seeded ledger, so a
+    // crash that spent the cap trips the seeded-overrun check below.
+    const quarantined: Array<{ jobId: string; reservationId: string; usd: number }> = [];
+    for (const [reservationId, open] of openReservations) {
+      assertValidUsd('unresolved reservation', open.usd);
+      this.usdSpentN += open.usd;
+      const released = releasedAtIndex.get(open.jobId);
+      if (released !== undefined && released > open.foldIndex) {
+        continue; // released AFTER this reservation opened: charged, not quarantined
+      }
+      this.quarantinedN.set(open.jobId, { reservationId, usd: open.usd });
+      quarantined.push({ jobId: open.jobId, reservationId, usd: open.usd });
+    }
+    if (quarantined.length > 0) {
+      this.record({ kind: 'quarantined', jobs: quarantined, atMs: this.now() });
+    }
     // Per-job attempt seed: the COUNT of prior starts (annex rule) — the
     // next admission of the job is attempt count + 1.
     for (const [jobId, starts] of startsByJob) {
@@ -1158,18 +1791,27 @@ export class BudgetGovernor {
     // journaled dispatch count so runDispatchQuota carries across resume
     // instead of restarting at 0.
     this.dispatchedCount += totalStarts;
-    // DD-9 fail-loud at seed time: a CLOSING job-finished that carries real
-    // usage (positive tokens) with NO costUSD is unpriced spend — maxUsd
-    // cannot bind it, so trip BEFORE the resumed run admits anything (fail
-    // loud, never fail open). Other finishes' costUSD does not price this
+    // DD-9 fail-loud at seed time: spend whose evidence carries real usage
+    // with NO price — a W2.2-era closing finish with usage and no costUSD,
+    // or a reservation-era settle with usage, a zero charge, and no observed
+    // price (`priced: false`; a settled `costUSD: 0` IS a price) — cannot
+    // be bound by maxUsd, so trip BEFORE the resumed run admits anything
+    // (fail loud, never fail open). Other events' prices do not price this
     // one (the mixed priced/unpriced fold trips too). v2 governed journals
     // carry costUSD on priced finishes and ABSENT usage when a reservation
     // settled unknown; a v1 journal with dispatches never reaches this seed
     // (the runner refuses it first).
-    if (this.config.maxUsd !== undefined && unpricedClosingUsage) {
+    if (this.capUsd !== undefined && unpricedClosingUsage) {
+      // Name the cap's PROVENANCE: an inherited cap binds a run that set no
+      // maxUsd of its own, and a message naming "maxUsd" there would lie
+      // about the run's configuration (composition review, comp 5).
+      const capProvenance =
+        this.config.maxUsd === undefined && this.inheritedCapUsdN !== undefined
+          ? ` (inherited from the previous capped run — this run set no maxUsd)`
+          : '';
       this.trip(
         'exhausted',
-        `seeded prior usage cannot be fully priced — a folded closing job-finished carries usage with no costUSD, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior spend; refusing to continue past an unenforceable budget (DD-9)`,
+        `seeded prior usage cannot be fully priced — spend with real usage carries no price in the folded history, so the USD cap ${this.capUsd}${capProvenance} cannot bind the resumed run's prior spend; refusing to continue past an unenforceable budget (DD-9)`,
       );
     }
     // A seed that already overruns a cap trips the governor BEFORE the
@@ -1178,9 +1820,11 @@ export class BudgetGovernor {
     // README "Budget governor"). BOTH caps check here — a seeded token
     // rollup over maxTokens that only tripped on later usage would admit
     // and dispatch before any new fold, and never trip at all if no
-    // further usage-reporting op ran (DD-9).
-    const cap = this.config.maxUsd;
-    if (cap !== undefined && this.usdSpentN > cap) {
+    // further usage-reporting op ran (DD-9). The USD check reads the
+    // EFFECTIVE cap (an inherited predecessor cap binds a capless resume
+    // too), and includes the unresolved reservations' full charges.
+    const cap = this.capUsd;
+    if (cap !== undefined && this.usdSpentN > cap + USD_EPSILON) {
       this.trip('exhausted', `seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
     const tokenCap = this.config.maxTokens;

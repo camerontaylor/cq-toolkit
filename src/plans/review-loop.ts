@@ -260,6 +260,18 @@ export interface ReviewLoopOpts {
    */
   governanceOptIn?: readonly GovernanceOptIn[];
   /**
+   * The ADVISORY escape for the fix run (W2.3, A12c), EXPLICIT and
+   * defaulting OFF (review r1 M4): absent/false refuses every fixer
+   * dispatch on an unattended run (every lane is ADVISORY at v1.1). The
+   * shipped sweep (self-review-loop) sets it true — unattended by design —
+   * and the journal records `allowAdvisoryProvenance: 'product'`, so the
+   * escape is attributable and an embedder can withhold it. A future HARD
+   * row puts allowAdvisory admissions OUTSIDE the C_max bound (ADR-0003
+   * §2.3) — that attribution is why this is an option, never a hardcoded
+   * `true`.
+   */
+  allowAdvisoryBudget?: boolean;
+  /**
    * The governor's LIMITS half for the fix run — the second
    * `governorConfig(runOptions, limits)` argument (`runOptions` above stays
    * the RunOptions half). Plain data; review-debt #137's arming surface for
@@ -847,9 +859,19 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // ALWAYS governed: runPlan's governed dispatch owns admission, the
       // ladder, the evidence folds, and the honest stop — its return IS the
       // fix report. The operator's opt-ins ride the handle by explicit key
-      // (P7) — absent opts.governanceOptIn, refusals stand.
+      // (P7) — absent opts.governanceOptIn, refusals stand. The ADVISORY
+      // escape (A12c) rides opts.allowAdvisoryBudget — EXPLICIT and
+      // defaulting OFF (r1 M4): the shipped sweep passes true (unattended
+      // by design, every lane ADVISORY at v1.1), the journal records the
+      // 'product' provenance, and a caller that withholds the option
+      // refuses every fixer dispatch while its budgets stay enforced
+      // through the evidence folds and (W2.3) reservation capacity.
       return await runPlan(plan, runOptions, view, {
         governor,
+        allowAdvisory: opts.allowAdvisoryBudget === true,
+        ...(opts.allowAdvisoryBudget === true
+          ? { allowAdvisoryProvenance: 'product' as const }
+          : {}),
         ...(opts.governanceOptIn !== undefined ? { optIn: opts.governanceOptIn } : {}),
       });
     } finally {

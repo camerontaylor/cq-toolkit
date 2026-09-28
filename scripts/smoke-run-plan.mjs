@@ -187,6 +187,16 @@ async function runPlanParent() {
         // 20) far under it.
         '--max-tokens=10000',
         `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+        // The A12c ADVISORY escape (W2.3): the lane table ships EMPTY at
+        // v1.1, so EVERY dispatch classifies ADVISORY, and this child is an
+        // unattended CLI run — the gate would refuse both jobs with
+        // reservation-refused {reason:'advisory-lane'} (exit 3, two
+        // budget-exhausted rows) before any usage fold could be observed,
+        // failing leg 0 for a reason that has nothing to do with what the
+        // smoke pins. This IS the recorded posture for a product path: an
+        // unattended-by-design caller passes the escape explicitly (the CLI
+        // flag stamps allowAdvisoryProvenance 'operator').
+        '--allow-advisory-budget',
       ],
       childEnv,
     );
@@ -411,6 +421,10 @@ async function runPlanParent() {
         // generous token cap for the same reason.
         '--max-tokens=1', // smallest guaranteed trip: the first usage observation totals 20 tokens (> 1)
         `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+        // Same A12c escape as the happy run: without it this child would
+        // refuse both ROOT dispatches as advisory and the cap would never
+        // be reached, so the trip leg would stop measuring the token fold.
+        '--allow-advisory-budget',
       ],
       childEnv,
     );

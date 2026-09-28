@@ -146,6 +146,146 @@ describe('journal v2 schema', () => {
     });
     expect(JournalEventSchema.parse(validGovernance)).toEqual(validGovernance);
   });
+
+  test('allowAdvisoryProvenance parses only ALONGSIDE allowAdvisory (r1 M4)', () => {
+    const operator: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
+      governance: { attended: false, allowAdvisory: true, allowAdvisoryProvenance: 'operator' },
+    });
+    expect(JournalEventSchema.parse(operator)).toEqual(operator);
+    const product: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
+      governance: { attended: false, allowAdvisory: true, allowAdvisoryProvenance: 'product' },
+    });
+    expect(JournalEventSchema.parse(product)).toEqual(product);
+    // Provenance without the escape is meaningless — corruption, not a fact.
+    const orphan: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      governance: { attended: false, allowAdvisoryProvenance: 'operator' },
+    });
+    expect(JournalEventSchema.safeParse(orphan).success).toBe(false);
+    // The enum is closed.
+    const bogus: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      governance: {
+        attended: false,
+        allowAdvisory: true,
+        allowAdvisoryProvenance: 'nobody' as 'operator',
+      },
+    });
+    expect(JournalEventSchema.safeParse(bogus).success).toBe(false);
+  });
+});
+
+describe('reservation-era journal events (W2.3)', () => {
+  const OPENED: JournalEvent = {
+    type: 'reservation-opened',
+    runId: 'plan-x--k--a',
+    at: AT_A,
+    jobId: 'j1',
+    op: 'op-j1',
+    attempt: 1,
+    reservationId: 'plan-x--k--a:j1:1:1',
+    usd: 0.5,
+    class: 'advisory',
+  };
+
+  test('reservation-opened parses; negative usd, unknown keys, and a hard class are shape-checked', () => {
+    expect(JournalEventSchema.parse(OPENED)).toEqual(OPENED);
+    const withProposal: JournalEvent = { ...OPENED, proposedUsd: 1 };
+    expect(JournalEventSchema.parse(withProposal)).toEqual(withProposal);
+    expect(JournalEventSchema.safeParse({ ...OPENED, usd: -1 }).success).toBe(false);
+    expect(JournalEventSchema.safeParse({ ...OPENED, vendor: true }).success).toBe(false);
+  });
+
+  test('reservation-settled parses; charged is required, negative charged is malformed', () => {
+    const settled: JournalEvent = {
+      type: 'reservation-settled',
+      runId: 'plan-x--k--a',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      charged: 0.25,
+      basis: 'observed',
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+    };
+    expect(JournalEventSchema.parse(settled)).toEqual(settled);
+    const full: JournalEvent = {
+      type: 'reservation-settled',
+      runId: 'plan-x--k--a',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      charged: 0.5,
+      basis: 'full',
+    };
+    expect(JournalEventSchema.parse(full)).toEqual(full);
+    expect(JournalEventSchema.safeParse({ ...settled, charged: -0.5 }).success).toBe(false);
+    const noCharged = { ...settled } as Record<string, unknown>;
+    delete noCharged['charged'];
+    expect(JournalEventSchema.safeParse(noCharged).success).toBe(false);
+    // PRICE PRESENCE (r1 H2): a zero-priced lane's `priced: true` parses;
+    // the field is boolean-typed.
+    expect(JournalEventSchema.safeParse({ ...settled, charged: 0, priced: true }).success).toBe(
+      true,
+    );
+    expect(JournalEventSchema.safeParse({ ...settled, priced: 'yes' }).success).toBe(false);
+  });
+
+  test('reservation-refused parses; the reason enum is closed', () => {
+    const refused: JournalEvent = {
+      type: 'reservation-refused',
+      runId: 'plan-x--k--a',
+      at: AT_A,
+      jobId: 'j1',
+      op: 'op-j1',
+      reason: 'advisory-lane',
+    };
+    expect(JournalEventSchema.parse(refused)).toEqual(refused);
+    expect(JournalEventSchema.safeParse({ ...refused, reason: 'vibes' }).success).toBe(false);
+  });
+
+  test('job-quarantined and quarantine-released parse; provenance is closed to call', () => {
+    const quarantined: JournalEvent = {
+      type: 'job-quarantined',
+      runId: 'plan-x--k--b',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      chargedUsd: 0.5,
+      reason: 'unresolved-reservation',
+    };
+    expect(JournalEventSchema.parse(quarantined)).toEqual(quarantined);
+    const released: JournalEvent = {
+      type: 'quarantine-released',
+      runId: 'plan-x--k--b',
+      at: AT_B,
+      jobId: 'j1',
+      provenance: 'call',
+    };
+    expect(JournalEventSchema.parse(released)).toEqual(released);
+    expect(JournalEventSchema.safeParse({ ...released, provenance: 'env' }).success).toBe(false);
+  });
+
+  test('job-finished charged parses and stays optional (the reservation-side rollup)', () => {
+    const finished: JournalEvent = {
+      type: 'job-finished',
+      runId: 'plan-x--k--a',
+      at: AT_A,
+      jobId: 'j1',
+      opId: 'op-j1',
+      inputsHash: 'h',
+      result: { status: 'ok', value: 1 },
+      costUSD: 0.25,
+      charged: 0.5,
+    };
+    expect(JournalEventSchema.parse(finished)).toEqual(finished);
+    expect(JournalEventSchema.safeParse({ ...finished, charged: -1 }).success).toBe(false);
+  });
 });
 
 describe('durable append', () => {
@@ -347,5 +487,50 @@ describe('foldOrderRuns', () => {
       ],
     };
     expect(() => foldOrderRuns([orphan])).toThrow(/run-started/);
+  });
+
+  test('a SURVIVING run file whose line count disagrees with run-finished.eventCount is corrupt (comp 2)', () => {
+    // A deleted line is the corruption the paired-line throws cannot see:
+    // dropping a crashed dispatch's `reservation-opened` would silently
+    // drop the run out of the reservation era (its full charge vanishes,
+    // its quarantine never fires). The count makes omission as loud as
+    // forgery. Three events journalled, two present → the reservation-opened
+    // was deleted.
+    const started = runStarted({ runId: 'p--short--aa', journalVersion: 2, seq: 1 });
+    const finished: JournalEvent = {
+      type: 'run-finished',
+      runId: 'p--short--aa',
+      at: AT_B,
+      stoppedEarly: false,
+      eventCount: 3,
+    };
+    const short: FoldRun = {
+      runId: 'p--short--aa',
+      events: [started, finished], // 2 ≠ 3 — a line went missing
+    };
+    expect(() => foldOrderRuns([short])).toThrow(/deleted from \(or inserted into\)/);
+    // The honest shape folds: the count matches the present lines.
+    const whole: FoldRun = {
+      runId: 'p--whole--bb',
+      events: [
+        runStarted({ runId: 'p--whole--bb', journalVersion: 2, seq: 2 }),
+        { type: 'job-started', runId: 'p--whole--bb', at: AT_A, jobId: 'j', op: 'o', attempt: 1 },
+        { ...finished, runId: 'p--whole--bb', eventCount: 3 },
+      ],
+    };
+    expect(() => foldOrderRuns([whole])).not.toThrow();
+    // A torn TAIL (run-finished lost entirely — the crash windows) is not
+    // checkable and not corrupt: no run-finished, no count, no throw.
+    const torn: FoldRun = {
+      runId: 'p--torn--cc',
+      events: [runStarted({ runId: 'p--torn--cc', journalVersion: 2, seq: 3 })],
+    };
+    expect(() => foldOrderRuns([torn])).not.toThrow();
+    // v1 runs carry no count — unchanged.
+    const v1: FoldRun = {
+      runId: 'p--v1--dd',
+      events: [runStarted({ runId: 'p--v1--dd', at: AT_A })],
+    };
+    expect(() => foldOrderRuns([v1])).not.toThrow();
   });
 });
