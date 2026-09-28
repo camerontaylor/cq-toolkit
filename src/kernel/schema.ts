@@ -297,6 +297,9 @@ export const GovernanceRecordSchema: z.ZodType<GovernanceRecord> = z
     attended: z.boolean(),
     // W2.3 (A12c): the ADVISORY escape, recorded when the operator passed it.
     allowAdvisory: z.boolean().exactOptional(),
+    // WHO set allowAdvisory ('operator' = the CLI flag, 'product' = an
+    // unattended-by-design product path) — present only alongside it.
+    allowAdvisoryProvenance: z.enum(['operator', 'product']).exactOptional(),
     // W2.3: a capless governed run's conservative inheritance of the
     // previous governed run's capUsd (the ledger's C never silently
     // disappears between runs).
@@ -316,7 +319,18 @@ export const GovernanceRecordSchema: z.ZodType<GovernanceRecord> = z
       .strict()
       .exactOptional(),
   })
-  .strict();
+  .strict()
+  // Provenance coupling (W2.3 fix round): the escape's provenance is
+  // meaningful only alongside the escape itself.
+  .superRefine((record, ctx) => {
+    if (record.allowAdvisoryProvenance !== undefined && record.allowAdvisory !== true) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'allowAdvisoryProvenance is only meaningful when allowAdvisory is true',
+        path: ['allowAdvisoryProvenance'],
+      });
+    }
+  });
 
 /** Mirrors `RunCounts`: all six states required, so a missing key fails the ZodType annotation. */
 export const RunCountsSchema: z.ZodType<RunCounts> = z
@@ -505,6 +519,10 @@ export const ReservationSettledJournalEventSchema = z
     reservationId: z.string().min(1),
     charged: z.number().nonnegative(),
     basis: z.enum(['observed', 'full']),
+    // PRICE PRESENCE (H2/DD-9): a `costUSD` (zero included) was observed on
+    // the channel. Optional in the schema so an older in-flight journal
+    // still parses; the fold treats ABSENT as unpriced (fail loud).
+    priced: z.boolean().exactOptional(),
     usage: UsageSchema.exactOptional(),
   })
   .strict();
@@ -559,6 +577,8 @@ export const RunFinishedJournalEventSchema = z
     at: z.iso.datetime(),
     stoppedEarly: z.boolean(),
     earlyStopReason: RunEarlyStopReasonSchema.exactOptional(),
+    // The run file's total event count (comp 2's line-deletion detector).
+    eventCount: z.number().int().positive().exactOptional(),
   })
   .strict()
   // Honest-stop coupling (frozen), mirroring RunReportSchema:

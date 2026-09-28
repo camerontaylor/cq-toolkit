@@ -328,7 +328,15 @@ export async function runPlanThroughKernel(
         {
           governor: createGovernor(governorConfig(runOptions, {})),
           ...(input.optIn.length > 0 ? { optIn: input.optIn } : {}),
-          ...(input.allowAdvisoryBudget ? { allowAdvisory: true } : {}),
+          ...(input.allowAdvisoryBudget
+            ? {
+                allowAdvisory: true,
+                // The CLI flag is the OPERATOR surface (r1 M4): the journal
+                // stamps provenance 'operator', distinguishing this escape
+                // from an unattended-by-design product path's ('product').
+                allowAdvisoryProvenance: 'operator' as const,
+              }
+            : {}),
           ...(input.releaseQuarantine.length > 0
             ? { releaseQuarantine: input.releaseQuarantine }
             : {}),

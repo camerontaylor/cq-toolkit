@@ -221,6 +221,16 @@ export interface SelfReviewLoopCfg {
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
   dryRun?: boolean;
+  /**
+   * The A12c ADVISORY escape for each loop's fix run, defaulting OFF at the
+   * loop's own option (r1 M4). The sweep passes true EXPLICITLY — the
+   * recorded unattended-by-design posture (comp 8): every lane is ADVISORY
+   * at v1.1, so withholding it would refuse every fixer dispatch, and the
+   * journal stamps `allowAdvisoryProvenance: 'product'` either way. The
+   * shipped CLI takes no flag for it: flipping the product posture is a
+   * code change, not a runtime accident.
+   */
+  allowAdvisoryBudget?: boolean;
 }
 
 /**
@@ -492,6 +502,10 @@ export async function runSelfReviewLoop(
       // workflow timeout. Default-only by design — no cfg override, no CLI
       // flag (the entry invents no number and offers no knob).
       limits: { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs },
+      // The A12c escape, EXPLICIT (r1 M4): the loop's own option defaults
+      // OFF; the sweep turns it on for its fix runs (unattended by design,
+      // comp 8) — the journal records the 'product' provenance.
+      allowAdvisoryBudget: cfg.allowAdvisoryBudget ?? true,
       dispatchLogPath: join(journalRoot, `dispatch-${String(row.pr)}.ndjson`),
       worktreeRoot,
       // Propagated spend (review-debt #186): recorded per PR, used on the

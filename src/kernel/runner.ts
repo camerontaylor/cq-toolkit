@@ -567,7 +567,15 @@ export async function runPlan(
   // mode-independent by construction.
   const journalDir = opts.journalDir;
   const runLog: RunLog | undefined = journalDir !== undefined ? openRunLog(journalDir) : undefined;
+  // THE LINE-COUNT LEDGER (W2.3 fix round, comp 2): every emitted event is
+  // counted and the total rides run-finished as `eventCount`, so the resume
+  // fold's line-count check (journal.foldOrderRuns) can detect a line
+  // DELETED from a surviving run file — the corruption shape the
+  // paired-line throws cannot see (a deleted `reservation-opened` would
+  // silently drop a crashed dispatch's full charge and its quarantine).
+  let journalledCount = 0;
   const emit = async (event: JournalEvent): Promise<void> => {
+    journalledCount += 1;
     if (runLog) await runLog.append(runId, event);
   };
   // The WRITE-AHEAD channel (W2.3): reservation-opened must be durable
@@ -576,6 +584,7 @@ export async function runPlan(
   // VISIBLE as an unresolved reservation (charged in full + quarantined on
   // resume, A12b) instead of silent lost spend.
   const emitDurable = async (event: JournalEvent): Promise<void> => {
+    journalledCount += 1;
     if (runLog) await runLog.append(runId, event, { durable: true });
   };
 
@@ -844,7 +853,18 @@ export async function runPlan(
             ...(config.maxUsd !== undefined ? { capUsd: config.maxUsd } : {}),
             ...(config.maxTokens !== undefined ? { capTokens: config.maxTokens } : {}),
             ...(inheritedCapUsd !== undefined ? { inheritedCapUsd } : {}),
-            ...(gov.allowAdvisory === true ? { allowAdvisory: true } : {}),
+            ...(gov.allowAdvisory === true
+              ? {
+                  allowAdvisory: true,
+                  // WHO set the escape (review r1 M4): 'operator' via the
+                  // CLI flag, 'product' via an unattended-by-design product
+                  // path — the journal distinguishes an operator's escape
+                  // from the product's own posture.
+                  ...(gov.allowAdvisoryProvenance !== undefined
+                    ? { allowAdvisoryProvenance: gov.allowAdvisoryProvenance }
+                    : {}),
+                }
+              : {}),
             attended: gov.attended ?? false,
             ...(legacyResetHonoured
               ? { legacyJournal: { mode: 'reset' as const, v1RunIds: [...unaccountedV1] } }
@@ -1019,9 +1039,15 @@ export async function runPlan(
       // refusal is terminal budget evidence ON THE JOB (ADR §2.9: advisory-*
       // rows stay budget-exhausted on themselves; dependents re-mark
       // transitively), journalled finish-only with the `reservation-refused`
-      // fact — nothing was dispatched, no attempt is spent.
+      // fact — nothing was dispatched, no attempt is spent. The gate sits
+      // BEHIND the trip check (`!governor.tripped`): on an already-tripped
+      // run the REAL cause of a refusal is the trip, and the durable
+      // `reservation-refused{reason:'advisory-lane'}` line would name the
+      // wrong bound (review r1 M1) — a tripped run falls through to
+      // `governor.admit`, whose refusal journals the trip as the cause.
       if (
         gov !== undefined &&
+        !governor.tripped &&
         gov.attended !== true &&
         gov.allowAdvisory !== true &&
         classifyDispatch() === 'advisory'
@@ -1034,6 +1060,11 @@ export async function runPlan(
           atMs: governor.now(),
         });
         if (opts.stopOnError) stop.requested = true;
+        // (With stopOnError the halt is the OPERATOR's stop policy, never a
+        // governor trip: the honest-stop pass below therefore does not
+        // re-mark the undispatched rows budget-exhausted — they stay
+        // `queued`, re-runnable, and the run claims no budget stop the
+        // journal cannot back with a budget-tripped fact.)
         await emit({
           type: 'reservation-refused',
           runId,
@@ -1142,7 +1173,9 @@ export async function runPlan(
       // (the settle's basis reads the dispatch's ending), and the composed
       // dispatch signal's cleanup.
       let reservation: BudgetReservation | undefined;
-      let settledCharge: { charged: number; basis: 'observed' | 'full' } | undefined;
+      let settledCharge:
+        | { charged: number; basis: 'observed' | 'full'; priced: boolean }
+        | undefined;
       let outcome: LadderOutcome<OpResult<unknown>> | undefined;
       // The dispatch-closed guard: once the ladder settles, the dispatch's
       // evidence window is CLOSED — a detached (killed) op promise's late
@@ -1392,6 +1425,12 @@ export async function runPlan(
               reservationId: `${runId}:${reservation.id}`,
               charged: settledCharge.charged,
               basis,
+              // PRICE PRESENCE (H2/DD-9): the journal distinguishes a
+              // legitimate zero-priced lane (costUSD: 0 observed) from
+              // unpriced spend, so the resume fold's DD-9 seed check
+              // `charged === 0 && usage > 0 && !priced` never hard-stops a
+              // priced-at-zero history.
+              ...(settledCharge.priced ? { priced: true } : {}),
               ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
             });
           } finally {
@@ -1571,10 +1610,23 @@ export async function runPlan(
         const advisoryRefused = governor.events.some(
           (event) => event.kind === 'short-circuited' && event.reason === 'advisory-lane',
         );
+        // The ADMISSION-refusal terms contribute to a budget stop, with ONE
+        // gate (composition review comp 1): the advisory-lane term counts
+        // only while the run was NOT halted by stopOnError. A classification
+        // refusal is a per-row terminal verdict, not a governor trip, so
+        // when the operator's stopOnError policy halted the run on it,
+        // re-marking the un-dispatched rows budget-exhausted and claiming
+        // `earlyStopReason: 'budget'` would report a budget stop the
+        // journal has NO budget-tripped fact for — $0 spent, no bound fired,
+        // and the sibling rows would lose their re-runnable `queued` state.
+        // With stopOnError false (the default) the term stands: dependents
+        // re-mark transitively per ADR §2.9. The dispatch-QUOTA term is
+        // W2.2's pinned budget-family semantic (its own refusal rows are
+        // durable terminal evidence) and is unchanged here.
         const budgetFamilyStop =
           (governor.tripped && governor.tripKind !== 'signal') ||
           dispatchQuotaRefused ||
-          advisoryRefused;
+          (advisoryRefused && !stop.requested);
         if (budgetFamilyStop) {
           // Is this job's non-execution attributable to the budget
           // (transitively)? Memoized per jobId: a diamond dependency must
@@ -1666,6 +1718,10 @@ export async function runPlan(
       at: now(),
       stoppedEarly,
       ...(earlyStopReason !== undefined ? { earlyStopReason } : {}),
+      // The line-count check's writer half (journal.foldOrderRuns verifies).
+      // +1: this run-finished line is itself part of the total — the spread
+      // above is evaluated before emit() increments the counter.
+      ...(runLog !== undefined ? { eventCount: journalledCount + 1 } : {}),
     });
 
     // --- Report ---------------------------------------------------------------

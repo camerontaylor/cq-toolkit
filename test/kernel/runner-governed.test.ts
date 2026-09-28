@@ -1823,7 +1823,7 @@ describe('W2.3 reserve-then-settle', () => {
       (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
         event.type === 'reservation-settled',
     );
-    expect(settled).toMatchObject({ charged: 0.1, basis: 'observed' });
+    expect(settled).toMatchObject({ charged: 0.1, basis: 'observed', priced: true });
     const finished = events.find((event): event is FinishedEvent => event.type === 'job-finished');
     expect(finished).toMatchObject({ charged: 0.1, costUSD: 0.1 });
   });
@@ -1871,8 +1871,12 @@ describe('W2.3 reserve-then-settle', () => {
     expect(shorts.map((event) => event.reason)).toEqual(['advisory-lane', 'advisory-lane']);
   });
 
-  test('A12c: allowAdvisory and attended are the two named escapes', async () => {
-    for (const escape of [{ allowAdvisory: true }, { attended: true }] as const) {
+  test('A12c: allowAdvisory and attended are the two named escapes, and the journal records WHO set the escape (r1 M4)', async () => {
+    for (const escape of [
+      { allowAdvisory: true, allowAdvisoryProvenance: 'product' as const },
+      { allowAdvisory: true, allowAdvisoryProvenance: 'operator' as const },
+      { attended: true },
+    ] as const) {
       const w3dirEscape = await mkdtemp(join(tmpdir(), 'w23-escape-'));
       try {
         const calls: string[] = [];
@@ -1888,8 +1892,12 @@ describe('W2.3 reserve-then-settle', () => {
         const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
         if ('allowAdvisory' in escape) {
           expect(started.governance?.allowAdvisory).toBe(true);
+          // The provenance rides the escape (ADR §2.3: allowAdvisory
+          // admissions sit OUTSIDE C_max — the breach must be attributable).
+          expect(started.governance?.allowAdvisoryProvenance).toBe(escape.allowAdvisoryProvenance);
         } else {
           expect(started.governance?.attended).toBe(true);
+          expect(started.governance?.allowAdvisory).toBeUndefined();
         }
       } finally {
         await rm(w3dirEscape, { recursive: true, force: true });
@@ -1923,6 +1931,45 @@ describe('W2.3 reserve-then-settle', () => {
     // The stop gated j2's undispatched work — the honest-stop claim holds.
     expect(report.stoppedEarly).toBe(true);
     expect(report.earlyStopReason).toBe('budget');
+  });
+
+  test('comp 1: stopOnError halts on an advisory refusal WITHOUT re-marking the sibling or claiming a budget stop', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    // Unattended, no escape: j1's dispatch is refused by the A12c gate. The
+    // operator's stopOnError halts the run there — but a classification
+    // refusal is a per-row terminal verdict, NOT a governor trip, so the
+    // honest-stop pass must NOT re-mark j2 budget-exhausted (it stays
+    // queued, re-runnable) and the run must NOT claim `earlyStopReason:
+    // 'budget'` the journal has no budget-tripped fact for (the run spent
+    // $0 and no bound fired).
+    const report = await runPlan(
+      independentPlan('w23-comp1', 2),
+      { concurrency: 1, stopOnError: true, journalDir: w3dir },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor }, // no attended, no allowAdvisory
+    );
+    expect(calls).toEqual([]); // nothing dispatched
+    // j1: the refusal row is its terminal budget verdict. j2: queued.
+    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'indeterminate']);
+    expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toMatchObject({
+      status: 'indeterminate',
+    });
+    // No budget stop claimed, no budget-tripped event journalled: the
+    // report and the journal agree (I9).
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
+    const events = await openRunLog(w3dir).read(report.runId);
+    expect(events.some((event) => event.type === 'budget-tripped')).toBe(false);
+    expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(1);
+    const finished = events.find(
+      (event): event is Extract<JournalEvent, { type: 'run-finished' }> =>
+        event.type === 'run-finished',
+    );
+    expect(finished).toMatchObject({ stoppedEarly: false });
+    // The writer half of the line-count check (comp 2): the total matches,
+    // run-finished included.
+    expect(finished?.eventCount).toBe(events.length);
   });
 
   test('A12b: an unresolved reservation charges IN FULL and QUARANTINES the job (never re-run)', async () => {
@@ -2292,7 +2339,10 @@ describe('W2.3 reserve-then-settle', () => {
     // LATE evidence from the detached promise: DROPPED — the ledger does not
     // move past the journal, and no usage event lands.
     const eventsBefore = governor.events.length;
-    held?.reportResult({ usage: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 }, costUSD: 9 });
+    held?.reportResult({
+      usage: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 9,
+    });
     expect(governor.usdSpent).toBeCloseTo(journalCharged);
     expect(governor.events.length).toBe(eventsBefore);
   });

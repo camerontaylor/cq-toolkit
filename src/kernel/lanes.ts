@@ -48,14 +48,29 @@ export const LANE_CLASSIFICATION: readonly LaneClassificationRow[] = [];
 /**
  * Classify one dispatch key. Longest-specifying-row-wins (a model row beats
  * a provider row beats a lane row beats the default); no matching row — or
- * no key at all, the lane-less case — is ADVISORY. A row that claims 'hard'
- * without evidence is table corruption and throws: HARD is a demonstrated
- * property, never a declaration.
+ * no key at all, the lane-less case, over an EMPTY table — is ADVISORY. A
+ * row that claims 'hard' without evidence is table corruption and throws:
+ * HARD is a demonstrated property, never a declaration. A NON-EMPTY table
+ * with NO key throws too (W2.3 fix round, comp 3): every row's constraints
+ * are vacuously satisfied by an absent key, so the winner is unresolvable —
+ * and a future HARD row silently failing to match (the gate refusing the
+ * dispatch as ADVISORY while the table promises HARD enforcement) is
+ * exactly the inert-gate failure this module must never hide. The kernel op
+ * seam is lane-less until W3.2/W3.3, so a populated table means the caller
+ * must thread the key.
  */
 export function classifyDispatch(
   key?: { lane?: string; provider?: string; model?: string },
   table: readonly LaneClassificationRow[] = LANE_CLASSIFICATION,
 ): BudgetClass {
+  if (key === undefined && table.length > 0) {
+    throw new Error(
+      'lanes: the classification table has rows but no dispatch key was supplied — every row ' +
+        'vacuously matches a key-less dispatch, so HARD enforcement could silently not bind; ' +
+        'thread the (lane, provider, model) key or clear the table (the kernel op seam is ' +
+        'lane-less until W3.2/W3.3)',
+    );
+  }
   let best: LaneClassificationRow | undefined;
   let bestSpecificity = -1;
   for (const row of table) {
