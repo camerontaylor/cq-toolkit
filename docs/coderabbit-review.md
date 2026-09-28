@@ -6,6 +6,9 @@ already installed and active on this repository and reviews opened PRs;
 (once merged to the default branch). The CLI cycles below are the author's
 pre-PR pass — distinct evidence from the App's PR review and from
 non-author acceptance (doctrine I2, `policy/DOCTRINE.md`).
+Non-author means an independent reviewer agent or human. Reviewer and author
+agents may use the same GitHub account; the enabled same-account path records
+distinct agent identities and a review attestation bound to the exact PR head.
 
 Configuration lives in `.coderabbit.yaml` (chill profile, repo path
 invariants, low-noise settings). Sources current as of 2026-09-16 —

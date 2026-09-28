@@ -74,6 +74,7 @@ interface ReviewSpec {
   state: string;
   submittedAt: string | null;
   oid: string | null;
+  body?: string;
 }
 
 interface ThreadSpec {
@@ -148,8 +149,19 @@ const review = (over: Partial<ReviewSpec> = {}): ReviewSpec => ({
   state: 'APPROVED',
   submittedAt: '2026-09-24T10:00:00Z',
   oid: SHA_B,
+  body: '',
   ...over,
 });
+
+const agentMarker = (verdict: 'PASS' | 'HOLD' | 'RETRACT', headSha = SHA_B): string =>
+  `<!-- cq-agent-review: ${JSON.stringify({
+    version: 1,
+    reviewerAgentId: 'reviewer-agent',
+    authorAgentId: 'author-agent',
+    headSha,
+    verdict,
+    independent: true,
+  })} -->`;
 
 /** A review's node id: its explicit `id`, else `R_<index>`. */
 const reviewNodeId = (r: ReviewSpec, index: number): string => r.id ?? `R_${String(index)}`;
@@ -266,6 +278,7 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
                     state: r.state,
                     submittedAt: r.submittedAt,
                     commit: r.oid === null ? null : { oid: r.oid },
+                    body: r.body ?? '',
                   })),
                 },
               }),
@@ -678,6 +691,77 @@ describe('actorKey + foldLatestOpinionated', () => {
 });
 
 describe('judgeAtHead', () => {
+  test('same-account author marker requires opt-in and the latest valid COMMENTED head review', async () => {
+    const pass = review({
+      login: 'alice',
+      association: 'OWNER',
+      state: 'COMMENTED',
+      body: agentMarker('PASS'),
+      submittedAt: '2026-09-24T12:00:00Z',
+    });
+    const atHead = await snapshotOf(prSpec({ author: 'alice', reviews: [pass] }));
+    expect(judgeAtHead(atHead, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      accepted: false,
+    });
+    const enabled = trustPolicyFromConfig({
+      allowSameAccountAgentReview: true,
+      automationLogin: 'alice',
+    });
+    expect(judgeAtHead(atHead, SHA_B, enabled)).toEqual({ accepted: true, by: ['user:alice'] });
+    const laterNonUser = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          pass,
+          review({
+            login: 'alice',
+            typename: 'Mannequin',
+            state: 'COMMENTED',
+            body: agentMarker('PASS'),
+            submittedAt: '2026-09-24T13:00:00Z',
+          }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(laterNonUser, SHA_B, enabled)).toMatchObject({ accepted: false });
+    expect(
+      judgeAtHead(
+        atHead,
+        SHA_B,
+        trustPolicyFromConfig({
+          allowSameAccountAgentReview: true,
+          automationLogin: 'alice',
+          excludedLogins: ['ALICE'],
+        }),
+      ),
+    ).toMatchObject({ accepted: false });
+    // Manually constructed policies may preserve mixed-case exclusion entries.
+    expect(
+      judgeAtHead(atHead, SHA_B, {
+        ...enabled,
+        excludedLogins: new Set(['ALICE']),
+        explicitExcludedLogins: new Set(['ALICE']),
+      }),
+    ).toMatchObject({ accepted: false });
+
+    const retracted = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          pass,
+          review({
+            login: 'alice',
+            association: 'OWNER',
+            state: 'DISMISSED',
+            body: agentMarker('PASS'),
+            submittedAt: '2026-09-24T13:00:00Z',
+          }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(retracted, SHA_B, enabled)).toMatchObject({ accepted: false });
+  });
+
   test('an approval whose commit.oid ≠ headRefOid at merge time is not acceptance', async () => {
     // SYNTHETIC TIMELINE: COLLABORATOR approves sha A; the author pushes sha
     // B; the merge-time snapshot reports headRefOid B.

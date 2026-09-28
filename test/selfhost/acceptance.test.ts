@@ -20,6 +20,7 @@ import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import {
   ACCEPTANCE_CHECK_NAME,
   ACCEPT_REVIEW_STATES_ENV,
+  ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
   TRUSTED_ASSOCIATIONS_ENV,
   TRUSTED_BOTS_ENV,
   judgeAcceptance,
@@ -52,6 +53,7 @@ interface ReviewSpec {
   state: string;
   submittedAt: string;
   oid: string;
+  body?: string;
 }
 
 interface ThreadSpec {
@@ -131,6 +133,7 @@ const payloadFor = (spec: PrSpec): unknown => ({
             state: r.state,
             submittedAt: r.submittedAt,
             commit: { oid: r.oid },
+            body: r.body ?? '',
           })),
         },
         timelineItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
@@ -207,6 +210,57 @@ const failLine = (report: readonly string[]): string =>
 // ---------------------------------------------------------------------------
 
 describe('judgeAcceptance', () => {
+  test('same-account author marker requires opt-in and a current COMMENTED head review', async () => {
+    const body = `<!-- cq-agent-review: ${JSON.stringify({
+      version: 1,
+      reviewerAgentId: 'reviewer-agent',
+      authorAgentId: 'author-agent',
+      headSha: SHA_B,
+      verdict: 'PASS',
+      independent: true,
+    })} -->`;
+    const spec = prSpec({
+      author: 'alice',
+      reviews: [
+        review({
+          login: 'alice',
+          association: 'OWNER',
+          state: 'COMMENTED',
+          body,
+          submittedAt: '2026-09-24T12:00:00Z',
+        }),
+      ],
+    });
+    expect((await judge(makeForge(spec))).verdict).toBe('fail');
+    const policy = resolveAcceptanceTrust({ [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: 'true' }).policy;
+    expect(await judge(makeForge(spec), {}, policy)).toMatchObject({
+      verdict: 'pass',
+      acceptedBy: ['user:alice'],
+    });
+    const retracted = makeForge(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review({
+            login: 'alice',
+            association: 'OWNER',
+            state: 'COMMENTED',
+            body,
+            submittedAt: '2026-09-24T12:00:00Z',
+          }),
+          review({
+            login: 'alice',
+            association: 'OWNER',
+            state: 'DISMISSED',
+            body,
+            submittedAt: '2026-09-24T13:00:00Z',
+          }),
+        ],
+      }),
+    );
+    expect((await judge(retracted, {}, policy)).verdict).toBe('fail');
+  });
+
   test('the check name is cq/acceptance', () => {
     expect(ACCEPTANCE_CHECK_NAME).toBe('cq/acceptance');
   });
@@ -387,11 +441,13 @@ describe('resolveAcceptanceTrust', () => {
       trustedBots: 'default',
       acceptReviewStates: 'default',
       trustedAssociations: 'default',
+      allowSameAccountAgentReview: 'default',
     });
     expect(trust.report).toEqual([
       'CQ_MERGE_TRUSTED_BOTS=(none) (default)',
       'CQ_MERGE_ACCEPT_REVIEW_STATES=APPROVED (default)',
       'CQ_MERGE_TRUSTED_ASSOCIATIONS=COLLABORATOR,MEMBER,OWNER (default)',
+      'CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=false (default)',
     ]);
   });
 
@@ -400,11 +456,13 @@ describe('resolveAcceptanceTrust', () => {
       [TRUSTED_BOTS_ENV]: '',
       [ACCEPT_REVIEW_STATES_ENV]: '   ',
       [TRUSTED_ASSOCIATIONS_ENV]: ' \t ',
+      [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: ' ',
     });
     expect(trust.layers).toEqual({
       trustedBots: 'default',
       acceptReviewStates: 'default',
       trustedAssociations: 'default',
+      allowSameAccountAgentReview: 'default',
     });
     expect(trust.report).toEqual(resolveAcceptanceTrust({}).report);
   });
@@ -414,6 +472,7 @@ describe('resolveAcceptanceTrust', () => {
       [TRUSTED_BOTS_ENV]: ' coderabbitai[bot] , ,renovate ',
       [ACCEPT_REVIEW_STATES_ENV]: 'approved, Commented',
       [TRUSTED_ASSOCIATIONS_ENV]: 'owner',
+      [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]: 'true',
     });
     expect([...trust.policy.trustedBots].sort()).toEqual(['coderabbitai', 'renovate']);
     expect([...trust.policy.acceptStates].sort()).toEqual(['APPROVED', 'COMMENTED']);
@@ -422,11 +481,13 @@ describe('resolveAcceptanceTrust', () => {
       trustedBots: 'env',
       acceptReviewStates: 'env',
       trustedAssociations: 'env',
+      allowSameAccountAgentReview: 'env',
     });
     expect(trust.report).toEqual([
       'CQ_MERGE_TRUSTED_BOTS=coderabbitai,renovate (env)',
       'CQ_MERGE_ACCEPT_REVIEW_STATES=APPROVED,COMMENTED (env)',
       'CQ_MERGE_TRUSTED_ASSOCIATIONS=OWNER (env)',
+      'CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true (env)',
     ]);
   });
 
@@ -438,6 +499,8 @@ describe('resolveAcceptanceTrust', () => {
     [TRUSTED_BOTS_ENV, 'coderabbitai[bot'],
     [TRUSTED_BOTS_ENV, '-leading-dash'],
     [TRUSTED_BOTS_ENV, 'two words'],
+    [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV, 'yes'],
+    [ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV, 'TRUE'],
   ])('%s=%s throws naming the key', (key, value) => {
     expect(() => resolveAcceptanceTrust({ [key]: value })).toThrow(new RegExp(`^${key}: `));
   });

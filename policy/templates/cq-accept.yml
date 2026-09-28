@@ -271,6 +271,7 @@ jobs:
       CQ_MERGE_TRUSTED_BOTS: ${{ vars.CQ_MERGE_TRUSTED_BOTS }}
       CQ_MERGE_ACCEPT_REVIEW_STATES: ${{ vars.CQ_MERGE_ACCEPT_REVIEW_STATES }}
       CQ_MERGE_TRUSTED_ASSOCIATIONS: ${{ vars.CQ_MERGE_TRUSTED_ASSOCIATIONS }}
+      CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW: ${{ vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW }}
     steps:
       - name: Refuse a half-registered verdict App (paired vars)
         # Posters mint on the client id; the gate and the sweep dedupe

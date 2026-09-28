@@ -65,6 +65,16 @@ import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../../../src/ops/review/threads.js';
 
+const agentMarker = (verdict: 'PASS' | 'HOLD' | 'RETRACT', headSha = 'a'.repeat(40)): string =>
+  `<!-- cq-agent-review: ${JSON.stringify({
+    version: 1,
+    reviewerAgentId: 'reviewer-agent',
+    authorAgentId: 'author-agent',
+    headSha,
+    verdict,
+    independent: true,
+  })} -->`;
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -135,6 +145,70 @@ const candidate = (extra?: Partial<PrCandidate>): PrCandidate => ({
 /** A candidate past every blocking row: looked at, quiet, conflicts nowhere. */
 const settleCandidate = (extra?: Partial<PrCandidate>): PrCandidate =>
   candidate({ reviews: [approved()], ...extra });
+
+describe('same-account independent-agent acceptance', () => {
+  const authorReview = (body: string, extra?: Partial<ReviewSummary>): ReviewSummary => ({
+    id: 'PRR_author',
+    authorLogin: 'pr-author',
+    authorType: 'User',
+    authorAssociation: 'MEMBER',
+    state: 'COMMENTED',
+    body,
+    submittedAt: AFTER_COMMIT,
+    commitOid: 'a'.repeat(40),
+    ...extra,
+  });
+  const enabled: ClassifyPrConfig = {
+    ...defaultClassifyPrConfig,
+    allowSameAccountAgentReview: true,
+  };
+  const reviewed = (reviews: ReviewSummary[], config = enabled) =>
+    classifyPr(
+      candidate({ authorLogin: 'pr-author', headRefOid: 'a'.repeat(40), reviews }),
+      PENDING_MS,
+      config,
+    );
+
+  test('valid author-account PASS is accepted only with explicit opt-in', () => {
+    const review = authorReview(agentMarker('PASS'));
+    expect(reviewed([review]).reason).toBe('settle_window_pending');
+    expect(reviewed([review], defaultClassifyPrConfig).reason).toBe('no_acceptable_review');
+  });
+
+  test('plain author comments, stale heads, retractions, and explicit exclusions do not accept', () => {
+    expect(reviewed([authorReview('I reviewed this separately.')]).reason).toBe(
+      'no_acceptable_review',
+    );
+    expect(reviewed([authorReview(agentMarker('PASS', 'b'.repeat(40)))]).reason).toBe(
+      'no_acceptable_review',
+    );
+    expect(
+      reviewed([
+        authorReview(agentMarker('PASS'), { submittedAt: AFTER_COMMIT }),
+        authorReview(agentMarker('RETRACT'), { submittedAt: '2026-01-01T00:00:01Z' }),
+      ]).reason,
+    ).toBe('no_acceptable_review');
+    expect(
+      reviewed([authorReview(agentMarker('PASS'))], {
+        ...enabled,
+        excludedLogins: ['pr-author'],
+        automationLogin: 'pr-author',
+      }).reason,
+    ).toBe('no_acceptable_review');
+  });
+
+  test('a later same-login non-User reserved marker retracts an earlier PASS', () => {
+    expect(
+      reviewed([
+        authorReview(agentMarker('PASS')),
+        authorReview(agentMarker('PASS'), {
+          authorType: 'Bot',
+          submittedAt: '2026-01-01T00:00:01Z',
+        }),
+      ]).reason,
+    ).toBe('no_acceptable_review');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // The decision table, row by row (first match wins)

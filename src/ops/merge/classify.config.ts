@@ -101,6 +101,8 @@ export interface ClassifyPrConfig {
    * the dispatch boundary rejects it outright.
    */
   acceptReviewStates?: readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[] | undefined;
+  /** Permit a validated independent-agent attestation under the PR author's account. Default false. */
+  allowSameAccountAgentReview?: boolean | undefined;
 }
 
 /**

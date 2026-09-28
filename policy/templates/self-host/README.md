@@ -46,6 +46,22 @@ to the run summary) and exit 0 with honest outcomes — per-PR failures and
 needs-human rows are results, not crashes; only a whole-run throw (bad args,
 a failed listing) exits 1.
 
+I2 acceptance normally requires a non-author review. When author and reviewer
+agents must share one GitHub account, set repository variable
+`CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` in the adopting repo; blank or
+false keeps author reviews ineligible. The independent reviewer must submit a
+`COMMENTED` review containing exactly one marker in this form, with distinct
+agent IDs and the exact reviewed head SHA:
+
+```html
+<!-- cq-agent-review: {"version":1,"reviewerAgentId":"reviewer-agent","authorAgentId":"author-agent","headSha":"0123456789abcdef0123456789abcdef01234567","verdict":"PASS","independent":true} -->
+```
+
+`HOLD`, `RETRACT`, malformed markers, stale heads, and later marked reviews
+supersede earlier author-agent passes. An ordinary author comment does not
+count. The marker records the independent review procedure; it does not
+cryptographically authenticate the agent IDs.
+
 ## Required secrets
 
 Names only in the templates — values live in the adopting repo's

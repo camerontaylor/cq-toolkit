@@ -73,6 +73,7 @@ import { countUnresolvedThreads } from '../review/threads.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../review/threads.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { defaultClassifyPrConfig } from './classify.config.js';
+import { parseIndependentReview } from '../../shared/independent-review.js';
 
 /**
  * The frozen I2 vocabulary — the ONLY five things that can be said about a
@@ -295,6 +296,65 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
+const STRUCTURAL_EXCLUDED = new Set([
+  'github-actions[bot]',
+  'cq-automation[bot]',
+  'cq-verdict[bot]',
+  'cq-promoter[bot]',
+]);
+
+/** Latest marked PR-author review supersedes earlier markers before validation. */
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
+  if (ctx.config.allowSameAccountAgentReview !== true) return false;
+  const author = candidate.authorLogin?.toLowerCase();
+  const head = candidate.headRefOid?.toLowerCase();
+  if (author === undefined || author === '' || head === undefined || !/^[0-9a-f]{40}$/.test(head))
+    return false;
+  const marked = candidate.reviews.filter((review) => {
+    if (review.authorLogin?.toLowerCase() !== author) return false;
+    if (review.state === null && review.submittedAt === null) return false;
+    return parseIndependentReview(review.body).kind !== 'absent';
+  });
+  if (marked.length === 0) return false;
+  let latest: ReviewSummary | undefined;
+  let latestMs = -Infinity;
+  for (const review of marked) {
+    const submittedMs = parseMs(review.submittedAt);
+    if (submittedMs === null) return false;
+    if (latest === undefined || submittedMs >= latestMs) {
+      latest = review;
+      latestMs = submittedMs;
+    }
+  }
+  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
+    return false;
+  const parsed = parseIndependentReview(latest.body);
+  const attestation = parsed.kind === 'valid' ? parsed.attestation : null;
+  if (
+    attestation === null ||
+    attestation.verdict !== 'PASS' ||
+    attestation.headSha.toLowerCase() !== head ||
+    latest.commitOid?.toLowerCase() !== head ||
+    latestMs <= (ctx.lastCommitMs ?? Infinity)
+  )
+    return false;
+  const associations = ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR'];
+  if (
+    latest.authorAssociation === null ||
+    latest.authorAssociation === undefined ||
+    !associations.some(
+      (association) => association.toUpperCase() === latest.authorAssociation?.toUpperCase(),
+    )
+  )
+    return false;
+  if (latest.authorLogin == null) return false;
+  const login = latest.authorLogin.toLowerCase();
+  if (STRUCTURAL_EXCLUDED.has(login)) return false;
+  if (ctx.config.excludedLogins?.some((excluded) => excluded.toLowerCase() === login) === true)
+    return false;
+  return true;
+};
+
 /**
  * An OUTSTANDING OBJECTION for row 6: reviewable evidence — a trusted
  * non-author whose body is screened as a skip notice only when
@@ -449,7 +509,9 @@ export function classifyPr(
   // acceptance until someone qualified has spoken about the head state at
   // least once — and no amount of settle time cures evidence that predates
   // the commit.
-  const hasAcceptableReview = foldedReviews.some((review) => isAcceptableReview(review, ctx));
+  const hasAcceptableReview =
+    foldedReviews.some((review) => isAcceptableReview(review, ctx)) ||
+    hasSameAccountAgentAcceptance(candidate, ctx);
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };
   }

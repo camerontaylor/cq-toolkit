@@ -30,7 +30,9 @@
 // with an association in {OWNER, MEMBER, COLLABORATOR}; bots never count
 // unless allowlisted (`authorAssociation` is NONE for bots, so the allowlist
 // is the ONLY bot trust path); an author that is neither Bot nor User
-// (Organization, Mannequin, deleted) never counts; the PR author and every
+// (Organization, Mannequin, deleted) never counts; the PR author ordinarily
+// does not count, with an explicitly enabled structured agent attestation as
+// the same-account exception; every
 // excluded login (the automation's own identity, plus the STRUCTURAL
 // automation bots, which config can never re-admit) NEVER count, whatever
 // their association. trustPolicyFromConfig maps the D3 config shape onto
@@ -79,6 +81,7 @@ import { observeWithChange, pruneToOpen, settleStatus } from './settle-state.js'
 import type { SettleTuple } from './settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
+import { parseIndependentReview } from '../shared/independent-review.js';
 
 /**
  * The ONE GraphQL document the recheck reads, paged by three independent
@@ -107,7 +110,7 @@ export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: I
       }
       reviews(first: 100, after: $reviewsAfter) {
         pageInfo { hasNextPage endCursor }
-        nodes { id author { login __typename } authorAssociation state submittedAt commit { oid } }
+        nodes { id author { login __typename } authorAssociation state submittedAt commit { oid } body }
       }
       timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $timelineAfter) {
         pageInfo { hasNextPage endCursor }
@@ -142,6 +145,8 @@ export interface BoundReview {
   submittedAt: string | null;
   /** The reviewed commit, lowercase 40-hex, or null when absent/malformed. */
   commitOid: string | null;
+  /** The review body, used only to read the reserved agent attestation. */
+  body: string;
 }
 
 /** One review thread, reduced to the facts the thread rule reads. */
@@ -195,6 +200,12 @@ export interface TrustPolicy {
   acceptStates: ReadonlySet<'APPROVED' | 'COMMENTED'>;
   /** Logins (automation identities) that never count, in either form. */
   excludedLogins: ReadonlySet<string>;
+  /** Whether a valid independent agent marker may attest under the PR author's login. */
+  allowSameAccountAgentReview?: boolean;
+  /** The automation login is tracked separately so only the marker path can bypass it. */
+  automationLogin?: string | null;
+  /** Explicit exclusions remain final even when an agent marker is present. */
+  explicitExcludedLogins?: ReadonlySet<string>;
 }
 
 /**
@@ -233,11 +244,14 @@ interface TrustPolicyConfig {
   excludedLogins?: readonly string[];
   /** Review states that count as acceptance; blank = APPROVED only. */
   acceptReviewStates?: readonly string[];
+  allowSameAccountAgentReview?: boolean;
 }
 
 /**
  * Map the D3 trust config onto a TrustPolicy — every mapping can only
- * NARROW trust relative to the blanks:
+ * NARROW ordinary trust relative to the blanks; the explicit
+ * allowSameAccountAgentReview option adds only a valid structured agent
+ * attestation by the PR author's account:
  *   - trustedBots: normalized to the bare lowercase name ('coderabbitai');
  *     an entry naming an excluded identity (structural, automation, or
  *     configured) is DROPPED;
@@ -253,13 +267,17 @@ interface TrustPolicyConfig {
 export function trustPolicyFromConfig(cfg: TrustPolicyConfig): TrustPolicy {
   const clean = (values: readonly string[] | undefined): string[] =>
     (values ?? []).map((value) => value.trim()).filter((value) => value !== '');
-  const excluded = new Set(
-    [
-      ...STRUCTURAL_EXCLUDED_LOGINS,
-      ...clean(cfg.excludedLogins),
-      ...clean(cfg.automationLogin == null ? [] : [cfg.automationLogin]),
-    ].map((login) => login.toLowerCase()),
+  const explicit = new Set(
+    [...STRUCTURAL_EXCLUDED_LOGINS, ...clean(cfg.excludedLogins)].map((login) =>
+      login.toLowerCase(),
+    ),
   );
+  const excluded = new Set([
+    ...explicit,
+    ...clean(cfg.automationLogin == null ? [] : [cfg.automationLogin]).map((login) =>
+      login.toLowerCase(),
+    ),
+  ]);
   const excludedNames = new Set([...excluded].map(bareName));
   const trustedBots = new Set(
     clean(cfg.trustedBots)
@@ -278,13 +296,21 @@ export function trustPolicyFromConfig(cfg: TrustPolicyConfig): TrustPolicy {
       ? ['APPROVED']
       : (['APPROVED', 'COMMENTED'] as const).filter((value) => states.includes(value)),
   );
-  return { trustedAssociations, trustedBots, acceptStates, excludedLogins: excluded };
+  return {
+    trustedAssociations,
+    trustedBots,
+    acceptStates,
+    excludedLogins: excluded,
+    allowSameAccountAgentReview: cfg.allowSameAccountAgentReview === true,
+    automationLogin: cfg.automationLogin?.toLowerCase() ?? null,
+    explicitExcludedLogins: explicit,
+  };
 }
 
 /**
  * The conservative blanks (RS-15 Annex B) — trustPolicyFromConfig({}):
  * OWNER/MEMBER/COLLABORATOR users, no bots, APPROVED only, the structural
- * automation identities excluded (the PR author is always excluded
+ * automation identities excluded (the PR author is ordinarily excluded
  * regardless). Frozen — callers build their own policy object.
  */
 export const CONSERVATIVE_TRUST_POLICY: TrustPolicy = Object.freeze(trustPolicyFromConfig({}));
@@ -445,6 +471,7 @@ const toBoundReview = (node: unknown): BoundReview => {
     state: REVIEW_STATES.includes(state) ? (state as BoundReview['state']) : null,
     submittedAt: asString(record['submittedAt']) || null,
     commitOid: asOid(asRecord(record['commit'])['oid']),
+    body: asString(record['body']),
   };
 };
 
@@ -807,6 +834,55 @@ const isTrusted = (
   return review.authorType === 'User' && policy.trustedAssociations.has(review.association);
 };
 
+/** Latest marked author review is selected before its contents are trusted. */
+const sameAccountAgentAccepted = (
+  snapshot: PrSnapshot,
+  headSha: string,
+  policy: TrustPolicy,
+): string | null => {
+  if (policy.allowSameAccountAgentReview !== true) return null;
+  const author = snapshot.authorLogin?.toLowerCase();
+  if (author === undefined || author === '') return null;
+  const candidates = snapshot.reviews.filter((review) => {
+    if (review.authorLogin?.toLowerCase() !== author) return false;
+    if (review.state === 'PENDING' || (review.state === null && review.submittedAt === null))
+      return false;
+    return parseIndependentReview(review.body).kind !== 'absent';
+  });
+  if (candidates.length === 0) return null;
+  let latest: BoundReview | undefined;
+  let latestMs = -Infinity;
+  for (const review of candidates) {
+    const submitted = review.submittedAt === null ? Number.NaN : Date.parse(review.submittedAt);
+    // An unorderable reserved marker could be newer than any valid PASS.
+    if (!Number.isFinite(submitted)) return null;
+    if (latest === undefined || submitted >= latestMs) {
+      latest = review;
+      latestMs = submitted;
+    }
+  }
+  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
+    return null;
+  const parsed = parseIndependentReview(latest.body);
+  if (parsed.kind !== 'valid') return null;
+  const attestation = parsed.attestation;
+  if (
+    attestation.verdict !== 'PASS' ||
+    attestation.headSha.toLowerCase() !== headSha.toLowerCase() ||
+    latest.commitOid !== headSha.toLowerCase() ||
+    !policy.trustedAssociations.has(latest.association)
+  )
+    return null;
+  const bare = bareName(author);
+  const explicitExcluded = policy.explicitExcludedLogins ?? policy.excludedLogins;
+  if (
+    [...explicitExcluded].some((login) => bareName(login) === bare) ||
+    STRUCTURAL_EXCLUDED_LOGINS.some((login) => bareName(login) === bare)
+  )
+    return null;
+  return `user:${bare}`;
+};
+
 /**
  * Judge acceptance AT `headSha` — pure. Trusted actors only (see the module
  * doc). An outstanding objection — a trusted actor whose latest opinionated
@@ -852,7 +928,8 @@ export function judgeAtHead(
         acceptStates.has(review.state),
     )
     .map((review) => review.actorKey);
-  if (acceptors.length === 0) {
+  const agentAcceptor = sameAccountAgentAccepted(snapshot, head, policy);
+  if (acceptors.length === 0 && agentAcceptor === null) {
     const atHead = snapshot.reviews.filter((review) => review.commitOid === head).length;
     return {
       accepted: false,
@@ -860,7 +937,10 @@ export function judgeAtHead(
       detail: `no trusted acceptance bound to head ${head.slice(0, 12)} (reviews=${String(snapshot.reviews.length)} trusted=${String(trusted.length)} atHead=${String(atHead)})`,
     };
   }
-  return { accepted: true, by: acceptors.sort() };
+  return {
+    accepted: true,
+    by: [...new Set([...acceptors, ...(agentAcceptor === null ? [] : [agentAcceptor])])].sort(),
+  };
 }
 
 // -- the recheck --------------------------------------------------------------
