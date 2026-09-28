@@ -1,0 +1,131 @@
+# agent-validation — ephemeral exact-commit validation for independent review.
+# Update the literal subject and base for each validation stage, then render
+# this template through scripts/render-templates.mjs. The workflow checks out
+# only the source subject; validation template changes are excluded from it.
+name: agent-validation
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: stage-1-before-cycle-1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VALIDATION_SUBJECT: 1cf93b6840f2d82cf16e65438f0930e5f6311e4d
+      VALIDATION_BASE: 130f77d2a6abf13b41f92e91c0e8abb3c3ef3c19
+      VALIDATION_STAGE: stage-1-before-cycle-1
+    steps:
+      - name: Check out source subject
+        id: source-checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 1cf93b6840f2d82cf16e65438f0930e5f6311e4d
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact subject and clean checkout
+        id: source-verified
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$VALIDATION_SUBJECT" ]; then
+            echo "expected subject $VALIDATION_SUBJECT, got $actual"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo 'source checkout is not clean'
+            exit 1
+          fi
+      - name: Set up Node 24
+        if: success()
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install dependencies
+        id: dependencies-installed
+        if: success()
+        run: npm ci
+      - name: Gate — static checks
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/gate-static.log"
+          npm run check:static > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / check:static — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Gate — format check
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/gate-format.log"
+          npm run format:check > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / format:check — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Gate — tests
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/gate-test.log"
+          npm run test > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / test — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Gate — Knip
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/gate-knip.log"
+          npm run knip > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / knip — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Whitespace — base through subject
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/whitespace-base-subject.log"
+          git diff --check "$VALIDATION_BASE" "$VALIDATION_SUBJECT" > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / diff-check base..subject — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Whitespace — staged changes
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/whitespace-staged.log"
+          git diff --cached --check > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / diff-check staged — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Whitespace — unstaged tracked changes
+        if: always() && steps.source-verified.outcome == 'success' && steps.dependencies-installed.outcome == 'success'
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/whitespace-unstaged.log"
+          git diff --check > "$log" 2>&1
+          rc=$?
+          printf '\nexit_code=%s\n' "$rc" >> "$log"
+          cat "$log"
+          printf '### %s / diff-check unstaged — exit %s\n\n' "$VALIDATION_STAGE" "$rc" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

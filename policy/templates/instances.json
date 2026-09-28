@@ -2,6 +2,11 @@
   "schemaVersion": 1,
   "instances": [
     {
+      "workflow": "agent-validation.yml",
+      "template": "agent-validation.yml",
+      "tokens": {}
+    },
+    {
       "workflow": "cq-accept.yml",
       "template": "cq-accept.yml",
       "tokens": {}
