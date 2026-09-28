@@ -197,6 +197,29 @@ describe('same-account independent-agent acceptance', () => {
     ).toBe('no_acceptable_review');
   });
 
+  test('attestations normalize bot suffixes for structural and explicit exclusions', () => {
+    const automationReview = authorReview(agentMarker('PASS'), { authorLogin: 'cq-automation' });
+    expect(
+      classifyPr(
+        candidate({
+          authorLogin: 'cq-automation',
+          headRefOid: 'a'.repeat(40),
+          reviews: [automationReview],
+        }),
+        PENDING_MS,
+        enabled,
+      ).reason,
+    ).toBe('no_acceptable_review');
+
+    expect(
+      reviewed([authorReview(agentMarker('PASS'))], {
+        ...enabled,
+        excludedLogins: ['PR-AUTHOR[bot]'],
+      }).reason,
+    ).toBe('no_acceptable_review');
+    expect(reviewed([authorReview(agentMarker('PASS'))]).reason).toBe('settle_window_pending');
+  });
+
   test('a later same-login non-User reserved marker retracts an earlier PASS', () => {
     expect(
       reviewed([
