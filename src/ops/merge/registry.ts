@@ -162,6 +162,7 @@ const ClassifyPrConfigDataSchema = z
     // diverge from the governed one (the selfhost recheck's trust mapping
     // refuses it the same way).
     acceptReviewStates: z.array(z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'])).optional(),
+    allowSameAccountAgentReview: z.boolean().optional(),
   })
   .strict();
 

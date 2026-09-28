@@ -149,6 +149,7 @@ export type RunMergePrsConfig = {
   // admissible (a dismissed review is retracted; the dispatch schema
   // rejects it — review r3, PR #222).
   acceptReviewStates?: readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[] | undefined;
+  allowSameAccountAgentReview?: boolean | undefined;
 };
 
 /** The composition's input: the fetched candidates plus the run's

@@ -23,7 +23,7 @@ thrown config errors and 127 for a missing binary — binding from phase 1.
 
 ## I2 — no-privileged-reviewer acceptance
 
-**Rule.** A change is acceptable when a non-author review of the last commit's exact
+**Rule.** A change is acceptable when an independent review of the last commit's exact
 head state exists — evidence covering an earlier commit never qualifies, no matter
 how long the settle, and no matter when it was resubmitted — plus either a settle
 of ≥10 minutes since that commit or an explicit all-clear that also postdates it.
@@ -34,9 +34,15 @@ unavailable; evidence predating the last commit accepts code nobody looked at.
 Truncated pagination reads as "no blocking threads" — absence never passes.
 
 **Enforcement.** The decision table is built and tested in phase 3 as specified, on
-top of `src/ops/review` (phases 1–2). Known deviation today: this repo's automation
-runs under a single identity — review supply is a fresh reviewer agent under the
-same account, standing in for non-author review until a second identity exists.
+top of `src/ops/review` (phases 1–2). Independence is procedural: a fresh reviewer
+agent must review the final head separately from the author agent. The reviewer may
+share the author's GitHub account when `CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true`
+is explicitly enabled. The review must be a `COMMENTED` review with exactly one
+`cq-agent-review` HTML marker carrying version 1, distinct nonempty reviewer and
+author agent IDs, the exact 40-hex head SHA, `verdict: "PASS"`, and
+`independent: true`. `HOLD`, `RETRACT`, malformed markers, and later marked reviews
+supersede earlier author-agent attestations. The setting defaults to false for
+adopters; ordinary author comments and reviews never count as acceptance.
 
 ## I3 — merge commits only; promotion to main is a pure fast-forward
 

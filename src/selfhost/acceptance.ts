@@ -22,14 +22,15 @@
 // mergeability row would be circular.
 //
 // TRUST (P7: built-in default → project env). The trust set comes from
-// three comma-list keys, CQ_MERGE_TRUSTED_BOTS, CQ_MERGE_ACCEPT_REVIEW_STATES
-// and CQ_MERGE_TRUSTED_ASSOCIATIONS; blank (absent, empty or whitespace-only)
-// is the conservative default — no bots, APPROVED only, OWNER/MEMBER/
-// COLLABORATOR users. Values map through trustPolicyFromConfig, so config
-// can only NARROW the blanks and the structural automation identities stay
+// three comma-list keys plus CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW;
+// blank (absent, empty or whitespace-only) is the conservative default — no
+// bots, APPROVED only, OWNER/MEMBER/COLLABORATOR users, same-account markers
+// disabled. Values map through trustPolicyFromConfig, so config
+// ordinarily only NARROW the blanks; the explicit structured agent-review
+// option permits a valid same-account attestation. Structural identities stay
 // excluded even when listed as trusted bots. An unrecognised entry fails
 // LOUDLY (a throw naming the key): a typo must never silently narrow or
-// widen trust. The PR author never counts.
+// widen ordinary review trust. The PR author counts only through that opt-in.
 //
 // NEVER THROWS (judgeAcceptance): every throw becomes verdict 'fail' with a
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
@@ -46,6 +47,10 @@ import {
   trustPolicyFromConfig,
 } from './merge-recheck.js';
 import type { PrSnapshot, SnapshotThread, TrustPolicy } from './merge-recheck.js';
+import {
+  ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
+  parseSameAccountReviewFlag,
+} from '../shared/independent-review.js';
 
 /** The check-run name the verdict posts under. */
 export const ACCEPTANCE_CHECK_NAME = 'cq/acceptance';
@@ -58,6 +63,7 @@ export const ACCEPT_REVIEW_STATES_ENV = 'CQ_MERGE_ACCEPT_REVIEW_STATES';
 
 /** P7 key: trusted user associations (comma list); blank → OWNER, MEMBER, COLLABORATOR. */
 export const TRUSTED_ASSOCIATIONS_ENV = 'CQ_MERGE_TRUSTED_ASSOCIATIONS';
+export { ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV };
 
 /** Where a resolved trust key came from (P7 layering). */
 export type ConfigLayer = 'default' | 'env';
@@ -71,6 +77,7 @@ export interface AcceptanceTrustConfig {
     trustedBots: ConfigLayer;
     acceptReviewStates: ConfigLayer;
     trustedAssociations: ConfigLayer;
+    allowSameAccountAgentReview: ConfigLayer;
   };
   /** One log line per key: `<ENV_KEY>=<resolved value> (<layer>)`. */
   report: string[];
@@ -110,7 +117,7 @@ const readListKey = (
 const listed = (values: Iterable<string>): string => [...values].sort().join(',') || '(none)';
 
 /**
- * Resolve the acceptance trust set from the three P7 keys in `env` (built-in
+ * Resolve the acceptance trust set from the P7 keys in `env` (built-in
  * default → project env; blank or whitespace-only = the conservative
  * default). Entries are trimmed and empties dropped, then mapped through
  * trustPolicyFromConfig — which drops a trusted bot naming a structural
@@ -140,10 +147,15 @@ export function resolveAcceptanceTrust(
     (entry) => ASSOCIATIONS.includes(entry.toUpperCase()),
     ASSOCIATIONS.join(', '),
   );
+  const allowSameAccountAgentReview = parseSameAccountReviewFlag(
+    env[ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV],
+    ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
+  );
   const policy = trustPolicyFromConfig({
     trustedBots: bots.entries,
     acceptReviewStates: states.entries,
     trustedAssociations: associations.entries,
+    allowSameAccountAgentReview,
   });
   return {
     policy,
@@ -151,11 +163,15 @@ export function resolveAcceptanceTrust(
       trustedBots: bots.layer,
       acceptReviewStates: states.layer,
       trustedAssociations: associations.layer,
+      allowSameAccountAgentReview: env[ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]?.trim()
+        ? 'env'
+        : 'default',
     },
     report: [
       `${TRUSTED_BOTS_ENV}=${listed(policy.trustedBots)} (${bots.layer})`,
       `${ACCEPT_REVIEW_STATES_ENV}=${listed(policy.acceptStates)} (${states.layer})`,
       `${TRUSTED_ASSOCIATIONS_ENV}=${listed(policy.trustedAssociations)} (${associations.layer})`,
+      `${ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV}=${String(policy.allowSameAccountAgentReview)} (${env[ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV]?.trim() ? 'env' : 'default'})`,
     ],
   };
 }
@@ -223,7 +239,7 @@ const asReviewThread = (thread: SnapshotThread): ReviewThread => ({
 
 /** The trust set as one log-safe line. */
 const trustSummary = (policy: TrustPolicy): string =>
-  `trust: bots=${listed(policy.trustedBots)} acceptStates=${listed(policy.acceptStates)} associations=${listed(policy.trustedAssociations)} excluded=${String(policy.excludedLogins.size)}`;
+  `trust: bots=${listed(policy.trustedBots)} acceptStates=${listed(policy.acceptStates)} associations=${listed(policy.trustedAssociations)} sameAccountAgentReview=${String(policy.allowSameAccountAgentReview === true)} excluded=${String(policy.excludedLogins.size)}`;
 
 /** A failed rule: its name and the one-line reason. */
 interface RuleFailure {

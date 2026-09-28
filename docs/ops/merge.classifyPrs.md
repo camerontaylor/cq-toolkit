@@ -332,6 +332,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           },
           "type": "array"
         },
+        "allowSameAccountAgentReview": {
+          "type": "boolean"
+        },
         "automationLogin": {
           "type": [
             "string",

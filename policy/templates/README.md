@@ -71,7 +71,11 @@ only when its `vars.CQ_*_APP_CLIENT_ID` repository variable is set; the
 gate's verdict selection keys on `vars.CQ_VERDICT_APP_ID`. The trust set is
 `vars.CQ_MERGE_TRUSTED_BOTS`, `vars.CQ_MERGE_ACCEPT_REVIEW_STATES`,
 `vars.CQ_MERGE_TRUSTED_ASSOCIATIONS` and the posture
-`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default).
+`vars.CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default). Set
+`vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` only when the project
+uses separate author and reviewer agents under one GitHub account; it defaults
+to false and both the acceptance check and merge-time recheck require a valid
+head-bound `cq-agent-review` marker.
 
 ## How instantiation works
 

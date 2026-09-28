@@ -72,6 +72,9 @@ full intended PR diff before creating a PR. Full protocol:
 The GitHub CodeRabbit App reviews the opened PR (already installed and
 active on this repo). CLI cycles are the author-side pre-PR pass and stay
 distinct from the PR review and from non-author acceptance (doctrine I2).
+Reviewer independence is between agents or humans, not GitHub accounts. An
+independent reviewer agent may share the author's GitHub account using the
+enabled exact-head attestation path documented in the policy templates.
 
 ## Doctrine
 

@@ -165,6 +165,7 @@ jobs:
           # never as interpolated text. Both are '' on schedule events.
           MAX_USD: ${{ inputs.max_usd }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW: ${{ vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW }}
         run: |
           # main()'s contract (src/selfhost/self-merge-prs.ts): ONE compact
           # JSON payload on stdout; exit 0 even when rows come back
