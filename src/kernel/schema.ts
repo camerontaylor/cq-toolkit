@@ -28,13 +28,17 @@ import type {
   DriverStopReason,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   SandboxLevel,
   SandboxPolicy,
   ToolDenial,
   ToolPolicy,
   ToolPolicyMode,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
+  WorkspaceBinding,
 } from '../driver/types.js';
 import type {
   GovernanceRecord,
@@ -127,6 +131,23 @@ export const ToolDenialSchema: z.ZodType<ToolDenial> = z
   })
   .strict();
 
+// Seam v2 (ADR-0002 §2.1/§2.8): the structured-output request and the
+// workspace binding ride the invocation, so the strict mirror gains them.
+// `JsonSchema` mirrors as a record of unknown — plain data, no external $ref.
+
+export const OutputSchemaSchema: z.ZodType<OutputSchema> = z
+  .object({
+    name: z.string(),
+    schema: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+export const WorkspaceBindingSchema: z.ZodType<WorkspaceBinding> = z
+  .object({
+    path: z.string(),
+  })
+  .strict();
+
 export const OpInvocationSchema: z.ZodType<OpInvocation> = z
   .object({
     prompt: z.string(),
@@ -135,6 +156,44 @@ export const OpInvocationSchema: z.ZodType<OpInvocation> = z
     sandboxPolicy: SandboxPolicySchema,
     sessionRef: z.string().exactOptional(),
     budget: BudgetSchema,
+    outputSchema: OutputSchemaSchema.exactOptional(),
+    workspace: WorkspaceBindingSchema.exactOptional(),
+  })
+  .strict();
+
+export const WorkerErrorClassSchema: z.ZodType<WorkerErrorClass> = z.enum([
+  'output-invalid',
+  'served-model-mismatch',
+  'transient',
+  'rate-limit',
+  'quota',
+  'auth',
+  'provider-error',
+  'harness',
+  'unknown',
+]);
+
+export const ProviderSignalsSchema: z.ZodType<ProviderSignals> = z
+  .object({
+    retryAfterMs: z.number().exactOptional(),
+    windows: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            utilization: z.number().exactOptional(),
+            remaining: z
+              .object({
+                requests: z.number().exactOptional(),
+                tokens: z.number().exactOptional(),
+              })
+              .strict()
+              .exactOptional(),
+            resetAt: z.string().exactOptional(),
+          })
+          .strict(),
+      )
+      .exactOptional(),
   })
   .strict();
 
@@ -149,6 +208,10 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     denials: z.array(ToolDenialSchema),
     // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
     error: z.string().min(1).max(513).exactOptional(),
+    // Seam v2 (ADR-0002 §2.2): structured failure class on an error verdict,
+    // and provider limit observations on ANY verdict.
+    errorClass: WorkerErrorClassSchema.exactOptional(),
+    providerSignals: ProviderSignalsSchema.exactOptional(),
     stopReason: DriverStopReasonSchema,
   })
   .strict()
@@ -179,6 +242,19 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
         code: 'custom',
         message: "error is only allowed when stopReason is 'error'",
         path: ['error'],
+      });
+    }
+    // Seam v2 (ADR-0002 §2.2), ONE-DIRECTIONAL wire rule, same pattern as
+    // `error` above: `errorClass` present ⇒ the verdict is 'error'. An
+    // 'error' verdict WITHOUT a class still parses, so v1 records and
+    // pre-S3 producers stay valid (the producer rule — every v2 error
+    // verdict CARRIES a class — is a conformance obligation, not a mirror
+    // constraint).
+    if (result.errorClass !== undefined && result.stopReason !== 'error') {
+      ctx.addIssue({
+        code: 'custom',
+        message: "errorClass is only allowed when stopReason is 'error'",
+        path: ['errorClass'],
       });
     }
   });
