@@ -1918,6 +1918,21 @@ describe('W2.3 reserve-then-settle', () => {
     // after j1's settle would leave O at 0.90, not 0.75.
     const releases = new Map<string, () => void>();
     const entered: string[] = [];
+    // A WALL-CLOCK wait, not the file's setImmediate `waitFor`: every
+    // dispatch here writes durable journal events (fdatasync), and a tight
+    // setImmediate loop can outrun the threadpool on a loaded runner — the
+    // first wait then fails with jobs still starting (observed on CI, not
+    // locally). setTimeout yields to the poll phase, so the durable writes
+    // land inside the bound.
+    const waitUntil = async (condition: () => boolean, what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!condition() && Date.now() < deadline) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 1);
+        });
+      }
+      expect(condition(), `waitUntil: ${what}`).toBe(true);
+    };
     const gated = async (raw: unknown): Promise<OpResult<unknown>> => {
       const jobId = (raw as { jobId: string }).jobId;
       entered.push(jobId);
@@ -1937,18 +1952,18 @@ describe('W2.3 reserve-then-settle', () => {
       viewWith(entry('fake', gated)),
       { governor, allowAdvisory: true },
     );
-    await waitFor(() => entered.length === 4, 'j1–j4 to hold their reservations');
+    await waitUntil(() => entered.length === 4, 'j1–j4 to hold their reservations');
     expect(governor.outstandingUsd).toBeCloseTo(1);
     releases.get('j1')?.();
     // j1's settle is journalled inside its own dispatch, BEFORE p-limit
     // releases the slot — so once the ledger shows the charge, j5's reserve
     // is either parked or has already been granted.
-    await waitFor(() => governor.usdSpent >= 0.1, 'j1 to settle');
+    await waitUntil(() => governor.usdSpent >= 0.1, 'j1 to settle');
     expect(governor.outstandingUsd).toBeCloseTo(0.75); // j5 NOT granted: it parked
     expect(entered).not.toContain('j5');
     // The second settle frees the room j5's proposal needs.
     releases.get('j2')?.();
-    await waitFor(() => entered.includes('j5'), 'j5 to be granted its reservation');
+    await waitUntil(() => entered.includes('j5'), 'j5 to be granted its reservation');
     releases.get('j5')?.();
     releases.get('j3')?.();
     releases.get('j4')?.();
