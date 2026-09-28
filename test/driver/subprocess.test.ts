@@ -50,6 +50,7 @@ import {
   usageFromCli,
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
+import type { ManagedChild, SpawnOptions } from '../../src/driver/subprocess/process.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import {
   RoutingTableSchema,
@@ -69,11 +70,12 @@ import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
-import { stripMetaSchema } from '../../src/driver/json-schema.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { realClock, runLadder } from '../../src/kernel/governor.js';
-import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
+import { WorkerResultSchema } from '../../src/kernel/schema.js';
+import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
 // The harness MCP server runs from TypeScript SOURCE in these process-level
 // runs (no build): the launch spec is mocked onto `node --import <the test
@@ -480,18 +482,27 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       });
       // DeepSeek-style gateways silently serve their default model for ANY
       // model name; the driver refuses to dispatch an unknown name instead.
-      await expect(
+      const allowlistErr = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } })),
-      ).rejects.toThrow(
+      );
+      expect(allowlistErr).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(allowlistErr)).toBe('config'); // seam v2: pre-dispatch class
+      expect((allowlistErr as Error).message).toMatch(
         /not on the deepseek allowlist .* silently remap unknown model names; refusing to dispatch/,
       );
       // The same rule is table-wide: unknown names on ANY endpoint refuse.
-      await expect(
+      const zaiErr = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'zai', model: 'gpt-9-imaginary' } })),
-      ).rejects.toThrow(/silently remap unknown model names; refusing to dispatch/);
-      await expect(
+      );
+      expect(errorClassOf(zaiErr)).toBe('config');
+      expect((zaiErr as Error).message).toMatch(
+        /silently remap unknown model names; refusing to dispatch/,
+      );
+      const providerErr = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'whatever' } })),
-      ).rejects.toThrow(/unknown provider 'nope'/);
+      );
+      expect(errorClassOf(providerErr)).toBe('config');
+      expect((providerErr as Error).message).toMatch(/unknown provider 'nope'/);
       // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
       // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
@@ -708,6 +719,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       ]);
       // result.is_error:true → an error verdict even though the stream closed cleanly.
       expect(result.stopReason).toBe('error');
+      // A failed result frame is a provider-side outcome (ADR-0002 §2.2).
+      expect(result.errorClass).toBe('provider-error');
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
     });
   });
@@ -725,6 +738,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // is what the journal must show — not a bare "no cause".
       expect(error).toContain('result event error');
       expect(error).toContain('error_during_execution');
+      expect(result.errorClass).toBe('provider-error');
       // boundedErrorText contract: ≤500 chars, or the truncation marker.
       expect(/… \[truncated\]$/.test(error) || error.length <= 513).toBe(true);
     });
@@ -738,6 +752,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The `result` string outranks the `errors` entries and the subtype.
       expect(resultString.error).toContain('result-string-cause');
       expect(resultString.error).not.toContain('errors-entry-cause');
+      expect(resultString.errorClass).toBe('provider-error');
 
       const errorsOnly = await new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-errors' }, []),
@@ -745,6 +760,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // No `result` string → the joined `errors` entries are the cause.
       expect(errorsOnly.error).toContain('errors-entry-cause');
       expect(errorsOnly.error).not.toContain('error_during_execution');
+      expect(errorsOnly.errorClass).toBe('provider-error');
     });
   });
 
@@ -763,12 +779,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // the CLI rejects that URI before the model runs (#209).
       const arg = jsonSchemaArgOf(calls[0]?.args ?? []);
       expect(arg['$schema']).toBeUndefined();
-      expect(arg).toEqual(stripMetaSchema(z.toJSONSchema(schema)));
+      expect(arg).toEqual(toOutputSchema('constructor', schema).schema);
     });
   });
 
-  test('structured output: a schema-violating payload is dropped to narration, never trusted', async () => {
-    await withScratch(async (scratchDir, store) => {
+  test('structured output: a schema-violating payload is the output-invalid verdict, never trusted (S3)', async () => {
+    await withScratch(async (scratchDir) => {
       // The fixture emits the raw payload verbatim (a lying CLI — no fixture
       // schema checking), so the driver's own settle-time validation is what
       // stands between the vendor field and the seam.
@@ -781,15 +797,16 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         outputSchema: z.object({ answer: z.string() }).strict(),
       });
       const result = await driver.run(invocation({ prompt: 'lying CLI run' }));
-      // The run itself succeeded; only the unrepresentable payload is gone.
-      expect(result.stopReason).toBe('complete');
+      // The §2.3 miss verdict (S3): the payload failed the schema, so the
+      // run is an error/'output-invalid' — NOT a complete with a dropped
+      // payload (the old behaviour is deleted), and the rejection is named.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
       expect(result.structuredOutput).toBeUndefined();
-      // The rejection is evidence, not silence: a plain-JSON narration
-      // marker carrying the zod issue count and paths.
-      const narration = await narrationOf(store, result.sessionId as string);
-      const rejected = narration.find((line) => line.includes('"structured-output-rejected"'));
-      expect(rejected !== undefined && rejected.includes('"issues":1')).toBe(true);
-      expect(rejected !== undefined && rejected.includes('"paths":["answer"]')).toBe(true);
+      expect(result.error).toContain('structured output invalid');
+      expect(result.error).toContain("schema 'constructor'");
+      // A real measurement keeps its usage evidence on the miss verdict.
+      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
     });
   });
 
@@ -858,6 +875,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(error).toMatch(/exited with code 1/);
       expect(error).toContain('fake-agent-cli');
       expect(error).toContain('not served by this endpoint');
+      // A non-zero exit with no result event is a local (harness) failure.
+      expect(result.errorClass).toBe('harness');
     });
   });
 
@@ -903,6 +922,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
       expect(error).toContain('killed by signal');
       expect(error).toContain('SIGKILL');
+      expect(result.errorClass).toBe('harness');
     });
   });
 
@@ -1068,12 +1088,14 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           expect(result.error).toMatch(/^subprocess driver: harness failure/);
           expect(result.error).toContain('never reported its init surface');
           expect(result.error).not.toContain('oversized');
+          expect(result.errorClass).toBe('harness');
           expect(result.structuredOutput).toBeUndefined();
           expect(
             await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
           ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
         } else {
           expect(result.error).toContain('oversized stdout/stderr line');
+          expect(result.errorClass).toBe('harness'); // an oversized line is a protocol break
         }
       });
     },
@@ -1097,6 +1119,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // #208: the spawn cause reaches WorkerResult.error too, not just narration.
       expect(result.error).toContain('spawn failed');
       expect(result.error).toContain('spawn args must be strings');
+      expect(result.errorClass).toBe('harness');
       // The failure is narrated best-effort (same swallow rule as persistence).
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"spawn-failed"'));
@@ -2701,5 +2724,485 @@ describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () 
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 §2.3 (S3) — invocation outputSchema, the uniform output-invalid
+// verdict, the §2.2 CLI classifier rows, and providerSignals
+// ---------------------------------------------------------------------------
+
+/** The invocation schema the §2.3 tests carry: `{answer: string}`, closed. */
+const S3_ANSWER_SCHEMA: OutputSchema = {
+  name: 'test.answer/v1',
+  schema: {
+    type: 'object',
+    properties: { answer: { type: 'string' } },
+    required: ['answer'],
+    additionalProperties: false,
+  },
+};
+
+/** The S3_USAGE the scripted streams report (the fixture's fixed numbers). */
+const S3_USAGE = {
+  input_tokens: 10,
+  output_tokens: 5,
+  cache_read_input_tokens: 2,
+  cache_creation_input_tokens: 3,
+};
+
+/** A harness-mode init line matching the expected surface (mode 'none'). */
+const s3InitLine = (tools: readonly string[]): string =>
+  JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'cli-s3',
+    model: CONFORMANCE_MODEL,
+    tools: [...tools],
+    mcp_servers: [],
+  });
+
+/** A failed result event line with the given overrides. */
+const s3ErrorResultLine = (overrides: Record<string, unknown>): string =>
+  JSON.stringify({
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    session_id: 'cli-s3',
+    model: CONFORMANCE_MODEL,
+    usage: S3_USAGE,
+    ...overrides,
+  });
+
+/** A spawn override that runs `node -e` emitting the given JSON lines. */
+function s3Child(lines: readonly string[], exitCode = 0): SpawnFn {
+  return (opts) =>
+    spawnManaged({
+      ...opts,
+      command: process.execPath,
+      args: [
+        '-e',
+        `process.stdin.resume(); for (const l of ${JSON.stringify(lines)}) process.stdout.write(l + '\\n');` +
+          (exitCode === 0 ? '' : ` process.exitCode = ${String(exitCode)};`),
+      ],
+    });
+}
+
+/** The S3 driver over a scripted stream (mode 'none' policy: no MCP server). */
+function s3Driver(
+  scratchDir: string,
+  lines: readonly string[],
+  opts: {
+    outputSchema?: SubprocessDriverOptions['outputSchema'];
+    binary?: SubprocessDriverOptions['binary'];
+    exitCode?: number;
+  } = {},
+): SubprocessDriver {
+  return new SubprocessDriver({
+    ...baseOptions(scratchDir, {}, []),
+    ...(opts.binary === undefined ? {} : { binary: opts.binary }),
+    ...(opts.outputSchema === undefined ? {} : { outputSchema: opts.outputSchema }),
+    spawn: s3Child(lines, opts.exitCode ?? 0),
+  });
+}
+
+describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
+  test('round-trip: an invocation outputSchema rides --json-schema and the validated payload completes', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // PRODUCER RULE: no class (and no error) on a non-error verdict.
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      // The transport carries the EXACT invocation document, meta-URI
+      // stripped; the same document is what the validator judged over.
+      const sent = jsonSchemaArgOf(calls[0]?.args ?? []);
+      expect(sent).toEqual(S3_ANSWER_SCHEMA.schema);
+      expect(sent['$schema']).toBeUndefined();
+    });
+  });
+
+  test('when both schema sources are present the INVOCATION wins', async () => {
+    await withScratch(async (scratchDir) => {
+      // The lying-CLI raw payload {"other":7} would REJECT under the
+      // constructor schema — completing with {other:7} proves the
+      // invocation schema was the judge.
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'structured-ok',
+            FAKE_AGENT_STRUCTURED_RAW: '{"other":7}',
+          },
+          [],
+        ),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(
+        invocation({
+          outputSchema: {
+            name: 'test.other/v1',
+            schema: {
+              type: 'object',
+              properties: { other: { type: 'number' } },
+              required: ['other'],
+              additionalProperties: false,
+            },
+          },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ other: 7 });
+      expect(result.errorClass).toBeUndefined();
+    });
+  });
+
+  test('no schema requested: structuredOutput is ABSENT and no --json-schema is sent', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: '{"answer":"ok"}' },
+          calls,
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'no schema run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.errorClass).toBeUndefined();
+      expect(calls[0]?.args).not.toContain('--json-schema');
+    });
+  });
+
+  test('the constructor source gets the same output-invalid verdict on a miss', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
+          [],
+        ),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(
+        invocation({ prompt: 'constructor miss run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.error).toContain('structured output invalid');
+    });
+  });
+
+  test('carve-outs: a token cap that fires with a schema in force is budget; a pre-aborted run is aborted', async () => {
+    await withScratch(async (scratchDir) => {
+      // A success frame with NO structured_output (a miss) whose usage trips
+      // the cap: the missing object is the cap's consequence — budget, no
+      // error, no class.
+      const capped = s3Driver(scratchDir, [
+        s3InitLine(['StructuredOutput']),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          usage: {
+            input_tokens: 120_000,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        }),
+      ]);
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          toolPolicy: { allow: [], mode: 'none' },
+          budget: { maxTokens: 1000 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.error).toBeUndefined();
+      expect(cappedResult.errorClass).toBeUndefined();
+      expect(cappedResult.structuredOutput).toBeUndefined();
+
+      // An already-fired signal never dispatches: 'aborted', no class.
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = s3Driver(scratchDir, [s3InitLine(['StructuredOutput'])]);
+      const abortedResult = await aborted.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, toolPolicy: { allow: [], mode: 'none' } }),
+        { signal: dead.signal },
+      );
+      expect(abortedResult.stopReason).toBe('aborted');
+      expect(abortedResult.errorClass).toBeUndefined();
+    });
+  });
+
+  test('classifier rows through the lane: quota (claude limit text, spend limit, opencode funds) and rate-limit rows', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = (): string => join(scratchDir, `run-${(runCount += 1)}`);
+
+      // The claude CLI's usage-limit result → quota WITH the window reset.
+      const limited = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your session limit · resets 3pm (Asia/Singapore)",
+        }),
+      ]);
+      const limitedResult = await limited.run(
+        invocation({ prompt: 'limited run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(limitedResult.stopReason).toBe('error');
+      expect(limitedResult.errorClass).toBe('quota');
+      const resetAt = limitedResult.providerSignals?.windows?.[0]?.resetAt;
+      expect(resetAt).toBeDefined();
+      const instant = Date.parse(resetAt as string);
+      expect(instant).toBeGreaterThan(Date.now() - 60_000);
+      expect(instant).toBeLessThan(Date.now() + 36 * 3_600_000);
+      expect(limitedResult.providerSignals?.windows?.[0]?.id).toBe('5h');
+
+      // The weekly window is named '7d'.
+      const weekly = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your weekly limit · resets 2026-12-31 3pm (Asia/Singapore)",
+        }),
+      ]);
+      const weeklyResult = await weekly.run(
+        invocation({ prompt: 'weekly run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(weeklyResult.errorClass).toBe('quota');
+      expect(weeklyResult.providerSignals?.windows?.[0]?.id).toBe('7d');
+
+      // Gateway funded-allowance prose → quota.
+      const spend = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ result: 'gateway upstream: spend limit reached for this account' }),
+      ]);
+      const spendResult = await spend.run(
+        invocation({ prompt: 'spend run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(spendResult.errorClass).toBe('quota');
+
+      // The opencode funded-balance row → quota.
+      const funds = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ errors: ['HTTP 402: Insufficient account funds'] }),
+      ]);
+      const fundsResult = await funds.run(
+        invocation({ prompt: 'funds run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(fundsResult.errorClass).toBe('quota');
+
+      // The throttle rows → rate-limit (result-frame text AND stderr).
+      const throttled = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ result: 'Server is temporarily limiting requests' }),
+      ]);
+      const throttledResult = await throttled.run(
+        invocation({ prompt: 'throttled run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(throttledResult.errorClass).toBe('rate-limit');
+
+      // "Request rejected (429)" arrives on STDERR with a non-zero exit —
+      // the throttle row still outranks the close-cause branch.
+      const rejectedViaStderr = new SubprocessDriver({
+        ...baseOptions(fresh(), {}, []),
+        spawn: (opts) =>
+          spawnManaged({
+            ...opts,
+            command: process.execPath,
+            args: [
+              '-e',
+              `process.stdin.resume(); process.stderr.write('Request rejected (429)\\n'); process.exitCode = 1;`,
+            ],
+          }),
+      });
+      const rejectedResult = await rejectedViaStderr.run(
+        invocation({ prompt: 'rejected run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(rejectedResult.stopReason).toBe('error');
+      expect(rejectedResult.errorClass).toBe('rate-limit');
+    });
+  });
+
+  test('the codex row: non-zero exit with folded usage and no result event → provider-error', async () => {
+    await withScratch(async (scratchDir) => {
+      const usageThenExit = (opts: SpawnOptions): ManagedChild =>
+        spawnManaged({
+          ...opts,
+          command: process.execPath,
+          args: [
+            '-e',
+            `process.stdin.resume();
+             process.stdout.write(${JSON.stringify(s3InitLine([]))} + '\\n');
+             process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'partial work' }], usage: S3_USAGE_FIXTURE } }) + '\\n');
+             process.exitCode = 1;`.replaceAll('S3_USAGE_FIXTURE', JSON.stringify(S3_USAGE)),
+          ],
+        });
+      // A codex CLI: the provider's failure surfaced through the CLI.
+      const codex = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        binary: ['/opt/vendor/codex'],
+        spawn: usageThenExit,
+      });
+      const codexResult = await codex.run(
+        invocation({ prompt: 'codex run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(codexResult.stopReason).toBe('error');
+      expect(codexResult.errorClass).toBe('provider-error');
+      expect(codexResult.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
+
+      // CONTROL: the same stream from a non-codex binary stays 'harness'
+      // (the exit is the CLI's own crash, not a provider classification).
+      const plain = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: usageThenExit,
+      });
+      const plainResult = await plain.run(
+        invocation({ prompt: 'plain run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(plainResult.stopReason).toBe('error');
+      expect(plainResult.errorClass).toBe('harness');
+    });
+  });
+
+  test('a missing route key env throws DispatchError config before any spawn', async () => {
+    await withScratch(async (scratchDir) => {
+      const keyName = 'CQ_TEST_SUBPROCESS_MISSING_KEY';
+      const saved = process.env[keyName];
+      delete process.env[keyName];
+      try {
+        const driver = new SubprocessDriver({
+          ...baseOptions(scratchDir, {}, []),
+          routingTable: RoutingTableSchema.parse({
+            endpoints: {
+              conformance: {
+                baseUrlEnv: 'CONFORMANCE_BASE_URL',
+                baseUrlDefault: 'http://127.0.0.1:1/anthropic',
+                keyEnv: keyName,
+                models: ['conformance-1'],
+                notes: 'key-less endpoint for the missing-key pre-dispatch test',
+              },
+            },
+          }),
+        });
+        const err = await thrownBy(driver.run(invocation()));
+        expect(err).toBeInstanceOf(DispatchError);
+        expect(errorClassOf(err)).toBe('config');
+        expect((err as Error).message).toMatch(new RegExp(keyName));
+      } finally {
+        if (saved !== undefined) process.env[keyName] = saved;
+      }
+    });
+  });
+
+  test('producer rule: errorClass rides every error verdict and NO non-error verdict; the mirror still parses them', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = (): string => join(scratchDir, `run-${(runCount += 1)}`);
+      const runs: Array<{ label: string; result: WorkerResult }> = [];
+
+      // 1. exit 1 with no result event → error/'harness'.
+      const fail = s3Driver(fresh(), [s3InitLine([])], { exitCode: 1 });
+      runs.push({
+        label: 'fail',
+        result: await fail.run(
+          invocation({ prompt: 'producer fail run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 2. a structured-output miss → error/'output-invalid'.
+      const miss = new SubprocessDriver({
+        ...baseOptions(
+          fresh(),
+          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
+          [],
+        ),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      runs.push({
+        label: 'output-invalid',
+        result: await miss.run(
+          invocation({ prompt: 'producer miss run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 3. the CLI usage-limit result → error/'quota' with the window.
+      const quota = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your session limit · resets 3pm (Asia/Singapore)",
+        }),
+      ]);
+      runs.push({
+        label: 'quota',
+        result: await quota.run(
+          invocation({ prompt: 'producer quota run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 4. complete → NO class.
+      const ok = s3Driver(fresh(), [
+        s3InitLine([]),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          usage: S3_USAGE,
+        }),
+      ]);
+      runs.push({
+        label: 'complete',
+        result: await ok.run(
+          invocation({ prompt: 'producer ok run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 5. pre-aborted → 'aborted', NO class (a cancellation is not a failure).
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = s3Driver(fresh(), [s3InitLine([])]);
+      runs.push({
+        label: 'aborted',
+        result: await aborted.run(
+          invocation({ prompt: 'producer aborted run', toolPolicy: { allow: [], mode: 'none' } }),
+          { signal: dead.signal },
+        ),
+      });
+
+      for (const { label, result } of runs) {
+        if (result.stopReason === 'error') {
+          expect(result.errorClass, `${label}: error verdicts carry a class`).toBeDefined();
+        } else {
+          expect(result.errorClass, `${label}: non-error verdicts carry none`).toBeUndefined();
+        }
+        // The strict v2 mirror parses every verdict (errorClass is
+        // one-directional: present ⇒ error).
+        const reparsed = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(reparsed.stopReason).toBe(result.stopReason);
+      }
+      expect(runs.map((r) => r.result.stopReason)).toEqual([
+        'error',
+        'error',
+        'error',
+        'complete',
+        'aborted',
+      ]);
+    });
   });
 });

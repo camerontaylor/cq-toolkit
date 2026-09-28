@@ -37,6 +37,7 @@
 // The driver reads the actual values from the environment at run() time
 // and throws a clear pre-dispatch error when one is missing.
 import { z } from 'zod';
+import { DispatchError } from '../errors.js';
 import type { ModelSpec } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -187,12 +188,19 @@ export function routeFor(
     ? parsed.endpoints[endpointName]
     : undefined;
   if (endpoint === undefined) {
-    throw new Error(
+    // Pre-dispatch misconfiguration carries its class as structured data
+    // (ADR-0002 §2.2): errorClassOf → 'config'.
+    throw new DispatchError(
+      'config',
       `routing: unknown provider '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,
     );
   }
   if (!endpoint.models.includes(modelSpec.model)) {
-    throw new Error(
+    // The footgun throw is a pre-dispatch route-resolution failure — its
+    // class rides as structured data (ADR-0002 §2.2): errorClassOf →
+    // 'config'. The allowlist itself stays until its S4 retirement.
+    throw new DispatchError(
+      'config',
       `routing: model '${modelSpec.model}' is not on the ${endpointName} allowlist — ` +
         'DeepSeek-style endpoints silently remap unknown model names; refusing to dispatch',
     );

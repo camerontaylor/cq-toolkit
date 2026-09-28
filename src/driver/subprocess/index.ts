@@ -49,10 +49,9 @@
 //                               rejects stream-json without it — found live,
 //                               CLI 2.1.270, T1.6 slice 4; a no-op for CLIs
 //                               that don't know the flag)
-//   --json-schema <json>        only when the constructor's outputSchema is
-//                               set (zod→JSON Schema via z.toJSONSchema;
-//                               the OpInvocation seam cannot carry a schema,
-//                               so per-op registries stay a later lane)
+//   --json-schema <json>        only when a structured-output schema is in
+//                               force (the invocation's outputSchema, or the
+//                               constructor option until its retirement)
 //   --tools ""                  harness mode (default): every CLI builtin
 //                               is REMOVED from the surface (absent, not
 //                               denied — RS-1/RS-1b b1/b5)
@@ -209,12 +208,33 @@
 // the retained stderr tail — so a 0-token failure is diagnosable from the
 // journal instead of an unexplained "driver reported no cause".
 // Only PRE-DISPATCH validation throws
-// (unknown model — the routing footgun; missing key env; unknown
-// sessionRef; a workspace binding that is not an absolute existing
-// directory or disagrees with the resumed record's realpath — a
-// DispatchError('config'); a non-positive Budget.maxTokens; invalid grace
-// windows or binary template at construction; a schema that cannot become
-// JSON Schema — the last at construction).
+// (unknown model / allowlist miss — the routing footgun — and missing key
+// env, each a DispatchError('config'); unknown sessionRef; a workspace
+// binding that is not an absolute existing directory or disagrees with the
+// resumed record's realpath — a DispatchError('config'); a non-positive
+// Budget.maxTokens; invalid grace windows or binary template at
+// construction; a constructor schema that cannot become a seam document —
+// the last at construction).
+//
+// ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
+// `errorClass`, classified ONLY from structured signals — the close cause
+// (spawn error / death signal / non-zero exit), the result-frame
+// subtype/errors, and the CLI's limit vocabulary where the vendor exposes
+// no structure (anchored patterns only; the unanchored numeric-status
+// style is banned). Cut order: an oversized output line is a protocol
+// break → 'harness'; the funded-allowance rows (claude session/weekly
+// limit text, gateway "spend limit reached", opencode "Insufficient
+// account funds") → 'quota', with the reset instant in
+// `providerSignals.windows[*].resetAt` when the claude limit text carries
+// an extractable one; the throttle rows ("Server is temporarily limiting
+// requests", "Request rejected (429)") → 'rate-limit'; a result-event
+// error → 'provider-error' (except a codex non-zero exit that folded real
+// usage with no result event — the provider's failure surfaced through
+// the CLI → 'provider-error'); spawn error / signal death / other
+// non-zero exit / silent death → 'harness'; anything unresolved is
+// 'unknown', NEVER a guessed 'transient'. Abort-shaped runs are excluded
+// (they are 'aborted', not errors). `providerSignals` rides ANY verdict,
+// only with structurally present data — never invented.
 //
 // BUDGET — the subprocess floor is honest about what a headless CLI cannot
 // do: there is NO mid-run token hook, so Budget.maxTokens is enforced only
@@ -239,10 +259,9 @@
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
@@ -265,16 +284,20 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { toOutputSchema, validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   RunOptions,
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
   WorkspaceBinding,
 } from '../types.js';
@@ -360,12 +383,14 @@ export interface SubprocessDriverOptions {
    */
   binary?: string | readonly string[];
   /**
-   * Structured-output schema (data-driven). When set, the CLI is invoked
-   * with `--json-schema <zod→JSON Schema>` and the result event's
-   * structured_output is validated against this schema before it lands in
-   * WorkerResult.structuredOutput (a payload that fails is dropped to
-   * narration, never trusted). Per-op schema registries are a later-lane
-   * concern (the frozen OpInvocation cannot carry a schema).
+   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
+   * it in a later slice): converted once at construction via
+   * `toOutputSchema('constructor', schema)` so the constructor path shares
+   * the invocation path's judge and verdict rule. When the invocation also
+   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
+   * the CLI is invoked with `--json-schema` and the result event's
+   * structured_output must validate (over the SAME document that was sent)
+   * before it lands in WorkerResult.structuredOutput.
    */
   outputSchema?: ZodType;
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
@@ -410,9 +435,8 @@ export interface SubprocessDriverOptions {
  */
 export class SubprocessDriver implements Driver {
   private readonly binary: readonly string[];
-  /** The constructor's original schema — the settle-time structured_output check parses against it. */
-  private readonly outputSchema: ZodType | undefined;
-  private readonly outputJsonSchema: string | undefined;
+  /** The migration-only constructor schema, normalized to the seam shape. */
+  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;
@@ -447,15 +471,15 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
-    // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise. The original
-    // zod schema is retained alongside the serialized form — the CLI's
-    // structured_output is validated against it post-settle (below).
-    this.outputSchema = options.outputSchema;
-    this.outputJsonSchema =
+    // zod→seam schema at CONSTRUCTION: an unrepresentable schema is a loud
+    // config error before any run, not a mid-dispatch surprise. The seam
+    // document is retained — the settle-time judge (`validateStructured`)
+    // re-derives its schema from THIS document, the same one the --json-schema
+    // transport strips and sends, so the judgment is over what the CLI saw.
+    this.constructorOutputSchema =
       options.outputSchema === undefined
         ? undefined
-        : JSON.stringify(stripMetaSchema(z.toJSONSchema(options.outputSchema)));
+        : toOutputSchema('constructor', options.outputSchema);
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());
@@ -584,12 +608,25 @@ export class SubprocessDriver implements Driver {
         ? undefined
         : await writeMcpConfig(sessionsDir, record.sessionId, manifest);
 
+    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
+    // wins when both sources are present; the constructor schema is the
+    // migration-only fallback. Both normalize to the same plain-data
+    // OutputSchema, so ONE validator judges the payload whichever source
+    // carried it.
+    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+
     const argv = buildArgs({
       route,
       toolSurface: this.toolSurface,
       allowedToolNames: stock ? allowed : allowed.map(qualifiedToolName),
       mcpConfigPath,
-      outputJsonSchema: this.outputJsonSchema,
+      outputJsonSchema:
+        outputSchema === undefined
+          ? undefined
+          : // Transport (ADR-0002 §2.3): the EXACT plain document the schema
+            // request carried, meta-URI stripped (the CLI rejects the
+            // draft-2020-12 `$schema` key, #209).
+            JSON.stringify(stripMetaSchema(outputSchema.schema)),
       resumeCliSessionId,
     });
 
@@ -605,7 +642,7 @@ export class SubprocessDriver implements Driver {
       observation.expectedSurface = {
         harness: manifest !== undefined,
         tools: allowed,
-        internalTools: this.outputJsonSchema === undefined ? [] : [CLI_STRUCTURED_OUTPUT_TOOL],
+        internalTools: outputSchema === undefined ? [] : [CLI_STRUCTURED_OUTPUT_TOOL],
       };
     }
     if (sandboxUnenforced) {
@@ -654,6 +691,9 @@ export class SubprocessDriver implements Driver {
         denials: [],
         stopReason: 'error',
         error: boundedErrorText(`subprocess driver: spawn failed — ${describeError(err)}`),
+        // A spawn failure is a local (harness) failure — the producer rule
+        // (ADR-0002 §2.2): every error verdict carries its class.
+        errorClass: 'harness',
       };
     }
 
@@ -767,29 +807,39 @@ export class SubprocessDriver implements Driver {
       observation.narration.push(JSON.stringify(observation.harnessFailure));
     }
 
-    // Structured_output is the one vendor field that becomes seam data, so
-    // when a schema was configured it must survive that schema before it can
-    // reach a verdict — the CLI is a vendor boundary, and a payload that
-    // fails is dropped and its rejection recorded as narration, never
-    // trusted (the ai-sdk lane gets the same guarantee from Output.object).
-    const rawStructured = observation.result?.['structured_output'];
+    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared validator
+    // judges the payload over the SAME document that was sent. A miss after
+    // the CLI's own retry settles the uniform error/'output-invalid' verdict
+    // (usage and cost kept, rejection in the bounded error text) — the old
+    // "complete with the payload dropped to narration" behaviour is deleted.
+    // A harness failure voids the payload outright: output produced on an
+    // unverified or broken tool surface is not a model outcome.
+    let structured: unknown;
+    let structuredMiss: string | undefined;
     if (
-      this.outputSchema !== undefined &&
-      observation.result !== undefined &&
-      rawStructured !== undefined
+      outputSchema !== undefined &&
+      !aborted &&
+      observation.harnessFailure === undefined &&
+      observation.result !== undefined
     ) {
-      const check = this.outputSchema.safeParse(rawStructured);
-      if (check.success) {
-        observation.result['structured_output'] = check.data;
-      } else {
-        delete observation.result['structured_output'];
-        observation.narration.push(
-          JSON.stringify({
-            cq: 'structured-output-rejected',
-            issues: check.error.issues.length,
-            paths: check.error.issues.map((issue) => issue.path.map(String).join('.')),
-          }),
-        );
+      const subtype = asString(observation.result['subtype']);
+      if (subtype === 'error_max_structured_output_retries') {
+        structuredMiss =
+          `the CLI exhausted its native structured-output retries ` +
+          `(subtype '${subtype}') without producing the required object`;
+      } else if (resultStatusOf(observation.result) === 'success') {
+        const raw = observation.result['structured_output'];
+        if (raw === undefined) {
+          structuredMiss =
+            'the result event carried no structured_output (the CLI never produced the required object)';
+        } else {
+          const check = validateStructured(outputSchema, raw);
+          if (check.ok) {
+            structured = check.value;
+          } else {
+            structuredMiss = `the result does not validate against schema '${outputSchema.name}' — ${check.reason}`;
+          }
+        }
       }
     }
 
@@ -817,7 +867,16 @@ export class SubprocessDriver implements Driver {
       // deliberately swallowed — the honest verdict outranks the record
     }
 
-    return this.verdict(modelSpec, budget, observation, record.sessionId, aborted);
+    return this.verdict(
+      modelSpec,
+      budget,
+      observation,
+      record.sessionId,
+      aborted,
+      structured,
+      structuredMiss,
+      isCodexBinary(this.binary[0] ?? ''),
+    );
   }
 
   // --- Internals -------------------------------------------------------------
@@ -837,7 +896,10 @@ export class SubprocessDriver implements Driver {
     for (const [childVar, hostVar] of Object.entries(route.env)) {
       const value = process.env[hostVar];
       if (value === undefined || value === '') {
-        throw new Error(
+        // Pre-dispatch misconfiguration carries its class as structured data
+        // (ADR-0002 §2.2): errorClassOf → 'config'.
+        throw new DispatchError(
+          'config',
           `subprocess driver: route to '${route.endpoint}' requires ${hostVar} in the environment`,
         );
       }
@@ -853,6 +915,14 @@ export class SubprocessDriver implements Driver {
    * report zeros and NEVER a cost. A served/reported model mismatch with
    * the requested id is the narration marker's business (run()); the
    * PRICING here keys on the served id either way (issue #24).
+   *
+   * ERROR CLASSES (seam v2, ADR-0002 §2.2): every 'error' verdict carries
+   * `errorClass` — the producer rule — and nothing else does. Cut order:
+   * a harness failure → 'harness'; a structured-output miss →
+   * 'output-invalid'; otherwise the §2.2 classifier over the close cause,
+   * the result frame and the CLI's cause texts. Abort/budget carve-outs
+   * carry no class: the missing object is their consequence, not their
+   * cause.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -860,16 +930,13 @@ export class SubprocessDriver implements Driver {
     observation: RunObservation,
     sessionId: string,
     aborted: boolean,
+    structured: unknown,
+    structuredMiss: string | undefined,
+    codexBinary: boolean,
   ): WorkerResult {
     const measured =
       observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
-    // A harness failure voids the payload: output produced on an unverified
-    // or broken tool surface is not a model outcome.
-    const structured =
-      observation.result === undefined || observation.harnessFailure !== undefined
-        ? undefined
-        : observation.result.structured_output;
     const stopReason = stopReasonOf({
       aborted,
       harnessFailure: observation.harnessFailure !== undefined,
@@ -878,18 +945,52 @@ export class SubprocessDriver implements Driver {
       resultStatus: resultStatusOf(observation.result),
       oversizedLine: observation.close?.oversizedLine === true,
     });
+    // §2.3 verdict unification: a structured-output miss is an ERROR verdict
+    // — except when a cap or the signal stopped the run first (the missing
+    // object is its consequence, not its cause: the budget/aborted carve-out).
+    const missIsError = structuredMiss !== undefined && stopReason === 'complete';
+    const effectiveStopReason: WorkerResult['stopReason'] = missIsError ? 'error' : stopReason;
     // The error field is present ONLY on a driver-level failure verdict (the
     // frozen contract allows `error` only with stopReason 'error'): the cause
     // is derived from the result frame, else the child's exit evidence, else
     // the narration tail — a bare 'error' tells the caller nothing (issue
     // #208, mirroring the claude-agent derivation).
     let error: string | undefined;
-    if (stopReason === 'error') {
-      error = errorCauseOf(observation);
-      if (observation.stderr.length > 0) {
+    let errorClass: WorkerErrorClass | undefined;
+    let providerSignals: ProviderSignals | undefined;
+    if (effectiveStopReason === 'error') {
+      if (observation.harnessFailure !== undefined) {
+        // Fail-closed surface/transport assertions are always 'harness'.
+        errorClass = 'harness';
+      } else if (structuredMiss !== undefined) {
+        error = `subprocess driver: structured output invalid — ${structuredMiss}`;
+        errorClass = 'output-invalid';
+      } else {
+        const result = observation.result;
+        const resultFailed = result !== undefined && resultStatusOf(result) === 'error';
+        const rawResult = asString(result?.['result']);
+        const errorEntries = (asArray(result?.['errors']) ?? []).filter(
+          (entry): entry is string => typeof entry === 'string' && entry.trim() !== '',
+        );
+        const subtype = asString(result?.['subtype']);
+        const resultCause =
+          rawResult !== undefined && rawResult.trim() !== '' ? rawResult : errorEntries.join('; ');
+        const classified = classifyFailure({
+          kind: resultFailed ? 'result-frame' : 'close',
+          texts: [...(resultFailed ? [resultCause, subtype ?? ''] : []), ...observation.stderr],
+          oversizedLine: observation.close?.oversizedLine === true,
+          close: observation.close,
+          measuredUsage: measured !== undefined || observation.assistantUsage !== undefined,
+          codexBinary,
+        });
+        errorClass = classified.errorClass;
+        providerSignals = classified.providerSignals;
+      }
+      error = error ?? errorCauseOf(observation);
+      if (error !== undefined && observation.stderr.length > 0) {
         error = `${error}; stderr: ${observation.stderr.slice(-3).join(' | ')}`;
       }
-      error = boundedErrorText(error);
+      error = boundedErrorText(error ?? 'subprocess driver: the CLI failed without a cause');
     }
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/spawn-failure verdict.
@@ -914,8 +1015,10 @@ export class SubprocessDriver implements Driver {
       ...cost,
       sessionId,
       denials: observation.denials,
-      stopReason,
+      stopReason: effectiveStopReason,
       ...(error !== undefined ? { error } : {}),
+      ...(errorClass !== undefined ? { errorClass } : {}),
+      ...(providerSignals !== undefined ? { providerSignals } : {}),
     };
   }
 
@@ -1586,6 +1689,246 @@ function errorCauseOf(observation: RunObservation): string {
 /** Σ of the frozen Usage fields — the fold Budget.maxTokens is checked against. */
 function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Error-class classifier (seam v2, ADR-0002 §2.2; RS-14 §4 CLI rows)
+// ---------------------------------------------------------------------------
+
+/** Inputs to the subprocess failure classifier — structured signals only. */
+export interface FailureClassInputs {
+  /** Which channel reported the failure (the classifier's kind signal). */
+  kind: 'result-frame' | 'close';
+  /**
+   * The CLI's cause texts: a failed result frame's result string / subtype,
+   * plus the retained stderr tail. The stream-json surface exposes no HTTP
+   * headers or status codes, so the vendor rows below match ONLY through
+   * these anchored patterns.
+   */
+  texts: readonly string[];
+  /** The child flushed an oversized stdout/stderr line (a protocol break). */
+  oversizedLine: boolean;
+  /** The child's settled close (spawn error / exit code / signal), when known. */
+  close: ProcessClose | undefined;
+  /** A real usage measurement was folded (the codex row's evidence). */
+  measuredUsage: boolean;
+  /** The spawned binary is a codex CLI (the codex row's structured signal). */
+  codexBinary: boolean;
+}
+
+/** The classifier's verdict: the frozen class plus any limit observations. */
+export interface FailureClassification {
+  errorClass: WorkerErrorClass;
+  providerSignals?: ProviderSignals;
+}
+
+/**
+ * The vendor limit texts, ANCHORED — never a bare numeric-status scan:
+ *   - the claude CLI's session/weekly usage-limit result ("You've hit your
+ *     … limit · resets …") — quota, reset when extractable;
+ *   - gateway funded-allowance prose ("spend limit reached") and the
+ *     opencode funded-balance row ("Insufficient account funds") — quota;
+ *   - the throttle rows ("Server is temporarily limiting requests",
+ *     "Request rejected (429)") — rate-limit.
+ */
+const CLI_LIMIT_TEXT = /you(?:'ve| have) hit your [a-z ]{1,32}limit · resets /i;
+const RATE_LIMIT_TEXTS: ReadonlyArray<RegExp> = [
+  /server is temporarily limiting requests/i,
+  /request rejected \(429\)/i,
+];
+const QUOTA_TEXTS: ReadonlyArray<RegExp> = [
+  /\bspend limit reached\b/i,
+  /\bInsufficient account funds\b/,
+];
+
+/**
+ * The class of a subprocess failure (header cut order):
+ *   1. an oversized output line is a protocol break → 'harness';
+ *   2. the funded-allowance rows → 'quota' (+ the claude reset window);
+ *   3. the throttle rows → 'rate-limit';
+ *   4. a result-event error → 'provider-error';
+ *   5. a codex CLI that folded real usage and exited non-zero with no
+ *      result event surfaced the PROVIDER's failure → 'provider-error';
+ *   6. a spawn error, a signal death, any other non-zero exit, or a
+ *      silent death → 'harness'.
+ * Abort-shaped runs never reach this function (they are 'aborted').
+ */
+export function classifyFailure(inputs: FailureClassInputs): FailureClassification {
+  if (inputs.oversizedLine) {
+    return { errorClass: 'harness' };
+  }
+  const joined = inputs.texts.join('\n');
+  if (CLI_LIMIT_TEXT.test(joined)) {
+    return quotaWithResetSignal(joined);
+  }
+  if (QUOTA_TEXTS.some((pattern) => pattern.test(joined))) {
+    return { errorClass: 'quota' };
+  }
+  if (RATE_LIMIT_TEXTS.some((pattern) => pattern.test(joined))) {
+    return { errorClass: 'rate-limit' };
+  }
+  if (inputs.kind === 'result-frame') {
+    return { errorClass: 'provider-error' };
+  }
+  const close = inputs.close;
+  const exitFailure =
+    close !== undefined &&
+    close.spawnError === undefined &&
+    close.signal === null &&
+    close.code !== 0;
+  if (inputs.codexBinary && exitFailure && inputs.measuredUsage) {
+    // RS-14 §4 codex row: the CLI reported usage, then died before the
+    // result event — the provider's failure, surfaced through the CLI.
+    return { errorClass: 'provider-error' };
+  }
+  return { errorClass: 'harness' };
+}
+
+/** Quota + the claude unified-window reset observation, when extractable. */
+function quotaWithResetSignal(text: string): FailureClassification {
+  const resetAt = resetAtFromLimitText(text);
+  return {
+    errorClass: 'quota',
+    ...(resetAt !== undefined
+      ? { providerSignals: { windows: [{ id: unifiedWindowIdOf(text), resetAt }] } }
+      : {}),
+  };
+}
+
+/**
+ * The unified-limit window id for a claude limit text: the vendor names the
+ * window ('use limit'/'session limit' = the 5h unified window, 'weekly
+ * limit' = the 7d one); anything else is honestly bucketed 'unified' rather
+ * than guessed.
+ */
+function unifiedWindowIdOf(text: string): string {
+  if (/\b(?:weekly|7d)\b/i.test(text)) return '7d';
+  if (/\b(?:use|session|5h)\b/i.test(text)) return '5h';
+  return 'unified';
+}
+
+/**
+ * The reset instant from a claude limit text's "· resets <when>" tail, when
+ * the vendor's form is parseable: an absolute date, a relative duration
+ * ('1h30m'), or the CLI's wall-clock form ("3pm (Asia/Singapore)" — resolved
+ * against the named IANA zone). Anything ambiguous (bare digits, a zoneless
+ * wall clock) is left OUT — never invent a reset.
+ */
+export function resetAtFromLimitText(text: string): string | undefined {
+  // The capture stops at the line end: the classifier may join several
+  // cause texts (result frame + subtype + stderr) into one string.
+  const tail = /· resets ([^\n]+)/i.exec(text)?.[1]?.trim();
+  if (tail === undefined || tail === '' || /^\d+$/.test(tail)) return undefined;
+  const parsed = Date.parse(tail);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  const duration =
+    /^((?<days>\d+)d)?((?<hours>\d+)h)?((?<minutes>\d+)m)?((?<seconds>\d+)s)?$/i.exec(tail);
+  if (duration?.groups !== undefined) {
+    const { days, hours, minutes, seconds } = duration.groups;
+    const totalMs =
+      Number(days ?? 0) * 86_400_000 +
+      Number(hours ?? 0) * 3_600_000 +
+      Number(minutes ?? 0) * 60_000 +
+      Number(seconds ?? 0) * 1000;
+    return totalMs > 0 ? new Date(Date.now() + totalMs).toISOString() : undefined;
+  }
+  const wall =
+    /^(?:(?<date>\d{4}-\d{2}-\d{2})\s+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?\s*(?<meridiem>am|pm)?\s*\((?<zone>[^)]+)\)$/i.exec(
+      tail,
+    );
+  if (wall?.groups === undefined) return undefined;
+  const { date, hour, minute, meridiem, zone } = wall.groups;
+  if (zone === undefined) return undefined; // a zoneless wall clock is no instant
+  let hours = Number(hour);
+  const minutes = Number(minute ?? '0');
+  if (!Number.isInteger(hours) || hours <= 0 || hours > 23) return undefined;
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) return undefined;
+  if (meridiem !== undefined) {
+    if (hours > 12) return undefined;
+    hours = (hours % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0);
+  }
+  return instantOfWallClock(hours, minutes, zone.trim(), date);
+}
+
+/**
+ * The UTC instant of the NEXT occurrence of `hour:minute` wall-clock time in
+ * `zone` (or of the named calendar date in that zone), best effort: the
+ * zone's offset is read through Intl and corrected twice for DST edges. An
+ * unknown zone yields undefined — a reset is never invented.
+ */
+function instantOfWallClock(
+  hour: number,
+  minute: number,
+  zone: string,
+  date: string | undefined,
+): string | undefined {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const offsetAt = (at: number): number => {
+      const parts: Record<string, number> = {};
+      for (const part of formatter.formatToParts(new Date(at))) {
+        if (part.type !== 'literal') parts[part.type] = Number(part.value);
+      }
+      return (
+        Date.UTC(
+          parts['year'] ?? 1970,
+          (parts['month'] ?? 1) - 1,
+          parts['day'] ?? 1,
+          parts['hour'] ?? 0,
+          parts['minute'] ?? 0,
+          parts['second'] ?? 0,
+        ) -
+        Math.floor(at / 1000) * 1000
+      );
+    };
+    const DAY_MS = 86_400_000;
+    const timeOfDay = hour * 3_600_000 + minute * 60_000;
+    // The wall-clock midnight of the target date as-if-UTC, then the target
+    // instant: solve midnightInstant + offset(midnightInstant) === U twice.
+    const midnightAsUtc =
+      date === undefined
+        ? Math.floor((Date.now() + offsetAt(Date.now())) / DAY_MS) * DAY_MS
+        : (() => {
+            const parsed = Date.parse(`${date}T00:00:00Z`);
+            return Number.isFinite(parsed) ? parsed : Number.NaN;
+          })();
+    if (!Number.isFinite(midnightAsUtc)) return undefined;
+    let midnight = midnightAsUtc;
+    midnight -= offsetAt(midnight);
+    midnight = midnightAsUtc - offsetAt(midnight);
+    let target = midnight + timeOfDay;
+    if (date === undefined && target <= Date.now() - 60_000) {
+      // Already past today: the reset means tomorrow (best effort — across a
+      // DST edge the roll may be off by the shift; it is an observation, not
+      // a contract).
+      const tomorrow = midnightAsUtc + DAY_MS;
+      let next = tomorrow;
+      next -= offsetAt(next);
+      next = tomorrow - offsetAt(next);
+      target = next + timeOfDay;
+    }
+    return new Date(target).toISOString();
+  } catch {
+    return undefined; // unknown zone — no reset invented
+  }
+}
+
+/**
+ * Whether the spawned binary is a codex CLI: the basename of the binary
+ * template's first element (a CONFIG field, not free text). The codex row
+ * needs it — a codex exit carries no result event to classify from.
+ */
+function isCodexBinary(binary: string): boolean {
+  return /^codex/i.test(basename(binary));
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */

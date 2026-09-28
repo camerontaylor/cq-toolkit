@@ -92,15 +92,28 @@
 // support must degrade to the documented harness enforcement, never fail
 // the run on a missing kernel feature we do not rely on.
 //
-// STRUCTURED OUTPUT: the SDK's NATIVE path — `outputFormat: { type:
-// 'json_schema', schema }` (zod → JSON Schema at CONSTRUCTION: an
-// unrepresentable schema is a loud config error before any run). The
-// success result's `structured_output` is validated against the ORIGINAL
-// zod schema post-settle — the agent is a vendor boundary, and a payload
-// that fails is dropped to narration, never trusted (the subprocess lane's
-// identical rule). The frozen OpInvocation cannot carry a schema, so per-op
-// schema registries stay a later-lane concern; callers configure the driver
-// instance per op family until that lane lands.
+// STRUCTURED OUTPUT (seam v2, ADR-0002 §2.3): the SDK's NATIVE path —
+// `outputFormat: { type: 'json_schema', schema }`. The schema rides the
+// INVOCATION (`OpInvocation.outputSchema` — the plain `OutputSchema`
+// {name, schema} document); the constructor's zod `outputSchema` option
+// still works during migration (retired in a later slice): it is converted
+// ONCE at construction via `toOutputSchema('constructor', zodSchema)` so
+// BOTH sources share one judge; when both are set the INVOCATION wins. The
+// after-settle judgment is the SHARED validator (`validateStructured` from
+// ../common/structured.js) over the SAME document that was sent (meta-URI
+// stripped for the CLI-bound transport). Verdict table (ADR §2.3):
+//   - object obtained and it validates → 'complete', structuredOutput = the
+//     validated plain JSON;
+//   - object missing/unparseable/schema-invalid AFTER the SDK's NATIVE
+//     outputFormat retry (no manual repair loop here) → stopReason 'error',
+//     errorClass 'output-invalid', usage/cost kept, the rejection recorded
+//     in the bounded error text; the old behaviour (complete with the
+//     payload dropped to narration) is DELETED — consumers read errorClass;
+//   - a cap (error_max_turns / error_max_budget_usd) or the signal stopped
+//     the run first → 'budget' / 'aborted' (the missing object is a
+//     consequence, not the cause);
+//   - no schema requested → structuredOutput is ABSENT even when the reply
+//     text looks like JSON.
 //
 // I6 ISOLATION via the harness session store (src/harness/session.ts) —
 // EXACTLY the other two lanes:
@@ -196,10 +209,29 @@
 // Once dispatched, run() NEVER throws: every failure lands in an honest
 // verdict carrying the sessionId + denials gathered so far. Only
 // PRE-DISPATCH validation throws (peer absent/misshaped, unknown provider,
-// missing key env, unknown sessionRef, a workspace binding that is not an
-// absolute existing directory or disagrees with the resumed record's
-// realpath — a DispatchError('config'); a non-positive Budget.maxTokens;
-// the outputSchema conversion throws at construction).
+// missing key env — each a DispatchError('config'); unknown sessionRef; a
+// workspace binding that is not an absolute existing directory or
+// disagrees with the resumed record's realpath — a DispatchError('config');
+// a non-positive Budget.maxTokens; the outputSchema conversion throws at
+// construction).
+//
+// ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
+// `errorClass`, classified ONLY from structured signals — the result-frame
+// subtype/errors, the assistant frame's structured `error:"rate_limit"`
+// field, and the vendor's limit vocabulary where the SDK exposes no
+// structure (anchored patterns only; the unanchored numeric-status style is
+// banned) — in the ADR's cut order: the funded-allowance code
+// (`enforced_spend_limit_reached`) is 'quota' whatever the wrapper; the
+// assistant rate_limit field and the CLI "You've hit your … limit · resets …"
+// result are 'quota' (RS-14 §4 rule 3 — ahead of the retry-after rule), with
+// the reset instant in `providerSignals.windows[*].resetAt` when the vendor's
+// reset text is extractable; `rate_limit_error` with a retry-after is
+// 'rate-limit' (retryAfterMs in providerSignals); a dispatch throw (spawn/
+// exit/crash of the CLI) is 'harness'; any other result-frame subtype/errors
+// is 'provider-error'; anything unresolved is 'unknown', NEVER a guessed
+// 'transient'. Abort-shaped results are excluded (they are 'aborted', not
+// errors). `providerSignals` rides ANY verdict, only with structurally
+// present data — never invented.
 //
 // COST (DD-2, derived-only): costUSD via the `pricing` constructor lookup
 // (default: computeCostUSD over the vendored models.dev table) — present
@@ -219,7 +251,6 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
@@ -240,17 +271,21 @@ import { boundedErrorText, describeError, redactSensitiveText } from '../error-t
 import { DispatchError } from '../errors.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
+import { toOutputSchema, validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   RunOptions,
   SandboxLevel,
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
   WorkspaceBinding,
 } from '../types.js';
@@ -352,12 +387,14 @@ export interface ClaudeAgentDriverOptions {
    */
   endpointTable?: EndpointTable;
   /**
-   * Structured-output schema (data-driven). When set, the SDK's native
-   * `outputFormat: { type: 'json_schema' }` path runs and the result's
-   * `structured_output` is validated against THIS schema before it lands
-   * in WorkerResult.structuredOutput (a payload that fails is dropped to
-   * narration, never trusted). Per-op schema registries are a later-lane
-   * concern (the frozen OpInvocation cannot carry a schema).
+   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
+   * it in a later slice): converted once at construction via
+   * `toOutputSchema('constructor', schema)` so the constructor path shares
+   * the invocation path's judge and verdict rule. When the invocation also
+   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
+   * the SDK's native `outputFormat: { type: 'json_schema' }` path runs and
+   * the result's `structured_output` must validate (over the SAME document
+   * that was sent) before it lands in WorkerResult.structuredOutput.
    */
   outputSchema?: ZodType;
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
@@ -384,8 +421,8 @@ export interface ClaudeAgentDriverOptions {
 export class ClaudeAgentDriver implements Driver {
   private readonly sdkLoader: SdkLoader;
   private readonly endpointTable: EndpointTable;
-  private readonly outputSchema: ZodType | undefined;
-  private readonly outputJsonSchema: string | undefined;
+  /** The migration-only constructor schema, normalized to the seam shape. */
+  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
@@ -403,15 +440,15 @@ export class ClaudeAgentDriver implements Driver {
       options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
     this.sdkLoader = options.sdkLoader ?? defaultSdkLoader;
     this.endpointTable = options.endpointTable ?? defaultEndpointTable();
-    // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise. The original
-    // zod schema is retained alongside the serialized form — the agent's
-    // structured_output is validated against it post-settle (below).
-    this.outputSchema = options.outputSchema;
-    this.outputJsonSchema =
+    // zod→seam schema at CONSTRUCTION: an unrepresentable schema is a loud
+    // config error before any run, not a mid-dispatch surprise. The seam
+    // document is retained — the settle-time judge (`validateStructured`)
+    // re-derives its schema from THIS document, the same one the transport
+    // strips and sends, so the judgment is over what the vendor saw.
+    this.constructorOutputSchema =
       options.outputSchema === undefined
         ? undefined
-        : JSON.stringify(zToJsonSchema(options.outputSchema));
+        : toOutputSchema('constructor', options.outputSchema);
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;
@@ -492,6 +529,13 @@ export class ClaudeAgentDriver implements Driver {
     // continuation).
     const resumeAgentSessionId = await readAgentSessionId(sessionsDir, record.sessionId);
 
+    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
+    // wins when both sources are present; the constructor schema is the
+    // migration-only fallback. Both normalize to the same plain-data
+    // OutputSchema, so ONE validator judges the payload whichever source
+    // carried it.
+    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+
     // The per-run observation — created before the options assembly because
     // the harness-tool closures accumulate denials into it directly.
     const observation = newObservation();
@@ -501,7 +545,7 @@ export class ClaudeAgentDriver implements Driver {
     observation.expectedSurface = {
       harness: surface !== undefined,
       tools: allowed,
-      internalTools: this.outputJsonSchema === undefined ? [] : [SDK_STRUCTURED_OUTPUT_TOOL],
+      internalTools: outputSchema === undefined ? [] : [SDK_STRUCTURED_OUTPUT_TOOL],
     };
 
     // --- The one SDK call: options assembly. ------------------------------
@@ -576,11 +620,15 @@ export class ClaudeAgentDriver implements Driver {
         : {}),
       ...(sandbox !== undefined ? { sandbox } : {}),
       ...(resumeAgentSessionId !== undefined ? { resume: resumeAgentSessionId } : {}),
-      ...(this.outputJsonSchema !== undefined
+      ...(outputSchema !== undefined
         ? {
             outputFormat: {
               type: 'json_schema',
-              schema: JSON.parse(this.outputJsonSchema) as unknown,
+              // Transport (ADR-0002 §2.3): the EXACT plain document the
+              // schema request carried, meta-URI stripped (the CLI rejects
+              // the draft-2020-12 `$schema` key, #209). The after-settle
+              // judgment is `validateStructured` over the SAME document.
+              schema: stripMetaSchema(outputSchema.schema),
             },
           }
         : {}),
@@ -607,6 +655,12 @@ export class ClaudeAgentDriver implements Driver {
       // check cannot see that).
       aborted = abortRoot?.controller.signal.aborted === true || isAbortShaped(err);
       if (!aborted) {
+        // A dispatch throw is the CLI's spawn/exit/crash surface (ADR §2.2):
+        // 'harness' unless the vendor's limit vocabulary says otherwise —
+        // the raw cause is kept for the classifier (the error field carries
+        // the lane-prefixed, bounded form).
+        observation.errorKind = 'dispatch-threw';
+        observation.caughtCause = describeError(err);
         observation.error = `claude-agent driver: query failed — ${describeError(err)}`;
       }
     }
@@ -647,29 +701,40 @@ export class ClaudeAgentDriver implements Driver {
     // EXECUTED tools were accumulated at the execute boundary.
     mapPermissionDenials(observation);
 
-    // --- Structured_output is the one vendor field that becomes seam data,
-    // so when a schema was configured it must survive that schema before it
-    // can reach a verdict — a payload that fails is dropped and its
-    // rejection recorded as narration, never trusted.
+    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared validator
+    // judges the payload over the SAME document that was sent. A miss after
+    // the SDK's NATIVE outputFormat retry settles the uniform
+    // error/'output-invalid' verdict (usage and cost kept, rejection in the
+    // bounded error text) — the old "complete with the payload dropped to
+    // narration" behaviour is deleted. A result frame that failed for its
+    // own reason is not a model-output outcome: the §2.2 classifier names
+    // it, and its payload (if any) never reaches the seam.
     let structured: unknown;
-    const rawStructured = observation.result?.['structured_output'];
+    let structuredMiss: string | undefined;
     if (
-      this.outputSchema !== undefined &&
+      outputSchema !== undefined &&
+      !aborted &&
       observation.harnessFailure === undefined &&
-      observation.result !== undefined &&
-      rawStructured !== undefined
+      observation.result !== undefined
     ) {
-      const check = this.outputSchema.safeParse(rawStructured);
-      if (check.success) {
-        structured = check.data;
-      } else {
-        observation.narration.push(
-          JSON.stringify({
-            cq: 'structured-output-rejected',
-            issues: check.error.issues.length,
-            paths: check.error.issues.map((issue) => issue.path.map(String).join('.')),
-          }),
-        );
+      const subtype = asString(observation.result['subtype']);
+      if (subtype === 'error_max_structured_output_retries') {
+        structuredMiss =
+          `the agent exhausted its native structured-output retries ` +
+          `(subtype '${subtype}') without producing the required object`;
+      } else if (resultStatusOf(observation.result) === 'success') {
+        const raw = observation.result['structured_output'];
+        if (raw === undefined) {
+          structuredMiss =
+            'the result event carried no structured_output (the agent never produced the required object)';
+        } else {
+          const check = validateStructured(outputSchema, raw);
+          if (check.ok) {
+            structured = check.value;
+          } else {
+            structuredMiss = `the result does not validate against schema '${outputSchema.name}' — ${check.reason}`;
+          }
+        }
       }
     }
 
@@ -688,6 +753,7 @@ export class ClaudeAgentDriver implements Driver {
     // `errors` entries, then the subtype — the SDK supplies whichever it
     // surfaces, and a bare 'error' verdict is exactly the dishonesty this
     // field exists to remove.
+    let resultCause: string | undefined;
     if (observation.error === undefined && resultStatusOf(observation.result) === 'error') {
       const resultFrame = observation.result;
       const rawResult = asString(resultFrame?.['result']);
@@ -702,9 +768,20 @@ export class ClaudeAgentDriver implements Driver {
             ? errorEntries.join('; ')
             : `subtype '${subtype ?? 'unknown'}'`;
       observation.error = `claude-agent driver: SDK result status error — ${cause}`;
+      observation.errorKind = 'result-frame';
+      resultCause = cause;
     }
 
-    return this.verdict(modelSpec, budget, observation, record.sessionId, aborted, structured);
+    return this.verdict(
+      modelSpec,
+      budget,
+      observation,
+      record.sessionId,
+      aborted,
+      structured,
+      structuredMiss,
+      resultCause,
+    );
   }
 
   // --- Internals -------------------------------------------------------------
@@ -721,11 +798,14 @@ export class ClaudeAgentDriver implements Driver {
       try {
         loaded = await this.sdkLoader();
       } catch (err) {
-        throw new Error(
+        // Pre-dispatch misconfiguration carries its class as structured data
+        // (ADR-0002 §2.2): errorClassOf → 'config'. The load failure's own
+        // message rides in the text — a DispatchError carries no cause chain.
+        throw new DispatchError(
+          'config',
           `claude-agent driver: the optional peer dependency '${SDK_MODULE_SPECIFIER}' is not installed — ` +
             'install it to use this lane (npm install --save-optional @anthropic-ai/claude-agent-sdk; ' +
-            'see src/driver/README.md). Refusing pre-dispatch, before any session exists.',
-          { cause: err },
+            `see src/driver/README.md). Refusing pre-dispatch, before any session exists. (${describeError(err)})`,
         );
       }
       return asAgentSdkModule(loaded);
@@ -739,6 +819,13 @@ export class ClaudeAgentDriver implements Driver {
    * assistant-usage fallback) is kept on any verdict that observed it;
    * unmeasured verdicts (dispatch failure, abort before any frame) report
    * zeros and NEVER a cost.
+   *
+   * ERROR CLASSES (seam v2, ADR-0002 §2.2): every 'error' verdict carries
+   * `errorClass` — the producer rule — and nothing else does. Cut order:
+   * a harness failure → 'harness'; a structured-output miss →
+   * 'output-invalid'; otherwise the §2.2 classifier over structured
+   * signals. Abort/budget carve-outs carry no class: the missing object is
+   * their consequence, not their cause.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -747,6 +834,8 @@ export class ClaudeAgentDriver implements Driver {
     sessionId: string,
     aborted: boolean,
     structured: unknown,
+    structuredMiss: string | undefined,
+    resultCause: string | undefined,
   ): WorkerResult {
     const measured =
       observation.result !== undefined ? usageFromAgent(observation.result['usage']) : undefined;
@@ -758,16 +847,50 @@ export class ClaudeAgentDriver implements Driver {
       usage,
       resultStatus: resultStatusOf(observation.result),
     });
+    // §2.3 verdict unification: a structured-output miss is an ERROR verdict
+    // — except when a cap or the signal stopped the run first (the missing
+    // object is its consequence, not its cause: the budget/aborted carve-out).
+    const missIsError = structuredMiss !== undefined && stopReason === 'complete';
+    const effectiveStopReason: WorkerResult['stopReason'] = missIsError ? 'error' : stopReason;
     // The error field is present ONLY on a driver-level failure verdict (the
     // frozen contract): a token-budget 'budget' stop is not a driver failure.
     // Within that verdict the cause may already be captured (dispatch throw,
-    // or a failed result frame); otherwise say the query ended without a
-    // result event — a bare 'error' tells the caller nothing.
-    const error =
-      stopReason === 'error'
-        ? (observation.error ??
-          'claude-agent driver: the SDK query ended without a result event (the SDK surfaced no error text)')
-        : undefined;
+    // or a failed result frame); a structured-output miss names the schema
+    // rejection; otherwise say the query ended without a result event — a
+    // bare 'error' tells the caller nothing.
+    let error: string | undefined;
+    let errorClass: WorkerErrorClass | undefined;
+    let providerSignals: ProviderSignals | undefined;
+    if (effectiveStopReason === 'error') {
+      if (observation.harnessFailure !== undefined) {
+        // Fail-closed surface/transport assertions are always 'harness'.
+        errorClass = 'harness';
+      } else if (structuredMiss !== undefined) {
+        error = `claude-agent driver: structured output invalid — ${structuredMiss}`;
+        errorClass = 'output-invalid';
+      } else {
+        const causeTexts =
+          observation.errorKind === 'result-frame'
+            ? [resultCause ?? '']
+            : [observation.caughtCause ?? ''];
+        const classified = classifyFailure({
+          kind:
+            observation.errorKind === 'result-frame'
+              ? 'result-frame'
+              : observation.errorKind === 'dispatch-threw'
+                ? 'dispatch-threw'
+                : 'no-result',
+          texts: causeTexts,
+          assistantRateLimit: observation.assistantRateLimit,
+        });
+        errorClass = classified.errorClass;
+        providerSignals = classified.providerSignals;
+      }
+      error =
+        error ??
+        observation.error ??
+        'claude-agent driver: the SDK query ended without a result event (the SDK surfaced no error text)';
+    }
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/dispatch-failure verdict.
     // Price the model that was actually SERVED when one was observed (the
@@ -792,8 +915,10 @@ export class ClaudeAgentDriver implements Driver {
       ...cost,
       sessionId,
       denials: observation.denials,
-      stopReason,
+      stopReason: effectiveStopReason,
       ...(error !== undefined ? { error: boundedErrorText(error) } : {}),
+      ...(errorClass !== undefined ? { errorClass } : {}),
+      ...(providerSignals !== undefined ? { providerSignals } : {}),
     };
   }
 
@@ -849,7 +974,10 @@ async function defaultSdkLoader(): Promise<unknown> {
 function asAgentSdkModule(loaded: unknown): AgentSdkModule {
   const rec = asRecord(loaded);
   if (rec === undefined) {
-    throw new Error(
+    // Pre-dispatch misconfiguration carries its class as structured data
+    // (ADR-0002 §2.2): errorClassOf → 'config'.
+    throw new DispatchError(
+      'config',
       `claude-agent driver: the loaded '${SDK_MODULE_SPECIFIER}' module is not an object — ` +
         'not the agent SDK surface this lane drives',
     );
@@ -858,7 +986,8 @@ function asAgentSdkModule(loaded: unknown): AgentSdkModule {
     (name) => typeof rec[name] !== 'function',
   );
   if (missing.length > 0) {
-    throw new Error(
+    throw new DispatchError(
+      'config',
       `claude-agent driver: the loaded '${SDK_MODULE_SPECIFIER}' module is missing the driven surface ` +
         `(${missing.join(', ')}) — capability detection is feature-based, never version-based`,
     );
@@ -870,7 +999,10 @@ function asAgentSdkModule(loaded: unknown): AgentSdkModule {
 function readKeyEnvOrThrow(endpoint: ResolvedEndpoint): string {
   const value = process.env[endpoint.keyEnv];
   if (value === undefined || value === '') {
-    throw new Error(
+    // Pre-dispatch misconfiguration carries its class as structured data
+    // (ADR-0002 §2.2): errorClassOf → 'config'.
+    throw new DispatchError(
+      'config',
       `claude-agent driver: endpoint '${endpoint.endpoint}' requires ${endpoint.keyEnv} in the environment`,
     );
   }
@@ -1046,6 +1178,19 @@ interface RunObservation {
    * verdict; never on a successful run (issue #204).
    */
   error: string | undefined;
+  /**
+   * The raw cause of the dispatch catch (unprefixed, unbounded) — the
+   * classifier's text input; the `error` field carries the lane-prefixed,
+   * bounded form.
+   */
+  caughtCause: string | undefined;
+  /** Which channel set `error` — the classifier's structured kind signal. */
+  errorKind: 'dispatch-threw' | 'result-frame' | undefined;
+  /**
+   * True when an assistant frame carried the SDK's structured
+   * `error: 'rate_limit'` field (RS-14 §4 rule 3 → 'quota').
+   */
+  assistantRateLimit: boolean;
   /** tool_use ids already denied via permission_denials (dedupe). */
   deniedToolUseIds: Set<string>;
   /** The frozen denials, in denial order (execute-boundary + permission-gate). */
@@ -1075,6 +1220,9 @@ function newObservation(): RunObservation {
     assistantUsage: undefined,
     result: undefined,
     error: undefined,
+    caughtCause: undefined,
+    errorKind: undefined,
+    assistantRateLimit: false,
     deniedToolUseIds: new Set(),
     denials: [],
     expectedSurface: undefined,
@@ -1188,6 +1336,11 @@ export function foldMessage(observation: RunObservation, message: unknown): void
         return;
       }
       observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
+      // The SDK's structured per-frame error field (e.g. `error:
+      // 'rate_limit'` on a throttled assistant message) — a STRUCTURED
+      // signal (RS-14 §4 rule 3), folded for the verdict classifier.
+      const frameError = asString(event['error']) ?? asString(inner['error']);
+      if (frameError === 'rate_limit') observation.assistantRateLimit = true;
       // The response-carried model id (the assistant frame's message is
       // shaped like an Anthropic Messages API Message, whose `model` field
       // is what the endpoint REPORTS it served) — the observed, never the
@@ -1328,10 +1481,231 @@ async function readAgentSessionId(
   }
 }
 
-/** zod → CLI-safe JSON Schema (the structured-output option's schema form). */
-function zToJsonSchema(schema: ZodType): Record<string, unknown> {
-  // The CLI rejects the draft-2020-12 meta `$schema` URI zod emits (#209).
-  return stripMetaSchema(z.toJSONSchema(schema));
+// ---------------------------------------------------------------------------
+// Error-class classifier (seam v2, ADR-0002 §2.2; RS-14 §4 cut order)
+// ---------------------------------------------------------------------------
+
+/** Inputs to the claude-agent failure classifier — structured signals only. */
+export interface FailureClassInputs {
+  /** Which channel reported the failure (the classifier's kind signal). */
+  kind: 'dispatch-threw' | 'result-frame' | 'no-result';
+  /**
+   * The vendor's cause texts for this failure: the thrown message (a
+   * dispatch throw) or the failed result frame's result string / joined
+   * errors / subtype. The agent SDK exposes no HTTP headers or status
+   * codes, so the vendor's limit vocabulary is matched ONLY through these
+   * anchored patterns below.
+   */
+  texts: readonly string[];
+  /** An assistant frame carried the structured `error: 'rate_limit'` field. */
+  assistantRateLimit: boolean;
+}
+
+/** The classifier's verdict: the frozen class plus any limit observations. */
+export interface FailureClassification {
+  errorClass: WorkerErrorClass;
+  providerSignals?: ProviderSignals;
+}
+
+/**
+ * The class of a claude-agent failure (header table). Cut order:
+ *   1. the funded-allowance code (`enforced_spend_limit_reached`) is
+ *      'quota' whatever wrapped it (ADR §2.2 rule 2);
+ *   2. the assistant's structured `error:'rate_limit'` field, or the CLI's
+ *      "You've hit your … limit · resets …" result → 'quota' (RS-14 §4
+ *      rule 3 — this precedes the retry-after rule), the reset instant in
+ *      `providerSignals.windows[*].resetAt` when extractable;
+ *   3. `rate_limit_error` → 'rate-limit', retryAfterMs from the vendor's
+ *      anchored retry-after text when present;
+ *   4. a dispatch throw or a silent death (no result event) → 'harness';
+ *   5. any other result-frame subtype/errors → 'provider-error'.
+ * Abort-shaped results never reach this function (they are 'aborted').
+ */
+export function classifyFailure(inputs: FailureClassInputs): FailureClassification {
+  const joined = inputs.texts.join('\n');
+  // Cut 1: funded-allowance exhaustion is quota at any status.
+  if (/\benforced_spend_limit_reached\b/.test(joined)) {
+    return { errorClass: 'quota' };
+  }
+  // Cut 2: the structured assistant field and the CLI usage-limit result —
+  // quota, ahead of the retry-after rule.
+  if (inputs.assistantRateLimit) {
+    return quotaWithResetSignal(joined);
+  }
+  if (CLI_LIMIT_TEXT.test(joined)) {
+    return quotaWithResetSignal(joined);
+  }
+  // Cut 3: the API's rate-limit error type → rate-limit (retry-after when
+  // the vendor's text states one).
+  if (/\brate_limit_error\b/.test(joined)) {
+    const retryAfterMs = retryAfterMsFromText(joined);
+    return {
+      errorClass: 'rate-limit',
+      ...(retryAfterMs !== undefined ? { providerSignals: { retryAfterMs } } : {}),
+    };
+  }
+  // Cut 4: the CLI's own failure surfaces are local (harness) — a spawn/
+  // exit/crash dispatch throw, or a death with no result event at all.
+  if (inputs.kind !== 'result-frame') {
+    return { errorClass: 'harness' };
+  }
+  // Cut 5: a result frame that failed for its own (provider-side) reason.
+  return { errorClass: 'provider-error' };
+}
+
+/** Quota + the unified-window reset observation, when the text carries one. */
+function quotaWithResetSignal(text: string): FailureClassification {
+  const resetAt = resetAtFromLimitText(text);
+  return {
+    errorClass: 'quota',
+    ...(resetAt !== undefined
+      ? { providerSignals: { windows: [{ id: unifiedWindowIdOf(text), resetAt }] } }
+      : {}),
+  };
+}
+
+/**
+ * The claude CLI's usage-limit result, ANCHORED: only the vendor's own
+ * "You've hit your … limit · resets …" shape matches — never a bare
+ * numeric-status scan.
+ */
+const CLI_LIMIT_TEXT = /you(?:'ve| have) hit your [a-z ]{1,32}limit · resets /i;
+
+/**
+ * The unified-limit window id for a limit text: the vendor names the window
+ * ('use limit'/'session limit' = the 5h unified window, 'weekly limit' = the
+ * 7d one); anything else is honestly bucketed 'unified' rather than guessed.
+ */
+function unifiedWindowIdOf(text: string): string {
+  if (/\b(?:weekly|7d)\b/i.test(text)) return '7d';
+  if (/\b(?:use|session|5h)\b/i.test(text)) return '5h';
+  return 'unified';
+}
+
+/**
+ * A retry-after stated in the vendor's error text → milliseconds. ANCHORED
+ * forms only ("Try again in 25 seconds.", "retry after 30s") — the agent
+ * SDK exposes no header structure to read instead.
+ */
+function retryAfterMsFromText(text: string): number | undefined {
+  const seconds = /try again in (\d+) seconds?/i.exec(text) ?? /retry[- ]after (\d+)s?/i.exec(text);
+  const value = seconds?.[1];
+  return value === undefined ? undefined : Number(value) * 1000;
+}
+
+/**
+ * The reset instant from a claude limit text's "· resets <when>" tail, when
+ * the vendor's form is parseable: an absolute date, a relative duration
+ * ('1h30m'), or the CLI's wall-clock form ("3pm (Asia/Singapore)" — resolved
+ * against the named IANA zone). Anything ambiguous (bare digits, a zoneless
+ * wall clock) is left OUT — never invent a reset.
+ */
+export function resetAtFromLimitText(text: string): string | undefined {
+  // The capture stops at the line end: the classifier may join several
+  // cause texts (result frame + subtype + stderr) into one string.
+  const tail = /· resets ([^\n]+)/i.exec(text)?.[1]?.trim();
+  if (tail === undefined || tail === '' || /^\d+$/.test(tail)) return undefined;
+  const parsed = Date.parse(tail);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  const duration =
+    /^((?<days>\d+)d)?((?<hours>\d+)h)?((?<minutes>\d+)m)?((?<seconds>\d+)s)?$/i.exec(tail);
+  if (duration?.groups !== undefined) {
+    const { days, hours, minutes, seconds } = duration.groups;
+    const totalMs =
+      Number(days ?? 0) * 86_400_000 +
+      Number(hours ?? 0) * 3_600_000 +
+      Number(minutes ?? 0) * 60_000 +
+      Number(seconds ?? 0) * 1000;
+    return totalMs > 0 ? new Date(Date.now() + totalMs).toISOString() : undefined;
+  }
+  const wall =
+    /^(?:(?<date>\d{4}-\d{2}-\d{2})\s+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?\s*(?<meridiem>am|pm)?\s*\((?<zone>[^)]+)\)$/i.exec(
+      tail,
+    );
+  if (wall?.groups === undefined) return undefined;
+  const { date, hour, minute, meridiem, zone } = wall.groups;
+  if (zone === undefined) return undefined; // a zoneless wall clock is no instant
+  let hours = Number(hour);
+  const minutes = Number(minute ?? '0');
+  if (!Number.isInteger(hours) || hours <= 0 || hours > 23) return undefined;
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) return undefined;
+  if (meridiem !== undefined) {
+    if (hours > 12) return undefined;
+    hours = (hours % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0);
+  }
+  return instantOfWallClock(hours, minutes, zone.trim(), date);
+}
+
+/**
+ * The UTC instant of the NEXT occurrence of `hour:minute` wall-clock time in
+ * `zone` (or of the named calendar date in that zone), best effort: the
+ * zone's offset is read through Intl and corrected twice for DST edges. An
+ * unknown zone yields undefined — a reset is never invented.
+ */
+function instantOfWallClock(
+  hour: number,
+  minute: number,
+  zone: string,
+  date: string | undefined,
+): string | undefined {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const offsetAt = (at: number): number => {
+      const parts: Record<string, number> = {};
+      for (const part of formatter.formatToParts(new Date(at))) {
+        if (part.type !== 'literal') parts[part.type] = Number(part.value);
+      }
+      return (
+        Date.UTC(
+          parts['year'] ?? 1970,
+          (parts['month'] ?? 1) - 1,
+          parts['day'] ?? 1,
+          parts['hour'] ?? 0,
+          parts['minute'] ?? 0,
+          parts['second'] ?? 0,
+        ) -
+        Math.floor(at / 1000) * 1000
+      );
+    };
+    const DAY_MS = 86_400_000;
+    const timeOfDay = hour * 3_600_000 + minute * 60_000;
+    // The wall-clock midnight of the target date as-if-UTC, then the target
+    // instant: solve midnightInstant + offset(midnightInstant) === U twice.
+    const midnightAsUtc =
+      date === undefined
+        ? Math.floor((Date.now() + offsetAt(Date.now())) / DAY_MS) * DAY_MS
+        : (() => {
+            const parsed = Date.parse(`${date}T00:00:00Z`);
+            return Number.isFinite(parsed) ? parsed : Number.NaN;
+          })();
+    if (!Number.isFinite(midnightAsUtc)) return undefined;
+    let midnight = midnightAsUtc;
+    midnight -= offsetAt(midnight);
+    midnight = midnightAsUtc - offsetAt(midnight);
+    let target = midnight + timeOfDay;
+    if (date === undefined && target <= Date.now() - 60_000) {
+      // Already past today: the reset means tomorrow (best effort — across a
+      // DST edge the roll may be off by the shift; it is an observation, not
+      // a contract).
+      const tomorrow = midnightAsUtc + DAY_MS;
+      let next = tomorrow;
+      next -= offsetAt(next);
+      next = tomorrow - offsetAt(next);
+      target = next + timeOfDay;
+    }
+    return new Date(target).toISOString();
+  } catch {
+    return undefined; // unknown zone — no reset invented
+  }
 }
 
 /** The terminal result event's status class for the stop-reason table. */
