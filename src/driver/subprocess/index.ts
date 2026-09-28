@@ -12,14 +12,18 @@
 //
 // I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
 // driver-owned scheduling primitives under src/driver/**; this file (and
-// routing.ts) contain none. WHEN to abort is the governor's decision: the
-// governed context arrives via `currentJobContext()` (imported from
-// ../../kernel/governor.js — the one deliberate driver→kernel import, same
-// as the ai-sdk driver) and its `signal` is forwarded EXACTLY ONE place:
-// the SIGTERM→SIGKILL grace ladder in ./process.ts (the scan's single
-// exempt file, where the ladder executes an already-decided kill). Outside
-// a governed run no cancellation source exists and a run is simply
-// un-abortable by us. Consequences, documented:
+// routing.ts) contain none. WHEN to abort is the signal sender's decision:
+// the run's cancellation SOURCE is `RunOptions.signal` (seam v2,
+// ADR-0002 §2.1) with the MIGRATION FALLBACK to the governed ambient
+// context (`options?.signal ?? currentJobContext()` — imported from
+// ../../kernel/governor.js, the one deliberate driver→kernel import, same
+// as the other lanes; a later slice removes the fallback). The resolved
+// signal is forwarded EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder
+// in ./process.ts (the scan's single exempt file, where the ladder executes
+// an already-decided kill). An already-aborted signal never dispatches and
+// creates NO session state. Outside a governed run without a signal no
+// cancellation source exists and a run is simply un-abortable by us.
+// Consequences, documented:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
 //     clock; a driver-owned deadline would duplicate and race it.
 //   - No retries, ever: exactly ONE spawn per run (attempts are the
@@ -123,6 +127,12 @@
 // SESSIONS (I6, OUR vocabulary — src/harness/session.ts):
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
 //     scratch dir and a fresh record; the CLI runs with cwd = workspace.
+//     When the invocation carries a `workspace` binding (ADR-0002 §2.4),
+//     the fresh record is instead created IN realpath(workspace.path) and
+//     the CLI + harness manifest bind there; a workspace set alongside a
+//     sessionRef must record the SAME realpath (else a pre-dispatch config
+//     throw). Session records and sidecars stay in the lane's sessionsDir —
+//     never inside the workspace.
 //   - sessionRef → SessionStore.load (unknown → THROW pre-dispatch: a fake
 //     resume is worse than a loud one); the SAME workspace continues, and
 //     `--resume` continues the CLI-side conversation using the CLI session
@@ -178,7 +188,8 @@
 //   anything else               → narration (collected, persisted)
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
-//   1. governed signal fired (the ladder terminated the child) → 'aborted'
+//   1. the run signal fired (already-aborted at entry, or mid-run through
+//      the ladder the signal triggers) → 'aborted'
 //   2. harness surface/transport failure → 'error'
 //   3. oversized stdout/stderr line → 'error'
 //   4. real usage folded ≥ Budget.maxTokens → 'budget'
@@ -199,9 +210,11 @@
 // journal instead of an unexplained "driver reported no cause".
 // Only PRE-DISPATCH validation throws
 // (unknown model — the routing footgun; missing key env; unknown
-// sessionRef; a non-positive Budget.maxTokens; invalid grace windows or
-// binary template at construction; a schema that cannot become JSON Schema
-// — the last at construction).
+// sessionRef; a workspace binding that is not an absolute existing
+// directory or disagrees with the resumed record's realpath — a
+// DispatchError('config'); a non-positive Budget.maxTokens; invalid grace
+// windows or binary template at construction; a schema that cannot become
+// JSON Schema — the last at construction).
 //
 // BUDGET — the subprocess floor is honest about what a headless CLI cannot
 // do: there is NO mid-run token hook, so Budget.maxTokens is enforced only
@@ -226,7 +239,8 @@
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
@@ -250,16 +264,19 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
+import { DispatchError } from '../errors.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  RunOptions,
   ToolDenial,
   ToolPolicy,
   Usage,
   WorkerResult,
+  WorkspaceBinding,
 } from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
@@ -476,8 +493,8 @@ export class SubprocessDriver implements Driver {
     this.spawnImpl = options.spawn ?? spawnManaged;
   }
 
-  /** The frozen seam: run one invocation to completion. */
-  async run(opInvocation: OpInvocation): Promise<WorkerResult> {
+  /** The frozen seam (v2): run one invocation to completion. */
+  async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
@@ -492,14 +509,36 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
+    // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
+    // session state exists — a bad binding is a pre-dispatch config throw.
+    const boundWorkspace =
+      opInvocation.workspace === undefined
+        ? undefined
+        : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
 
-    // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
+    // --- Governed cancellation (I8): the run's signal is RunOptions.signal
+    // (migration fallback: the ambient governed context — a later slice
+    // removes the fallback). Checked BEFORE the spawn (an already-cancelled
+    // invocation never spawns — and never creates a session record, never
+    // appends a dangling user turn), then forwarded to the ladder — the
+    // driver decides nothing about WHEN.
+    const signal = options?.signal ?? currentJobContext()?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+
+    // --- I6 isolation / §2.4 workspace table: a fresh record — created in
+    // the bound workspace when one is set, else in a fresh temp workspace —
+    // or a real resume, which must record the SAME realpath when a workspace
+    // is bound (else a pre-dispatch config throw).
     const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
     const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
-        ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
-        : await loadSessionOrThrow(store, sessionRef);
+        ? await store.create(
+            boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
+          )
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -553,21 +592,6 @@ export class SubprocessDriver implements Driver {
       outputJsonSchema: this.outputJsonSchema,
       resumeCliSessionId,
     });
-
-    // --- Governed cancellation (I8): checked before the spawn (an already-
-    // cancelled invocation never spawns), then forwarded to the ladder —
-    // the driver decides nothing about WHEN.
-    const governed = currentJobContext();
-    const signal = governed?.signal;
-    if (signal?.aborted === true) {
-      await removeMcpConfig(mcpConfigPath);
-      return {
-        usage: zeroUsage(),
-        sessionId: record.sessionId,
-        denials: [],
-        stopReason: 'aborted',
-      };
-    }
 
     // --- The one spawn. From here on, run() NEVER throws past the seam —
     // including the spawn itself: a SYNCHRONOUS spawnImpl failure (empty
@@ -673,6 +697,15 @@ export class SubprocessDriver implements Driver {
     const onAbort = (): void => startTermination('governed');
     if (signal !== undefined) {
       signal.addEventListener('abort', onAbort, { once: true });
+      // ATTACH-TIME RECHECK (the acp lane's Codex P1 pattern, and
+      // claude-agent's abortRootFollowing): abort events are NOT replayed —
+      // a signal that fired while the record/manifest/MCP-config awaits were
+      // in flight (between the pre-dispatch aborted check and THIS attach)
+      // lands the listener on an ALREADY-aborted signal, never invoked, and
+      // the child would never be terminated: the run would stream past a
+      // fired cancellation. Run the abort path NOW — startTermination is
+      // once-guarded, and the settle below awaits the ladder's markers.
+      if (signal.aborted) onAbort();
     }
 
     let earlyConfigDelete: Promise<void> | undefined;
@@ -929,6 +962,54 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
     );
   }
   return record;
+}
+
+/**
+ * The §2.4 set×set cell: the resumed record must record the SAME workspace
+ * realpath the invocation binds — a divergence means the caller pointed one
+ * session at two different trees, a caller bug that throws PRE-DISPATCH
+ * (before any message lands in the record).
+ */
+async function resumedRecordOrThrow(
+  store: SessionStore,
+  sessionRef: string,
+  boundWorkspace: string | undefined,
+): Promise<SessionRecord> {
+  const record = await loadSessionOrThrow(store, sessionRef);
+  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
+    throw new DispatchError(
+      'config',
+      `subprocess driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
+ * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
+ * record or compared against one). A relative path, or a path that does not
+ * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
+ */
+function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
+  if (!isAbsolute(workspace.path)) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
+    );
+  }
+  try {
+    const real = realpathSync(workspace.path);
+    if (!statSync(real).isDirectory()) {
+      throw new Error('not a directory');
+    }
+    return real;
+  } catch (err) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
+    );
+  }
 }
 
 /**

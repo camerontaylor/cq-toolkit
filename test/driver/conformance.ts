@@ -16,7 +16,11 @@
 //     can inspect records with harness SessionStore and clean everything up.
 //   - `spec.outputSchema` — when present, the driver is CONSTRUCTED with
 //     this structured-output schema; a run then carries the parsed value in
-//     `WorkerResult.structuredOutput`.
+//     `WorkerResult.structuredOutput`. (SEAM-V2 NOTE: `outputSchema` moves
+//     to the `OpInvocation` in a LATER goal of this same effort — until
+//     then the suite's schema legs keep the constructor option, and the
+//     seam-v2 legs below exercise ONLY `RunOptions.signal` +
+//     `OpInvocation.workspace`.)
 //   - `spec.directive` — scripts the MODEL's behavior for this driver's
 //     runs, in OUR vocabulary (never vendor shapes):
 //       { kind: 'reply', text }                    — the model replies with
@@ -48,10 +52,19 @@
 //     `pricing` option), so the derived-cost test asserts a real costUSD
 //     labeled `costBasis: 'modeled'` (the api-equivalent figure; DD-9). The
 //     canonical conformance model is NEVER priced.
-//   - I8: run() honors the governed `currentJobContext()` signal — the
-//     abort test wraps a run in `runLadder`, fires the signal mid-run, and
-//     requires stopReason 'aborted'. The scripted model blocks until the
-//     signal fires.
+//   - I8: run() honors the run's cancellation signal — seam v2's
+//     `RunOptions.signal` first (leg b-iii: pre-aborted never dispatches;
+//     a plain-AbortController mid-run fire settles 'aborted' with NO
+//     governor in the loop), with the migration fallback to the governed
+//     `currentJobContext()` (leg b-ii: runLadder fires the ambient signal
+//     mid-run; a later goal removes the fallback). The scripted model
+//     blocks until the signal fires.
+//   - `OpInvocation.workspace` (seam v2, ADR-0002 §2.4): when set without a
+//     sessionRef, the fresh record is created IN the bound directory's
+//     realpath and the tool write lands there (leg f-iii); with a
+//     sessionRef recording a DIFFERENT realpath, the run throws
+//     PRE-DISPATCH with `errorClassOf → 'config'` (leg f-iv). Session
+//     records stay in the lane's sessionsDir — never in the workspace.
 //   - The driver MUST surface the served model id in `WorkerResult.model`
 //     on a completed run (the observed-model check, leg m, binds all
 //     lanes: the RESPONSE-reported id, present and equal to the requested
@@ -59,7 +72,7 @@
 //
 // Each test builds a FRESH driver via makeDriver (no state shared between
 // tests) in a fresh temp scratch dir, removed in a finally block.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -68,6 +81,7 @@ import type { Driver, OpInvocation, WorkerResult } from '../../src/driver/types.
 import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
+import { errorClassOf } from '../../src/driver/errors.js';
 
 // ---------------------------------------------------------------------------
 // The make-driver contract (public so driver implementations can type against it)
@@ -582,6 +596,95 @@ export function runDriverConformance(
         // this suite is bound by this check.
         expect(result.model).toBeDefined();
         expect(result.model).toBe(invocation().modelSpec.model);
+      });
+    });
+
+    test('b-iii. RunOptions.signal: PRE-aborted never dispatches; fired mid-run settles aborted', async () => {
+      await withScratch(async (scratchDir) => {
+        // Half 1 — ALREADY aborted at entry: the driver must never dispatch.
+        // The scripted model MUST NOT have run; the observable verdict is
+        // the zero-usage 'aborted' with NO sessionId (no record was created
+        // for a run that never dispatched).
+        const preAborted = makeDriver({
+          directive: { kind: 'reply', text: 'must never run' },
+          scratchDir,
+        });
+        const dead = new AbortController();
+        dead.abort();
+        const result = await preAborted.run(invocation(), { signal: dead.signal });
+        expect(result.stopReason).toBe('aborted');
+        expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+        expect(result.denials).toEqual([]);
+        expect(result.sessionId).toBeUndefined();
+        // Half 2 — fired MID-RUN: a plain AbortController, NO runLadder (the
+        // ambient governed context is undefined here, so options.signal is
+        // the only cancellation source — the seam-v2 wiring). The delay
+        // lands after every lane's abort wiring is live; wherever it lands,
+        // the run settles the honest 'aborted' verdict.
+        const midRun = makeDriver({ directive: { kind: 'block-until-abort' }, scratchDir });
+        const live = new AbortController();
+        setTimeout(() => live.abort(), 100);
+        const aborted = await midRun.run(invocation(), { signal: live.signal });
+        expect(aborted.stopReason).toBe('aborted');
+        expect(aborted.error).toBeUndefined(); // the cancellation is not a failure
+      });
+    });
+
+    test('f-iii. workspace binding: the tool write lands in workspace.path; the record (in sessionsDir) records its realpath', async () => {
+      await withScratch(async (scratchDir) => {
+        const workspaceDir = join(scratchDir, 'ws');
+        await mkdir(workspaceDir);
+        const driver = makeDriver({
+          directive: {
+            kind: 'tool-then-reply',
+            tool: 'run',
+            toolIdentity: 'run',
+            input: { command: 'echo conformance-marker > note.txt' },
+            reply: 'wrote note.txt',
+          },
+          scratchDir,
+        });
+        const result = await driver.run(invocation({ workspace: { path: workspaceDir } }));
+        expect(result.stopReason).toBe('complete');
+        // The write really executed INSIDE the bound workspace (cwd and path
+        // confinement bind to realpath(workspace.path) — never prompt text).
+        await expect(readFile(join(workspaceDir, 'note.txt'), 'utf8')).resolves.toContain(
+          'conformance-marker',
+        );
+        // The fresh record was created in the LANE's sessionsDir and records
+        // the bound REALPATH as its workspace (symlinks resolved BEFORE
+        // storing).
+        const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(
+          result.sessionId as string,
+        );
+        expect(record?.workspace).toBe(await realpath(workspaceDir));
+      });
+    });
+
+    test('f-iv. workspace + sessionRef naming a DIFFERENT workspace: the run THROWS pre-dispatch with errorClass config', async () => {
+      await withScratch(async (scratchDir) => {
+        const workspaceDir = join(scratchDir, 'ws');
+        const otherDir = join(scratchDir, 'other');
+        await mkdir(workspaceDir);
+        await mkdir(otherDir);
+        // Establish a session bound to workspaceDir.
+        const first = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
+        const run1 = await first.run(invocation({ workspace: { path: workspaceDir } }));
+        expect(run1.stopReason).toBe('complete');
+        if (run1.sessionId === undefined) throw new Error('first run must create a session');
+        // The SAME session pointed at a DIFFERENT workspace: a caller bug —
+        // a PRE-DISPATCH throw (before any dispatch), classed 'config'.
+        const second = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
+        let thrown: unknown;
+        try {
+          await second.run(
+            invocation({ workspace: { path: otherDir }, sessionRef: run1.sessionId }),
+          );
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeDefined();
+        expect(errorClassOf(thrown)).toBe('config');
       });
     });
   });
