@@ -98,7 +98,12 @@ export type ModelDirective =
   // The model FAILS outright (a plain non-abort error) — the script behind
   // the error-verdict test: the driver must RETURN stopReason 'error', never
   // throw past the seam.
-  | { kind: 'fail' };
+  | { kind: 'fail' }
+  // The model replies with text that is NOT the JSON object a structured-
+  // output schema demands — the script behind the output-invalid legs (seam
+  // v2, ADR-0002 §2.3): the driver must repair once (W3.4) and then settle
+  // error/'output-invalid' with usage kept.
+  | { kind: 'reply-invalid-json' };
 
 /** Per-driver construction hints the suite hands to `makeDriver`. */
 export interface ConformanceSpec {

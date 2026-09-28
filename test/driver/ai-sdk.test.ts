@@ -28,6 +28,8 @@ import {
   DEFAULT_MAX_STEPS,
   DEFAULT_STEP_TIMEOUT_MS,
   classifyRunFailure,
+  providerSignalsFromError,
+  providerSignalsFromHeaders,
   stopReasonOf,
   usageFromSdk,
 } from '../../src/driver/ai-sdk/index.js';
@@ -46,7 +48,7 @@ import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
-import type { OpInvocation } from '../../src/driver/types.js';
+import type { OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
 // ---------------------------------------------------------------------------
 // generateText arg capture — a TRANSPARENT spy over the real 'ai' module:
@@ -88,6 +90,28 @@ function lastGenerateTextArgs(): {
   };
 }
 
+/**
+ * The args of a generateText call counted from the END (0 = most recent,
+ * 1 = the one before it — the main call of a run that also repaired).
+ */
+function generateTextArgsFromEnd(offsetFromEnd: number): {
+  system?: string;
+  messages?: Array<{ role: string; content: string }>;
+  stopWhen?: unknown;
+  maxRetries?: number;
+  tools?: Record<string, unknown>;
+} {
+  const args = captured.generateTextArgs[captured.generateTextArgs.length - 1 - offsetFromEnd];
+  if (args === undefined) throw new Error(`no generateText call at offset ${offsetFromEnd}`);
+  return args as {
+    system?: string;
+    messages?: Array<{ role: string; content: string }>;
+    stopWhen?: unknown;
+    maxRetries?: number;
+    tools?: Record<string, unknown>;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mock-model scripting (the conformance contract, wired onto ai/test mocks)
 // ---------------------------------------------------------------------------
@@ -106,6 +130,33 @@ function textResult(text: string): LanguageModelV4GenerateResult {
   return {
     content: [{ type: 'text', text }],
     finishReason: { unified: 'stop', raw: undefined },
+    usage: mockUsage(),
+    warnings: [],
+  };
+}
+
+/** A text reply carrying provider limit headers on the response metadata (RS-14). */
+function textResultWithHeaders(
+  text: string,
+  headers: Record<string, string>,
+): LanguageModelV4GenerateResult {
+  return {
+    content: [{ type: 'text', text }],
+    finishReason: { unified: 'stop', raw: undefined },
+    usage: mockUsage(),
+    warnings: [],
+    response: { headers },
+  };
+}
+
+/** A RESOLVED step whose finish reason is a provider-level failure (no throw). */
+function finishResult(
+  unified: 'error' | 'content-filter',
+  text = 'the reply never satisfied anything',
+): LanguageModelV4GenerateResult {
+  return {
+    content: [{ type: 'text', text }],
+    finishReason: { unified, raw: undefined },
     usage: mockUsage(),
     warnings: [],
   };
@@ -187,6 +238,13 @@ function modelFor(
       return new MockLanguageModelV4({
         ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: textResult(directive?.text ?? 'ok'),
+      });
+    case 'reply-invalid-json':
+      // A reply that is NOT the JSON object a structured-output schema
+      // demands (the output-invalid legs' script — no legs ship yet).
+      return new MockLanguageModelV4({
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
+        doGenerate: textResult('this reply is prose, not the required JSON object'),
       });
   }
 }
@@ -354,9 +412,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
         providers: { mock: () => modelFor(undefined) },
         sessionsDir,
       });
-      await expect(
+      const err = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'm' } })),
-      ).rejects.toThrow(/unknown provider 'nope'/);
+      );
+      expect(err).toBeInstanceOf(DispatchError);
+      expect((err as DispatchError).message).toContain("unknown provider 'nope'");
+      // Seam v2: pre-dispatch misconfigurations carry their class (leg i-ii).
+      expect(errorClassOf(err)).toBe('config');
       await expect(readdir(sessionsDir)).resolves.toEqual([]);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -370,9 +432,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
     try {
       for (const name of keyNames) delete process.env[name];
       const driver = new AiSdkDriver({ sessionsDir: join(scratchDir, 'sessions') });
-      await expect(
+      const err = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'anthropic', model: 'claude-haiku-4-5' } })),
-      ).rejects.toThrow(/ANTHROPIC_API_KEY/);
+      );
+      expect((err as DispatchError).message).toContain('ANTHROPIC_API_KEY');
+      expect(errorClassOf(err)).toBe('config');
     } finally {
       for (const [name, value] of saved) {
         if (value === undefined) delete process.env[name];
@@ -394,9 +458,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
       // missing-key error is the proof the alias routed (no network call —
       // the key check is pre-dispatch), and it names the handle the caller
       // configured ('ai-sdk'), not the internal factory.
-      await expect(
+      const err = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'ai-sdk', model: 'glm-5.3-flash' } })),
-      ).rejects.toThrow(/provider 'ai-sdk' requires ZAI_API_KEY/);
+      );
+      expect((err as DispatchError).message).toContain("provider 'ai-sdk' requires ZAI_API_KEY");
+      expect(errorClassOf(err)).toBe('config');
     } finally {
       if (saved !== undefined) process.env.ZAI_API_KEY = saved;
       await rm(scratchDir, { recursive: true, force: true });
@@ -584,10 +650,19 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
-  test('a missing structured object is an error verdict carrying the cause, never a model score (#203)', async () => {
+  test('a missing structured object is repaired ONCE, then settles error/output-invalid (#203, W3.4)', async () => {
+    let calls = 0;
     const alwaysToolCalls = new MockLanguageModelV4({
       modelId: 'mock-1',
-      doGenerate: async () => toolCallResult('read', { path: 'absent.txt' }),
+      doGenerate: async (options) => {
+        calls += 1;
+        // The repair is TOOL-FREE: the mock answers it with another tool
+        // call, so the repair's own parse misses too — the give-up path.
+        if (options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { path: 'absent.txt' });
+        }
+        return textResult('still not an object');
+      },
     });
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
@@ -599,18 +674,24 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const result = await driver.run(
         invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
       );
+      // ONE bounded repair attempt after the miss: 8 tool-loop steps + the
+      // single repair step.
+      expect(calls).toBe(DEFAULT_MAX_STEPS + 1);
       expect(result.stopReason).toBe('error');
-      expect(typeof result.error).toBe('string');
-      // #210: the miss is machine-classifiable — the stable token prefixes
-      // the bounded cause text; the parse cause still rides after it.
-      expect(result.error?.startsWith('ai-sdk driver: [structured-output-miss]')).toBe(true);
-      expect(result.error).toContain('structured output was not produced');
+      // ADR-0002 §2.3: the uniform miss verdict — output-invalid, rejection
+      // recorded in the bounded error text (both the miss and the repair).
+      expect(result.errorClass).toBe('output-invalid');
+      expect(
+        result.error?.startsWith(
+          'ai-sdk driver: structured output invalid after the repair attempt',
+        ),
+      ).toBe(true);
+      expect(result.error).toContain('repair');
       // never a model score: no fabricated structuredOutput on an error verdict.
       expect(result.structuredOutput).toBeUndefined();
-      // The usage is the REAL per-step fold from every completed step — an
-      // error verdict reporting zeros after real work would be dishonest
-      // evidence (8 steps × {100 in, 12 out, 15 cacheRead, 5 cacheWrite}).
-      expect(result.usage).toEqual({ input: 800, output: 96, cacheRead: 120, cacheWrite: 40 });
+      // The usage covers BOTH calls: 8 tool-loop steps + 1 repair step,
+      // each folding {100 in, 12 out, 15 cacheRead, 5 cacheWrite}.
+      expect(result.usage).toEqual({ input: 900, output: 108, cacheRead: 135, cacheWrite: 45 });
       expect(result.costUSD).toBeUndefined(); // never fabricated on a non-complete run
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -640,6 +721,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
       );
       expect(result.stopReason).toBe('budget');
       expect(result.error).toBeUndefined();
+      // The carve-out is NOT a failure verdict: no errorClass rides it
+      // (the one-directional producer rule — classes only on 'error').
+      expect(result.errorClass).toBeUndefined();
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -696,12 +780,46 @@ describe('ai-sdk driver failure classes (#210)', () => {
     }
   });
 
-  test('an endpoint header timeout is classified [endpoint-timeout] on the outer catch', async () => {
+  test('an SDK-retryable endpoint failure is classified transient with providerSignals from the error headers', async () => {
+    const transient = new APICallError({
+      message: 'Cannot connect to API: Headers Timeout Error',
+      url: 'https://example.test',
+      requestBodyValues: {},
+      isRetryable: true,
+    });
     const timeoutModel = new MockLanguageModelV4({
       modelId: 'mock-1',
-      // The exact transient class #210 observed (glm-5.3-flash 3/5). After
-      // maxRetries: 1 is exhausted the SDK rethrows a message naming the
-      // attempts; a plain throw here exercises the same classifier branch.
+      // The exact transient class #210 observed (glm-5.3-flash 3/5): the
+      // SDK-retryable class. After maxRetries: 1 is exhausted the SDK
+      // rethrows a RetryError naming the attempts; the classifier digs the
+      // wrapped APICallError out of the chain — a STRUCTURED signal.
+      doGenerate: async () => {
+        throw transient;
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => timeoutModel },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      // ADR-0002 §2.2: errorClass on every error verdict; the error text is
+      // bounded human diagnostics (the [token] prefix contract is retired).
+      expect(result.errorClass).toBe('transient');
+      expect(result.error?.startsWith('ai-sdk driver: run failed —')).toBe(true);
+      expect(result.error).toContain('Cannot connect to API: Headers Timeout Error');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.providerSignals).toBeUndefined(); // no headers on this error
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('an UNSTRUCTURED endpoint failure classifies unknown — never a guessed transient', async () => {
+    const timeoutModel = new MockLanguageModelV4({
+      modelId: 'mock-1',
       doGenerate: async () => {
         throw new Error('Cannot connect to API: Headers Timeout Error');
       },
@@ -714,15 +832,17 @@ describe('ai-sdk driver failure classes (#210)', () => {
       });
       const result = await driver.run(invocation());
       expect(result.stopReason).toBe('error');
-      expect(result.error?.startsWith('ai-sdk driver: [endpoint-timeout] run failed —')).toBe(true);
-      expect(result.error).toContain('Cannot connect to API: Headers Timeout Error');
-      expect(result.structuredOutput).toBeUndefined();
+      // A plain Error carries no status, no provider code, no SDK class:
+      // the structured-only rule leaves it 'unknown' (ADR §2.2 — anything
+      // unresolved is unknown, never guessed into 'transient').
+      expect(result.errorClass).toBe('unknown');
+      expect(result.error?.startsWith('ai-sdk driver: run failed —')).toBe(true);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
   });
 
-  test('a RETRYABLE endpoint timeout is retried once, then classified [endpoint-timeout] (#210)', async () => {
+  test('a RETRYABLE endpoint timeout is retried once, then classified transient (#210)', async () => {
     // The SDK's own retry machinery classifies this APICallError retryable:
     // attempt 1 fails, the SDK backs off, attempt 2 fails, and the exhausted
     // retry throws a RetryError naming the attempt count and the last error.
@@ -749,7 +869,7 @@ describe('ai-sdk driver failure classes (#210)', () => {
       const result = await driver.run(invocation());
       expect(calls).toBe(2); // maxRetries: 1 really retried the transient class
       expect(result.stopReason).toBe('error');
-      expect(result.error?.startsWith('ai-sdk driver: [endpoint-timeout] run failed —')).toBe(true);
+      expect(result.errorClass).toBe('transient');
       expect(result.error).toContain('Failed after 2 attempts');
       expect(result.error).toContain('Headers Timeout Error');
       expect(result.structuredOutput).toBeUndefined();
@@ -821,7 +941,7 @@ describe('ai-sdk driver failure classes (#210)', () => {
     }
   });
 
-  test('a non-transient failure is classified [provider-error] on the outer catch', async () => {
+  test('an unstructured scripted failure classifies unknown (no structured signal — never guessed)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
       const driver = new AiSdkDriver({
@@ -830,73 +950,250 @@ describe('ai-sdk driver failure classes (#210)', () => {
       });
       const result = await driver.run(invocation());
       expect(result.stopReason).toBe('error');
-      expect(result.error?.startsWith('ai-sdk driver: [provider-error] run failed —')).toBe(true);
+      // PRODUCER RULE: the error verdict carries a class — an honest
+      // 'unknown' (a plain scripted Error has no status/code/class).
+      expect(result.errorClass).toBe('unknown');
+      expect(result.error?.startsWith('ai-sdk driver: run failed —')).toBe(true);
       expect(result.error).toContain('scripted model failure');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
   });
 
-  test('classifyRunFailure: structured-output miss wins, then the transient class, else provider-error', () => {
-    // The miss FIRST — even when the message would otherwise look transient.
-    const missByName = Object.assign(new Error('No object generated: could not parse'), {
-      name: 'NoObjectGeneratedError',
-    });
-    expect(classifyRunFailure(missByName)).toBe('structured-output-miss');
-    expect(
-      classifyRunFailure(Object.assign(new Error('no output'), { name: 'NoOutputGeneratedError' })),
-    ).toBe('structured-output-miss');
+  test('a resolved run ending on finishReason error/content-filter carries a class too', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: finishResult('error'),
+            }),
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('unknown'); // no structured cause — never guessed
+      expect(result.error).toContain("finishReason 'error'");
 
-    // The SDK-retryable transient class — message and name variants.
-    expect(classifyRunFailure(new Error('Cannot connect to API: Headers Timeout Error'))).toBe(
-      'endpoint-timeout',
-    );
-    expect(classifyRunFailure(new Error('connect ETIMEDOUT 1.2.3.4:443'))).toBe('endpoint-timeout');
-    expect(classifyRunFailure(new Error('read ECONNRESET'))).toBe('endpoint-timeout');
-    expect(classifyRunFailure(new Error('socket hang up'))).toBe('endpoint-timeout');
-    expect(classifyRunFailure(new Error('fetch failed'))).toBe('endpoint-timeout');
-    // The other SDK-retryable transient signals (rate limit / 5xx) also
-    // classify endpoint-timeout after retry exhaustion — the exhausted-retry
-    // wrapper preserves the last error's wording.
+      // A content filter is a provider-reported permanent refusal.
+      const filtered = new AiSdkDriver({
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: finishResult('content-filter'),
+            }),
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const filteredResult = await filtered.run(invocation());
+      expect(filteredResult.stopReason).toBe('error');
+      expect(filteredResult.errorClass).toBe('provider-error');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  /** An APICallError fixture with only the structured fields a case needs. */
+  function apiError(opts: {
+    statusCode?: number;
+    url?: string;
+    headers?: Record<string, string>;
+    data?: unknown;
+    responseBody?: string;
+    isRetryable?: boolean;
+    message?: string;
+  }): APICallError {
+    return new APICallError({
+      message: opts.message ?? 'provider error',
+      url: opts.url ?? 'https://provider.test/v1/messages',
+      requestBodyValues: {},
+      ...(opts.statusCode !== undefined ? { statusCode: opts.statusCode } : {}),
+      ...(opts.headers !== undefined ? { responseHeaders: opts.headers } : {}),
+      ...(opts.data !== undefined ? { data: opts.data } : {}),
+      ...(opts.responseBody !== undefined ? { responseBody: opts.responseBody } : {}),
+      isRetryable: opts.isRetryable ?? false,
+    });
+  }
+
+  test('classifyRunFailure: the ADR §2.2 limit cuts, structured signals only', () => {
+    // ---- cut 3: 401/403 → auth.
+    expect(classifyRunFailure(apiError({ statusCode: 401 }))).toBe('auth');
+    expect(classifyRunFailure(apiError({ statusCode: 403 }))).toBe('auth');
+
+    // ---- cut 2: funded-allowance codes are quota WHATEVER the status —
+    // even on a 429 that also carries a retry-after (code outranks).
     expect(
-      classifyRunFailure(new Error('Failed after 2 attempts. Last error: 429 Too Many Requests')),
-    ).toBe('endpoint-timeout');
+      classifyRunFailure(
+        apiError({
+          statusCode: 429,
+          data: { error: { code: 'insufficient_quota' } },
+          headers: { 'retry-after': '10' },
+        }),
+      ),
+    ).toBe('quota');
     expect(
-      classifyRunFailure(new Error('Failed after 2 attempts. Last error: 503 Service Unavailable')),
-    ).toBe('endpoint-timeout');
-    // The SDK step-timeout DOMException carries name TimeoutError; a bare
-    // `timeout` substring in a provider message is NOT a transient signal.
+      classifyRunFailure(
+        apiError({ statusCode: 429, data: { error: { code: 'credit_balance_exhausted' } } }),
+      ),
+    ).toBe('quota');
+    expect(
+      classifyRunFailure(
+        apiError({ statusCode: 429, data: { code: 'enforced_spend_limit_reached' } }),
+      ),
+    ).toBe('quota');
+    expect(
+      classifyRunFailure(
+        apiError({ statusCode: 429, data: { error: { code: 'deepseek_spend_limit_exceeded' } } }),
+      ),
+    ).toBe('quota');
+    // The code also wins when it only rides the JSON response body.
+    expect(
+      classifyRunFailure(
+        apiError({ statusCode: 429, responseBody: '{"error":{"code":"insufficient_quota"}}' }),
+      ),
+    ).toBe('quota');
+    // HTTP 402 → quota (DeepSeek / OpenCode Zen funded balance).
+    expect(classifyRunFailure(apiError({ statusCode: 402 }))).toBe('quota');
+    // The Z.AI coding wire's 429 is the plan-funded quota wall (URL signal).
+    expect(
+      classifyRunFailure(
+        apiError({ statusCode: 429, url: 'https://api.z.ai/api/coding/paas/v4/chat/completions' }),
+      ),
+    ).toBe('quota');
+
+    // ---- cut 4: the 429 discrimination — quota vs rate-limit.
+    // Another 429 WITH retry-after → rate-limit.
+    expect(
+      classifyRunFailure(apiError({ statusCode: 429, headers: { 'Retry-After': '3741' } })),
+    ).toBe('rate-limit');
+    // A 429 whose retry-after exists ELSEWHERE in the wrapped chain.
+    const inner429 = apiError({ statusCode: 429, headers: { 'retry-after': '5' } });
+    const retryWrapper = Object.assign(new Error('Failed after 2 attempts. Last error: 429'), {
+      cause: inner429,
+    });
+    expect(classifyRunFailure(retryWrapper)).toBe('rate-limit');
+    // A bare 429 with NO retry-after anywhere and no funded code: not a
+    // throttle claim — 'provider-error'.
+    expect(classifyRunFailure(apiError({ statusCode: 429 }))).toBe('provider-error');
+
+    // ---- cut 5: 408/5xx → transient.
+    expect(classifyRunFailure(apiError({ statusCode: 408 }))).toBe('transient');
+    expect(classifyRunFailure(apiError({ statusCode: 500 }))).toBe('transient');
+    expect(classifyRunFailure(apiError({ statusCode: 503 }))).toBe('transient');
+    expect(classifyRunFailure(apiError({ statusCode: 529 }))).toBe('transient');
+
+    // ---- cut 6: SDK class signals without a status.
+    // The SDK's retryable class (network / endpoint header timeout).
+    expect(classifyRunFailure(apiError({ isRetryable: true }))).toBe('transient');
+    // The step-timeout DOMException.
     expect(
       classifyRunFailure(
         Object.assign(new Error('Step timeout of 120000ms exceeded'), { name: 'TimeoutError' }),
       ),
-    ).toBe('endpoint-timeout');
-    expect(classifyRunFailure(new Error('Step timeout of 120000ms exceeded'))).toBe(
-      'provider-error',
-    );
-    expect(
-      classifyRunFailure(Object.assign(new Error('timed out'), { name: 'TimeoutError' })),
-    ).toBe('endpoint-timeout');
+    ).toBe('transient');
 
-    // STRUCTURED SIGNAL BEATS UNANCHORED TEXT: a non-retryable APICallError
-    // is permanent even when its message embeds a transient phrase.
-    expect(
-      classifyRunFailure(
-        new APICallError({
-          message: 'invalid request: fetch failed',
-          url: 'https://example.test',
-          requestBodyValues: {},
-          isRetryable: false,
-        }),
-      ),
-    ).toBe('provider-error');
+    // ---- permanent provider failures.
+    expect(classifyRunFailure(apiError({ statusCode: 400 }))).toBe('provider-error');
+    expect(classifyRunFailure(apiError({ statusCode: 404 }))).toBe('provider-error');
+    expect(classifyRunFailure(apiError({}))).toBe('provider-error');
 
-    // Anything else — including a bare abort with no timeout wording (the
-    // governed abort is handled before this classifier).
-    expect(classifyRunFailure(new Error('scripted model failure'))).toBe('provider-error');
-    expect(classifyRunFailure(new Error('Request was aborted'))).toBe('provider-error');
-    expect(classifyRunFailure(new Error('op prompt is over budget'))).toBe('provider-error');
-    expect(classifyRunFailure('a plain string failure')).toBe('provider-error');
+    // ---- anything unresolved → 'unknown', NEVER a guessed 'transient'.
+    // (The old unanchored \b(408|409|429|5\d\d)\b message regex is deleted:
+    // a status number embedded in prose is not a status code.)
+    expect(classifyRunFailure(new Error('request failed with 429 somewhere'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('connect ETIMEDOUT 1.2.3.4:443'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('read ECONNRESET'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('socket hang up'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('fetch failed'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('Step timeout of 120000ms exceeded'))).toBe('unknown');
+    expect(classifyRunFailure(new Error('op prompt is over budget'))).toBe('unknown');
+    expect(classifyRunFailure('a plain string failure')).toBe('unknown');
+    // A bare abort never reaches this classifier (the catch short-circuits
+    // to 'aborted'), so it stays unresolved here — 'unknown'.
+    expect(classifyRunFailure(new Error('Request was aborted'))).toBe('unknown');
+  });
+
+  test('providerSignalsFromHeaders maps the recognized limit-header families, only what is present', () => {
+    // The claude unified plan windows: percent-REMAINING → used fraction.
+    const unified = providerSignalsFromHeaders({
+      'anthropic-ratelimit-unified-5h-percent-remaining': '12.5',
+      'anthropic-ratelimit-unified-5h-reset': '2026-09-28T12:00:00Z',
+      'anthropic-ratelimit-unified-7d-percent-remaining': '80',
+    });
+    expect(unified?.windows).toHaveLength(2);
+    const fiveHour = unified?.windows?.find((w) => w.id === '5h');
+    expect(fiveHour?.utilization).toBeCloseTo(0.875, 12);
+    expect(fiveHour?.resetAt).toBe('2026-09-28T12:00:00.000Z');
+    const sevenDay = unified?.windows?.find((w) => w.id === '7d');
+    expect(sevenDay?.utilization).toBeCloseTo(0.2, 12);
+    expect(sevenDay?.resetAt).toBeUndefined();
+    // The per-minute API family: remaining/limit counts → utilization.
+    const perMinute = providerSignalsFromHeaders({
+      'x-ratelimit-limit-requests': '100',
+      'x-ratelimit-remaining-requests': '45',
+      'x-ratelimit-reset-requests': '6m0s',
+      'x-ratelimit-limit-tokens': '10000',
+      'x-ratelimit-remaining-tokens': '9000',
+      'x-ratelimit-reset-tokens': '1s',
+    });
+    const perMinuteWindows = perMinute?.windows ?? [];
+    expect(perMinuteWindows).toHaveLength(2);
+    const requestsWindow = perMinuteWindows.find((w) => w.id === 'requests');
+    expect(requestsWindow?.utilization).toBeCloseTo(0.55, 12);
+    expect(requestsWindow?.remaining).toEqual({ requests: 45 });
+    expect(requestsWindow?.resetAt).toBeDefined(); // derived from the 6m0s duration
+    expect(typeof requestsWindow?.resetAt).toBe('string');
+    const tokensWindow = perMinuteWindows.find((w) => w.id === 'tokens');
+    expect(tokensWindow?.utilization).toBeCloseTo(0.1, 12);
+    expect(tokensWindow?.remaining).toEqual({ tokens: 9000 });
+    // retry-after (delay-seconds form) joins the windows.
+    const withRetry = providerSignalsFromHeaders({
+      'retry-after': '3741',
+      'x-ratelimit-remaining-tokens': '1',
+    });
+    expect(withRetry?.retryAfterMs).toBe(3_741_000);
+    // Case-insensitive header names.
+    expect(providerSignalsFromHeaders({ 'RETRY-AFTER': '2' })?.retryAfterMs).toBe(2000);
+    // HTTP-date form parses against the current clock.
+    const httpDate = providerSignalsFromHeaders({
+      'retry-after': new Date(Date.now() + 60_000).toUTCString(),
+    });
+    expect(httpDate?.retryAfterMs).toBeGreaterThan(0);
+    expect(httpDate?.retryAfterMs).toBeLessThanOrEqual(60_000);
+    // Nothing recognized → absent; never invented.
+    expect(providerSignalsFromHeaders({ 'x-request-id': 'abc' })).toBeUndefined();
+    expect(providerSignalsFromHeaders(undefined)).toBeUndefined();
+    // An ambiguous bare-digit reset value is NOT guessed into a resetAt.
+    const ambiguous = providerSignalsFromHeaders({
+      'anthropic-ratelimit-unified-5h-reset': '3741',
+    });
+    expect(ambiguous?.windows?.[0]?.resetAt).toBeUndefined();
+  });
+
+  test('providerSignalsFromError digs the APICallError headers out of a wrapped chain', () => {
+    const inner = new APICallError({
+      message: 'Too Many Requests',
+      url: 'https://provider.test/v1/messages',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: {
+        'retry-after': '30',
+        'anthropic-ratelimit-unified-5h-percent-remaining': '0',
+        'anthropic-ratelimit-unified-5h-reset': '2026-09-28T12:00:00Z',
+      },
+    });
+    const wrapped = Object.assign(new Error('Failed after 2 attempts. Last error: 429'), {
+      cause: inner,
+    });
+    expect(providerSignalsFromError(wrapped)).toEqual({
+      retryAfterMs: 30_000,
+      windows: [{ id: '5h', utilization: 1, resetAt: '2026-09-28T12:00:00.000Z' }],
+    });
+    expect(providerSignalsFromError(new Error('no structure'))).toBeUndefined();
   });
 });
 
@@ -1323,6 +1620,376 @@ describe('ai-sdk driver seam v2: RunOptions.signal + workspace binding', () => {
         expect(errorClassOf(err), `workspace.path '${badPath}'`).toBe('config');
       }
       expect(modelCalls).toBe(0); // none of them ever dispatched
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 §2.3 (S3) — invocation outputSchema, the uniform output-invalid
+// verdict, the W3.4 bounded repair, and providerSignals on any verdict
+// ---------------------------------------------------------------------------
+
+/** The invocation schema the §2.3 tests carry: `{answer: string}`, closed. */
+const ANSWER_OUTPUT_SCHEMA: OutputSchema = {
+  name: 'test.answer/v1',
+  schema: {
+    type: 'object',
+    properties: { answer: { type: 'string' } },
+    required: ['answer'],
+    additionalProperties: false,
+  },
+};
+
+/** A quota 429 with the claude unified limit headers (RS-14 §1.2 shape). */
+function quota429Error(): APICallError {
+  return new APICallError({
+    message: 'rate limit exceeded: insufficient quota',
+    url: 'https://provider.test/v1/messages',
+    requestBodyValues: {},
+    statusCode: 429,
+    responseHeaders: {
+      'anthropic-ratelimit-unified-5h-percent-remaining': '0',
+      'anthropic-ratelimit-unified-5h-reset': '2026-09-28T12:00:00Z',
+    },
+    data: { error: { code: 'insufficient_quota' } },
+    isRetryable: false,
+  });
+}
+
+describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + providerSignals', () => {
+  test('round-trip: a schema-valid reply completes with the validated plain JSON', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return textResult('{"answer":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // PRODUCER RULE: no class (and no error) on a non-error verdict.
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      // A valid object means NO repair: exactly one model call.
+      expect(modelCalls).toBe(1);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('W3.4 repair: ONE tool-free repair call with the schema restated, then complete; usage covers BOTH calls', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return modelCalls === 1
+          ? textResult('I wrote prose instead of the JSON object, sorry')
+          : textResult('{"answer":"repaired"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA, toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(modelCalls).toBe(2); // the main call + exactly ONE repair
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ answer: 'repaired' });
+      expect(result.errorClass).toBeUndefined();
+      // The repair is a REAL extra model call: both calls' usage lands in
+      // the verdict (2 × {100 in, 12 out, 15 cacheRead, 5 cacheWrite}).
+      expect(result.usage).toEqual({ input: 200, output: 24, cacheRead: 30, cacheWrite: 10 });
+      // The REPAIR call is the most recent generateText: tool-free, one
+      // attempt, one step, the schema restated, over the transcript.
+      const repairArgs = generateTextArgsFromEnd(0);
+      expect(repairArgs.tools).toBeUndefined();
+      expect(repairArgs.maxRetries).toBe(0);
+      expect(repairArgs.stopWhen).toHaveLength(1); // stepCountIs(1): no budget set
+      const repairTurns = repairArgs.messages ?? [];
+      const repairTurn = repairTurns[repairTurns.length - 1];
+      expect(repairTurn?.role).toBe('user');
+      expect(repairTurn?.content).toContain('JSON Schema (draft 2020-12)');
+      expect(repairTurn?.content).toContain('"answer"'); // the schema restated
+      // The model sees what it produced: the transcript + its own reply ride.
+      expect(
+        repairTurns.some(
+          (m) => m.role === 'assistant' && m.content.includes('prose instead of the JSON'),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('W3.4 repair exhausted: still invalid → error/output-invalid, usage and derived cost over BOTH calls', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        // PARSEABLE but schema-invalid — both the main call and the repair.
+        return textResult('{"wrong":true}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        pricing: () => ({ input: 3, output: 15 }),
+      });
+      const result = await driver.run(invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA }));
+      expect(modelCalls).toBe(2); // one repair attempt, exactly
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.structuredOutput).toBeUndefined();
+      // The verdict keeps the spend evidence of BOTH calls, and the derived
+      // cost is computed over the folded usage.
+      expect(result.usage).toEqual({ input: 200, output: 24, cacheRead: 30, cacheWrite: 10 });
+      expect(typeof result.costUSD).toBe('number');
+      expect(result.costBasis).toBe('modeled');
+      // The rejection is recorded in the bounded text: main miss + repair miss.
+      expect(result.error).toContain("does not validate against schema 'test.answer/v1'");
+      expect(result.error).toContain('repair:');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('no schema requested: structuredOutput is ABSENT even when the reply is JSON', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return textResult('{"answer":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.errorClass).toBeUndefined();
+      expect(modelCalls).toBe(1); // no schema → no repair machinery at all
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('constructor schema still works and UNIFIES: its miss is the same output-invalid verdict', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        return textResult('{"nope":1}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ answer: z.string() }).strict(), // the migration-only option
+      });
+      const result = await driver.run(invocation()); // NO invocation schema
+      expect(modelCalls).toBe(2); // the same ONE repair as the invocation path
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.usage).toEqual({ input: 200, output: 24, cacheRead: 30, cacheWrite: 10 });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('when both schema sources are present the INVOCATION wins', async () => {
+    let modelCalls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        modelCalls += 1;
+        // Valid for the INVOCATION schema; the constructor schema would
+        // reject it — so a completion proves which judge ran.
+        return textResult('{"other":7}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(
+        invocation({
+          outputSchema: {
+            name: 'test.other/v1',
+            schema: {
+              type: 'object',
+              properties: { other: { type: 'number' } },
+              required: ['other'],
+              additionalProperties: false,
+            },
+          },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ other: 7 });
+      expect(modelCalls).toBe(1); // no repair: the invocation schema accepted it
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('providerSignals ride ANY verdict: response-metadata headers on success, error headers on a quota 429', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    try {
+      // SUCCESS: the response metadata headers the SDK exposes.
+      const okMock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () =>
+          textResultWithHeaders('ok', {
+            'retry-after': '30',
+            'x-ratelimit-limit-requests': '100',
+            'x-ratelimit-remaining-requests': '50',
+          }),
+      });
+      const okDriver = new AiSdkDriver({
+        providers: { mock: () => okMock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const okResult = await okDriver.run(invocation());
+      expect(okResult.stopReason).toBe('complete');
+      expect(okResult.providerSignals).toEqual({
+        retryAfterMs: 30_000,
+        windows: [{ id: 'requests', utilization: 0.5, remaining: { requests: 50 } }],
+      });
+      expect(okResult.errorClass).toBeUndefined();
+
+      // FAILURE: a quota 429 whose headers carry the claude unified window —
+      // quota class WITH the window's resetAt (the §2.2 rule-5 producer rule).
+      const quotaMock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          throw quota429Error();
+        },
+      });
+      const quotaDriver = new AiSdkDriver({
+        providers: { mock: () => quotaMock },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const quotaResult = await quotaDriver.run(invocation());
+      expect(quotaResult.stopReason).toBe('error');
+      expect(quotaResult.errorClass).toBe('quota');
+      expect(quotaResult.providerSignals).toEqual({
+        windows: [{ id: '5h', utilization: 1, resetAt: '2026-09-28T12:00:00.000Z' }],
+      });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('producer rule: errorClass rides every error verdict and NO non-error verdict; the mirror still parses them', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
+    let sessionsDirCounter = 0;
+    const freshDir = (): string => join(scratchDir, `run-${(sessionsDirCounter += 1)}`);
+    try {
+      const runs: Array<{ label: string; result: WorkerResult }> = [];
+
+      // 1. provider failure → error (class from the structured cuts).
+      const failDriver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'fail' }) },
+        sessionsDir: freshDir(),
+      });
+      runs.push({ label: 'fail', result: await failDriver.run(invocation()) });
+
+      // 2. output-invalid → error/'output-invalid'.
+      const invalidMock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => textResult('{"wrong":true}'),
+      });
+      const invalidDriver = new AiSdkDriver({
+        providers: { mock: () => invalidMock },
+        sessionsDir: freshDir(),
+      });
+      runs.push({
+        label: 'output-invalid',
+        result: await invalidDriver.run(invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA })),
+      });
+
+      // 3. a quota 429 → error/'quota' with providerSignals.
+      const quotaDriver = new AiSdkDriver({
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: async () => {
+                throw quota429Error();
+              },
+            }),
+        },
+        sessionsDir: freshDir(),
+      });
+      runs.push({ label: 'quota', result: await quotaDriver.run(invocation()) });
+
+      // 4. complete → NO class.
+      const okDriver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'plain prose' }) },
+        sessionsDir: freshDir(),
+      });
+      runs.push({ label: 'complete', result: await okDriver.run(invocation()) });
+
+      // 5. pre-aborted → 'aborted', NO class (a cancellation is not a failure).
+      const dead = new AbortController();
+      dead.abort();
+      const abortedDriver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'never runs' }) },
+        sessionsDir: freshDir(),
+      });
+      runs.push({
+        label: 'aborted',
+        result: await abortedDriver.run(invocation(), { signal: dead.signal }),
+      });
+
+      for (const { label, result } of runs) {
+        if (result.stopReason === 'error') {
+          expect(result.errorClass, `${label}: error verdicts carry a class`).toBeDefined();
+        } else {
+          expect(result.errorClass, `${label}: non-error verdicts carry none`).toBeUndefined();
+        }
+        // The strict v2 mirror parses every verdict (errorClass is
+        // one-directional: present ⇒ error).
+        const reparsed = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(reparsed.stopReason).toBe(result.stopReason);
+      }
+      expect(runs.map((r) => r.result.stopReason)).toEqual([
+        'error',
+        'error',
+        'error',
+        'complete',
+        'aborted',
+      ]);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

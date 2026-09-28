@@ -101,6 +101,14 @@ function directiveEnv(directive: ModelDirective | undefined): Record<string, str
       };
     case 'reply':
       return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
+    // No output-invalid legs ship yet (seam v2 goal F): until then the fake
+    // harness answers the directive with a prose reply that is NOT the JSON
+    // object a structured-output schema demands.
+    case 'reply-invalid-json':
+      return {
+        FAKE_ACP_MODE: 'ok',
+        FAKE_ACP_REPLY: 'this reply is prose, not the required JSON object',
+      };
     case undefined:
     default:
       return { FAKE_ACP_MODE: 'ok' };
