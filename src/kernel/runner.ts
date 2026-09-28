@@ -921,6 +921,14 @@ export async function runPlan(
             jobId: job.id,
             provenance: 'call',
           });
+          // A release RE-RUNS the job (that is its whole contract — the
+          // dispatch behind the crash died in UNKNOWN status, so any older
+          // verified ok is stale evidence from before the unknown effects).
+          // Drop the replay record so the wave loop's replay-skip cannot
+          // mark the released job done without dispatching it (Codex P1 on
+          // the fix round: run 1 ok → run 2 crashes after opening its
+          // reservation → run 3 resumes WITH the release).
+          replay.delete(job.id);
           continue;
         }
         await emit({

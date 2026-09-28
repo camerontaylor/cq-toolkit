@@ -2134,6 +2134,100 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor4.usdSpent).toBeCloseTo(2.5); // the crash charge + run 3's spend, still held
   });
 
+  test('A12b: a released job RE-RUNS even when an older ok sits in the replay map (no replay-skip bypass)', async () => {
+    // Codex P1 on the fix round: run 0 completes j1 ok (verified, journalled);
+    // run 1 re-runs it and CRASHES after opening its reservation (its effects
+    // are unknown); run 2 resumes WITH --release-quarantine. The release
+    // contract says the job re-runs — an older matching ok must not let the
+    // replay-skip mark it done without dispatching.
+    const log = openRunLog(w3dir);
+    const plan: Plan = {
+      id: 'w23-release-replay',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    // Run 0: j1 completes ok (priced).
+    const okRunId = 'w23-release-replay--r0--aa';
+    await log.append(okRunId, {
+      type: 'run-started',
+      runId: okRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'w23-release-replay',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(okRunId, {
+      type: 'job-started',
+      runId: okRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(okRunId, {
+      type: 'job-finished',
+      runId: okRunId,
+      at: '2026-01-01T00:00:02.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'ok', value: 'r0' },
+      costUSD: 0.1,
+    });
+    // Run 1: re-dispatch crashes after opening its reservation (no settle,
+    // no finish) — the A12b window over a job with an OLDER verified ok.
+    const crashRunId = 'w23-release-replay--r1--bb';
+    await log.append(crashRunId, {
+      type: 'run-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:00.000Z',
+      planId: 'w23-release-replay',
+      journalVersion: 2,
+      seq: 2,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(crashRunId, {
+      type: 'job-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 2,
+    });
+    await log.append(crashRunId, {
+      type: 'reservation-opened',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:01.500Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 2,
+      reservationId: `${crashRunId}:j1:2:1`,
+      usd: 1,
+      class: 'advisory',
+    });
+
+    // Run 2: resume WITH the release — the job must RE-DISPATCH (a fresh
+    // reservation, a real invocation), never replay-skip on run 0's ok.
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', spendOnce(calls, 0.25))),
+      { governor, allowAdvisory: true, releaseQuarantine: ['j1'] },
+    );
+    expect(calls).toEqual(['j1']); // the re-run HAPPENED — the bypass is closed
+    expect(report.jobs[0]?.result.status).toBe('ok');
+    const events = await openRunLog(w3dir).read(report.runId);
+    expect(events.some((event) => event.type === 'quarantine-released')).toBe(true);
+    // The re-dispatch opened its own write-ahead reservation.
+    expect(events.some((event) => event.type === 'reservation-opened')).toBe(true);
+    // Ledger: run 0's priced 0.1 + the never-refunded 1.0 crash charge +
+    // the re-run's 0.25.
+    expect(governor.usdSpent).toBeCloseTo(1.35);
+  });
+
   test('A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch', async () => {
     const log = openRunLog(w3dir);
     const plan: Plan = {
