@@ -365,7 +365,11 @@ export function recheckedRegistryView(opts: {
       return {
         name: entry.name,
         inputSchema: entry.inputSchema,
-        // Same bottom-instantiation variance adapter as centralRegistryView.
+        // SAFETY: same bottom-instantiation variance adapter as
+        // centralRegistryView — `gated` wraps the SAME op `entry.importer`
+        // resolves (only its effects are gated), so the awaited return type
+        // is the entry's own; TypeScript cannot see that identity through
+        // the effect-wrapper's erased type parameters.
         importer: async () => gated as unknown as Awaited<ReturnType<typeof entry.importer>>,
       };
     },

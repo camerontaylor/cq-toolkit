@@ -1832,7 +1832,8 @@ describe('W2.3 reserve-then-settle', () => {
     // executeOp never rejects: a throwing op becomes a `failed` OpResult, so
     // the ladder reports 'completed' and the settle basis alone would read
     // 'observed' and charge zero for a dispatch that had already started
-    // billable work. The dispatch signals the body throw out of band.
+    // billable work. The dispatch signals the post-invocation failure out
+    // of band.
     const throwAfterDispatch = async (): Promise<OpResult<unknown>> => {
       // Billable work started, then the op died before reporting anything.
       throw new Error('op died mid-dispatch');
@@ -1852,6 +1853,31 @@ describe('W2.3 reserve-then-settle', () => {
     );
     // charged = the whole reservation (fair share C/concurrency = 1/1), not
     // the zero the definitive-verdict reading would have produced.
+    expect(settled).toMatchObject({ charged: 1, basis: 'full' });
+    expect(governor.usdSpent).toBeCloseTo(1);
+  });
+
+  test('an op that RESOLVES to a contract violation also settles basis full', async () => {
+    // The successful-but-invalid sibling of the rejecting case: the body ran
+    // (and may have spent), then resolved to something executeOp refuses —
+    // here a value that is not an OpResult at all. Same unknown-spend
+    // exposure, same out-of-band signal; a verdict-only reading would settle
+    // 'observed' zero.
+    const resolvesToGarbage = (): Promise<OpResult<unknown>> =>
+      Promise.resolve({ not: 'an OpResult' } as unknown as OpResult<unknown>);
+    const governor = createGovernor({ maxUsd: 1 });
+    const report = await runPlan(
+      independentPlan('w23-contract', 1),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', resolvesToGarbage)),
+      { governor, allowAdvisory: true },
+    );
+    expect(report.jobs[0]?.result.status).toBe('failed');
+    const events = await openRunLog(w3dir).read(report.runId);
+    const settled = events.find(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
     expect(settled).toMatchObject({ charged: 1, basis: 'full' });
     expect(governor.usdSpent).toBeCloseTo(1);
   });
@@ -1878,20 +1904,60 @@ describe('W2.3 reserve-then-settle', () => {
   });
 
   test('capacity waits FIFO behind outstanding reservations, then admits (settled + outstanding + proposed ≤ cap)', async () => {
-    const calls: string[] = [];
-    // cap 1.0, concurrency 4 → share 0.25 each; three jobs reserve 0.75,
-    // the fourth parks until a settle frees capacity.
-    const report = await runPlan(
-      independentPlan('w23-fifo', 4),
+    // The park is CONSTRUCTED, not hoped for. cap 1.0, concurrency 4 → the
+    // fair-share proposal is 0.25, so j1–j4 fill C exactly (4 × 0.25 = 1.0)
+    // and j5's 0.25 proposal has nowhere to come from until a settle frees
+    // room. Every op is GATED and released by this test in a known order, so
+    // the wait is deterministic rather than a race:
+    //   - j1–j4 hold their reservations (O = 1.0) until released;
+    //   - releasing j1 frees its p-limit slot, so j5's dispatch starts and
+    //     reaches `reserve` while j3 and j4 still hold theirs: free capacity
+    //     is 1.0 − 0.1 − 0.75 = 0.15 < the 0.25 proposal → j5 WAITS;
+    //   - only j2's settle (free 0.30 ≥ 0.25) wakes the head.
+    // The middle assertion is the proof: a runner that granted j5 straight
+    // after j1's settle would leave O at 0.90, not 0.75.
+    const releases = new Map<string, () => void>();
+    const entered: string[] = [];
+    const gated = async (raw: unknown): Promise<OpResult<unknown>> => {
+      const jobId = (raw as { jobId: string }).jobId;
+      entered.push(jobId);
+      await new Promise<void>((resolve) => {
+        releases.set(jobId, resolve);
+      });
+      currentJobContext()?.reportResult({
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+        costUSD: 0.1,
+      });
+      return { status: 'ok', value: jobId };
+    };
+    const governor = createGovernor({ maxUsd: 1 });
+    const runPromise = runPlan(
+      independentPlan('w23-fifo', 5),
       { concurrency: 4, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', spendOnce(calls, 0.1))),
-      { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
+      viewWith(entry('fake', gated)),
+      { governor, allowAdvisory: true },
     );
-    expect(calls).toEqual(['j1', 'j2', 'j3', 'j4']); // every job eventually ran
-    expect(report.counts.done).toBe(4);
-    expect(report.costUSD).toBeCloseTo(0.4); // the seeded-less ledger: Σ charged
-    const governor = (report as unknown as { __gov?: never })['__gov'];
-    void governor;
+    await waitFor(() => entered.length === 4, 'j1–j4 to hold their reservations');
+    expect(governor.outstandingUsd).toBeCloseTo(1);
+    releases.get('j1')?.();
+    // j1's settle is journalled inside its own dispatch, BEFORE p-limit
+    // releases the slot — so once the ledger shows the charge, j5's reserve
+    // is either parked or has already been granted.
+    await waitFor(() => governor.usdSpent >= 0.1, 'j1 to settle');
+    expect(governor.outstandingUsd).toBeCloseTo(0.75); // j5 NOT granted: it parked
+    expect(entered).not.toContain('j5');
+    // The second settle frees the room j5's proposal needs.
+    releases.get('j2')?.();
+    await waitFor(() => entered.includes('j5'), 'j5 to be granted its reservation');
+    releases.get('j5')?.();
+    releases.get('j3')?.();
+    releases.get('j4')?.();
+    const report = await runPromise;
+    expect(entered).toEqual(expect.arrayContaining(['j1', 'j2', 'j3', 'j4', 'j5']));
+    expect(report.counts.done).toBe(5);
+    expect(report.costUSD).toBeCloseTo(0.5); // the seeded-less ledger: Σ charged
+    // The cap held through the wait: settled + outstanding never exceeded C.
+    expect(governor.outstandingUsd).toBeCloseTo(0);
   });
 
   test('A12c: an unattended governed run refuses every ADVISORY dispatch without the escape', async () => {

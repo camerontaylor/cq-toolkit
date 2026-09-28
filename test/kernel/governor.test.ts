@@ -2444,11 +2444,11 @@ describe('W2.3 reserve-then-settle', () => {
   test('a proposal within capacity grants in full; zero capacity with outstanding parks FIFO', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.25, 'advisory');
-    if (first.outcome !== 'reserved') return;
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
     // Capacity 0.75 covers the proposal: full grant, no shrink, no park.
     const second = await governor.reserve('j2', 1, 0.75, 'advisory');
     expect(second.outcome).toBe('reserved');
-    if (second.outcome !== 'reserved') return;
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
     expect(second.reservation.usd).toBe(0.75);
     expect(second.reservation.proposedUsd).toBeUndefined();
     expect(governor.outstandingUsd).toBe(1.0);
@@ -2481,7 +2481,7 @@ describe('W2.3 reserve-then-settle', () => {
   test('a second grant for a job that already holds an open reservation throws (r1 L2)', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.25, 'advisory');
-    if (first.outcome !== 'reserved') return;
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
     // Unreachable from the runner (one dispatch per job per run; settle or
     // abandon deletes the openByJob entry before the job can be admitted
     // again) — if it ever fires, the state machine is corrupt and the throw
@@ -2496,7 +2496,7 @@ describe('W2.3 reserve-then-settle', () => {
   test('settle carries the PRICE-PRESENCE fact: an observed costUSD — zero included — prices the dispatch (r1 H2)', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.25, 'advisory');
-    if (first.outcome !== 'reserved') return;
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
     // No cost evidence ever observed on the channel: priced false — the
     // journal will fold this settle as unpriced if it settles zero with
     // usage.
@@ -2507,7 +2507,7 @@ describe('W2.3 reserve-then-settle', () => {
     // observeCost, the settle journals `priced: true`, and the resume fold's
     // DD-9 check (`charged === 0 && usage > 0 && !priced`) leaves it alone.
     const second = await governor.reserve('j2', 1, 0.25, 'advisory');
-    if (second.outcome !== 'reserved') return;
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
     governor.observeCost('j2', 0);
     settled = governor.settle(second.reservation, { basis: 'observed' });
     expect(settled.charged).toBe(0);

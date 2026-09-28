@@ -309,7 +309,13 @@ from `reserve` to `settle`.
   file is loud: `run-finished` carries the file's total `eventCount`, and
   the resume fold throws on a mismatch (a deleted `reservation-opened`
   would otherwise drop the run out of the reservation era — its full
-  charge vanishing and its quarantine never firing).
+  charge vanishing and its quarantine never firing). Recorded residual: the
+  CLI's release surface is a comma-separated flag whose empty segments are
+  dropped (`--release-quarantine`, `src/cli/run-plan.ts`), so a job whose
+  `id` is the empty string — a degenerate but schema-valid plan — can be
+  quarantined and never named on that surface. The honest closure is on the
+  PLAN side (`JobSchema.id` requiring `min(1)`), a frozen input-contract
+  change outside this slice; recorded here rather than papered over.
 - **Sizing.** The proposal is the fair share `C / concurrency` — ADR §2.2
   step 3's `inv.budget.maxUsd` proposal term is NOT implementable at today's
   kernel op seam (no per-invocation budget crosses it; the term lands with
@@ -343,15 +349,23 @@ from `reserve` to `settle`.
   Definitive verdicts settle basis `observed` — the charge is exactly what
   the folds saw (a pre-dispatch failure like an unknown op settles 0). A
   dispatch ending in UNKNOWN status — ladder kill, `indeterminate` verdict,
-  a defensive throw, or the op BODY rejecting — settles basis `full`:
+  a defensive throw, or a post-invocation failure — settles basis `full`:
   charged = max(r, folded), at
-  least the whole reservation (spend may exist that no fold saw). The op-body
-  case is INVISIBLE in the verdict — `executeOp` never rejects (a throwing op
-  becomes a `failed` result, by the frozen contract), so the dispatch signals
-  it out of band and the settle reads that signal: a pre-dispatch failure
-  (unknown op, schema violation, throwing importer) still settles `observed`
-  zero, while an op that threw after its dispatch started charges the whole
-  reservation. The
+  least the whole reservation (spend may exist that no fold saw). The
+  post-invocation case is INVISIBLE in the verdict — `executeOp` never
+  rejects and flattens every such failure into a `failed` result (by the
+  frozen contract), so the dispatch signals it out of band and the settle
+  reads that signal. It covers a body that REJECTED and a body that RESOLVED
+  to something that is not an `OpResult` at all: both RAN the op, so both
+  may have spent. The PRE-dispatch failures — a throwing registry lookup, an
+  unknown op, a schema violation, a throwing importer — provably dispatched
+  nothing and settle `observed` zero. A body that resolved to a WELL-FORMED
+  result whose VALUE the journal refuses is deliberately NOT in the signal:
+  that is the evidence guard's lying-measurement case (a `NaN`/negative
+  `costUSD` folds nothing by design), and a full-reservation charge there
+  would let a bad number invent spend no fold ever saw. Recorded residual:
+  a dispatch whose ONLY evidence is such an uns journallable value settles
+  `observed` at zero. The
   journal's `reservation-settled.charged` and the live ledger agree exactly
   (the settle adds only the un-counted remainder), and the event carries
   `priced` — whether a `costUSD`, ZERO included, was observed on the
