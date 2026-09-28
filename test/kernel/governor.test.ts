@@ -2174,13 +2174,19 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     governor.seedFromJournal(events);
     expect(governor.tripped).toBe(true);
     expect(governor.tripReason).toMatch(/seeded usd rollup 1\.5 exceeded cap 1/);
+    expect(governor.usdSpent).toBe(1.5);
 
+    // A fresh governor must learn the prior spend through runPlan's resume
+    // path itself, rather than inheriting the direct seed above.
+    const runGovernor = createGovernor({ maxUsd: 1.0 });
     const report = await runPlan(
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor: runGovernor },
     );
+    expect(runGovernor.tripReason).toMatch(/seeded usd rollup 1\.5 exceeded cap 1/);
+    expect(runGovernor.usdSpent).toBe(1.5);
     expect(calls).toEqual([]); // zero op invocations — nothing was re-dispatched
     expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'c1' }); // attested
     // c2 is never even ADMITTED: the runner's tripped gate stops dispatch

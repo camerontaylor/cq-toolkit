@@ -133,9 +133,18 @@ describe('journal v2 schema', () => {
     expect(JournalEventSchema.parse(finished)).toEqual(finished);
     const badGovernance: JournalEvent = runStarted({
       runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
       governance: { capUsd: -1, attended: false },
     });
     expect(JournalEventSchema.safeParse(badGovernance).success).toBe(false);
+    const validGovernance: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 1, attended: false },
+    });
+    expect(JournalEventSchema.parse(validGovernance)).toEqual(validGovernance);
   });
 });
 
