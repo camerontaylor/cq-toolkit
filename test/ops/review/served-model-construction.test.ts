@@ -1,156 +1,123 @@
+// S4b-B (ADR-0002 §2.6) — review.fixItem's REAL served-model construction
+// path. The FACTORY is the one served-model hook for toolkit dispatch, so
+// the construction path under test is makeFixReviewItem over
+// createDriverFactory → the subprocess lane over the fake CLI (the same
+// shape as test/driver/served-model-construction.test.ts's S1 leg). The
+// lane binding is explicit factory config — the conservative defaults
+// never resolve to a host-CLI lane, and no lane class is constructed here.
+//
+// CONTROL and TREATMENT differ only in the served model the fake CLI
+// reports; both inner results are complete and carry the same valid,
+// successful fix contract. CONTROL → ok (the parsed triple); TREATMENT →
+// the wrapper rewrites the verdict to error/served-model-mismatch, and the
+// op maps that to `failed` per ADR-0002 §2.9 with the class named in the
+// text — a served-model mismatch can no longer masquerade as a clean
+// no-change fix.
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { AiSdkDriver } from '../../../src/driver/ai-sdk/index.js';
-import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
-import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
-import { defaultHarnessConfig } from '../../../src/harness/config.js';
-import { makeFixReviewItem, worktreeFixDriver } from '../../../src/ops/review/fixReviewItem.js';
+import { createDriverFactory } from '../../../src/driver/factory.js';
+import { makeFixReviewItem } from '../../../src/ops/review/fixReviewItem.js';
 import type { FixReviewItemInput } from '../../../src/ops/review/fixReviewItem.js';
-import { registry } from '../../../src/ops/review/registry.js';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
 
-const roots: string[] = [];
+const FAKE_CLI = fileURLToPath(new URL('../../fixtures/fake-agent-cli.mjs', import.meta.url));
+const temporary: string[] = [];
+
+// The strict op-side parse accepts exactly this no-change fix contract
+// (changed false ⇔ empty commits, non-empty summary).
+const FIX_CONTRACT = { changed: false, summary: 'Already addressed.', commits: [] };
+
+async function fixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'review-served-construction-'));
+  temporary.push(root);
+  return root;
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  vi.unstubAllEnvs();
+  await Promise.all(temporary.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-const inputFor = (path: string, provider = 'test-provider'): FixReviewItemInput => ({
+const inputFor = (root: string): FixReviewItemInput => ({
   pr: 7,
   item: { id: 'thread-7', path: 'src/a.ts', line: 1, body: 'Check the result.', comments: [] },
-  worktree: { path, branch: 'review/pr-7' },
-  driver: { model: 'requested-model', provider },
+  worktree: { path: root, branch: 'review/pr-7' },
+  driver: { model: 'construction-model', provider: 'construction' },
+  // All tools disabled → an EMPTY harness selection → the lane runs its
+  // stock surface (no MCP config, no harness server spawn) — the same
+  // posture as the S1 leg in test/driver/served-model-construction.test.ts
+  // (whose op passes no harness at all). The served-model property under
+  // test is orthogonal to the tool surface.
+  harness: {
+    ...defaultHarnessConfig,
+    tools: {
+      ...defaultHarnessConfig.tools,
+      read: { ...defaultHarnessConfig.tools.read, enabled: false },
+      edit: { ...defaultHarnessConfig.tools.edit, enabled: false },
+      run: { ...defaultHarnessConfig.tools.run, enabled: false },
+    },
+  },
 });
 
-// Control and treatment differ only in the observed model. Both inner
-// results are complete and carry the same valid, successful fix contract.
-const success = (invocation: OpInvocation, observed: boolean): WorkerResult => ({
-  stopReason: 'complete',
-  structuredOutput: { changed: false, summary: 'Already addressed.', commits: [] },
-  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  denials: [],
-  ...(observed ? { model: invocation.modelSpec.model } : {}),
-});
-
-const cases = [
-  { label: 'CONTROL observed model', observed: true },
-  { label: 'TREATMENT missing model', observed: false },
-];
-
-describe('S4 worktreeFixDriver construction', () => {
-  test.each(cases)('$label through makeInner', async ({ observed }) => {
-    const root = await mkdtemp(join(tmpdir(), 'cq-review-s4-'));
-    roots.push(root);
-    const run = vi.fn(async (invocation: OpInvocation) => success(invocation, observed));
-    const driver = worktreeFixDriver({
-      harnessConfig: defaultHarnessConfig,
-      worktreePath: root,
-      sessionsDir: join(root, 'sessions'),
-      makeInner: () => ({ run }),
-    });
-    const result = await driver.run({
-      prompt: 'Fix the review item.',
-      modelSpec: inputFor(root).driver,
-      toolPolicy: { mode: 'allowlist', allow: [] },
-      sandboxPolicy: { level: 'workspace-write' },
-      budget: {},
-    });
-    expect(run).toHaveBeenCalledOnce();
-    expect(run.mock.calls[0]?.[0].sessionRef).toBeTypeOf('string');
-    if (observed) {
-      expect(result.stopReason).toBe('complete');
-      expect(result.structuredOutput).toEqual({
-        changed: false,
-        summary: 'Already addressed.',
-        commits: [],
+describe('S4b review.fixItem served-model construction', () => {
+  test.each(['CONTROL', 'TREATMENT'] as const)(
+    'a factory-resolved fixer worker %s: dispatch succeeds only for the requested model',
+    async (variant) => {
+      const root = await fixture();
+      const binary = [
+        'env',
+        'FAKE_AGENT_MODE=structured-ok',
+        `FAKE_AGENT_STRUCTURED_RAW=${JSON.stringify(FIX_CONTRACT)}`,
+        ...(variant === 'TREATMENT' ? ['FAKE_AGENT_SERVED_MODEL=remapped'] : []),
+        process.execPath,
+        FAKE_CLI,
+      ];
+      vi.stubEnv('CQ_CONSTRUCTION_KEY', 'offline-fixture-key');
+      const op = makeFixReviewItem({
+        drivers: createDriverFactory({
+          bindings: { fixer: { construction: 'subprocess' } },
+          lanes: {
+            subprocess: {
+              binary,
+              sessionsDir: join(root, 'sessions'),
+              routingTable: {
+                endpoints: {
+                  construction: {
+                    baseUrlEnv: 'CQ_CONSTRUCTION_URL',
+                    baseUrlDefault: 'https://unused.invalid',
+                    keyEnv: 'CQ_CONSTRUCTION_KEY',
+                    models: ['construction-model'],
+                    notes: 'Offline fake CLI; no network calls',
+                  },
+                },
+              },
+            },
+          },
+        }),
       });
-    } else {
-      expect(result.stopReason).toBe('error');
-      expect(result.error).toContain('served unobserved');
-      expect(result.structuredOutput).toBeUndefined();
-    }
-  });
-
-  // Replace only the concrete driver's transport. The registry importer,
-  // perHarness provider selection and worktree adapter remain real.
-  describe.each(['test-provider', 'ai-sdk'])('registry perHarness provider %s', (provider) => {
-    test.each(cases)('$label through importer', async ({ observed }) => {
-      const root = await mkdtemp(join(tmpdir(), 'cq-review-s4-registry-'));
-      roots.push(root);
-      const prototype = provider === 'ai-sdk' ? AiSdkDriver.prototype : SubprocessDriver.prototype;
-      const run = vi
-        .spyOn(prototype, 'run')
-        // The annotation is load-bearing: with the seam-v2 signature
-        // run(invocation, options?) the mock callback's parameter no longer
-        // receives a contextual type from vitest's mockImplementation.
-        .mockImplementation(async (invocation: OpInvocation) => success(invocation, observed));
-      const entry = registry.find((candidate) => candidate.name === 'review.fixItem');
-      expect(entry).toBeDefined();
-      const op = await entry!.importer();
-      const result = await op(inputFor(root, provider));
-      expect(run).toHaveBeenCalledOnce();
-      expect(run.mock.calls[0]?.[0].sessionRef).toBeTypeOf('string');
-      if (observed) {
+      const result = await op(inputFor(root));
+      if (variant === 'CONTROL') {
         expect(result.status).toBe('ok');
+        if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
+        expect(result.value).toMatchObject({
+          changed: false,
+          summary: 'Already addressed.',
+          commits: [],
+        });
       } else {
         expect(result.status).toBe('failed');
         if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-        expect(result.error).toContain('served unobserved');
+        expect(result.error).toContain("requested 'construction-model', served 'remapped'");
+        expect(result.error).toContain('errorClass=served-model-mismatch');
+        // The mismatch verdict outranks the valid payload: the ok value
+        // (the parsed fix contract) never surfaces.
+        expect(result).not.toHaveProperty('value');
+        expect(JSON.stringify(result)).not.toContain('Already addressed.');
       }
-    });
-  });
-});
-
-describe('S5 makeFixReviewItem plain Driver construction', () => {
-  test.each(cases)('$label through injected Driver', async ({ observed }) => {
-    const run = vi.fn(async (invocation: OpInvocation) => success(invocation, observed));
-    const driver: Driver = { run };
-    const result = await makeFixReviewItem({ driver })(inputFor('/tmp/cq-review-s5'));
-    expect(run).toHaveBeenCalledOnce();
-    if (observed) {
-      expect(result.status).toBe('ok');
-    } else {
-      expect(result.status).toBe('failed');
-      if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-      expect(result.error).toContain('served unobserved');
-    }
-  });
-});
-
-describe('makeFixReviewItem caller-supplied perHarness construction', () => {
-  test.each([
-    { label: 'CONTROL observed model', model: 'requested-model' },
-    { label: 'TREATMENT missing model', model: undefined },
-    { label: 'TREATMENT mismatched model', model: 'different-model' },
-  ])('$label through raw factory', async ({ model }) => {
-    const input = inputFor('/tmp/cq-review-per-harness');
-    const run = vi.fn(async (invocation: OpInvocation): Promise<WorkerResult> => ({
-      ...success(invocation, false),
-      ...(model === undefined ? {} : { model }),
-    }));
-    // No worktree adapter or inner assertion: this exercises the exported
-    // caller-supplied factory boundary independently of the registry path.
-    const perHarness = vi.fn((): Driver => ({ run }));
-    const result = await makeFixReviewItem({ driver: { perHarness } })(input);
-    expect(perHarness).toHaveBeenCalledExactlyOnceWith(
-      defaultHarnessConfig,
-      input.worktree,
-      input.driver,
-    );
-    expect(run).toHaveBeenCalledOnce();
-    if (model === input.driver.model) {
-      expect(result.status).toBe('ok');
-      if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
-      expect(result.value.summary).toBe('Already addressed.');
-    } else {
-      expect(result.status).toBe('failed');
-      if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-      expect(result.error).toMatch(
-        /requested 'requested-model', served (unobserved|'different-model')/,
-      );
-      expect(result).not.toHaveProperty('value');
-      expect(JSON.stringify(result)).not.toContain('Already addressed.');
-    }
-  });
+    },
+  );
 });
