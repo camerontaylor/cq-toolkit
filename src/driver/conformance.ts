@@ -1,25 +1,24 @@
-// THE driver-conformance suite — T1.4 slice 3.
+// THE shipped driver-conformance suite — T1.4 slice 3, seam v2 (ADR-0002 §4).
 //
 // Shared, parameterized behavioral contract for EVERY first-party driver on
-// the frozen seam (ai-sdk today; the T1.5/T1.6 drivers reuse it verbatim by
-// calling `runDriverConformance` with their own `makeDriver`). Deliberately
-// driver-agnostic: the suite touches ONLY the frozen `Driver` interface,
-// the harness `SessionStore` (the I6 record format every driver shares), the
-// kernel's strict `WorkerResultSchema` mirror, and the governor's
-// `runLadder` (the I8 governed-context mechanics). No vendor types, no
-// driver internals.
+// the frozen seam: each lane's test file calls `runDriverConformance` with
+// its own `makeDriver` and ITS TEST FRAMEWORK's `{describe, test, expect}`
+// functions (the runner is INJECTED — this module imports no test framework).
+// Deliberately driver-agnostic: the suite touches ONLY the frozen `Driver`
+// interface, the harness `SessionStore` (the I6 record format every driver
+// shares), the driver-family strict `WorkerResultSchema` mirror, and the
+// shared seam helpers (`toOutputSchema`, `withServedModelAssertion`). No
+// vendor types, no driver internals — and NO kernel import: the seam rule
+// (src/driver never imports src/kernel) binds this file, so the GOVERNED
+// abort leg (b-ii, the kernel escalation ladder) lives in the callers' test
+// tree (test/driver/conformance-kernel.ts), which imports the kernel on the
+// lanes' behalf.
 //
 // THE MAKE-DRIVER CONTRACT (what a conforming `makeDriver` must honor):
 //   - `spec.scratchDir` — a suite-created temp directory. The driver's
 //     session store MUST live at `<scratchDir>/sessions` (SESSIONS_DIR) and
 //     its scratch workspaces SHOULD live under `<scratchDir>`, so the suite
 //     can inspect records with harness SessionStore and clean everything up.
-//   - `spec.outputSchema` — the MIGRATION-ONLY constructor hint (seam v2
-//     note below): post-S3 the structured-output schema rides
-//     `invocation.outputSchema` (legs a/a-ii/a-iii/a-iv build it with
-//     `toOutputSchema`), so the suite's schema legs no longer pass it here;
-//     the field stays in the type until the later conformance-v2 goal
-//     removes the constructor path.
 //   - `spec.directive` — scripts the MODEL's behavior for this driver's
 //     runs, in OUR vocabulary (never vendor shapes):
 //       { kind: 'reply', text }                    — the model replies with
@@ -30,13 +29,19 @@
 //                                                    name/input, then
 //                                                    replies with `reply`;
 //       { kind: 'block-until-abort' }              — the model blocks until
-//                                                    the governed signal
-//                                                    fires, then rejects
-//                                                    (the abort test);
+//                                                    the abort signal fires,
+//                                                    then rejects (the abort
+//                                                    tests);
 //       { kind: 'fail' }                           — the model fails with a
 //                                                    plain non-abort error
 //                                                    (the error-verdict
 //                                                    test).
+//       { kind: 'reply-invalid-json' }             — the model replies with
+//                                                    text that is NOT the
+//                                                    JSON object a
+//                                                    structured-output
+//                                                    schema demands (the
+//                                                    output-invalid legs).
 //     The scripted model MUST report token usage (input/output/cacheRead/
 //     cacheWrite, reasoning optional) — the usage contract needs numbers.
 //   - Tool permissions follow the frozen `OpInvocation` policies: the
@@ -51,13 +56,11 @@
 //     `pricing` option), so the derived-cost test asserts a real costUSD
 //     labeled `costBasis: 'modeled'` (the api-equivalent figure; DD-9). The
 //     canonical conformance model is NEVER priced.
-//   - I8: run() honors the run's cancellation signal — seam v2's
-//     `RunOptions.signal` first (leg b-iii: pre-aborted never dispatches;
-//     a plain-AbortController mid-run fire settles 'aborted' with NO
-//     governor in the loop), with the migration fallback to the governed
-//     `currentJobContext()` (leg b-ii: runLadder fires the ambient signal
-//     mid-run; a later goal removes the fallback). The scripted model
-//     blocks until the signal fires.
+//   - I8: run() honors `RunOptions.signal` — seam v2's only cancellation
+//     channel (leg b-iii: a pre-aborted signal never dispatches; a
+//     mid-run fire settles 'aborted' with NO governor in the loop). Leg
+//     b-v re-runs b-iii THROUGH the seam's pass-through wrappers; the
+//     kernel-ladder leg (b-ii) is the callers' kernel test.
 //   - `OpInvocation.workspace` (seam v2, ADR-0002 §2.4): when set without a
 //     sessionRef, the fresh record is created IN the bound directory's
 //     realpath and the tool write lands there (leg f-iii); with a
@@ -74,14 +77,41 @@
 import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
-import type { Driver, OpInvocation, WorkerResult } from '../../src/driver/types.js';
-import { WorkerResultSchema } from '../../src/kernel/schema.js';
-import { SessionStore } from '../../src/harness/session.js';
-import { runLadder } from '../../src/kernel/governor.js';
-import { errorClassOf } from '../../src/driver/errors.js';
-import { toOutputSchema } from '../../src/driver/common/structured.js';
+import { toOutputSchema } from './common/structured.js';
+import { errorClassOf } from './errors.js';
+import { normaliseModelId, servedModelCheck, withServedModelAssertion } from './served-model.js';
+import type { ServedModelPolicy } from './served-model.js';
+import { SEAM_VERSION } from './types.js';
+import type { Budget, Driver, OpInvocation, RunOptions, WorkerResult } from './types.js';
+import { WorkerResultSchema } from './schema.js';
+import { SessionStore } from '../harness/session.js';
+
+// ---------------------------------------------------------------------------
+// The injected test-runner surface (no test framework is imported here)
+// ---------------------------------------------------------------------------
+
+/** The minimal expectation surface the suite uses — vitest-compatible. */
+export interface ConformanceExpectation {
+  toBe(expected: unknown): void;
+  toEqual(expected: unknown): void;
+  toBeDefined(): void;
+  toBeUndefined(): void;
+  toBeCloseTo(expected: number, numDigits?: number): void;
+  toBeGreaterThan(expected: number): void;
+  toBeGreaterThanOrEqual(expected: number): void;
+  toBeLessThanOrEqual(expected: number): void;
+  toContain(expected: unknown): void;
+  readonly not: ConformanceExpectation;
+  readonly resolves: ConformanceExpectation;
+}
+
+/** The test-framework functions a caller injects (vitest's own work verbatim). */
+export interface ConformanceRunner {
+  describe(name: string, fn: () => void): void;
+  test(name: string, fn: () => void | Promise<void>): void;
+  expect(actual: unknown): ConformanceExpectation;
+}
 
 // ---------------------------------------------------------------------------
 // The make-driver contract (public so driver implementations can type against it)
@@ -91,8 +121,8 @@ import { toOutputSchema } from '../../src/driver/common/structured.js';
 export type ModelDirective =
   | { kind: 'reply'; text: string }
   | { kind: 'tool-then-reply'; tool: string; input: unknown; reply: string; toolIdentity?: string }
-  // The model BLOCKS until the governed signal fires, then rejects — the
-  // script behind the I8 abort test (makeDriver wires the driver's abort
+  // The model BLOCKS until the abort signal fires, then rejects — the
+  // script behind the I8 abort tests (makeDriver wires the driver's abort
   // seam; the mock honors it).
   | { kind: 'block-until-abort' }
   // The model FAILS outright (a plain non-abort error) — the script behind
@@ -107,8 +137,6 @@ export type ModelDirective =
 
 /** Per-driver construction hints the suite hands to `makeDriver`. */
 export interface ConformanceSpec {
-  /** Build the driver with this structured-output schema (structured-output test). */
-  outputSchema?: z.ZodType;
   /** Script the model's behavior for this driver's runs. */
   directive?: ModelDirective;
   /**
@@ -165,19 +193,37 @@ export const BANNED_VOCABULARY: readonly string[] = [
   'ResponseMessage',
 ];
 
+/**
+ * The canonical conformance invocation; only the pieces a caller names
+ * differ. Exported so the callers' kernel-side legs (b-ii) dispatch on the
+ * SAME canonical invocation the shipped suite uses.
+ */
+export function conformanceInvocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
+  return {
+    prompt: 'conformance run',
+    modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL },
+    toolPolicy: { allow: [], mode: 'unrestricted' },
+    sandboxPolicy: { level: 'workspace-write' },
+    budget: {},
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The suite
 // ---------------------------------------------------------------------------
 
 /**
- * Register the conformance describe block for one driver. Call from a test
- * file (vitest collects the tests); every test constructs a fresh driver in
- * a fresh scratch dir.
+ * Register the conformance suite for one driver. Call from a test file,
+ * passing the test framework's own `{describe, test, expect}` as the
+ * runner; every test constructs a fresh driver in a fresh scratch dir.
  */
 export function runDriverConformance(
   makeDriver: ConformanceMakeDriver,
+  runner: ConformanceRunner,
   opts?: { label?: string },
 ): void {
+  const { describe, test, expect } = runner;
   const label = opts?.label ?? 'driver';
 
   /** Fresh scratch dir per test, cleaned up no matter how the body ends. */
@@ -190,18 +236,6 @@ export function runDriverConformance(
     }
   }
 
-  /** The canonical conformance invocation; only the pieces a test names differ. */
-  function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
-    return {
-      prompt: 'conformance run',
-      modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL },
-      toolPolicy: { allow: [], mode: 'unrestricted' },
-      sandboxPolicy: { level: 'workspace-write' },
-      budget: {},
-      ...overrides,
-    };
-  }
-
   describe(`driver conformance: ${label}`, () => {
     test('a. structured-output round-trip: the schema rides the INVOCATION; parsed, plain JSON, schema-valid, stable under re-parse', async () => {
       await withScratch(async (scratchDir) => {
@@ -210,11 +244,11 @@ export function runDriverConformance(
           directive: { kind: 'reply', text: '{"answer":"ok"}' },
           scratchDir,
         });
-        // Post-S3 (seam v2 §2.3): the structured-output contract is a
-        // PER-INVOCATION request built through the shared seam — never a
-        // driver-construction option.
+        // Seam v2 (§2.3): the structured-output contract is a PER-INVOCATION
+        // request built through the shared seam — never a driver-construction
+        // option.
         const result = await driver.run(
-          invocation({
+          conformanceInvocation({
             prompt: 'produce structured output',
             outputSchema: toOutputSchema('conformance/structured/v1', schema),
           }),
@@ -237,7 +271,7 @@ export function runDriverConformance(
           scratchDir,
         });
         const result = await driver.run(
-          invocation({
+          conformanceInvocation({
             prompt: 'produce structured output',
             outputSchema: toOutputSchema('conformance/invalid-reply/v1', schema),
           }),
@@ -273,7 +307,7 @@ export function runDriverConformance(
           directive: { kind: 'reply', text: '{"answer":"ok"}' },
           scratchDir,
         });
-        const result = await driver.run(invocation({ prompt: 'plain reply run' }));
+        const result = await driver.run(conformanceInvocation({ prompt: 'plain reply run' }));
         expect(result.stopReason).toBe('complete');
         expect(result.structuredOutput).toBeUndefined();
         expect(result.errorClass).toBeUndefined();
@@ -293,13 +327,13 @@ export function runDriverConformance(
           scratchDir,
         });
         const runA = await driver.run(
-          invocation({
+          conformanceInvocation({
             prompt: 'schema A run',
             outputSchema: toOutputSchema('conformance/schema-a/v1', schemaA),
           }),
         );
         const runB = await driver.run(
-          invocation({
+          conformanceInvocation({
             prompt: 'schema B run',
             outputSchema: toOutputSchema('conformance/schema-b/v1', schemaB),
           }),
@@ -316,7 +350,7 @@ export function runDriverConformance(
         // from one static reply (a driver bound to one construction-level
         // schema cannot).
         const runC = await driver.run(
-          invocation({
+          conformanceInvocation({
             prompt: 'schema C run',
             outputSchema: toOutputSchema(
               'conformance/schema-c/v1',
@@ -335,32 +369,76 @@ export function runDriverConformance(
           directive: { kind: 'reply', text: 'this reply is never the point' },
           scratchDir,
         });
-        const result = await driver.run(invocation({ budget: { maxTokens: 1 } }));
+        const result = await driver.run(conformanceInvocation({ budget: { maxTokens: 1 } }));
         expect(result.stopReason).toBe('budget');
         expect(typeof result.usage.input).toBe('number');
         expect(typeof result.usage.output).toBe('number');
       });
     });
 
-    test('b-ii. abort: governed signal fired mid-run settles stopReason aborted', async () => {
+    test('b-iv. Budget pass-through (ADR-0003): an unknown optional Budget field is IGNORED, not rejected; RunOptions.reservation is accepted', async () => {
       await withScratch(async (scratchDir) => {
-        const driver = makeDriver({
-          directive: { kind: 'block-until-abort' },
-          scratchDir,
+        const driver = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
+        // A forward-compat cap a later ADR adds: the Budget record is OPEN —
+        // a lane that rejected unknown fields would break every older caller
+        // the moment the record grows. (The cast is the point: TS would
+        // reject the literal; the WIRE must not.)
+        const forwardBudget = {
+          maxTokens: 10_000,
+          aFutureCapField: 'added by a later ADR',
+        } as unknown as Budget;
+        const budgeted = await driver.run(conformanceInvocation({ budget: forwardBudget }));
+        expect(budgeted.stopReason).toBe('complete');
+        // The governor's reservation (ADR-0003 §2.2) rides RunOptions next
+        // to the signal. A lane MAY ignore it — ACCEPTING the run is the
+        // contract; the governor enforces, the lane informs.
+        const reserved = await driver.run(conformanceInvocation(), {
+          reservation: { id: 'conf-reservation', usd: 1, overshootUsd: 0, class: 'hard' },
         });
-        // The governor's own channel mechanics: runLadder installs the job
-        // context and fires its signal at wallClockMs; a conforming driver
-        // obeys the signal and settles 'aborted' (I8 — the driver decides
-        // nothing about WHEN).
-        const outcome = await runLadder(
-          () => driver.run(invocation()),
-          { wallClockMs: 25 },
-          { op: 'conformance', jobKey: 'conformance', attempt: 1 },
+        expect(reserved.stopReason).toBe('complete');
+      });
+    });
+
+    test('b-v. the pass-through wrappers forward RunOptions.signal — a wrapper that drops it kills cancellation silently', async () => {
+      // Part 1 — the shared served-model wrapper over a signal-observing
+      // fake: the pre-aborted signal MUST reach the inner driver. The lane
+      // scope names 'ai-sdk' only because the wrapper requires one; an
+      // aborted/complete-with-exact-model run is never lane-judged here.
+      let seen: RunOptions | undefined;
+      const fake: Driver = {
+        run: async (inv, options) => {
+          seen = options;
+          return {
+            stopReason: 'complete',
+            model: inv.modelSpec.model,
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          };
+        },
+      };
+      const dead = new AbortController();
+      dead.abort();
+      await withServedModelAssertion(fake, { lane: 'ai-sdk' }).run(conformanceInvocation(), {
+        signal: dead.signal,
+      });
+      expect(seen).toBeDefined();
+      expect(seen?.signal).toBeDefined();
+      expect(seen?.signal?.aborted).toBe(true);
+      // Part 2 — the REAL lane under test behind the SAME wrapper: the
+      // mid-run fire still settles 'aborted' (b-iii's contract survives the
+      // wrapper). The FACTORY's wrappers (reap-on-settle resolution and the
+      // full resolve() stack) are proven signal-tight in
+      // test/driver/factory.test.ts (leg b-v's factory half).
+      await withScratch(async (scratchDir) => {
+        const midRun = withServedModelAssertion(
+          makeDriver({ directive: { kind: 'block-until-abort' }, scratchDir }),
+          { lane: 'ai-sdk' },
         );
-        expect(outcome.outcome).toBe('completed');
-        if (outcome.outcome !== 'completed') return; // narrow for TS
-        expect(outcome.value.stopReason).toBe('aborted');
-        expect(outcome.value.error).toBeUndefined();
+        const live = new AbortController();
+        setTimeout(() => live.abort(), 100);
+        const aborted = await midRun.run(conformanceInvocation(), { signal: live.signal });
+        expect(aborted.stopReason).toBe('aborted');
+        expect(aborted.error).toBeUndefined(); // the cancellation is not a failure
       });
     });
 
@@ -378,7 +456,9 @@ export function runDriverConformance(
         });
         // read-only sandbox: edit MUST deny (documented harness mapping);
         // the denial flows into WorkerResult.denials in the frozen shape.
-        const result = await driver.run(invocation({ sandboxPolicy: { level: 'read-only' } }));
+        const result = await driver.run(
+          conformanceInvocation({ sandboxPolicy: { level: 'read-only' } }),
+        );
         expect(result.denials.length).toBeGreaterThan(0);
         for (const denial of result.denials) {
           expect(Object.keys(denial).sort()).toEqual(['reason', 'tool']);
@@ -392,7 +472,7 @@ export function runDriverConformance(
     test('d. usage fields: input/output/cacheRead/cacheWrite numbers on a successful run', async () => {
       await withScratch(async (scratchDir) => {
         const driver = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         expect(result.stopReason).toBe('complete');
         expect(typeof result.usage.input).toBe('number');
         expect(typeof result.usage.output).toBe('number');
@@ -421,7 +501,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         const serialized = JSON.stringify(result);
         for (const banned of BANNED_VOCABULARY) {
           expect(serialized).not.toContain(banned);
@@ -448,7 +528,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const run1 = await driver1.run(invocation({ prompt: 'isolation run one' }));
+        const run1 = await driver1.run(conformanceInvocation({ prompt: 'isolation run one' }));
         expect(typeof run1.sessionId).toBe('string');
         const record1 = await store.load(run1.sessionId as string);
         expect(record1).toBeDefined();
@@ -467,7 +547,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const run2 = await driver2.run(invocation({ prompt: 'isolation run two' }));
+        const run2 = await driver2.run(conformanceInvocation({ prompt: 'isolation run two' }));
         expect(run2.sessionId).not.toBe(run1.sessionId);
         const record2 = await store.load(run2.sessionId as string);
         expect(record2).toBeDefined();
@@ -501,7 +581,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const run1 = await driver1.run(invocation({ prompt: 'resume run one' }));
+        const run1 = await driver1.run(conformanceInvocation({ prompt: 'resume run one' }));
         const before = await store.load(run1.sessionId as string);
         const workspace1 = before?.workspace as string;
         const lengthBefore = before?.messages.length as number;
@@ -520,7 +600,7 @@ export function runDriverConformance(
         });
         if (run1.sessionId === undefined) throw new Error('first run must create a session');
         const run2 = await driver2.run(
-          invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
+          conformanceInvocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
         );
         expect(run2.sessionId).toBe(run1.sessionId);
         // No read denial: the resumed workspace still holds run 1's file.
@@ -544,7 +624,7 @@ export function runDriverConformance(
           directive: { kind: 'reply', text: 'ok' },
           scratchDir,
         });
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         // The canonical conformance model is by contract NOT in any price
         // map: a driver reporting costUSD for it is fabricating cost. No
         // cost means no basis either — costBasis is never fabricated without
@@ -570,7 +650,7 @@ export function runDriverConformance(
           scratchDir,
         });
         const result = await driver.run(
-          invocation({ modelSpec: pricedModel, prompt: 'priced run' }),
+          conformanceInvocation({ modelSpec: pricedModel, prompt: 'priced run' }),
         );
         expect(result.stopReason).toBe('complete');
         expect(typeof result.costUSD).toBe('number');
@@ -605,7 +685,7 @@ export function runDriverConformance(
         // The run must RESOLVE with an honest error verdict (carrying the
         // seam evidence — usage, denials, sessionId) — a throw here fails
         // the suite.
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         expect(result.stopReason).toBe('error');
         expect(result.usage).toBeDefined();
         expect(Array.isArray(result.denials)).toBe(true);
@@ -628,7 +708,9 @@ export function runDriverConformance(
         // DispatchError('config') (§2.2) — the one throw seam v2 allows.
         let thrown: unknown;
         try {
-          await driver.run(invocation({ workspace: { path: join(scratchDir, 'never-created') } }));
+          await driver.run(
+            conformanceInvocation({ workspace: { path: join(scratchDir, 'never-created') } }),
+          );
         } catch (err) {
           thrown = err;
         }
@@ -640,7 +722,7 @@ export function runDriverConformance(
     test('s. providerSignals: plain data through the mirror; a quota verdict carries the reset its source exposed', async () => {
       await withScratch(async (scratchDir) => {
         const driver = makeDriver({ directive: { kind: 'fail' }, scratchDir });
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         expect(result.stopReason).toBe('error');
         // CONDITIONAL on presence — the suite is lane-agnostic (ACP, for
         // one, never emits signals: its wire exposes no limit structure).
@@ -707,7 +789,10 @@ export function runDriverConformance(
         // whatever verdict the driver lands on, the observable fact is that
         // the tool never ran.
         const result = await driver.run(
-          invocation({ toolPolicy: { allow: [], mode: 'none' }, budget: { maxTokens: 25 } }),
+          conformanceInvocation({
+            toolPolicy: { allow: [], mode: 'none' },
+            budget: { maxTokens: 25 },
+          }),
         );
         const record = await store.load(result.sessionId as string);
         expect(record?.messages.some((m) => m.role === 'tool')).toBe(false);
@@ -730,7 +815,7 @@ export function runDriverConformance(
           scratchDir,
         });
         const allowed = await allowedDriver.run(
-          invocation({ toolPolicy: policy, prompt: 'allowlist allowed' }),
+          conformanceInvocation({ toolPolicy: policy, prompt: 'allowlist allowed' }),
         );
         expect(allowed.denials.some((d) => d.tool === 'read')).toBe(true); // executed and refused on the merits
         const allowedRecord = await store.load(allowed.sessionId as string);
@@ -751,7 +836,11 @@ export function runDriverConformance(
           scratchDir,
         });
         const denied = await deniedDriver.run(
-          invocation({ toolPolicy: policy, prompt: 'allowlist denied', budget: { maxTokens: 25 } }),
+          conformanceInvocation({
+            toolPolicy: policy,
+            prompt: 'allowlist denied',
+            budget: { maxTokens: 25 },
+          }),
         );
         const deniedRecord = await store.load(denied.sessionId as string);
         expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(
@@ -772,7 +861,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const result = await driver.run(invocation({ prompt: 'escape attempt' }));
+        const result = await driver.run(conformanceInvocation({ prompt: 'escape attempt' }));
         expect(
           result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape')),
         ).toBe(true);
@@ -782,14 +871,122 @@ export function runDriverConformance(
     test('m. observed model: the served model id is present and equals the requested model (the silent-remap defence)', async () => {
       await withScratch(async (scratchDir) => {
         const driver = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
-        const result = await driver.run(invocation());
+        const result = await driver.run(conformanceInvocation());
         // A pre-dispatch allowlist cannot catch a server-side remap; only the
         // RESPONSE can. A driver that hides the served id, or serves a
         // different model than requested, fails here — every lane that runs
         // this suite is bound by this check.
         expect(result.model).toBeDefined();
-        expect(result.model).toBe(invocation().modelSpec.model);
+        expect(result.model).toBe(conformanceInvocation().modelSpec.model);
       });
+    });
+
+    test('m-ii. served-model policy: mismatch → error with evidence kept; lane-scoped alias → complete; unobserved policy; the acp normalisation', async () => {
+      /** A fake lane that always completes with the given observed id. */
+      const laneReporting = (
+        observed: string | undefined,
+        extra: Partial<WorkerResult> = {},
+      ): Driver => ({
+        run: async () => ({
+          stopReason: 'complete',
+          usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          ...(observed !== undefined ? { model: observed } : {}),
+          ...extra,
+        }),
+      });
+      const requested = (model: string): OpInvocation => ({
+        ...conformanceInvocation(),
+        modelSpec: { provider: 'wire', model },
+      });
+
+      // 1. OBSERVED MISMATCH → error/'served-model-mismatch': the spend
+      // evidence (usage, providerSignals, the RAW observed id) is KEPT; the
+      // payload (structuredOutput) is DROPPED — it is not an outcome the
+      // requested model produced.
+      const mismatch = await withServedModelAssertion(
+        laneReporting('remapped-id', {
+          structuredOutput: { answer: 'ok' },
+          providerSignals: { windows: [{ id: 'rolling', utilization: 0.5 }] },
+        }),
+        { lane: 'ai-sdk' },
+      ).run(requested('requested-id'));
+      expect(mismatch.stopReason).toBe('error');
+      expect(mismatch.errorClass).toBe('served-model-mismatch');
+      expect(mismatch.model).toBe('remapped-id'); // the raw observation is evidence
+      expect(mismatch.usage).toEqual({ input: 3, output: 4, cacheRead: 0, cacheWrite: 0 });
+      expect(mismatch.providerSignals).toBeDefined();
+      expect(mismatch.structuredOutput).toBeUndefined();
+      // 2. A LANE-SCOPED ALIAS → complete: the declared remap admits the
+      // served spelling on THAT lane only.
+      const aliasPolicy: ServedModelPolicy = {
+        aliases: { acp: { wire: { requested: ['remapped-id'] } } },
+      };
+      const aliased = await withServedModelAssertion(laneReporting('remapped-id'), {
+        lane: 'acp',
+        policy: aliasPolicy,
+      }).run(requested('requested'));
+      expect(aliased.stopReason).toBe('complete');
+      // 3. THE SAME ALIAS DECLARED FOR ANOTHER LANE → still mismatch: the
+      // admission never crosses lanes.
+      const crossLane = await withServedModelAssertion(laneReporting('remapped-id'), {
+        lane: 'ai-sdk',
+        policy: aliasPolicy,
+      }).run(requested('requested'));
+      expect(crossLane.stopReason).toBe('error');
+      expect(crossLane.errorClass).toBe('served-model-mismatch');
+      // 4. UNOBSERVED (no reported id) → error: an eval/caller claiming
+      // model identity cannot accept an unattributable run.
+      const unobserved = await withServedModelAssertion(laneReporting(undefined), {
+        lane: 'ai-sdk',
+      }).run(requested('requested-id'));
+      expect(unobserved.stopReason).toBe('error');
+      expect(unobserved.errorClass).toBe('served-model-mismatch');
+      // 5. UNOBSERVED with requireObserved[lane]=false → complete; the pure
+      // check records HOW it passed ('unobserved-allowed') — the record the
+      // wrapper's decision is made from.
+      const allowUnobserved: ServedModelPolicy = { requireObserved: { acp: false } };
+      const permitted = withServedModelAssertion(laneReporting(undefined), {
+        lane: 'acp',
+        policy: allowUnobserved,
+      });
+      const unobservedAllowed = await permitted.run(requested('requested-id'));
+      expect(unobservedAllowed.stopReason).toBe('complete');
+      expect(
+        servedModelCheck(requested('requested-id'), unobservedAllowed, {
+          lane: 'acp',
+          policy: allowUnobserved,
+        }),
+      ).toEqual({ pass: true, via: 'unobserved-allowed' });
+      // 6. an OBSERVED mismatch under requireObserved=false is STILL an
+      // error: the policy admits absence, never a different model.
+      const stillMismatch = await withServedModelAssertion(laneReporting('remapped-id'), {
+        lane: 'acp',
+        policy: allowUnobserved,
+      }).run(requested('requested-id'));
+      expect(stillMismatch.stopReason).toBe('error');
+      expect(stillMismatch.errorClass).toBe('served-model-mismatch');
+      // 7. THE ACP NORMALISER (§2.6): the wire's `builtin:bigmodel\GLM-5.3`
+      // spelling equals a requested 'glm-5.3' after ONE namespace strip +
+      // case-fold — and never a requested 'glm-5.3-flash'.
+      const acpServed = 'builtin:bigmodel\\GLM-5.3';
+      expect(normaliseModelId('acp', acpServed)).toBe('glm-5.3');
+      const normalises = servedModelCheck(
+        requested('glm-5.3'),
+        { ...completeWorkerResult(), model: acpServed },
+        { lane: 'acp' },
+      );
+      expect(normalises.pass).toBe(true);
+      const remap = servedModelCheck(
+        requested('glm-5.3-flash'),
+        { ...completeWorkerResult(), model: acpServed },
+        { lane: 'acp' },
+      );
+      expect(remap.pass).toBe(false);
+    });
+
+    test('v. SEAM_VERSION is 2 on the seam barrel (the conformance suite pins the frozen seam version)', () => {
+      expect(SEAM_VERSION).toBe(2);
     });
 
     test('b-iii. RunOptions.signal: PRE-aborted never dispatches; fired mid-run settles aborted', async () => {
@@ -804,20 +1001,20 @@ export function runDriverConformance(
         });
         const dead = new AbortController();
         dead.abort();
-        const result = await preAborted.run(invocation(), { signal: dead.signal });
+        const result = await preAborted.run(conformanceInvocation(), { signal: dead.signal });
         expect(result.stopReason).toBe('aborted');
         expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
         expect(result.denials).toEqual([]);
         expect(result.sessionId).toBeUndefined();
         // Half 2 — fired MID-RUN: a plain AbortController, NO runLadder (the
-        // ambient governed context is undefined here, so options.signal is
-        // the only cancellation source — the seam-v2 wiring). The delay
-        // lands after every lane's abort wiring is live; wherever it lands,
-        // the run settles the honest 'aborted' verdict.
+        // governed ambient context is gone in seam v2 — RunOptions.signal is
+        // the ONLY cancellation channel). The delay lands after every lane's
+        // abort wiring is live; wherever it lands, the run settles the
+        // honest 'aborted' verdict.
         const midRun = makeDriver({ directive: { kind: 'block-until-abort' }, scratchDir });
         const live = new AbortController();
         setTimeout(() => live.abort(), 100);
-        const aborted = await midRun.run(invocation(), { signal: live.signal });
+        const aborted = await midRun.run(conformanceInvocation(), { signal: live.signal });
         expect(aborted.stopReason).toBe('aborted');
         expect(aborted.error).toBeUndefined(); // the cancellation is not a failure
       });
@@ -837,11 +1034,13 @@ export function runDriverConformance(
           },
           scratchDir,
         });
-        const result = await driver.run(invocation({ workspace: { path: workspaceDir } }));
+        const result = await driver.run(
+          conformanceInvocation({ workspace: { path: workspaceDir } }),
+        );
         expect(result.stopReason).toBe('complete');
         // The write really executed INSIDE the bound workspace (cwd and path
         // confinement bind to realpath(workspace.path) — never prompt text).
-        await expect(readFile(join(workspaceDir, 'note.txt'), 'utf8')).resolves.toContain(
+        expect(await readFile(join(workspaceDir, 'note.txt'), 'utf8')).toContain(
           'conformance-marker',
         );
         // The fresh record was created in the LANE's sessionsDir and records
@@ -862,7 +1061,7 @@ export function runDriverConformance(
         await mkdir(otherDir);
         // Establish a session bound to workspaceDir.
         const first = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
-        const run1 = await first.run(invocation({ workspace: { path: workspaceDir } }));
+        const run1 = await first.run(conformanceInvocation({ workspace: { path: workspaceDir } }));
         expect(run1.stopReason).toBe('complete');
         if (run1.sessionId === undefined) throw new Error('first run must create a session');
         // The SAME session pointed at a DIFFERENT workspace: a caller bug —
@@ -871,7 +1070,7 @@ export function runDriverConformance(
         let thrown: unknown;
         try {
           await second.run(
-            invocation({ workspace: { path: otherDir }, sessionRef: run1.sessionId }),
+            conformanceInvocation({ workspace: { path: otherDir }, sessionRef: run1.sessionId }),
           );
         } catch (err) {
           thrown = err;
@@ -881,4 +1080,13 @@ export function runDriverConformance(
       });
     });
   });
+}
+
+/** A minimal complete WorkerResult for the pure served-model-check legs. */
+function completeWorkerResult(): WorkerResult {
+  return {
+    stopReason: 'complete',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+  };
 }

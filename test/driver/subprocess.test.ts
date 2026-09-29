@@ -66,9 +66,14 @@ import {
   terminateActiveChildrenOnExit,
 } from '../../src/driver/subprocess/process.js';
 import type { ProcessClose } from '../../src/driver/subprocess/process.js';
-import { runDriverConformance } from './conformance.js';
-import type { ConformanceSpec, ModelDirective } from './conformance.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
+import { runDriverConformance } from '../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
+import {
+  SESSIONS_DIR,
+  CONFORMANCE_PROVIDER,
+  CONFORMANCE_MODEL,
+} from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { SessionStore } from '../../src/harness/session.js';
@@ -259,7 +264,6 @@ function makeDriver(spec: ConformanceSpec): Driver {
   const calls: SpawnCall[] = [];
   return new SubprocessDriver({
     ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -277,7 +281,12 @@ function makeDriver(spec: ConformanceSpec): Driver {
 // 1. The conformance suite, fake-CLI-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'subprocess driver (fake agent CLI)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'subprocess driver (fake agent CLI)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific tests
@@ -536,7 +545,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         killGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'stubborn run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'stubborn run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
         {
@@ -584,7 +593,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         termGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'slow run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'slow run' }), { signal: ctx.signal }),
         // > node startup: the abort must land after the driver attached the
         // ladder (an abort before the spawn path returns the early-aborted
         // verdict with no narration)
@@ -751,18 +760,22 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
       const schema = z.object({ answer: z.string() }).strict();
-      const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
-        outputSchema: schema,
-      });
-      const result = await driver.run(invocation({ prompt: 'structured run' }));
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'structured run',
+          outputSchema: toOutputSchema('test/structured/v1', schema),
+        }),
+      );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ answer: 'ok' });
       // The serialized --json-schema arg carries NO draft-2020-12 meta key —
       // the CLI rejects that URI before the model runs (#209).
       const arg = jsonSchemaArgOf(calls[0]?.args ?? []);
       expect(arg['$schema']).toBeUndefined();
-      expect(arg).toEqual(toOutputSchema('constructor', schema).schema);
+      expect(arg).toEqual(toOutputSchema('test/structured/v1', schema).schema);
     });
   });
 
@@ -771,15 +784,22 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The fixture emits the raw payload verbatim (a lying CLI — no fixture
       // schema checking), so the driver's own settle-time validation is what
       // stands between the vendor field and the seam.
-      const driver = new SubprocessDriver({
-        ...baseOptions(
+      const driver = new SubprocessDriver(
+        baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
           [],
         ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'lying CLI run' }));
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'lying CLI run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       // The §2.3 miss verdict (S3): the payload failed the schema, so the
       // run is an error/'output-invalid' — NOT a complete with a dropped
       // payload (the old behaviour is deleted), and the rejection is named.
@@ -787,7 +807,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.errorClass).toBe('output-invalid');
       expect(result.structuredOutput).toBeUndefined();
       expect(result.error).toContain('structured output invalid');
-      expect(result.error).toContain("schema 'constructor'");
+      expect(result.error).toContain("schema 'test/structured/v1'");
       // A real measurement keeps its usage evidence on the miss verdict.
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
     });
@@ -1228,7 +1248,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         killGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'group kill run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'group kill run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-group', attempt: 1 },
         {
@@ -2232,15 +2252,18 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('a harness failure voids structured output: an unverified run never exposes the payload (review r1)', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver({
-        ...baseOptions(
-          scratchDir,
-          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_NO_INIT: '1' },
-          [],
-        ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'unverified structured run' }));
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_NO_INIT: '1' }, []),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'unverified structured run',
+          outputSchema: toOutputSchema(
+            'test/unverified/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       expect(result.stopReason).toBe('error');
       expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
       expect(result.structuredOutput).toBeUndefined();
@@ -2438,7 +2461,8 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
         killGraceMs: 500,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'governed harness run' })),
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'governed harness run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-harness-abort', attempt: 1 },
         {
@@ -2776,7 +2800,6 @@ function s3Driver(
   scratchDir: string,
   lines: readonly string[],
   opts: {
-    outputSchema?: SubprocessDriverOptions['outputSchema'];
     binary?: SubprocessDriverOptions['binary'];
     exitCode?: number;
   } = {},
@@ -2784,7 +2807,6 @@ function s3Driver(
   return new SubprocessDriver({
     ...baseOptions(scratchDir, {}, []),
     ...(opts.binary === undefined ? {} : { binary: opts.binary }),
-    ...(opts.outputSchema === undefined ? {} : { outputSchema: opts.outputSchema }),
     spawn: s3Child(lines, opts.exitCode ?? 0),
   });
 }
@@ -2812,42 +2834,6 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
     });
   });
 
-  test('when both schema sources are present the INVOCATION wins', async () => {
-    await withScratch(async (scratchDir) => {
-      // The lying-CLI raw payload {"other":7} would REJECT under the
-      // constructor schema — completing with {other:7} proves the
-      // invocation schema was the judge.
-      const driver = new SubprocessDriver({
-        ...baseOptions(
-          scratchDir,
-          {
-            FAKE_AGENT_MODE: 'structured-ok',
-            FAKE_AGENT_STRUCTURED_RAW: '{"other":7}',
-          },
-          [],
-        ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(
-        invocation({
-          outputSchema: {
-            name: 'test.other/v1',
-            schema: {
-              type: 'object',
-              properties: { other: { type: 'number' } },
-              required: ['other'],
-              additionalProperties: false,
-            },
-          },
-          toolPolicy: { allow: [], mode: 'none' },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      expect(result.structuredOutput).toEqual({ other: 7 });
-      expect(result.errorClass).toBeUndefined();
-    });
-  });
-
   test('no schema requested: structuredOutput is ABSENT and no --json-schema is sent', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
@@ -2863,26 +2849,6 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
       expect(result.structuredOutput).toBeUndefined();
       expect(result.errorClass).toBeUndefined();
       expect(calls[0]?.args).not.toContain('--json-schema');
-    });
-  });
-
-  test('the constructor source gets the same output-invalid verdict on a miss', async () => {
-    await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver({
-        ...baseOptions(
-          scratchDir,
-          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
-          [],
-        ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(
-        invocation({ prompt: 'constructor miss run', toolPolicy: { allow: [], mode: 'none' } }),
-      );
-      expect(result.stopReason).toBe('error');
-      expect(result.errorClass).toBe('output-invalid');
-      expect(result.structuredOutput).toBeUndefined();
-      expect(result.error).toContain('structured output invalid');
     });
   });
 
@@ -3108,18 +3074,24 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
       });
 
       // 2. a structured-output miss → error/'output-invalid'.
-      const miss = new SubprocessDriver({
-        ...baseOptions(
+      const miss = new SubprocessDriver(
+        baseOptions(
           fresh(),
           { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
           [],
         ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
+      );
       runs.push({
         label: 'output-invalid',
         result: await miss.run(
-          invocation({ prompt: 'producer miss run', toolPolicy: { allow: [], mode: 'none' } }),
+          invocation({
+            prompt: 'producer miss run',
+            toolPolicy: { allow: [], mode: 'none' },
+            outputSchema: toOutputSchema(
+              'test/producer-miss/v1',
+              z.object({ answer: z.string() }).strict(),
+            ),
+          }),
         ),
       });
 

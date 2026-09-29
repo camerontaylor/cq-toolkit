@@ -487,11 +487,12 @@ reference implements no structured output at all. The claude-agent lane's
 native path (src/driver/README.md) has NO analog here. Strategy, same
 posture as the weakest existing lane, stated without cosmetics:
 
-- When `outputSchema` is constructed in, the driver APPENDS the JSON
+- When the INVOCATION carries `outputSchema` (seam v2 — there is no
+  construction-time schema), the driver APPENDS the JSON
   schema and a reply-with-only-JSON instruction to the prompt
   (prompt-directed JSON), assembles the final assistant text from the
-  `agent_message_chunk` stream, and post-settle validates it with zod
-  against the constructor schema. Parse/validation success →
+  `agent_message_chunk` stream, and post-settle validates it with the
+  SHARED validator against that same document. Parse/validation success →
   `WorkerResult.structuredOutput`.
 - **The honest gap:** the model may refuse, prepend prose, or malform —
   identical to every prompt-directed scheme. A failing payload is

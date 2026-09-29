@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -15,8 +16,37 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const DRIVER_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/driver');
 const roots: string[] = [];
 const BASELINE = 'baselines/typecheck--typecheck-count--7caef1e76077.json';
+
+/**
+ * The seam's one-directional import rule (ADR-0002), checked on the live
+ * tree: NO file under src/driver may import src/kernel — statically or via
+ * an import() expression. The kernel imports the seam, never the reverse;
+ * the shipped conformance suite lives under src/driver and must satisfy the
+ * same rule (its kernel-side leg, b-ii, lives in the test tree instead).
+ */
+function kernelImports(directory: string): string[] {
+  const hits: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      hits.push(...kernelImports(path));
+    } else if (entry.name.endsWith('.ts')) {
+      // Strip comments first: a JSDoc mention of a kernel module is prose,
+      // not an import edge.
+      const source = readFileSync(path, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '');
+      if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*\/kernel\//.test(source)) {
+        hits.push(path.slice(ROOT.length + 1));
+      }
+    }
+  }
+  return hits.sort();
+}
+
 function fixture(prefix = 'cq-static-conformance-'): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
   roots.push(root);
@@ -73,6 +103,9 @@ afterEach(() => {
 
 // Each test spawns the real pinned TypeScript compiler and oxlint via the static gate.
 describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () => {
+  it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
+    expect(kernelImports(DRIVER_SRC)).toEqual([]);
+  });
   it('counts projected files, imported files, configs and inputs outside lint traversal', () => {
     const root = fixture();
     writeFileSync(

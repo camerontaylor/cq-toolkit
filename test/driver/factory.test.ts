@@ -308,6 +308,28 @@ describe('driver factory — wrapping', () => {
     const record = await store.load(verdict.sessionId as string);
     expect(record).toBeDefined();
   });
+
+  test("b-v (factory half): the resolved wrapper stack forwards RunOptions.signal — a PRE-aborted 'reap-on-settle' resolution never dispatches", async () => {
+    stubKey();
+    const dir = await scratch();
+    const dead = new AbortController();
+    dead.abort();
+    // Conformance leg b-v's factory half (ADR-0002 §2.1): the signal must
+    // cross the reap-on-settle wrapper AND the outermost served-model
+    // assertion and reach the lane. A fewer-parameter wrapper would compile
+    // and silently drop it; the zero-usage 'aborted' verdict with NO session
+    // proves the CLI child never spawned (a spawn would leave a record).
+    const verdict = await createDriverFactory(subprocessConfig(dir, []))
+      .resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+        sessionRetention: 'reap-on-settle',
+      })
+      .driver.run(invocation(), { signal: dead.signal });
+    expect(verdict.stopReason).toBe('aborted');
+    expect(verdict.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(verdict.sessionId).toBeUndefined();
+  });
 });
 
 describe('driver factory — knobs reach the constructed lane', () => {

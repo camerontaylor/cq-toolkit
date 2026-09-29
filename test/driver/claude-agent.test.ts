@@ -63,9 +63,10 @@ import {
   resolveEndpoint,
 } from '../../src/driver/claude-agent/routing.js';
 import type { EndpointTable } from '../../src/driver/claude-agent/routing.js';
-import { runDriverConformance } from './conformance.js';
-import type { ConformanceSpec, ModelDirective } from './conformance.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from './conformance.js';
+import { runDriverConformance } from '../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
+import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { buildManifest, createHarnessSurface } from '../../src/harness/surface.js';
@@ -445,7 +446,6 @@ function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
         calls: [],
       }),
     endpointTable: conformanceEndpointTable(),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -465,7 +465,12 @@ function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
 // 1. The conformance suite, mock-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'claude-agent driver (mock sdk)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'claude-agent driver (mock sdk)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific unit tests
@@ -795,7 +800,6 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const calls: MockQueryCall[] = [];
       const base = {
         endpointTable: conformanceEndpointTable(),
-        outputSchema: schema,
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       };
@@ -804,7 +808,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
-      }).run(invocation({ prompt: 'structured ok' }));
+      }).run(
+        invocation({
+          prompt: 'structured ok',
+          outputSchema: toOutputSchema('test/native/v1', schema),
+        }),
+      );
       const sent = optionsOf(calls, 0)['outputFormat'] as {
         type: string;
         schema: Record<string, unknown>;
@@ -814,7 +823,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // hands the schema to the CLI (the CLI rejects that URI pre-model,
       // #209); the body is the seam document the validator judges over.
       expect(sent.schema['$schema']).toBeUndefined();
-      expect(sent.schema).toEqual(toOutputSchema('constructor', schema).schema);
+      expect(sent.schema).toEqual(toOutputSchema('test/native/v1', schema).schema);
       expect(ok.structuredOutput).toEqual({ answer: 'ok' });
       expect(ok.stopReason).toBe('complete');
 
@@ -825,12 +834,17 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"nope":true}' }, calls }),
-      }).run(invocation({ prompt: 'structured bad' }));
+      }).run(
+        invocation({
+          prompt: 'structured bad',
+          outputSchema: toOutputSchema('test/native/v1', schema),
+        }),
+      );
       expect(bad.stopReason).toBe('error');
       expect(bad.errorClass).toBe('output-invalid');
       expect(bad.structuredOutput).toBeUndefined();
       expect(bad.error).toContain('structured output invalid');
-      expect(bad.error).toContain("schema 'constructor'");
+      expect(bad.error).toContain("schema 'test/native/v1'");
       // A real measurement keeps its usage evidence on the miss verdict.
       expect(bad.usage).toEqual({ input: 120, output: 12, cacheRead: 15, cacheWrite: 5 });
     } finally {
@@ -877,7 +891,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // The governor's own channel mechanics: the ladder fires its signal at
       // wallClockMs; the wired cancellation root settles the query 'aborted'.
       const outcome = await runLadder(
-        () => driver.run(invocation({ budget: { maxTokens: 10_000 } })),
+        async (ctx) =>
+          driver.run(invocation({ budget: { maxTokens: 10_000 } }), { signal: ctx.signal }),
         { wallClockMs: 25 },
         { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
       );
@@ -1168,7 +1183,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
       const outcome = await runLadder(
-        () => driver.run(invocation()),
+        async (ctx) => driver.run(invocation(), { signal: ctx.signal }),
         { wallClockMs: 20 },
         { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
       );
@@ -2005,9 +2020,15 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         endpointTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
-        outputSchema: z.object({ answer: z.string() }).strict(),
       });
-      const result = await driver.run(invocation());
+      const result = await driver.run(
+        invocation({
+          outputSchema: toOutputSchema(
+            'test/unverified/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       expect(result.stopReason).toBe('error');
       expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
       expect(result.error).toContain('never reported its init surface');
@@ -2028,16 +2049,19 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       const schema = z.object({ answer: z.string() }).strict();
       const base = {
         endpointTable: conformanceEndpointTable(),
-        outputSchema: schema,
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       };
+      const invocationWithSchema = (): Partial<OpInvocation> => ({
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        outputSchema: toOutputSchema('test/init-surface/v1', schema),
+      });
       const calls: MockQueryCall[] = [];
       const ok = await new ClaudeAgentDriver({
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
-      }).run(invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }));
+      }).run(invocation(invocationWithSchema()));
       expect(ok.stopReason).toBe('complete');
       expect(ok.structuredOutput).toEqual({ answer: 'ok' });
       expect(honestInitSurface(optionsOf(calls)).tools).toEqual([
@@ -2056,7 +2080,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               tools: surface.tools.filter((t) => t !== 'StructuredOutput'),
             }),
           }),
-      }).run(invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }));
+      }).run(invocation(invocationWithSchema()));
       expect(missing.stopReason).toBe('error');
       expect(missing.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
       expect(missing.structuredOutput).toBeUndefined();
@@ -2093,12 +2117,16 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
 
       const structured = await new ClaudeAgentDriver({
         endpointTable: conformanceEndpointTable(),
-        outputSchema: z.object({ answer: z.string() }),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"x"}' }, calls }),
-      }).run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      }).run(
+        invocation({
+          toolPolicy: { allow: [], mode: 'none' },
+          outputSchema: toOutputSchema('test/output-format/v1', z.object({ answer: z.string() })),
+        }),
+      );
       expect(structured.stopReason).toBe('complete');
       expect(honestInitSurface(optionsOf(calls))).toEqual({
         tools: ['StructuredOutput'],
@@ -2180,7 +2208,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
       const outcome = await runLadder(
-        () => driver.run(invocation()),
+        async (ctx) => driver.run(invocation(), { signal: ctx.signal }),
         { wallClockMs: 20 },
         { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
       );
@@ -2194,7 +2222,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         directive: { kind: 'block-until-abort' },
       });
       const blocked = await runLadder(
-        () => blocking.run(invocation()),
+        async (ctx) => blocking.run(invocation(), { signal: ctx.signal }),
         { wallClockMs: 20 },
         { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
       );
@@ -2516,43 +2544,6 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     }
   });
 
-  test('when both schema sources are present the INVOCATION wins', async () => {
-    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
-    try {
-      const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
-        sdkLoader: async () =>
-          mockSdkModule({ directive: { kind: 'reply', text: '{"other":7}' }, calls }),
-        endpointTable: conformanceEndpointTable(),
-        // The constructor schema would REJECT {"other":7} — completing with
-        // {other:7} proves the invocation schema was the judge.
-        outputSchema: z.object({ answer: z.string() }).strict(),
-        sessionsDir: join(scratchDir, SESSIONS_DIR),
-        harnessConfig: conformanceHarnessConfig(scratchDir),
-      });
-      const result = await driver.run(
-        invocation({
-          outputSchema: {
-            name: 'test.other/v1',
-            schema: {
-              type: 'object',
-              properties: { other: { type: 'number' } },
-              required: ['other'],
-              additionalProperties: false,
-            },
-          },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      expect(result.structuredOutput).toEqual({ other: 7 });
-      expect(result.errorClass).toBeUndefined();
-      const sent = optionsOf(calls)['outputFormat'] as { schema: Record<string, unknown> };
-      expect(sent.schema['properties']).toEqual({ other: { type: 'number' } });
-    } finally {
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
-
   test('no schema requested: structuredOutput is ABSENT even when the reply is JSON', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {
@@ -2865,11 +2856,20 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"nope":1}' }, calls: [] }),
         endpointTable: conformanceEndpointTable(),
-        outputSchema: z.object({ answer: z.string() }).strict(),
         sessionsDir: join(freshDir(), SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(freshDir()),
       });
-      runs.push({ label: 'output-invalid', result: await missDriver.run(invocation()) });
+      runs.push({
+        label: 'output-invalid',
+        result: await missDriver.run(
+          invocation({
+            outputSchema: toOutputSchema(
+              'test/classifier-miss/v1',
+              z.object({ answer: z.string() }).strict(),
+            ),
+          }),
+        ),
+      });
 
       // 3. the CLI usage-limit result → error/'quota' with the window.
       const quotaDriver = streamDriver(freshDir(), () => [

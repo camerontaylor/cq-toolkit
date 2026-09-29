@@ -43,8 +43,10 @@ import {
   BANNED_VOCABULARY,
   SESSIONS_DIR,
   runDriverConformance,
-} from './conformance.js';
+} from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { WorkerResultSchema } from '../../src/kernel/schema.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
@@ -286,7 +288,6 @@ function makeDriver(spec: ConformanceSpec): AiSdkDriver {
         ? { [spec.pricedModel.provider]: (modelId) => modelFor(spec.directive, modelId) }
         : {}),
     },
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     // PRICING KEYING (issue #18): the lookup matches provider AND model —
@@ -317,7 +318,12 @@ function makeDriver(spec: ConformanceSpec): AiSdkDriver {
 // 1. The conformance suite, mock-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'ai-sdk driver (mock model)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'ai-sdk driver (mock model)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific unit tests
@@ -638,10 +644,15 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => mock },
         sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
       });
       const result = await driver.run(
-        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/multi-step/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
       );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
@@ -673,10 +684,15 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => alwaysToolCalls },
         sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
       });
       const result = await driver.run(
-        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/repair-once/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
       );
       // ONE bounded repair attempt after the miss: 8 tool-loop steps + the
       // single repair step.
@@ -712,7 +728,6 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => alwaysToolCalls },
         sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
       });
       // Per-step usage folds 132 tokens, so the 200 cap trips after step 2 and
       // the final step stays on tool-calls — the missing object is the cap's
@@ -721,6 +736,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
         invocation({
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
           budget: { maxTokens: 200 },
+          outputSchema: toOutputSchema(
+            'test/token-cap/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
         }),
       );
       expect(result.stopReason).toBe('budget');
@@ -743,11 +762,16 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => alwaysToolCalls },
         sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
         pricing: () => ({ input: 3, output: 15 }),
       });
       const result = await driver.run(
-        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/priced-miss/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
       );
       expect(result.stopReason).toBe('error');
       expect(typeof result.costUSD).toBe('number');
@@ -911,19 +935,23 @@ describe('ai-sdk driver failure classes (#210)', () => {
       const driver = new AiSdkDriver({
         providers: { mock: () => toolCallThenAbort },
         sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
         // A priced model DISCRIMINATES the inner carve-out (full-result usage +
         // derived cost) from the outer catch (partial fold, never fabricated
         // cost) — so the test proves the branch, not just the verdict.
         pricing: () => ({ input: 3, output: 15 }),
       });
       const outcome = await runLadder(
-        () =>
+        async (ctx) =>
           driver.run(
             invocation({
               toolPolicy: { allow: ['read'], mode: 'allowlist' },
               budget: { maxTokens: 1 },
+              outputSchema: toOutputSchema(
+                'test/abort-priced/v1',
+                z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+              ),
             }),
+            { signal: ctx.signal },
           ),
         { wallClockMs: 1_000 },
         { op: 'ai-sdk-failure-class', jobKey: 'ai-sdk-failure-class', attempt: 1 },
@@ -1806,72 +1834,6 @@ describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + provid
       expect(result.structuredOutput).toBeUndefined();
       expect(result.errorClass).toBeUndefined();
       expect(modelCalls).toBe(1); // no schema → no repair machinery at all
-    } finally {
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
-
-  test('constructor schema still works and UNIFIES: its miss is the same output-invalid verdict', async () => {
-    let modelCalls = 0;
-    const mock = new MockLanguageModelV4({
-      modelId: 'mock-1',
-      doGenerate: async () => {
-        modelCalls += 1;
-        return textResult('{"nope":1}');
-      },
-    });
-    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
-    try {
-      const driver = new AiSdkDriver({
-        providers: { mock: () => mock },
-        sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ answer: z.string() }).strict(), // the migration-only option
-      });
-      const result = await driver.run(invocation()); // NO invocation schema
-      expect(modelCalls).toBe(2); // the same ONE repair as the invocation path
-      expect(result.stopReason).toBe('error');
-      expect(result.errorClass).toBe('output-invalid');
-      expect(result.structuredOutput).toBeUndefined();
-      expect(result.usage).toEqual({ input: 200, output: 24, cacheRead: 30, cacheWrite: 10 });
-    } finally {
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
-
-  test('when both schema sources are present the INVOCATION wins', async () => {
-    let modelCalls = 0;
-    const mock = new MockLanguageModelV4({
-      modelId: 'mock-1',
-      doGenerate: async () => {
-        modelCalls += 1;
-        // Valid for the INVOCATION schema; the constructor schema would
-        // reject it — so a completion proves which judge ran.
-        return textResult('{"other":7}');
-      },
-    });
-    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-s3-'));
-    try {
-      const driver = new AiSdkDriver({
-        providers: { mock: () => mock },
-        sessionsDir: join(scratchDir, 'sessions'),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(
-        invocation({
-          outputSchema: {
-            name: 'test.other/v1',
-            schema: {
-              type: 'object',
-              properties: { other: { type: 'number' } },
-              required: ['other'],
-              additionalProperties: false,
-            },
-          },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      expect(result.structuredOutput).toEqual({ other: 7 });
-      expect(modelCalls).toBe(1); // no repair: the invocation schema accepted it
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

@@ -13,12 +13,9 @@
 // I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
 // driver-owned scheduling primitives under src/driver/**; this file (and
 // routing.ts) contain none. WHEN to abort is the signal sender's decision:
-// the run's cancellation SOURCE is `RunOptions.signal` (seam v2,
-// ADR-0002 §2.1) with the MIGRATION FALLBACK to the governed ambient
-// context (`options?.signal ?? currentJobContext()` — imported from
-// ../../kernel/governor.js, the one deliberate driver→kernel import, same
-// as the other lanes; a later slice removes the fallback). The resolved
-// signal is forwarded EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder
+// the run's ONLY cancellation SOURCE is `RunOptions.signal` (seam v2,
+// ADR-0002 §2.1) — the caller passes the governed rung-1 signal
+// explicitly. The signal is forwarded EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder
 // in ./process.ts (the scan's single exempt file, where the ladder executes
 // an already-decided kill). An already-aborted signal never dispatches and
 // creates NO session state. Outside a governed run without a signal no
@@ -264,8 +261,6 @@ import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import type { ZodType } from 'zod';
-import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
@@ -286,14 +281,13 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
-import { toOutputSchema, validateStructured } from '../common/structured.js';
+import { validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
-  OutputSchema,
   ProviderSignals,
   RunOptions,
   ToolDenial,
@@ -384,17 +378,6 @@ export interface SubprocessDriverOptions {
    * (`['claude', '--fallback-flag']`). Default 'claude'.
    */
   binary?: string | readonly string[];
-  /**
-   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
-   * it in a later slice): converted once at construction via
-   * `toOutputSchema('constructor', schema)` so the constructor path shares
-   * the invocation path's judge and verdict rule. When the invocation also
-   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
-   * the CLI is invoked with `--json-schema` and the result event's
-   * structured_output must validate (over the SAME document that was sent)
-   * before it lands in WorkerResult.structuredOutput.
-   */
-  outputSchema?: ZodType;
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
   routingTable?: RoutingTable;
   /** SIGTERM→SIGKILL grace in ms (default: process.ts's DEFAULT_TERM_GRACE_MS). */
@@ -438,7 +421,6 @@ export interface SubprocessDriverOptions {
 export class SubprocessDriver implements Driver {
   private readonly binary: readonly string[];
   /** The migration-only constructor schema, normalized to the seam shape. */
-  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;
@@ -473,15 +455,6 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
-    // zod→seam schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise. The seam
-    // document is retained — the settle-time judge (`validateStructured`)
-    // re-derives its schema from THIS document, the same one the --json-schema
-    // transport strips and sends, so the judgment is over what the CLI saw.
-    this.constructorOutputSchema =
-      options.outputSchema === undefined
-        ? undefined
-        : toOutputSchema('constructor', options.outputSchema);
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());
@@ -542,13 +515,12 @@ export class SubprocessDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal
-    // (migration fallback: the ambient governed context — a later slice
-    // removes the fallback). Checked BEFORE the spawn (an already-cancelled
-    // invocation never spawns — and never creates a session record, never
-    // appends a dangling user turn), then forwarded to the ladder — the
-    // driver decides nothing about WHEN.
-    const signal = options?.signal ?? currentJobContext()?.signal;
+    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
+    // the ONLY cancellation channel (seam v2). Checked BEFORE the spawn (an
+    // already-cancelled invocation never spawns — and never creates a
+    // session record, never appends a dangling user turn), then forwarded
+    // to the ladder — the driver decides nothing about WHEN.
+    const signal = options?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
@@ -610,12 +582,10 @@ export class SubprocessDriver implements Driver {
         ? undefined
         : await writeMcpConfig(sessionsDir, record.sessionId, manifest);
 
-    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
-    // wins when both sources are present; the constructor schema is the
-    // migration-only fallback. Both normalize to the same plain-data
-    // OutputSchema, so ONE validator judges the payload whichever source
-    // carried it.
-    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+    // --- Per-run schema resolution (ADR-0002 §2.3): the invocation schema
+    // is the only schema source; it normalizes to the same plain-data
+    // OutputSchema the shared validator judges.
+    const outputSchema = opInvocation.outputSchema;
 
     const argv = buildArgs({
       route,

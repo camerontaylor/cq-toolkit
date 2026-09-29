@@ -62,15 +62,21 @@ import type { ExecutableProbe } from '../../src/driver/acp/binaries.js';
 import type { AcpDriverOptions } from '../../src/driver/acp/index.js';
 import { argvForShimSpawn, spawnAcpProcess } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
-import { runDriverConformance } from './conformance.js';
-import type { ConformanceSpec, ModelDirective } from './conformance.js';
+import { runDriverConformance } from '../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
 import { mapWireUsage } from '../../src/driver/acp/protocol.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
+import {
+  SESSIONS_DIR,
+  CONFORMANCE_PROVIDER,
+  CONFORMANCE_MODEL,
+} from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
 import type { Clock } from '../../src/kernel/governor.js';
 import { WorkerResultSchema } from '../../src/kernel/schema.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
 import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
 // The fake ACP server: node + the fixture script, spawned through the
@@ -163,7 +169,6 @@ function makeDriver(spec: ConformanceSpec): Driver {
   const calls: SpawnCall[] = [];
   return new AcpDriver({
     ...driverOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -181,7 +186,12 @@ function makeDriver(spec: ConformanceSpec): Driver {
 // 1. The conformance suite, fake-ACP-server-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'acp driver (fake ACP server)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'acp driver (fake ACP server)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific tests
@@ -1446,7 +1456,7 @@ describe('acp driver specifics (fake ACP server)', () => {
       // signal fires → session/cancel → the cancelled prompt response
       // (usage null) settles the run.
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'cancel run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'cancel run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'acp', jobKey: 'acp-cancel', attempt: 1 },
       );
@@ -1478,7 +1488,8 @@ describe('acp driver specifics (fake ACP server)', () => {
         killGraceMs: 300,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'ignore-cancel run' })),
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'ignore-cancel run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'acp', jobKey: 'acp-ignore-cancel', attempt: 1 },
       );
@@ -1531,7 +1542,8 @@ describe('acp driver specifics (fake ACP server)', () => {
         spawn: abortingSpawn,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'pre-attach abort run' })),
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'pre-attach abort run' }), { signal: ctx.signal }),
         { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-pre-attach-abort', attempt: 1 },
         { clock },
@@ -1575,7 +1587,8 @@ describe('acp driver specifics (fake ACP server)', () => {
         cancelWriteGraceMs: 100,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
       );
@@ -1899,15 +1912,22 @@ describe('acp driver specifics (fake ACP server)', () => {
 
   test('structured output: a non-JSON reply settles the uniform output-invalid verdict (ADR-0002 §2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const driver = new AcpDriver(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose before json {"answer":' },
           [],
         ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'lying harness run' }));
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'lying harness run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       // S3 verdict unification: a miss is an ERROR verdict — the old
       // "complete with the payload dropped to narration" rule is deleted;
       // consumers read errorClass, never narration text tokens.
@@ -1934,15 +1954,18 @@ describe('acp driver specifics (fake ACP server)', () => {
 
   test('structured output round-trip through the wire: prompt-directed JSON lands in structuredOutput', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new AcpDriver({
-        ...driverOptions(
-          scratchDir,
-          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' },
-          [],
-        ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'structured run' }));
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'structured run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ answer: 'ok' });
     });
@@ -2361,33 +2384,6 @@ describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invali
     });
   });
 
-  test('when both schema sources are present the INVOCATION wins', async () => {
-    await withScratch(async (scratchDir) => {
-      // The reply {"other":7} would REJECT under the constructor schema —
-      // completing with {other:7} proves the invocation schema was the judge.
-      const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"other":7}' }, []),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(
-        invocation({
-          outputSchema: {
-            name: 'test.other/v1',
-            schema: {
-              type: 'object',
-              properties: { other: { type: 'number' } },
-              required: ['other'],
-              additionalProperties: false,
-            },
-          },
-        }),
-      );
-      expect(result.stopReason).toBe('complete');
-      expect(result.structuredOutput).toEqual({ other: 7 });
-      expect(result.errorClass).toBeUndefined();
-    });
-  });
-
   test('no schema requested: structuredOutput is ABSENT even when the reply is JSON', async () => {
     await withScratch(async (scratchDir) => {
       const driver = new AcpDriver(
@@ -2397,22 +2393,6 @@ describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invali
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toBeUndefined();
       expect(result.errorClass).toBeUndefined();
-    });
-  });
-
-  test('the constructor source gets the same output-invalid verdict on a miss', async () => {
-    await withScratch(async (scratchDir) => {
-      const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":42}' }, []),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'constructor miss run' }));
-      expect(result.stopReason).toBe('error');
-      expect(result.errorClass).toBe('output-invalid');
-      expect(result.structuredOutput).toBeUndefined();
-      expect(result.error).toContain('structured output invalid');
-      // Usage/cost kept: a real measured turn was spent on the miss.
-      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
     });
   });
 

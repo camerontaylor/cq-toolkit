@@ -117,11 +117,9 @@
 // STRUCTURED OUTPUT (seam v2, ADR-0002 §2.3 — prompt-directed JSON, strategy
 // §4): no ACP structured-output carrier exists, so the schema rides the
 // prompt. The schema source is the INVOCATION (`OpInvocation.outputSchema` —
-// a plain `OutputSchema` {name, schema: JsonSchema document}); the
-// constructor's zod `outputSchema` option still works during migration (a
-// later slice deletes it): it is converted once at construction via
-// `toOutputSchema('constructor', zodSchema)` so BOTH schema sources share one
-// validator and one verdict rule; when both are present the INVOCATION wins.
+// a plain `OutputSchema` {name, schema: JsonSchema document}); there is NO
+// construction-time schema (S6) — the invocation is the only schema source,
+// so ONE validator and one verdict rule cover every lane the same way.
 // The prompt APPENDS the EXACT seam document + a reply-with-only-JSON
 // instruction; the final text is assembled from the agent_message_chunk
 // stream and judged post-settle by the SHARED validator
@@ -171,11 +169,10 @@
 //     surface. Persist errors after dispatch are swallowed: the honest
 //     verdict outranks the record.
 //
-// I8 SEAM — the driver owns NO wall clock. The run's cancellation SOURCE is
-// `RunOptions.signal` (seam v2, ADR-0002 §2.1) with the MIGRATION FALLBACK
-// to the governed ambient context (`options?.signal ?? currentJobContext()`
-// — the one driver→kernel import, same as every lane; a later slice removes
-// the fallback). The resolved signal is used in exactly two cooperative
+// I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
+// SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
+// passes the governed rung-1 signal explicitly. The signal is used in
+// exactly two cooperative
 // ways: an already-fired signal never dispatches (and creates NO session
 // state), and a signal firing mid-prompt sends
 // session/cancel — the COURTESY write, raced against a short bounded grace
@@ -263,14 +260,12 @@ import { isAbsolute, join } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
-import type { ZodType } from 'zod';
-import { currentJobContext } from '../../kernel/governor.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
-import { toOutputSchema, validateStructured } from '../common/structured.js';
+import { validateStructured } from '../common/structured.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -379,19 +374,6 @@ export interface AcpDriverOptions {
    * surfaces exactly that fact. Default: undefined (no model transmission).
    */
   modelEnv?: string;
-  /**
-   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
-   * it in a later slice): converted once at construction via
-   * `toOutputSchema('constructor', schema)` so the constructor path shares
-   * the invocation path's judge and verdict rule. When the invocation also
-   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
-   * the prompt carries the JSON schema + a reply-with-only-JSON instruction
-   * (prompt-directed JSON, strategy §4 — ACP has no native carrier), and the
-   * assembled agent text must validate over the SAME document before it
-   * lands in WorkerResult.structuredOutput; a miss settles the uniform
-   * error/'output-invalid' verdict.
-   */
-  outputSchema?: ZodType;
   /** Root under which fresh temp workspaces are created. Default: the harness default (os.tmpdir()/cq-harness). */
   workspaceRoot?: string;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
@@ -794,7 +776,6 @@ export class AcpDriver implements Driver {
   private readonly envNames: readonly string[];
   private readonly modelEnv: string | undefined;
   /** The migration-only constructor schema, normalized to the seam shape. */
-  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly workspaceRoot: string | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly pricingOverride:
@@ -811,15 +792,6 @@ export class AcpDriver implements Driver {
     this.endpointTable = options.endpointTable ?? defaultAcpEndpointTable();
     this.envNames = Object.freeze([...(options.envNames ?? [])]);
     this.modelEnv = options.modelEnv;
-    // zod→seam schema at CONSTRUCTION (the migration-only source): an
-    // unrepresentable schema is a loud config error before any run, not a
-    // mid-dispatch surprise. The seam document is retained — the settle-time
-    // judge (`validateStructured`) re-derives its schema from THIS document,
-    // the same one the prompt carried.
-    this.constructorOutputSchema =
-      options.outputSchema === undefined
-        ? undefined
-        : toOutputSchema('constructor', options.outputSchema);
     this.workspaceRoot = options.workspaceRoot;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;
@@ -883,13 +855,12 @@ export class AcpDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'acp driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal
-    // (migration fallback: the ambient governed context — a later slice
-    // removes the fallback). Checked BEFORE the user-turn append AND before
-    // the spawn — the envNames hoist rationale applies identically: an
-    // already-cancelled invocation must leave neither a dangling user turn
-    // in the record nor a session record nor a spawn.
-    const signal = options?.signal ?? currentJobContext()?.signal;
+    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
+    // the ONLY cancellation channel (seam v2). Checked BEFORE the user-turn
+    // append AND before the spawn — the envNames hoist rationale applies
+    // identically: an already-cancelled invocation must leave neither a
+    // dangling user turn in the record nor a session record nor a spawn.
+    const signal = options?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
@@ -1524,12 +1495,10 @@ export class AcpDriver implements Driver {
       }
     }
 
-    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
-    // wins when both sources are present; the constructor schema is the
-    // migration-only fallback. Both normalize to the same plain-data
-    // OutputSchema, so ONE validator judges the payload whichever source
-    // carried it.
-    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+    // --- Per-run schema resolution (ADR-0002 §2.3): the invocation schema
+    // is the only schema source; it normalizes to the same plain-data
+    // OutputSchema the shared validator judges.
+    const outputSchema = opInvocation.outputSchema;
 
     // --- The one prompt: fire-and-settle.
     let promptResponse: PromptResponse | undefined;

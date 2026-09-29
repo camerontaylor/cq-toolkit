@@ -9,15 +9,13 @@
 // I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
 // driver-owned scheduling primitives under src/driver/**: WHEN to abort is
 // the governor's decision (T1.3), and this driver only OBEYS. The run's
-// cancellation SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) with
-// the MIGRATION FALLBACK to the governed ambient context
-// (`options?.signal ?? currentJobContext()` — imported from
-// ../../kernel/governor.js, the one deliberate driver→kernel import: the
-// governor's cooperative-cancel channel is the process-wide job context; a
-// later slice removes the fallback). The resolved signal rides the SDK
-// call's `abortSignal` option; an already-aborted signal never dispatches
-// (stopReason 'aborted', zero usage, no session state created). Outside a
-// governed run without a signal the SDK call is simply not wired to a
+// ONLY cancellation SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1)
+// — the caller passes the governed rung-1 signal explicitly; a lane that
+// consulted ambient state instead would abort runs its caller never
+// cancelled. The signal rides the SDK call's `abortSignal` option; an
+// already-aborted signal never dispatches
+// (stopReason 'aborted', zero usage, no session state created). Without a
+// signal the SDK call is simply not wired to a
 // cancellation source. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
@@ -87,11 +85,9 @@
 // wire transport is the SDK's structured output over the EXACT document the
 // invocation carried, and the after-settle judgment is the SHARED validator
 // (`validateStructured` from ../common/structured.js) over that same
-// document. The constructor's zod `outputSchema` option still works during
-// migration (a later slice deletes it): it is converted once at
-// construction via `toOutputSchema('constructor', zodSchema)` so BOTH schema
-// sources share one validator and one verdict rule; when both are present
-// the INVOCATION wins. Verdict table (ADR §2.3):
+// document. There is NO construction-time schema: the invocation is the
+// only schema source (S6), so ONE validator and one verdict rule judge every
+// lane the same way. Verdict table (ADR §2.3):
 //   - object obtained and it validates  → 'complete', structuredOutput =
 //     the validated plain JSON;
 //   - missing / unparseable / invalid after ONE bounded repair request
@@ -199,7 +195,6 @@ import type {
   ToolSet,
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
-import type { ZodType } from 'zod';
 import { realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -207,7 +202,6 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
 import { createDeepSeek } from '@ai-sdk/deepseek';
-import { currentJobContext } from '../../kernel/governor.js';
 import { deepFreeze, defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
@@ -218,7 +212,7 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
-import { toOutputSchema, validateStructured } from '../common/structured.js';
+import { validateStructured } from '../common/structured.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -270,14 +264,6 @@ export interface AiSdkDriverOptions {
    * read from the environment at call time.
    */
   providers?: Readonly<Record<string, ProviderFactory>>;
-  /**
-   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
-   * it in a later slice): converted once at construction via
-   * `toOutputSchema('constructor', schema)` so the constructor path shares
-   * the invocation path's validator and verdict rule. When the invocation
-   * also carries `outputSchema`, the INVOCATION wins.
-   */
-  outputSchema?: ZodType;
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
   /**
@@ -306,8 +292,6 @@ export interface AiSdkDriverOptions {
  */
 export class AiSdkDriver implements Driver {
   private readonly providers: Readonly<Record<string, ProviderFactory>>;
-  /** The migration-only constructor schema, normalized to the seam shape. */
-  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sandboxConfig: SandboxConfig | undefined;
   private readonly sessionsDir: string | undefined;
@@ -315,13 +299,6 @@ export class AiSdkDriver implements Driver {
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
-    // Convert the zod contract ONCE, eagerly: a constructor schema that
-    // cannot render as a within-document-resolving JSON Schema is a caller
-    // bug that should surface at construction, not mid-run.
-    this.constructorOutputSchema =
-      options.outputSchema === undefined
-        ? undefined
-        : toOutputSchema('constructor', options.outputSchema);
     // The effective config is stored as a deep-frozen STRUCTURED CLONE:
     // neither the caller's object (mutated after construction) nor the
     // shared `defaultHarnessConfig` can be reached — or mutated — through
@@ -359,11 +336,11 @@ export class AiSdkDriver implements Driver {
 
     // --- Governed cancellation (I8): the governor decides WHEN to abort; ---
     // the driver only forwards its signal. No driver-owned wall clock. The
-    // SOURCE is the seam-v2 RunOptions.signal with the migration fallback to
-    // the ambient governed context (a later slice removes the fallback). An
-    // already-aborted signal never dispatches and creates NO session state:
-    // zero usage, no denials, no sessionId (no record was created).
-    const abortSignal = options?.signal ?? currentJobContext()?.signal;
+    // SOURCE is the seam-v2 RunOptions.signal — the ONLY cancellation
+    // channel. An already-aborted signal never dispatches and creates NO
+    // session state: zero usage, no denials, no sessionId (no record was
+    // created).
+    const abortSignal = options?.signal;
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -442,11 +419,10 @@ export class AiSdkDriver implements Driver {
       stepCountIs(DEFAULT_MAX_STEPS),
     ];
 
-    // Structured output (ADR-0002 §2.3): the INVOCATION schema wins when
-    // both sources are present; the constructor schema is the migration-only
-    // fallback. Both normalize to the same plain-data OutputSchema, so ONE
-    // validator judges the payload whichever source carried it.
-    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+    // Structured output (ADR-0002 §2.3): the invocation schema is the only
+    // schema source; it normalizes to the same plain-data OutputSchema the
+    // shared validator judges.
+    const outputSchema = opInvocation.outputSchema;
 
     // --- The one SDK call. -------------------------------------------------
     // Per-step usage accumulation (DD-2 evidence): onStepFinish fires for

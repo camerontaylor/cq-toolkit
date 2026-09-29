@@ -63,11 +63,7 @@
 // network). EXIT CODE: 0 only when every selected cell passed (identity,
 // fixture, and fold checks green); any failed cell sets exit 1. Usage:
 // zsh -lic 'node scripts/demo-eval-axes.mjs'
-import {
-  SessionStore,
-  createDriverFactory,
-  runLadder,
-} from '../dist/index.js';
+import { SessionStore, createDriverFactory, runLadder } from '../dist/index.js';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import dns from 'node:dns';
 import net from 'node:net';

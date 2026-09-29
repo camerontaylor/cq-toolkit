@@ -95,10 +95,9 @@
 // STRUCTURED OUTPUT (seam v2, ADR-0002 §2.3): the SDK's NATIVE path —
 // `outputFormat: { type: 'json_schema', schema }`. The schema rides the
 // INVOCATION (`OpInvocation.outputSchema` — the plain `OutputSchema`
-// {name, schema} document); the constructor's zod `outputSchema` option
-// still works during migration (retired in a later slice): it is converted
-// ONCE at construction via `toOutputSchema('constructor', zodSchema)` so
-// BOTH sources share one judge; when both are set the INVOCATION wins. The
+// {name, schema} document); there is NO construction-time schema (S6) — the
+// invocation is the only schema source, so ONE judge covers every lane the
+// same way. The
 // after-settle judgment is the SHARED validator (`validateStructured` from
 // ../common/structured.js) over the SAME document that was sent (meta-URI
 // stripped for the CLI-bound transport). Verdict table (ADR §2.3):
@@ -149,11 +148,10 @@
 //     errors after dispatch are swallowed: the honest verdict outranks the
 //     record.
 //
-// I8 SEAM — the driver owns NO wall clock. The run's cancellation SOURCE is
-// `RunOptions.signal` (seam v2, ADR-0002 §2.1) with the MIGRATION FALLBACK
-// to the governed ambient context (`options?.signal ?? currentJobContext()`
-// — the one driver→kernel import, same as the other lanes; a later slice
-// removes the fallback), forwarded EXACTLY ONE place: the SDK query's
+// I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
+// SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
+// passes the governed rung-1 signal explicitly — forwarded EXACTLY ONE
+// place: the SDK query's
 // cancellation root (Options.abortController), wired by ./process.ts (the
 // hygiene scan's exempt file — construction of the root is machinery; the
 // WHEN stays the signal's sender). An already-fired signal never dispatches
@@ -251,8 +249,6 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import type { ZodType } from 'zod';
-import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import {
@@ -271,14 +267,13 @@ import { boundedErrorText, describeError, redactSensitiveText } from '../error-t
 import { DispatchError } from '../errors.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
-import { toOutputSchema, validateStructured } from '../common/structured.js';
+import { validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
-  OutputSchema,
   ProviderSignals,
   RunOptions,
   SandboxLevel,
@@ -386,17 +381,6 @@ export interface ClaudeAgentDriverOptions {
    * UNCHECKED (header).
    */
   endpointTable?: EndpointTable;
-  /**
-   * Structured-output schema (zod) — MIGRATION-ONLY (ADR-0002 §2.5 retires
-   * it in a later slice): converted once at construction via
-   * `toOutputSchema('constructor', schema)` so the constructor path shares
-   * the invocation path's judge and verdict rule. When the invocation also
-   * carries `outputSchema`, the INVOCATION wins. When a schema is in force
-   * the SDK's native `outputFormat: { type: 'json_schema' }` path runs and
-   * the result's `structured_output` must validate (over the SAME document
-   * that was sent) before it lands in WorkerResult.structuredOutput.
-   */
-  outputSchema?: ZodType;
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
@@ -422,7 +406,6 @@ export class ClaudeAgentDriver implements Driver {
   private readonly sdkLoader: SdkLoader;
   private readonly endpointTable: EndpointTable;
   /** The migration-only constructor schema, normalized to the seam shape. */
-  private readonly constructorOutputSchema: OutputSchema | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
@@ -445,10 +428,6 @@ export class ClaudeAgentDriver implements Driver {
     // document is retained — the settle-time judge (`validateStructured`)
     // re-derives its schema from THIS document, the same one the transport
     // strips and sends, so the judgment is over what the vendor saw.
-    this.constructorOutputSchema =
-      options.outputSchema === undefined
-        ? undefined
-        : toOutputSchema('constructor', options.outputSchema);
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;
@@ -481,12 +460,11 @@ export class ClaudeAgentDriver implements Driver {
         : boundWorkspacePath(opInvocation.workspace, 'claude-agent driver');
 
     // --- Governed cancellation (I8): the run's signal is RunOptions.signal
-    // (migration fallback: the ambient governed context — a later slice
-    // removes the fallback). Checked BEFORE the dispatch (an
-    // already-cancelled invocation never dispatches — and never creates a
-    // session record), then wired to the SDK's cancellation root — the
+    // the ONLY cancellation channel (seam v2). Checked BEFORE the dispatch
+    // (an already-cancelled invocation never dispatches — and never creates
+    // a session record), then wired to the SDK's cancellation root — the
     // driver decides nothing about WHEN.
-    const signal = options?.signal ?? currentJobContext()?.signal;
+    const signal = options?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
@@ -529,12 +507,10 @@ export class ClaudeAgentDriver implements Driver {
     // continuation).
     const resumeAgentSessionId = await readAgentSessionId(sessionsDir, record.sessionId);
 
-    // --- Per-run schema resolution (ADR-0002 §2.3): the INVOCATION schema
-    // wins when both sources are present; the constructor schema is the
-    // migration-only fallback. Both normalize to the same plain-data
-    // OutputSchema, so ONE validator judges the payload whichever source
-    // carried it.
-    const outputSchema = opInvocation.outputSchema ?? this.constructorOutputSchema;
+    // --- Per-run schema resolution (ADR-0002 §2.3): the invocation schema
+    // is the only schema source; it normalizes to the same plain-data
+    // OutputSchema the shared validator judges.
+    const outputSchema = opInvocation.outputSchema;
 
     // The per-run observation — created before the options assembly because
     // the harness-tool closures accumulate denials into it directly.

@@ -17,9 +17,9 @@
 // fixture ops (test/fixtures/cli-ops) through the governed kernel, so no
 // network, model, or real filesystem target is touched. Deterministic: tmp
 // dirs only, cleaned up.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { runCli } from '../../src/cli/main.js';
@@ -27,6 +27,38 @@ import type { CliIo } from '../../src/cli/output.js';
 import { RunReportSchema } from '../../src/kernel/schema.js';
 
 const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
+const OPS_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/ops');
+
+/**
+ * The factory rule's static half (ADR-0002 §2.5), checked on the live tree:
+ * NO file under src/ops may import a lane module — statically or via an
+ * import() expression. Ops resolve drivers through the DriverFactory; a
+ * direct lane import would bypass the served-model wrapper and the
+ * plan-data-never-names-an-executable bound.
+ */
+async function laneImports(directory: string): Promise<string[]> {
+  const hits: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      hits.push(...(await laneImports(path)));
+    } else if (entry.name.endsWith('.ts')) {
+      // Strip comments first: a JSDoc mention of a lane module is prose,
+      // not an import edge.
+      const source = (await readFile(path, 'utf8'))
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '');
+      if (
+        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
+          source,
+        )
+      ) {
+        hits.push(path.slice(OPS_SRC.length + 1));
+      }
+    }
+  }
+  return hits.sort();
+}
 
 interface CapturedRun {
   code: number;
@@ -142,6 +174,10 @@ describe('sample: pure op through the real registry', () => {
 });
 
 describe('sample: agentic-class op through the real registry', () => {
+  test('no src/ops module imports a lane module — static or dynamic (the factory rule)', async () => {
+    expect(await laneImports(OPS_SRC)).toEqual([]);
+  });
+
   test('sweep.unit without a driver config fails honestly before any spawn', async () => {
     const { code, out, err } = await capture([
       'sweep.unit',

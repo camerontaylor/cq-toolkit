@@ -9,8 +9,9 @@
 // cancellation root (`Options.abortController` — "Controller for cancelling
 // the query. When aborted, the query will stop and clean up resources",
 // claude-agent-sdk@0.3.270). The driver (index.ts) decides NOTHING about
-// WHEN to abort: it forwards the governed signal it received via
-// `currentJobContext()` and this helper only WIRES that signal into the
+// WHEN to abort: it forwards the `RunOptions.signal` it received (seam v2 —
+// the caller passes the governed rung-1 signal explicitly) and this helper
+// only WIRES that signal into the
 // root the SDK watches. No timer, no deadline, no retry lives here — a
 // signal that never fires produces a query that never aborts, which is the
 // point: outside a governed run there is no cancellation source and the
