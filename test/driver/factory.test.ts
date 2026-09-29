@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
-import { createDriverFactory, withReapOnSettle } from '../../src/driver/factory.js';
+import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
@@ -309,43 +309,31 @@ describe('driver factory — wrapping', () => {
     expect(record).toBeDefined();
   });
 
-  test('reap-on-settle covers a REJECTED run too: the snapshot delta reaps a record created before the throw, never the pre-existing one', async () => {
+  test('reap-on-settle is RUN-SPECIFIC: a concurrent run sharing the sessionsDir never gets its record reaped', async () => {
+    stubKey();
     const dir = await scratch();
     const sessionsDir = join(dir, 'sessions');
     const store = new SessionStore(sessionsDir);
     const workspace = await mkdtemp(join(dir, 'ws-'));
     temporary.push(workspace);
-    // The pre-run record: predates the wrapped run, NEVER reaped.
-    const preexisting = await store.create(workspace);
-    // A lane that creates its fresh record and THEN rejects (the finding's
-    // mechanism): its record id is unknowable to the caller, so the
-    // wrapper's before/after snapshot delta is what makes the targeted reap
-    // possible at all.
-    let innerCreatedId: string | undefined;
-    const rejecting: Driver = {
-      run: async () => {
-        const created = await store.create(workspace);
-        innerCreatedId = created.sessionId;
-        throw new Error('lane rejected after creating its record');
-      },
-    };
-    const wrapped = withReapOnSettle(rejecting, sessionsDir);
-    await expect(
-      wrapped.run({
-        prompt: 'rejected after create',
-        modelSpec: { provider: 'construction', model: 'construction-model' },
-        toolPolicy: { allow: [], mode: 'none' },
-        sandboxPolicy: { level: 'none' },
-        budget: {},
-      }),
-    ).rejects.toThrow(/lane rejected after creating its record/);
-    expect(innerCreatedId).toBeDefined();
-    // The fresh record is GONE (reaped on the rejection); the pre-existing
-    // record survives.
-    const ids = await store.ids();
-    expect(ids).toEqual([preexisting.sessionId]);
-    await expect(store.load(innerCreatedId as string)).resolves.toBeUndefined();
-    await expect(store.load(preexisting.sessionId)).resolves.toBeDefined();
+    // The CONCURRENT run's record: created while the wrapped run is in
+    // flight (after its dispatch, before its settle). The wrapped run's
+    // reap is keyed on its OWN verdict sessionId — a directory-wide
+    // "created since we started" delta would delete this record (PR #238
+    // review round 5).
+    const concurrent = await store.create(workspace);
+    const resolved = createDriverFactory(subprocessConfig(dir, [])).resolve({
+      role: 'fixer',
+      modelSpec: { provider: 'construction', model: 'construction-model' },
+      sessionRetention: 'reap-on-settle',
+    });
+    const verdict = await resolved.driver.run(invocation());
+    expect(verdict.stopReason).toBe('complete');
+    expect(verdict.sessionId).not.toBe(concurrent.sessionId);
+    // The wrapped run's fresh record is reaped...
+    await expect(store.load(verdict.sessionId as string)).resolves.toBeUndefined();
+    // ...and the concurrent run's record is UNTOUCHED.
+    await expect(store.load(concurrent.sessionId)).resolves.toBeDefined();
   });
 
   test("b-v (factory half): the resolved wrapper stack forwards RunOptions.signal — a PRE-aborted 'reap-on-settle' resolution never dispatches", async () => {

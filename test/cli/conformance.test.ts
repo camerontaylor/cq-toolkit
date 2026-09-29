@@ -25,6 +25,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { runCli } from '../../src/cli/main.js';
 import type { CliIo } from '../../src/cli/output.js';
 import { RunReportSchema } from '../../src/kernel/schema.js';
+import { stripComments } from '../helpers/strip-comments.js';
 
 const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
 const OPS_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/ops');
@@ -44,15 +45,10 @@ async function laneImports(directory: string): Promise<string[]> {
       hits.push(...(await laneImports(path)));
     } else if (entry.name.endsWith('.ts')) {
       // Tokenize before matching (a JSDoc mention of a lane module is
-      // prose, not an import edge): STRING LITERALS first (a '/*' inside a
-      // literal must not open a phantom block), then ALL line comments
-      // (anchored or trailing), then block comments — block-first stripping
-      // once hid real import statements behind a `/*` inside a `//`
-      // comment.
-      const source = (await readFile(path, 'utf8'))
-        .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, "''")
-        .replace(/\/\/[^\n]*/g, '')
-        .replace(/\/\*[\s\S]*?\*\//g, '');
+      // prose, not an import edge). The single-pass scanner keeps literal
+      // contents VERBATIM — erasing them would erase the quoted specifiers
+      // this scan matches on — while dropping both comment forms.
+      const source = stripComments(await readFile(path, 'utf8'));
       if (
         /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
           source,

@@ -14,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
+import { stripComments } from '../helpers/strip-comments.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DRIVER_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/driver');
@@ -35,15 +36,12 @@ function kernelImports(directory: string): string[] {
       hits.push(...kernelImports(path));
     } else if (entry.name.endsWith('.ts')) {
       // Tokenize before matching (a JSDoc mention of a kernel module is
-      // prose, not an import edge): STRING LITERALS first (a '/*' inside a
-      // prompt or path literal must not open a phantom block), then ALL
-      // line comments (anchored or trailing), then block comments. Block-
-      // first stripping once hid a live driver→kernel import behind a `/*`
-      // inside a `//` comment — the order is load-bearing.
-      const source = readFileSync(path, 'utf8')
-        .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, "''")
-        .replace(/\/\/[^\n]*/g, '')
-        .replace(/\/\*[\s\S]*?\*\//g, '');
+      // prose, not an import edge). The single-pass scanner keeps literal
+      // contents VERBATIM — erasing them would erase the quoted specifiers
+      // this scan matches on — while dropping both comment forms (block-
+      // first regex passes once hid a live driver→kernel import behind a
+      // `/*` inside a `//` comment).
+      const source = stripComments(readFileSync(path, 'utf8'));
       if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*\/kernel\//.test(source)) {
         hits.push(path.slice(ROOT.length + 1));
       }

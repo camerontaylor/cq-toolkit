@@ -43,7 +43,7 @@
 // then-append is one step and can never interleave with an in-flight
 // append.
 import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -346,32 +346,6 @@ export class SessionStore {
   async remove(sessionId: string): Promise<void> {
     assertSafeSessionId(sessionId);
     await rm(this.pathFor(sessionId), { force: true });
-  }
-
-  /**
-   * The ids of the records currently in the store's directory (the
-   * `<sessionId>.jsonl` basenames, validated). Read-only diagnostics/
-   * bookkeeping surface — the factory's reap-on-settle wrapper snapshots it
-   * before a run so a run that REJECTS (throws after creating its record)
-   * can still have its fresh record identified and reaped. A missing or
-   * unreadable directory yields [] (nothing to list); real fs errors throw.
-   */
-  async ids(): Promise<string[]> {
-    const names = await readdir(this.sessionsDir).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return [] as string[];
-      throw err;
-    });
-    return names
-      .filter((name) => name.endsWith('.jsonl'))
-      .map((name) => name.replace(/\.jsonl$/, ''))
-      .filter((id) => {
-        try {
-          assertSafeSessionId(id);
-          return true;
-        } catch {
-          return false;
-        }
-      });
   }
 }
 
