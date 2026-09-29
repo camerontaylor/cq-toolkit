@@ -456,15 +456,9 @@ export class AiSdkDriver implements Driver {
           maxRetries: 1,
           // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
           // hung request cannot stall the loop. The step-timeout abort is not
-          // SDK-retryable, so it surfaces as [endpoint-timeout].
+          // SDK-retryable; it classifies as 'transient' (TimeoutError name).
           timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
           ...(selected.length > 0 ? { tools: toolSet } : {}),
-          // DECOUPLE the mandatory structured object from the tool loop (#203):
-          // with tools available on the final step the model tends to call one
-          // more tool instead of emitting the required object, and `result.output`
-          // then throws. Disabling tools on that step nudges the model into
-          // prose the Output.object path can parse. Pure step-number function —
-          // no scheduling primitive (I8).
           // DECOUPLE the mandatory structured object from the tool loop (#203):
           // with tools available on the final step the model tends to call one
           // more tool instead of emitting the required object, and `result.output`
@@ -742,6 +736,10 @@ export class AiSdkDriver implements Driver {
         totalUsage,
       ),
     });
+    /** Usage WITHOUT a derived cost — the mixed-identity (repair remap) verdict refuses to price. */
+    const verdictUsageOnly = (totalUsage: Usage): Pick<WorkerResult, 'usage'> => ({
+      usage: totalUsage,
+    });
     const verdictSignals = (): { providerSignals?: ProviderSignals } => {
       const signals = providerSignalsFromHeaders(responseHeaders);
       return signals !== undefined ? { providerSignals: signals } : {};
@@ -859,6 +857,15 @@ export class AiSdkDriver implements Driver {
         }),
       });
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
+      // The repair is a REAL model call: its own served-id observation
+      // participates in the remap defence (the outer wrapper only sees the
+      // MAIN response's id — a repair served by a different model must fail
+      // closed HERE, before the payload is accepted), and its finish status
+      // rides the verdict rule unchanged.
+      const repairServedModel =
+        typeof repair.response.modelId === 'string' && repair.response.modelId !== ''
+          ? repair.response.modelId
+          : undefined;
       if (repair.text.trim() !== '') {
         await store.appendMessage(record.sessionId, {
           role: 'assistant',
@@ -879,19 +886,58 @@ export class AiSdkDriver implements Driver {
       }
       if (repairRejection === undefined) {
         // The repair consumed budget too: a successful repair is judged by
-        // the SAME cap rule as the main loop (the stopReasonOf token fold
-        // over the ACCUMULATED usage, main call + repair). A repair that
-        // lands on/over the cap is an honest 'budget' verdict carrying its
-        // spend evidence — never a complete that ignored the cap; its
-        // payload does not ride a verdict that is not 'complete'. (cycle-2
-        // finding; the repair's own finish is by construction a parsed,
-        // validated object — 'stop'.)
+        // the SAME rule as the main loop — stopReasonOf over the repair's
+        // OWN finish status and the ACCUMULATED usage (main call + repair).
+        // A repair that lands on/over the cap is an honest 'budget' verdict
+        // carrying its spend evidence; one the provider ended on a terminal
+        // status is 'error' with the classified cause — never a complete
+        // that overrode the wire. The payload rides a 'complete' verdict
+        // only.
         const repairStop = stopReasonOf({
-          finishReason: 'stop',
+          finishReason: repair.finishReason,
           aborted: signalAborted(abortSignal),
           tokenBudget: budget.maxTokens,
           totalTokens: totalTokensOf(totalUsage),
         });
+        if (repairStop === 'error') {
+          return {
+            ...(servedModel !== undefined ? { model: servedModel } : {}),
+            ...verdictExtras(totalUsage),
+            sessionId: record.sessionId,
+            denials,
+            stopReason: 'error',
+            error: boundedErrorText(
+              `ai-sdk driver: the repair attempt ended on the provider's terminal status (${String(repair.finishReason)})`,
+            ),
+            errorClass: finishReasonErrorClass(repair.finishReason),
+            ...verdictSignals(),
+          };
+        }
+        // A repair served by a DIFFERENT model than the main call observed
+        // is an intra-run remap: the payload mixes two model identities, so
+        // it is dropped and the verdict fails closed as
+        // 'served-model-mismatch'. Spend evidence is kept; the derived cost
+        // is NOT — pricing the fold would attribute the repair's tokens to
+        // the wrong model, so an unpriceable mixed-identity run carries no
+        // costUSD (the same derived-only honesty as an unpriced model).
+        if (
+          repairServedModel !== undefined &&
+          servedModel !== undefined &&
+          repairServedModel !== servedModel
+        ) {
+          return {
+            model: servedModel,
+            ...verdictUsageOnly(totalUsage),
+            sessionId: record.sessionId,
+            denials,
+            stopReason: 'error',
+            error: boundedErrorText(
+              `ai-sdk driver: the repair attempt was served '${repairServedModel}' while the main call observed '${servedModel}' — the payload mixes model identities`,
+            ),
+            errorClass: 'served-model-mismatch',
+            ...verdictSignals(),
+          };
+        }
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
           ...(repairStop === 'complete' ? { structuredOutput: repairedValue } : {}),

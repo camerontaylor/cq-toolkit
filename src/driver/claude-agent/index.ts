@@ -210,8 +210,7 @@
 // missing key env — each a DispatchError('config'); unknown sessionRef; a
 // workspace binding that is not an absolute existing directory or
 // disagrees with the resumed record's realpath — a DispatchError('config');
-// a non-positive Budget.maxTokens; the outputSchema conversion throws at
-// construction).
+// a non-positive Budget.maxTokens).
 //
 // ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
 // `errorClass`, classified ONLY from structured signals — the result-frame
@@ -405,7 +404,6 @@ export interface ClaudeAgentDriverOptions {
 export class ClaudeAgentDriver implements Driver {
   private readonly sdkLoader: SdkLoader;
   private readonly endpointTable: EndpointTable;
-  /** The migration-only constructor schema, normalized to the seam shape. */
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
@@ -423,11 +421,6 @@ export class ClaudeAgentDriver implements Driver {
       options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
     this.sdkLoader = options.sdkLoader ?? defaultSdkLoader;
     this.endpointTable = options.endpointTable ?? defaultEndpointTable();
-    // zod→seam schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise. The seam
-    // document is retained — the settle-time judge (`validateStructured`)
-    // re-derives its schema from THIS document, the same one the transport
-    // strips and sends, so the judgment is over what the vendor saw.
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;

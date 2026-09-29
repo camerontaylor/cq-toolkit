@@ -775,7 +775,6 @@ export class AcpDriver implements Driver {
   private readonly endpointTable: AcpEndpointTable;
   private readonly envNames: readonly string[];
   private readonly modelEnv: string | undefined;
-  /** The migration-only constructor schema, normalized to the seam shape. */
   private readonly workspaceRoot: string | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly pricingOverride:

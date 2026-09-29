@@ -229,7 +229,7 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
         // retry loop NEVER issues another paid call once a cell produced a
         // completed result.
         const ladderOutcome = await runLadder(
-          () => driver.run(invocationFor(resolved.modelSpec, budget)),
+          (ctx) => driver.run(invocationFor(resolved.modelSpec, budget), { signal: ctx.signal }),
           { wallClockMs: WALL_CLOCK_MS },
           { op: 'eval-axes', jobKey: `eval-axes/${lane}/${model}`, attempt },
         );

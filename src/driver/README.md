@@ -149,12 +149,13 @@ class, never narration-text tokens. The verdict stays `error` and
 governed abort that leaves the final step on tool-calls is the honest
 `budget`/`aborted` verdict instead — the missing object is its consequence,
 not a driver failure — and `structuredOutput` is likewise never fabricated
-on those paths. `[endpoint-timeout]` —
-the SDK-retryable transient class (endpoint header timeout, network error,
-rate limit / 429, 5xx), plus the non-retryable step-timeout abort (classified
-via its `TimeoutError` name). `[provider-error]` —
-anything else. The classification lives in
-the exported pure `classifyRunFailure(err)`.
+on those paths. The remaining `errorClass` values come from the structured
+cuts: `'transient'` for the SDK-retryable class (endpoint header timeout,
+network error) AND the non-retryable step-timeout abort (its `TimeoutError`
+name), `'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
+rules, and `'unknown'` for anything message-only (a bare message regex is
+never a class). The classification lives in the exported pure
+`classifyRunFailure(err)`.
 
 Pricing attribution: `costUSD` is derived via
 `src/driver/pricing/index.ts` (`computeCostUSD`) over the vendored
@@ -279,8 +280,8 @@ Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A):
   harness results three ways (harness denial by prefix / CLI permission
   denial / anything else = transport failure), and settles every harness
   failure as stopReason `error` with a `HARNESS_ERROR_PREFIX` cause and an
-  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field
-  lands with the W3.3 types bump).
+  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field —
+  shipped with seam v2).
 - Named limitations: a same-uid `run` command can still read an
   ancestor's environment (OS confinement, T1.8); a server killed without
   SIGTERM orphans an in-flight command group until it exits on its own.
@@ -483,10 +484,10 @@ handle is exactly as precise and out of its reach; a sidecar-less
 session resumes the workspace only, an honest partial continuation);
 unknown sessionRef throws. Session turns persist in our
 `SessionMessage` vocabulary only. Structured output rides the SDK's
-NATIVE `outputFormat: { type: 'json_schema' }` path; the result's
-`structured_output` is validated against the configured zod schema
-post-settle — a payload that fails is dropped to narration, never
-trusted. Usage maps the result vocabulary (`input_tokens` /
+NATIVE `outputFormat: { type: 'json_schema' }` path (the schema rides the
+INVOCATION); the result's `structured_output` is validated post-settle by
+the shared validator — a payload that fails settles the uniform
+error/`output-invalid` verdict, never trusted. Usage maps the result vocabulary (`input_tokens` /
 `output_tokens` / `cache_read_input_tokens` /
 `cache_creation_input_tokens`); `reasoning` is deliberately OMITTED —
 the SDK's `thinkingTokens` are already counted inside `output_tokens`,

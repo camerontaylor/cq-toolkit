@@ -46,9 +46,8 @@
 //                               rejects stream-json without it — found live,
 //                               CLI 2.1.270, T1.6 slice 4; a no-op for CLIs
 //                               that don't know the flag)
-//   --json-schema <json>        only when a structured-output schema is in
-//                               force (the invocation's outputSchema, or the
-//                               constructor option until its retirement)
+//   --json-schema <json>        only when the invocation carries
+//                               `outputSchema`
 //   --tools ""                  harness mode (default): every CLI builtin
 //                               is REMOVED from the surface (absent, not
 //                               denied — RS-1/RS-1b b1/b5)
@@ -212,8 +211,7 @@
 // binding that is not an absolute existing directory or disagrees with the
 // resumed record's realpath — a DispatchError('config'); a non-positive
 // Budget.maxTokens; invalid grace windows or binary template at
-// construction; a constructor schema that cannot become a seam document —
-// the last at construction).
+// construction).
 //
 // ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
 // `errorClass`, classified ONLY from structured signals — the close cause
@@ -420,7 +418,6 @@ export interface SubprocessDriverOptions {
  */
 export class SubprocessDriver implements Driver {
   private readonly binary: readonly string[];
-  /** The migration-only constructor schema, normalized to the seam shape. */
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;

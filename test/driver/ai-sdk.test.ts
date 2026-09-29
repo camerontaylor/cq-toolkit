@@ -767,8 +767,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(budgeted.errorClass).toBeUndefined(); // a cap is not a failure
       expect(budgeted.usage).toEqual({ input: 900, output: 108, cacheRead: 135, cacheWrite: 45 });
       // CONTROL: the same successful repair under a cap it never reaches →
-      // complete WITH the payload.
+      // complete WITH the payload. toolFreeCalls resets too — the control
+      // must follow the SAME invalid-final-step path (miss → repair →
+      // object), not complete on the loop's final step.
       calls = 0;
+      toolFreeCalls = 0;
       const free = new AiSdkDriver({
         providers: { mock: () => repairSucceeds },
         sessionsDir: join(scratchDir, 'sessions'),
@@ -782,6 +785,8 @@ describe('ai-sdk driver specifics (mock model)', () => {
       );
       expect(completed.stopReason).toBe('complete');
       expect(completed.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      // The repair really fired: 8 loop steps + 1 repair step.
+      expect(calls).toBe(DEFAULT_MAX_STEPS + 1);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
