@@ -718,6 +718,75 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('a SUCCESSFUL repair is still judged by the token cap: the accumulated fold trips budget (cycle-2)', async () => {
+    let calls = 0;
+    let toolFreeCalls = 0;
+    const repairSucceeds = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        // Main loop tool-calls. The lane's TOOL-FREE FINAL LOOP STEP (and
+        // then the tool-free REPAIR) is distinguished by counting: the
+        // FIRST tool-free call must ALSO miss (else the loop's final step
+        // completes the run and no repair fires); the SECOND — the repair —
+        // answers with the valid object.
+        if (options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { path: 'absent.txt' });
+        }
+        toolFreeCalls += 1;
+        return toolFreeCalls === 1
+          ? textResult('prose with no json at all')
+          : textResult('{\"fixed\":true,\"notes\":\"ok\"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => repairSucceeds },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const schema = toOutputSchema(
+        'test/repair-budget/v1',
+        z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+      );
+      // 8 main steps end on the step cap (8 × 132 total tokens incl. cache
+      // = 1056, under the 1100 cap — the loop ends on max-steps, so the
+      // REPAIR fires), then the repair pushes the accumulated fold to
+      // 9 × 132 = 1188 ≥ 1100: the repair's success is an honest 'budget'
+      // verdict — the payload does not ride it, the spend evidence does.
+      const budgeted = await driver.run(
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          budget: { maxTokens: 1100 },
+          outputSchema: schema,
+        }),
+      );
+      expect(calls).toBe(DEFAULT_MAX_STEPS + 1);
+      expect(budgeted.stopReason).toBe('budget');
+      expect(budgeted.structuredOutput).toBeUndefined();
+      expect(budgeted.errorClass).toBeUndefined(); // a cap is not a failure
+      expect(budgeted.usage).toEqual({ input: 900, output: 108, cacheRead: 135, cacheWrite: 45 });
+      // CONTROL: the same successful repair under a cap it never reaches →
+      // complete WITH the payload.
+      calls = 0;
+      const free = new AiSdkDriver({
+        providers: { mock: () => repairSucceeds },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const completed = await free.run(
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          budget: { maxTokens: 5000 },
+          outputSchema: schema,
+        }),
+      );
+      expect(completed.stopReason).toBe('complete');
+      expect(completed.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a token cap that leaves the final step on tool-calls reports budget, not error (#203)', async () => {
     const alwaysToolCalls = new MockLanguageModelV4({
       modelId: 'mock-1',

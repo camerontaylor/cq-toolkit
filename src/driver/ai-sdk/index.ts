@@ -878,13 +878,27 @@ export class AiSdkDriver implements Driver {
         repairRejection = describeError(err);
       }
       if (repairRejection === undefined) {
+        // The repair consumed budget too: a successful repair is judged by
+        // the SAME cap rule as the main loop (the stopReasonOf token fold
+        // over the ACCUMULATED usage, main call + repair). A repair that
+        // lands on/over the cap is an honest 'budget' verdict carrying its
+        // spend evidence — never a complete that ignored the cap; its
+        // payload does not ride a verdict that is not 'complete'. (cycle-2
+        // finding; the repair's own finish is by construction a parsed,
+        // validated object — 'stop'.)
+        const repairStop = stopReasonOf({
+          finishReason: 'stop',
+          aborted: signalAborted(abortSignal),
+          tokenBudget: budget.maxTokens,
+          totalTokens: totalTokensOf(totalUsage),
+        });
         return {
           ...(servedModel !== undefined ? { model: servedModel } : {}),
-          structuredOutput: repairedValue,
+          ...(repairStop === 'complete' ? { structuredOutput: repairedValue } : {}),
           ...verdictExtras(totalUsage),
           sessionId: record.sessionId,
           denials,
-          stopReason: 'complete',
+          stopReason: repairStop,
           ...verdictSignals(),
         };
       }
