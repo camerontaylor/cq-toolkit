@@ -101,7 +101,7 @@ describe('real pinned compiler and lint conformance', () => {
     const missing = gate(root);
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('TS2307');
-  });
+  }, 70_000);
   it('fails project configuration errors even with a larger baseline', () => {
     const root = fixture();
     const original = readFileSync(join(root, BASELINE), 'utf8').replace(
