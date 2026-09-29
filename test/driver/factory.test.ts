@@ -18,7 +18,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
-import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import type { OpInvocation } from '../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
 
