@@ -40,7 +40,7 @@
 import {
   processSignalCleanupStarted,
   registerProcessSignalCleanup,
-} from '../../kernel/process-signals.js';
+} from '../../shared/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 

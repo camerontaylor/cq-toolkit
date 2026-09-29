@@ -35,10 +35,13 @@ function kernelImports(directory: string): string[] {
       hits.push(...kernelImports(path));
     } else if (entry.name.endsWith('.ts')) {
       // Strip comments first: a JSDoc mention of a kernel module is prose,
-      // not an import edge.
+      // not an import edge. LINE comments go FIRST — stripping block
+      // comments first lets a `/*` sequence inside a `//` line comment open
+      // a phantom block that swallows real import statements (a false
+      // negative that hid a live driver→kernel import once).
       const source = readFileSync(path, 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/^\s*\/\/.*$/gm, '');
+        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
       if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*\/kernel\//.test(source)) {
         hits.push(path.slice(ROOT.length + 1));
       }
