@@ -52,6 +52,7 @@ import {
   SWEEP_PLAN_JOB_IDS,
   type SweepPlanConfig,
 } from '../../../src/plans/sweep.js';
+import { buildTestFixPlan } from '../../../src/plans/test-fix.js';
 import {
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
@@ -163,6 +164,8 @@ export interface RunSweepOpts {
   push?: boolean;
   /** Optional staged-path allowlist overlay (the test-fix scope pin). */
   stagePathAllowlist?: { patterns: string[] };
+  /** Build through the shipped test-fix factory, including its protected allowlist. */
+  testFixPlan?: boolean;
   /** The units dispatch's concurrency; default 1 (the e2e's serial default). */
   concurrency?: number;
 }
@@ -201,24 +204,34 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // ASSEMBLE job is REMOVED from this plan: it is dispatched separately
   // below, composed from the units' committed markers (jTPa8 — the static
   // Job cannot know which units committed until they have run).
-  const fullPlan = buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
-    driver: opts.driver,
-    check: opts.check,
-    push: opts.push ?? true,
-    ...(opts.stagePathAllowlist !== undefined
-      ? { stagePathAllowlist: opts.stagePathAllowlist }
-      : {}),
-  });
+  const fullPlan = opts.testFixPlan
+    ? buildTestFixPlan(opts.config, planner)
+    : buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
+        driver: opts.driver,
+        check: opts.check,
+        push: opts.push ?? true,
+        ...(opts.stagePathAllowlist !== undefined
+          ? { stagePathAllowlist: opts.stagePathAllowlist }
+          : {}),
+      });
   const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
   const plan = {
     ...fullPlan,
     jobs: fullPlan.jobs.filter((job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble),
   };
   for (const job of plan.jobs) {
-    if (job.op !== SWEEP_UNIT_OP || opts.promptTemplate === undefined) continue;
-    (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
-      job.input as WorkUnit,
-    );
+    if (job.op !== SWEEP_UNIT_OP) continue;
+    const input = job.input as SweepUnitDispatchInput;
+    if (opts.promptTemplate !== undefined) {
+      input.promptTemplate = opts.promptTemplate(job.input as WorkUnit);
+    }
+    if (opts.testFixPlan) {
+      // The public test-fix factory pins scope itself; only supply the
+      // execution bindings that the standard sweep builder normally layers.
+      input.driver = opts.driver;
+      input.check = opts.check;
+      input.push = opts.push ?? true;
+    }
   }
 
   // The dispatch view: the CENTRAL registry (sweep.planSweep AND the

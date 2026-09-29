@@ -49,7 +49,7 @@ import {
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
-import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
+import { fingerprintFailure } from '../../../src/ops/gates/fingerprint.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
@@ -163,6 +163,7 @@ function optsFor(
   extra?: {
     push?: boolean;
     stagePathAllowlist?: { patterns: string[] };
+    testFixPlan?: boolean;
     concurrency?: number;
   },
 ): RunSweepOpts {
@@ -656,8 +657,8 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
     async () => {
       const scene = await scenario('cq/e2e-scope');
       // The test-fix run: the planner's units carry the test-only fixer, and
-      // the staged set is held to the test-file patterns (the plan overlay
-      // buildTestFixPlan ships — wired here explicitly).
+      // the staged set is held to the test-file patterns by the shipped
+      // buildTestFixPlan factory before the real plan executor dispatches it.
       const outcome: SweepRunOutcome = await runSweepPlan(
         optsFor(
           { ...scene, config: { ...scene.config, fixers: ['test-fix'] } },
@@ -665,7 +666,7 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
             { edit: ALPHA_FIX }, // the legitimate test fix
             { write: { file: 'packages/beta/index.js', text: "export const beta = 'prod';\n" } }, // production code
           ),
-          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+          { testFixPlan: true },
         ),
       );
 
@@ -674,6 +675,11 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
       expect(alpha.status).toBe('ok');
       expect(alpha.report?.committed).toBe(true);
       expect(alpha.report?.pushed).toBe(true);
+      const originalFailure = alpha.report?.baseline.failureSet?.failures[0];
+      const fixedFailure = alpha.report?.regression?.fixedFailures[0];
+      expect(originalFailure?.message).toBe(ALPHA_FAILURE_MESSAGE);
+      expect(fixedFailure).toBeDefined();
+      expect(fingerprintFailure(fixedFailure!)).toBe(fingerprintFailure(originalFailure!));
 
       // Beta: the production-code file is OUT of scope — the unit failed
       // naming the path, and nothing was committed or pushed.
@@ -793,7 +799,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
               delete: 'packages/beta/package.json',
             },
           ),
-          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+          { testFixPlan: true },
         ),
       );
 
