@@ -312,7 +312,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       let lastError = error;
       for (let attempt = 2; attempt <= 1 + rescueBudget; attempt += 1) {
         const rescuePlan = {
-          id: SWEEP_PLAN_ID,
+          id: fullPlan.id,
           label: `sweep: rescue re-dispatch (attempt ${attempt} of ${1 + rescueBudget})`,
           jobs: [
             {

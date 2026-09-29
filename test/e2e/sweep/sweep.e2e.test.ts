@@ -53,6 +53,7 @@ import { fingerprintFailure } from '../../../src/ops/gates/fingerprint.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
+import { TEST_FIX_PLAN_ID } from '../../../src/plans/test-fix.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
 import {
   SWEEP_RUN_STATE_BASELINE_DIR,
@@ -975,6 +976,48 @@ describe('sweep e2e: rescue lane and prep mode', () => {
       expect(outcome.assembleRun).toBeDefined();
       const assembled = assembleReport(outcome.assembleRun as RunReport);
       expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+    },
+  );
+
+  test(
+    'test-fix rescue remains journaled under the selected test-fix plan id',
+    { timeout: 180_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-test-fix-rescue');
+      const faultMarker = join(scene.root, 'alpha-faulted');
+      const outcome = await runSweepPlan(
+        optsFor(
+          {
+            ...scene,
+            config: {
+              ...scene.config,
+              fixers: ['test-fix'],
+              rescue: { maxRedispatch: 1 },
+            },
+          },
+          prompts(
+            {
+              edit: ALPHA_FIX,
+              faultOnce: { marker: faultMarker, why: 'transient crash on alpha' },
+            },
+            {},
+          ),
+          { testFixPlan: true },
+        ),
+      );
+
+      expect(unitRow(outcome.run, 'alpha', 'test-fix').status).toBe('failed');
+      expect(outcome.rescueRuns).toHaveLength(1);
+      expect(outcome.rescueRuns?.[0]?.jobs[0]?.jobId).toBe('sweep-alpha-test-fix-r2');
+      expect(outcome.rescueRuns?.[0]?.jobs[0]?.result.status).toBe('ok');
+
+      const rescueEvents = await runEventsAt(scene.journalDir, TEST_FIX_PLAN_ID, 1);
+      expect(rescueEvents[0]).toMatchObject({ type: 'run-started', planId: TEST_FIX_PLAN_ID });
+      expect(
+        rescueEvents.some(
+          (event) => event.type === 'job-started' && event.jobId === 'sweep-alpha-test-fix-r2',
+        ),
+      ).toBe(true);
     },
   );
 
