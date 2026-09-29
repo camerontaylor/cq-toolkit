@@ -483,8 +483,13 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('THE REMAP DEFENCE IS POST-DISPATCH (§2.6): unknown provider still refuses pre-dispatch; an unknown MODEL now dispatches and the served id is observed', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      // The deepseek endpoint reads its key value at run() time.
-      process.env.DEEPSEEK_API_KEY ??= 'offline-remap-key';
+      // The deepseek endpoint reads its key value at run() time. Stubbed
+      // (not written): a host DEEPSEEK_API_KEY stays untouched and the
+      // afterEach unstub restores the unset state.
+      vi.stubEnv('DEEPSEEK_API_KEY', 'offline-remap-key');
+      onTestFinished(() => {
+        vi.unstubAllEnvs();
+      });
       const driver = new SubprocessDriver(
         baseOptions(
           scratchDir,

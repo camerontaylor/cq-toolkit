@@ -495,12 +495,11 @@ posture as the weakest existing lane, stated without cosmetics:
   SHARED validator against that same document. Parse/validation success →
   `WorkerResult.structuredOutput`.
 - **The honest gap:** the model may refuse, prepend prose, or malform —
-  identical to every prompt-directed scheme. A failing payload is
-  DROPPED to narration (the raw text never lands in
-  `structuredOutput`), `structuredOutput` stays absent, and the run
-  verdict stays what the wire said — the claude-agent lane's
-  dropped-to-narration rule, without even a native fallback to hide
-  behind. Conformance exercises the scripted-JSON path through the fake
+  identical to every prompt-directed scheme. A failing payload never
+  lands in `structuredOutput` and the run settles the UNIFORM
+  error/`output-invalid` verdict (seam v2 §2.3), usage and cost kept —
+  this lane has no native retry or repair turn to hide behind.
+  Conformance exercises the scripted-JSON path through the fake
   server; the LIVE harness's fidelity is a model+vendor fact.
 - **DD-4 (GLM/DeepSeek schema fidelity) is RECORDED, not solved:** this
   lane adds a THIRD wire shape for exactly the two vendors DD-4 is

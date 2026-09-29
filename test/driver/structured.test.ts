@@ -252,6 +252,22 @@ describe('validateStructured — seam guards', () => {
     expect(result.reason.length).toBeGreaterThan(0);
     expect(result.reason).toContain('answer');
   });
+
+  test('an UNCOMPILABLE document is an ok:false result, never a thrown compile error', () => {
+    // The invocation schema is caller-authored plain data: a document that
+    // zod's importer refuses to compile must settle the uniform
+    // output-invalid path ({ok:false} naming the schema), not escape as a
+    // foreign throw past the seam (cycle-1 finding).
+    const os = { name: 'hostile/uncompilable/v1', schema: { type: 'not-a-json-schema-type' } };
+    let result: ReturnType<typeof validateStructured>;
+    try {
+      result = validateStructured(os, { answer: 'ok' });
+    } catch (err) {
+      throw new Error(`validateStructured threw instead of returning ok:false: ${String(err)}`);
+    }
+    assert(!result.ok);
+    expect(result.reason).toContain('hostile/uncompilable/v1');
+  });
 });
 
 /** Vitest-free assertion narrow used to satisfy the type checker above. */

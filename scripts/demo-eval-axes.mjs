@@ -246,6 +246,26 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
         // for a CORRECT fold.
         const pricedModel = result.model ?? model;
         const recomputed = recomputeCost({ provider, model: pricedModel }, result.usage);
+        // A FACTORY-ADJUDICATED remap arrives as stopReason 'error' /
+        // errorClass 'served-model-mismatch' with the RAW served id kept
+        // (seam v2 §2.6): endpoint configuration, not a transient — record
+        // the evidence and NEVER re-pay for the same answer (the same
+        // no-retry rule the raw-id remap check below applies).
+        if (result.stopReason === 'error' && result.errorClass === 'served-model-mismatch') {
+          attempts.push({
+            attempt,
+            stopReason: result.stopReason,
+            servedModelMismatch: {
+              requested: model,
+              ...(expectedServed !== undefined ? { expectedServed } : {}),
+              served: result.model ?? null,
+              usage: result.usage,
+              driverCostUSD: result.costUSD ?? null,
+              recomputed,
+            },
+          });
+          break;
+        }
         // Fixture validation (the acceptance bar for a PASS): the verdict
         // must be stopReason 'complete' — a 'budget' or 'error' stopReason
         // records the cell as failed-with-evidence — AND the assistant

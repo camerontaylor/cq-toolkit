@@ -195,7 +195,11 @@ export function toOutputSchema(name: string, schema: z.ZodType): OutputSchema {
  * re-derived from `os.schema` (never the caller's original contract), so a
  * lane cannot pass a doc it did not validate against. Never mutates `value`;
  * on `ok` returns the schema-normalised plain JSON (e.g. unknown keys are
- * treated exactly as the emitted document treats them).
+ * treated exactly as the emitted document treats them). A document that
+ * cannot even COMPILE (the invocation schema is caller-authored plain data —
+ * an unresolvable/unrepresentable document must surface as the uniform
+ * `output-invalid` verdict, never as a foreign throw past the seam) is an
+ * `ok: false` result naming the schema and the compiler's objection.
  */
 export function validateStructured(
   os: OutputSchema,
@@ -203,7 +207,17 @@ export function validateStructured(
 ): { ok: true; value: unknown } | { ok: false; reason: string } {
   // `JsonSchema` is deliberately the loose plain-data seam type; zod's
   // importer wants its own (structurally identical) JSON Schema type.
-  const schema = z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
+  let schema: z.ZodType;
+  try {
+    schema = z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `schema '${os.name}' could not be compiled from its JSON Schema document: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     return { ok: false, reason: z.prettifyError(parsed.error) };
