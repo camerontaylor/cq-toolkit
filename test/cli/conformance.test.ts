@@ -43,12 +43,15 @@ async function laneImports(directory: string): Promise<string[]> {
     if (entry.isDirectory()) {
       hits.push(...(await laneImports(path)));
     } else if (entry.name.endsWith('.ts')) {
-      // Strip comments first: a JSDoc mention of a lane module is prose,
-      // not an import edge. LINE comments go FIRST — block-first stripping
-      // lets a `/*` inside a `//` line comment open a phantom block that
-      // swallows real import statements (false negatives).
+      // Tokenize before matching (a JSDoc mention of a lane module is
+      // prose, not an import edge): STRING LITERALS first (a '/*' inside a
+      // literal must not open a phantom block), then ALL line comments
+      // (anchored or trailing), then block comments — block-first stripping
+      // once hid real import statements behind a `/*` inside a `//`
+      // comment.
       const source = (await readFile(path, 'utf8'))
-        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, "''")
+        .replace(/\/\/[^\n]*/g, '')
         .replace(/\/\*[\s\S]*?\*\//g, '');
       if (
         /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(

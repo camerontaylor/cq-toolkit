@@ -269,24 +269,37 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
 
 /**
  * The reap-on-settle wrapper (§2.5): after the run settles — WHATEVER the
- * verdict — delete ONLY the FRESH record that run created. The run created
- * a record iff it resolved with a `sessionId` AND the invocation carried NO
- * `sessionRef`; a sessionRef-resumed record predates the run and is never
- * reaped. Cleanup is best-effort: a reap failure is swallowed, the verdict
- * outranks it (the same posture as the lanes' persistence).
+ * verdict, AND on a REJECTION (a lane that throws after creating its fresh
+ * record must not leak the prompt-bearing JSONL) — delete ONLY the FRESH
+ * records that run created. Freshness is a snapshot delta: the store's ids
+ * before the run vs after it (a lane's record id is unknowable to the
+ * caller on a rejection, so "created by this run" is the only safe set). A
+ * sessionRef-resumed record predates the run and is never reaped. Cleanup
+ * is best-effort: a reap failure is swallowed, the verdict (or the original
+ * rejection) outranks it (the same posture as the lanes' persistence).
  */
-function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
+export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
   return {
     async run(invocation, options): Promise<WorkerResult> {
-      const result = await driver.run(invocation, options);
-      if (invocation.sessionRef === undefined && result.sessionId !== undefined) {
-        try {
-          await new SessionStore(sessionsDir).remove(result.sessionId);
-        } catch {
-          // deliberately swallowed — the verdict outranks the cleanup
+      const store = new SessionStore(sessionsDir);
+      const snapshot =
+        invocation.sessionRef === undefined ? await store.ids().catch(() => undefined) : undefined;
+      try {
+        return await driver.run(invocation, options);
+      } finally {
+        if (snapshot !== undefined) {
+          const fresh = await store
+            .ids()
+            .then((ids) => ids.filter((id) => !snapshot.includes(id)))
+            .catch((): string[] => []);
+          for (const id of fresh) {
+            await store.remove(id).catch(() => {
+              // deliberately swallowed — the verdict (or the original
+              // rejection) outranks the cleanup
+            });
+          }
         }
       }
-      return result;
     },
   };
 }

@@ -889,20 +889,30 @@ export class AiSdkDriver implements Driver {
             ? 'match'
             : 'mixed';
       const verdictModel = repairIdentity === 'repair-only' ? repairServedModel : servedModel;
-      /** Usage WITHOUT a derived cost — the mixed-identity fold is unpriceable. */
+      /**
+       * Aggregate pricing requires ONE attributable identity for BOTH calls:
+       * 'mixed' attributes the repair's tokens to the main response's model
+       * (fabrication), and 'repair-only' attributes the possibly-remapped
+       * MAIN call's tokens to the repair's model (misattribution that would
+       * also silence the governor's unpriced-usage trip). Both settle with
+       * the usage evidence and NO costUSD — the same derived-only honesty as
+       * an unpriced model. Only 'match' prices: both observed and equal
+       * under the served id; both unobserved under the requested id (the v1
+       * rule).
+       */
       const repairVerdictExtras = (
         usage: Usage,
       ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> =>
-        repairIdentity === 'mixed'
-          ? verdictUsageOnly(usage)
-          : {
+        repairIdentity === 'match'
+          ? {
               usage,
               ...costField(
                 this.pricing,
-                { ...modelSpec, model: verdictModel ?? modelSpec.model },
+                { ...modelSpec, model: servedModel ?? modelSpec.model },
                 usage,
               ),
-            };
+            }
+          : verdictUsageOnly(usage);
       // The repair's OWN limit headers are the FRESHER observation (the
       // second request consumed capacity after the first) — they take
       // precedence over the main response's whenever the repair returned
@@ -962,10 +972,14 @@ export class AiSdkDriver implements Driver {
         }
         // The ONE fail-closed point for a mixed identity (see the judgment
         // above): the payload is dropped, spend evidence kept, the fold
-        // unpriced.
-        // 'mixed' implies the main response observed an id (see the
-        // judgment above); the conjunction narrows for the compiler.
-        if (repairIdentity === 'mixed' && servedModel !== undefined) {
+        // unpriced. Only a COMPLETE verdict carries a payload — a 'budget'
+        // or 'aborted' repair keeps its honest verdict (a governed abort is
+        // never a failure, I8; a cap trip is never an endpoint mismatch);
+        // those are already payload-free and unpriced by
+        // repairVerdictExtras. 'mixed' implies the main response observed an
+        // id (see the judgment above); the conjunction narrows for the
+        // compiler.
+        if (repairStop === 'complete' && repairIdentity === 'mixed' && servedModel !== undefined) {
           return {
             model: servedModel,
             ...verdictUsageOnly(totalUsage),
@@ -1038,7 +1052,9 @@ export class AiSdkDriver implements Driver {
           signals;
         return {
           ...(errModel !== undefined ? { model: errModel } : {}),
-          ...(errIdentity === 'mixed' ? { usage: totalUsage } : { ...verdictExtras(totalUsage) }),
+          // Same aggregate-pricing rule as the returned-repair paths: only
+          // a 'match' (both observed and equal, or neither observed) prices.
+          ...(errIdentity === 'match' ? verdictExtras(totalUsage) : { usage: totalUsage }),
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
