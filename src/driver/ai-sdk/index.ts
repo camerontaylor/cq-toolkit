@@ -608,7 +608,14 @@ export class AiSdkDriver implements Driver {
       const finishClass = stopReason === 'error' ? finishReasonErrorClass(finishReason) : undefined;
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+        // The payload rides a COMPLETE verdict only (as the repair path
+        // already does): a budget/aborted run's parsed object is not an
+        // outcome the caller may consume, and the outer served-model
+        // wrapper judges only completes — a payload on a non-complete
+        // verdict would bypass the observed-model check.
+        ...(stopReason === 'complete' && structuredOutput !== undefined
+          ? { structuredOutput }
+          : {}),
         usage,
         // PRICING KEY: derived over the OBSERVED served model id — a
         // silently-remapped gateway is priced off the id the response
@@ -1047,9 +1054,13 @@ export class AiSdkDriver implements Driver {
               ? 'match'
               : 'mixed';
         const errModel = errIdentity === 'repair-only' ? errRepairServedModel : servedModel;
+        // The repair error's own headers first; when it exposes none, the
+        // MAIN response's still-honest limit evidence — dropping it would
+        // hide quota/reset facts already observed on this run.
         const errSignals =
           providerSignalsFromHeaders(err.response?.headers as Record<string, string> | undefined) ??
-          signals;
+          signals ??
+          providerSignalsFromHeaders(responseHeaders);
         return {
           ...(errModel !== undefined ? { model: errModel } : {}),
           // Same aggregate-pricing rule as the returned-repair paths: only
@@ -1079,7 +1090,15 @@ export class AiSdkDriver implements Driver {
               errorClass: classifyRunFailure(err),
             }
           : {}),
-        ...(signals !== undefined ? { providerSignals: signals } : {}),
+        // The failure error's own signals first; when it exposes none, the
+        // MAIN response's limit evidence stays on the verdict (same
+        // fallback as the parse-miss path above).
+        ...(signals !== undefined
+          ? { providerSignals: signals }
+          : (() => {
+              const mainSignals = providerSignalsFromHeaders(responseHeaders);
+              return mainSignals !== undefined ? { providerSignals: mainSignals } : {};
+            })()),
       };
     }
   }
