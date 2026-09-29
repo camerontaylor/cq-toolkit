@@ -297,10 +297,8 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
 
   test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {
     const driver = {
-      binary: ['node', '/opt/agent.mjs'],
       provider: 'cq-e2e',
       model: 'sweep-fake',
-      sessionsDir: '/tmp/sweep-sessions',
     };
     const check = {
       adapter: 'tsc-lines' as const,
@@ -487,8 +485,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
         await generateScratchRepo(repo);
         const captured: OpInvocation[] = [];
         // A capturing fake driver: records the invocation, then stops the
-        // pipeline (the op folds the throw into a `failed` result — the
-        // capture is the point).
+        // pipeline. S4b-B2 (ADR-0002 §2.9): an unclassified driver throw is
+        // a pre-dispatch failure the human arranges — the op folds it into a
+        // `needs-human` result (the capture is the point).
         const driver: Driver = {
           run: async (invocation) => {
             captured.push(invocation);
@@ -511,15 +510,22 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           }),
           driver,
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-          sessionsDir: join(root, 'sessions'),
           prompt: () => 'capture me',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };
         const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
         // DEFAULT: none (the shipped behavior, unchanged).
-        const failed = await makeSweepUnitOp(base)(unit);
-        expect(failed.status).toBe('failed'); // the capture's deliberate stop
+        const refused = await makeSweepUnitOp(base)(unit);
+        expect(refused.status).toBe('needs-human'); // the capture's deliberate stop
         expect(captured[0]?.sandboxPolicy).toEqual({ level: 'none' });
+        // WORKSPACE BINDING (ADR-0002 §2.4): the worktree rides the
+        // invocation as its workspace — no pre-created session record, no
+        // sessionRef — and the invocation carries the bindings' (resolved)
+        // modelSpec verbatim.
+        expect(captured[0]?.workspace).toBeDefined();
+        expect(captured[0]?.workspace?.path).toContain(join(repo, 'worktrees'));
+        expect(captured[0]?.sessionRef).toBeUndefined();
+        expect(captured[0]?.modelSpec).toEqual({ model: 'sweep-fake', provider: 'cq-d4-e2e' });
         // OVERRIDE: the binding rides verbatim into the OpInvocation.
         const hardened: WorkUnit = { package: 'alpha', fixer: 'hardened', files: [] };
         await makeSweepUnitOp({ ...base, sandboxPolicy: { level: 'workspace-write' } })(hardened);

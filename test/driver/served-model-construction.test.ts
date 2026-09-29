@@ -129,40 +129,57 @@ describe('served-model real construction paths', () => {
       vi.stubEnv('CQ_CONSTRUCTION_KEY', 'offline-fixture-key');
       vi.stubEnv('FAKE_AGENT_MODE', 'ok');
       vi.stubEnv('FAKE_AGENT_SERVED_MODEL', undefined);
-      const bindings = bindingsFromDispatch({
-        repoRoot: root,
-        worktreesDir: join(root, 'worktrees'),
-        runPrefix: 'cq/construction',
-        base: 'main',
-        package: 'fixture',
-        fixer: 'fix',
-        files: ['file.ts'],
-        driver: {
-          binary: [
-            'env',
-            ...(variant === 'TREATMENT' ? ['FAKE_AGENT_SERVED_MODEL=remapped'] : []),
-            process.execPath,
-            FAKE_CLI,
-          ],
-          model: 'construction-model',
-          provider: 'construction',
-          sessionsDir: join(root, 'sessions'),
-          routingTable: {
-            endpoints: {
-              construction: {
-                baseUrlEnv: 'CQ_CONSTRUCTION_URL',
-                baseUrlDefault: 'https://unused.invalid',
-                keyEnv: 'CQ_CONSTRUCTION_KEY',
-                models: ['construction-model'],
-                notes: 'Offline fake CLI; no network calls',
+      // S4b-B2 (ADR-0002 §2.3/§2.5): the dispatch input's driver section is
+      // the factory's RESOLUTION INPUT ({provider, model} — plan data names
+      // no executable); the lane knobs (binary/routing table/sessions dir)
+      // moved into DriverFactoryConfig.lanes.subprocess, and the CONFIGURED
+      // factory is bindingsFromDispatch's second argument. The factory owns
+      // the served-model assertion.
+      const drivers = createDriverFactory({
+        bindings: { fixer: { construction: 'subprocess' } },
+        lanes: {
+          subprocess: {
+            binary: [
+              'env',
+              ...(variant === 'TREATMENT' ? ['FAKE_AGENT_SERVED_MODEL=remapped'] : []),
+              process.execPath,
+              FAKE_CLI,
+            ],
+            sessionsDir: join(root, 'sessions'),
+            routingTable: {
+              endpoints: {
+                construction: {
+                  baseUrlEnv: 'CQ_CONSTRUCTION_URL',
+                  baseUrlDefault: 'https://unused.invalid',
+                  keyEnv: 'CQ_CONSTRUCTION_KEY',
+                  models: ['construction-model'],
+                  notes: 'Offline fake CLI; no network calls',
+                },
               },
             },
           },
         },
-        check: { adapter: 'tsc-lines', command: 'unused', args: [] },
       });
+      const bindings = bindingsFromDispatch(
+        {
+          repoRoot: root,
+          worktreesDir: join(root, 'worktrees'),
+          runPrefix: 'cq/construction',
+          base: 'main',
+          package: 'fixture',
+          fixer: 'fix',
+          files: ['file.ts'],
+          driver: {
+            model: 'construction-model',
+            provider: 'construction',
+          },
+          check: { adapter: 'tsc-lines', command: 'unused', args: [] },
+        },
+        drivers,
+      );
       const invocation: OpInvocation = {
         prompt: 'construction proof',
+        // The RESOLVED spec rides the invocation (never the input's raw spec).
         modelSpec: bindings.modelSpec,
         toolPolicy: { mode: 'none', allow: [] },
         sandboxPolicy: { level: 'read-only' },

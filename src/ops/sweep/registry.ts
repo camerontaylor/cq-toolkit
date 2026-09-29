@@ -22,7 +22,8 @@
 // is the library boundary, and neither is allowed to default.
 import { z } from 'zod';
 import { BudgetSchema, SandboxPolicySchema, ToolPolicySchema } from '../../kernel/schema.js';
-import { RoutingTableSchema } from '../../driver/subprocess/routing.js';
+import { errorClassOf } from '../../driver/errors.js';
+import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
 import type { CleanupInput } from './cleanup.js';
@@ -254,11 +255,14 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
       .exactOptional(),
     driver: z
       .object({
-        binary: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+        // PLAN DATA names NO executable and NO lane (ADR-0002 §2.5, P1):
+        // {provider, model} is the factory's RESOLUTION INPUT; the lane and
+        // its construction knobs (subprocess binary/routing table/sessions
+        // dir) live in the deployment's DriverFactoryConfig. The S4b-B2
+        // keys (binary, routingTable, sessionsDir) are REMOVED in this
+        // bump — the strict schema rejects plans carrying them.
         provider: z.string().min(1),
         model: z.string().min(1),
-        sessionsDir: z.string().min(1).exactOptional(),
-        routingTable: RoutingTableSchema.exactOptional(),
         toolPolicy: ToolPolicySchema.exactOptional(),
         budget: BudgetSchema.exactOptional(),
       })
@@ -321,12 +325,21 @@ export const registry: OpRegistryEntry[] = [
     // before invoking the op, so the erased op typing is safe here. The
     // importer resolves the unit-composition module and binds the REAL
     // effects INPUT-DRIVEN (the worktreeFor precedent): the subprocess
-    // worktree adapter, the REAL subprocess driver over the input's driver
-    // section (binary/provider/model over a plain-data routing table; key
-    // VALUES read from env at dispatch), the real probe runner, and the real
-    // git push — all constructed per dispatch from the dispatched input; the
-    // registry entry carries no run state. A binding refusal (no driver or
-    // check config) is an honest `failed` naming the field.
+    // worktree adapter, the real probe runner, and the real git push — all
+    // constructed per dispatch from the dispatched input; the registry
+    // entry carries no run state. THE DRIVER FACTORY MEDIATES CONSTRUCTION
+    // (ADR-0002 §2.5 — createDriverFactory is NOT a lane module): the
+    // DEFAULT binding resolves role 'fixer' to the ai-sdk lane for the
+    // default providers (zai/anthropic/openai/deepseek); the subprocess
+    // lane (or claude-agent/acp) runs ONLY when the deployment's factory
+    // config binds it — a sweep that wants the CLI lane binds it explicitly
+    // in the deployment's DriverFactoryConfig (bindings + lanes.subprocess
+    // knobs), never in plan JSON. The FACTORY owns the served-model
+    // assertion; no lane class is constructed here, statically or
+    // dynamically. A binding refusal (no driver or check config) is an
+    // honest `failed` naming the field; a factory RESOLVE throw is a §2.9
+    // PRE-DISPATCH failure (an unbound provider/role is classified
+    // 'config') → `needs-human` naming the provider/role.
     importer: () =>
       import('./unit.js').then(
         (m) =>
@@ -339,7 +352,7 @@ export const registry: OpRegistryEntry[] = [
               // seam re-validates input through inputSchema.parseAsync, so
               // the erased op typing is safe here (the registry precedent).
               const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(
-                m.bindingsFromDispatch(input),
+                m.bindingsFromDispatch(input, createDriverFactory()),
               );
               return await unitOp({
                 package: input.package,
@@ -347,6 +360,18 @@ export const registry: OpRegistryEntry[] = [
                 files: input.files,
               });
             } catch (err) {
+              // A CLASSIFIED throw (errorClassOf → 'config'/'auth') is the
+              // factory's pre-dispatch refusal — an unbound provider/role is
+              // deployment CONFIGURATION, the human's to arrange
+              // (review-debt #186 / ADR-0002 §2.9), never `failed` (which
+              // would claim the fixer ran and broke). The unclassified field
+              // refusals above stay honest `failed`s naming the field.
+              if (errorClassOf(err) !== undefined) {
+                return {
+                  status: 'needs-human',
+                  reason: err instanceof Error ? err.message : String(err),
+                };
+              }
               return {
                 status: 'failed',
                 error: err instanceof Error ? err.message : String(err),
