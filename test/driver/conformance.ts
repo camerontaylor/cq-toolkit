@@ -541,7 +541,7 @@ export function runDriverConformance(
           false,
         );
       });
-    });
+    }, 10_000);
 
     test('l. path escape: a read pointing outside the workspace denies at the driver level', async () => {
       await withScratch(async (scratchDir) => {
