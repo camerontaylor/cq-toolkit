@@ -861,11 +861,25 @@ export class AiSdkDriver implements Driver {
       // participates in the remap defence (the outer wrapper only sees the
       // MAIN response's id — a repair served by a different model must fail
       // closed HERE, before the payload is accepted), and its finish status
-      // rides the verdict rule unchanged.
+      // rides the verdict rule unchanged. A repair that reports NO id at all
+      // is the same failure closed: the accepted payload's producer identity
+      // would be unobserved while the run claims the main call's id — the
+      // wrapper's default requireObserved cannot reach this inner call, so
+      // the lane applies the same default itself.
       const repairServedModel =
         typeof repair.response.modelId === 'string' && repair.response.modelId !== ''
           ? repair.response.modelId
           : undefined;
+      // The repair's OWN limit headers are the FRESHER observation (the
+      // second request consumed capacity after the first) — they take
+      // precedence over the main response's whenever the repair returned
+      // any.
+      const repairSignals = (): { providerSignals?: ProviderSignals } => {
+        const signals =
+          providerSignalsFromHeaders(repair.response.headers) ??
+          providerSignalsFromHeaders(responseHeaders);
+        return signals !== undefined ? { providerSignals: signals } : {};
+      };
       if (repair.text.trim() !== '') {
         await store.appendMessage(record.sessionId, {
           role: 'assistant',
@@ -910,20 +924,22 @@ export class AiSdkDriver implements Driver {
               `ai-sdk driver: the repair attempt ended on the provider's terminal status (${String(repair.finishReason)})`,
             ),
             errorClass: finishReasonErrorClass(repair.finishReason),
-            ...verdictSignals(),
+            ...repairSignals(),
           };
         }
         // A repair served by a DIFFERENT model than the main call observed
-        // is an intra-run remap: the payload mixes two model identities, so
-        // it is dropped and the verdict fails closed as
-        // 'served-model-mismatch'. Spend evidence is kept; the derived cost
-        // is NOT — pricing the fold would attribute the repair's tokens to
-        // the wrong model, so an unpriceable mixed-identity run carries no
-        // costUSD (the same derived-only honesty as an unpriced model).
+        // is an intra-run remap, and a repair that reports NO id leaves the
+        // accepted payload's producer identity UNOBSERVED while the run
+        // claims the main call's id (the wrapper's default requireObserved
+        // cannot reach this inner call): either way the payload is dropped
+        // and the verdict fails closed as 'served-model-mismatch'. Spend
+        // evidence is kept; the derived cost is NOT — pricing the fold
+        // would attribute the repair's tokens to the wrong (or an unknown)
+        // model, so an unpriceable mixed-identity run carries no costUSD
+        // (the same derived-only honesty as an unpriced model).
         if (
-          repairServedModel !== undefined &&
           servedModel !== undefined &&
-          repairServedModel !== servedModel
+          (repairServedModel === undefined || repairServedModel !== servedModel)
         ) {
           return {
             model: servedModel,
@@ -932,10 +948,12 @@ export class AiSdkDriver implements Driver {
             denials,
             stopReason: 'error',
             error: boundedErrorText(
-              `ai-sdk driver: the repair attempt was served '${repairServedModel}' while the main call observed '${servedModel}' — the payload mixes model identities`,
+              repairServedModel === undefined
+                ? `ai-sdk driver: the repair attempt reported no model id while the main call observed '${servedModel}' — the accepted payload's producer identity is unobserved`
+                : `ai-sdk driver: the repair attempt was served '${repairServedModel}' while the main call observed '${servedModel}' — the payload mixes model identities`,
             ),
             errorClass: 'served-model-mismatch',
-            ...verdictSignals(),
+            ...repairSignals(),
           };
         }
         return {
@@ -945,7 +963,7 @@ export class AiSdkDriver implements Driver {
           sessionId: record.sessionId,
           denials,
           stopReason: repairStop,
-          ...verdictSignals(),
+          ...repairSignals(),
         };
       }
       return {
@@ -958,7 +976,7 @@ export class AiSdkDriver implements Driver {
           `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${repairRejection}`,
         ),
         errorClass: 'output-invalid',
-        ...verdictSignals(),
+        ...repairSignals(),
       };
     } catch (err) {
       // The REPAIR REQUEST itself failed. A parse miss (NoObjectGeneratedError

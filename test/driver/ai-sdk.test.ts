@@ -792,6 +792,58 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('a repair with an UNOBSERVED model id fails closed; its fresher limit headers win (PR #238 review round 2)', async () => {
+    let calls = 0;
+    let toolFreeCalls = 0;
+    const repairShadow = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        if (options.tools !== undefined && options.tools.length > 0) {
+          return toolCallResult('read', { path: 'absent.txt' });
+        }
+        toolFreeCalls += 1;
+        if (toolFreeCalls === 1) return textResult('prose with no json at all');
+        // The REPAIR: a valid object, but the provider metadata reports an
+        // EMPTY model id (unobserved) and a FRESH retry-after header — the
+        // second request consumed capacity after the first.
+        return {
+          ...textResult('{\"fixed\":true,\"notes\":\"ok\"}'),
+          response: { modelId: '', headers: { 'retry-after': '99' } },
+        };
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => repairShadow },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: toOutputSchema(
+            'test/repair-shadow/v1',
+            z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+          ),
+        }),
+      );
+      // The main call observed 'mock-1'; the payload's producer reported NO
+      // id — the intra-run guard fails closed exactly like the wrapper's
+      // default requireObserved would.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('served-model-mismatch');
+      expect(result.error).toContain('reported no model id');
+      // Spend evidence kept; the mixed-identity fold is unpriced.
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.usage.input).toBeGreaterThan(0);
+      // The REPAIR's fresher limit header, not the main response's absence.
+      expect(result.providerSignals).toEqual({ retryAfterMs: 99_000 });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a token cap that leaves the final step on tool-calls reports budget, not error (#203)', async () => {
     const alwaysToolCalls = new MockLanguageModelV4({
       modelId: 'mock-1',
