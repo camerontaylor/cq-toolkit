@@ -857,19 +857,52 @@ export class AiSdkDriver implements Driver {
         }),
       });
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
-      // The repair is a REAL model call: its own served-id observation
-      // participates in the remap defence (the outer wrapper only sees the
-      // MAIN response's id — a repair served by a different model must fail
-      // closed HERE, before the payload is accepted), and its finish status
-      // rides the verdict rule unchanged. A repair that reports NO id at all
-      // is the same failure closed: the accepted payload's producer identity
-      // would be unobserved while the run claims the main call's id — the
-      // wrapper's default requireObserved cannot reach this inner call, so
-      // the lane applies the same default itself.
+      // The repair is a REAL model call with its OWN served-id observation,
+      // judged ONCE for every repair-path verdict — not only the success
+      // path (the wrapper cannot see this inner call):
+      //   'mixed'       — the main observed an id and the repair reports a
+      //                   DIFFERENT one or none at all: the payload's
+      //                   producer identity contradicts (or is unobserved
+      //                   under) the run's claim — fail closed wherever a
+      //                   payload would be accepted, and NEVER price the
+      //                   fold (attributing the repair's tokens to the main
+      //                   response's model would be fabrication);
+      //   'repair-only' — the main was unobserved but the repair reported:
+      //                   the repair IS the payload's producer, so the
+      //                   verdict reports ITS id and prices under it — the
+      //                   outer wrapper then judges that id against the
+      //                   REQUESTED model exactly as it judges a single-call
+      //                   run (its default requireObserved and alias policy
+      //                   both apply);
+      //   'match'       — both observed and equal, or neither observed:
+      //                   unchanged behavior.
       const repairServedModel =
         typeof repair.response.modelId === 'string' && repair.response.modelId !== ''
           ? repair.response.modelId
           : undefined;
+      const repairIdentity: 'match' | 'mixed' | 'repair-only' =
+        servedModel === undefined
+          ? repairServedModel === undefined
+            ? 'match'
+            : 'repair-only'
+          : repairServedModel === servedModel
+            ? 'match'
+            : 'mixed';
+      const verdictModel = repairIdentity === 'repair-only' ? repairServedModel : servedModel;
+      /** Usage WITHOUT a derived cost — the mixed-identity fold is unpriceable. */
+      const repairVerdictExtras = (
+        usage: Usage,
+      ): Pick<WorkerResult, 'usage' | 'costUSD' | 'costBasis'> =>
+        repairIdentity === 'mixed'
+          ? verdictUsageOnly(usage)
+          : {
+              usage,
+              ...costField(
+                this.pricing,
+                { ...modelSpec, model: verdictModel ?? modelSpec.model },
+                usage,
+              ),
+            };
       // The repair's OWN limit headers are the FRESHER observation (the
       // second request consumed capacity after the first) — they take
       // precedence over the main response's whenever the repair returned
@@ -915,8 +948,8 @@ export class AiSdkDriver implements Driver {
         });
         if (repairStop === 'error') {
           return {
-            ...(servedModel !== undefined ? { model: servedModel } : {}),
-            ...verdictExtras(totalUsage),
+            ...(verdictModel !== undefined ? { model: verdictModel } : {}),
+            ...repairVerdictExtras(totalUsage),
             sessionId: record.sessionId,
             denials,
             stopReason: 'error',
@@ -927,20 +960,12 @@ export class AiSdkDriver implements Driver {
             ...repairSignals(),
           };
         }
-        // A repair served by a DIFFERENT model than the main call observed
-        // is an intra-run remap, and a repair that reports NO id leaves the
-        // accepted payload's producer identity UNOBSERVED while the run
-        // claims the main call's id (the wrapper's default requireObserved
-        // cannot reach this inner call): either way the payload is dropped
-        // and the verdict fails closed as 'served-model-mismatch'. Spend
-        // evidence is kept; the derived cost is NOT — pricing the fold
-        // would attribute the repair's tokens to the wrong (or an unknown)
-        // model, so an unpriceable mixed-identity run carries no costUSD
-        // (the same derived-only honesty as an unpriced model).
-        if (
-          servedModel !== undefined &&
-          (repairServedModel === undefined || repairServedModel !== servedModel)
-        ) {
+        // The ONE fail-closed point for a mixed identity (see the judgment
+        // above): the payload is dropped, spend evidence kept, the fold
+        // unpriced.
+        // 'mixed' implies the main response observed an id (see the
+        // judgment above); the conjunction narrows for the compiler.
+        if (repairIdentity === 'mixed' && servedModel !== undefined) {
           return {
             model: servedModel,
             ...verdictUsageOnly(totalUsage),
@@ -957,9 +982,9 @@ export class AiSdkDriver implements Driver {
           };
         }
         return {
-          ...(servedModel !== undefined ? { model: servedModel } : {}),
+          ...(verdictModel !== undefined ? { model: verdictModel } : {}),
           ...(repairStop === 'complete' ? { structuredOutput: repairedValue } : {}),
-          ...verdictExtras(totalUsage),
+          ...repairVerdictExtras(totalUsage),
           sessionId: record.sessionId,
           denials,
           stopReason: repairStop,
@@ -967,8 +992,8 @@ export class AiSdkDriver implements Driver {
         };
       }
       return {
-        ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...verdictExtras(totalUsage),
+        ...(verdictModel !== undefined ? { model: verdictModel } : {}),
+        ...repairVerdictExtras(totalUsage),
         sessionId: record.sessionId,
         denials,
         stopReason: 'error',
@@ -990,9 +1015,30 @@ export class AiSdkDriver implements Driver {
         signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
       const signals = providerSignalsFromError(err);
       if (!aborted && NoObjectGeneratedError.isInstance(err)) {
+        // The parse-miss error carries the repair's own response metadata:
+        // the SAME identity judgment as the returned-repair paths (a
+        // repair-only observation is reported for the wrapper to judge; a
+        // mixed identity is never priced), and the repair's headers are the
+        // fresher limit evidence.
+        const errRepairServedModel =
+          typeof err.response?.modelId === 'string' && err.response.modelId !== ''
+            ? err.response.modelId
+            : undefined;
+        const errIdentity: 'match' | 'mixed' | 'repair-only' =
+          servedModel === undefined
+            ? errRepairServedModel === undefined
+              ? 'match'
+              : 'repair-only'
+            : errRepairServedModel === servedModel
+              ? 'match'
+              : 'mixed';
+        const errModel = errIdentity === 'repair-only' ? errRepairServedModel : servedModel;
+        const errSignals =
+          providerSignalsFromHeaders(err.response?.headers as Record<string, string> | undefined) ??
+          signals;
         return {
-          ...(servedModel !== undefined ? { model: servedModel } : {}),
-          ...verdictExtras(totalUsage),
+          ...(errModel !== undefined ? { model: errModel } : {}),
+          ...(errIdentity === 'mixed' ? { usage: totalUsage } : { ...verdictExtras(totalUsage) }),
           sessionId: record.sessionId,
           denials,
           stopReason: 'error',
@@ -1000,7 +1046,7 @@ export class AiSdkDriver implements Driver {
             `ai-sdk driver: structured output invalid after the repair attempt — ${rejection}; repair: ${describeError(err)}`,
           ),
           errorClass: 'output-invalid',
-          ...(signals !== undefined ? { providerSignals: signals } : {}),
+          ...(errSignals !== undefined ? { providerSignals: errSignals } : {}),
         };
       }
       return {

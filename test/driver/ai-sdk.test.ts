@@ -18,6 +18,7 @@
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtempSync } from 'node:fs';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
@@ -842,6 +843,85 @@ describe('ai-sdk driver specifics (mock model)', () => {
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
+  });
+
+  test('repair identity judgment: repair-only observation is REPORTED for the wrapper; a mixed identity is unpriced on every repair path (PR #238 round 3)', async () => {
+    const schema = z.object({ fixed: z.boolean(), notes: z.string() }).strict();
+    // 1. REPAIR-ONLY: the main call never observes an id (empty provider
+    //    metadata on every main step); the repair reports 'repair-served-1'.
+    //    The verdict reports the repair's id — the outer wrapper's default
+    //    requireObserved then judges THAT id (here: a bare lane, so the
+    //    propagation itself is the assertion).
+    let toolFree1 = 0;
+    const d1 = new AiSdkDriver({
+      providers: {
+        mock: () =>
+          new MockLanguageModelV4({
+            modelId: 'mock-1',
+            doGenerate: async (options: { tools?: unknown[] }) => {
+              if (options.tools !== undefined && options.tools.length > 0) {
+                return {
+                  ...toolCallResult('read', { path: 'absent.txt' }),
+                  response: { modelId: '' },
+                };
+              }
+              toolFree1 += 1;
+              if (toolFree1 === 1) {
+                return { ...textResult('prose, no json'), response: { modelId: '' } };
+              }
+              return {
+                ...textResult('{\"fixed\":true,\"notes\":\"ok\"}'),
+                response: { modelId: 'repair-served-1' },
+              };
+            },
+          }),
+      },
+      sessionsDir: join(mkdtempSync(join(tmpdir(), 'aidrv-id1-')), 'sessions'),
+    });
+    const r1 = await d1.run(
+      invocation({
+        outputSchema: toOutputSchema('test/identity-1/v1', schema),
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+      }),
+    );
+    expect(r1.stopReason).toBe('complete');
+    expect(r1.model).toBe('repair-served-1'); // the payload's producer, for the wrapper to judge
+    expect(r1.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+
+    // 2. MIXED on the INVALID-repair path: the main observed 'mock-1', the
+    //    repair reports 'other-id' and its object misses: the output-invalid
+    //    verdict keeps the usage but the PRICED fold is suppressed — pricing
+    //    under the main id would attribute the repair's tokens to it.
+    let toolFree2 = 0;
+    const priced = new AiSdkDriver({
+      providers: {
+        mock: () =>
+          new MockLanguageModelV4({
+            modelId: 'mock-1',
+            doGenerate: async (options: { tools?: unknown[] }) => {
+              if (options.tools !== undefined && options.tools.length > 0) {
+                return toolCallResult('read', { path: 'absent.txt' });
+              }
+              toolFree2 += 1;
+              if (toolFree2 === 1) return textResult('prose, no json');
+              return { ...textResult('still no object'), response: { modelId: 'other-id' } };
+            },
+          }),
+      },
+      pricing: () => ({ input: 3, output: 15 }),
+      sessionsDir: join(mkdtempSync(join(tmpdir(), 'aidrv-id2-')), 'sessions'),
+    });
+    const r2 = await priced.run(
+      invocation({
+        outputSchema: toOutputSchema('test/identity-2/v1', schema),
+        toolPolicy: { allow: ['read'], mode: 'allowlist' },
+      }),
+    );
+    expect(r2.stopReason).toBe('error');
+    expect(r2.errorClass).toBe('output-invalid');
+    expect(r2.model).toBe('mock-1'); // the main observation, as evidence
+    expect(r2.usage.input).toBeGreaterThan(0);
+    expect(r2.costUSD).toBeUndefined(); // a mixed-identity fold is NEVER priced
   });
 
   test('a token cap that leaves the final step on tool-calls reports budget, not error (#203)', async () => {
