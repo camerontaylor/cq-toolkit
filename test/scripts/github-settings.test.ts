@@ -32,9 +32,14 @@ const TEMPLATE = readFileSync(TEMPLATE_PATH, 'utf8');
 const SCRIPT = join(ROOT, 'scripts', 'github-settings-drift.mjs');
 const VERDICT = 1001;
 const PROMOTER = 2002;
+const AUTOMATION = 3003;
 
 function target(): GithubSettings {
-  return renderSettings(TEMPLATE, { verdictAppId: VERDICT, promoterAppId: PROMOTER });
+  return renderSettings(TEMPLATE, {
+    verdictAppId: VERDICT,
+    promoterAppId: PROMOTER,
+    automationAppId: AUTOMATION,
+  });
 }
 
 /** A live state equal to the target, carrying the server-only fields the API adds. */
@@ -67,7 +72,7 @@ function liveFrom(settings: GithubSettings): LiveSettings {
   }
   return {
     rulesets: settings.rulesets.map((r, i) => withServerFields(r, 100 + i)),
-    classicBranchProtection: { main: null, 'merge-queue': null },
+    classicBranchProtection: { main: null, 'merge-queue': null, 'cq-state': null },
     environments,
     repositorySecrets: [],
     actions: clone(settings.actions),
@@ -97,13 +102,15 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(raw['schemaVersion']).toBe(1);
     expect(TEMPLATE).toContain('"{{VERDICT_APP_ID}}"');
     expect(TEMPLATE).toContain('"{{PROMOTER_APP_ID}}"');
+    expect(TEMPLATE).toContain('"{{AUTOMATION_APP_ID}}"');
   });
 
-  it('names exactly the three rulesets and four environments', () => {
+  it('names exactly the four rulesets and four environments', () => {
     const settings = target();
     expect(settings.rulesets.map((r) => r.name)).toEqual([
       'cq-r0-history',
       'cq-r1-main',
+      'cq-r3-state',
       'cq-r2-merge-queue',
     ]);
     expect(Object.keys(settings.environments).sort()).toEqual([
@@ -112,7 +119,11 @@ describe('github-settings.json: the committed D13 target', () => {
       'drill',
       'promote',
     ]);
-    expect(settings.classicBranchProtection).toEqual({ main: null, 'merge-queue': null });
+    expect(settings.classicBranchProtection).toEqual({
+      main: null,
+      'merge-queue': null,
+      'cq-state': null,
+    });
     expect(settings.repositorySecrets).toEqual([]);
   });
 
@@ -122,7 +133,11 @@ describe('github-settings.json: the committed D13 target', () => {
       { actor_id: PROMOTER, actor_type: 'Integration', bypass_mode: 'always' },
       { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
     ]);
-    const checks = params(settings.rulesets[2] as RuleObject, 'required_status_checks')[
+    expect(settings.rulesets[2]?.bypass_actors).toEqual([
+      { actor_id: AUTOMATION, actor_type: 'Integration', bypass_mode: 'always' },
+    ]);
+    expect(settings.rulesets[2]?.rules.map((r) => r.type)).toEqual(['update', 'deletion']);
+    const checks = params(settings.rulesets[3] as RuleObject, 'required_status_checks')[
       'required_status_checks'
     ] as { context: string; integration_id: number }[];
     expect(checks.filter((c) => c.context.startsWith('cq/'))).toEqual([
@@ -130,9 +145,10 @@ describe('github-settings.json: the committed D13 target', () => {
       { context: 'cq/ratchet', integration_id: VERDICT },
       { context: 'cq/acceptance', integration_id: VERDICT },
     ]);
-    expect(renderSettings(TEMPLATE, { verdictAppId: '7', promoterAppId: '8' }).schemaVersion).toBe(
-      1,
-    );
+    expect(
+      renderSettings(TEMPLATE, { verdictAppId: '7', promoterAppId: '8', automationAppId: '9' })
+        .schemaVersion,
+    ).toBe(1);
   });
 
   it('refuses a non-integer or missing App id', () => {
@@ -147,20 +163,23 @@ describe('github-settings.json: the committed D13 target', () => {
       1.5,
       '99999999999999999999',
     ]) {
-      expect(() => renderSettings(TEMPLATE, { verdictAppId: bad, promoterAppId: 2 })).toThrow(
-        /verdictAppId/,
-      );
-      expect(() => renderSettings(TEMPLATE, { verdictAppId: 1, promoterAppId: bad })).toThrow(
-        /promoterAppId/,
-      );
+      expect(() =>
+        renderSettings(TEMPLATE, { verdictAppId: bad, promoterAppId: 2, automationAppId: 3 }),
+      ).toThrow(/verdictAppId/);
+      expect(() =>
+        renderSettings(TEMPLATE, { verdictAppId: 1, promoterAppId: bad, automationAppId: 3 }),
+      ).toThrow(/promoterAppId/);
+      expect(() =>
+        renderSettings(TEMPLATE, { verdictAppId: 1, promoterAppId: 2, automationAppId: bad }),
+      ).toThrow(/automationAppId/);
     }
   });
 
   it('refuses a leftover placeholder', () => {
     const text = TEMPLATE.replace('"read"', '"{{WORKFLOW_PERMS}}"');
-    expect(() => renderSettings(text, { verdictAppId: 1, promoterAppId: 2 })).toThrow(
-      /unrendered placeholder "\{\{WORKFLOW_PERMS\}\}/,
-    );
+    expect(() =>
+      renderSettings(text, { verdictAppId: 1, promoterAppId: 2, automationAppId: 3 }),
+    ).toThrow(/unrendered placeholder "\{\{WORKFLOW_PERMS\}\}/);
   });
 
   it("allows exactly the trigger events this repo's workflows use", () => {
@@ -256,6 +275,23 @@ describe('compareSettings', () => {
       `ruleset cq-r1-main: bypass_actors differ: expected [{"actor_id":${PROMOTER},"actor_type":"Integration","bypass_mode":"always"},{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}] actual [{"actor_id":${PROMOTER},"actor_type":"Integration","bypass_mode":"exempt"},{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]`,
       `ruleset cq-r1-main: bypass actor Integration ${PROMOTER} has bypass_mode "exempt"; it must be "always" (an exempt bypass leaves no audit entry)`,
     ]);
+  });
+
+  it('detects cq-state writes opened to a non-automation identity', () => {
+    const live = liveFrom(target());
+    const state = ruleset(live, 'cq-r3-state');
+    state.bypass_actors = [
+      { actor_id: AUTOMATION, actor_type: 'Integration', bypass_mode: 'always' },
+      { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+    ];
+    expect(
+      driftOf(live).some((line) => line.includes('ruleset cq-r3-state: bypass_actors differ')),
+    ).toBe(true);
+    state.bypass_actors = [
+      { actor_id: AUTOMATION, actor_type: 'Integration', bypass_mode: 'always' },
+    ];
+    state.rules = [{ type: 'deletion' }];
+    expect(driftOf(live)).toContain('ruleset cq-r3-state: rule update missing');
   });
 
   it('reports an App bypass added to R2 and an unreadable bypass list', () => {
@@ -525,13 +561,14 @@ describe('github-settings-drift CLI', () => {
   it('fails closed without App ids and reads no API', { timeout: 180_000 }, () => {
     for (const args of [
       ['--repository=a/b'],
-      ['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id='],
-      ['--repository=a/b', '--verdict-app-id= ', '--promoter-app-id=2'],
+      ['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=', '--automation-app-id=3'],
+      ['--repository=a/b', '--verdict-app-id= ', '--promoter-app-id=2', '--automation-app-id=3'],
+      ['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=2'],
     ]) {
       const res = runCli(args);
       expect(res.status).toBe(1);
       expect(res.stdout).toContain(
-        'drift: apps not registered (RS-11 B1): verdict/promoter app ids unset',
+        'drift: apps not registered (RS-11 B1): verdict/promoter/automation app ids unset',
       );
       expect(res.stderr).toBe('');
     }
@@ -543,10 +580,15 @@ describe('github-settings-drift CLI', () => {
     () => {
       for (const args of [
         ['--repository=a'],
-        ['--repository=a/b/c', '--verdict-app-id=1', '--promoter-app-id=2'],
-        ['--repository=-a/b', '--verdict-app-id=1', '--promoter-app-id=2'],
-        ['--repository=a/..', '--verdict-app-id=1', '--promoter-app-id=2'],
-        ['--repository=a/b', '--verdict-app-id=x', '--promoter-app-id=2'],
+        [
+          '--repository=a/b/c',
+          '--verdict-app-id=1',
+          '--promoter-app-id=2',
+          '--automation-app-id=3',
+        ],
+        ['--repository=-a/b', '--verdict-app-id=1', '--promoter-app-id=2', '--automation-app-id=3'],
+        ['--repository=a/..', '--verdict-app-id=1', '--promoter-app-id=2', '--automation-app-id=3'],
+        ['--repository=a/b', '--verdict-app-id=x', '--promoter-app-id=2', '--automation-app-id=3'],
         ['--repository=a/b', '--bogus=1'],
       ]) {
         const res = runCli(args);
@@ -557,7 +599,12 @@ describe('github-settings-drift CLI', () => {
   );
 
   it('treats a gh failure as an error, never as absent (exit 2)', { timeout: 180_000 }, () => {
-    const res = runCli(['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=2']);
+    const res = runCli([
+      '--repository=a/b',
+      '--verdict-app-id=1',
+      '--promoter-app-id=2',
+      '--automation-app-id=3',
+    ]);
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/github-settings-drift: error: gh api repos\/a\/b\/rulesets/);
   });
@@ -660,6 +707,7 @@ exit 1
         '--repository=o/r',
         `--verdict-app-id=${VERDICT}`,
         `--promoter-app-id=${PROMOTER}`,
+        `--automation-app-id=${AUTOMATION}`,
         ...extra,
       ],
       env: { ...process.env, CQ_GH_BIN: bin, FAKE_GH_DIR: dir },

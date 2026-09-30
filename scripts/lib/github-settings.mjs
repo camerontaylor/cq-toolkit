@@ -33,6 +33,7 @@
 const PLACEHOLDERS = Object.freeze({
   verdictAppId: '{{VERDICT_APP_ID}}',
   promoterAppId: '{{PROMOTER_APP_ID}}',
+  automationAppId: '{{AUTOMATION_APP_ID}}',
 });
 
 /**
@@ -54,10 +55,10 @@ function appId(label, value) {
 
 /**
  * Render the settings template: each QUOTED placeholder ("{{VERDICT_APP_ID}}",
- * "{{PROMOTER_APP_ID}}") becomes the numeric id literal. Throws on an invalid
+ * "{{PROMOTER_APP_ID}}", "{{AUTOMATION_APP_ID}}") becomes the numeric id literal. Throws on an invalid
  * id, on any leftover `{{`, on invalid JSON and on an unknown schemaVersion.
  * @param {string} templateText
- * @param {{ verdictAppId: unknown, promoterAppId: unknown }} ids
+ * @param {{ verdictAppId: unknown, promoterAppId: unknown, automationAppId: unknown }} ids
  * @returns {Record<string, any>}
  */
 export function renderSettings(templateText, ids) {

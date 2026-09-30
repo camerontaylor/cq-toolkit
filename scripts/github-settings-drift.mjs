@@ -5,7 +5,7 @@
 // wizard's job.
 //
 //   node scripts/github-settings-drift.mjs --repository=<owner>/<name>
-//     --verdict-app-id=<n> --promoter-app-id=<n>
+//     --verdict-app-id=<n> --promoter-app-id=<n> --automation-app-id=<n>
 //     [--template=policy/templates/github-settings.json]
 //     [--require-event-policy]
 //
@@ -68,7 +68,13 @@ class NotFound extends Error {
 function parseArgs(argv) {
   /** @type {Record<string, string>} */
   const opts = {};
-  const known = new Set(['repository', 'template', 'verdict-app-id', 'promoter-app-id']);
+  const known = new Set([
+    'repository',
+    'template',
+    'verdict-app-id',
+    'promoter-app-id',
+    'automation-app-id',
+  ]);
   let requireEventPolicy = false;
   for (const arg of argv) {
     if (arg === '--require-event-policy') {
@@ -99,6 +105,7 @@ function parseArgs(argv) {
     template: resolve(opts['template'] ?? DEFAULT_TEMPLATE),
     verdictAppId: (opts['verdict-app-id'] ?? '').trim(),
     promoterAppId: (opts['promoter-app-id'] ?? '').trim(),
+    automationAppId: (opts['automation-app-id'] ?? '').trim(),
     requireEventPolicy,
   };
 }
@@ -258,8 +265,8 @@ async function readLive(repo, expected, requireEventPolicy) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  if (opts.verdictAppId === '' || opts.promoterAppId === '') {
-    console.log('drift: apps not registered (RS-11 B1): verdict/promoter app ids unset');
+  if (opts.verdictAppId === '' || opts.promoterAppId === '' || opts.automationAppId === '') {
+    console.log('drift: apps not registered (RS-11 B1): verdict/promoter/automation app ids unset');
     console.log(`github-settings-drift: ${opts.repository}: 1 drift line, 0 notices (no API read)`);
     return 1;
   }
@@ -268,6 +275,7 @@ async function main() {
     expected = renderSettings(readFileSync(opts.template, 'utf8'), {
       verdictAppId: opts.verdictAppId,
       promoterAppId: opts.promoterAppId,
+      automationAppId: opts.automationAppId,
     });
   } catch (error) {
     throw new UsageError(error.message);

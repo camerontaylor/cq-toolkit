@@ -90,7 +90,7 @@ export const ACTIONS_EVENT_POLICY_UNCHECKED: string;
 
 export function renderSettings(
   templateText: string,
-  ids: { verdictAppId: unknown; promoterAppId: unknown },
+  ids: { verdictAppId: unknown; promoterAppId: unknown; automationAppId: unknown },
 ): GithubSettings;
 
 export function environmentFromApi(

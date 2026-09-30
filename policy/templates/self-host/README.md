@@ -151,10 +151,11 @@ adopter owns it by hand.
   store. A refusal shows as a `cq merge-time recheck refused pr N: …`
   needs-human row, and a later run merges the PR once it qualifies.
   `{{SELFHOST_TOKEN}}` needs Contents write to update `cq-state`.
-  Restricting that branch to the automation identity is a MANUAL ruleset
-  step today — no automation enforces it until W1.10 — so any Contents-write
-  holder can back-date an anchor. That can only shorten settle; it can never
-  forge SHA-bound acceptance.
+  The settings-as-code target now contains `cq-r3-state`, allowing only the
+  automation App to update `cq-state`. Until that rule is applied and its
+  live denial/write probes pass, any Contents-write holder can back-date an
+  anchor. That can only shorten settle; it can never forge SHA-bound
+  acceptance.
 
 ### Honest outcomes
 

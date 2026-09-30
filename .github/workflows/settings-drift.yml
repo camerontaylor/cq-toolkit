@@ -61,6 +61,8 @@ jobs:
           VERDICT_CLIENT_ID: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
           PROMOTER_APP_ID: ${{ vars.CQ_PROMOTER_APP_ID }}
           PROMOTER_CLIENT_ID: ${{ vars.CQ_PROMOTER_APP_CLIENT_ID }}
+          AUTOMATION_APP_ID: ${{ vars.CQ_AUTOMATION_APP_ID }}
+          AUTOMATION_CLIENT_ID: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
         run: |
           set -euo pipefail
           if [ "${VERDICT_APP_ID:+set}" != "${VERDICT_CLIENT_ID:+set}" ]; then
@@ -71,6 +73,11 @@ jobs:
           if [ "${PROMOTER_APP_ID:+set}" != "${PROMOTER_CLIENT_ID:+set}" ]; then
             echo 'refusing: set vars.CQ_PROMOTER_APP_ID and'
             echo 'vars.CQ_PROMOTER_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
+          if [ "${AUTOMATION_APP_ID:+set}" != "${AUTOMATION_CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_AUTOMATION_APP_ID and'
+            echo 'vars.CQ_AUTOMATION_APP_CLIENT_ID together (exactly one is set)'
             exit 1
           fi
       - name: Check out the trust ref (the default branch)
@@ -104,6 +111,7 @@ jobs:
           REPO: ${{ github.repository }}
           VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
           PROMOTER_APP_ID: ${{ vars.CQ_PROMOTER_APP_ID }}
+          AUTOMATION_APP_ID: ${{ vars.CQ_AUTOMATION_APP_ID }}
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
@@ -115,6 +123,7 @@ jobs:
             --repository="$REPO" \
             --verdict-app-id="$VERDICT_APP_ID" \
             --promoter-app-id="$PROMOTER_APP_ID" \
+            --automation-app-id="$AUTOMATION_APP_ID" \
             > "${RUNNER_TEMP}/drift.txt" 2>&1 || rc=$?
           cat "${RUNNER_TEMP}/drift.txt"
           {
