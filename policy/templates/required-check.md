@@ -31,9 +31,9 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the six command steps below are this repo's
+instantiation tokens; the seven command steps below are this repo's
 `{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, test, Knip, build, and the generated-op-docs drift check. This repo's
+format check, unit tests, e2e/ACP tests, Knip, build, and the generated-op-docs drift check. This repo's
 `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
@@ -85,8 +85,10 @@ jobs:
         run: npm run check:static
       - name: Check formatting
         run: npm run format:check
-      - name: Test
-        run: npm run test
+      - name: Test unit
+        run: npm run test:unit
+      - name: Test e2e/acp
+        run: npm run test:e2e
       - name: Check unused files and dependencies
         run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
@@ -140,7 +142,7 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the six
+permissions shape exactly as shown, swap the tokens, and replace the seven
 command steps with your own `{{COMMANDS...}}` — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
