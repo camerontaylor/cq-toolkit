@@ -27,6 +27,7 @@
 //     custom Driver OBJECT cannot cross the JSON boundary (pass its config:
 //     binary + routing table + sessions dir).
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { SWEEP_DIFF_FLAGS } from './gitDiffFlags.js';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
@@ -586,12 +587,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       worktree.path,
       'diff',
       '--cached',
-      '--text',
-      '--no-ext-diff',
-      '--no-textconv',
-      '--no-renames',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
+      ...SWEEP_DIFF_FLAGS,
       '--',
     ]);
     if (diff.code !== 0) {
@@ -1146,12 +1142,7 @@ async function enforceStagePathAllowlist(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1214,12 +1205,7 @@ async function commitStaged(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--quiet',
   ]);
   if (empty.code !== 0 && empty.code !== 1) {
@@ -1728,12 +1714,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1757,12 +1738,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--',
   ]);
   if (committedDiff.code !== 0) {

@@ -26,6 +26,7 @@
 //      pinned to the PUBLISHED vectors in test/ops/gates/fingerprint.test.ts,
 //      so this chain inherits a non-circular anchor), and RangeError on an
 //      empty/non-string tool — the fingerprint default-tool trap.
+import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/gitDiffFlags.js';
 import { describe, expect, test } from 'vitest';
 import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -900,19 +901,7 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
 
   test('the changed-files argv terminates the rev list AFTER the base', () => {
     const args = changedFilesArgs('origin/main');
-    expect(args).toEqual([
-      'diff',
-      '--text',
-      '--no-ext-diff',
-      '--no-textconv',
-      '--no-renames',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
-      '--name-status',
-      '-z',
-      'origin/main',
-      '--',
-    ]);
+    expect(args).toEqual(['diff', ...SWEEP_DIFF_FLAGS, '--name-status', '-z', 'origin/main', '--']);
     // The base is a REVISION (before the terminator); the trailing `--`
     // ends the rev list with an empty pathspec — never `-- <base>`, which
     // would read the base as a PATH.

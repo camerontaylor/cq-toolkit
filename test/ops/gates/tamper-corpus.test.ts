@@ -10,6 +10,7 @@ import { hackDetector } from '../../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
 import { classifyStagePaths } from '../../../src/ops/sweep/unit.js';
 import { isProtectedStagePath } from '../../../src/ops/gates/protectedPaths.js';
+import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/gitDiffFlags.js';
 
 const execFileAsync = promisify(execFile);
 const CLEANUP: string[] = [];
@@ -222,34 +223,22 @@ describe('RS-10 detector and totals regressions', () => {
       await git(['init', '-q', '-b', 'main']);
       await git(['config', 'user.email', 'test@example.invalid']);
       await git(['config', 'user.name', 'Test']);
+      await git(['config', 'diff.noprefix', 'true']);
+      await git(['config', 'diff.mnemonicPrefix', 'true']);
+      await git(['config', 'diff.external', 'false']);
+      await git(['config', 'diff.hostile.textconv', 'false']);
       writeFileSync(join(root, 'victim.ts'), 'export const value = 1;\n');
       writeFileSync(join(root, '.gitattributes'), 'victim.ts -diff\n');
       await git(['add', '.']);
       await git(['commit', '-q', '-m', 'base']);
       writeFileSync(
         join(root, '.gitattributes'),
-        ['victim.ts binary -diff textconv=hostile diff.external=false', '*.ts -diff', ''].join(
-          '\n',
-        ),
+        ['victim.ts binary -diff diff=hostile', '*.ts -diff', ''].join('\n'),
       );
       writeFileSync(join(root, 'victim.ts'), 'export const value = 2;\n');
       await git(['add', '.']);
 
-      const diff = await git([
-        '-c',
-        'diff.noprefix=false',
-        '-c',
-        'diff.mnemonicPrefix=true',
-        'diff',
-        '--cached',
-        '--text',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-renames',
-        '--src-prefix=a/',
-        '--dst-prefix=b/',
-        '--',
-      ]);
+      const diff = await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']);
       expect(diff).toContain('--- a/victim.ts');
       expect(diff).toContain('+++ b/victim.ts');
       expect(diff).toContain('+export const value = 2;');

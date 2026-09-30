@@ -27,6 +27,7 @@
 //     as an orphan, never silently dropped: the report must account for
 //     every file the dep showed it.
 import { execFile } from 'node:child_process';
+import { SWEEP_DIFF_FLAGS } from './gitDiffFlags.js';
 import { fingerprintFailure } from '../gates/fingerprint.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { makeLedgerQuery } from '../ledger/ledger.js';
@@ -658,19 +659,7 @@ const SWEEP_GIT_TIMEOUT_MS = 600_000;
  * dash-leading value is parsed as an OPTION before any terminator applies).
  */
 export function changedFilesArgs(base: string): string[] {
-  return [
-    'diff',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
-    '--name-status',
-    '-z',
-    base,
-    '--',
-  ];
+  return ['diff', ...SWEEP_DIFF_FLAGS, '--name-status', '-z', base, '--'];
 }
 
 /**
