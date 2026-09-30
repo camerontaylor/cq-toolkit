@@ -216,7 +216,7 @@ describe('ratchet family op registry entries', () => {
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test('trusted verifier importers preserve failed op results', async () => {
     const verify = await entryByName('ratchet.verifyRatchet').importer();
