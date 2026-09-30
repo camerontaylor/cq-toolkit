@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 — pending
+
+First planned npm publication. The owner chose 0.2 on 2026-10-01 because
+the project is not stable. This release is gated on the remaining
+prepublication hardening, review debt, accepted ADR implementation, and G2
+adversarial evidence. The final change list and release date will be filled
+from merged PRs in the reviewed release PR. The postpublication fixtures
+and self-host proofs complete G3. See the
+[0.2 release runbook](docs/0.2-release-runbook.md).
+
+The dated `v1.0.0` and `v1.0.1` entries below describe historical source
+milestones; neither version was published to npm. The `v1.0.0` source tag
+is retained and will not be moved.
+
 All notable changes to `@camerontaylor/cq-toolkit`. Entries are generated
 from merged pull-request titles, grouped by the v1 workstreams of
 `plans/toolkit-v1-plan.md` §7 and the `plans/breakdown/ws-*.md` files
@@ -168,6 +182,7 @@ release tooling — together with the fixtures/eval repo.
 
 ### npm
 
-- `@camerontaylor/cq-toolkit@1.0.0` — publish pending owner action
-  (`AUTOPUBLISH=no`); the `0.0.0` reservation remains on the registry until
-  the owner publishes. See `RELEASE.md`.
+- `@camerontaylor/cq-toolkit@1.0.0` was prepared but not published.
+  The owner replaced that publication path with 0.2 on 2026-10-01;
+  `0.0.0` remains the reservation. See the historical `RELEASE.md` and
+  current `docs/0.2-release-runbook.md`.
