@@ -340,7 +340,7 @@ export const registry: OpRegistryEntry[] = [
     // honest `failed` naming the field; a factory RESOLVE throw is a §2.9
     // PRE-DISPATCH failure (an unbound provider/role is classified
     // 'config') → `needs-human` naming the provider/role.
-    importer: () =>
+    importer: (wiring) =>
       import('./unit.js').then(
         (m) =>
           (async (input: SweepUnitDispatchInput) => {
@@ -351,8 +351,18 @@ export const registry: OpRegistryEntry[] = [
               // `failed` HERE — never a throw across the op seam. The dispatch
               // seam re-validates input through inputSchema.parseAsync, so
               // the erased op typing is safe here (the registry precedent).
+              // The dispatch wiring (PR #238 review P2) rides the per-dispatch
+              // factory config: the host's alias-notice sink; absent (every
+              // library caller), the library default — one stderr line.
               const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(
-                m.bindingsFromDispatch(input, createDriverFactory()),
+                m.bindingsFromDispatch(
+                  input,
+                  createDriverFactory(
+                    wiring?.onDeprecatedAlias !== undefined
+                      ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                      : {},
+                  ),
+                ),
               );
               return await unitOp({
                 package: input.package,

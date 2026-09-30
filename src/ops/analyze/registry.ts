@@ -427,9 +427,20 @@ export const registry: OpRegistryEntry[] = [
     // fresh invocation (I6). The op returns the driver's WorkerResult and
     // NEVER applies anything itself; its consumer decides outside the
     // autonomous path.
-    importer: () =>
+    importer: (wiring) =>
       import('./agenticRemediation.js').then(
-        (m) => m.makeAgenticRemediation(createDriverFactory()) as Op<unknown, unknown>,
+        (m) =>
+          m.makeAgenticRemediation(
+            createDriverFactory(
+              // Dispatch wiring (PR #238 review P2): the host's alias-notice
+              // sink rides the factory config; absent (every library
+              // caller), the library default — one stderr line — is
+              // unchanged.
+              wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {},
+            ),
+          ) as Op<unknown, unknown>,
       ),
   },
   {

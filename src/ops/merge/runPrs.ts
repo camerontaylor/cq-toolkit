@@ -614,6 +614,14 @@ export interface MakeRunMergePrsOpDeps {
    */
   drivers?: DriverFactory;
   /**
+   * The deprecated-alias notice sink carried onto the DEFAULT factory's
+   * DriverFactoryConfig (PR #238 review P2) and forwarded to the composed
+   * resolve op's own default factory. Inert when `drivers` is supplied (an
+   * explicit factory IS the notice surface). Default: none — the library
+   * default, one stderr line.
+   */
+  onDeprecatedAlias?: (message: string) => void;
+  /**
    * resolveConflict passthrough — carried on the DriverRequest the resolve
    * op resolves (the harness surface). Default: the resolve op's own
    * shipped default (`defaultHarnessConfig`).
@@ -666,7 +674,17 @@ export function makeRunMergePrsOp(
       effects,
       ...(deps?.drivers !== undefined
         ? { drivers: deps.drivers }
-        : { drivers: createDriverFactory(sessionsDir !== undefined ? { sessionsDir } : {}) }),
+        : {
+            drivers: createDriverFactory({
+              ...(sessionsDir !== undefined ? { sessionsDir } : {}),
+              // The dispatch wiring's alias-notice sink (PR #238 review P2)
+              // rides the DEFAULT factory's config; absent, the library
+              // default — one stderr line — is unchanged.
+              ...(deps?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: deps.onDeprecatedAlias }
+                : {}),
+            }),
+          }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
     });
     const outcome = await runMergePrs(input, {

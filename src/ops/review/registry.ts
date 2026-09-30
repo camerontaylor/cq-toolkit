@@ -503,9 +503,16 @@ export const registry: OpRegistryEntry[] = [
     // patterns of a write-capable worker; input.worktree.path becomes the
     // invocation's workspace.path; input.driver (ModelSpec) selects the
     // lane through the factory.
-    importer: async () =>
+    importer: async (wiring) =>
       (await import('./fixReviewItem.js')).makeFixReviewItem({
-        drivers: createDriverFactory(),
+        drivers: createDriverFactory(
+          // Dispatch wiring (PR #238 review P2): the host's alias-notice
+          // sink rides the factory config; absent (every library caller),
+          // the library default — one stderr line — is unchanged.
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
       }) as Op<unknown, unknown>,
   },
   {

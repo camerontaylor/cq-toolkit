@@ -506,7 +506,15 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.resolveConflict',
     inputSchema: ResolveConflictInputSchema,
-    importer: async () => (await import('./resolveConflict.js')).default as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./resolveConflict.js')).makeResolveConflictOp(
+        // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
+        // rides the default factory's config; absent (every library
+        // caller), the library default — one stderr line — is unchanged.
+        wiring?.onDeprecatedAlias !== undefined
+          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+          : {},
+      ) as Op<unknown, unknown>,
   },
   {
     name: 'merge.diagnoseMergeFailure',
@@ -521,6 +529,14 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'merge.runPrs',
     inputSchema: RunMergePrsInputSchema,
-    importer: async () => (await import('./runPrs.js')).default as Op<unknown, unknown>,
+    importer: async (wiring) =>
+      (await import('./runPrs.js')).makeRunMergePrsOp(
+        // Dispatch wiring (PR #238 review P2): the host's alias-notice sink
+        // rides the default factory's config; absent (every library
+        // caller), the library default — one stderr line — is unchanged.
+        wiring?.onDeprecatedAlias !== undefined
+          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+          : {},
+      ) as Op<unknown, unknown>,
   },
 ];

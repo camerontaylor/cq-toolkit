@@ -395,6 +395,14 @@ export interface ResolveConflictDeps {
    */
   drivers?: DriverFactory;
   /**
+   * The deprecated-alias notice sink carried onto the DEFAULT factory's
+   * DriverFactoryConfig (PR #238 review P2) — the dispatch wiring the
+   * registry importer binds. Inert when `drivers` is supplied (an explicit
+   * factory IS the notice surface). Default: none — the library default,
+   * one stderr line.
+   */
+  onDeprecatedAlias?: (message: string) => void;
+  /**
    * Harness config carried on the DriverRequest (tool surface plus the
    * sandbox/path restrictions the harness maps per lane). The SHIPPED
    * default is `defaultHarnessConfig` — run-deny-all. A live-capable
@@ -482,7 +490,15 @@ export function makeResolveConflictOp(
     // worktree.
     let resolved: ResolvedDriver;
     try {
-      resolved = (deps.drivers ?? createDriverFactory()).resolve({
+      resolved = (
+        deps.drivers ??
+        createDriverFactory(
+          // The dispatch wiring's alias-notice sink (PR #238 review P2)
+          // rides the DEFAULT factory's config; absent, the library default
+          // — one stderr line — is unchanged.
+          deps.onDeprecatedAlias !== undefined ? { onDeprecatedAlias: deps.onDeprecatedAlias } : {},
+        )
+      ).resolve({
         role: 'conflict-resolver',
         modelSpec,
         ...(deps.harnessConfig !== undefined ? { harness: deps.harnessConfig } : {}),
