@@ -1,7 +1,8 @@
 # Sweep worktree setup
 
-The unit dispatch defaults `worktreesDir` to `<repo-parent>/worktrees/cq`,
-outside the repository. The plan builder can supply an explicit directory.
+The discovered sweep plan and unit dispatch default `worktreesDir` to
+`<repo-parent>/worktrees/cq`, outside the repository. Authored plans can
+supply an explicit directory.
 
 The worktree provider locks each new checkout against Git pruning. To install
 dependencies before the first probe, set the unit dispatch `install` hook:

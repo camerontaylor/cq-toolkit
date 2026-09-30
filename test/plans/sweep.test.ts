@@ -17,11 +17,11 @@
 //      sweep registry entry is a harmless pass (empty manifest plans nothing,
 //      zero effect calls).
 //   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
-//      binding (default `none`, caller-overridable for production) lands
+//      binding (default `workspace-write`, caller-overridable) lands
 //      verbatim in the Driver's OpInvocation.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
@@ -43,6 +43,7 @@ import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
 import { makeSweepUnitOp, sweepUnitSegments } from '../../src/ops/sweep/unit.js';
 import {
   buildSweepPlan,
+  defaultSweepWorktreesDir,
   SWEEP_PLAN_ID,
   SweepUnitJobOverlay,
   type SweepPlanConfig,
@@ -104,6 +105,13 @@ describe('plans barrel surface (jZ59o)', () => {
     for (const job of testFixPlan.jobs.filter((candidate) => candidate.op === 'sweep.unit')) {
       expect((job as { input: { proposeOnly?: boolean } }).input.proposeOnly).toBe(true);
     }
+  });
+});
+
+describe('sweep worktree default', () => {
+  test('floor default resolves to a sibling worktrees directory', () => {
+    expect(defaultSweepWorktreesDir('/repo')).toBe(resolve('/repo', '..', 'worktrees', 'cq'));
+    expect(defaultSweepWorktreesDir('.')).toBe(resolve('.', '..', 'worktrees', 'cq'));
   });
 });
 
