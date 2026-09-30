@@ -15,9 +15,12 @@
 //     never silently falls back (a guessed lane is a wrong lane).
 //   - DEPRECATED ALIAS: modelSpec.provider 'ai-sdk' (the self-host DRIVER
 //     handle, review-debt #186) normalises to provider 'zai' on the SAME
-//     lane, with a `cq:`-prefixed stderr notice. The resolved.modelSpec
-//     carries the NORMALISED spec — ops put it on the invocation, so the
-//     alias never reaches a lane or a journal. Removed next major.
+//     lane, with a `cq:`-prefixed notice through the configurable sink
+//     (DriverFactoryConfig.onDeprecatedAlias; absent = one stderr line, so
+//     the bare createDriverFactory() callers keep today's behavior). The
+//     resolved.modelSpec carries the NORMALISED spec — ops put it on the
+//     invocation, so the alias never reaches a lane or a journal. Removed
+//     next major.
 //   - WRAPPER ORDER, innermost first: the lane, then the reap-on-settle
 //     wrapper (when requested), then the served-model assertion outermost.
 //     Both inner wrappers forward the `RunOptions` second parameter
@@ -138,6 +141,16 @@ export interface DriverFactoryConfig {
   pricing?: (spec: ModelSpec) => PerMillionRates | undefined;
   /** Per-lane served-model policy for the assertion wrapper (ADR-0002 §2.6). */
   servedModel?: ServedModelPolicy;
+  /**
+   * The deprecated-alias notice sink (review-debt #186): fired once per
+   * resolve() that normalises provider 'ai-sdk'. Absent = the library
+   * default, one `process.stderr.write` of the `cq:`-prefixed line, so the
+   * bare `createDriverFactory()` callers (the ops registries) keep today's
+   * behavior with no call-site churn. A caller that owns a narration
+   * contract (the CLI's CliIo — `--json` keeps stderr EMPTY) injects its
+   * mode-aware writer here.
+   */
+  onDeprecatedAlias?: (message: string) => void;
   /** Per-lane construction knobs. */
   lanes?: {
     subprocess?: SubprocessLaneConfig;
@@ -162,6 +175,15 @@ const DEFAULT_LANE: LaneId = 'ai-sdk';
  * the effective dir when neither the lane config nor the factory names one.
  */
 const DEFAULT_SESSIONS_DIR = join(tmpdir(), 'cq-harness', 'sessions');
+
+/**
+ * The absent-sink alias notice: byte-for-byte today's one-line stderr write.
+ * A factory resolves its sink ONCE, so the bare `createDriverFactory()`
+ * callers (the ops registries) all share this closure.
+ */
+const stderrAliasNotice = (message: string): void => {
+  process.stderr.write(message);
+};
 
 /**
  * Resolve the lane for a (role, provider) pair: configured bindings win
@@ -303,6 +325,10 @@ export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
 
 /** Create a driver factory over the given (optional) configuration. */
 export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFactory {
+  // The alias sink resolves ONCE per factory (PR #238 review P2): a caller
+  // that owns a narration contract injects it through the config; absent,
+  // the library default keeps today's stderr line byte-for-byte.
+  const onDeprecatedAlias = config.onDeprecatedAlias ?? stderrAliasNotice;
   return {
     resolve(request: DriverRequest): ResolvedDriver {
       // Deprecated provider alias (review-debt #186): normalise FIRST, so
@@ -310,7 +336,7 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
       let provider = request.modelSpec.provider;
       let modelSpec = request.modelSpec;
       if (provider === 'ai-sdk') {
-        process.stderr.write(
+        onDeprecatedAlias(
           "cq: modelSpec.provider 'ai-sdk' is deprecated and is removed in the next major — it now means the 'ai-sdk' lane on provider 'zai'; put the normalised spec (provider 'zai') on the invocation\n",
         );
         provider = 'zai';
