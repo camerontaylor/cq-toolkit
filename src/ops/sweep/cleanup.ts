@@ -784,6 +784,12 @@ export function makeSubprocessCleanupEffects(
     modifiedTimeMs: async (path) => (await stat(path)).mtimeMs,
     isStrictClean: listings.isStrictClean,
     worktreeRemove: async (root, path, opts) => {
+      // Sweep locks active worktrees against Git's automatic pruning. An
+      // explicit cleanup has already revalidated this tree under the mutex.
+      await runCleanupGit(['worktree', 'unlock', path], root, timeoutMs).catch((err: unknown) => {
+        if (err instanceof Error && /not locked/.test(err.message)) return;
+        throw err;
+      });
       const args =
         opts?.force === true
           ? ['worktree', 'remove', '--force', path]

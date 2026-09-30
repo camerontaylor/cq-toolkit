@@ -202,6 +202,31 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minimum": 1,
       "type": "integer"
     },
+    "install": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "timeoutMs": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command",
+        "args"
+      ],
+      "type": "object"
+    },
     "kind": {
       "minLength": 1,
       "type": "string"
@@ -312,7 +337,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   },
   "required": [
     "repoRoot",
-    "worktreesDir",
     "runPrefix",
     "base",
     "package",

@@ -940,6 +940,11 @@ export function makeSubprocessWorktreeEffects(
         add.repoRoot,
         timeoutMs,
       );
+      await runGit(
+        ['worktree', 'lock', '--reason', 'cq sweep active', add.path],
+        add.repoRoot,
+        timeoutMs,
+      );
     },
     worktreePrune: async (root) => {
       await runGit(['worktree', 'prune'], root, timeoutMs);

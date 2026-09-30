@@ -300,6 +300,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       binary: ['node', '/opt/agent.mjs'],
       provider: 'cq-e2e',
       model: 'sweep-fake',
+      budget: { maxUsd: 1 },
       sessionsDir: '/tmp/sweep-sessions',
     };
     const check = {
@@ -478,7 +479,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   });
 
   test(
-    'the unit composition binds sandboxPolicy: default none, the override rides the invocation',
+    'the unit composition binds a required budget and defaults sandboxPolicy to workspace-write',
     { timeout: 120_000 },
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
@@ -511,15 +512,22 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           }),
           driver,
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          budget: { maxUsd: 1 },
           sessionsDir: join(root, 'sessions'),
           prompt: () => 'capture me',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };
         const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
-        // DEFAULT: none (the shipped behavior, unchanged).
+        // The SDK requires a cap before the unit can run.
+        expect(() => makeSweepUnitOp({ ...base, budget: {} })).toThrow(/nonempty budget/);
+        expect(() => makeSweepUnitOp({ ...base, budget: undefined } as never)).toThrow(
+          /nonempty budget/,
+        );
+        // DEFAULT: workspace-write.
         const failed = await makeSweepUnitOp(base)(unit);
         expect(failed.status).toBe('failed'); // the capture's deliberate stop
-        expect(captured[0]?.sandboxPolicy).toEqual({ level: 'none' });
+        expect(captured[0]?.sandboxPolicy).toEqual({ level: 'workspace-write' });
+        expect(captured[0]?.budget).toEqual({ maxUsd: 1 });
         // OVERRIDE: the binding rides verbatim into the OpInvocation.
         const hardened: WorkUnit = { package: 'alpha', fixer: 'hardened', files: [] };
         await makeSweepUnitOp({ ...base, sandboxPolicy: { level: 'workspace-write' } })(hardened);
