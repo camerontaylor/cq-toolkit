@@ -33,6 +33,7 @@ import {
   readdirSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -871,5 +872,81 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
       expect(readFileSync(ledgerPath, 'utf8')).toBe('nonce-durable\n');
       return ledger.consume('nonce-durable');
     });
+  });
+
+  test('a SHORT write is looped to completion: the synced record is the whole nonce', async () => {
+    // The reported edge: `fs.writeSync` returns a byte COUNT and may write
+    // less than asked. A single unchecked call would fdatasync a truncated
+    // line, report 'consumed', and leave the full nonce absent — so the
+    // very same token would replay cleanly, which is the one outcome this
+    // ledger exists to prevent.
+    const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const calls: number[] = [];
+    const ledger = makeFileNonceLedger(ledgerPath, {
+      // A writer that dribbles out five bytes at a time.
+      write: (handle, buffer, offset, length) => {
+        const count = Math.min(5, length);
+        calls.push(count);
+        return writeSync(handle, buffer, offset, count);
+      },
+    });
+    const outcome = await ledger.consume('nonce-short-write');
+    expect(outcome).toBe('consumed');
+    // It really did take several writes, and the file holds the WHOLE
+    // record — not a prefix that would parse as a different nonce.
+    expect(calls.length).toBeGreaterThan(1);
+    expect(readFileSync(ledgerPath, 'utf8')).toBe('nonce-short-write\n');
+    // And the full nonce is genuinely spent, so the replay is refused.
+    const replay = await ledger.consume('nonce-short-write');
+    expect(replay).toBe('spent');
+  });
+
+  test('a write that cannot progress is REFUSED before any consumption is claimed', async () => {
+    // Fail closed: a zero-byte write leaves an incomplete record, so the
+    // ledger must throw and the op must refuse with the nonce UNSPENT —
+    // never report 'consumed' for a record that is not on disk.
+    const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const ledger = makeFileNonceLedger(ledgerPath, {
+      write: () => 0,
+    });
+    await expect(ledger.consume('nonce-zero-write')).rejects.toThrow(/made no progress/);
+  });
+
+  test('an over-reporting writer is refused too (it is not honouring the contract)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const ledger = makeFileNonceLedger(ledgerPath, {
+      write: (handle, buffer) => {
+        writeSync(handle, buffer, 0, buffer.length);
+        return buffer.length + 10;
+      },
+    });
+    await expect(ledger.consume('nonce-over-report')).rejects.toThrow(/not honouring/);
+  });
+
+  test('a short-write ledger still makes the op refuse rather than write (end to end, fail-closed)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-short-'));
+    const ledger = makeFileNonceLedger(join(dir, 'approvals.ndjson'), { write: () => 0 });
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-short-e2e',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+    });
+    const spy = writeSpy();
+    const result = await withApprovedMutation(authority, subject(), spy.run);
+    expect(result.status).toBe('needs-human');
+    const reason = result.status === 'needs-human' ? result.reason : '';
+    expect(reason).toContain('ledger');
+    expect(reason).toContain('UNSPENT');
+    expect(spy.calls).toBe(0);
   });
 });

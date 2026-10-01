@@ -348,6 +348,19 @@ resolutions are decisions with a stated alternative, not defaults.
   documents too), and the ledger is a plain file, not a MAC'd one — it is
   trusted because it lives in the P1-trusted layer (ADR §1), not because it
   is tamper-evident.
+- **The append is write-ALL, and fails closed.** `fs.writeSync` RETURNS a
+  byte count and does not promise the whole buffer, so the first version's
+  single unchecked call could `fdatasync` a TRUNCATED line, report
+  `consumed`, and leave the full nonce absent from the ledger — after which
+  that same token replays cleanly, the exact outcome the ledger exists to
+  prevent. The write now loops to completion, and a write that cannot make
+  progress (or that over-reports) THROWS, which `exercise` turns into a
+  `needs-human` refusal with the nonce UNSPENT. A torn record is
+  deliberately NOT truncated away: the file is shared, and truncating to a
+  remembered length could discard a CONCURRENT append, turning a safe
+  failure into an unsafe replay of another writer's token. A torn line is
+  inert — it parses as one meaningless nonce string and cannot make a real
+  128-bit nonce look spent.
 
 ### Open integration lease (for the #238 / kernel owner, NOT done here)
 

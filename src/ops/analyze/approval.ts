@@ -295,8 +295,29 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * when `consume` runs inside the mutation lock for the same workspace —
  * which is exactly where {@link ApprovalAuthority.exercise} calls it. A
  * caller who lifts the ledger out of the lock reopens a replay window.
+ *
+ * SHORT WRITES, and why `consume` cannot simply call `writeSync` once:
+ * `fs.writeSync` RETURNS the number of bytes it wrote and does not promise
+ * the whole buffer (a full disk, a signal, or a filesystem that decides to
+ * write less all yield a short count). A single unchecked call would
+ * therefore `fdatasync` a TRUNCATED line, report `consumed`, and leave the
+ * full nonce absent from the ledger — after which the very same token
+ * replays cleanly, which is the one outcome this file exists to prevent. So
+ * the write loops until the whole line is out, and any write that cannot
+ * make progress THROWS: the caller (`exercise`) turns a throw into a
+ * `needs-human` refusal with the nonce UNSPENT, which is the fail-closed
+ * direction. A torn record left behind by such a failure is NOT truncated
+ * away on purpose: the file is shared, and truncating to a remembered
+ * length could discard a CONCURRENT append, converting this safe failure
+ * into an unsafe replay of another writer's token. A torn line is inert —
+ * it parses as one meaningless nonce string, and it cannot make a real
+ * 128-bit nonce look spent.
  */
-export function makeFileNonceLedger(path: string): InspectableNonceLedger {
+export function makeFileNonceLedger(
+  path: string,
+  config: FileNonceLedgerConfig = {},
+): InspectableNonceLedger {
+  const write = config.write ?? defaultWrite;
   const known = new Set<string>();
   // The directory entry is durable once the FILE is created; later appends
   // to a known file skip the dir fsync entirely (the journal's own rule).
@@ -320,9 +341,12 @@ export function makeFileNonceLedger(path: string): InspectableNonceLedger {
       // promise resolves, or the exercise would report "consumed" for a
       // nonce that is still only a promise of a byte on disk.
       const isNew = !dirSynced;
+      const line = Buffer.from(`${nonce}\n`, 'utf8');
       const handle = openSync(path, 'a');
       try {
-        writeSync(handle, `${nonce}\n`);
+        // WRITE-ALL, then one fsync of the completed record: the record
+        // that reaches the platter is the whole nonce, never a prefix.
+        writeAll(handle, line, write, nonce);
         fdatasyncSync(handle);
       } finally {
         closeSync(handle);
@@ -549,6 +573,60 @@ function syncDirSync(dir: string): void {
     if (code === undefined || !SOFT_ERRORS.has(code)) throw err;
   } finally {
     if (handle !== undefined) closeSync(handle);
+  }
+}
+
+/**
+ * The write seam of {@link makeFileNonceLedger}, injectable so the
+ * short-write case is REPRODUCIBLE in a test rather than asserted about in
+ * prose. The default is `fs.writeSync`, whose return value is a byte count
+ * that may be smaller than the buffer — the default writer is what the
+ * write-all loop exists to cope with.
+ */
+export interface FileNonceLedgerConfig {
+  /**
+   * Write up to `length` bytes from `buffer` at `offset` to `handle`,
+   * returning how many were written. Defaults to `fs.writeSync`.
+   */
+  write?: (handle: number, buffer: Buffer, offset: number, length: number) => number;
+}
+
+/** The default write seam: node:fs, whose short-count behaviour is the reason for the loop. */
+const defaultWrite: NonNullable<FileNonceLedgerConfig['write']> = (
+  handle,
+  buffer,
+  offset,
+  length,
+) => writeSync(handle, buffer, offset, length);
+
+/**
+ * Write the WHOLE line, looping over short writes, and throw rather than
+ * claim success on a partial record. A non-positive count means the write
+ * can make no progress (a full disk, a closed handle); a count larger than
+ * what was asked for means the writer is not honouring the contract. Either
+ * way the throw propagates to `exercise`, which refuses the mutation with
+ * the token unspent.
+ */
+function writeAll(
+  handle: number,
+  line: Buffer,
+  write: NonNullable<FileNonceLedgerConfig['write']>,
+  nonce: string,
+): void {
+  let written = 0;
+  while (written < line.length) {
+    const count = write(handle, line, written, line.length - written);
+    if (!Number.isInteger(count) || count <= 0) {
+      throw new Error(
+        `approval ledger: the append of nonce '${nonce}' made no progress (${String(count)} bytes written of ${String(line.length - written)} remaining) — the record is incomplete, so the nonce is NOT marked spent and the write is refused`,
+      );
+    }
+    if (written + count > line.length) {
+      throw new Error(
+        `approval ledger: the append of nonce '${nonce}' reported ${String(count)} bytes written but only ${String(line.length - written)} were requested — the writer is not honouring the write contract, so the nonce is NOT marked spent and the write is refused`,
+      );
+    }
+    written += count;
   }
 }
 
