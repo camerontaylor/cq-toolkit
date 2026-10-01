@@ -72,10 +72,12 @@ ADR-0003 §2.4 criterion 2: both token limits come from the provider's published
 model limits, never a client default. Unknown limits stay ADVISORY, so an absent
 entry below is a deliberate refusal, not a missing field.
 
-| Model              | max input (context) | max output     | Source                                                                                                                                                                                                                                                   |
-| ------------------ | ------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude-haiku-4-5` | 200,000             | 64,000         | vendor model table, fetched 2026-10-01 (documented)                                                                                                                                                                                                      |
-| `glm-5.3-flash`    | 1,000,000           | **unverified** | context documented (vendor page, 2026-10-01); a 131,072 output figure circulates in the community DB and in RS-14, but was NOT confirmed against a vendor page in this lane, so it is left absent and the lane stays ADVISORY for output-bounded `W_max` |
+| Model                                | max input (context) | max output     | Source                                                                                                                                                                                                                                                   |
+| ------------------------------------ | ------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-haiku-4-5`                   | 200,000             | 64,000         | vendor model table, fetched 2026-10-01 (documented)                                                                                                                                                                                                      |
+| `glm-5.3-flash`                      | 1,000,000           | **unverified** | context documented (vendor page, 2026-10-01); a 131,072 output figure circulates in the community DB and in RS-14, but was NOT confirmed against a vendor page in this lane, so it is left absent and the lane stays ADVISORY for output-bounded `W_max` |
+| `gpt-5`, `gpt-5-mini` (OpenAI)       | absent              | absent         | no OpenAI vendor page was fetched for per-model token limits in this lane, so `admissionVerdict` returns ADVISORY `model-limits-unverified` for these models instead of borrowing the community DB's numbers                                             |
+| `deepseek-flash`, OpenCode Go models | absent              | absent         | same: absent from the profile data, so those lanes fail closed to ADVISORY                                                                                                                                                                               |
 
 ## 4. Plan-quota and rate-limit surfaces (RS-14 input to the admission helpers)
 
@@ -86,10 +88,16 @@ Re-confirmed from the vendor page fetched 2026-10-01 (HTTP 200),
   Pro 12,000 / 60,000, Max 28,000 / 140,000 credits. "5-hour credits:
   dynamically refreshed; credit quota resets 5 hours after consumption.
   Weekly credits: activated upon subscription; resets every 7 days."
-- Credit formula: `(Input tokens × Input multiplier + Cached Input tokens ×
-Cached Input multiplier + Output tokens × Output multiplier) / 10,000`, plus
-  MCP calls × output multiplier. Multipliers: GLM-5.3 6.9 / 1.7 / 24;
-  GLM-5.3-Flash 2.3 / 0.56 / 8.
+- Credit formula: "(Input tokens × Input multiplier + Cached Input tokens ×
+  Cached Input multiplier + Output tokens × Output multiplier) / 10,000", plus
+  MCP calls × output multiplier. The multipliers multiply RAW TOKEN COUNTS —
+  there is no other scaling factor in the published formula. The vendor's own
+  "Estimated Token Allowance" table is the regression source that pins the scale:
+  at these multipliers a Lite weekly allowance of 10,000 credits buys ≈59M cached
+  GLM-5.3 tokens and ≈179M cached GLM-5.3-Flash tokens, inside the documented
+  bands of 48–97M and 146–292M (and off-peak they reach or exceed the band
+  maxima, which is exactly the documented 0.5× discount). Per-model rows:
+  GLM-5.3 6.9 / 1.7 / 24; GLM-5.3-Flash 2.3 / 0.56 / 8.
 - Peak pricing: "**During off-peak hours, model usage is charged at 50% of the
   standard credit rate**. **Peak hours**: Monday to Friday, 14:00–18:00
   Singapore Standard Time (UTC+8)." This is the documented basis for the
@@ -109,6 +117,34 @@ transcribed in `provider-profiles.ts` with the RS-14 evidence paths, because
 they were captured with credentials this lane does not hold and must not
 re-capture. Every such field is marked `verifiedBy: 'rs14-capture'` with its
 capture date, so a reader can tell a documented fact from a captured one.
+
+### OpenAI 429 body codes (re-fetched 2026-10-01, HTTP 200)
+
+From <https://developers.openai.com/api/docs/guides/spend-limits> and
+<https://platform.openai.com/docs/guides/rate-limits>:
+
+- "When tracked spend reaches an applicable hard limit, affected API requests
+  return a 429 error with the `organization_spend_limit_exceeded` or
+  `project_spend_limit_exceeded` code." Both are **quota** (raise or remove the
+  limit before the monthly reset), and "enforcement is not instantaneous, so
+  recorded spend can slightly exceed the configured amount".
+- `organization_usage_limit_exceeded` — "request a higher approved usage
+  limit". Not a throttle under any reading.
+- `credit_balance_exhausted` / `insufficient_quota` — add credits (the former is
+  also the RS-14 live capture).
+- The vendor's own routing sentence: "If the error reports a request or token
+  rate limit, follow the rate limit guide." `Retry-After` is documented as "the
+  minimum number of seconds to wait before retrying a temporary rate-limit error,
+  **when present**".
+
+Consequence recorded in the profile data: there is deliberately **no bare
+`429 → rate-limit` rule** on the OpenAI or Anthropic API profiles, because every
+documented 429 body code on those surfaces is a quota condition and a
+status-only rule would classify an exhausted allowance as retryable, busy-retry
+it for an hour, and hide the reset time. Anthropic's documented shape is the same
+(`retry-after` on a rate-limit 429, absent on the spend-cap 429). DeepSeek and
+Z.AI keep their status rules because theirs ARE documented status conditions — a
+concurrency 429 and a plan-window 429 respectively.
 
 ## 5. What this lane did NOT do
 

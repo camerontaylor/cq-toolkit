@@ -90,10 +90,26 @@ export interface PeakWindowFact {
   readonly provenance: Provenance;
 }
 
-/** The provider's own credit formula, when it publishes one. */
+/**
+ * The provider's own credit formula, when it publishes one, PER MODEL.
+ *
+ * The published formula is `(Input tokens × Input multiplier + Cached Input
+ * tokens × Cached Input multiplier + Output tokens × Output multiplier) /
+ * 10,000` (vendor page, fetched 2026-10-01), so the multipliers multiply RAW
+ * TOKEN COUNTS. Applying any extra scaling factor here under-counts credits by
+ * that factor — the cross-check that pins this is the vendor's own "Estimated
+ * Token Allowance" table (see test/driver/provider-profiles.test.ts): at the
+ * published multipliers the Lite weekly allowance converts to a weekly token
+ * count inside the documented band, and a 10^6 error misses it by six orders of
+ * magnitude.
+ *
+ * Per MODEL, not per profile: GLM-5.3 and GLM-5.3-Flash have different
+ * multipliers (6.9 / 1.7 / 24 versus 2.3 / 0.56 / 8). A single profile-wide set
+ * silently misprices whichever model it is not for.
+ */
 export interface CreditBurnModel {
   readonly divisor: number;
-  readonly perMillion: {
+  readonly tokenMultiplier: {
     readonly input: number;
     readonly cachedInput: number;
     readonly output: number;
@@ -153,7 +169,8 @@ export interface ProviderProfile {
   readonly quota?: {
     readonly windows: readonly QuotaWindowFact[];
     readonly peak?: PeakWindowFact;
-    readonly burnModel?: CreditBurnModel;
+    /** Burn model per MODEL id; absent for a model the profile has no formula for. */
+    readonly burnModels?: Readonly<Record<string, CreditBurnModel>>;
   };
   readonly observability: Observability;
   readonly rateLimitHeaders: readonly string[];
@@ -213,16 +230,6 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
         },
       },
       {
-        httpStatus: 429,
-        errorClass: 'rate-limit',
-        provenance: {
-          kind: 'documented',
-          source: DOC_RATE_LIMITS,
-          asOf: '2026-09-25',
-          note: 'Rate-limit 429 carries retry-after and the anthropic-ratelimit-* header set.',
-        },
-      },
-      {
         httpStatus: 400,
         errorClass: 'quota',
         provenance: {
@@ -232,6 +239,16 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
           note: 'A self-set workspace spend limit answers HTTP 400 invalid_request_error beginning "You have reached your specified API usage limits".',
         },
       },
+      // NO bare `429 -> rate-limit` rule on this profile, by design. The vendor
+      // documents `retry-after` on a genuine rate-limit 429 and its ABSENCE on
+      // the spend-cap 429, so a status-only throttle rule would classify an
+      // exhausted allowance as a throttle and busy-retry it for an hour. What
+      // remains here is fail-closed: a 429 whose code is not
+      // enforced_spend_limit_reached and that carries no retry-after falls
+      // through to the status rule above and settles as QUOTA - deferred, never
+      // retried - rather than as a throttle. A real throttle is classified by
+      // the classifier's retry-after rule, which is the documented
+      // discriminator.
     ],
     modelLimits: {
       'claude-haiku-4-5': {
@@ -390,14 +407,26 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
           note: '"During off-peak hours, model usage is charged at 50% of the standard credit rate." Peak hours: Monday to Friday, 14:00-18:00 Singapore Standard Time (UTC+8). The dated campaign in that page (2026-09-25 to 2026-10-07, all hours off-peak) is deliberately NOT modelled: it expires.',
         },
       },
-      burnModel: {
-        divisor: 10_000,
-        perMillion: { input: 2.3, cachedInput: 0.56, output: 8 },
-        provenance: {
-          kind: 'documented',
-          source: DOC_ZAI,
-          asOf: '2026-10-01',
-          note: 'Credit usage = (Input x Input multiplier + Cached Input x Cached Input multiplier + Output x Output multiplier) / 10,000; MCP calls x output multiplier. The multipliers recorded are GLM-5.3-Flash (2.3 / 0.56 / 8); GLM-5.3 is 6.9 / 1.7 / 24 and is keyed per model by the seam owner.',
+      burnModels: {
+        'glm-5.3-flash': {
+          divisor: 10_000,
+          tokenMultiplier: { input: 2.3, cachedInput: 0.56, output: 8 },
+          provenance: {
+            kind: 'documented',
+            source: DOC_ZAI,
+            asOf: '2026-10-01',
+            note: 'Credit usage = (Input x Input multiplier + Cached Input x Cached Input multiplier + Output x Output multiplier) / 10,000; MCP calls x output multiplier. GLM-5.3-Flash row of the published multiplier table.',
+          },
+        },
+        'glm-5.3': {
+          divisor: 10_000,
+          tokenMultiplier: { input: 6.9, cachedInput: 1.7, output: 24 },
+          provenance: {
+            kind: 'documented',
+            source: DOC_ZAI,
+            asOf: '2026-10-01',
+            note: 'GLM-5.3 row of the same published multiplier table. Roughly 3x the GLM-5.3-Flash coefficient on every direction, which is why one profile-wide set would misprice whichever model it is not for.',
+          },
         },
       },
     },
@@ -529,20 +558,61 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
           kind: 'rs14-capture',
           source: `${CAPTURES}oa_body.json`,
           asOf: '2026-09-24',
-          note: 'Live 429 {"type":"insufficient_quota","code":"credit_balance_exhausted"} with NO Retry-After and no x-ratelimit-* headers on the response. Dashboard hard-limit 429s use organization_/project_spend_limit_exceeded.',
+          note: 'Live 429 {"type":"insufficient_quota","code":"credit_balance_exhausted"} with NO Retry-After and no x-ratelimit-* headers. Documented remedy: add credits.',
         },
       },
       {
-        httpStatus: 429,
-        errorClass: 'rate-limit',
+        providerCode: 'insufficient_quota',
+        errorClass: 'quota',
         provenance: {
           kind: 'documented',
-          source: DOC_OPENAI_RL,
-          asOf: '2026-09-25',
-          note: 'Transient 429/503 carry Retry-After.',
+          source: DOC_OPENAI_SPEND,
+          asOf: '2026-10-01',
+          note: 'insufficient_quota accompanies an exhausted funded balance; the remedy is to add credits, never to wait out a window.',
+        },
+      },
+      {
+        providerCode: 'organization_spend_limit_exceeded',
+        httpStatus: 429,
+        errorClass: 'quota',
+        provenance: {
+          kind: 'documented',
+          source: DOC_OPENAI_SPEND,
+          asOf: '2026-10-01',
+          note: '"When tracked spend reaches an applicable hard limit, affected API requests return a 429 error with the organization_spend_limit_exceeded or project_spend_limit_exceeded code." Remedy: raise or remove the limit before the monthly reset. Enforcement is not instantaneous, so recorded spend can slightly exceed the configured amount.',
+        },
+      },
+      {
+        providerCode: 'project_spend_limit_exceeded',
+        httpStatus: 429,
+        errorClass: 'quota',
+        provenance: {
+          kind: 'documented',
+          source: DOC_OPENAI_SPEND,
+          asOf: '2026-10-01',
+          note: 'Project-scoped hard spend limit, same 429 shape as the organization limit.',
+        },
+      },
+      {
+        providerCode: 'organization_usage_limit_exceeded',
+        errorClass: 'quota',
+        provenance: {
+          kind: 'documented',
+          source: DOC_OPENAI_SPEND,
+          asOf: '2026-10-01',
+          note: 'Documented remedy: request a higher approved usage limit. Not a throttle under any reading.',
         },
       },
     ],
+    // No bare `429 -> rate-limit` rule exists on this profile, on purpose. Every
+    // documented 429 body code here is a quota condition, and the vendor's own
+    // guidance for a genuine throttle is to consult the rate-limit guide: "If
+    // the error reports a request or token rate limit, follow the rate limit
+    // guide." A status-only throttle rule would therefore classify a
+    // spend/usage-limit 429 as retryable and busy-retry an exhausted allowance
+    // for an hour. Throttles reach the classifier through the retry-after rule,
+    // which the rate-limits page documents as present on temporary rate-limit
+    // errors and absent otherwise. Both OpenAI pages fetched 2026-10-01.
   },
 
   'codex-chatgpt': {

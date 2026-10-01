@@ -111,12 +111,32 @@ export const CANDIDATE_ZAI_ROUTING_ALIASES: ServedAliasTable = {
   },
 };
 
-/** Everything above, for a caller that wants to inspect the whole candidate set. */
-export const CANDIDATE_SERVED_ALIASES: ServedAliasTable = {
-  ...CANDIDATE_ANTHROPIC_DATED_ALIASES,
-  ...CANDIDATE_DEEPSEEK_SERVED_ALIASES,
-  ...CANDIDATE_ZAI_ROUTING_ALIASES,
-};
+/**
+ * Every candidate above, merged WITHOUT clobbering.
+ *
+ * The groups each carry an `ai-sdk` key, so a shallow object spread silently
+ * keeps only the LAST group's `ai-sdk` map and loses the anthropic and deepseek
+ * entries — a merged table that looks populated and is missing half of what went
+ * into it. This merge therefore descends lane → provider → requested, and a test
+ * asserts every group survives the merge.
+ */
+export const CANDIDATE_SERVED_ALIASES: ServedAliasTable = Object.freeze(
+  [
+    CANDIDATE_ANTHROPIC_DATED_ALIASES,
+    CANDIDATE_DEEPSEEK_SERVED_ALIASES,
+    CANDIDATE_ZAI_ROUTING_ALIASES,
+  ].reduce<ServedAliasTable>((merged, group) => {
+    const lanes: Record<string, Record<string, Record<string, readonly string[]>>> = { ...merged };
+    for (const [lane, byProvider] of Object.entries(group)) {
+      const byModel: Record<string, Record<string, readonly string[]>> = { ...(lanes[lane] ?? {}) };
+      for (const [provider, byRequested] of Object.entries(byProvider)) {
+        byModel[provider] = { ...(byModel[provider] ?? {}), ...byRequested };
+      }
+      lanes[lane] = byModel;
+    }
+    return lanes;
+  }, {}),
+);
 
 /**
  * Candidates deliberately NOT recorded, and why (an omission here is a finding,

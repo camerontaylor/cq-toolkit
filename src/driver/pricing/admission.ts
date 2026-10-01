@@ -62,11 +62,40 @@ function headerValue(signal: ProviderSignal, name: string): string | undefined {
   return signal.headers?.[name.toLowerCase()];
 }
 
-/** Epoch seconds from a unified-quota `-*-reset` header, when present and sane. */
-function claudeResetMs(signal: ProviderSignal): number | undefined {
-  const raw =
-    headerValue(signal, 'anthropic-ratelimit-unified-5h-reset') ??
-    headerValue(signal, 'anthropic-ratelimit-unified-7d-reset');
+/**
+ * Epoch milliseconds from the unified-quota reset header of the window that
+ * actually BLOCKS, or `undefined` when no window's reset is readable.
+ *
+ * Reading the 5-hour reset unconditionally is wrong: the weekly window can be
+ * exhausted while the 5-hour window still has room, and deferring to the 5-hour
+ * reset then retries against a wall that has not moved. A window is treated as
+ * blocking when its `-status` is `rejected` or its `-utilization` has reached
+ * 1.0; when NEITHER window reports blocking but resets are present, the LATER
+ * reset is returned, because that is the only choice that cannot produce an
+ * early retry.
+ */
+function claudeDeferMs(signal: ProviderSignal): number | undefined {
+  const resets: { readonly at: number; readonly blocking: boolean }[] = [];
+  for (const [window, statusHeader, utilizationHeader] of [
+    ['5h', 'anthropic-ratelimit-unified-5h-status', 'anthropic-ratelimit-unified-5h-utilization'],
+    ['7d', 'anthropic-ratelimit-unified-7d-status', 'anthropic-ratelimit-unified-7d-utilization'],
+  ] as const) {
+    const reset = epochSecondsMs(
+      headerValue(signal, `anthropic-ratelimit-unified-${window}-reset`),
+    );
+    if (reset === undefined) continue;
+    const status = headerValue(signal, statusHeader);
+    const utilization = Number(headerValue(signal, utilizationHeader));
+    const blocking = status === 'rejected' || (Number.isFinite(utilization) && utilization >= 1);
+    resets.push({ at: reset, blocking });
+  }
+  if (resets.length === 0) return undefined;
+  const blocking = resets.filter((window) => window.blocking);
+  const pool = blocking.length > 0 ? blocking : resets;
+  return Math.max(...pool.map((window) => window.at));
+}
+
+function epochSecondsMs(raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   const seconds = Number(raw);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
@@ -111,7 +140,7 @@ export function classifyProviderSignal(
   }
   const marker = firstMatchingMarker(profile, signal);
   if (marker !== undefined) {
-    const deferUntilMs = claudeResetMs(signal) ?? isoResetMs(observedQuota?.resetsAt);
+    const deferUntilMs = claudeDeferMs(signal) ?? isoResetMs(observedQuota?.resetsAt);
     return {
       errorClass: marker.errorClass,
       ...(deferUntilMs === undefined ? {} : { deferUntilMs }),
@@ -189,25 +218,34 @@ export function peakMultiplier(profile: ProviderProfile, instantMs: number): num
 
 /**
  * Plan credits a usage observation burns on a quota lane, per the provider's own
- * published formula. `undefined` when the profile publishes no burn model — the
- * caller then has no local burn figure and must stay ADVISORY.
+ * published formula: `(Input tokens × Input multiplier + Cached Input tokens ×
+ * Cached Input multiplier + Output tokens × Output multiplier) / 10,000`, times
+ * the peak/off-peak multiplier in force at the instant. The multipliers multiply
+ * RAW TOKEN COUNTS — the formula is published exactly that way, and the vendor's
+ * own "Estimated Token Allowance" table only reconciles with these numbers (see
+ * test/driver/provider-profiles.test.ts), so any extra scaling factor here is a
+ * silent under-count.
  *
- * Cached input is billed at the CACHED-INPUT multiplier, not the input one; a
+ * Burn models are per MODEL: GLM-5.3 and GLM-5.3-Flash carry roughly 3×
+ * different coefficients, so a model with no recorded formula yields `undefined`
+ * rather than another model's rates.
+ *
+ * Cached input bills at the CACHED-INPUT multiplier, not the input one: a
  * cache-read token is not an input token.
  */
 export function creditsForUsage(
   profile: ProviderProfile,
+  model: string,
   usage: Usage,
   instantMs: number,
 ): number | undefined {
-  const burn = profile.quota?.burnModel;
+  const burn = profile.quota?.burnModels?.[model];
   if (burn === undefined) return undefined;
-  const { perMillion, divisor } = burn;
+  const { tokenMultiplier, divisor } = burn;
   const tokens =
-    (usage.input * perMillion.input +
-      usage.cacheRead * perMillion.cachedInput +
-      usage.output * perMillion.output) /
-    1_000_000;
+    usage.input * tokenMultiplier.input +
+    usage.cacheRead * tokenMultiplier.cachedInput +
+    usage.output * tokenMultiplier.output;
   return (tokens / divisor) * peakMultiplier(profile, instantMs);
 }
 
@@ -219,21 +257,47 @@ export type AdvisoryReason =
   | 'unknown-profile'
   | 'limits-unknown'
   | 'unobservable-allowance'
-  | 'no-native-cap';
+  | 'no-native-cap'
+  | 'model-limits-unverified'
+  | 'no-observed-balance';
+
+/** The evidence a HARD claim must bring with it. */
+export interface AdmissionEvidence {
+  /** The exact model id the claim is about. Absent ⇒ ADVISORY. */
+  readonly model?: string;
+  /**
+   * The remaining allowance actually OBSERVED at decision time, in the profile's
+   * own unit (credits, USD). Absent ⇒ ADVISORY: a channel that can report
+   * remaining allowance is not the same thing as a channel that HAS reported it,
+   * and "can be checked" must never be read as "is checked".
+   */
+  readonly observedRemaining?: number;
+}
 
 /**
- * The fail-closed admission ceiling for a profile.
+ * The fail-closed admission ceiling for a lane.
  *
- * HARD requires ALL of: a known profile, `limitsKnown`, a real observation
- * channel (`headers` or `endpoint` — a console-only or interactive-TUI allowance
- * cannot be checked by an unattended run), and a published native cap. Anything
- * else is ADVISORY with a reason, which is the classification ADR-0003 §2.4
- * requires; an unknown profile id is ADVISORY, never "unmetered".
+ * HARD requires ALL of:
+ *   - a known profile;
+ *   - `limitsKnown`;
+ *   - a real observation channel (`headers` or `endpoint` — a console-only or
+ *     interactive-TUI allowance cannot be checked by an unattended run);
+ *   - a published native cap;
+ *   - the claim's model carrying BOTH published token limits (`maxInputTokens`
+ *     and `maxOutputTokens`). A profile-wide cap is not a model cap: without the
+ *     per-model numbers, ADR-0003 §2.4 criterion 2 has no `W_max` input, so the
+ *     claim is ADVISORY. Profiles whose limits this lane could not confirm
+ *     against a vendor page (OpenAI, DeepSeek, OpenCode Go) therefore cannot
+ *     claim HARD for ANY model;
+ *   - an OBSERVED remaining allowance on a quota-accounted lane.
+ *
+ * Everything else is ADVISORY with a reason, which is the classification
+ * ADR-0003 §2.4 requires. An unknown profile id is ADVISORY, never "unmetered".
  */
-export function admissionVerdict(profileId: string | undefined): {
-  readonly verdict: AdmissionVerdict;
-  readonly reasons: readonly AdvisoryReason[];
-} {
+export function admissionVerdict(
+  profileId: string | undefined,
+  evidence: AdmissionEvidence = {},
+): { readonly verdict: AdmissionVerdict; readonly reasons: readonly AdvisoryReason[] } {
   const profile = providerProfile(profileId);
   if (profile === undefined) return { verdict: 'advisory', reasons: ['unknown-profile'] };
   const reasons: AdvisoryReason[] = [];
@@ -242,5 +306,19 @@ export function admissionVerdict(profileId: string | undefined): {
     reasons.push('unobservable-allowance');
   }
   if (profile.cap.kind === 'none') reasons.push('no-native-cap');
+  if (evidence.model === undefined) {
+    reasons.push('model-limits-unverified');
+  } else {
+    const limits = profile.modelLimits?.[evidence.model];
+    if (limits?.maxInputTokens === undefined || limits?.maxOutputTokens === undefined) {
+      reasons.push('model-limits-unverified');
+    }
+  }
+  if (
+    profile.accounting === 'quota' &&
+    (evidence.observedRemaining === undefined || !(evidence.observedRemaining > 0))
+  ) {
+    reasons.push('no-observed-balance');
+  }
   return { verdict: reasons.length === 0 ? 'hard' : 'advisory', reasons };
 }

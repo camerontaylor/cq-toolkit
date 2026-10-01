@@ -93,8 +93,79 @@ describe('classifyProviderSignal', () => {
     const verdict = classifyProviderSignal('claude-subscription', CLAUDE_EXHAUSTED_429);
     expect(verdict.errorClass).toBe('quota');
     expect(verdict.rule).toMatch(/marker-header|structured/);
-    // The unified -reset epoch is the defer-until time.
+    // The unified -reset epoch of the BLOCKING window is the defer-until time.
     expect(verdict.deferUntilMs).toBe(1_790_269_200_000);
+  });
+
+  test('when the WEEKLY window is the blocked one, defer past the 7-day reset', () => {
+    const verdict = classifyProviderSignal('claude-subscription', {
+      ...CLAUDE_EXHAUSTED_429,
+      headers: {
+        ...CLAUDE_EXHAUSTED_429.headers,
+        // 5-hour window has room again; the weekly window is spent.
+        'anthropic-ratelimit-unified-5h-utilization': '0.2',
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-7d-utilization': '1.0',
+        'anthropic-ratelimit-unified-7d-status': 'rejected',
+      },
+    });
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(1_790_341_200_000);
+  });
+
+  test('with neither window reporting blocked, defer past the LATER reset', () => {
+    const verdict = classifyProviderSignal('claude-subscription', {
+      ...CLAUDE_EXHAUSTED_429,
+      headers: {
+        ...CLAUDE_EXHAUSTED_429.headers,
+        'anthropic-ratelimit-unified-5h-utilization': '0.2',
+        'anthropic-ratelimit-unified-7d-utilization': '0.7',
+      },
+    });
+    // Choosing the earlier reset here could retry against a wall that has not moved.
+    expect(verdict.deferUntilMs).toBe(1_790_341_200_000);
+  });
+
+  test('a 5-hour-only exhaustion defers to the 5-hour reset', () => {
+    const headers = { 'anthropic-ratelimit-unified-status': 'rejected' };
+    const verdict = classifyProviderSignal('claude-subscription', {
+      httpStatus: 429,
+      headers: {
+        ...headers,
+        'anthropic-ratelimit-unified-5h-reset': '1790269200',
+        'anthropic-ratelimit-unified-5h-utilization': '1.0',
+      },
+    });
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(1_790_269_200_000);
+  });
+
+  test('an OpenAI spend or usage-limit 429 is QUOTA, never a retryable throttle', () => {
+    // Codes verified against the vendor spend-limits page, fetched 2026-10-01.
+    for (const code of [
+      'organization_spend_limit_exceeded',
+      'project_spend_limit_exceeded',
+      'organization_usage_limit_exceeded',
+      'insufficient_quota',
+    ]) {
+      const verdict = classifyProviderSignal('openai-api', { httpStatus: 429, providerCode: code });
+      expect(verdict.errorClass).toBe('quota');
+      expect(verdict.deferUntilMs).toBeUndefined();
+    }
+  });
+
+  test('an OpenAI 429 with no body code and no Retry-After is NOT called a throttle', () => {
+    const verdict = classifyProviderSignal('openai-api', { httpStatus: 429 });
+    expect(verdict.errorClass).not.toBe('rate-limit');
+  });
+
+  test('an OpenAI transient 429 WITH Retry-After is a throttle', () => {
+    const verdict = classifyProviderSignal('openai-api', {
+      httpStatus: 429,
+      retryAfterMs: 2_000,
+    });
+    expect(verdict.errorClass).toBe('rate-limit');
+    expect(verdict.rule).toBe('retry-after');
   });
 
   test('a plain 429 with no unified headers is a throttle, deferring on retry-after', () => {
@@ -108,10 +179,22 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 
-  test('a 429 with neither unified headers nor retry-after falls back to the status rule', () => {
-    const verdict = classifyProviderSignal('claude-subscription', { httpStatus: 429 });
-    expect(verdict.errorClass).toBe('rate-limit');
-    expect(verdict.rule).toBe('structured');
+  test('an undocumented 429 splits by profile, and never by guesswork', () => {
+    // Claude subscription: the vendor documents that a 429 WITHOUT unified
+    // quota headers is the plain "Server is temporarily limiting requests"
+    // throttle, so it stays rate-limit.
+    expect(classifyProviderSignal('claude-subscription', { httpStatus: 429 }).errorClass).toBe(
+      'rate-limit',
+    );
+    // Anthropic API: the vendor documents the OPPOSITE discrimination (a
+    // spend-cap 429 carries no retry-after), so an unattributed 429 settles
+    // fail-closed as quota - deferred, never busy-retried.
+    expect(classifyProviderSignal('anthropic-api', { httpStatus: 429 }).errorClass).toBe('quota');
+    // OpenAI: every documented 429 code there is a quota code, so a code-less
+    // 429 must not become a throttle.
+    expect(classifyProviderSignal('openai-api', { httpStatus: 429 }).errorClass).not.toBe(
+      'rate-limit',
+    );
   });
 
   test('a provider error code outranks the HTTP status and the message text', () => {
@@ -214,47 +297,135 @@ describe('peakMultiplier', () => {
 
 describe('creditsForUsage', () => {
   const usage = { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheWrite: 0 };
+  const PEAK = Date.parse('2026-10-01T07:00:00Z'); // Thursday 15:00 +08
+  const OFF_PEAK = Date.parse('2026-10-01T12:00:00Z'); // Thursday 20:00 +08
 
-  test('the published GLM-5.3-Flash formula, with cache read at the CACHED rate', () => {
-    // (1e6*2.3 + 1e6*0.56 + 1e6*8) / 1e6 / 10000 credits, at peak (1x).
-    expect(creditsForUsage(ZAI!, usage, Date.parse('2026-10-01T07:00:00Z'))).toBeCloseTo(
-      (2.3 + 0.56 + 8) / 10_000,
-      12,
+  /**
+   * The vendor's own cross-check, fetched 2026-10-01:
+   * https://docs.z.ai/devpack/overview.md, "Estimated Token Allowance" table.
+   * At the published multipliers a Lite weekly allowance of 10,000 credits buys a
+   * weekly token count inside the documented band; a 1e6 scaling error misses it
+   * by six orders of magnitude, and using one model's coefficients for the other
+   * misses it entirely.
+   */
+  const LITE_WEEKLY_CREDITS = 10_000;
+  const ALLOWANCE_BAND_M_TOKENS_WEEK = {
+    'glm-5.3': { min: 48, max: 97 },
+    'glm-5.3-flash': { min: 146, max: 292 },
+  } as const;
+
+  function weeklyTokensAtCachedRate(model: string, credits: number, instantMs: number): number {
+    const burn = creditsForUsage(
+      ZAI!,
+      model,
+      { input: 0, output: 0, cacheRead: 1_000_000, cacheWrite: 0 },
+      instantMs,
+    )!;
+    return (credits / burn) * 1_000_000;
+  }
+
+  test('the published formula, with cache read at the CACHED-INPUT multiplier', () => {
+    // (1e6 x 2.3 + 1e6 x 0.56 + 1e6 x 8) / 10,000 credits at peak (1x).
+    expect(creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)).toBeCloseTo(
+      (2.3 + 0.56 + 8) * 100,
+      6,
     );
   });
 
-  test('off-peak credits are half the peak burn', () => {
-    const peak = creditsForUsage(ZAI!, usage, Date.parse('2026-10-01T07:00:00Z'))!;
-    const offPeak = creditsForUsage(ZAI!, usage, Date.parse('2026-10-01T12:00:00Z'))!;
-    expect(offPeak).toBeCloseTo(peak * 0.5, 12);
+  test('the scale reconciles with the vendor token-allowance table (Lite weekly)', () => {
+    for (const [model, band] of Object.entries(ALLOWANCE_BAND_M_TOKENS_WEEK)) {
+      const bestCasePeak = weeklyTokensAtCachedRate(model, LITE_WEEKLY_CREDITS, PEAK) / 1e6;
+      const bestCaseOffPeak = weeklyTokensAtCachedRate(model, LITE_WEEKLY_CREDITS, OFF_PEAK) / 1e6;
+      // All-cached is the cheapest possible mix, so it must land INSIDE the
+      // documented band at peak, and reach or exceed the band maximum off-peak
+      // (the documented range is exactly the 0.5x off-peak discount).
+      expect(bestCasePeak).toBeGreaterThanOrEqual(band.min);
+      expect(bestCasePeak).toBeLessThanOrEqual(band.max);
+      expect(bestCaseOffPeak).toBeGreaterThanOrEqual(band.max);
+    }
   });
 
-  test('a profile with no published burn model yields no local burn figure', () => {
-    expect(creditsForUsage(CLAUDE_SUB!, usage, THURSDAY_UTC_MIDNIGHT)).toBeUndefined();
+  test('GLM-5.3 uses its OWN coefficients, roughly 3x the Flash ones', () => {
+    const flash = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
+    const full = creditsForUsage(ZAI!, 'glm-5.3', usage, PEAK)!;
+    // 6.9/2.3 = 1.7/0.56 = 24/8 = 3 exactly per direction, so the blended total
+    // is 3 to within a rounding hair; a profile-wide coefficient set lands ~3x
+    // off this for one of the two models.
+    expect(full / flash).toBeCloseTo(3, 1);
+  });
+
+  test('a model with no recorded burn formula yields no local burn figure', () => {
+    expect(creditsForUsage(ZAI!, 'glm-4.7', usage, PEAK)).toBeUndefined();
+    expect(creditsForUsage(CLAUDE_SUB!, 'claude-haiku-4-5', usage, PEAK)).toBeUndefined();
+  });
+
+  test('off-peak credits are half the peak burn', () => {
+    const peak = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
+    const offPeak = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, OFF_PEAK)!;
+    expect(offPeak).toBeCloseTo(peak * 0.5, 9);
   });
 });
 
 describe('admissionVerdict', () => {
-  test('a lane with a documented cap, observable headers and known limits is HARD-eligible', () => {
-    expect(admissionVerdict('anthropic-api')).toEqual({ verdict: 'hard', reasons: [] });
-    expect(admissionVerdict('claude-subscription')).toEqual({ verdict: 'hard', reasons: [] });
+  // HARD is not broadened by this lane: it now needs the claim's MODEL to carry
+  // both published token limits, and a quota lane needs an OBSERVED remaining
+  // allowance. "Can be observed" is not "was observed".
+  const HAIKU = { model: 'claude-haiku-4-5', observedRemaining: 1_000 };
+
+  test('a modelled lane with published model limits and an observed balance is HARD-eligible', () => {
+    expect(admissionVerdict('anthropic-api', HAIKU)).toEqual({ verdict: 'hard', reasons: [] });
   });
 
-  test('the console-only Z.AI lane is ADVISORY: its allowance cannot be observed', () => {
-    expect(admissionVerdict('zai-glm-coding')).toEqual({
+  test('a modelled lane WITHOUT a model claim is ADVISORY', () => {
+    expect(admissionVerdict('anthropic-api')).toEqual({
       verdict: 'advisory',
-      reasons: ['limits-unknown', 'unobservable-allowance'],
+      reasons: ['model-limits-unverified'],
     });
   });
 
-  test('the interactive-TUI codex lane is ADVISORY for quota-aware admission', () => {
-    const verdict = admissionVerdict('codex-chatgpt');
+  test('a model whose output cap was never verified cannot claim HARD', () => {
+    expect(admissionVerdict('zai-glm-coding', { model: 'glm-5.3-flash' }).reasons).toContain(
+      'model-limits-unverified',
+    );
+  });
+
+  test('the console-only Z.AI lane is ADVISORY: its allowance cannot be observed', () => {
+    const verdict = admissionVerdict('zai-glm-coding', { model: 'glm-5.3-flash' });
     expect(verdict.verdict).toBe('advisory');
+    expect(verdict.reasons).toContain('limits-unknown');
     expect(verdict.reasons).toContain('unobservable-allowance');
   });
 
-  test('the OpenCode Go lane has an observable endpoint, so it is HARD-eligible', () => {
-    expect(admissionVerdict('opencode-go')).toEqual({ verdict: 'hard', reasons: [] });
+  test('a quota lane with a modeled balance but no OBSERVED one stays ADVISORY', () => {
+    expect(admissionVerdict('opencode-go', { model: 'glm-5.3-flash' }).reasons).toContain(
+      'no-observed-balance',
+    );
+    expect(
+      admissionVerdict('opencode-go', { model: 'glm-5.3-flash', observedRemaining: 0 }).reasons,
+    ).toContain('no-observed-balance');
+    // An observed positive balance clears that reason but NOT the missing model
+    // limits: OpenCode Go has no published per-model token limits here.
+    expect(
+      admissionVerdict('opencode-go', { model: 'glm-5.3-flash', observedRemaining: 5 }),
+    ).toEqual({
+      verdict: 'advisory',
+      reasons: ['model-limits-unverified'],
+    });
+  });
+
+  test('openai-api and deepseek cannot claim HARD for any model without published limits', () => {
+    expect(
+      admissionVerdict('openai-api', { model: 'gpt-5', observedRemaining: 5 }).reasons,
+    ).toContain('model-limits-unverified');
+    expect(
+      admissionVerdict('deepseek', { model: 'deepseek-flash', observedRemaining: 5 }).reasons,
+    ).toContain('model-limits-unverified');
+  });
+
+  test('the interactive-TUI codex lane is ADVISORY for quota-aware admission', () => {
+    const verdict = admissionVerdict('codex-chatgpt', { model: 'gpt-6-sol' });
+    expect(verdict.verdict).toBe('advisory');
+    expect(verdict.reasons).toContain('unobservable-allowance');
   });
 
   test('an unknown provider is ADVISORY, never treated as unmetered', () => {

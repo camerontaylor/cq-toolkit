@@ -54,6 +54,45 @@ describe('candidate served aliases — shape and contents', () => {
     });
   });
 
+  test('the merged candidate table keeps EVERY group (no shallow-spread clobber)', () => {
+    // A shallow `{...a, ...b, ...c}` keeps only the LAST group's `ai-sdk` map and
+    // silently loses the anthropic and deepseek entries: a table that looks
+    // populated and is missing half of what went into it.
+    const aiSdk = CANDIDATE_SERVED_ALIASES['ai-sdk'];
+    expect(Object.keys(aiSdk ?? {}).sort()).toEqual(['anthropic', 'deepseek', 'zai']);
+    expect(
+      servedAliasIds(CANDIDATE_SERVED_ALIASES, 'ai-sdk', 'anthropic', 'claude-haiku-4-5'),
+    ).toEqual(['claude-haiku-4-5-20251001']);
+    expect(servedAliasIds(CANDIDATE_SERVED_ALIASES, 'ai-sdk', 'deepseek', 'deepseek-chat')).toEqual(
+      ['deepseek-flash'],
+    );
+    expect(servedAliasIds(CANDIDATE_SERVED_ALIASES, 'ai-sdk', 'zai', 'glm-4.7')).toEqual([
+      'glm-5.3-flash',
+    ]);
+    // And the lane-scoped groups that no other group carries survive too.
+    expect(
+      servedAliasIds(CANDIDATE_SERVED_ALIASES, 'claude-agent', 'anthropic', 'claude-haiku-4-5'),
+    ).toEqual(['claude-haiku-4-5-20251001']);
+  });
+
+  test('the merged table is a superset of every group it merged', () => {
+    for (const group of [
+      CANDIDATE_ANTHROPIC_DATED_ALIASES,
+      CANDIDATE_DEEPSEEK_SERVED_ALIASES,
+      CANDIDATE_ZAI_ROUTING_ALIASES,
+    ]) {
+      for (const [lane, byProvider] of Object.entries(group)) {
+        for (const [provider, byRequested] of Object.entries(byProvider)) {
+          for (const [requested, served] of Object.entries(byRequested)) {
+            expect(servedAliasIds(CANDIDATE_SERVED_ALIASES, lane, provider, requested)).toEqual(
+              served,
+            );
+          }
+        }
+      }
+    }
+  });
+
   test('no candidate maps a served id that itself remaps (an alias cycle would never settle)', () => {
     const seen = new Set<string>();
     for (const [lane, byProvider] of Object.entries(CANDIDATE_SERVED_ALIASES)) {
