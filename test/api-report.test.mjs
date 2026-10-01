@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { makeReport, parseArgs } from '../scripts/api-report.mjs';
+
+const scriptPath = fileURLToPath(new URL('../scripts/api-report.mjs', import.meta.url));
 
 async function fixture(exports) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cq-api-report-'));
@@ -19,20 +23,95 @@ test('draft mode is explicit and default mode remains baseline comparison', () =
   assert.throws(() => parseArgs(['--invented']), /unknown argument/);
 });
 
-test('reports declared package targets and declaration hashes deterministically', async () => {
+test('reports deterministic hashes for the reachable declaration graph', async () => {
   const root = await fixture({ '.': './dist/index.js' });
   try {
     await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
-    await writeFile(
-      path.join(root, 'dist/index.d.ts'),
-      'export declare function run(name: string): boolean;\nexport interface Options { enabled: boolean }\n',
-    );
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./public.js";\n');
+    await writeFile(path.join(root, 'dist/public.d.ts'), 'export { run } from "./leaf.js";\n');
+    await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export declare function run(): void;\n');
     const first = await makeReport(root);
     const second = await makeReport(root);
     assert.deepEqual(first, second);
     assert.equal(first.entries[0].specifier, '.');
-    assert.equal(first.entries[0].declaration, './dist/index.d.ts');
-    assert.match(first.entries[0].declarationSha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(
+      first.entries[0].targets[0].declarationGraph.map(({ path: declaration }) => declaration),
+      ['./dist/index.d.ts', './dist/leaf.d.ts', './dist/public.d.ts'],
+    );
+    assert.match(first.entries[0].targets[0].declarationGraph[0].sha256, /^[a-f0-9]{64}$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('preserves conditional export keys and targets instead of deduplicating branches', async () => {
+  const root = await fixture({
+    '.': { import: './dist/esm.js', require: './dist/cjs.cjs' },
+  });
+  try {
+    await writeFile(path.join(root, 'dist/esm.js'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/esm.d.ts'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/cjs.cjs'), 'module.exports = {};\n');
+    await writeFile(path.join(root, 'dist/cjs.d.cts'), 'export {};\n');
+    const report = await makeReport(root);
+    assert.deepEqual(report.entries[0].exportMap, {
+      import: './dist/esm.js',
+      require: './dist/cjs.cjs',
+    });
+    assert.deepEqual(
+      report.entries[0].targets.map(({ conditions, target }) => ({ conditions, target })),
+      [
+        { conditions: ['import'], target: './dist/esm.js' },
+        { conditions: ['require'], target: './dist/cjs.cjs' },
+      ],
+    );
+
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        exports: { '.': { require: './dist/cjs.cjs', import: './dist/esm.js' } },
+      }),
+    );
+    assert.notDeepEqual(await makeReport(root), report);
+
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        exports: { '.': { import: './dist/cjs.cjs', require: './dist/esm.js' } },
+      }),
+    );
+    assert.notDeepEqual(await makeReport(root), report);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CLI baseline comparison detects edits in a re-exported declaration leaf', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./leaf.js";\n');
+    const leafPath = path.join(root, 'dist/leaf.d.ts');
+    await writeFile(leafPath, 'export declare function run(): void;\n');
+    const baselinePath = path.join(root, 'approved-api-report.json');
+    await writeFile(baselinePath, `${JSON.stringify(await makeReport(root), null, 2)}\n`);
+
+    const matches = spawnSync(process.execPath, [scriptPath, '--baseline', baselinePath], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(matches.status, 0, matches.stderr);
+    assert.match(matches.stdout, /matches baseline/);
+
+    await writeFile(leafPath, 'export declare function run(value: string): boolean;\n');
+    const drifts = spawnSync(process.execPath, [scriptPath, '--baseline', baselinePath], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(drifts.status, 1);
+    assert.match(drifts.stderr, /differs from baseline/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -61,5 +140,26 @@ test('rejects export targets that escape the package root', async () => {
     await assert.rejects(makeReport(root), /unsafe or non-relative target/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects export targets and declarations that resolve through symlinks outside the package', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'cq-api-report-outside-'));
+  try {
+    const outsideTarget = path.join(outside, 'index.js');
+    await writeFile(outsideTarget, 'export {};\n');
+    await symlink(outsideTarget, path.join(root, 'dist/index.js'));
+    await assert.rejects(makeReport(root), /resolves outside package root/);
+
+    await rm(path.join(root, 'dist/index.js'));
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    const outsideDeclaration = path.join(outside, 'index.d.ts');
+    await writeFile(outsideDeclaration, 'export {};\n');
+    await symlink(outsideDeclaration, path.join(root, 'dist/index.d.ts'));
+    await assert.rejects(makeReport(root), /resolves outside package root/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
