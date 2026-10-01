@@ -295,12 +295,34 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       return { available: true };
     },
     async launch(request) {
+      // Canonicalize FIRST — before any workspace mutation (Sol recheck):
+      // containment, `-D WS`, cwd, and the child's TMPDIR all bind THIS one
+      // resolved path, so a symlink retarget after the check cannot reopen
+      // policy-parent inclusion.  An unresolvable workspace fails closed.
+      let workspace: string;
+      try {
+        workspace = await realpath(request.workspace);
+      } catch (error) {
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError: `workspace path is not canonicalizable: ${(error as Error).message}`,
+        };
+      }
+      const refusal = (message: string): SandboxLaunchResult => ({
+        ok: false,
+        exitCode: null,
+        signal: null,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        spawnError: message,
+      });
       const env = launcherEnv(request);
-      // The child must never rely on the host per-user temp: it sits outside
-      // this profile's read allowlist, so TMPDIR moves into the workspace.
-      const childTmp = join(request.workspace, '.tmp');
-      await mkdir(childTmp, { recursive: true });
-      env['TMPDIR'] = childTmp;
       // The policy NEVER lives in the model-writable workspace, and its
       // parent is CANONICAL — never env-derived (Sol final audit: an
       // inherited TMPDIR pointing inside the workspace would defeat any
@@ -312,48 +334,39 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       // and the next launch compiles a fresh profile.
       const profileDir = await mkdtemp(join(SEATBELT_POLICY_PARENT, 'cq-sb-prof-'));
       try {
-        // Pathological-workspace guard, RESOLVED not lexical (Sol exact-head
-        // audit): a workspace path traversing a symlink that lands on the
-        // trusted policy parent is lexically "somewhere else" but physically
-        // INSIDE it.  Canonicalize both ends; refuse when the policy
-        // directory falls inside the resolved workspace.  An unresolvable
-        // workspace fails closed.
-        let resolvedWorkspace: string;
-        try {
-          resolvedWorkspace = await realpath(request.workspace);
-        } catch (error) {
-          return {
-            ok: false,
-            exitCode: null,
-            signal: null,
-            stdout: '',
-            stderr: '',
-            timedOut: false,
-            spawnError: `workspace path is not canonicalizable: ${(error as Error).message}`,
-          };
-        }
+        // Containment guard BEFORE any workspace mutation (Sol recheck): a
+        // workspace that resolves onto the trusted policy parent is refused
+        // without so much as creating <workspace>/.tmp.
         const resolvedPolicyDir = await realpath(profileDir);
-        if (!relative(resolvedWorkspace, resolvedPolicyDir).startsWith('..')) {
-          return {
-            ok: false,
-            exitCode: null,
-            signal: null,
-            stdout: '',
-            stderr: '',
-            timedOut: false,
-            spawnError:
-              'requested workspace contains the trusted policy parent; refusing to place the sandbox policy inside it',
-          };
+        if (!relative(workspace, resolvedPolicyDir).startsWith('..')) {
+          return refusal(
+            'requested workspace contains the trusted policy parent; refusing to place the sandbox policy inside it',
+          );
         }
+        // Race hardening: the workspace must STILL resolve to the same
+        // canonical directory immediately before exec — a symlink retargeted
+        // between canonicalization and use is refused, never followed.
+        const retargetCheck = await realpath(request.workspace).catch(() => undefined);
+        if (retargetCheck !== workspace) {
+          return refusal(
+            'workspace retargeted during launch; the certified canonical binding is stale',
+          );
+        }
+        // Only now mutate the (contained) workspace: the child must never
+        // rely on the host per-user temp — it sits outside the read
+        // allowlist — so TMPDIR moves into the workspace.
+        const childTmp = join(workspace, '.tmp');
+        await mkdir(childTmp, { recursive: true });
+        env['TMPDIR'] = childTmp;
         const profilePath = join(profileDir, 'policy.sb');
         await writeFile(profilePath, seatbeltProfile(request.network, request.proxyPort), {
           mode: 0o600,
         });
         return await runChild(
           SEATBELT_BIN,
-          ['-D', `WS=${request.workspace}`, '-f', profilePath, '--', ...request.argv],
+          ['-D', `WS=${workspace}`, '-f', profilePath, '--', ...request.argv],
           {
-            cwd: request.workspace,
+            cwd: workspace,
             env,
             timeoutMs: request.timeoutMs ?? 30_000,
             maxOutputChars: request.maxOutputChars ?? 64 * 1024,

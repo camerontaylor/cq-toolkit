@@ -484,6 +484,47 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     const parentListing = await readdir('/private/var/tmp');
     expect(parentListing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
   }, 30_000);
+
+  test('a static symlink onto the policy parent mutates nothing before refusal', async () => {
+    // Sol recheck: the old order ran mkdir(<workspace>/.tmp) BEFORE the
+    // containment guard, so this exact case already created
+    // /private/var/tmp/.tmp.  The guard now precedes every mutation.
+    const adapter = seatbeltAdapter();
+    const linkDir = await mkdtemp(join(tmpdir(), 'cq-sbx-link-'));
+    scratch.push(linkDir);
+    const workspaceThroughLink = join(linkDir, 'pvt');
+    await symlink('/private/var/tmp', workspaceThroughLink);
+    const result = await adapter.launch({
+      workspace: workspaceThroughLink,
+      argv: ['/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(false);
+    const parentListing = await readdir('/private/var/tmp');
+    expect(parentListing.includes('.tmp')).toBe(false);
+    expect(parentListing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
+  }, 30_000);
+
+  test('the confined child binds the CANONICAL workspace, not the lexical path', async () => {
+    const adapter = seatbeltAdapter();
+    const workspaceReal = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-real-'));
+    scratch.push(workspaceReal);
+    const linkDir = await mkdtemp(join(tmpdir(), 'cq-sbx-link-'));
+    scratch.push(linkDir);
+    const workspaceLink = join(linkDir, 'ws');
+    await symlink(workspaceReal, workspaceLink);
+    // One canonical binding for cwd and child TMPDIR: through a symlinked
+    // workspace path, the child observes only the resolved directory.
+    const result = await adapter.launch({
+      workspace: workspaceLink,
+      argv: ['/bin/sh', '-c', 'pwd; /usr/bin/printenv TMPDIR'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(workspaceReal);
+    expect(result.stdout).toContain(join(workspaceReal, '.tmp'));
+    expect(result.stdout).not.toContain(workspaceLink);
+  }, 30_000);
 });
 
 describe.runIf(process.platform !== 'darwin')('seatbelt is darwin-only', () => {
