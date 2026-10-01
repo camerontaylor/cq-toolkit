@@ -64,18 +64,32 @@ function headerValue(signal: ProviderSignal, name: string): string | undefined {
 
 /**
  * Epoch milliseconds from the unified-quota reset header of the window that
- * actually BLOCKS, or `undefined` when no window's reset is readable.
+ * actually BLOCKS, or `undefined` when no defensible defer time can be read.
  *
  * Reading the 5-hour reset unconditionally is wrong: the weekly window can be
  * exhausted while the 5-hour window still has room, and deferring to the 5-hour
  * reset then retries against a wall that has not moved. A window is treated as
  * blocking when its `-status` is `rejected` or its `-utilization` has reached
- * 1.0; when NEITHER window reports blocking but resets are present, the LATER
- * reset is returned, because that is the only choice that cannot produce an
- * early retry.
+ * 1.0.
+ *
+ * The fail-closed cases, all of which return `undefined` rather than a time:
+ *   - a BLOCKING window whose own reset is absent or malformed. Skipping it and
+ *     using the other, unblocked window's reset yields a retry that is provably
+ *     premature — the wall that is actually blocking has no known release time.
+ *     An unbounded allowance with an unknown reset is a needs-human decision, and
+ *     the verdict text says so;
+ *   - no window's reset is readable at all.
+ * When NEITHER window reports blocking but resets are present, the LATER reset is
+ * returned, because that is the only choice that cannot produce an early retry.
+ *
+ * A caller that knows a reset is already in the past (a stale header) should
+ * treat the result as needs-human too; the wall clock belongs to the runner, not
+ * to this pure helper.
  */
 function claudeDeferMs(signal: ProviderSignal): number | undefined {
-  const resets: { readonly at: number; readonly blocking: boolean }[] = [];
+  let anyBlocking = false;
+  let blockingResetMs: number | undefined;
+  const anyResetMs: number[] = [];
   for (const [window, statusHeader, utilizationHeader] of [
     ['5h', 'anthropic-ratelimit-unified-5h-status', 'anthropic-ratelimit-unified-5h-utilization'],
     ['7d', 'anthropic-ratelimit-unified-7d-status', 'anthropic-ratelimit-unified-7d-utilization'],
@@ -83,16 +97,22 @@ function claudeDeferMs(signal: ProviderSignal): number | undefined {
     const reset = epochSecondsMs(
       headerValue(signal, `anthropic-ratelimit-unified-${window}-reset`),
     );
-    if (reset === undefined) continue;
     const status = headerValue(signal, statusHeader);
     const utilization = Number(headerValue(signal, utilizationHeader));
     const blocking = status === 'rejected' || (Number.isFinite(utilization) && utilization >= 1);
-    resets.push({ at: reset, blocking });
+    if (blocking) {
+      anyBlocking = true;
+      // A blocking window with no usable reset of its own makes EVERY candidate
+      // defer time unsound, including the other window's.
+      if (reset === undefined) return undefined;
+      blockingResetMs = Math.max(blockingResetMs ?? 0, reset);
+      continue;
+    }
+    if (reset !== undefined) anyResetMs.push(reset);
   }
-  if (resets.length === 0) return undefined;
-  const blocking = resets.filter((window) => window.blocking);
-  const pool = blocking.length > 0 ? blocking : resets;
-  return Math.max(...pool.map((window) => window.at));
+  if (anyBlocking) return blockingResetMs;
+  if (anyResetMs.length === 0) return undefined;
+  return Math.max(...anyResetMs);
 }
 
 function epochSecondsMs(raw: string | undefined): number | undefined {
@@ -146,6 +166,15 @@ export function classifyProviderSignal(
       ...(deferUntilMs === undefined ? {} : { deferUntilMs }),
       rule:
         marker.markerHeader !== undefined ? `marker-header:${marker.markerHeader}` : 'structured',
+      // An exhausted allowance whose release time cannot be read is a HUMAN
+      // decision, not a retry. Naming it here keeps "no defer time" from reading
+      // as "forgot to compute one".
+      ...(deferUntilMs === undefined && marker.errorClass === 'quota'
+        ? {
+            advisoryReason:
+              'quota verdict with no usable reset time — the blocking window has none; needs-human, do not retry on a timer',
+          }
+        : {}),
     };
   }
   const resetsAt = isoResetMs(observedQuota?.resetsAt);

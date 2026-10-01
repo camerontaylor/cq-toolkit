@@ -140,6 +140,93 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBe(1_790_269_200_000);
   });
 
+  // Fail-closed: a BLOCKING window whose own reset is missing or malformed makes
+  // every candidate defer time unsound. Falling back to the other, UNBLOCKED
+  // window's reset would schedule a retry against a wall that has not moved.
+  test('a rejected WEEKLY window with no usable 7d reset yields NO defer time', () => {
+    const verdict = classifyProviderSignal('claude-subscription', {
+      httpStatus: 429,
+      headers: {
+        'anthropic-ratelimit-unified-status': 'rejected',
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-5h-utilization': '0.2',
+        'anthropic-ratelimit-unified-5h-reset': '1790269200',
+        'anthropic-ratelimit-unified-7d-status': 'rejected',
+        // the 7d reset header is simply ABSENT
+      },
+    });
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+    expect(verdict.advisoryReason).toMatch(/needs-human/);
+  });
+
+  test('a MALFORMED 7d reset is treated as no reset, not as a time', () => {
+    for (const malformed of ['', '   ', 'soon', '0', '-1', 'NaN', '1790341200ms']) {
+      const verdict = classifyProviderSignal('claude-subscription', {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-5h-reset': '1790269200',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-utilization': '1.0',
+          'anthropic-ratelimit-unified-7d-reset': malformed,
+        },
+      });
+      expect({ reset: malformed, deferUntilMs: verdict.deferUntilMs }).toEqual({
+        reset: malformed,
+        deferUntilMs: undefined,
+      });
+    }
+  });
+
+  test('the mirror case: a rejected 5h window with no usable 5h reset yields NO defer time', () => {
+    const verdict = classifyProviderSignal('claude-subscription', {
+      httpStatus: 429,
+      headers: {
+        'anthropic-ratelimit-unified-status': 'rejected',
+        'anthropic-ratelimit-unified-5h-status': 'rejected',
+        'anthropic-ratelimit-unified-5h-utilization': '1.0',
+        // the 5h reset header is ABSENT; the unblocked weekly window has one.
+        'anthropic-ratelimit-unified-7d-status': 'allowed',
+        'anthropic-ratelimit-unified-7d-utilization': '0.4',
+        'anthropic-ratelimit-unified-7d-reset': '1790341200',
+      },
+    });
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('BOTH windows blocking with only one usable reset still yields no defer time', () => {
+    const verdict = classifyProviderSignal('claude-subscription', {
+      httpStatus: 429,
+      headers: {
+        'anthropic-ratelimit-unified-status': 'rejected',
+        'anthropic-ratelimit-unified-5h-utilization': '1.0',
+        'anthropic-ratelimit-unified-5h-reset': '1790269200',
+        'anthropic-ratelimit-unified-7d-utilization': '1.0',
+        // the 7d reset header is ABSENT
+      },
+    });
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('an observed endpoint resetsAt still supplies a defer time when the headers cannot', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+        },
+      },
+      { resetsAt: '2026-09-28T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
+  });
+
   test('an OpenAI spend or usage-limit 429 is QUOTA, never a retryable throttle', () => {
     // Codes verified against the vendor spend-limits page, fetched 2026-10-01.
     for (const code of [
