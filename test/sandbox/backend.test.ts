@@ -8,7 +8,7 @@
 import { mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
   adaptersForPlatform,
@@ -19,6 +19,8 @@ import {
   landlockAdapter,
   seatbeltAdapter,
   seatbeltProfile,
+  type ContainerAdapterOptions,
+  type LandlockAdapterOptions,
 } from '../../src/sandbox/backend.js';
 
 describe('seatbelt boundary construction', () => {
@@ -199,6 +201,69 @@ describe('linux and container boundary construction', () => {
     const availability = await adapter.available();
     expect(availability.available).toBe(false);
     expect(availability.blocker).toMatch(/daemon unreachable/);
+  });
+});
+
+describe('adapter options are snapshotted at construction (Sol final-head review)', () => {
+  let stubDir: string;
+  const stubScript = async (name: string, marker: string): Promise<string> => {
+    const path = join(stubDir, name);
+    await writeFile(path, `#!/bin/sh\necho "${marker} $@"\n`, { mode: 0o755 });
+    return path;
+  };
+
+  beforeEach(async () => {
+    stubDir = await mkdtemp(join(tmpdir(), 'cq-sbx-stub-'));
+  });
+  afterEach(async () => {
+    if (stubDir !== undefined) await rm(stubDir, { recursive: true, force: true });
+  });
+
+  test('mutating container options after construction cannot change the boundary', async () => {
+    const stubA = await stubScript('docker-a', 'STUB-A');
+    const stubB = await stubScript('docker-b', 'STUB-B');
+    const options: ContainerAdapterOptions = {
+      image: 'orig:latest',
+      command: stubA,
+      user: '1000:1000',
+    };
+    const adapter = containerAdapter(options);
+    // The caller mutates the SAME options object after construction — the
+    // launch must still be exactly the boundary that was constructed.
+    options.command = stubB;
+    options.image = 'evil:latest';
+    options.user = '0:0';
+    const result = await adapter.launch({
+      workspace: stubDir,
+      argv: ['/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain('STUB-A');
+    expect(result.stdout).not.toContain('STUB-B');
+    expect(result.stdout).toContain('--user 1000:1000');
+    expect(result.stdout).toContain('orig:latest');
+    expect(result.stdout).not.toContain('evil:latest');
+    expect(result.stdout).not.toContain('0:0');
+  });
+
+  test('mutating landlock helperPath after construction cannot swap the helper', async () => {
+    const stubA = await stubScript('landlock-a', 'STUB-A');
+    const stubB = await stubScript('landlock-b', 'STUB-B');
+    const options: LandlockAdapterOptions = { helperPath: stubA };
+    const adapter = landlockAdapter(options);
+    options.helperPath = stubB;
+    const result = await adapter.launch({
+      workspace: stubDir,
+      argv: ['/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain('STUB-A');
+    expect(result.stdout).not.toContain('STUB-B');
+    // Availability reads the same snapshot: still the constructed helper.
+    const availability = await adapter.available();
+    expect(availability.available).toBe(true);
   });
 });
 

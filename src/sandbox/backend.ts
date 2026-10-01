@@ -508,12 +508,22 @@ export function containerArgv(
 
 export function containerAdapter(options: ContainerAdapterOptions): SandboxBackendAdapter {
   const backend: SandboxBackend = 'container';
-  const command = options.command ?? 'docker';
+  // Snapshot and freeze EVERY launch-relevant option at construction (Sol
+  // final-head review): the adapter must never read caller-owned mutable
+  // state after certification, or mutating options.command/image/user would
+  // change the executable while adapter.launch stays identity-fixed and the
+  // receipt cannot see it.  Validation also happens HERE, so a root --user
+  // is refused before any probe, not just at launch.
+  const resolved = Object.freeze({
+    command: options.command ?? 'docker',
+    image: options.image,
+    user: validatedContainerUser(options.user),
+  });
   return {
     backend,
     workspaceParent: tmpdir,
     async available() {
-      const probe = await runChild(command, ['info', '--format', 'ok'], {
+      const probe = await runChild(resolved.command, ['info', '--format', 'ok'], {
         env: launcherEnv({}),
         timeoutMs: 15_000,
         maxOutputChars: 4_000,
@@ -521,7 +531,7 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
       if (!probe.ok) {
         return {
           available: false,
-          blocker: `${command} daemon unreachable: ${probe.stderr.split('\n')[0] || probe.spawnError || `exit ${probe.exitCode}`}`,
+          blocker: `${resolved.command} daemon unreachable: ${probe.stderr.split('\n')[0] || probe.spawnError || `exit ${probe.exitCode}`}`,
         };
       }
       return { available: true };
@@ -541,7 +551,7 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
         };
       }
       const env = launcherEnv(request);
-      const argv = containerArgv(options, request.workspace, request.network, env, request.argv);
+      const argv = containerArgv(resolved, request.workspace, request.network, env, request.argv);
       return runChild(argv[0]!, argv.slice(1), {
         cwd: request.workspace,
         env,
@@ -567,18 +577,23 @@ export interface LandlockAdapterOptions {
 
 export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBackendAdapter {
   const backend: SandboxBackend = 'landlock';
+  // Snapshot at construction (Sol final-head review): options.helperPath is
+  // caller-owned mutable state — reading it at launch time would let a
+  // post-certification mutation swap the helper that executes while
+  // adapter.launch stays identity-fixed.
+  const helperPath = options.helperPath;
   return {
     backend,
     workspaceParent: tmpdir,
     async available() {
-      if (options.helperPath === undefined) {
+      if (helperPath === undefined) {
         return {
           available: false,
           blocker:
             'no landlock helper binary provided; landlock(2) needs a compiled ruleset launcher the toolkit does not ship',
         };
       }
-      const probe = await runChild(options.helperPath, ['--version'], {
+      const probe = await runChild(helperPath, ['--version'], {
         env: launcherEnv({}),
         timeoutMs: 10_000,
         maxOutputChars: 4_000,
@@ -592,7 +607,7 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
       return { available: true };
     },
     async launch(request) {
-      if (options.helperPath === undefined) {
+      if (helperPath === undefined) {
         return {
           ok: false,
           exitCode: null,
@@ -604,7 +619,7 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
         };
       }
       return runChild(
-        options.helperPath,
+        helperPath,
         ['--workspace', request.workspace, '--network', request.network, '--', ...request.argv],
         {
           cwd: request.workspace,
