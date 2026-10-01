@@ -7,12 +7,21 @@
 //
 //   seatbelt  — macOS `sandbox-exec` with a generated deny-default profile
 //               (importing bsd.sb is REQUIRED: deny-default profiles without
-//               the BSD startup closure abort every child with SIGABRT).
-//   bwrap     — Linux bubblewrap: bind-mount the workspace over a read-only
-//               root, unshare the network namespace for model-only posture.
+//               the BSD startup closure abort every child with SIGABRT).  File
+//               reads use a NARROW runtime allowlist — the Sol audit rejected
+//               the earlier broad `(subpath "/")` allow with narrow denies,
+//               which left sibling host paths (e.g. other /private/var/tmp
+//               trees) readable.  LIVE STATUS: this narrow-allow profile has
+//               NOT yet executed a child on any host (the broad-root variant
+//               did — a limited 6/6 canary observation, retracted as
+//               certification by audit); final-head live evidence is a gate
+//               of the fresh protocol sequence.
+//   bwrap     — Linux bubblewrap: minimal read-only binds of the OS runtime
+//               trees (no host-root bind — same audit finding), unshare the
+//               network namespace for model-only posture.
 //   container — an OCI container (`docker run`) with no network, read-only
-//               rootfs, no-new-privileges, and the workspace as the only
-//               writable mount.
+//               rootfs, no-new-privileges, all capabilities dropped, a
+//               non-root UID, and the workspace as the only writable mount.
 //   landlock  — needs a compiled helper binary that issues the landlock(2)
 //               syscalls; absent a helper this backend records itself as not
 //               provisioned (the D7 pattern), it is never silently "auto".
@@ -39,6 +48,12 @@ export interface SandboxLaunchRequest {
   envPassthrough?: readonly string[];
   /** Requested egress posture; every shipped adapter is stricter than it. */
   network: SandboxNetwork;
+  /**
+   * Loopback port of the local model proxy, for `model-only` composed with a
+   * proxy: the ONLY egress the backend permits.  A backend that cannot compose
+   * a proxy refuses the request outright rather than silently denying all.
+   */
+  proxyPort?: number;
   timeoutMs?: number;
   maxOutputChars?: number;
 }
@@ -64,6 +79,13 @@ export interface SandboxBackendAdapter {
   readonly backend: SandboxBackend;
   /** Where a runnable workspace should be created on this platform. */
   workspaceParent(): string;
+  /**
+   * Whether model-only posture can compose a loopback proxy (request
+   * `proxyPort`).  A backend without this capability is UNCERTIFIABLE for a
+   * proxy-composed posture: the probe records the blocker and certifies
+   * nothing — the posture fails closed.
+   */
+  readonly supportsProxyModelOnly?: boolean;
   /** Present AND usable: a binary that exists but cannot run is a blocker. */
   available(): Promise<{ available: boolean; blocker?: string }>;
   launch(request: SandboxLaunchRequest): Promise<SandboxLaunchResult>;
@@ -143,21 +165,40 @@ export const SEATBELT_BIN = '/usr/bin/sandbox-exec';
  * The seatbelt profile.  Deny-default is the only honest starting point, and
  * `bsd.sb` must be imported: on darwin 24 a deny-default profile without the
  * BSD startup closure SIGABRTs every child before main (observed on
- * darwin 24.6.0, sandbox-exec rc=134).  After the import, reads of the
- * read-only sealed system volume stay allowed for process startup and every
- * user-data zone is denied by path, so the workspace is the only
- * user-writable and user-readable surface.  The workspace rides in as the
- * `WS` profile PARAMETER (via `sandbox-exec -D`), never as interpolated
- * profile text: a workspace path is data and cannot rewrite the profile.
- * `model-only` denies all network operations — strictly stronger than the
- * requested posture, which the certification record states rather than
- * implying endpoint filtering.
+ * darwin 24.6.0, sandbox-exec rc=134).
+ *
+ * File reads are a NARROW runtime allowlist (Sol audit, backend.ts:156): the
+ * sealed system volume trees a child needs to exec and load — and NOTHING
+ * else.  The earlier broad `(allow file-read* (subpath "/"))` with narrow
+ * user-data denies left sibling host paths readable and was rejected; this
+ * profile never grants a whole-volume read, so a sentinel beside the
+ * workspace (same parent tree) is unreadable by construction.
+ *
+ * The workspace rides in as the `WS` profile PARAMETER (via
+ * `sandbox-exec -D`), never as interpolated profile text: a workspace path is
+ * data and cannot rewrite the profile.
+ *
+ * Egress: `model-only` with `proxyPort` permits outbound connections to that
+ * ONE loopback port — the local model proxy — and nothing else; `model-only`
+ * without a proxy permits no network at all.  `allow` permits everything.
+ * No rule implies denial under `(deny default)`, and seatbelt `deny` is
+ * sticky, so the composition stays minimal.
+ *
+ * LIVE STATUS: the broad-root variant of this profile executed children on
+ * darwin 24.6.0 (limited 6/6 canary observation, audit-retracted as
+ * certification); THIS narrow-allow variant has not yet run on any host —
+ * live evidence at final head is a gate of the fresh protocol sequence.  A
+ * wrong SBPL rule (e.g. a bad `(remote ip ...)` form) surfaces as a child
+ * launch failure, which the probe records as a control failure — it can
+ * never pass by accident.
  */
-export function seatbeltProfile(network: SandboxNetwork): string {
-  const denies = [
-    '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/folders"))',
-    ...(network === 'model-only' ? ['(deny network*)'] : []),
-  ];
+export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): string {
+  const networkRules =
+    network === 'allow'
+      ? ['(allow network*)']
+      : proxyPort !== undefined
+        ? [`(allow network-outbound (remote ip "127.0.0.1:${proxyPort}"))`]
+        : [];
   return [
     '(version 1)',
     '(deny default)',
@@ -168,8 +209,21 @@ export function seatbeltProfile(network: SandboxNetwork): string {
     '(allow sysctl-read)',
     '(allow ipc-posix-shm)',
     '(allow ipc-posix-sem)',
-    '(allow file-read* (subpath "/"))',
-    ...denies,
+    '(allow file-read*',
+    '  (subpath "/bin")',
+    '  (subpath "/sbin")',
+    '  (subpath "/usr/bin")',
+    '  (subpath "/usr/sbin")',
+    '  (subpath "/usr/lib")',
+    '  (subpath "/usr/share")',
+    '  (subpath "/usr/local/share")',
+    '  (subpath "/usr/local/bin")',
+    '  (subpath "/System")',
+    '  (subpath "/Library/Apple")',
+    '  (subpath "/private/var/db/dyld")',
+    '  (subpath "/private/etc")',
+    '  (subpath "/dev"))',
+    ...networkRules,
     '(allow file-read* file-write* (subpath (param "WS")))',
     '(allow file-write* (subpath "/dev/null"))',
     '',
@@ -178,12 +232,13 @@ export function seatbeltProfile(network: SandboxNetwork): string {
 
 const SEATBELT_WORKSPACE_PARENT = '/private/var/tmp';
 
-/** Symlink-honest: /tmp resolves into /private/tmp, a denied user-data zone. */
+/** Symlink-honest: /tmp resolves into /private/tmp, outside the read allowlist. */
 export function seatbeltAdapter(): SandboxBackendAdapter {
   const backend: SandboxBackend = 'seatbelt';
   return {
     backend,
     workspaceParent: () => SEATBELT_WORKSPACE_PARENT,
+    supportsProxyModelOnly: true,
     async available() {
       if (process.platform !== 'darwin') {
         return { available: false, blocker: 'sandbox-exec exists only on darwin' };
@@ -214,12 +269,12 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
     },
     async launch(request) {
       const env = launcherEnv(request);
-      // The child must never rely on the host per-user temp: it is a denied
-      // user-data zone under this profile, so TMPDIR moves into the workspace.
+      // The child must never rely on the host per-user temp: it sits outside
+      // this profile's read allowlist, so TMPDIR moves into the workspace.
       const childTmp = join(request.workspace, '.tmp');
       await mkdir(childTmp, { recursive: true });
       const profilePath = join(request.workspace, '.cq-seatbelt.sb');
-      await writeFile(profilePath, seatbeltProfile(request.network));
+      await writeFile(profilePath, seatbeltProfile(request.network, request.proxyPort));
       env['TMPDIR'] = childTmp;
       return runChild(
         SEATBELT_BIN,
@@ -240,16 +295,20 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
 // ---------------------------------------------------------------------------
 
 /**
- * The bubblewrap argv for one launch: the root tree is read-only, volatile
- * mounts (tmpfs over /tmp and over the host HOME, which the read-only root
- * bind would otherwise expose with its credentials) land BEFORE the workspace
- * bind so a workspace nested under either still shadows them, the workspace
- * is the only writable bind, and model-only posture unshares the whole
- * network namespace.  The child inherits the launcher process environment —
- * already the scrubbed launcher env — so env VALUES never appear in argv,
- * where any local user could read them.  Built as data so tests can assert
- * the boundary flags on any host; only a host that can actually run
- * bubblewrap can certify it (that proof lives in ./probe.js).
+ * The bubblewrap argv for one launch.  The host root is NOT bound (Sol audit,
+ * backend.ts:261 — a root ro-bind exposes host reads): only the OS runtime
+ * trees a child needs are bound read-only (`/usr` required; `/bin`, `/sbin`,
+ * `/lib`, `/lib64`, `/etc` with `-try`, which skip absent trees), volatile
+ * paths are masked (`/tmp`, and `$HOME` so host credentials are never in the
+ * mount namespace), and the workspace is the only writable bind, placed AFTER
+ * the masks so a workspace nested under either still shadows them.  Model-only
+ * posture unshares the whole network namespace — which necessarily denies
+ * loopback too, so bwrap cannot compose a loopback proxy; a proxyPort request
+ * is refused, never silently downgraded.  The child inherits the launcher
+ * process environment — already the scrubbed launcher env — so env VALUES
+ * never appear in argv, where any local user could read them.  Built as data
+ * so tests can assert the boundary flags on any host; only a host that can
+ * actually run bubblewrap can certify it (that proof lives in ./probe.js).
  */
 export function bwrapArgv(
   workspace: string,
@@ -261,8 +320,23 @@ export function bwrapArgv(
   return [
     'bwrap',
     '--ro-bind',
-    '/',
-    '/',
+    '/usr',
+    '/usr',
+    '--ro-bind-try',
+    '/bin',
+    '/bin',
+    '--ro-bind-try',
+    '/sbin',
+    '/sbin',
+    '--ro-bind-try',
+    '/lib',
+    '/lib',
+    '--ro-bind-try',
+    '/lib64',
+    '/lib64',
+    '--ro-bind-try',
+    '/etc',
+    '/etc',
     '--dev',
     '/dev',
     '--proc',
@@ -301,6 +375,20 @@ export function bwrapAdapter(): SandboxBackendAdapter {
       return { available: true };
     },
     async launch(request) {
+      if (request.proxyPort !== undefined) {
+        // --unshare-net denies loopback with the rest of the network; there is
+        // no proxy composition.  Refuse rather than silently downgrade.
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError:
+            'bwrap cannot compose a loopback proxy under model-only (--unshare-net denies loopback); proxyPort is unsupported',
+        };
+      }
       const argv = bwrapArgv(
         request.workspace,
         request.network,
@@ -326,14 +414,22 @@ export interface ContainerAdapterOptions {
   image: string;
   /** Container CLI binary (default `docker`). */
   command?: string;
+  /**
+   * Non-root UID:GID the container runs as (Sol audit, backend.ts:344).
+   * Fixed numeric so no image can silently grant root; override only with
+   * another NON-root identity.  A workspace whose permissions exclude this
+   * UID fails the workspace control and is not certifiable.
+   */
+  user?: string;
 }
 
 /**
- * `--env NAME` (no value): the CLI reads each name from its own environment —
- * the scrubbed launcher env passed by `launch` — so env VALUES never appear
- * in argv, where any local user could read them.
+ * `--cap-drop ALL` and a non-root `--user` are part of the boundary, not
+ * optional hardening: the canaries certify the launcher exactly as built
+ * here.  `--env NAME` (no value) makes the CLI read each name from its own
+ * environment — the scrubbed launcher env passed by `launch` — so env VALUES
+ * never appear in argv, where any local user could read them.
  */
-
 export function containerArgv(
   options: ContainerAdapterOptions,
   workspace: string,
@@ -348,8 +444,12 @@ export function containerArgv(
     '--network',
     network === 'model-only' ? 'none' : 'bridge',
     '--read-only',
+    '--cap-drop',
+    'ALL',
     '--security-opt',
     'no-new-privileges',
+    '--user',
+    options.user ?? '65532:65532',
     '--volume',
     `${workspace}:${workspace}`,
     '--workdir',
@@ -383,6 +483,19 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
       return { available: true };
     },
     async launch(request) {
+      if (request.proxyPort !== undefined) {
+        // --network none denies loopback with the rest; no proxy composition.
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError:
+            'container cannot compose a loopback proxy under model-only (--network none); proxyPort is unsupported',
+        };
+      }
       const env = launcherEnv(request);
       const argv = containerArgv(options, request.workspace, request.network, env, request.argv);
       return runChild(argv[0]!, argv.slice(1), {

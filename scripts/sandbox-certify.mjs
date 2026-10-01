@@ -9,7 +9,13 @@
 // environmental blocker instead of quietly passing.
 //
 // Usage:
-//   npm run build && node scripts/sandbox-certify.mjs [--network model-only|allow] [--json]
+//   npm run build && node scripts/sandbox-certify.mjs \
+//     [--network model-only|allow] [--model-proxy] [--json]
+//
+// --model-proxy composes model-only with a local proxy stand-in: only one
+// loopback port passes and every other egress target must be refused.  A
+// backend that cannot compose a proxy is uncertifiable under that posture
+// and fails closed.
 //
 // Exit 0 when at least one backend certified; exit 1 when none did (required
 // mode stays fail-closed); exit 2 on usage/build errors.
@@ -39,14 +45,20 @@ if (network !== undefined && network !== 'model-only' && network !== 'allow') {
   stderr.write(`sandbox-certify: --network must be model-only or allow, got '${network}'\n`);
   exit(2);
 }
+const modelProxy = process.argv.includes('--model-proxy');
 
-const certification = await probe.certifyBackends(network === undefined ? {} : { network });
+const certification = await probe.certifyBackends({
+  ...(network === undefined ? {} : { network }),
+  ...(modelProxy ? { modelProxy: true } : {}),
+});
 
 if (process.argv.includes('--json')) {
   stdout.write(`${JSON.stringify(certification, null, 2)}\n`);
 } else {
   stdout.write(
-    `RS-13 certification — platform ${certification.platform}, posture ${certification.network}, probed ${certification.probedAt}\n`,
+    `RS-13 boundary probe — platform ${certification.platform}, posture ${certification.network}, ` +
+      `egress demonstrated: ${certification.networkDemonstrated}, probed ${certification.probedAt}\n` +
+      `(a pass here is a live canary observation, not an RS-13 certification claim)\n`,
   );
   for (const record of certification.records) {
     stdout.write(

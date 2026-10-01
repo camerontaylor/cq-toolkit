@@ -1,7 +1,10 @@
 // The RS-13 backend adapters (B14): boundary construction is data (assertable
 // on any host), while boundary ENFORCEMENT is only claimed where it can
 // actually execute (the darwin seatbelt legs skip elsewhere — certification
-// evidence comes from probe.ts, never from these builders alone).
+// evidence comes from probe.ts, never from these builders alone).  LIVE
+// STATUS of the narrow-allow seatbelt profile is recorded in backend.ts: it
+// replaces the audit-rejected broad-root read and has not yet executed on
+// any host; live evidence at final head is a gate of the fresh protocol.
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,35 +29,72 @@ describe('seatbelt boundary construction', () => {
     expect(profile).toContain('(import "bsd.sb")');
   });
 
-  test('model-only denies all network operations; allow does not', () => {
-    expect(seatbeltProfile('model-only')).toContain('(deny network*)');
-    expect(seatbeltProfile('allow')).not.toContain('(deny network*)');
+  test('reads use a narrow runtime allowlist — never a whole-volume grant', () => {
+    const profile = seatbeltProfile('model-only');
+    // The audit-rejected broad allow must be gone: no (subpath "/").
+    expect(profile).not.toMatch(/\(subpath "\/"\)/);
+    for (const runtime of [
+      '"/bin"',
+      '"/sbin"',
+      '"/usr/bin"',
+      '"/usr/lib"',
+      '"/System"',
+      '"/private/var/db/dyld"',
+      '"/private/etc"',
+    ]) {
+      expect(profile).toContain(`(subpath ${runtime})`);
+    }
+    // User-data trees are simply NOT in the allowlist: deny-default denies
+    // them without per-zone deny lines.
+    expect(profile).not.toContain('"/Users"');
+    expect(profile).not.toContain('"/Volumes"');
+    expect(profile).not.toContain('"/private/var/folders"');
   });
 
   test('the workspace arrives as the WS parameter, never as profile text', () => {
     const profile = seatbeltProfile('model-only');
     expect(profile).toContain('(allow file-read* file-write* (subpath (param "WS")))');
-    for (const zone of ['/Users', '/Volumes', '/private/tmp', '/private/var/folders']) {
-      expect(profile).toContain(`(deny file-read* (subpath "${zone}")`);
-    }
     // A hostile workspace path cannot rewrite the profile: no caller-supplied
     // path is interpolated into profile text at all.
     expect(profile).not.toMatch(/\/private\/var\/tmp|cq-ws/);
   });
+
+  test('model-only is deny-all by default; allow grants network', () => {
+    expect(seatbeltProfile('model-only')).not.toContain('network-outbound');
+    expect(seatbeltProfile('model-only')).not.toContain('(allow network*)');
+    expect(seatbeltProfile('allow')).toContain('(allow network*)');
+  });
+
+  test('a proxy-composed model-only permits exactly the proxy loopback port', () => {
+    const profile = seatbeltProfile('model-only', 9053);
+    expect(profile).toContain('(allow network-outbound (remote ip "127.0.0.1:9053"))');
+    // No other egress rule may appear: one port, nothing else.
+    expect(profile.match(/network-outbound/g)).toHaveLength(1);
+    expect(profile).not.toContain('(allow network*)');
+    // And without a proxy there is no port rule at all.
+    expect(seatbeltProfile('model-only')).not.toContain('network-outbound');
+  });
 });
 
 describe('linux and container boundary construction', () => {
-  test('bwrap binds the root read-only, masks volatile paths, binds ws last', () => {
+  test('bwrap binds only runtime trees, masks volatile paths, binds ws last', () => {
     const argv = bwrapArgv('/tmp/cq-ws', 'model-only', { PATH: '/bin', HOME: '/home/u' }, [
       '/bin/sh',
       '-c',
       'echo',
     ]);
-    expect(argv.slice(0, 5)).toEqual(['bwrap', '--ro-bind', '/', '/', '--dev']);
+    // The host root is never bound (Sol audit, backend.ts:261): the only
+    // unconditional read bind is /usr, the rest are -try.
+    expect(argv.slice(0, 3)).toEqual(['bwrap', '--ro-bind', '/usr']);
+    expect(argv.join(' ')).not.toContain('--ro-bind / /');
+    for (const tree of ['/bin', '/sbin', '/lib', '/lib64', '/etc']) {
+      const treeAt = argv.indexOf(tree);
+      expect(treeAt).toBeGreaterThan(-1);
+      expect(argv[treeAt - 1]).toBe('--ro-bind-try');
+    }
     // /tmp and HOME are masked BEFORE the workspace bind, so a workspace
     // nested under either still shadows them.
     expect(argv.indexOf('--tmpfs')).toBeLessThan(argv.indexOf('--bind'));
-    expect(argv).toContain('--tmpfs');
     expect(argv.join(' ')).toContain('--tmpfs /tmp');
     expect(argv.join(' ')).toContain('--tmpfs /home/u');
     const bindAt = argv.indexOf('--bind');
@@ -74,7 +114,7 @@ describe('linux and container boundary construction', () => {
     expect(bwrapArgv('/ws', 'allow', {}, ['/bin/true'])).not.toContain('--unshare-net');
   });
 
-  test('container runs no-network, read-only, no-new-privileges, workspace-mounted', () => {
+  test('container drops all capabilities and runs as a fixed non-root UID', () => {
     const argv = containerArgv(
       { image: 'cq-sandbox:latest' },
       '/ws',
@@ -85,6 +125,10 @@ describe('linux and container boundary construction', () => {
     expect(argv.slice(0, 2)).toEqual(['docker', 'run']);
     expect(argv.join(' ')).toContain('--network none');
     expect(argv).toContain('--read-only');
+    // Part of the boundary, not optional hardening (Sol audit, backend.ts:344).
+    expect(argv.join(' ')).toContain('--cap-drop ALL');
+    const userAt = argv.indexOf('--user');
+    expect(argv.slice(userAt, userAt + 2)).toEqual(['--user', '65532:65532']);
     expect(argv.join(' ')).toContain('--security-opt no-new-privileges');
     expect(argv.slice(argv.indexOf('--volume'), argv.indexOf('--volume') + 2)).toEqual([
       '--volume',
@@ -131,6 +175,13 @@ describe('adapter selection per platform', () => {
     ]);
     expect(adaptersForPlatform('win32')).toEqual([]);
   });
+
+  test('only seatbelt declares loopback-proxy composition for model-only', () => {
+    expect(seatbeltAdapter().supportsProxyModelOnly).toBe(true);
+    expect(bwrapAdapter().supportsProxyModelOnly).toBeUndefined();
+    expect(containerAdapter({ image: 'x' }).supportsProxyModelOnly).toBeUndefined();
+    expect(landlockAdapter().supportsProxyModelOnly).toBeUndefined();
+  });
 });
 
 describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boundary', () => {
@@ -153,7 +204,9 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     expect(result.stdout).toContain('in-boundary');
     const profile = await readFile(join(workspace, '.cq-seatbelt.sb'), 'utf8');
     expect(profile).toContain('(deny default)');
-  });
+    // The on-disk profile matches the constructor: no whole-volume read.
+    expect(profile).not.toContain('(subpath "/")');
+  }, 30_000);
 
   test('the launcher env scrub reaches the confined child, and TMPDIR moves inside', async () => {
     const adapter = seatbeltAdapter();
@@ -161,14 +214,14 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     scratch.push(workspace);
     const result = await adapter.launch({
       workspace,
-      argv: ['/usr/bin/env'],
+      argv: ['/usr/bin/printenv', 'TMPDIR'],
       parentEnv: { ...process.env, CQ_PROBE_TEST_SECRET: 'leak-me-not' },
       envPassthrough: [],
       network: 'model-only',
     });
     expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(join(workspace, '.tmp'));
     expect(result.stdout).not.toContain('leak-me-not');
-    expect(result.stdout).toContain(`TMPDIR=${join(workspace, '.tmp')}`);
   }, 30_000);
 
   test('the confined child cannot read a real file outside the workspace', async () => {
@@ -186,6 +239,39 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     });
     expect(result.ok).toBe(false);
     expect(result.stdout).not.toContain('outside-secret-value');
+  }, 30_000);
+
+  test('a SIBLING directory beside the workspace is unreadable too', async () => {
+    const adapter = seatbeltAdapter();
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
+    scratch.push(workspace);
+    const sibling = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-sib-'));
+    scratch.push(sibling);
+    const siblingPath = join(sibling, 'secret.txt');
+    await writeFile(siblingPath, 'sibling-secret-value');
+    const result = await adapter.launch({
+      workspace,
+      argv: ['/bin/cat', siblingPath],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.stdout).not.toContain('sibling-secret-value');
+  }, 30_000);
+
+  test('a proxyPort launch permits the proxy port in the on-disk profile', async () => {
+    const adapter = seatbeltAdapter();
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
+    scratch.push(workspace);
+    const result = await adapter.launch({
+      workspace,
+      argv: ['/bin/true'],
+      network: 'model-only',
+      proxyPort: 45454,
+    });
+    expect(result.ok).toBe(true);
+    const profile = await readFile(join(workspace, '.cq-seatbelt.sb'), 'utf8');
+    expect(profile).toContain('(allow network-outbound (remote ip "127.0.0.1:45454"))');
+    expect(profile.match(/network-outbound/g)).toHaveLength(1);
   }, 30_000);
 });
 
