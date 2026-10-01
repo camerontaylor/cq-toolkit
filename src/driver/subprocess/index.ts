@@ -256,8 +256,7 @@
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
-import { realpathSync, statSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -279,6 +278,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -293,7 +293,6 @@ import type {
   Usage,
   WorkerErrorClass,
   WorkerResult,
-  WorkspaceBinding,
 } from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
@@ -533,7 +532,7 @@ export class SubprocessDriver implements Driver {
         ? await store.create(
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
           )
-        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'subprocess driver');
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -1023,65 +1022,6 @@ function nowIso(): string {
 /** Default sessions dir (sibling of the harness temp-workspace root). */
 function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
-}
-
-/** Load a sessionRef for resume; unknown sessions throw (a fake resume is worse than a loud error). */
-async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
-  const record = await store.load(sessionRef);
-  if (record === undefined) {
-    throw new Error(
-      `subprocess driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
-    );
-  }
-  return record;
-}
-
-/**
- * The §2.4 set×set cell: the resumed record must record the SAME workspace
- * realpath the invocation binds — a divergence means the caller pointed one
- * session at two different trees, a caller bug that throws PRE-DISPATCH
- * (before any message lands in the record).
- */
-async function resumedRecordOrThrow(
-  store: SessionStore,
-  sessionRef: string,
-  boundWorkspace: string | undefined,
-): Promise<SessionRecord> {
-  const record = await loadSessionOrThrow(store, sessionRef);
-  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
-    throw new DispatchError(
-      'config',
-      `subprocess driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
-    );
-  }
-  return record;
-}
-
-/**
- * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
- * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
- * record or compared against one). A relative path, or a path that does not
- * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
- */
-function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
-  if (!isAbsolute(workspace.path)) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
-    );
-  }
-  try {
-    const real = realpathSync(workspace.path);
-    if (!statSync(real).isDirectory()) {
-      throw new Error('not a directory');
-    }
-    return real;
-  } catch (err) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
-    );
-  }
 }
 
 /**

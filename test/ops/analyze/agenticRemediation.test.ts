@@ -126,6 +126,29 @@ describe('agenticRemediationPrompt (deterministic, proposal-only)', () => {
 });
 
 describe('makeAgenticRemediation (the driver-factory seam)', () => {
+  test.each(['complete', 'error', 'budget', 'aborted'] as const)(
+    'reports paid worker evidence once for %s',
+    async (stopReason) => {
+      const usage = { input: 120, output: 40, cacheRead: 0, cacheWrite: 0 };
+      const worker: WorkerResult = {
+        ...COMPLETE,
+        usage,
+        costUSD: 0.07,
+        stopReason,
+        ...(stopReason === 'error' ? { errorClass: 'output-invalid' as const } : {}),
+      };
+      const reported: Array<{ usage?: unknown; costUSD?: number }> = [];
+      const outcome = await runLadder(
+        () => makeAgenticRemediation(fakeFactory(fakeDriver(worker)))(baseInput()),
+        {},
+        { op: 'analyze.agenticRemediation', jobKey: 'paid', attempt: 1 },
+        { onResult: (result) => reported.push(result) },
+      );
+      expect(outcome.outcome).toBe('completed');
+      expect(reported).toEqual([{ usage, costUSD: 0.07 }]);
+    },
+  );
+
   test('a complete run returns the WorkerResult verbatim, with the no-write defaults', async () => {
     const driver = fakeDriver(COMPLETE);
     const result = await makeAgenticRemediation(fakeFactory(driver))(baseInput());

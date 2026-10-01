@@ -335,9 +335,9 @@ export class SessionStore {
   }
 
   /**
-   * Delete one session record — the `<sessionId>.jsonl` file ONLY (the
-   * reap-on-settle retention of ADR-0002 §2.5): sidecars (`.cq-cli-session`
-   * and friends) and the workspace directory are NOT touched. A missing
+   * Delete one session record and its known resume sidecar (the
+   * reap-on-settle retention of ADR-0002 §2.5): `<sessionId>.jsonl` and
+   * `<sessionId>.cq-cli-session` only. The workspace is preserved. A missing
    * record is a no-op (`rm` force); real fs errors throw — the CALLER
    * decides the error policy (the factory's reap wrapper swallows: the
    * verdict outranks the cleanup). Unknown sessions are rejected by the
@@ -345,7 +345,10 @@ export class SessionStore {
    */
   async remove(sessionId: string): Promise<void> {
     assertSafeSessionId(sessionId);
-    await rm(this.pathFor(sessionId), { force: true });
+    await Promise.all([
+      rm(this.pathFor(sessionId), { force: true }),
+      rm(join(this.sessionsDir, `${sessionId}.cq-cli-session`), { force: true }),
+    ]);
   }
 }
 

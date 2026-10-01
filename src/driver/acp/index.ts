@@ -256,15 +256,15 @@
 // (usage_update's cost object) are dropped with the frame that carries
 // them (DD-9): a vendor-reported cost would bypass the derived-only rule.
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
-import { realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
-import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
+import { boundedErrorText, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { validateStructured } from '../common/structured.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -280,7 +280,6 @@ import type {
   Usage,
   WorkerErrorClass,
   WorkerResult,
-  WorkspaceBinding,
 } from '../types.js';
 import {
   ACP_METHODS,
@@ -873,7 +872,7 @@ export class AcpDriver implements Driver {
     const record =
       sessionRef === undefined
         ? await store.create(boundWorkspace ?? (await tempWorkspace(this.workspaceRoot)))
-        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'acp driver');
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -1854,65 +1853,6 @@ function nowIso(): string {
 /** Default sessions dir (sibling of the harness temp-workspace root). */
 function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
-}
-
-/** Load a sessionRef for resume; unknown sessions throw (a fake resume is worse than a loud error). */
-async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
-  const record = await store.load(sessionRef);
-  if (record === undefined) {
-    throw new Error(
-      `acp driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
-    );
-  }
-  return record;
-}
-
-/**
- * The §2.4 set×set cell: the resumed record must record the SAME workspace
- * realpath the invocation binds — a divergence means the caller pointed one
- * session at two different trees, a caller bug that throws PRE-DISPATCH
- * (before any message lands in the record).
- */
-async function resumedRecordOrThrow(
-  store: SessionStore,
-  sessionRef: string,
-  boundWorkspace: string | undefined,
-): Promise<SessionRecord> {
-  const record = await loadSessionOrThrow(store, sessionRef);
-  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
-    throw new DispatchError(
-      'config',
-      `acp driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
-    );
-  }
-  return record;
-}
-
-/**
- * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
- * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
- * record or compared against one). A relative path, or a path that does not
- * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
- */
-function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
-  if (!isAbsolute(workspace.path)) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
-    );
-  }
-  try {
-    const real = realpathSync(workspace.path);
-    if (!statSync(real).isDirectory()) {
-      throw new Error('not a directory');
-    }
-    return real;
-  } catch (err) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
-    );
-  }
 }
 
 /**

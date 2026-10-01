@@ -296,6 +296,11 @@ export function makeAgenticRemediation(
         reason: `agentic remediation: the driver could not dispatch the worker (dispatch class: ${dispatched ?? 'unclassified'}) — ${cause}`,
       };
     }
+    // Preserve paid evidence before mapping terminal verdicts into op statuses.
+    currentJobContext()?.reportResult({
+      usage: result.usage,
+      ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
+    });
     switch (result.stopReason) {
       case 'complete':
         return { status: 'ok', value: result };
@@ -312,9 +317,7 @@ export function makeAgenticRemediation(
         };
       case 'budget':
         // The honest stop: the invocation halted on a locally-enforced cap.
-        // Nothing is fabricated — the partial WorkerResult is DISCARDED as
-        // evidence (its usage may be untrustworthy mid-flight) and the stop
-        // is what the caller sees.
+        // Observed spend has already been reported; the caller sees the stop.
         return { status: 'budget-exhausted' };
       case 'aborted':
         return {

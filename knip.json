@@ -10,8 +10,7 @@
     "scripts/lib/render-templates.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
-    "test/fixtures/cli-smoke-ops/smoke/*.js",
-    "test/fixtures/cli-smoke-ops/sweepfix/*.js"
+    "test/fixtures/cli-smoke-ops/smoke/*.js"
   ],
   "project": [
     "src/**/*.ts",

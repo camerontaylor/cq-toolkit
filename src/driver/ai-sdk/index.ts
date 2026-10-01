@@ -195,9 +195,8 @@ import type {
   ToolSet,
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
-import { realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -212,6 +211,7 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { validateStructured } from '../common/structured.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -224,7 +224,7 @@ import type {
   Usage,
   WorkerResult,
 } from '../types.js';
-import type { ModelSpec, OpInvocation, WorkspaceBinding } from '../types.js';
+import type { ModelSpec, OpInvocation } from '../types.js';
 import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ export class AiSdkDriver implements Driver {
         ? await store.create(
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
           )
-        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'ai-sdk driver');
     // A FAILED prior attempt persists its prompt with no verdict after it:
     // when the resumed record's LAST message is already this exact user
     // prompt, re-appending would compose two CONSECUTIVE identical user
@@ -1078,7 +1078,8 @@ export class AiSdkDriver implements Driver {
       }
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
-        ...verdictExtras(totalUsage),
+        // Failed requests may contain unobserved spend; partial usage cannot price the run.
+        usage: totalUsage,
         sessionId: record.sessionId,
         denials,
         stopReason: aborted ? 'aborted' : 'error',
@@ -1236,65 +1237,6 @@ function defaultProviders(): Record<string, ProviderFactory> {
     deepseek: (modelId) =>
       createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
   };
-}
-
-/** Load a sessionRef for resume; unknown sessions throw (a fake resume is worse than a loud error). */
-async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
-  const record = await store.load(sessionRef);
-  if (record === undefined) {
-    throw new Error(
-      `ai-sdk driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
-    );
-  }
-  return record;
-}
-
-/**
- * The §2.4 set×set cell: the resumed record must record the SAME workspace
- * realpath the invocation binds — a divergence means the caller pointed one
- * session at two different trees, a caller bug that throws PRE-DISPATCH
- * (before any message lands in the record).
- */
-async function resumedRecordOrThrow(
-  store: SessionStore,
-  sessionRef: string,
-  boundWorkspace: string | undefined,
-): Promise<SessionRecord> {
-  const record = await loadSessionOrThrow(store, sessionRef);
-  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
-    throw new DispatchError(
-      'config',
-      `ai-sdk driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
-    );
-  }
-  return record;
-}
-
-/**
- * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
- * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
- * record or compared against one). A relative path, or a path that does not
- * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
- */
-function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
-  if (!isAbsolute(workspace.path)) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
-    );
-  }
-  try {
-    const real = realpathSync(workspace.path);
-    if (!statSync(real).isDirectory()) {
-      throw new Error('not a directory');
-    }
-    return real;
-  } catch (err) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
-    );
-  }
 }
 
 /**

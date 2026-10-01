@@ -311,6 +311,15 @@ async function buildRealSweepFamilyPlan(kind: 'sweep' | 'test-fix'): Promise<Rea
   return { plan: { ...full, id: planId, jobs }, sessionsDir };
 }
 
+test('the sweep fixture registry exposes both real deployment operations', async () => {
+  const { registry } = await import('../fixtures/cli-smoke-ops/sweepfix/registry.js');
+  expect(registry.map((entry) => entry.name)).toEqual(['sweep.planSweep', 'sweep.unit']);
+  for (const entry of registry) {
+    expect(entry.inputSchema.safeParse({}).success).toBe(false);
+    expect(typeof entry.importer).toBe('function');
+  }
+});
+
 describe('the plan smoke table covers the registry (generation contract)', () => {
   test('exactly the discovered plan set is exercised', async () => {
     const discovered = (await listPlans()).map((entry) => entry.name).sort();

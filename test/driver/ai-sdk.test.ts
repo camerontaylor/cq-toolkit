@@ -1985,6 +1985,39 @@ describe('ai-sdk driver seam v2 §2.3: invocation outputSchema + repair + provid
     }
   });
 
+  test.each(['provider', 'abort'] as const)(
+    'failed repair keeps observed usage unpriced: %s',
+    async (failure) => {
+      let modelCalls = 0;
+      const mock = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          modelCalls += 1;
+          if (modelCalls === 1) return textResult('{"wrong":true}');
+          const error = new Error('repair failed');
+          if (failure === 'abort') error.name = 'AbortError';
+          throw error;
+        },
+      });
+      const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-repair-failed-'));
+      try {
+        const driver = new AiSdkDriver({
+          providers: { mock: () => mock },
+          sessionsDir: join(scratchDir, 'sessions'),
+          pricing: () => ({ input: 3, output: 15 }),
+        });
+        const result = await driver.run(invocation({ outputSchema: ANSWER_OUTPUT_SCHEMA }));
+        expect(modelCalls).toBe(2);
+        expect(result.stopReason).toBe(failure === 'abort' ? 'aborted' : 'error');
+        expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5 });
+        expect(result.costUSD).toBeUndefined();
+        expect(result.costBasis).toBeUndefined();
+      } finally {
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('W3.4 repair exhausted: still invalid → error/output-invalid, usage and derived cost over BOTH calls', async () => {
     let modelCalls = 0;
     const mock = new MockLanguageModelV4({

@@ -245,8 +245,7 @@
 // reports trusted USD — the SDK's own total_cost_usd is deliberately NOT
 // surfaced: a vendor-side cost estimate would bypass the derived-only rule.
 import { tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
-import { realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -264,6 +263,7 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { validateStructured } from '../common/structured.js';
@@ -281,7 +281,6 @@ import type {
   Usage,
   WorkerErrorClass,
   WorkerResult,
-  WorkspaceBinding,
 } from '../types.js';
 import { defaultEndpointTable, resolveEndpoint } from './routing.js';
 import type { EndpointTable, ResolvedEndpoint } from './routing.js';
@@ -473,7 +472,7 @@ export class ClaudeAgentDriver implements Driver {
         ? await store.create(
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
           )
-        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-agent driver');
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -976,65 +975,6 @@ function readKeyEnvOrThrow(endpoint: ResolvedEndpoint): string {
     );
   }
   return value;
-}
-
-/** Load a sessionRef for resume; unknown sessions throw (a fake resume is worse than a loud error). */
-async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
-  const record = await store.load(sessionRef);
-  if (record === undefined) {
-    throw new Error(
-      `claude-agent driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
-    );
-  }
-  return record;
-}
-
-/**
- * The §2.4 set×set cell: the resumed record must record the SAME workspace
- * realpath the invocation binds — a divergence means the caller pointed one
- * session at two different trees, a caller bug that throws PRE-DISPATCH
- * (before any message lands in the record).
- */
-async function resumedRecordOrThrow(
-  store: SessionStore,
-  sessionRef: string,
-  boundWorkspace: string | undefined,
-): Promise<SessionRecord> {
-  const record = await loadSessionOrThrow(store, sessionRef);
-  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
-    throw new DispatchError(
-      'config',
-      `claude-agent driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
-    );
-  }
-  return record;
-}
-
-/**
- * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
- * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
- * record or compared against one). A relative path, or a path that does not
- * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
- */
-function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
-  if (!isAbsolute(workspace.path)) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
-    );
-  }
-  try {
-    const real = realpathSync(workspace.path);
-    if (!statSync(real).isDirectory()) {
-      throw new Error('not a directory');
-    }
-    return real;
-  } catch (err) {
-    throw new DispatchError(
-      'config',
-      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
-    );
-  }
 }
 
 /**
