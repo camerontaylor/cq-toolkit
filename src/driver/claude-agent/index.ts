@@ -1429,8 +1429,10 @@ export interface FailureClassification {
  *      "You've hit your … limit · resets …" result → 'quota' (RS-14 §4
  *      rule 3 — this precedes the retry-after rule), the reset instant in
  *      `providerSignals.windows[*].resetAt` when extractable;
- *   3. `rate_limit_error` → 'rate-limit', retryAfterMs from the vendor's
- *      anchored retry-after text when present;
+ *   3. `rate_limit_error` → 'rate-limit' WITH the vendor's anchored
+ *      retry-after in `providerSignals.retryAfterMs`; without a stated
+ *      retry-after it falls to 'provider-error' (the class contract:
+ *      "429 WITH retry-after"; ai-sdk bare-429 parity);
  *   4. a dispatch throw or a silent death (no result event) → 'harness';
  *   5. any other result-frame subtype/errors → 'provider-error'.
  * Abort-shaped results never reach this function (they are 'aborted').
