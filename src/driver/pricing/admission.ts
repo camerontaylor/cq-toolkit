@@ -212,7 +212,7 @@ export function classifyProviderSignal(
       advisoryReason: `no profile for '${profileId ?? '<none>'}'; unknown limits stay ADVISORY`,
     };
   }
-  const marker = firstMatchingMarker(profile, signal);
+  const marker = firstMatchingRule(profile, signal);
   if (marker !== undefined) {
     const resolution = claudeDeferResolution(signal, observedQuota);
     const deferUntilMs =
@@ -244,16 +244,12 @@ export function classifyProviderSignal(
       rule: 'retry-after',
     };
   }
-  const byStatus = profile.errorSignals.find(
-    (fact) => fact.httpStatus !== undefined && fact.httpStatus === signal.httpStatus,
-  );
-  if (byStatus !== undefined) {
-    return {
-      errorClass: byStatus.errorClass,
-      ...(resetsAt === undefined ? {} : { deferUntilMs: resetsAt }),
-      rule: 'structured',
-    };
-  }
+  // NO status-only fallback here. Status-declared rules are already resolved by
+  // firstMatchingRule, which applies ruleMatches; a second lookup keyed on the
+  // status alone would bypass that AND and resurrect the two defects this
+  // replaced - an ordinary Anthropic 400 would match the spend-limit rule
+  // without its documented message, and a Zen-wire (or endpoint-less) 402 would
+  // match the Go-wire rule without the identity that scopes it.
   if (resetsAt !== undefined) {
     return {
       errorClass: 'quota',
@@ -264,13 +260,22 @@ export function classifyProviderSignal(
   return { errorClass: 'provider-error', rule: 'unclassified' };
 }
 
-function firstMatchingMarker(
+/**
+ * The most specific rule that matches this observation, or `undefined`.
+ *
+ * Rules are tried by discriminator specificity - provider error code, then
+ * message shape, then endpoint identity, then HTTP status, then marker-header
+ * presence - and a rule matches only when EVERY discriminator it declares
+ * matches. That AND is what keeps a rule from admitting a neighbouring condition
+ * that shares its status: the Anthropic spend-limit 400 needs its documented
+ * message as well as its code, and the OpenCode Go 402 needs the Go endpoint
+ * identity, so an ordinary 400 and a Zen-wire 402 fall through to
+ * `provider-error` instead of charging an allowance.
+ */
+function firstMatchingRule(
   profile: ProviderProfile,
   signal: ProviderSignal,
 ): ProviderProfile['errorSignals'][number] | undefined {
-  // Most specific discriminators first. A rule matches only when EVERY
-  // discriminator it declares matches, so a rule that names an endpoint or a
-  // message shape is never reached by an observation that has neither.
   const order = [
     (fact: ErrorSignalFact): boolean => fact.providerCode !== undefined,
     (fact: ErrorSignalFact): boolean => fact.messagePrefix !== undefined,

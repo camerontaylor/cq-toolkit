@@ -468,10 +468,24 @@ describe('classifyProviderSignal', () => {
     expect(classifyProviderSignal('claude-subscription', { httpStatus: 429 }).errorClass).toBe(
       'rate-limit',
     );
-    // Anthropic API: the vendor documents the OPPOSITE discrimination (a
-    // spend-cap 429 carries no retry-after), so an unattributed 429 settles
-    // fail-closed as quota - deferred, never busy-retried.
-    expect(classifyProviderSignal('anthropic-api', { httpStatus: 429 }).errorClass).toBe('quota');
+    // Anthropic API: with NO code and NO retry-after there is nothing to
+    // attribute the 429 to, so it settles as provider-error — honestly
+    // unattributed, and fail-closed (no defer time, no retry).
+    expect(classifyProviderSignal('anthropic-api', { httpStatus: 429 }).errorClass).toBe(
+      'provider-error',
+    );
+    // The documented discriminator still works in the other direction: a
+    // retry-after means the vendor says the condition clears on its own.
+    expect(
+      classifyProviderSignal('anthropic-api', { httpStatus: 429, retryAfterMs: 1_000 }).errorClass,
+    ).toBe('rate-limit');
+    // ...and the documented spend-cap code resolves to quota.
+    expect(
+      classifyProviderSignal('anthropic-api', {
+        httpStatus: 429,
+        providerCode: 'enforced_spend_limit_reached',
+      }).errorClass,
+    ).toBe('quota');
     // OpenAI: every documented 429 code there is a quota code, so a code-less
     // 429 must not become a throttle.
     expect(classifyProviderSignal('openai-api', { httpStatus: 429 }).errorClass).not.toBe(
@@ -503,6 +517,45 @@ describe('classifyProviderSignal', () => {
   test('a DeepSeek 402 is quota; a 429 is the concurrency throttle', () => {
     expect(classifyProviderSignal('deepseek', { httpStatus: 402 }).errorClass).toBe('quota');
     expect(classifyProviderSignal('deepseek', { httpStatus: 429 }).errorClass).toBe('rate-limit');
+  });
+
+  // Structural guard against the bypass that survived the first fix: a lookup
+  // keyed on HTTP status alone would re-admit every rule that declares a status
+  // PLUS another discriminator. For any such rule, a bare status-only
+  // observation must NOT resolve to that rule's class.
+  test('no rule matches on its status alone when it declares another discriminator', () => {
+    for (const profile of Object.values(PROVIDER_PROFILES)) {
+      for (const fact of profile.errorSignals) {
+        if (fact.httpStatus === undefined) continue;
+        if (
+          fact.providerCode === undefined &&
+          fact.messagePrefix === undefined &&
+          fact.endpointMatch === undefined &&
+          fact.markerHeader === undefined
+        ) {
+          continue; // genuinely status-only: matching on the status is correct
+        }
+        const verdict = classifyProviderSignal(profile.id, { httpStatus: fact.httpStatus });
+        expect({
+          profile: profile.id,
+          status: fact.httpStatus,
+          ruleClass: fact.errorClass,
+          got: verdict.errorClass,
+        }).toEqual({
+          profile: profile.id,
+          status: fact.httpStatus,
+          ruleClass: fact.errorClass,
+          got: 'provider-error',
+        });
+      }
+    }
+  });
+
+  test('a genuinely status-only rule DOES match on its status', () => {
+    // DeepSeek's concurrency 429 and Z.AI's plan-window 429 are documented status
+    // conditions, so this is the path that must keep working.
+    expect(classifyProviderSignal('deepseek', { httpStatus: 429 }).errorClass).toBe('rate-limit');
+    expect(classifyProviderSignal('zai-glm-coding', { httpStatus: 429 }).errorClass).toBe('quota');
   });
 
   test('a Z.AI coding-wire 429 is quota-shaped: no retry-after means wait for the window', () => {
