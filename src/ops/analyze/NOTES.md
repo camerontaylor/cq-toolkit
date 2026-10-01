@@ -311,17 +311,31 @@ resolutions are decisions with a stated alternative, not defaults.
   verified claim. Re-reading it at call time collapses the two moments back
   into one and reopens the window; an adapter that cannot supply it must
   return `undefined` (refusal), not a guess.
-- **A dirty workspace is not an approvable state** — a deliberate
-  TIGHTENING of ADR-0003 §4c step 1, which compares only the clean
-  BOOLEAN. That predicate admits a hole: an approval over a dirty tree stays
-  "valid" when the tree becomes a DIFFERENT dirty tree (same boolean, same
-  HEAD, different bytes). The alternative was hashing the full dirty tree,
-  which closes it at the cost of reading and hashing every tracked and
-  untracked byte on every state read; refusing the dirty state is the same
-  fail-closed direction at a fraction of the cost. **This diverges from the
-  ADR's literal predicate and needs the ADR owner's sign-off** — recorded
-  here rather than narrowed silently. Ignored files remain out of scope of
-  the state predicate (ADR's own stated residual).
+- **A dirty workspace is not an approvable state** — and this is the
+  ACCEPTED ADR's own requirement, not a local tightening of it. Verified
+  against the accepted `bf5f540`
+  `research/research-20260925-v11/adr-0003-approval-token.md`: §4c step 1
+  requires the clean predicate to be EMPTY
+  (`git status --porcelain=v1 --untracked-files=all`, untracked files
+  counting as dirty), §4c's enumerated refusal reasons include
+  `workspace dirty`, and §7 lists "a dirty tree from an untracked file" as a
+  required `needs-human` case. The observable contract this module
+  implements — `needs-human`, the `workspace dirty` reason, no write, no
+  spend — is the ADR's, and the refusal reason quotes the ADR's own token
+  so a refusal is traceable to the clause that requires it.
+  CORRECTION: an earlier revision of this note described the refusal as a
+  "deliberate tightening … a divergence needing the ADR owner's sign-off",
+  and listed that sign-off as an open lease. That claim was WRONG — it
+  misread the ADR's predicate as a bare boolean comparison rather than an
+  emptiness requirement — and the conductor's ruling (on this accepted
+  text) confirmed it. The behavior is unchanged and required; only the
+  description and the phantom lease were wrong. The check sits at ADMISSION
+  rather than only at the exercise because the claim's `treeClean` is a
+  boolean that cannot distinguish one dirty state from another (same
+  boolean, same HEAD, different bytes); refusing before a grant is minted
+  means that comparison is never reached, and an earlier refusal spends
+  nothing. Ignored files remain out of scope of the state predicate — the
+  ADR's own stated residual, unchanged here.
 - **The durable ledger is now actually durable.** `appendFileSync` returns
   once the bytes are in the OS page cache, so a machine crash could lose a
   spent nonce and leave the token REPLAYABLE — the exact outcome §4c's
@@ -359,10 +373,7 @@ resolutions are decisions with a stated alternative, not defaults.
    approvals. It inherits this contract: source `state` from the verified
    claim, refuse rather than guess, and keep the deny-all default for any
    subject the verifier has not approved.
-6. **The clean-tree tightening needs ADR sign-off** (see above). If the ADR
-   owner prefers the literal predicate, the replacement must be a full
-   digest of the dirty tree — not a return to the boolean, which is the hole.
-7. The journal's `approval-consumed` audit record (kid, nonce, subject
+6. The journal's `approval-consumed` audit record (kid, nonce, subject
    hash; token BYTES never) is still unwritten — this module consumes the
    grant durably in the operator ledger but emits no journal event, so the
    tamper-protection the journal fold would give is absent until the kernel

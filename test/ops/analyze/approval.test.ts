@@ -759,10 +759,73 @@ describe('a dirty workspace is not an approvable state (the clean BOOLEAN is not
     const outcome = await withApprovedMutation(authority, subject(), spy.run);
     expect(outcome.status).toBe('needs-human');
     const reason = outcome.status === 'needs-human' ? outcome.reason : '';
-    expect(reason).toContain('DIRTY');
-    // The reason must say WHY a boolean is not enough, because the ADR's
-    // literal predicate would have allowed this.
-    expect(reason).toContain('cannot distinguish one dirty state from another');
+    // The ADR's own enumerated reason token (bf5f540 adr-0003 §4c), quoted
+    // verbatim so the refusal is traceable to the clause requiring it.
+    expect(reason).toContain('workspace dirty');
+    expect(reason).toContain('ADR-0003 §4c step 1');
+    // Untracked files count as dirty, which is the case §7 names.
+    expect(reason).toContain('an untracked file counts as dirty');
+    expect(spy.calls).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('a CLEAN signed state with a dirty workspace is refused the same way (the state moved, and the ADR forbids the write)', async () => {
+    // The complementary case to the one above: the token describes a clean
+    // tree, and the workspace is dirty by the time this op admits. This is
+    // also the ADR's "state changed" direction, and it must refuse BEFORE
+    // any grant is minted.
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-clean-then-dirty',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: {
+        read: () => Promise.resolve({ ...CLEAN_STATE, treeClean: false }),
+      },
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('workspace dirty');
+    expect(spy.calls).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('the real git reader reports an UNTRACKED file as dirty (the predicate the ADR specifies)', async () => {
+    // The predicate is asserted against real `git status`, not only against
+    // the fake reader: an untracked file must make `treeClean` false, since
+    // that is the exact case ADR §7 requires refusing.
+    const repo = realRepo();
+    const reader = makeGitApprovalStateReader();
+    const before = await reader.read(repo);
+    expect(before.treeClean).toBe(true);
+    writeFileSync(join(repo, 'src', 'untracked.ts'), 'export const u = 1;\n');
+    const after = await reader.read(repo);
+    expect(after.treeClean).toBe(false);
+    // ...and the whole op refuses on that state.
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-untracked',
+            state: { ...before, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: reader,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject({ workspace: repo }), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('workspace dirty');
     expect(spy.calls).toBe(0);
     expect(ledger.spent()).toBe(0);
   });

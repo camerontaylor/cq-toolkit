@@ -596,23 +596,30 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           reason: `approval refused: the workspace state could not be read — ${messageOf(err)}; an unreadable state is never treated as unchanged, and nothing was written`,
         };
       }
-      // A DIRTY TREE IS NOT AN APPROVABLE STATE (deliberate TIGHTENING of
-      // ADR-0003 §4c step 1, which compares only the clean BOOLEAN). The
-      // boolean admits a hole the ADR does not close: an approval taken
-      // over a dirty tree stays "valid" when the tree becomes a DIFFERENT
-      // dirty tree — same `treeClean: false`, same HEAD, entirely different
-      // bytes. Hashing the full dirty tree instead would close it too, at
-      // the cost of reading and hashing every tracked and untracked byte on
-      // every state read; refusing the dirty state is the same fail-closed
-      // direction at a fraction of the cost, and it is the direction this
-      // whole module already takes. The ADR's permissive predicate is
-      // therefore NOT implemented as written — recorded in the family
-      // NOTES as a divergence for the ADR owner, not silently narrowed.
+      // A DIRTY TREE IS NOT AN APPROVABLE STATE — and this is the ACCEPTED
+      // ADR's requirement, not a local tightening of it. ADR-0003 §4c step 1
+      // requires the clean predicate to be EMPTY
+      // (`git status --porcelain=v1 --untracked-files=all`), and §4c's
+      // enumerated refusal reasons include `workspace dirty`; §7 lists "a
+      // dirty tree from an untracked file" as a required `needs-human`
+      // case. So a `treeClean: false` state must NOT reach a write, and the
+      // observable contract — `needs-human`, `workspace dirty`, no write,
+      // no spend — is exactly the ADR's.
+      //
+      // WHY IT IS CHECKED AT ADMISSION RATHER THAN ONLY AT THE EXERCISE:
+      // the same refusal, detected earlier. The claim's `treeClean` is a
+      // boolean, and comparing booleans cannot distinguish one dirty state
+      // from another — an approval over a dirty tree would look unchanged
+      // when the tree became a DIFFERENT dirty tree (same boolean, same
+      // HEAD, different bytes). Refusing as soon as the state is known to
+      // be dirty never mints a grant, so that comparison is never reached.
+      // An earlier refusal is strictly safer than a later one and spends
+      // nothing, so there is nothing for the ADR to permit here.
       if (!state.treeClean) {
         return {
           granted: false,
           reason:
-            'approval refused: the workspace is DIRTY (an untracked file counts) — this module only acts on a strictly clean tree, because a clean/dirty BOOLEAN cannot distinguish one dirty state from another, and the approval was not taken over a known state; commit, stash or clean the workspace, then approve against that',
+            'approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state',
         };
       }
       const verified = await config.approvals.verifiedFor(subject);
@@ -834,10 +841,11 @@ function sameSubject(a: ApprovalSubject, b: ApprovalSubject): boolean {
  * The first drift between the approved state and the current one, or null.
  *
  * Both states are strictly CLEAN by the time this runs — admission refuses
- * a dirty state outright — so the tree comparison only ever sees
- * clean→dirty, and that is the only direction it has to name. The
- * dirty→clean direction is unrepresentable rather than unhandled: there is
- * no grant to compare against, because a dirty state never produced one.
+ * a dirty state outright, as ADR-0003 §4c step 1 requires — so the tree
+ * comparison only ever sees clean→dirty, and that is the only direction it
+ * has to name. The dirty→clean direction is unrepresentable rather than
+ * unhandled: there is no grant to compare against, because a dirty state
+ * never produced one.
  */
 function stateDrift(approved: ApprovalState, current: ApprovalState): string | null {
   if (approved.workspace !== current.workspace) {
