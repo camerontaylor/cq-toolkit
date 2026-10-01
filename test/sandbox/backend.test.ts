@@ -467,12 +467,15 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     // The containment guard must canonicalize (realpath), not compare
     // lexically: a workspace path THROUGH a symlink that resolves onto the
     // trusted policy parent is physically inside it even when the lexical
-    // relative() says otherwise (Sol exact-head audit).
+    // relative() says otherwise (Sol exact-head audit).  Baseline-first: the
+    // shared parent may hold unrelated preexisting entries — the assertion is
+    // that the refused launch ADDS nothing policy-shaped.
     const adapter = seatbeltAdapter();
     const linkDir = await mkdtemp(join(tmpdir(), 'cq-sbx-link-'));
     scratch.push(linkDir);
     const workspaceThroughLink = join(linkDir, 'pvt');
     await symlink('/private/var/tmp', workspaceThroughLink);
+    const before = new Set(await readdir('/private/var/tmp'));
     const result = await adapter.launch({
       workspace: workspaceThroughLink,
       argv: ['/bin/true'],
@@ -480,30 +483,46 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/contains the trusted policy parent/);
-    // And nothing policy-shaped was left in the trusted parent.
-    const parentListing = await readdir('/private/var/tmp');
-    expect(parentListing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
+    const added = (await readdir('/private/var/tmp')).filter((entry) => !before.has(entry));
+    expect(added.filter((entry) => entry.includes('cq-sb-prof-'))).toEqual([]);
   }, 30_000);
 
   test('a static symlink onto the policy parent mutates nothing before refusal', async () => {
     // Sol recheck: the old order ran mkdir(<workspace>/.tmp) BEFORE the
     // containment guard, so this exact case already created
     // /private/var/tmp/.tmp.  The guard now precedes every mutation.
+    // Baseline-first assertion: the trusted parent is shared host state, so
+    // the test captures what exists BEFORE the launch and requires the
+    // refused launch to add nothing — it never deletes or requires the
+    // absence of preexisting entries.
     const adapter = seatbeltAdapter();
     const linkDir = await mkdtemp(join(tmpdir(), 'cq-sbx-link-'));
     scratch.push(linkDir);
     const workspaceThroughLink = join(linkDir, 'pvt');
     await symlink('/private/var/tmp', workspaceThroughLink);
+    const before = new Set(await readdir('/private/var/tmp'));
     const result = await adapter.launch({
       workspace: workspaceThroughLink,
       argv: ['/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(false);
-    const parentListing = await readdir('/private/var/tmp');
-    expect(parentListing.includes('.tmp')).toBe(false);
-    expect(parentListing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
+    expect(result.spawnError).toMatch(/contains the trusted policy parent/);
+    const added = (await readdir('/private/var/tmp')).filter((entry) => !before.has(entry));
+    expect(added).toEqual([]);
   }, 30_000);
+
+  // PRACTICAL LIMIT, stated per reviewer: the mid-flight retarget refusal
+  // ("workspace retargeted during launch") cannot be triggered
+  // deterministically from outside the launch — a symlink swap would have to
+  // land inside the window between the probe's two realpath calls, which no
+  // public seam exposes, and a timing-based swap makes the test flaky by
+  // construction.  The recheck itself is the enforcement (backend.ts,
+  // "workspace retargeted during launch; the certified canonical binding is
+  // stale"); this suite proves the deterministic parts — the containment
+  // guard precedes every mutation, and the child binds only the canonical
+  // path.  The race-window leg belongs to the fresh protocol's adversarial
+  // review (A11/A17-style), not to a timing test here.
 
   test('the confined child binds the CANONICAL workspace, not the lexical path', async () => {
     const adapter = seatbeltAdapter();
