@@ -74,7 +74,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { GIT_HARDEN } from '../ratchet/git.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
 
@@ -347,12 +347,30 @@ function workspaceKey(workspace: string): string {
   return createHash('sha256').update(realpathOrSelf(workspace)).digest('hex').slice(0, 32);
 }
 
-/** `realpath` when the path exists, else the path itself (the read fails closed downstream). */
+/**
+ * Resolve a path for a CONTAINMENT comparison, tolerating a tail that does
+ * not exist yet. Plain `realpathSync` throws on a missing path and the
+ * obvious fallback (return the raw string) then compares an unresolved
+ * `/var/...` against a resolved `/private/var/...` and MISSES the nesting —
+ * silently, and exactly for the common case of a ledger directory created
+ * on first write. So: walk up to the longest existing ancestor, resolve
+ * THAT, and re-join the remaining segments. Every existing segment is
+ * therefore symlink-resolved, and the answer does not depend on whether the
+ * last component happens to exist.
+ */
 function realpathOrSelf(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
+  const segments: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      const resolved = realpathSync(current);
+      return segments.length === 0 ? resolved : join(resolved, ...segments.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return path; // reached the root without resolving
+      segments.push(basename(current));
+      current = parent;
+    }
   }
 }
 
@@ -583,11 +601,60 @@ export async function withApprovedMutation<T>(
         'approval refused: the authority exposes no mutation lock, so the state re-check could not be atomic with the write; nothing was written and the token is UNSPENT',
     };
   }
-  return locks.forWorkspace(subject.workspace).withLock(async () => {
-    const exercised = await authority.exercise(admitted.grant, subject);
-    if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
-    return { status: 'ok', value: await write() };
-  });
+  const held = await withMutationLock(
+    authority,
+    subject.workspace,
+    async (): Promise<ApprovedMutation<T>> => {
+      const exercised = await authority.exercise(admitted.grant, subject);
+      if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
+      return { status: 'ok', value: await write() };
+    },
+  );
+  if (!held.ok) return { status: 'needs-human', reason: held.reason };
+  return held.value;
+}
+
+/**
+ * Run `fn` inside the workspace mutation lock the AUTHORITY was built with —
+ * the same lock, the same key, the same critical section the exercise runs
+ * in. Exported because a mutation is not only the first write: a ROLLBACK is
+ * a write too, and it has to be serialized against the other approved
+ * writers of the same workspace exactly as the original apply was. A caller
+ * that mutates outside this helper reintroduces the lost update this lock
+ * exists to prevent.
+ *
+ * Unlike {@link withApprovedMutation} this does NOT admit, exercise or
+ * consume: it is the same mutual exclusion, with no approval semantics of
+ * its own. An authority with no bound locks refuses rather than running
+ * unlocked.
+ */
+export async function withMutationLock<T>(
+  authority: ApprovalAuthority,
+  workspace: string,
+  fn: () => Promise<T>,
+): Promise<
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string }
+> {
+  const locks = (authority as Partial<BoundAuthority>)[LOCKS];
+  if (locks === undefined) {
+    return {
+      ok: false,
+      reason:
+        "approval refused: the authority exposes no mutation lock, so this workspace's mutations are not serialized; nothing was written",
+    };
+  }
+  return { ok: true, value: await locks.forWorkspace(workspace).withLock(fn) };
+}
+
+/**
+ * A STRONG fingerprint of a file's bytes (`sha256:…`), for compare-and-swap
+ * guards on a mutation. The family's `contentDigest` is a 32-bit FNV-1a
+ * coarse freshness marker; using it to decide "did anything change since I
+ * wrote this?" would put a 1-in-4-billion guess on whether a concurrent
+ * writer's edit gets clobbered, which is the wrong place for that trade.
+ */
+export function contentFingerprint(bytes: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
 /** A structural admission fault (no state read, no token lookup), or null when admissible. */
@@ -598,7 +665,14 @@ function preAdmissionFault(
   if (subject.targets.length === 0) {
     return 'the mutation has no target files — there is nothing to approve, and an approval over an empty target set would bind nothing';
   }
-  if (trustedLayerDir !== undefined && isInside(trustedLayerDir, subject.workspace)) {
+  // ARGUMENT ORDER IS LOAD-BEARING: `isInside(parent, child)` asks whether
+  // CHILD is nested in PARENT, so the question here is "is the trusted layer
+  // nested in the workspace?", i.e. parent = the workspace. Passing them the
+  // other way round silently answers the harmless question instead ("is the
+  // workspace nested in the trusted layer?"), which refuses legitimate
+  // layouts — a ledger under $HOME state with a workspace under $HOME — and
+  // lets the actual tamper vector through.
+  if (trustedLayerDir !== undefined && isInside(subject.workspace, trustedLayerDir)) {
     return `the trusted approval layer '${trustedLayerDir}' is inside the workspace under approval ('${subject.workspace}') — the subject would be able to edit the record that spends its own approval`;
   }
   return null;

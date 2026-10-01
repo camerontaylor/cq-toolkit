@@ -236,19 +236,52 @@ resolutions are decisions with a stated alternative, not defaults.
   The process-local lock is offered for tests and single-process callers and
   claims nothing cross-process; that claim is stated in its doc comment
   rather than left to be assumed.
-- **O-6 — do non-approval writers take the lock: in this path, vacuous.**
-  Every write `applyRemediation` and `playbookDispatch` perform is
-  approval-required and holds the lock through it, so there is no
-  non-approval writer here to co-schedule against. A concurrent writer
-  OUTSIDE the lock remains ADR §2.7's open residual (a post-mutation-hook
-  hazard) and is NOT closed by this patch: no such writer was modified to
-  make it look closed.
+- **O-6 — do non-approval writers take the lock: closed for THIS path, and
+  it took two attempts to get right.** The first version of this patch
+  claimed the question was vacuous because "every write holds the lock".
+  That was wrong, and a security review caught it: a ROLLBACK is a write
+  too. The dispatch released the lock when the engine call returned and
+  only wrote the pre-apply bytes back after the verifier had run, so a
+  concurrent approved dispatch of another playbook could land in that
+  window and have its edit silently discarded by this one's rollback — a
+  lost update between the ops' OWN writers, which no amount of "the
+  workspace is under approval" excuses. Two changes close it:
+  1. the restore runs under the SAME mutation lock (`withMutationLock`,
+     exported from `approval.ts` precisely so a second mutation of the same
+     workspace serializes like the first);
+  2. the restore is CONDITIONAL — it writes the pre-apply bytes back only
+     if the file still holds the exact bytes THIS dispatch wrote, compared
+     by a `sha256` fingerprint read back inside the apply's own critical
+     section. A file that no longer matches belongs to another writer and is
+     reported STRANDED, UNTOUCHED, with both digests.
+     A non-approval writer OUTSIDE the lock remains ADR §2.7's open residual
+     (a post-mutation-hook hazard) and is NOT closed here: no such writer was
+     modified to make it look closed. What is closed is the lost update
+     between writes this module itself performs.
+- **The trusted-layer containment guard was shipped reversed and is fixed.**
+  `isInside(parent, child)` asks whether CHILD is nested in PARENT; the
+  call site passed them the other way round, so it refused the harmless
+  layouts (a ledger under `$HOME/state` beside a workspace under `$HOME`)
+  and ALLOWED the actual tamper vector (a ledger inside the workspace). The
+  argument order is now commented at the call site, and the three cases the
+  reversal got wrong are pinned together in `approval.test.ts`: an ancestor
+  trusted layer is allowed, a nested one is refused even through a symlink
+  and before it exists on disk, and a prefix-sharing sibling (`/ws` vs
+  `/ws-cq`) is not "inside". Path resolution for that comparison also
+  resolves the longest EXISTING ancestor and rejoins the tail, because plain
+  `realpathSync` throws on a not-yet-created ledger directory and the raw
+  fallback compared `/var/...` against `/private/var/...` and missed the
+  nesting — silently, in the most common configuration.
 - **Rollback is a step, not a side effect.** The dispatch captures every
   target's pre-apply bytes before the engine runs, and a `fail` or an
-  `indeterminate` verdict restores them through the same store. A restore
-  that cannot put a file back reports it as STRANDED, and the prose then
-  says the workspace is NOT at its pre-dispatch state — the report never
-  claims a clean rollback it did not achieve.
+  `indeterminate` verdict restores them through the same store, under the
+  mutation lock, conditionally on the post-apply bytes (see O-6). A restore
+  that cannot put a file back — a write fault OR a conflict with a
+  concurrent writer — reports that file as STRANDED, and the prose then
+  says the workspace is NOT at its pre-dispatch state; the report never
+  claims a clean rollback it did not achieve. A post-apply re-read failure
+  is its own outcome: the apply happened, the rollback cannot be proven
+  safe, so NO restore is attempted and the op says exactly that.
 - **A failed verifier is a `failed` dispatch, not an `ok` with a bad
   outcome.** This reverses the old regressionGate "a definitive verdict is
   the op's decision output" mapping, and the header says why: once step 5

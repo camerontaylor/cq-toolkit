@@ -25,7 +25,7 @@
 // NO credentials, no network, no ast-grep binary: the only subprocess is
 // `git` against a temporary repository, used to prove the real state reader.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -384,6 +384,67 @@ describe('A16 — a forged approved:true, and the deny-all default', () => {
     expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
       'inside the workspace under approval',
     );
+  });
+
+  // The three cases below are the ones a REVERSED containment comparison
+  // gets wrong, and they are pinned together because the first version of
+  // this guard asked "is the workspace inside the trusted layer?" — which
+  // refused the harmless layouts, allowed the attack, and still passed the
+  // one test above.
+  test('a trusted layer that CONTAINS the workspace is allowed (that is the normal layout)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cq-trust-'));
+    const workspace = join(root, 'proj');
+    mkdirSync(workspace, { recursive: true });
+    // $HOME/state beside $HOME/proj: the ledger's layer is an ANCESTOR of
+    // the workspace. Nothing under approval can reach it.
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-ancestor') },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader({ ...CLEAN_STATE, workspace }),
+      trustedLayerDir: root,
+    });
+    const outcome = await withApprovedMutation(authority, subject({ workspace }), writeSpy().run);
+    expect(outcome.status).toBe('ok');
+  });
+
+  test('a trusted layer nested in the workspace is refused even through a SYMLINK and before it exists', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cq-trust-'));
+    const real = join(root, 'real');
+    const workspace = join(real, 'ws');
+    mkdirSync(workspace, { recursive: true });
+    // A symlinked path to the same tree, and a trusted layer that has NOT
+    // been created yet (the common case: the ledger dir appears on first
+    // write). Both must still resolve to the same containment answer.
+    symlinkSync(real, join(root, 'link'));
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-symlink') },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader({ ...CLEAN_STATE, workspace }),
+      trustedLayerDir: join(root, 'link', 'ws', '.cq'),
+    });
+    const outcome = await withApprovedMutation(authority, subject({ workspace }), writeSpy().run);
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+      'inside the workspace under approval',
+    );
+  });
+
+  test('a sibling with a shared PREFIX is not "inside" (no /ws vs /ws-cq confusion)', async () => {
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-sibling') },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+      trustedLayerDir: '/ws-cq',
+    });
+    const outcome = await withApprovedMutation(
+      authority,
+      subject({ workspace: '/ws' }),
+      writeSpy().run,
+    );
+    expect(outcome.status).toBe('ok');
   });
 });
 

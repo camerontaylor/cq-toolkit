@@ -57,6 +57,16 @@
 //      report names what was restored and — the part that must never be
 //      softened — what is STRANDED (a file the restore could not put
 //      back), so the exact on-disk state is always knowable.
+//      THE RESTORE IS A MUTATION, so it runs under the SAME workspace
+//      mutation lock as the apply (O-6, closed for real this time) AND it
+//      is CONDITIONAL: it writes the pre-apply bytes back only if the file
+//      still holds the exact bytes THIS dispatch wrote. A concurrent
+//      approved dispatch of another playbook may legitimately have written
+//      the same workspace while this verifier was running, and a blind
+//      restore would silently discard that work — a lost update between
+//      the ops' own writers, which no amount of "the workspace is under
+//      approval" excuses. A file that no longer matches is reported
+//      STRANDED, untouched, with the digests on both sides.
 //
 // THE TRACE CUT (journal-record shape): every dispatch is supposed to leave
 // a journal record, but the kernel journal seam (src/kernel/journal.ts) is
@@ -74,10 +84,16 @@
 // journal are post-v1 (recorded in the family NOTES.md).
 import type { Op, OpResult } from '../../../kernel/types.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
-import type { ApprovalAuthority } from '../approval.js';
-import { approvalInputDigest, DENY_ALL_APPROVALS, withApprovedMutation } from '../approval.js';
+import type { ApprovalAuthority, ApprovedMutation } from '../approval.js';
+import {
+  approvalInputDigest,
+  contentFingerprint,
+  DENY_ALL_APPROVALS,
+  withApprovedMutation,
+  withMutationLock,
+} from '../approval.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
-import type { CodemodFileApplied } from '../codemod/astGrep.js';
+import type { CodemodFileApplied, CodemodReport } from '../codemod/astGrep.js';
 import { makeAstGrepCodemod } from '../codemod/astGrep.js';
 import type { Playbook, VerifierCommand } from './format.js';
 import type { QuarantineLedger, QuarantineRecord } from './quarantine.js';
@@ -492,29 +508,68 @@ export function makePlaybookDispatchOp(
       }),
     };
     const codemod = makeAstGrepCodemod(deps.run, () => store);
-    const approved = await withApprovedMutation(
-      deps.approval ?? DENY_ALL_APPROVALS,
-      subject,
-      async () =>
-        codemod({
-          dir: input.dir,
-          rule: JSON.stringify(playbook.rule),
-          files: targets,
-          dryRun: false,
-          // NOT the authorization: the primitive's intra-op freshness
-          // anchor, which ADR-0003 §2/§6 keeps. The authorization is the
-          // grant consumed above.
-          approved: true,
-          ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-        }),
-    );
+    // The try wraps the AWAIT itself, not the destructuring below: a
+    // PostApplyReadFault is thrown from inside the write callback, so it
+    // surfaces as a rejection of withApprovedMutation, after the lock has
+    // been released.
+    let approved: ApprovedMutation<{
+      engine: OpResult<CodemodReport>;
+      applied: Map<string, string>;
+    }>;
+    try {
+      approved = await withApprovedMutation(
+        deps.approval ?? DENY_ALL_APPROVALS,
+        subject,
+        async (): Promise<{ engine: OpResult<CodemodReport>; applied: Map<string, string> }> => {
+          const engine = await codemod({
+            dir: input.dir,
+            rule: JSON.stringify(playbook.rule),
+            files: targets,
+            dryRun: false,
+            // NOT the authorization: the primitive's intra-op freshness
+            // anchor, which ADR-0003 §2/§6 keeps. The authorization is the
+            // grant consumed above.
+            approved: true,
+            ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+          });
+          // THE POST-APPLY FINGERPRINTS, read back INSIDE the same critical
+          // section that wrote them. They are what step 5's conditional
+          // restore compares against, so "the file still holds what I
+          // wrote" is answered from bytes this dispatch itself produced,
+          // not from a digest the engine reported and never re-read.
+          const written = new Map<string, string>();
+          if (engine.status === 'ok' && engine.value.mode === 'applied') {
+            for (const file of engine.value.files) {
+              try {
+                written.set(file.file, contentFingerprint(await store.readBytes(file.file)));
+              } catch (err) {
+                throw new PostApplyReadFault(file.file, messageOf(err));
+              }
+            }
+          }
+          return { engine, applied: written };
+        },
+      );
+    } catch (err) {
+      // A post-apply read fault lands here: the apply DID happen, and the
+      // one thing we can no longer prove is what the file holds, so no
+      // rollback is attempted. Saying so beats restoring blind.
+      if (err instanceof PostApplyReadFault) {
+        return {
+          status: 'failed',
+          error: `playbook dispatch: the remediation was applied, but re-reading '${err.file}' to fingerprint the applied bytes FAILED (${err.message}) — the rollback on a non-passing verifier verdict cannot be proven safe, so NO restore was attempted and the workspace holds the applied edits; inspect it by hand before re-dispatching`,
+        };
+      }
+      throw err;
+    }
     if (approved.status === 'needs-human') {
       return {
         status: 'needs-human',
         reason: `${approved.reason}; playbook '${playbook.id}' was not dispatched and no target of '${targets.length}' was read for modification — re-approve against the current workspace state to dispatch it`,
       };
     }
-    const engineResult = approved.value;
+    const engineResult: OpResult<CodemodReport> = approved.value.engine;
+    const postApply: Map<string, string> = approved.value.applied;
     if (engineResult.status !== 'ok') {
       // Unreachable by construction (approved: true, dryRun: false — and the
       // engine never returns budget-exhausted/indeterminate), but the frozen
@@ -591,11 +646,15 @@ export function makePlaybookDispatchOp(
       // STEP 5: a remediation that provably did not hold is rolled back to
       // the pre-dispatch bytes before the status is decided, and the status
       // is NOT `ok` — see the module header for why the regressionGate
-      // "verdict as decision output" precedent no longer applies.
+      // "verdict as decision output" precedent no longer applies. The
+      // restore is CONDITIONAL and LOCKED: see `restoreTargets`.
       const restore = await restoreTargets(
+        deps.approval ?? DENY_ALL_APPROVALS,
         store,
+        input.dir,
         preApply,
         files.map((file) => file.file),
+        postApply,
       );
       const record: PlaybookDispatchRecord = {
         kind: 'playbook-dispatch',
@@ -637,9 +696,12 @@ export function makePlaybookDispatchOp(
     // taxonomy gives this status no value slot, so the trace record rides
     // `detail` as serialized JSON ({@link PlaybookDispatchRecord}).
     const restore = await restoreTargets(
+      deps.approval ?? DENY_ALL_APPROVALS,
       store,
+      input.dir,
       preApply,
       files.map((file) => file.file),
+      postApply,
     );
     const record: PlaybookDispatchRecord = {
       kind: 'playbook-dispatch',
@@ -695,34 +757,109 @@ export function makePlaybookDispatchOp(
 /**
  * STEP 5: restore the pre-apply bytes of every file the apply rewrote,
  * through the SAME store the apply used (so containment, and the fault
- * behavior, are identical). Best-effort per file and NEVER silent: a file
- * that could not be restored is reported as STRANDED, because a stranded
- * file means the workspace is NOT the pre-dispatch state and the prose must
- * not claim otherwise.
+ * behavior, are identical).
+ *
+ * TWO properties, both load-bearing, and the second one is a correction of
+ * the first version of this function:
+ *
+ *  1. IT RUNS UNDER THE MUTATION LOCK. A restore is a write; running it
+ *     after the lock was released at the end of the apply let a concurrent
+ *     approved dispatch of ANOTHER playbook interleave its apply with this
+ *     one's rollback.
+ *  2. IT IS CONDITIONAL ON THE POST-APPLY BYTES (`expected`, the
+ *     fingerprints read back inside the apply's own critical section). A
+ *     file whose current bytes no longer match what THIS dispatch wrote
+ *     belongs to someone else's edit — a concurrent playbook, a human, a
+ *     hook — and a blind restore would silently delete it. Such a file is
+ *     reported STRANDED, UNTOUCHED, with both digests, and the prose then
+ *     refuses to claim the workspace is at its pre-dispatch state.
+ *
+ * The per-file outcome is honest in both directions: a file that could not
+ * be restored (write fault) and a file deliberately not restored (conflict)
+ * are both STRANDED, because from the caller's point of view they are the
+ * same fact — "this file is not back to the pre-dispatch bytes, and here is
+ * why".
  */
 async function restoreTargets(
+  authority: ApprovalAuthority,
   store: AnalyzeFileStore,
+  workspace: string,
   preApply: ReadonlyMap<string, Uint8Array>,
   rewritten: readonly string[],
+  expected: ReadonlyMap<string, string>,
 ): Promise<PlaybookRestoreReport> {
   const restored: string[] = [];
   const stranded: Array<{ file: string; error: string }> = [];
-  for (const file of [...rewritten].sort()) {
-    const before = preApply.get(file);
-    if (before === undefined) {
-      // A file the apply reported but the capture did not hold: nothing to
-      // restore from, and saying so is the honest report.
-      stranded.push({ file, error: 'no pre-apply capture for this file' });
-      continue;
+  const ordered = [...rewritten].sort();
+  const held = await withMutationLock(authority, workspace, async () => {
+    for (const file of ordered) {
+      const before = preApply.get(file);
+      if (before === undefined) {
+        // A file the apply reported but the capture did not hold: nothing to
+        // restore from, and saying so is the honest report.
+        stranded.push({ file, error: 'no pre-apply capture for this file' });
+        continue;
+      }
+      // COMPARE BEFORE WRITE: the guard that keeps this restore from
+      // clobbering a concurrent writer.
+      let current: Uint8Array;
+      try {
+        current = await store.readBytes(file);
+      } catch (err) {
+        stranded.push({
+          file,
+          error: `could not read the current bytes to compare — ${messageOf(err)}`,
+        });
+        continue;
+      }
+      const currentFingerprint = contentFingerprint(current);
+      const appliedFingerprint = expected.get(file);
+      if (appliedFingerprint !== undefined && currentFingerprint !== appliedFingerprint) {
+        stranded.push({
+          file,
+          error: `another writer changed this file while the verifier ran (this dispatch wrote ${String(appliedFingerprint)}, the file now holds ${currentFingerprint}) — NOT restored, because overwriting it would discard that writer's work`,
+        });
+        continue;
+      }
+      if (appliedFingerprint === undefined) {
+        stranded.push({
+          file,
+          error: 'no post-apply fingerprint for this file, so a conditional restore is impossible',
+        });
+        continue;
+      }
+      try {
+        await store.writeBytes(file, before);
+        restored.push(file);
+      } catch (err) {
+        stranded.push({ file, error: messageOf(err) });
+      }
     }
-    try {
-      await store.writeBytes(file, before);
-      restored.push(file);
-    } catch (err) {
-      stranded.push({ file, error: messageOf(err) });
-    }
+  });
+  if (!held.ok) {
+    // No lock bound: the restore cannot be made safe, so it is NOT run and
+    // every file is reported stranded with the reason.
+    return {
+      attempted: ordered,
+      restored: [],
+      stranded: ordered.map((file) => ({ file, error: held.reason })),
+    };
   }
-  return { attempted: [...rewritten].sort(), restored, stranded };
+  return { attempted: ordered, restored, stranded };
+}
+
+/**
+ * A post-apply re-read fault: the apply happened and the workspace is in an
+ * unknown-to-us state, so no rollback may be attempted.
+ */
+class PostApplyReadFault extends Error {
+  constructor(
+    readonly file: string,
+    detail: string,
+  ) {
+    super(detail);
+    this.name = 'PostApplyReadFault';
+  }
 }
 
 /**
