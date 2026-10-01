@@ -18,7 +18,7 @@
 //    the profile is unknown. Anything else is ADVISORY, and an UNKNOWN profile is
 //    ADVISORY too — never "unmetered".
 import { providerProfile } from './provider-profiles.js';
-import type { ProviderProfile } from './provider-profiles.js';
+import type { ErrorSignalFact, ProviderProfile } from './provider-profiles.js';
 import type { Usage } from '../types.js';
 
 /**
@@ -33,6 +33,16 @@ export type ProviderErrorClass = 'rate-limit' | 'quota' | 'provider-error';
 /** One observed failure signal, as a lane can surface it. */
 export interface ProviderSignal {
   readonly httpStatus?: number;
+  /**
+   * The wire endpoint the observation came from, as an opaque origin+path
+   * identity with no credential in it (e.g. the Go usage/chat wire). Required
+   * wherever two endpoints of the SAME provider answer a shared status with
+   * opposite meanings - OpenCode Go is the documented case: a 402 from the Zen
+   * pay-per-use wire means the Zen balance is empty, while a 402 from the Go
+   * wire means the Go allowance is spent. Without this, a rule scoped to one
+   * wire would admit the other's verdict.
+   */
+  readonly endpoint?: string;
   /** The vendor's error code from the response body, when it publishes one. */
   readonly providerCode?: string;
   /** Parsed `retry-after`, in milliseconds. Absent means the header was absent. */
@@ -258,16 +268,42 @@ function firstMatchingMarker(
   profile: ProviderProfile,
   signal: ProviderSignal,
 ): ProviderProfile['errorSignals'][number] | undefined {
-  // 1. provider error code, the most specific structured signal.
-  const byCode = profile.errorSignals.find(
-    (fact) => fact.providerCode !== undefined && fact.providerCode === signal.providerCode,
-  );
-  if (byCode !== undefined) return byCode;
-  // 2. marker-header presence, which discriminates a plan window from a throttle.
-  return profile.errorSignals.find((fact) => {
-    const name = fact.markerHeader;
-    return name !== undefined && headerValue(signal, name) !== undefined;
-  });
+  // Most specific discriminators first. A rule matches only when EVERY
+  // discriminator it declares matches, so a rule that names an endpoint or a
+  // message shape is never reached by an observation that has neither.
+  const order = [
+    (fact: ErrorSignalFact): boolean => fact.providerCode !== undefined,
+    (fact: ErrorSignalFact): boolean => fact.messagePrefix !== undefined,
+    (fact: ErrorSignalFact): boolean => fact.endpointMatch !== undefined,
+    (fact: ErrorSignalFact): boolean => fact.httpStatus !== undefined,
+    (fact: ErrorSignalFact): boolean => fact.markerHeader !== undefined,
+  ];
+  for (const hasDiscriminator of order) {
+    const match = profile.errorSignals.find(
+      (fact) => hasDiscriminator(fact) && ruleMatches(fact, signal),
+    );
+    if (match !== undefined) return match;
+  }
+  return undefined;
+}
+
+/** Every discriminator a rule declares must match the observation. */
+function ruleMatches(fact: ErrorSignalFact, signal: ProviderSignal): boolean {
+  if (fact.providerCode !== undefined && fact.providerCode !== signal.providerCode) return false;
+  if (fact.messagePrefix !== undefined && !startsWith(signal.message, fact.messagePrefix)) {
+    return false;
+  }
+  if (fact.endpointMatch !== undefined && fact.endpointMatch !== signal.endpoint) return false;
+  if (fact.httpStatus !== undefined && fact.httpStatus !== signal.httpStatus) return false;
+  if (fact.markerHeader !== undefined && headerValue(signal, fact.markerHeader) === undefined) {
+    return false;
+  }
+  return true;
+}
+
+/** Case-insensitive prefix test that treats an absent message as no match. */
+function startsWith(message: string | undefined, prefix: string): boolean {
+  return message !== undefined && message.trim().toLowerCase().startsWith(prefix.toLowerCase());
 }
 
 /**

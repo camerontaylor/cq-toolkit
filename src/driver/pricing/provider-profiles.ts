@@ -55,6 +55,12 @@ const DOC_OPENAI_RL = 'https://platform.openai.com/docs/guides/rate-limits';
 const DOC_OPENAI_SPEND = 'https://developers.openai.com/api/docs/guides/spend-limits';
 const DOC_CODEX_PRICING = 'https://developers.openai.com/codex/pricing';
 const DOC_OPENCODE_GO = 'https://opencode.ai/docs/go/';
+/**
+ * The Go wire's origin, used for BOTH the usage endpoint and the endpoint-scoped
+ * 402 rule so the two cannot drift apart — a rule naming a different wire than
+ * the one we read quota from would never match.
+ */
+const OPENCODE_GO_ORIGIN = 'https://opencode.ai/zen/go/v1';
 const CAPTURES = 'research/research-20260925-v11/evidence/rs14/';
 
 /** The native cap a provider enforces, as far as it is published. */
@@ -147,6 +153,21 @@ export interface ModelLimitFacts {
 export interface ErrorSignalFact {
   /** Provider error code in the response body, when the vendor publishes one. */
   readonly providerCode?: string;
+  /**
+   * Required message shape, case-insensitively. Used where the STATUS AND CODE
+   * are shared by conditions with different meanings - Anthropic answers every
+   * 400 as `invalid_request_error`, and only one message family means the
+   * workspace spend limit was reached. Without this discriminator the rule would
+   * admit every malformed request as an exhausted allowance.
+   */
+  readonly messagePrefix?: string;
+  /**
+   * The endpoint this rule speaks for. Used where one provider answers the same
+   * status from two endpoints with opposite meanings (OpenCode Go versus the Zen
+   * pay-per-use wire). An observation carrying no endpoint identity cannot match
+   * such a rule, so it fails closed.
+   */
+  readonly endpointMatch?: string;
   readonly httpStatus?: number;
   /** A header whose PRESENCE discriminates this class (Claude unified quota). */
   readonly markerHeader?: string;
@@ -230,13 +251,20 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
         },
       },
       {
+        // CONSTRAINED, not "any 400": Anthropic answers every bad request with
+        // `invalid_request_error`, and only this message family means the
+        // self-set workspace spend limit was reached. An ordinary 400 (malformed
+        // body, unknown field) must NOT be classified as an exhausted allowance,
+        // so the rule declares the message shape as well as the code and status.
+        providerCode: 'invalid_request_error',
+        messagePrefix: 'you have reached your specified api usage limits',
         httpStatus: 400,
         errorClass: 'quota',
         provenance: {
           kind: 'documented',
           source: DOC_RATE_LIMITS,
           asOf: '2026-09-25',
-          note: 'A self-set workspace spend limit answers HTTP 400 invalid_request_error beginning "You have reached your specified API usage limits".',
+          note: 'A self-set workspace spend limit answers HTTP 400 invalid_request_error beginning "You have reached your specified API usage limits". Recorded verbatim from the vendor page; the prefix is the discriminator that keeps unrelated 400s out.',
         },
       },
       // NO bare `429 -> rate-limit` rule on this profile, by design. The vendor
@@ -714,7 +742,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
     },
     observability: {
       channel: 'endpoint',
-      usageEndpoint: { method: 'GET', url: 'https://opencode.ai/zen/go/v1/usage' },
+      usageEndpoint: { method: 'GET', url: `${OPENCODE_GO_ORIGIN}/usage` },
       provenance: {
         kind: 'rs14-capture',
         source: `${CAPTURES}oc_bal.json`,
@@ -725,13 +753,22 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
     rateLimitHeaders: ['x-opencode-endpoint-id', 'x-opencode-upstream-model-id'],
     errorSignals: [
       {
+        // SCOPED TO THE GO WIRE. The same vendor answers 402 on the Zen
+        // pay-per-use wire ("Insufficient account funds") with a DIFFERENT
+        // meaning - an empty Zen balance, not a spent Go allowance - and RS-14
+        // captured the CLI routing paid models onto Zen while a Go key was
+        // active. Keying off the status alone would charge a Go allowance for a
+        // Zen balance error, so the rule names the endpoint it speaks for, and an
+        // observation with no endpoint identity (or the Zen one) fails closed to
+        // provider-error rather than resolving against the Go allowance.
+        endpointMatch: OPENCODE_GO_ORIGIN,
         httpStatus: 402,
         errorClass: 'quota',
         provenance: {
           kind: 'rs14-capture',
           source: `${CAPTURES}zen_body.json`,
           asOf: '2026-09-24',
-          note: 'HTTP 402 {"type":"server_error","message":"Upstream request failed: Insufficient account funds"} observed on the ZEN wire. Known W2.6 hazard: the CLI routes paid models onto Zen even when a Go key is active, so a 402 can mean either allowance — classification must key off the ENDPOINT, not the status alone.',
+          note: 'HTTP 402 {"type":"server_error","message":"Upstream request failed: Insufficient account funds"} captured on the ZEN wire (https://opencode.ai/zen/v1/chat/completions). Go exhaustion is the documented per-model monthly dollar limit; the observed Zen 402 is the documented hazard that classification must key off the ENDPOINT, not the status alone.',
         },
       },
     ],

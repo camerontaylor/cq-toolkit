@@ -24,8 +24,6 @@ const CLAUDE_SUB = providerProfile('claude-subscription');
 const THURSDAY_UTC_MIDNIGHT = Date.parse('2026-10-01T00:00:00Z');
 const DEEPSEEK = providerProfile('deepseek');
 
-/** 2026-10-01T00:00:00Z — a Thursday. */
-
 /** The unified-quota 429 RS-14 captured (research evidence cc_out3.json). */
 const CLAUDE_EXHAUSTED_429 = {
   httpStatus: 429,
@@ -118,6 +116,12 @@ describe('classifyProviderSignal', () => {
       ...CLAUDE_EXHAUSTED_429,
       headers: {
         ...CLAUDE_EXHAUSTED_429.headers,
+        // BOTH statuses must be cleared, not just the utilizations: the shared
+        // fixture reports `5h-status: rejected`, which alone keeps the 5-hour
+        // window blocking. Overriding utilization only would leave the fixture
+        // describing a blocked window while the assertion expected a free one.
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-7d-status': 'allowed',
         'anthropic-ratelimit-unified-5h-utilization': '0.2',
         'anthropic-ratelimit-unified-7d-utilization': '0.7',
       },
@@ -299,6 +303,79 @@ describe('classifyProviderSignal', () => {
   // Two blocking windows: BOTH must clear, so every blocking window needs a known
   // release time and the defer is the MAX across them. An endpoint value that
   // resolves ONE of them does not make the other resolved.
+  // (2) Anthropic answers every 400 as invalid_request_error; only the documented
+  // message family means the workspace spend limit was reached.
+  test('the self-set spend-limit 400 is quota ONLY with its documented message', () => {
+    const verdict = classifyProviderSignal('anthropic-api', {
+      httpStatus: 400,
+      providerCode: 'invalid_request_error',
+      message: 'You have reached your specified API usage limits for this workspace',
+    });
+    expect(verdict.errorClass).toBe('quota');
+  });
+
+  test('an ORDINARY Anthropic 400 is not quota', () => {
+    for (const message of [
+      'invalid request: unexpected content type',
+      'max_tokens: must be <= 64000',
+      'model: unknown model claude-nope',
+    ]) {
+      const verdict = classifyProviderSignal('anthropic-api', {
+        httpStatus: 400,
+        providerCode: 'invalid_request_error',
+        message,
+      });
+      expect({ message, errorClass: verdict.errorClass }).toEqual({
+        message,
+        errorClass: 'provider-error',
+      });
+      expect(verdict.deferUntilMs).toBeUndefined();
+    }
+  });
+
+  test('a bare 400 with no code and no message is not quota either', () => {
+    expect(classifyProviderSignal('anthropic-api', { httpStatus: 400 }).errorClass).toBe(
+      'provider-error',
+    );
+  });
+
+  // (3) Go 402 is endpoint-scoped: the Zen wire answers 402 for a different
+  // reason, and an observation with no endpoint identity must not resolve
+  // against the Go allowance.
+  test('a Go-wire 402 is quota only when the endpoint IS the Go wire', () => {
+    const verdict = classifyProviderSignal('opencode-go', {
+      httpStatus: 402,
+      endpoint: 'https://opencode.ai/zen/go/v1',
+    });
+    expect(verdict.errorClass).toBe('quota');
+  });
+
+  test('a ZEN-wire 402 does NOT charge the Go allowance', () => {
+    const verdict = classifyProviderSignal('opencode-go', {
+      httpStatus: 402,
+      endpoint: 'https://opencode.ai/zen/v1/chat/completions',
+      message: 'Upstream request failed: Insufficient account funds',
+    });
+    // Fail closed: an empty Zen balance is a different condition, and resolving
+    // it against the Go allowance would defer/charge the wrong plan.
+    expect(verdict.errorClass).toBe('provider-error');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('a 402 with NO endpoint identity fails closed on the Go profile', () => {
+    const verdict = classifyProviderSignal('opencode-go', { httpStatus: 402 });
+    expect(verdict.errorClass).toBe('provider-error');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('the Go rule names the SAME origin as the usage endpoint it resets from', () => {
+    const profile = providerProfile('opencode-go');
+    const rule = profile?.errorSignals[0];
+    expect(rule?.endpointMatch).toBe(
+      profile?.observability.usageEndpoint?.url.replace('/usage', ''),
+    );
+  });
+
   test('two blocked windows: 7d from a targeted endpoint, 5h from its header -> MAX of both', () => {
     const verdict = classifyProviderSignal(
       'claude-subscription',
@@ -437,7 +514,9 @@ describe('classifyProviderSignal', () => {
   test('an observed resetsAt attaches the defer-until time to the matched status rule', () => {
     const verdict = classifyProviderSignal(
       'opencode-go',
-      { httpStatus: 402 },
+      // Endpoint identity is REQUIRED by this rule (finding: a Zen 402 is a
+      // different condition), so the observation carries the Go wire.
+      { httpStatus: 402, endpoint: 'https://opencode.ai/zen/go/v1' },
       { resetsAt: '2026-09-28T00:00:00Z' },
     );
     expect(verdict.errorClass).toBe('quota');
