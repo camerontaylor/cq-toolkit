@@ -46,6 +46,8 @@ let fresh: string;
 let ghLog: string;
 const savedEnv: Record<string, string | undefined> = {};
 
+// Seven real Git subprocesses (including push and clone) build this fixture.
+// Keep their setup budget separate from the behavior tests' deadlines.
 beforeAll(() => {
   tmp = mkdtempSync(join(tmpdir(), 'cq-ratchet-effects-'));
   bare = join(tmp, 'remote.git');
@@ -110,7 +112,7 @@ beforeAll(() => {
   // them (asserted by the token-gate test).
   process.env.GH_TOKEN = 'ambient-gh-token-should-be-ignored';
   process.env.GITHUB_TOKEN = 'ambient-github-token-should-be-ignored';
-});
+}, 30_000);
 
 afterAll(() => {
   for (const [key, value] of Object.entries(savedEnv)) {
