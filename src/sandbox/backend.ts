@@ -438,7 +438,14 @@ function validatedContainerUser(user: string | undefined): string {
   if (match === null) {
     throw new Error(`sandbox: container --user '${requested}' must be numeric UID[:GID]`);
   }
-  if (match[1] === '0' || match[2] === '0') {
+  // Numeric parse, not string equality: `00`, `000:1000` and `1000:00` are
+  // all root-aliasing forms and must be refused (delta review).
+  const uid = Number(match[1]);
+  const gid = match[2] === undefined ? uid : Number(match[2]);
+  if (!Number.isSafeInteger(uid) || !Number.isSafeInteger(gid)) {
+    throw new Error(`sandbox: container --user '${requested}' is out of range`);
+  }
+  if (uid === 0 || gid === 0) {
     throw new Error(
       `sandbox: container --user '${requested}' is refused; the container boundary is certified non-root`,
     );

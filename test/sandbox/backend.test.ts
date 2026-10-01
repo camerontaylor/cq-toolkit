@@ -174,10 +174,17 @@ describe('linux and container boundary construction', () => {
   });
 
   test('a container --user override naming root or a non-numeric identity is refused', () => {
-    for (const root of ['0', '0:0', '0:1000', '1000:0', 'root', '65532:root']) {
+    // Numeric ALIASES of zero are caught by parse, not string equality
+    // (delta review): `00`, `000:1000` and `1000:00` are all root forms.
+    for (const root of ['0', '0:0', '0:1000', '1000:0', '00', '000:1000', '1000:00']) {
       expect(() =>
         containerArgv({ image: 'x', user: root }, '/ws', 'model-only', {}, ['/bin/true']),
-      ).toThrow(/non-root|numeric/);
+      ).toThrow(/non-root/);
+    }
+    for (const malformed of ['root', '65532:root', '-1']) {
+      expect(() =>
+        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', {}, ['/bin/true']),
+      ).toThrow(/numeric/);
     }
     // Any other fixed numeric identity is accepted verbatim.
     const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', {}, [

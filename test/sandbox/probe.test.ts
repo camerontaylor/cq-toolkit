@@ -273,11 +273,15 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
       adapters: [adapter],
       network: 'allow',
     });
-    // Tamper with every informational field a forger would reach for.
-    (certification.certified as string[]).push('container', 'seatbelt');
+    // The certified list is FROZEN at construction: the push itself is
+    // refused (strict mode), so a forger cannot even widen the informational
+    // copy — and the receipt is untouched either way.
+    expect(() => (certification.certified as string[]).push('container')).toThrow();
+    expect(certification.certified).toEqual(['bwrap']);
+    // The intentionally-mutable caller-view fields cannot widen the gates:
+    // the receipt still decides posture and egress flavor.
     (certification as { networkDemonstrated: string }).networkDemonstrated = 'proxy-loopback';
     (certification as { network: string }).network = 'model-only';
-    // The receipt still decides: the launch stays bound to the earned posture…
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
@@ -285,8 +289,39 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
         network: 'model-only',
       }),
     ).rejects.toThrow(/certified under the 'allow' posture/);
-    // …and the resolver handoff still yields exactly what the probe earned.
+    // The handoff still yields exactly what the probe earned.
     expect(certifiedBackendsOf(certification)).toEqual(['bwrap']);
+    const launched = await launchCertified(adapter, certification, {
+      workspace: '/tmp/ws',
+      argv: ['/bin/true'],
+      network: 'allow',
+    });
+    expect(launched.ok).toBe(true);
+  });
+
+  test('a launch method swapped in after certification is refused', async () => {
+    const adapter = fakeAdapter('fs-only');
+    const certification = await certifyBackends({
+      adapters: [adapter],
+      network: 'allow',
+    });
+    const certifiedLaunch = adapter.launch;
+    // Same object, same backend name — but the launch function is swapped for
+    // a grant-all AFTER the canaries ran.  The receipt binds the exact
+    // function reference, so the swap is detected, never inherited.
+    adapter.launch = fakeAdapter('grant-all').launch;
+    try {
+      await expect(
+        launchCertified(adapter, certification, {
+          workspace: '/tmp/ws',
+          argv: ['/bin/cat', '/etc/hostname'],
+          network: 'allow',
+        }),
+      ).rejects.toThrow(/launch method changed after certification/);
+    } finally {
+      adapter.launch = certifiedLaunch;
+    }
+    // With the certified function restored, the same launch is authorized.
     const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
       argv: ['/bin/true'],

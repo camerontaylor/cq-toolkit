@@ -135,7 +135,10 @@ interface ProbeReceipt {
   network: SandboxNetwork;
   networkDemonstrated: NetworkDemonstrated;
   /** Every probed adapter object → its blocker ('' when it certified). */
-  probedAdapters: ReadonlyMap<SandboxBackendAdapter, string>;
+  probedAdapters: ReadonlyMap<
+    SandboxBackendAdapter,
+    { blocker: string; launch: SandboxBackendAdapter['launch'] }
+  >;
   /** Frozen certified-backend list `certifiedBackendsOf` hands out. */
   certified: readonly SandboxBackend[];
 }
@@ -333,6 +336,23 @@ export async function probeBackend(
   adapter: SandboxBackendAdapter,
   options: ProbeOptions = {},
 ): Promise<BackendProbeRecord> {
+  return (await probeBackendWithLaunch(adapter, options)).record;
+}
+
+/**
+ * Internal probe that also returns the EXACT `launch` function it exercised —
+ * the receipt binds that reference, so replacing `adapter.launch` after
+ * certification is detected instead of inherited (delta review 3).
+ */
+async function probeBackendWithLaunch(
+  adapter: SandboxBackendAdapter,
+  options: ProbeOptions,
+): Promise<{ record: BackendProbeRecord; launchRef: SandboxBackendAdapter['launch'] }> {
+  // Bind the launch function at entry: every canary below goes through THIS
+  // reference, and the receipt hands back precisely what was exercised.
+  const launchRef = adapter.launch;
+  const launchVia = (request: Parameters<SandboxBackendAdapter['launch']>[0]) =>
+    launchRef.call(adapter, request);
   const platform = options.platform ?? process.platform;
   const network = options.network ?? 'model-only';
   const timeoutMs = options.timeoutMs ?? 20_000;
@@ -344,25 +364,31 @@ export async function probeBackend(
   const availability = await adapter.available();
   if (!availability.available) {
     return {
-      ...base,
-      networkDemonstrated: 'none',
-      runnable: false,
-      certified: false,
-      ...(availability.blocker !== undefined ? { blocker: availability.blocker } : {}),
-      canaries: [],
+      record: {
+        ...base,
+        networkDemonstrated: 'none',
+        runnable: false,
+        certified: false,
+        ...(availability.blocker !== undefined ? { blocker: availability.blocker } : {}),
+        canaries: [],
+      },
+      launchRef,
     };
   }
   if (modelProxy && adapter.supportsProxyModelOnly !== true) {
     // Uncertifiable posture: refuse the backend rather than certifying a
     // weaker boundary than the posture demands.
     return {
-      ...base,
-      networkDemonstrated: 'none',
-      runnable: false,
-      certified: false,
-      blocker:
-        'backend cannot compose a loopback proxy under model-only; the proxy-composed posture is uncertifiable for this backend',
-      canaries: [],
+      record: {
+        ...base,
+        networkDemonstrated: 'none',
+        runnable: false,
+        certified: false,
+        blocker:
+          'backend cannot compose a loopback proxy under model-only; the proxy-composed posture is uncertifiable for this backend',
+        canaries: [],
+      },
+      launchRef,
     };
   }
 
@@ -383,7 +409,7 @@ export async function probeBackend(
 
     let proxyPort: number | undefined;
     const launch = (argv: readonly string[], launchTimeoutMs = timeoutMs) =>
-      adapter.launch({
+      launchVia({
         workspace,
         argv,
         parentEnv,
@@ -737,12 +763,15 @@ export async function probeBackend(
             .map((c) => `${c.id} ${c.verdict}: ${c.detail}`)
             .join('; ');
     return {
-      ...base,
-      networkDemonstrated: controlOk && denied ? demonstrated : 'none',
-      runnable,
-      certified: controlOk && denied,
-      ...(blocker !== undefined ? { blocker } : {}),
-      canaries,
+      record: {
+        ...base,
+        networkDemonstrated: controlOk && denied ? demonstrated : 'none',
+        runnable,
+        certified: controlOk && denied,
+        ...(blocker !== undefined ? { blocker } : {}),
+        canaries,
+      },
+      launchRef,
     };
   });
 }
@@ -760,14 +789,21 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
   const modelProxy = options.modelProxy === true && network === 'model-only';
   const adapters = options.adapters ?? adaptersForPlatform(platform);
   const records: BackendProbeRecord[] = [];
-  const probedAdapters = new Map<SandboxBackendAdapter, string>();
+  const probedAdapters = new Map<
+    SandboxBackendAdapter,
+    { blocker: string; launch: SandboxBackendAdapter['launch'] }
+  >();
   for (const adapter of adapters) {
-    const record = await probeBackend(adapter, { ...options, platform, network });
+    const { record, launchRef } = await probeBackendWithLaunch(adapter, {
+      ...options,
+      platform,
+      network,
+    });
     records.push(record);
-    probedAdapters.set(
-      adapter,
-      record.certified ? '' : (record.blocker ?? 'probe did not certify this launcher'),
-    );
+    probedAdapters.set(adapter, {
+      blocker: record.certified ? '' : (record.blocker ?? 'probe did not certify this launcher'),
+      launch: launchRef,
+    });
   }
   const certification: SandboxCertification = {
     platform,
@@ -811,6 +847,9 @@ export function certifiedBackendsOf(
  *     object has no receipt and is refused outright;
  *   - the ADAPTER must be one of the exact instances whose canaries passed —
  *     a different instance sharing the backend name inherits nothing;
+ *   - the LAUNCH FUNCTION must still be the reference the canaries exercised —
+ *     swapping adapter.launch after certification is detected and refused
+ *     (delta review 3);
  *   - the requested posture must match the demonstrated posture, and a
  *     proxy-composed certification is only valid for launches that carry the
  *     proxy port.
@@ -837,17 +876,27 @@ export async function launchCertified(
       'sandbox: certification was not produced by the RS-13 probe; a caller-forged certification object cannot authorize a launch',
     );
   }
-  const blocker = receipt.probedAdapters.get(adapter);
-  if (blocker === undefined) {
+  const probed = receipt.probedAdapters.get(adapter);
+  if (probed === undefined) {
     throw new Error(
       `sandbox: this ${adapter.backend} launcher object was not probed by this certification — ` +
         'a receipt binds the exact adapter instances it probed, and a different instance ' +
         'sharing the backend name inherits nothing; CQ_SANDBOX=required is fail-closed',
     );
   }
-  if (blocker !== '') {
+  // The receipt binds the EXACT launch function the canaries exercised
+  // (delta review 3): replacing adapter.launch after certification — e.g.
+  // with a grant-all — is detected and refused, never inherited.
+  if (probed.launch !== adapter.launch) {
     throw new Error(
-      `sandbox: ${adapter.backend} is not certified for required mode (${blocker}); ` +
+      `sandbox: this ${adapter.backend} launcher's launch method changed after certification; ` +
+        'the receipt authorizes only the function the canaries exercised; ' +
+        'CQ_SANDBOX=required is fail-closed',
+    );
+  }
+  if (probed.blocker !== '') {
+    throw new Error(
+      `sandbox: ${adapter.backend} is not certified for required mode (${probed.blocker}); ` +
         'CQ_SANDBOX=required is fail-closed until a certified backend launcher is configured',
     );
   }
