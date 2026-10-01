@@ -1,0 +1,547 @@
+// Analyze lane W4.3 — DIRECT OFFLINE evidence for the approval authority
+// (ADR-0003 §4a–§6; A16 forged `approved: true`; the TOCTOU denial).
+//
+// What is pinned here, and why each one earns its place:
+//   - a token authorizes ONE write, and the second attempt is refused with
+//     the nonce already spent (single use, §5);
+//   - the STATE re-check under the lock is what catches a commit landing
+//     between admission and the write (the TOCTOU case, §7) — proven twice:
+//     once over a scripted state reader, once over a REAL git repository, so
+//     the proof does not rest on the fake's fidelity;
+//   - a refusal NEVER burns the token: after every denial the ledger reports
+//     zero spent nonces, which is what makes a retry-after-re-approval
+//     possible and a denial non-destructive;
+//   - the `needs-human` verdicts are specific enough to act on, because a
+//     refusal a human cannot act on is a refusal that gets worked around;
+//   - O-5: the mutation lock's record lands BESIDE the operator ledger and
+//     NEVER inside the workspace under approval (the tamper vector the annex
+//     left open);
+//   - the lock is held THROUGH the write, proven by two concurrent
+//     mutations of one workspace producing no interleaved critical sections;
+//   - the deny-all default refuses a forged `approved: true` with an
+//     untouched workspace, which is the state the shared registry adapter
+//     (#238's file, not edited here) is in until the kernel wiring lands.
+//
+// NO credentials, no network, no ast-grep binary: the only subprocess is
+// `git` against a temporary repository, used to prove the real state reader.
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, test } from 'vitest';
+import type {
+  ApprovalState,
+  ApprovalSubject,
+  MutationLock,
+  MutationLocks,
+} from '../../../src/ops/analyze/approval.js';
+import {
+  approvalInputDigest,
+  DENY_ALL_APPROVALS,
+  makeApprovalAuthority,
+  makeFileNonceLedger,
+  makeGitApprovalStateReader,
+  makeInMemoryNonceLedger,
+  makeLedgerBesideMutationLocks,
+  makeProcessLocalMutationLocks,
+  withApprovedMutation,
+} from '../../../src/ops/analyze/approval.js';
+import {
+  CLEAN_STATE,
+  failingStateReader,
+  fixedStateReader,
+  grantingAuthority,
+  noVerifiedApprovals,
+  scriptedStateReader,
+} from './approvalFixtures.js';
+
+const OP = 'analyze.applyRemediation';
+const WORKSPACE = '/ws';
+const TARGETS = ['src/a.ts'] as const;
+
+function subject(overrides: Partial<ApprovalSubject> = {}): ApprovalSubject {
+  return {
+    op: OP,
+    workspace: WORKSPACE,
+    targets: [...TARGETS],
+    inputDigest: 'sha256:test',
+    ...overrides,
+  };
+}
+
+/** A write spy: records the call and reports what the op would have done. */
+function writeSpy(log: string[] = []): { calls: number; run: () => Promise<string> } {
+  const spy = {
+    calls: 0,
+    run: async (): Promise<string> => {
+      spy.calls += 1;
+      log.push('write');
+      return 'written';
+    },
+  };
+  return spy;
+}
+
+describe('withApprovedMutation — admission, consumption at the mutation', () => {
+  test('an approved subject writes ONCE and spends the nonce', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('ok');
+    expect(spy.calls).toBe(1);
+    expect(fixture.ledger.spent()).toBe(1);
+  });
+
+  test('REPLAY: a second dispatch on the same approval is refused (nonce spent), with no write', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const first = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      writeSpy().run,
+    );
+    expect(first.status).toBe('ok');
+    const replayWrite = writeSpy();
+    const replay = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      replayWrite.run,
+    );
+    expect(replay.status).toBe('needs-human');
+    expect(replay.status === 'needs-human' ? replay.reason : '').toContain('already consumed');
+    expect(replayWrite.calls).toBe(0);
+    // The refusal cost the workspace nothing; the token was spent by the
+    // FIRST write, which is why the message says "already consumed".
+    expect(fixture.ledger.spent()).toBe(1);
+  });
+
+  test('a grant exercised twice THROWS rather than spending one decision twice', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const admitted = await fixture.authority.admit(fixture.subjectOf(TARGETS));
+    expect(admitted.granted).toBe(true);
+    if (!admitted.granted) return;
+    const first = await fixture.authority.exercise(admitted.grant, fixture.subjectOf(TARGETS));
+    expect(first.granted).toBe(true);
+    await expect(
+      fixture.authority.exercise(admitted.grant, fixture.subjectOf(TARGETS)),
+    ).rejects.toThrow(/already exercised/);
+  });
+
+  test('a DIFFERENT input digest is a different subject: refused even with a valid token', async () => {
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      inputDigest: 'sha256:granted',
+    });
+    // The run's verified approvals hold a token for 'sha256:granted' and
+    // nothing for any other input: the inputs hash is part of the subject,
+    // so re-using one human's approval for edited inputs is not possible.
+    const drifted = writeSpy();
+    const refused = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS).inputDigest === 'sha256:granted'
+        ? subject({ inputDigest: 'sha256:other' })
+        : fixture.subjectOf(TARGETS),
+      drifted.run,
+    );
+    expect(refused.status).toBe('needs-human');
+    expect(drifted.calls).toBe(0);
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+
+  test('a grant exercised against a different subject is refused at the exercise', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const admitted = await fixture.authority.admit(fixture.subjectOf(TARGETS));
+    expect(admitted.granted).toBe(true);
+    if (!admitted.granted) return;
+    // Same op, same workspace, same state — different inputs. The exercise
+    // compares the FULL subject, so an approval cannot be slid onto a
+    // different plan.
+    const outcome = await fixture.authority.exercise(admitted.grant, {
+      ...fixture.subjectOf(TARGETS),
+      inputDigest: 'sha256:swapped',
+    });
+    expect(outcome.granted).toBe(false);
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+});
+
+describe('TOCTOU — the state moves between admission and the write', () => {
+  test('a commit landing mid-flight denies the write and leaves the token UNSPENT', async () => {
+    // Two reads: the admission read (clean, at HEAD A) and the exercise read
+    // under the lock (HEAD B — the commit landed in between).
+    const readState = scriptedStateReader([
+      CLEAN_STATE,
+      { ...CLEAN_STATE, headSha: 'head-after-the-commit' },
+    ]);
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      readState,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('approval state changed since approval');
+    expect(reason).toContain('head-after-the-commit');
+    expect(reason).toContain('UNSPENT');
+    expect(spy.calls).toBe(0);
+    // THE load-bearing assertion: a denied op must not burn the human's
+    // approval. A refusal that consumed the token would force a re-approval
+    // for a change nobody made.
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+
+  test('a dirty tree (an untracked file counts) denies the write, unspent', async () => {
+    const readState = scriptedStateReader([CLEAN_STATE, { ...CLEAN_STATE, treeClean: false }]);
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      readState,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(spy.calls).toBe(0);
+    expect(fixture.ledger.spent()).toBe(0);
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('dirty');
+  });
+
+  test('a workspace that was dirty at approval and is clean now is still refused', async () => {
+    const readState = scriptedStateReader([{ ...CLEAN_STATE, treeClean: false }, CLEAN_STATE]);
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      state: { ...CLEAN_STATE, treeClean: false },
+      readState,
+    });
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      writeSpy().run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+
+  test('TOCTOU over a REAL git repository: a commit between admission and the write denies it', async () => {
+    const repo = realRepo();
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-real') },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: makeGitApprovalStateReader(),
+    });
+    const bound = { op: OP, workspace: repo, targets: ['src/a.ts'], inputDigest: 'sha256:real' };
+    const admitted = await authority.admit(bound);
+    expect(admitted.granted).toBe(true);
+    // A commit lands in the window the ADR calls out: after admission, before
+    // the exercise re-check, with no lock held by anyone.
+    git(repo, ['commit', '--allow-empty', '-m', 'the window commit']);
+    let writes = 0;
+    const outcome = await withApprovedMutation(authority, bound, async () => {
+      writes += 1;
+      return 'written';
+    });
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('HEAD');
+    expect(reason).toContain('UNSPENT');
+    expect(writes).toBe(0);
+  });
+
+  test('an unreadable state denies at admission and at exercise (never "unchanged")', async () => {
+    const admitFixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      readState: failingStateReader,
+    });
+    const denied = await withApprovedMutation(
+      admitFixture.authority,
+      admitFixture.subjectOf(TARGETS),
+      writeSpy().run,
+    );
+    expect(denied.status).toBe('needs-human');
+    expect(denied.status === 'needs-human' ? denied.reason : '').toContain(
+      'never treated as unchanged',
+    );
+
+    const exerciseFixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      readState: scriptedStateReader([CLEAN_STATE, CLEAN_STATE]),
+    });
+    // Swap in a reader that succeeds at admission and fails at exercise.
+    let calls = 0;
+    const flaky = {
+      read: (): Promise<ApprovalState> => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve(CLEAN_STATE)
+          : Promise.reject(new Error('git status failed'));
+      },
+    };
+    const flakyAuthority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-flaky') },
+      ledger: exerciseFixture.ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: flaky,
+    });
+    const outcome = await withApprovedMutation(flakyAuthority, subject(), writeSpy().run);
+    expect(outcome.status).toBe('needs-human');
+    expect(exerciseFixture.ledger.spent()).toBe(0);
+  });
+
+  test('an unreadable ledger denies the write and spends nothing', async () => {
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-ledger') },
+      ledger: {
+        consume: () => Promise.reject(new Error('ledger is a directory')),
+      },
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('ledger');
+    expect(spy.calls).toBe(0);
+  });
+});
+
+describe('A16 — a forged approved:true, and the deny-all default', () => {
+  test('the deny-all authority refuses every mutation, naming the intent/proof gap', async () => {
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(DENY_ALL_APPROVALS, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('DECLARED INTENT');
+    expect(reason).toContain('Nothing was written');
+    expect(spy.calls).toBe(0);
+  });
+
+  test('an approval the run never verified is refused even with a clean, matching state', async () => {
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      approvals: noVerifiedApprovals,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(spy.calls).toBe(0);
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+
+  test('an empty target set is refused: an approval binding nothing is not an approval', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf([]),
+      writeSpy().run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('no target files');
+  });
+
+  test('a trusted approval layer INSIDE the workspace is refused (tamper vector #26)', async () => {
+    const authority = makeApprovalAuthority({
+      approvals: { nonceFor: () => Promise.resolve('nonce-inside') },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+      trustedLayerDir: '/ws/.cq',
+    });
+    const outcome = await withApprovedMutation(
+      authority,
+      subject({ workspace: '/ws' }),
+      writeSpy().run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+      'inside the workspace under approval',
+    );
+  });
+});
+
+describe('O-5 — where the mutation lock record lives', () => {
+  test('the record lands BESIDE the ledger, and never inside the workspace', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-o5-'));
+    const workspace = join(dir, 'worktree');
+    const trusted = join(dir, 'state');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(trusted, { recursive: true });
+    const locks = makeLedgerBesideMutationLocks(join(trusted, 'approvals.ndjson'));
+    const lock: MutationLock = locks.forWorkspace(workspace);
+    // Acquiring CREATES the artifact — that is the observation: where the
+    // `.lock` directory appears IS the O-5 answer.
+    return lock
+      .withLock(async () => {
+        const inWorkspace = readdirSync(workspace);
+        const inTrusted = readdirSync(trusted);
+        expect(inWorkspace).toEqual([]);
+        const artifacts = inTrusted.filter((entry) => entry.startsWith('mutation-'));
+        expect(artifacts).toHaveLength(1);
+        // Keyed on the workspace, not on the ledger file: the artifact name
+        // carries a sha256(realpath(workspace)) prefix, so two workspaces
+        // sharing one ledger never share a lock.
+        expect(artifacts[0]).toMatch(/^mutation-[0-9a-f]{32}\.lock$/);
+        return artifacts[0] as string;
+      })
+      .then((artifact) => {
+        // Released on exit, so a second acquire succeeds — the lock is not
+        // a latch left behind.
+        return lock.withLock(() => artifact);
+      })
+      .then((artifact) => {
+        expect(artifact).toMatch(/^mutation-/);
+      });
+  });
+});
+
+describe('the mutation lock is held THROUGH the write', () => {
+  test('two concurrent mutations of one workspace never interleave', async () => {
+    const log: string[] = [];
+    let depth = 0;
+    let maxDepth = 0;
+    const instrumented: MutationLocks = {
+      forWorkspace: (workspace) => {
+        const inner = makeProcessLocalMutationLocks().forWorkspace(workspace);
+        return {
+          withLock: async <T>(fn: () => T | Promise<T>): Promise<T> =>
+            inner.withLock(async () => {
+              depth += 1;
+              maxDepth = Math.max(maxDepth, depth);
+              try {
+                return await fn();
+              } finally {
+                depth -= 1;
+              }
+            }),
+        } satisfies MutationLock;
+      },
+    };
+    const authority = makeApprovalAuthority({
+      // One verified approval per distinct subject, so both writes are
+      // authorized — the point of the test is the LOCK, not the approval.
+      approvals: { nonceFor: (candidate) => Promise.resolve(`n-${candidate.inputDigest}`) },
+      ledger: makeInMemoryNonceLedger(),
+      locks: instrumented,
+      readState: fixedStateReader(),
+    });
+    const section = (label: string) => async (): Promise<string> => {
+      log.push(`${label}:start`);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      log.push(`${label}:end`);
+      return label;
+    };
+    await Promise.all([
+      withApprovedMutation(authority, subject({ inputDigest: 'sha256:a' }), section('a')),
+      withApprovedMutation(authority, subject({ inputDigest: 'sha256:b' }), section('b')),
+    ]);
+    // maxDepth 1 is the O-6 statement for this path: every write's critical
+    // section — re-check, consume, write — is exclusive per workspace.
+    expect(maxDepth).toBe(1);
+    // And the log is a strict serialization, never a-b-start/a-end overlap.
+    const starts = log.filter((entry) => entry.endsWith(':start'));
+    const ends = log.filter((entry) => entry.endsWith(':end'));
+    expect(starts).toHaveLength(2);
+    expect(ends).toHaveLength(2);
+    expect(log[0]?.endsWith(':start')).toBe(true);
+    expect(log[1]).toBe(`${String(log[0]?.split(':')[0])}:end`);
+  });
+});
+
+describe('the durable operator ledger (ADR-0003 §5)', () => {
+  test('a token spent in one run is refused in a LATER run against the same ledger', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-ledger-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const firstRun = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      ledger: makeFileNonceLedger(ledgerPath),
+    });
+    const first = await withApprovedMutation(
+      firstRun.authority,
+      firstRun.subjectOf(TARGETS),
+      writeSpy().run,
+    );
+    expect(first.status).toBe('ok');
+    // A fresh process would look exactly like this: a NEW authority over the
+    // same operator ledger, with no memory of the first run.
+    const secondRun = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      ledger: makeFileNonceLedger(ledgerPath),
+    });
+    const replayWrite = writeSpy();
+    const replay = await withApprovedMutation(
+      secondRun.authority,
+      secondRun.subjectOf(TARGETS),
+      replayWrite.run,
+    );
+    expect(replay.status).toBe('needs-human');
+    expect(replayWrite.calls).toBe(0);
+  });
+});
+
+describe('approvalInputDigest', () => {
+  test('is stable across key order and sensitive to every input change', () => {
+    expect(approvalInputDigest({ a: 1, b: [2, { d: 4, c: 3 }] })).toBe(
+      approvalInputDigest({ b: [2, { c: 3, d: 4 }], a: 1 }),
+    );
+    expect(approvalInputDigest({ approved: true })).not.toBe(
+      approvalInputDigest({ approved: false }),
+    );
+    expect(approvalInputDigest({ a: 1 })).not.toBe(approvalInputDigest({ a: 2 }));
+    expect(approvalInputDigest({ a: 1 })).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+});
+
+/** A temporary git repository with one commit, for the real-state TOCTOU proof. */
+function realRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cq-approval-repo-'));
+  git(dir, ['init', '-q']);
+  git(dir, ['config', 'user.email', 'approval@example.invalid']);
+  git(dir, ['config', 'user.name', 'approval test']);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src/a.ts'), 'const x = 1;\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-q', '-m', 'the approved state']);
+  return realpathOf(dir);
+}
+
+/** macOS temp dirs are symlinked (/var → /private/var); the reader realpaths, so bind the real one. */
+function realpathOf(dir: string): string {
+  return execFileSync('realpath', [dir], { encoding: 'utf8' }).trim();
+}
+
+/** Run `git` in `cwd`, failing loudly: a silently-unset git would fake the proof. */
+function git(cwd: string, args: string[]): void {
+  execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' });
+}

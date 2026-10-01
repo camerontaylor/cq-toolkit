@@ -217,3 +217,68 @@ otherwise (and always as a second, deterministic leg); the test logs which
 mode ran. The quarantine miniature in the same file dispatches a playbook
 whose verifier fails, asserts the quarantine record, and asserts the second
 dispatch is refused.
+
+### W4.3 — the approval token at the mutation, and rollback on a non-passing verifier
+
+Recorded: B12 (branch `cq02/remediation`, from `dd247ca`). The two
+reconciliation rows ADR-0003 §4c left open are resolved here, and both
+resolutions are decisions with a stated alternative, not defaults.
+
+- **O-5 — where the workspace mutation lock's RECORD lives: BESIDE the
+  operator approval ledger, in the P1-trusted layer, keyed on
+  `sha256(realpath(workspace))`** (`makeLedgerBesideMutationLocks`, built
+  on the sweep lane's existing `makeGitMutex` — no new lock subsystem). The
+  two candidates ADR-0003 rejected are excluded on evidence: an
+  environment-derived location (`os.tmpdir()`, `$XDG_STATE_HOME`)
+  reintroduces ADR §2.5's split-brain, and a record inside the workspace is
+  tamper vector #26 — the very tree under approval. `approval.ts` also
+  REFUSES a trusted layer that resolves inside the workspace it protects.
+  The process-local lock is offered for tests and single-process callers and
+  claims nothing cross-process; that claim is stated in its doc comment
+  rather than left to be assumed.
+- **O-6 — do non-approval writers take the lock: in this path, vacuous.**
+  Every write `applyRemediation` and `playbookDispatch` perform is
+  approval-required and holds the lock through it, so there is no
+  non-approval writer here to co-schedule against. A concurrent writer
+  OUTSIDE the lock remains ADR §2.7's open residual (a post-mutation-hook
+  hazard) and is NOT closed by this patch: no such writer was modified to
+  make it look closed.
+- **Rollback is a step, not a side effect.** The dispatch captures every
+  target's pre-apply bytes before the engine runs, and a `fail` or an
+  `indeterminate` verdict restores them through the same store. A restore
+  that cannot put a file back reports it as STRANDED, and the prose then
+  says the workspace is NOT at its pre-dispatch state — the report never
+  claims a clean rollback it did not achieve.
+- **A failed verifier is a `failed` dispatch, not an `ok` with a bad
+  outcome.** This reverses the old regressionGate "a definitive verdict is
+  the op's decision output" mapping, and the header says why: once step 5
+  restores the workspace there is no applied state left to report, and a
+  bare `ok` is exactly what a status-only reader takes as success. The
+  structured evidence moved to serialized JSON in `error`/`detail` (the
+  frozen `OpResult` taxonomy has no payload slot) under the
+  `PlaybookDispatchUnverified` shape.
+- **The signature half of ADR-0003 is NOT re-implemented here.** The kernel
+  verifier owns the signer snapshot, the TTL and the `inputsHash` check; this
+  patch consumes a `VerifiedApprovals` seam. The ops therefore default to
+  the DENY-ALL authority: with no authority bound, an apply or a dispatch is
+  refused `needs-human` and writes nothing, which is the A16 forged-
+  `approved: true` state.
+
+### Open integration lease (for the #238 / kernel owner, NOT done here)
+
+1. `src/ops/analyze/registry.ts` is #238's file and was deliberately not
+   edited. Both call sites still compose the ops with no authority, so the
+   shipped, registry-composed `analyze.applyRemediation` and
+   `analyze.playbookDispatch` REFUSE every write until the kernel's verified
+   approvals are bound. That is fail-closed by design, but it is a real
+   functional change to the registry path and needs the adapter to land.
+2. The generated op docs describe the pre-W4.3 approval semantics
+   ("approved: true" as sufficient). `gen:op-docs` is generated from the
+   registry description, so the text moves with (1).
+3. `currentJobContext().approval` (ADR §4b step 7) and the journal's
+   `approval-consumed` event are kernel work; this patch consumes the
+   exercised grant at the op and leaves the durable audit record to that
+   lane rather than inventing a second journal shape.
+4. ADR-0003 §5's "same host, fresh `--journal-dir`" replay case is enforced
+   by the DURABLE ledger (`makeFileNonceLedger`); the process-local ledger
+   cannot enforce it and does not claim to.

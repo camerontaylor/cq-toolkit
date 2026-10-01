@@ -35,6 +35,12 @@ import {
 } from '../../../src/ops/gates/checkRunner.js';
 import { tscLinesAdapter } from '../../../src/ops/gates/adapters/tsc.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
+import type { ApprovalAuthority } from '../../../src/ops/analyze/approval.js';
+import {
+  makeApprovalAuthority,
+  makeInMemoryNonceLedger,
+  makeProcessLocalMutationLocks,
+} from '../../../src/ops/analyze/approval.js';
 import { pathAnalysisFileStore } from '../../../src/ops/analyze/analysisStore.js';
 import { makeApplyRemediation } from '../../../src/ops/analyze/applyRemediation.js';
 import { clusterErrorsOp } from '../../../src/ops/analyze/clusterErrors.js';
@@ -58,6 +64,27 @@ const TSC_BIN = join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 
 /** True when a real ast-grep binary answers on PATH (the real-binary leg). */
 const AST_GREP_AVAILABLE = spawnSync('ast-grep', ['--version'], { stdio: 'ignore' }).status === 0;
+
+/**
+ * W4.3 — the approval authority this e2e binds. A REAL `ApprovalAuthority`
+ * (the same code the ops call) over an in-memory nonce ledger and
+ * process-local locks, with the run's verified approvals answering for every
+ * subject and a fixed workspace state. The state reader is fixed rather than
+ * the real git one because the seeded temp tree is deliberately not a
+ * repository; the state re-check, single-use nonce and the mutation lock are
+ * the real code either way, and the TOCTOU/durability proofs over a REAL
+ * repository live in test/ops/analyze/approval.test.ts.
+ */
+function e2eApprovalAuthority(): ApprovalAuthority {
+  return makeApprovalAuthority({
+    approvals: { nonceFor: (subject) => Promise.resolve(`e2e-${subject.op}`) },
+    ledger: makeInMemoryNonceLedger(),
+    locks: makeProcessLocalMutationLocks(),
+    readState: {
+      read: () => Promise.resolve({ workspace: '', headSha: 'e2e-head', treeClean: true }),
+    },
+  });
+}
 
 /** The consumer's ast-grep rule (the seeded error shape's mechanical fix). */
 const FIX_RULE = {
@@ -222,9 +249,14 @@ async function runAnalyzeChain(mode: 'real' | 'scripted'): Promise<void> {
 
     // 4. The remediation: applyRemediation with the cluster id, approval,
     // and the consumer rule — collision-checked, applied through the store.
+    // W4.3: the apply's write is gated on an approval GRANT, not on the
+    // `approved: true` flag. This e2e composes the op the way a direct SDK
+    // consumer does, so it binds a real authority (the registry adapter that
+    // binds the kernel's verified approvals is #238's file and unchanged).
     const apply = makeApplyRemediation(
       (input) => pathAnalysisFileStore(input.dir ?? dirname(input.sidecarPath)),
       codemodRunner(mode),
+      e2eApprovalAuthority(),
     );
     if (cluster === undefined) throw new Error('unreachable: the chain asserted one cluster');
     const applied = await apply({
@@ -347,26 +379,40 @@ describe('the quarantine lane in miniature (end to end)', () => {
         quarantine,
         run,
         storeFor: (input) => pathAnalysisFileStore(input.dir),
+        approval: e2eApprovalAuthority(),
       });
       const input = { playbookId: playbook.id, dir, targets: ['src/alpha.ts'] };
 
-      // First dispatch: remediation APPLIED, verifier FAILED, quarantined.
+      // First dispatch: remediation APPLIED, verifier FAILED, quarantined —
+      // and (W4.3) the edits ROLLED BACK, so the dispatch is NOT `ok`.
+      const before = await readFile(join(dir, 'src', 'alpha.ts'), 'utf8');
       const first = await dispatch(input);
-      expect(first.status).toBe('ok');
-      if (first.status !== 'ok') return;
-      if (first.value.outcome !== 'verifier-failed') {
-        throw new Error(`expected verifier-failed, got ${first.value.outcome}`);
-      }
-      expect(first.value.quarantined).toBe(true);
-      expect(first.value.verifierReason).toContain('exited 1');
-      expect(first.value.record.kind).toBe('playbook-dispatch');
-      expect(first.value.record.quarantined).toBe(true);
-      // The remediation WAS applied (the honest report) — and the ledger
-      // now holds the phase-tagged record with the verifier's reason.
-      expect(await readFile(join(dir, 'src', 'alpha.ts'), 'utf8')).toContain('config.retries');
+      expect(first.status).toBe('failed');
+      if (first.status !== 'failed') return;
+      expect(first.error).toContain('the verifier FAILED');
+      const marker = 'Dispatch evidence: ';
+      const at = first.error.indexOf(marker);
+      expect(at).toBeGreaterThanOrEqual(0);
+      const evidence = JSON.parse(first.error.slice(at + marker.length)) as {
+        outcome: string;
+        quarantined: boolean;
+        verifierReason: string;
+        restore: { restored: string[]; stranded: unknown[] };
+        record: { kind: string; quarantined: boolean };
+      };
+      expect(evidence.outcome).toBe('verifier-failed');
+      expect(evidence.quarantined).toBe(true);
+      expect(evidence.verifierReason).toContain('exited 1');
+      expect(evidence.record.kind).toBe('playbook-dispatch');
+      expect(evidence.record.quarantined).toBe(true);
+      // STEP 5, over a REAL store and a REAL verifier: the failed
+      // remediation is rolled back to the exact pre-dispatch bytes.
+      expect(evidence.restore.restored).toEqual(['src/alpha.ts']);
+      expect(evidence.restore.stranded).toEqual([]);
+      expect(await readFile(join(dir, 'src', 'alpha.ts'), 'utf8')).toBe(before);
       expect(quarantine.isQuarantined(playbook.id)).toBe(true);
       expect(quarantine.records()[0]?.phase).toBe('verifier-failed');
-      expect(quarantine.reasonOf(playbook.id)).toBe(first.value.verifierReason);
+      expect(quarantine.reasonOf(playbook.id)).toBe(evidence.verifierReason);
 
       // Second dispatch: refused BEFORE anything runs.
       const second = await dispatch(input);

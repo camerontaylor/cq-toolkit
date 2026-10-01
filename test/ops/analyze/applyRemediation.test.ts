@@ -10,6 +10,16 @@
 import { resolve, sep } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import type {
+  ApprovalAuthority,
+  ApprovalStateReader,
+  InspectableNonceLedger,
+} from '../../../src/ops/analyze/approval.js';
+import {
+  makeApprovalAuthority,
+  makeInMemoryNonceLedger,
+  makeProcessLocalMutationLocks,
+} from '../../../src/ops/analyze/approval.js';
 import type { AnalyzeFileStore } from '../../../src/ops/analyze/analysisStore.js';
 import { AnalysisStoreError } from '../../../src/ops/analyze/analysisStore.js';
 import { makeApplyRemediation } from '../../../src/ops/analyze/applyRemediation.js';
@@ -153,8 +163,45 @@ const FIXTURE_FILES: Record<string, string> = {
 };
 const SIDECAR_PATH = '/ws/analysis-deadbeef.sidecar.json';
 
-function makeOp(store: AnalyzeFileStore, run: RunCheck = codemodRunner(FIXTURE_FILES)) {
-  return makeApplyRemediation(() => store, run);
+/**
+ * The W4.3 authority this suite's apply-path tests run under: a REAL
+ * `ApprovalAuthority` (same code the op calls) over an in-memory nonce
+ * ledger and process-local locks, with the run's verified approvals
+ * answering for every subject. The tests below are about the op's
+ * remediation behavior GIVEN an approved subject; subject binding,
+ * single-use and the state re-check are pinned directly in
+ * approval.test.ts, and the DENIAL cases below deliberately use the
+ * shipped deny-all default instead.
+ */
+function approvedAuthority(readState?: ApprovalStateReader): {
+  authority: ApprovalAuthority;
+  ledger: InspectableNonceLedger;
+} {
+  const ledger = makeInMemoryNonceLedger();
+  const authority = makeApprovalAuthority({
+    // Derived from the subject, as a real verified token's nonce is bound
+    // to one op+inputs: identical inputs re-present the same (spent) token,
+    // changed inputs are a different subject with no token at all.
+    approvals: {
+      nonceFor: (subject) =>
+        Promise.resolve(`nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`),
+    },
+    ledger,
+    locks: makeProcessLocalMutationLocks(),
+    readState: readState ?? {
+      read: () =>
+        Promise.resolve({ workspace: '/ws', headSha: 'head-at-approval', treeClean: true }),
+    },
+  });
+  return { authority, ledger };
+}
+
+function makeOp(
+  store: AnalyzeFileStore,
+  run: RunCheck = codemodRunner(FIXTURE_FILES),
+  authority: ApprovalAuthority = approvedAuthority().authority,
+) {
+  return makeApplyRemediation(() => store, run, authority);
 }
 
 function baseInput(): {
@@ -881,5 +928,123 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
       expect(result.value.targets).toEqual(['src/shared.ts']);
       expect(JSON.stringify(result.value)).not.toContain('src/noise.ts');
     }
+  });
+});
+
+// W4.3 — the op-level approval boundary. These are the A16/TOCTOU proofs
+// AT THE OP: the denial is a `needs-human` from `applyRemediation` itself,
+// and the store's write map is the witness that no byte changed.
+describe('W4.3 approval at the mutation boundary (applyRemediation)', () => {
+  function approvedStore(): AnalyzeFileStore & { written: Map<string, Uint8Array> } {
+    return memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+  }
+
+  test('A16: a forged approved:true with the shipped deny-all default is refused and writes NOTHING', async () => {
+    const store = approvedStore();
+    // No authority bound — exactly how the (frozen, #238-owned) registry
+    // adapter composes this op today.
+    const result = await makeApplyRemediation(
+      () => store,
+      codemodRunner(FIXTURE_FILES),
+    )(baseInput());
+    expect(result.status).toBe('needs-human');
+    const reason = result.status === 'needs-human' ? result.reason : '';
+    expect(reason).toContain('DECLARED INTENT');
+    expect(reason).toContain('Nothing was written');
+    // The witness: the plan said approved, the op scanned and planned, and
+    // the workspace is still byte-identical.
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a dry run needs no approval token: it writes nothing, so there is nothing to approve', async () => {
+    const store = approvedStore();
+    const result = await makeApplyRemediation(
+      () => store,
+      codemodRunner(FIXTURE_FILES),
+    )({
+      ...baseInput(),
+      dryRun: true,
+    });
+    expect(result.status).toBe('ok');
+    expect(store.written.size).toBe(0);
+  });
+
+  test('TOCTOU: a commit landing between admission and the write is refused, with the token UNSPENT', async () => {
+    const store = approvedStore();
+    // Two state reads: the admission read, then the exercise read under the
+    // mutation lock — HEAD moved in between.
+    let reads = 0;
+    const { authority, ledger } = approvedAuthority({
+      read: () => {
+        reads += 1;
+        return Promise.resolve({
+          workspace: '/ws',
+          headSha: reads === 1 ? 'head-at-approval' : 'head-after-the-commit',
+          treeClean: true,
+        });
+      },
+    });
+    const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(result.status).toBe('needs-human');
+    const reason = result.status === 'needs-human' ? result.reason : '';
+    expect(reason).toContain('approval state changed since approval');
+    expect(reason).toContain('UNSPENT');
+    expect(reason).toContain('fully planned and NOTHING was written');
+    expect(store.written.size).toBe(0);
+    // The refusal did not burn the human's approval: a re-approval against
+    // the current state can still apply this exact plan.
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('REPLAY: a second apply of the same approved inputs is refused (nonce spent), writing nothing', async () => {
+    const store = approvedStore();
+    const { authority, ledger } = approvedAuthority();
+    const first = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(first.status).toBe('ok');
+    expect(ledger.spent()).toBe(1);
+    // The replay runs against a workspace back at the APPROVED state (the
+    // state the token was issued against — e.g. after a rollback), with a
+    // non-empty plan. That isolates the refusal under test: it is the
+    // spent token, not a stale sidecar and not an empty plan, and it is
+    // exactly ADR-0003 §5's replay case.
+    const replayStore = approvedStore();
+    const second = await makeOp(replayStore, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(second.status).toBe('needs-human');
+    expect(second.status === 'needs-human' ? second.reason : '').toContain('already consumed');
+    expect(replayStore.written.size).toBe(0);
+  });
+
+  test('an approval that never verified is refused even though approved:true is present', async () => {
+    const store = approvedStore();
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      // A16 at the seam: the run's snapshot holds no token for this subject.
+      approvals: { nonceFor: () => Promise.resolve(undefined) },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: {
+        read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+      },
+    });
+    const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(result.status).toBe('needs-human');
+    expect(store.written.size).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('an empty plan (nothing matched) is an honest ok that consumes no approval', async () => {
+    const store = approvedStore();
+    const { authority, ledger } = approvedAuthority();
+    const result = await makeOp(store, codemodRunner({}), authority)(baseInput());
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.plannedEdits).toBe(0);
+    }
+    // There was no write, so no human decision was spent on one.
+    expect(ledger.spent()).toBe(0);
+    expect(store.written.size).toBe(0);
   });
 });

@@ -21,6 +21,63 @@ import {
   makePlaybookRegistry,
 } from '../../../../src/ops/analyze/playbooks/registry.js';
 import { makeQuarantineLedger } from '../../../../src/ops/analyze/playbooks/quarantine.js';
+import type {
+  ApprovalAuthority,
+  ApprovalStateReader,
+  InspectableNonceLedger,
+} from '../../../../src/ops/analyze/approval.js';
+import type { PlaybookDispatchUnverified } from '../../../../src/ops/analyze/playbooks/registry.js';
+import {
+  makeApprovalAuthority,
+  makeInMemoryNonceLedger,
+  makeProcessLocalMutationLocks,
+} from '../../../../src/ops/analyze/approval.js';
+
+/**
+ * Parse the dispatch EVIDENCE the non-ok statuses carry as serialized JSON
+ * (the frozen OpResult taxonomy gives `failed`/`indeterminate` no payload
+ * slot). The marker is in the op's own prose, so a test that finds no
+ * evidence fails loudly here instead of on a null deref later.
+ */
+function dispatchEvidence(text: string): PlaybookDispatchUnverified {
+  const marker = 'Dispatch evidence: ';
+  const at = text.indexOf(marker);
+  expect(at).toBeGreaterThanOrEqual(0);
+  return JSON.parse(text.slice(at + marker.length)) as PlaybookDispatchUnverified;
+}
+
+/**
+ * The W4.3 authority the dispatch suite runs under: a REAL
+ * `ApprovalAuthority` (the same code the op calls) with the run's verified
+ * approvals answering for every subject, so these tests stay about the
+ * dispatch FLOW. The approval boundary itself — deny-all refusal, single
+ * use, the state re-check, O-5/O-6 — is pinned in
+ * test/ops/analyze/approval.test.ts and, at the op level, in the two W4.3
+ * describes at the end of this file.
+ */
+function approvedAuthority(readState?: ApprovalStateReader): {
+  authority: ApprovalAuthority;
+  ledger: InspectableNonceLedger;
+} {
+  const ledger = makeInMemoryNonceLedger();
+  const authority = makeApprovalAuthority({
+    // The nonce is DERIVED FROM THE SUBJECT, exactly as a real verified
+    // token's nonce is bound to one op+inputs: two different playbooks get
+    // two different tokens, while a re-dispatch of the SAME playbook over
+    // the SAME inputs re-presents the SAME (now spent) token.
+    approvals: {
+      nonceFor: (subject) =>
+        Promise.resolve(`nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`),
+    },
+    ledger,
+    locks: makeProcessLocalMutationLocks(),
+    readState: readState ?? {
+      read: () =>
+        Promise.resolve({ workspace: '/ws', headSha: 'head-at-approval', treeClean: true }),
+    },
+  });
+  return { authority, ledger };
+}
 
 /** The consumer rule as a JSON object (the playbook format's rule field). */
 const RULE = {
@@ -134,6 +191,7 @@ function harness(
     quarantine,
     run,
     storeFor: () => store,
+    approval: approvedAuthority().authority,
   });
   playbooks.register(playbook);
   return { run, store, quarantine, playbooks, dispatch };
@@ -307,31 +365,41 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     expect(h.store.backing.get('src/a.ts')).toBe('const x = fooBar;\nconst y = fooBar;\n');
   });
 
-  test('verifier FAIL: quarantined with the reason; the report says applied-but-failed; next dispatch refuses', async () => {
+  test('verifier FAIL: quarantined with the reason; the edits are ROLLED BACK; the dispatch is `failed`; next dispatch refuses', async () => {
     const h = harness(FIXTURE, 1, 'verify-tool: 2 mismatches\n');
+    const before = h.store.backing.get('src/a.ts');
     const result = await h.dispatch({
       playbookId: 'fix-foo-bar',
       dir: '/ws',
       targets: ['src/a.ts'],
     });
-    // THE HONEST REPORT: the dispatch ran to a definitive verdict (the
-    // regressionGate precedent) — ok with an unambiguous outcome
-    // discriminator, the full evidence, and the quarantine state change.
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') return;
-    expect(result.value.outcome).toBe('verifier-failed');
-    if (result.value.outcome !== 'verifier-failed') return;
-    expect(result.value.quarantined).toBe(true);
-    expect(result.value.verifierReason).toContain('exited 1');
-    expect(result.value.verifierReason).toContain('2 mismatches');
-    expect(result.value.plannedEdits).toBe(2);
-    expect(result.value.record.outcome).toBe('verifier-failed');
-    expect(result.value.record.quarantined).toBe(true);
-    // The remediation WAS applied (honest) — and the ledger now holds the
-    // record carrying the verifier's reason verbatim.
-    expect(h.store.backing.get('src/a.ts')).toContain('fooBar');
+    // W4.3: a remediation that provably did not hold is a FAILED dispatch,
+    // not an `ok` carrying a bad outcome. The status is what a plan step and
+    // a summary line read, so it must not say "ok" here.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.error).toContain('the verifier FAILED');
+    expect(result.error).toContain('exited 1');
+    expect(result.error).toContain('2 mismatches');
+    expect(result.error).toContain('QUARANTINED');
+    // The evidence rides the error as serialized JSON (the taxonomy gives
+    // `failed` no payload slot) — same trace cut the record always used.
+    const evidence = dispatchEvidence(result.error);
+    expect(evidence.outcome).toBe('verifier-failed');
+    expect(evidence.quarantined).toBe(true);
+    expect(evidence.verifierReason).toContain('exited 1');
+    expect(evidence.plannedEdits).toBe(2);
+    expect(evidence.record.outcome).toBe('verifier-failed');
+    expect(evidence.record.quarantined).toBe(true);
+    // STEP 5: the applied edits were rolled back, so the workspace is back
+    // at its pre-dispatch bytes.
+    expect(evidence.restore.restored).toEqual(['src/a.ts']);
+    expect(evidence.restore.stranded).toEqual([]);
+    expect(h.store.backing.get('src/a.ts')).toBe(before);
+    expect(h.store.backing.get('src/a.ts')).toContain('foo_bar');
+    // The ledger holds the record carrying the verifier's reason verbatim.
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(true);
-    expect(h.quarantine.reasonOf('fix-foo-bar')).toBe(result.value.verifierReason);
+    expect(h.quarantine.reasonOf('fix-foo-bar')).toBe(evidence.verifierReason);
     expect(h.quarantine.records()[0]?.phase).toBe('verifier-failed');
     // And the VERY NEXT dispatch is refused before anything runs.
     const refused = await h.dispatch({
@@ -343,8 +411,9 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     expect(h.run.scans).toHaveLength(1); // no second scan happened
   });
 
-  test('verifier INDETERMINATE (null exit): honest indeterminate, NO quarantine, record rides detail as JSON', async () => {
+  test('verifier INDETERMINATE (null exit): honest indeterminate, NO quarantine, edits restored, evidence rides detail', async () => {
     const h = harness(FIXTURE, null, 'timeout kill');
+    const before = h.store.backing.get('src/a.ts');
     const result = await h.dispatch({
       playbookId: 'fix-foo-bar',
       dir: '/ws',
@@ -354,30 +423,43 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     if (result.status !== 'indeterminate') return;
     expect(result.detail).toContain('NOT quarantined');
     expect(result.detail).toContain('unobservable');
-    // The trace record is embedded as serialized JSON of the exported shape.
-    const marker = 'Dispatch record: ';
-    const at = result.detail.indexOf(marker);
-    expect(at).toBeGreaterThanOrEqual(0);
-    const record = JSON.parse(result.detail.slice(at + marker.length)) as {
-      kind: string;
-      outcome: string;
-      quarantined: boolean;
-      verifier: { verdict: string };
-    };
-    expect(record.kind).toBe('playbook-dispatch');
-    expect(record.outcome).toBe('verifier-indeterminate');
-    expect(record.quarantined).toBe(false);
-    expect(record.verifier.verdict).toBe('indeterminate');
+    // The evidence is embedded as serialized JSON of the exported shape.
+    const evidence = dispatchEvidence(result.detail);
+    expect(evidence.record.kind).toBe('playbook-dispatch');
+    expect(evidence.outcome).toBe('verifier-indeterminate');
+    expect(evidence.quarantined).toBe(false);
+    expect(evidence.record.verifier.verdict).toBe('indeterminate');
+    // STEP 5 applies here too: an unobservable verdict is not a licence to
+    // leave unverified edits on disk.
+    expect(evidence.restore.restored).toEqual(['src/a.ts']);
+    expect(h.store.backing.get('src/a.ts')).toBe(before);
     // An unobservable verdict never punishes the playbook: the ledger is
-    // untouched, and a re-dispatch RUNS (retry is the consumer's call).
+    // untouched, so the playbook is still dispatchable.
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(false);
+    // ADR-0003 §5: a re-dispatch needs a FRESH approval. The first dispatch
+    // consumed the token, and the workspace was restored, so this is a
+    // clean retry — but it is refused until a human approves again. This is
+    // the "a job that did not finish ok needs a fresh token" rule, and it
+    // is the reason the old "do NOT blindly re-dispatch" warning is gone:
+    // nothing is on disk, and nothing proceeds without a new approval.
     const again = await h.dispatch({
       playbookId: 'fix-foo-bar',
       dir: '/ws',
       targets: ['src/a.ts'],
     });
-    expect(again.status).toBe('indeterminate');
-    expect(h.run.scans).toHaveLength(2);
+    expect(again.status).toBe('needs-human');
+    expect(again.status === 'needs-human' ? again.reason : '').toContain('already consumed');
+    expect(h.run.scans).toHaveLength(1);
+    // ...and WITH a fresh approval the retry runs and reaches the verifier
+    // again — the playbook was never quarantined.
+    const approved = harness(FIXTURE, null, 'timeout kill');
+    const retried = await approved.dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    expect(retried.status).toBe('indeterminate');
+    expect(approved.run.scans).toHaveLength(1);
   });
 
   test('an engine collision fails the dispatch; the ledger is untouched (the playbook did not fail its verifier)', async () => {
@@ -413,6 +495,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       quarantine: h.quarantine,
       run: h.run,
       storeFor: () => h.store,
+      approval: approvedAuthority().authority,
     });
     const result = await failing({
       playbookId: 'fix-foo-bar',
@@ -436,6 +519,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       storeFor: () => {
         throw new AnalysisStoreError("analysis store: root does not resolve — '/missing'");
       },
+      approval: approvedAuthority().authority,
     });
     const result = await failing({
       playbookId: 'fix-foo-bar',
@@ -483,6 +567,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       quarantine: h.quarantine,
       run: gatedRun,
       storeFor: () => h.store,
+      approval: approvedAuthority().authority,
     });
     const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
     // Both dispatches START concurrently; the first parks at the verifier.
@@ -507,9 +592,9 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     // in-flight one).
     releaseVerifier?.();
     const firstResult = await first;
-    expect(firstResult.status).toBe('ok');
-    if (firstResult.status === 'ok' && firstResult.value.outcome === 'verifier-failed') {
-      expect(firstResult.value.quarantined).toBe(true);
+    expect(firstResult.status).toBe('failed');
+    if (firstResult.status === 'failed') {
+      expect(dispatchEvidence(firstResult.error).quarantined).toBe(true);
     }
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(true);
     expect(h.run.verifierCalls).toHaveLength(1); // only the in-flight dispatch's verifier ever ran
@@ -543,6 +628,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       quarantine: h.quarantine,
       run: gatedRun,
       storeFor: () => h.store,
+      approval: approvedAuthority().authority,
     });
     const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
     const a = serialized(input); // in flight (its verifier will park)
