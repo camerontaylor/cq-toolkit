@@ -26,7 +26,7 @@
 //               syscalls; absent a helper this backend records itself as not
 //               provisioned (the D7 pattern), it is never silently "auto".
 import { execFile as execFileCb } from 'node:child_process';
-import { access, constants, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, constants, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { promisify } from 'node:util';
@@ -192,6 +192,21 @@ export const SEATBELT_BIN = '/usr/bin/sandbox-exec';
  * launch failure, which the probe records as a control failure — it can
  * never pass by accident.
  */
+/**
+ * Runtime validation for the proxy port (Sol exact-head audit): the port is
+ * interpolated into an SBPL rule, so TypeScript's `number` annotation is not
+ * a guard — a string arriving through an untyped boundary could inject
+ * policy syntax.  Only a real integer in [1, 65535] passes.
+ */
+function validatedProxyPort(port: number): number {
+  if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `sandbox: proxyPort must be an integer between 1 and 65535, got '${String(port)}'`,
+    );
+  }
+  return port;
+}
+
 export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): string {
   // Process execution is narrowed to the accepted P7 trial's trees: /usr/bin,
   // /bin, /sbin, /usr/libexec.  /usr/local/* is deliberately ABSENT (the
@@ -200,11 +215,12 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
   const execTrees = ['"/usr/bin"', '"/bin"', '"/sbin"', '"/usr/libexec"']
     .map((tree) => `(subpath ${tree})`)
     .join(' ');
+  const port = proxyPort === undefined ? undefined : validatedProxyPort(proxyPort);
   const networkRules =
     network === 'allow'
       ? ['(allow network*)']
-      : proxyPort !== undefined
-        ? [`(allow network-outbound (remote ip "127.0.0.1:${proxyPort}"))`]
+      : port !== undefined
+        ? [`(allow network-outbound (remote ip "127.0.0.1:${port}"))`]
         : [];
   return [
     '(version 1)',
@@ -296,9 +312,28 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       // and the next launch compiles a fresh profile.
       const profileDir = await mkdtemp(join(SEATBELT_POLICY_PARENT, 'cq-sb-prof-'));
       try {
-        // Pathological-workspace guard: refuse any workspace that contains
-        // the trusted policy parent itself.
-        if (!relative(request.workspace, profileDir).startsWith('..')) {
+        // Pathological-workspace guard, RESOLVED not lexical (Sol exact-head
+        // audit): a workspace path traversing a symlink that lands on the
+        // trusted policy parent is lexically "somewhere else" but physically
+        // INSIDE it.  Canonicalize both ends; refuse when the policy
+        // directory falls inside the resolved workspace.  An unresolvable
+        // workspace fails closed.
+        let resolvedWorkspace: string;
+        try {
+          resolvedWorkspace = await realpath(request.workspace);
+        } catch (error) {
+          return {
+            ok: false,
+            exitCode: null,
+            signal: null,
+            stdout: '',
+            stderr: '',
+            timedOut: false,
+            spawnError: `workspace path is not canonicalizable: ${(error as Error).message}`,
+          };
+        }
+        const resolvedPolicyDir = await realpath(profileDir);
+        if (!relative(resolvedWorkspace, resolvedPolicyDir).startsWith('..')) {
           return {
             ok: false,
             exitCode: null,

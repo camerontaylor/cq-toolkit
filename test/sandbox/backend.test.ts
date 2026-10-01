@@ -89,6 +89,25 @@ describe('seatbelt boundary construction', () => {
     // And without a proxy there is no port rule at all.
     expect(seatbeltProfile('model-only')).not.toContain('network-outbound');
   });
+
+  test('a runtime proxyPort outside an integer 1-65535 is refused before any policy is built', () => {
+    // TypeScript's `number` is not a runtime guard (Sol exact-head audit):
+    // a string through an untyped boundary must not reach the SBPL text.
+    for (const bad of [
+      '45454',
+      '45454)) (allow network*',
+      0,
+      -1,
+      70000,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(() => seatbeltProfile('model-only', bad as unknown as number)).toThrow(
+        /proxyPort must be an integer/,
+      );
+    }
+  });
 });
 
 describe('linux and container boundary construction', () => {
@@ -442,6 +461,28 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
       if (priorTmp === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = priorTmp;
     }
+  }, 30_000);
+
+  test('a workspace traversing a symlink onto the policy parent is refused', async () => {
+    // The containment guard must canonicalize (realpath), not compare
+    // lexically: a workspace path THROUGH a symlink that resolves onto the
+    // trusted policy parent is physically inside it even when the lexical
+    // relative() says otherwise (Sol exact-head audit).
+    const adapter = seatbeltAdapter();
+    const linkDir = await mkdtemp(join(tmpdir(), 'cq-sbx-link-'));
+    scratch.push(linkDir);
+    const workspaceThroughLink = join(linkDir, 'pvt');
+    await symlink('/private/var/tmp', workspaceThroughLink);
+    const result = await adapter.launch({
+      workspace: workspaceThroughLink,
+      argv: ['/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.spawnError).toMatch(/contains the trusted policy parent/);
+    // And nothing policy-shaped was left in the trusted parent.
+    const parentListing = await readdir('/private/var/tmp');
+    expect(parentListing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
   }, 30_000);
 });
 
