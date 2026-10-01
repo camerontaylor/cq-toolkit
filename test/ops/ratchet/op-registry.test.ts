@@ -12,13 +12,16 @@
 //      touching the network, or reading the filesystem at bind time: the
 //      CheckRunner/gh/git seams are bound per dispatch and are closure-only
 //      at construction (the inertness proof).
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { promisify } from 'node:util';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import { registry } from '../../../src/ops/ratchet/registry.js';
+
+const execFileAsync = promisify(execFile);
 
 const ENTRY_NAMES = [
   'ratchet.captureBaseline',
@@ -163,24 +166,27 @@ describe('ratchet family op registry entries', () => {
     }
   });
 
-  test('ratchet.monotonicGuard ref mode diffs the merge base with hardened Git reads', async () => {
-    const repo = await mkdtemp(join(tmpdir(), 'cq-op-registry-ref-'));
-    const git = (...args: string[]): string =>
-      execFileSync('git', args, {
-        cwd: repo,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GIT_CONFIG_GLOBAL: '/dev/null',
-          GIT_CONFIG_SYSTEM: '/dev/null',
-          GIT_CONFIG_NOSYSTEM: '1',
-        },
-      }).trim();
-    try {
-      git('init', '-q', '-b', 'main');
-      git('config', 'user.email', 'test@example.test');
-      git('config', 'user.name', 'test');
-      git('config', 'commit.gpgsign', 'false');
+  describe('ref-mode Git fixture', () => {
+    let repo: string;
+    let base: string;
+    const git = async (...args: string[]): Promise<string> =>
+      (
+        await execFileAsync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: '/dev/null',
+            GIT_CONFIG_SYSTEM: '/dev/null',
+            GIT_CONFIG_NOSYSTEM: '1',
+          },
+        })
+      ).stdout.trim();
+    // Construct the real two-commit repository outside the assertion deadline.
+    // Inline commit identity and signing settings avoid three setup subprocesses.
+    beforeAll(async () => {
+      repo = await mkdtemp(join(tmpdir(), 'cq-op-registry-ref-'));
+      await git('init', '-q', '-b', 'main');
       await mkdir(join(repo, 'baselines'));
       const rel = baselineRelPath('coverage', 'coverage');
       const baseline = (value: number): string =>
@@ -194,13 +200,26 @@ describe('ratchet family op registry entries', () => {
           capturedAt: '2026-09-15T19:20:25.084Z',
         });
       await writeFile(join(repo, rel), baseline(93), 'utf8');
-      git('add', rel);
-      git('commit', '-q', '-m', 'baseline');
-      const base = git('rev-parse', 'HEAD');
+      await git('add', rel);
+      const commitConfig = [
+        '-c',
+        'user.email=test@example.test',
+        '-c',
+        'user.name=test',
+        '-c',
+        'commit.gpgsign=false',
+      ];
+      await git(...commitConfig, 'commit', '-q', '-m', 'baseline');
+      base = await git('rev-parse', 'HEAD');
       await writeFile(join(repo, rel), baseline(94), 'utf8');
-      git('add', rel);
-      git('commit', '-q', '-m', 'tighten');
+      await git(...commitConfig, 'commit', '-q', '-am', 'tighten');
+    }, 30_000);
 
+    afterAll(async () => {
+      if (repo !== undefined) await rm(repo, { recursive: true, force: true });
+    });
+
+    test('ratchet.monotonicGuard ref mode diffs the merge base with hardened Git reads', async () => {
       const op = await entryByName('ratchet.monotonicGuard').importer();
       expect(await op({ repo, base, head: 'HEAD' })).toMatchObject({
         status: 'ok',
@@ -213,9 +232,7 @@ describe('ratchet family op registry entries', () => {
       expect(await op({ repo, base: '--output=bad', head: 'HEAD' })).toMatchObject({
         status: 'failed',
       });
-    } finally {
-      await rm(repo, { recursive: true, force: true });
-    }
+    }, 15_000);
   });
 
   test('trusted verifier importers preserve failed op results', async () => {
