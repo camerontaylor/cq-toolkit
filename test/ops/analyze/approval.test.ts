@@ -25,7 +25,15 @@
 // NO credentials, no network, no ast-grep binary: the only subprocess is
 // `git` against a temporary repository, used to prove the real state reader.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -34,6 +42,7 @@ import type {
   ApprovalSubject,
   MutationLock,
   MutationLocks,
+  VerifiedApproval,
 } from '../../../src/ops/analyze/approval.js';
 import {
   approvalInputDigest,
@@ -243,7 +252,13 @@ describe('TOCTOU — the state moves between admission and the write', () => {
   test('TOCTOU over a REAL git repository: a commit between admission and the write denies it', async () => {
     const repo = realRepo();
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-real') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-real',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
       readState: makeGitApprovalStateReader(),
@@ -300,7 +315,13 @@ describe('TOCTOU — the state moves between admission and the write', () => {
       },
     };
     const flakyAuthority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-flaky') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-flaky',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: exerciseFixture.ledger,
       locks: makeProcessLocalMutationLocks(),
       readState: flaky,
@@ -312,7 +333,13 @@ describe('TOCTOU — the state moves between admission and the write', () => {
 
   test('an unreadable ledger denies the write and spends nothing', async () => {
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-ledger') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-ledger',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: {
         consume: () => Promise.reject(new Error('ledger is a directory')),
       },
@@ -369,7 +396,13 @@ describe('A16 — a forged approved:true, and the deny-all default', () => {
 
   test('a trusted approval layer INSIDE the workspace is refused (tamper vector #26)', async () => {
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-inside') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-inside',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
       readState: fixedStateReader(),
@@ -398,7 +431,13 @@ describe('A16 — a forged approved:true, and the deny-all default', () => {
     // $HOME/state beside $HOME/proj: the ledger's layer is an ANCESTOR of
     // the workspace. Nothing under approval can reach it.
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-ancestor') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-ancestor',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
       readState: fixedStateReader({ ...CLEAN_STATE, workspace }),
@@ -418,7 +457,13 @@ describe('A16 — a forged approved:true, and the deny-all default', () => {
     // write). Both must still resolve to the same containment answer.
     symlinkSync(real, join(root, 'link'));
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-symlink') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-symlink',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
       readState: fixedStateReader({ ...CLEAN_STATE, workspace }),
@@ -433,7 +478,13 @@ describe('A16 — a forged approved:true, and the deny-all default', () => {
 
   test('a sibling with a shared PREFIX is not "inside" (no /ws vs /ws-cq confusion)', async () => {
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: () => Promise.resolve('nonce-sibling') },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-sibling',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
       readState: fixedStateReader(),
@@ -508,7 +559,13 @@ describe('the mutation lock is held THROUGH the write', () => {
     const authority = makeApprovalAuthority({
       // One verified approval per distinct subject, so both writes are
       // authorized — the point of the test is the LOCK, not the approval.
-      approvals: { nonceFor: (candidate) => Promise.resolve(`n-${candidate.inputDigest}`) },
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: `n-${candidate.inputDigest}`,
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: instrumented,
       readState: fixedStateReader(),
@@ -606,3 +663,150 @@ function realpathOf(dir: string): string {
 function git(cwd: string, args: string[]): void {
   execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' });
 }
+
+// The second security review's two state-binding findings. Both are about
+// the WINDOW between moments rather than about any single check: the
+// kernel's signature check and the op's admission are two different
+// instants, and "clean" is a boolean, not a description of the bytes.
+describe('the kernel-to-admission window (a signed state is required, and compared)', () => {
+  test('a workspace mutated between the kernel check and admission is refused, token UNSPENT', async () => {
+    // The signed claim describes HEAD A. By the time this op admits, the
+    // workspace is at HEAD B. The first version of this module adopted B as
+    // its baseline and the exercise happily re-checked B against B.
+    const readState = scriptedStateReader([{ ...CLEAN_STATE, headSha: 'head-B' }]);
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-window',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('changed since approval');
+    expect(reason).toContain('head-B');
+    expect(reason).toContain('between the kernel');
+    expect(reason).toContain('UNSPENT');
+    expect(spy.calls).toBe(0);
+    // The whole point: the token is still spendable after a re-approval
+    // against the state the workspace is actually in.
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('a verified approval with NO signed state is refused (fail-closed, no best guess)', async () => {
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      // An adapter that cannot supply the claim's state must refuse, not
+      // re-read at call time — a re-read collapses the two moments and
+      // reopens the window the field exists to close.
+      approvals: {
+        verifiedFor: () =>
+          Promise.resolve({ nonce: 'nonce-stateless' } as unknown as VerifiedApproval),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('carried no signed state');
+    expect(reason).toContain('mandatory');
+    expect(spy.calls).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('a matching signed state is admitted (the happy path still works)', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('ok');
+    expect(spy.calls).toBe(1);
+  });
+});
+
+describe('a dirty workspace is not an approvable state (the clean BOOLEAN is not enough)', () => {
+  test('a DIRTY tree at admission is refused outright, unspent', async () => {
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: 'nonce-dirty',
+            state: { ...CLEAN_STATE, workspace: candidate.workspace, treeClean: false },
+          }),
+      },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: {
+        read: () => Promise.resolve({ ...CLEAN_STATE, treeClean: false }),
+      },
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    const reason = outcome.status === 'needs-human' ? outcome.reason : '';
+    expect(reason).toContain('DIRTY');
+    // The reason must say WHY a boolean is not enough, because the ADR's
+    // literal predicate would have allowed this.
+    expect(reason).toContain('cannot distinguish one dirty state from another');
+    expect(spy.calls).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('TOCTOU: an untracked file appearing between admission and the write is refused, unspent', async () => {
+    // The specific hole: same HEAD, still "dirty" on both sides of the
+    // exercise, but a DIFFERENT dirty state than the one approved.
+    const readState = scriptedStateReader([CLEAN_STATE, { ...CLEAN_STATE, treeClean: false }]);
+    const fixture = grantingAuthority({
+      op: OP,
+      workspace: WORKSPACE,
+      targets: TARGETS,
+      readState,
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+    );
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+      'the tree is dirty (an untracked file counts)',
+    );
+    expect(spy.calls).toBe(0);
+    expect(fixture.ledger.spent()).toBe(0);
+  });
+});
+
+describe('the operator ledger is durable before it reports a spend (ADR-0003 §4c step 2)', () => {
+  test('the nonce is on disk, and the directory entry exists, when consume resolves', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-durable-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const ledger = makeFileNonceLedger(ledgerPath);
+    // Synchronous consumption is the observable half of the claim: by the
+    // time the promise settles the bytes must be readable from the file, not
+    // queued in a buffer. (The fdatasync/dir-fsync that make it survive a
+    // POWER loss are not observable from a test process, and are not claimed
+    // to be beyond the journal's own F_FULLFSYNC residual.)
+    return ledger.consume('nonce-durable').then((outcome) => {
+      expect(outcome).toBe('consumed');
+      expect(existsSync(ledgerPath)).toBe(true);
+      expect(readFileSync(ledgerPath, 'utf8')).toBe('nonce-durable\n');
+      return ledger.consume('nonce-durable');
+    });
+  });
+});

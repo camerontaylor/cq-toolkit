@@ -23,6 +23,7 @@ import {
 import { makeQuarantineLedger } from '../../../../src/ops/analyze/playbooks/quarantine.js';
 import type {
   ApprovalAuthority,
+  ApprovalState,
   ApprovalStateReader,
   InspectableNonceLedger,
 } from '../../../../src/ops/analyze/approval.js';
@@ -60,21 +61,29 @@ function approvedAuthority(readState?: ApprovalStateReader): {
   ledger: InspectableNonceLedger;
 } {
   const ledger = makeInMemoryNonceLedger();
+  // The state the "signed" claim carries. It must MATCH what the state
+  // reader below reports, or admission refuses on the kernel-to-admission
+  // comparison — which is the point of the field.
+  const approvedState: ApprovalState = {
+    workspace: '/ws',
+    headSha: 'head-at-approval',
+    treeClean: true,
+  };
   const authority = makeApprovalAuthority({
     // The nonce is DERIVED FROM THE SUBJECT, exactly as a real verified
     // token's nonce is bound to one op+inputs: two different playbooks get
     // two different tokens, while a re-dispatch of the SAME playbook over
     // the SAME inputs re-presents the SAME (now spent) token.
     approvals: {
-      nonceFor: (subject) =>
-        Promise.resolve(`nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`),
+      verifiedFor: (subject) =>
+        Promise.resolve({
+          nonce: `nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`,
+          state: { ...approvedState, workspace: subject.workspace },
+        }),
     },
     ledger,
     locks: makeProcessLocalMutationLocks(),
-    readState: readState ?? {
-      read: () =>
-        Promise.resolve({ workspace: '/ws', headSha: 'head-at-approval', treeClean: true }),
-    },
+    readState: readState ?? { read: () => Promise.resolve(approvedState) },
   });
   return { authority, ledger };
 }
@@ -821,7 +830,13 @@ describe('W4.3 the rollback is conditional and locked (no lost update)', () => {
       }),
     };
     const authority = makeApprovalAuthority({
-      approvals: { nonceFor: (s) => Promise.resolve(`nonce-${s.inputDigest.slice(0, 12)}`) },
+      approvals: {
+        verifiedFor: (s) =>
+          Promise.resolve({
+            nonce: `nonce-${s.inputDigest.slice(0, 12)}`,
+            state: { workspace: '/ws', headSha: 'head', treeClean: true },
+          }),
+      },
       ledger: makeInMemoryNonceLedger(),
       locks: instrumented,
       readState: {

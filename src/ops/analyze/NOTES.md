@@ -297,6 +297,44 @@ resolutions are decisions with a stated alternative, not defaults.
   refused `needs-human` and writes nothing, which is the A16 forged-
   `approved: true` state.
 
+### Second security review — three state-binding corrections
+
+- **The nonce seam now carries the SIGNED state, and admission compares
+  it.** `VerifiedApprovals` returns `{ nonce, state }`, not a bare nonce.
+  The kernel's signature check and this op's admission are two different
+  instants; with only a nonce, a workspace mutated BETWEEN them had its
+  post-mutation state silently adopted as the baseline the exercise then
+  re-checked — the module re-verified itself against a state no human had
+  ever seen. Admission now refuses on any difference between the claim's
+  `state` and the state read at admission, with the nonce UNSPENT.
+  _Integration contract:_ the adapter MUST source `state` from the
+  verified claim. Re-reading it at call time collapses the two moments back
+  into one and reopens the window; an adapter that cannot supply it must
+  return `undefined` (refusal), not a guess.
+- **A dirty workspace is not an approvable state** — a deliberate
+  TIGHTENING of ADR-0003 §4c step 1, which compares only the clean
+  BOOLEAN. That predicate admits a hole: an approval over a dirty tree stays
+  "valid" when the tree becomes a DIFFERENT dirty tree (same boolean, same
+  HEAD, different bytes). The alternative was hashing the full dirty tree,
+  which closes it at the cost of reading and hashing every tracked and
+  untracked byte on every state read; refusing the dirty state is the same
+  fail-closed direction at a fraction of the cost. **This diverges from the
+  ADR's literal predicate and needs the ADR owner's sign-off** — recorded
+  here rather than narrowed silently. Ignored files remain out of scope of
+  the state predicate (ADR's own stated residual).
+- **The durable ledger is now actually durable.** `appendFileSync` returns
+  once the bytes are in the OS page cache, so a machine crash could lose a
+  spent nonce and leave the token REPLAYABLE — the exact outcome §4c's
+  crash analysis exists to prevent, while the function claimed otherwise.
+  The append now goes through an append-mode handle with `fdatasync`, and
+  the ledger's directory is fsync'd once when the file is created, matching
+  the journal's own `durable: true` idiom (src/kernel/journal.ts) rather
+  than a hand-rolled idea. Two residuals remain and are stated in the code:
+  macOS `F_FULLFSYNC` is not issued (a power-loss window the journal
+  documents too), and the ledger is a plain file, not a MAC'd one — it is
+  trusted because it lives in the P1-trusted layer (ADR §1), not because it
+  is tamper-evident.
+
 ### Open integration lease (for the #238 / kernel owner, NOT done here)
 
 1. `src/ops/analyze/registry.ts` is #238's file and was deliberately not
@@ -315,3 +353,17 @@ resolutions are decisions with a stated alternative, not defaults.
 4. ADR-0003 §5's "same host, fresh `--journal-dir`" replay case is enforced
    by the DURABLE ledger (`makeFileNonceLedger`); the process-local ledger
    cannot enforce it and does not claim to.
+5. **Not safe for production binding until (1) above is wired.** With the
+   deny-all default the ops refuse every write, so there is no unsafe state
+   in the tree today; the risk is the adapter that binds the kernel
+   approvals. It inherits this contract: source `state` from the verified
+   claim, refuse rather than guess, and keep the deny-all default for any
+   subject the verifier has not approved.
+6. **The clean-tree tightening needs ADR sign-off** (see above). If the ADR
+   owner prefers the literal predicate, the replacement must be a full
+   digest of the dirty tree — not a return to the boolean, which is the hole.
+7. The journal's `approval-consumed` audit record (kid, nonce, subject
+   hash; token BYTES never) is still unwritten — this module consumes the
+   grant durably in the operator ledger but emits no journal event, so the
+   tamper-protection the journal fold would give is absent until the kernel
+   lane writes it.

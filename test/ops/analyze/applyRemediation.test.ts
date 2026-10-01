@@ -12,6 +12,7 @@ import { describe, expect, test } from 'vitest';
 import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import type {
   ApprovalAuthority,
+  ApprovalState,
   ApprovalStateReader,
   InspectableNonceLedger,
 } from '../../../src/ops/analyze/approval.js';
@@ -178,20 +179,28 @@ function approvedAuthority(readState?: ApprovalStateReader): {
   ledger: InspectableNonceLedger;
 } {
   const ledger = makeInMemoryNonceLedger();
+  // The state the "signed" claim carries. It must MATCH what the state
+  // reader below reports, or admission refuses on the kernel-to-admission
+  // comparison — which is the point of the field.
+  const approvedState: ApprovalState = {
+    workspace: '/ws',
+    headSha: 'head-at-approval',
+    treeClean: true,
+  };
   const authority = makeApprovalAuthority({
     // Derived from the subject, as a real verified token's nonce is bound
     // to one op+inputs: identical inputs re-present the same (spent) token,
     // changed inputs are a different subject with no token at all.
     approvals: {
-      nonceFor: (subject) =>
-        Promise.resolve(`nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`),
+      verifiedFor: (subject) =>
+        Promise.resolve({
+          nonce: `nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`,
+          state: { ...approvedState, workspace: subject.workspace },
+        }),
     },
     ledger,
     locks: makeProcessLocalMutationLocks(),
-    readState: readState ?? {
-      read: () =>
-        Promise.resolve({ workspace: '/ws', headSha: 'head-at-approval', treeClean: true }),
-    },
+    readState: readState ?? { read: () => Promise.resolve(approvedState) },
   });
   return { authority, ledger };
 }
@@ -1022,7 +1031,7 @@ describe('W4.3 approval at the mutation boundary (applyRemediation)', () => {
     const ledger = makeInMemoryNonceLedger();
     const authority = makeApprovalAuthority({
       // A16 at the seam: the run's snapshot holds no token for this subject.
-      approvals: { nonceFor: () => Promise.resolve(undefined) },
+      approvals: { verifiedFor: () => Promise.resolve(undefined) },
       ledger,
       locks: makeProcessLocalMutationLocks(),
       readState: {

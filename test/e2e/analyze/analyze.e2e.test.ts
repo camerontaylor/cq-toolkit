@@ -77,7 +77,13 @@ const AST_GREP_AVAILABLE = spawnSync('ast-grep', ['--version'], { stdio: 'ignore
  */
 function e2eApprovalAuthority(): ApprovalAuthority {
   return makeApprovalAuthority({
-    approvals: { nonceFor: (subject) => Promise.resolve(`e2e-${subject.op}`) },
+    approvals: {
+      verifiedFor: (subject) =>
+        Promise.resolve({
+          nonce: `e2e-${subject.op}`,
+          state: { workspace: subject.workspace, headSha: 'e2e-head', treeClean: true },
+        }),
+    },
     ledger: makeInMemoryNonceLedger(),
     locks: makeProcessLocalMutationLocks(),
     readState: {

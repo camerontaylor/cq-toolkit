@@ -73,7 +73,16 @@
 // read. Every seam is injectable, so the direct tests never spawn anything.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fdatasyncSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeSync,
+} from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import { GIT_HARDEN } from '../ratchet/git.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
@@ -184,13 +193,36 @@ function denyReason(subject: ApprovalSubject, why: string): string {
 }
 
 /**
- * The run's VERIFIED approvals (the kernel verifier's output: ADR-0003 §4a's
- * snapshot plus §4b steps 3–5). Returning a nonce asserts that a token has
- * ALREADY verified against this EXACT subject — signature, kid, TTL and
- * `inputsHash` are upstream and are not re-implemented here.
+ * What the KERNEL verifier hands this module: the nonce of a token it has
+ * ALREADY verified, together with the `state` that token was SIGNED AGAINST
+ * (ADR-0003 §2 — `state` is MANDATORY for a mutating op, and it is the
+ * approver's view of the workspace, not this module's).
+ *
+ * The state is carried because dropping it would open a window the module
+ * cannot see: the kernel's signature check and this op's admission are two
+ * separate moments, and a workspace mutated BETWEEN them would otherwise
+ * have the post-mutation state silently adopted as the baseline the
+ * exercise then re-checks against. Carrying the signed state lets
+ * {@link ApprovalAuthority.admit} compare "what the human approved" against
+ * "what the workspace is now" itself, and refuse the gap.
+ *
+ * INTEGRATION CONTRACT for the kernel owner (#238's adapter): `state` MUST
+ * be the `state` field of the VERIFIED claim — not a re-read at the moment
+ * of the call, which would collapse the two moments back into one and
+ * restore exactly the window this field exists to close. An adapter that
+ * cannot supply it must return undefined (refusal), not a best guess.
  */
+export interface VerifiedApproval {
+  /** The verified token's nonce — the single-use identity. */
+  readonly nonce: string;
+  /** The state the SIGNED claim carries, per ADR-0003 §2. */
+  readonly state: ApprovalState;
+}
+
+/** The run's VERIFIED approvals (the kernel verifier's output: ADR-0003 §4a's snapshot plus §4b steps 3–5). */
 export interface VerifiedApprovals {
-  nonceFor(subject: ApprovalSubject): Promise<string | undefined>;
+  /** The verified approval for this EXACT subject, or none. */
+  verifiedFor(subject: ApprovalSubject): Promise<VerifiedApproval | undefined>;
 }
 
 /**
@@ -237,9 +269,26 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * The DURABLE operator ledger (ADR-0003 §5): an append-only NDJSON file in
  * the P1-trusted layer, one nonce per line, re-read on every consume so a
  * nonce spent by an earlier run — or by a concurrent process — is refused.
- * Synchronous by design: the append IS the durability point, and a buffered
- * append would make ADR §4c's crash analysis ("a crash between step 2 and
- * step 3 burns the token — safe") untrue.
+ *
+ * DURABILITY, matched to the journal's own idiom (src/kernel/journal.ts,
+ * `durable: true`) rather than to a hand-rolled idea: the line is written
+ * through an append-mode handle and `fdatasync`ed BEFORE `consume` resolves,
+ * and the ledger's DIRECTORY is fsync'd once, when this process creates the
+ * file, so the directory entry is durable too. A plain `appendFileSync` was
+ * the first version here and it was NOT durable in the sense the ADR's crash
+ * analysis needs: it returns once the bytes are in the OS page cache, so a
+ * machine crash could lose a spent nonce and leave the token REPLAYABLE —
+ * precisely the outcome §4c's "a crash between step 2 and step 3 burns the
+ * token (safe)" exists to prevent.
+ *
+ * Two residuals, stated rather than implied (both are the journal's own):
+ * macOS `F_FULLFSYNC` is not issued, so a POWER-LOSS window remains where
+ * the data was in the drive's cache but not on the platters — process-crash
+ * durability does not depend on it, and neither does the replay window this
+ * ledger closes for a same-host re-run. And the ledger is a plain file, not
+ * a MAC'd one: it is trusted because it lives in the P1-trusted layer, not
+ * because it is tamper-evident. An attacker who can write that layer can
+ * rewrite history; that assumption is ADR §1's, not this function's.
  *
  * Concurrency, stated because it is a real precondition: the
  * read-then-append is not atomic on its own, so this ledger is correct only
@@ -249,6 +298,9 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  */
 export function makeFileNonceLedger(path: string): InspectableNonceLedger {
   const known = new Set<string>();
+  // The directory entry is durable once the FILE is created; later appends
+  // to a known file skip the dir fsync entirely (the journal's own rule).
+  let dirSynced = existsSync(path);
   const absorb = (): void => {
     // Fresh read every time: the in-process set is a CACHE of a file another
     // process may have appended since. A missing file is an empty ledger
@@ -264,7 +316,21 @@ export function makeFileNonceLedger(path: string): InspectableNonceLedger {
     consume: async (nonce) => {
       absorb();
       if (known.has(nonce)) return 'spent';
-      appendFileSync(path, `${nonce}\n`, { encoding: 'utf8' });
+      // Synchronous on purpose: the append must be COMPLETE before this
+      // promise resolves, or the exercise would report "consumed" for a
+      // nonce that is still only a promise of a byte on disk.
+      const isNew = !dirSynced;
+      const handle = openSync(path, 'a');
+      try {
+        writeSync(handle, `${nonce}\n`);
+        fdatasyncSync(handle);
+      } finally {
+        closeSync(handle);
+      }
+      if (isNew) {
+        dirSynced = true;
+        syncDirSync(dirname(path));
+      }
       known.add(nonce);
       return 'consumed';
     },
@@ -459,6 +525,33 @@ export interface ApprovalAuthorityConfig {
   trustedLayerDir?: string;
 }
 
+/**
+ * fsync a DIRECTORY so a freshly created file's directory entry is durable
+ * (ADR-0003 annex §2: "the journal directory is fsync'd when a run file is
+ * created"), using the same best-effort policy as the journal's `syncDir`:
+ * exotic mounts (network FS, some container overlays) refuse a read-mode
+ * directory fsync with EPERM/EACCES/EINVAL/ENOSYS, and on those the call
+ * is a recorded no-op rather than a blocker — the supported local
+ * filesystem, the only case these claims are made about, gets real
+ * dirent durability. A refusal here is deliberately NOT fatal: the nonce
+ * line itself is already fdatasync'd, so the worst case is a lost directory
+ * ENTRY on a filesystem that cannot promise one, not a lost spend record on
+ * the file.
+ */
+function syncDirSync(dir: string): void {
+  const SOFT_ERRORS = new Set(['EPERM', 'EACCES', 'EINVAL', 'ENOSYS']);
+  let handle: number | undefined;
+  try {
+    handle = openSync(dir, 'r');
+    fsyncSync(handle);
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === undefined || !SOFT_ERRORS.has(code)) throw err;
+  } finally {
+    if (handle !== undefined) closeSync(handle);
+  }
+}
+
 /** The lock provider an authority was built with, reachable for the write-through lock. */
 const LOCKS = Symbol('cq.approval.locks');
 
@@ -503,8 +596,27 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           reason: `approval refused: the workspace state could not be read — ${messageOf(err)}; an unreadable state is never treated as unchanged, and nothing was written`,
         };
       }
-      const nonce = await config.approvals.nonceFor(subject);
-      if (nonce === undefined || nonce === '') {
+      // A DIRTY TREE IS NOT AN APPROVABLE STATE (deliberate TIGHTENING of
+      // ADR-0003 §4c step 1, which compares only the clean BOOLEAN). The
+      // boolean admits a hole the ADR does not close: an approval taken
+      // over a dirty tree stays "valid" when the tree becomes a DIFFERENT
+      // dirty tree — same `treeClean: false`, same HEAD, entirely different
+      // bytes. Hashing the full dirty tree instead would close it too, at
+      // the cost of reading and hashing every tracked and untracked byte on
+      // every state read; refusing the dirty state is the same fail-closed
+      // direction at a fraction of the cost, and it is the direction this
+      // whole module already takes. The ADR's permissive predicate is
+      // therefore NOT implemented as written — recorded in the family
+      // NOTES as a divergence for the ADR owner, not silently narrowed.
+      if (!state.treeClean) {
+        return {
+          granted: false,
+          reason:
+            'approval refused: the workspace is DIRTY (an untracked file counts) — this module only acts on a strictly clean tree, because a clean/dirty BOOLEAN cannot distinguish one dirty state from another, and the approval was not taken over a known state; commit, stash or clean the workspace, then approve against that',
+        };
+      }
+      const verified = await config.approvals.verifiedFor(subject);
+      if (verified === undefined || verified.nonce === '') {
         return {
           granted: false,
           reason: denyReason(
@@ -513,7 +625,28 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           ),
         };
       }
-      return { granted: true, grant: { subject, nonce, state } };
+      // THE KERNEL-TO-ADMISSION WINDOW (ADR-0003 §4b → §4c). The kernel
+      // verified the signature at some earlier moment; this is a later one.
+      // If the workspace moved in between, adopting the new state as the
+      // baseline would silently re-point a human's approval at bytes they
+      // never saw — so the signed state is compared to the state read HERE,
+      // and a difference refuses with the nonce UNSPENT.
+      const signed = verified.state;
+      if (signed === undefined || signed === null) {
+        return {
+          granted: false,
+          reason:
+            "approval refused: the verified approval carried no signed state — ADR-0003 §2 makes `state` mandatory for a mutating op, and without it this module cannot tell what the approver actually saw; the adapter must supply the claim's state, not a re-read",
+        };
+      }
+      const gap = stateDrift(signed, state);
+      if (gap !== null) {
+        return {
+          granted: false,
+          reason: `approval state changed since approval: ${gap} — the workspace moved between the kernel's verification of this token and this op's admission, so the approval cannot be shown to cover the current state; nothing was written and the token is UNSPENT (re-approve against the current state)`,
+        };
+      }
+      return { granted: true, grant: { subject, nonce: verified.nonce, state } };
     },
     exercise: async (grant, subject) => {
       if (exercised.has(grant)) {
@@ -697,7 +830,15 @@ function sameSubject(a: ApprovalSubject, b: ApprovalSubject): boolean {
   );
 }
 
-/** The first drift between the approved state and the current one, or null. */
+/**
+ * The first drift between the approved state and the current one, or null.
+ *
+ * Both states are strictly CLEAN by the time this runs — admission refuses
+ * a dirty state outright — so the tree comparison only ever sees
+ * clean→dirty, and that is the only direction it has to name. The
+ * dirty→clean direction is unrepresentable rather than unhandled: there is
+ * no grant to compare against, because a dirty state never produced one.
+ */
 function stateDrift(approved: ApprovalState, current: ApprovalState): string | null {
   if (approved.workspace !== current.workspace) {
     return `workspace ${current.workspace} ≠ ${approved.workspace}`;
@@ -707,7 +848,7 @@ function stateDrift(approved: ApprovalState, current: ApprovalState): string | n
   }
   if (approved.treeClean !== current.treeClean) {
     return current.treeClean
-      ? 'the tree is clean again, but it was dirty at approval'
+      ? 'the tree is clean again, but the approval was not taken over a clean tree'
       : 'the tree is dirty (an untracked file counts)';
   }
   return null;

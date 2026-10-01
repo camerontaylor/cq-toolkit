@@ -59,14 +59,27 @@ export const failingStateReader: ApprovalStateReader = {
   read: () => Promise.reject(new Error("git rev-parse HEAD failed in '/ws'")),
 };
 
-/** The verified-approval seam: every subject gets a nonce derived from the subject. */
-export function alwaysVerifiedApprovals(): VerifiedApprovals {
-  return { nonceFor: (subject) => Promise.resolve(nonceFor(subject)) };
+/**
+ * The verified-approval seam: every subject gets a nonce derived from the
+ * subject, carrying the state the "signed" claim was taken against. The
+ * state is REQUIRED by the interface because a token without one cannot be
+ * shown to cover anything (ADR-0003 §2) — a test that wants to model a
+ * state the token does not describe must script the state reader, not drop
+ * the field.
+ */
+export function alwaysVerifiedApprovals(state: ApprovalState = CLEAN_STATE): VerifiedApprovals {
+  return {
+    verifiedFor: (subject) =>
+      Promise.resolve({
+        nonce: nonceFor(subject),
+        state: { ...state, workspace: subject.workspace },
+      }),
+  };
 }
 
 /** NO verified approvals: the A16 shape — nothing in the run's snapshot. */
 export const noVerifiedApprovals: VerifiedApprovals = {
-  nonceFor: () => Promise.resolve(undefined),
+  verifiedFor: () => Promise.resolve(undefined),
 };
 
 /** The nonce a verified approval for `subject` carries (stable per subject). */
@@ -115,16 +128,18 @@ export function grantingAuthority(options: ApprovalFixtureOptions): ApprovalFixt
   const ledger = options.ledger ?? makeInMemoryNonceLedger();
   const locks = options.locks ?? makeProcessLocalMutationLocks();
   const authority = makeApprovalAuthority({
-    approvals: options.approvals ?? {
-      nonceFor: (subject) =>
-        Promise.resolve(
-          subject.op === options.op &&
-            subject.workspace === options.workspace &&
-            subject.inputDigest === (options.inputDigest ?? 'sha256:test')
-            ? nonceFor(subject)
-            : undefined,
-        ),
-    },
+    approvals:
+      options.approvals ??
+      ({
+        verifiedFor: (candidate) =>
+          Promise.resolve(
+            candidate.op === options.op &&
+              candidate.workspace === options.workspace &&
+              candidate.inputDigest === (options.inputDigest ?? 'sha256:test')
+              ? { nonce: nonceFor(candidate), state }
+              : undefined,
+          ),
+      } satisfies VerifiedApprovals),
     ledger,
     locks,
     readState: options.readState ?? fixedStateReader(state),
