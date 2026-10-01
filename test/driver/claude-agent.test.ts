@@ -2674,6 +2674,37 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     }
   });
 
+  test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any agent contact (PR #238 review round 2)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-preflight-'));
+    try {
+      let consulted = false;
+      const driver = streamDriver(scratchDir, () => {
+        consulted = true;
+        return [];
+      });
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+      );
+      // The uniform schema-miss verdict, compiled locally — the same shape
+      // the settle-time miss flow produces, never a provider/harness
+      // failure from a request-setup rejection. The SDK was never entered
+      // and no session state exists.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.error).toContain('test.broken/v1');
+      expect(result.error).toContain('could not be compiled');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+      expect(consulted).toBe(false); // the agent SDK never ran
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('an assistant frame with the structured error rate_limit classifies quota', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {

@@ -1130,6 +1130,52 @@ describe('WorkerResult.providerSignals — seam v2, allowed on ANY verdict', () 
     });
   });
 
+  test('window values carry the conformance bounds (PR #238 review round 2)', () => {
+    // The mirror enforces the same rows the shipped conformance suite
+    // asserts per result (src/driver/conformance.ts): nonempty ids,
+    // utilization 0–1, parseable reset instants — plus integral nonnegative
+    // remaining counts (the doc calls them counts). Malformed quota
+    // evidence must not parse as validated data.
+    const schema = kernelSchema.WorkerResultSchema;
+    const window = (over: Record<string, unknown>): unknown => ({
+      ...base,
+      stopReason: 'complete',
+      providerSignals: { windows: [{ id: '5h', utilization: 0.5, ...over }] },
+    });
+    failsParse(schema, window({ id: '' }), 'an empty window id');
+    failsParse(schema, window({ utilization: 1.5 }), 'utilization over 1');
+    failsParse(schema, window({ utilization: -0.1 }), 'negative utilization');
+    failsParse(
+      schema,
+      {
+        ...base,
+        stopReason: 'complete',
+        providerSignals: { windows: [{ id: 'requests', remaining: { requests: 2.5 } }] },
+      },
+      'a fractional remaining count',
+    );
+    failsParse(
+      schema,
+      {
+        ...base,
+        stopReason: 'complete',
+        providerSignals: { windows: [{ id: 'tokens', remaining: { tokens: -1 } }] },
+      },
+      'a negative remaining count',
+    );
+    failsParse(schema, window({ resetAt: 'next tuesday' }), 'an unparseable resetAt');
+    // The boundary values stay legal: the closed utilization range, a zero
+    // count, and any parseable instant.
+    schema.parse(window({ utilization: 0, resetAt: '2026-09-28T00:00:00.000Z' }));
+    schema.parse({
+      ...base,
+      stopReason: 'complete',
+      providerSignals: {
+        windows: [{ id: 'requests', remaining: { requests: 0, tokens: 0 }, utilization: 1 }],
+      },
+    });
+  });
+
   test('an empty providerSignals object parses — every field is optional', () => {
     roundTripsThrough(kernelSchema.WorkerResultSchema, {
       ...base,

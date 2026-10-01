@@ -28,22 +28,26 @@ const BASELINE = 'baselines/typecheck--typecheck-count--7caef1e76077.json';
  * the shipped conformance suite lives under src/driver and must satisfy the
  * same rule (its kernel-side leg, b-ii, lives in the test tree instead).
  */
-function kernelImports(directory: string): string[] {
+function kernelImports(directory: string, root = directory): string[] {
   const hits: string[] = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      hits.push(...kernelImports(path));
+      hits.push(...kernelImports(path, root));
     } else if (entry.name.endsWith('.ts')) {
       // Tokenize before matching (a JSDoc mention of a kernel module is
       // prose, not an import edge). The single-pass scanner keeps literal
       // contents VERBATIM — erasing them would erase the quoted specifiers
       // this scan matches on — while dropping both comment forms (block-
       // first regex passes once hid a live driver→kernel import behind a
-      // `/*` inside a `//` comment).
+      // `/*` inside a `//` comment). The specifier class covers
+      // single/double quotes AND constant template literals (a backtick
+      // import is still an import edge).
       const source = stripComments(readFileSync(path, 'utf8'));
-      if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*\/kernel\//.test(source)) {
-        hits.push(path.slice(ROOT.length + 1));
+      if (/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*\/kernel\//.test(source)) {
+        // Relative to the scan root (kept through the recursion), so a
+        // fixture scan names its files exactly like the live tree names.
+        hits.push(path.slice(root.length + 1));
       }
     }
   }
@@ -108,6 +112,29 @@ afterEach(() => {
 describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () => {
   it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
     expect(kernelImports(DRIVER_SRC)).toEqual([]);
+  });
+  it('the scan also catches a constant template-literal specifier (PR #238 review round 2)', () => {
+    // A backtick import is still an import edge: the matcher accepts
+    // single-quoted, double-quoted AND constant template-literal
+    // specifiers, so ``await import(`…src/kernel/…`)`` cannot bypass the
+    // driver-to-kernel seam guard.
+    const scratch = mkdtempSync(join(tmpdir(), 'cq-kernel-import-tick-'));
+    roots.push(scratch);
+    writeFileSync(
+      join(scratch, 'backtick.ts'),
+      'const mod = await import(`../../src/kernel/types.js`);\nexport default mod;\n',
+    );
+    writeFileSync(
+      join(scratch, 'quoted.ts'),
+      "import x from '../../src/kernel/runner.js';\nexport default x;\n",
+    );
+    // The scan names both files (its path slice is relative to the repo
+    // root, so fixture names are compared by basename).
+    const hits = kernelImports(scratch);
+    expect(hits.map((hit) => hit.replaceAll('\\', '/').split('/').pop())).toEqual([
+      'backtick.ts',
+      'quoted.ts',
+    ]);
   });
   it('counts projected files, imported files, configs and inputs outside lint traversal', () => {
     const root = fixture();

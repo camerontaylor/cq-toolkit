@@ -170,6 +170,9 @@ const DEFAULT_PROVIDERS: readonly string[] = ['zai', 'anthropic', 'openai', 'dee
 /** The default lane for the default providers — the in-process lane. */
 const DEFAULT_LANE: LaneId = 'ai-sdk';
 
+/** The closed lane set, for runtime validation of decoded/JS binding values. */
+const LANE_IDS: readonly LaneId[] = ['ai-sdk', 'claude-agent', 'subprocess', 'acp'];
+
 /**
  * Mirrors every lane's private `defaultSessionsDir()` (they all share it):
  * the effective dir when neither the lane config nor the factory names one.
@@ -200,7 +203,22 @@ function laneForRole(
     byRole !== undefined && Object.prototype.hasOwnProperty.call(byRole, provider)
       ? byRole[provider]
       : byRole?.['*'];
-  if (configured !== undefined) return configured;
+  if (configured !== undefined) {
+    // Runtime binding validation (PR #238 review round 2): decoded/JS config
+    // is plain data the compiler already trusted — a value outside the four
+    // lanes must fail HERE as a structured pre-dispatch 'config' throw (the
+    // factory contract), never as a wrapper around an unconstructable lane
+    // whose run() dies later with an unclassified error, after the caller
+    // may have fetched refs or prepared a worktree. Covers exact and
+    // wildcard bindings alike — both flow through `configured`.
+    if (!LANE_IDS.includes(configured)) {
+      throw new DispatchError(
+        'config',
+        `driver factory: binding for role '${role}' on provider '${provider}' names unknown lane '${String(configured)}' — expected one of: ${LANE_IDS.join(', ')}`,
+      );
+    }
+    return configured;
+  }
   if (DEFAULT_PROVIDERS.includes(provider)) return DEFAULT_LANE;
   throw new DispatchError(
     'config',

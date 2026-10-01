@@ -343,6 +343,45 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 describe('ai-sdk driver specifics (mock model)', () => {
+  test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any provider call (PR #238 review round 2)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-preflight-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          mock: () => {
+            throw new Error('the provider must never be consulted for an uncompilable schema');
+          },
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        sandboxConfig: {
+          mode: 'off',
+          backend: 'auto',
+          network: 'model-only',
+          runTool: 'on',
+          envPassthrough: [],
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+        }),
+      );
+      // The uniform schema-miss verdict, compiled locally — the same shape
+      // the settle-time miss flow produces, never a provider/harness
+      // failure from a request-setup rejection. No session state exists.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.error).toContain('test.broken/v1');
+      expect(result.error).toContain('could not be compiled');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('omits run from the model surface when CQ policy withholds it', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
     try {

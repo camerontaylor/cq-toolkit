@@ -37,24 +37,28 @@ const OPS_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/ops'
  * direct lane import would bypass the served-model wrapper and the
  * plan-data-never-names-an-executable bound.
  */
-async function laneImports(directory: string): Promise<string[]> {
+async function laneImports(directory: string, root = directory): Promise<string[]> {
   const hits: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      hits.push(...(await laneImports(path)));
+      hits.push(...(await laneImports(path, root)));
     } else if (entry.name.endsWith('.ts')) {
       // Tokenize before matching (a JSDoc mention of a lane module is
       // prose, not an import edge). The single-pass scanner keeps literal
       // contents VERBATIM — erasing them would erase the quoted specifiers
-      // this scan matches on — while dropping both comment forms.
+      // this scan matches on — while dropping both comment forms. The
+      // specifier class covers single/double quotes AND constant
+      // template literals (a backtick import is still an import edge).
       const source = stripComments(await readFile(path, 'utf8'));
       if (
-        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"][^'"]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
+        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
           source,
         )
       ) {
-        hits.push(path.slice(OPS_SRC.length + 1));
+        // Relative to the scan root (kept through the recursion), so a
+        // fixture scan names its files exactly like the live tree names.
+        hits.push(path.slice(root.length + 1));
       }
     }
   }
@@ -177,6 +181,33 @@ describe('sample: pure op through the real registry', () => {
 describe('sample: agentic-class op through the real registry', () => {
   test('no src/ops module imports a lane module — static or dynamic (the factory rule)', async () => {
     expect(await laneImports(OPS_SRC)).toEqual([]);
+  });
+
+  test('the scan also catches a constant template-literal specifier (PR #238 review round 2)', async () => {
+    // A backtick import is still an import edge: the matcher accepts
+    // single-quoted, double-quoted AND constant template-literal
+    // specifiers, so ``await import(`…driver/acp/…`)`` cannot bypass the
+    // ops-to-lane guard.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-lane-import-tick-'));
+    try {
+      await writeFile(
+        join(scratch, 'backtick.ts'),
+        'const mod = await import(`../../driver/acp/index.js`);\nexport default mod;\n',
+      );
+      await writeFile(
+        join(scratch, 'quoted.ts'),
+        "import x from '../../driver/subprocess/index.js';\nexport default x;\n",
+      );
+      // The scan names both files (its path slice is relative to the live
+      // src/ops tree, so fixture names are compared by basename).
+      const hits = await laneImports(scratch);
+      expect(hits.map((hit) => hit.replaceAll('\\', '/').split('/').pop())).toEqual([
+        'backtick.ts',
+        'quoted.ts',
+      ]);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 
   test('sweep.unit without a driver config fails honestly before any spawn', async () => {

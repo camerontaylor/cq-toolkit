@@ -163,6 +163,40 @@ describe('driver factory — resolution', () => {
     );
   });
 
+  test('a binding naming an unknown lane is a pre-dispatch config throw (exact and wildcard)', () => {
+    // Decoded/JS config is plain data the compiler already trusted: a
+    // binding value outside the four lanes must fail at RESOLVE time as a
+    // structured 'config' throw — never as a wrapper around an
+    // unconstructable lane whose run() dies unclassified mid-goal (PR #238
+    // review round 2).
+    const decoded = {
+      fixer: { zai: 'not-a-lane' },
+    } as unknown as NonNullable<DriverFactoryConfig['bindings']>;
+    const exact = createDriverFactory({ bindings: decoded });
+    const thrown = (): unknown => {
+      try {
+        exact.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'glm-4.6' } });
+        return undefined;
+      } catch (err) {
+        return err;
+      }
+    };
+    const err = thrown();
+    expect(err).toBeInstanceOf(DispatchError);
+    expect(errorClassOf(err)).toBe('config');
+    expect((err as Error).message).toMatch(/unknown lane 'not-a-lane'/);
+    expect((err as Error).message).toMatch(/role 'fixer' on provider 'zai'/);
+    // The wildcard row flows through the same validation.
+    const wild = createDriverFactory({
+      bindings: {
+        classifier: { '*': 'vendor' },
+      } as unknown as NonNullable<DriverFactoryConfig['bindings']>,
+    });
+    expect(() =>
+      wild.resolve({ role: 'classifier', modelSpec: { provider: 'anything', model: 'm' } }),
+    ).toThrow(/unknown lane 'vendor'/);
+  });
+
   test("the deprecated provider 'ai-sdk' alias normalises to provider 'zai' with a cq: stderr notice", async () => {
     // The ABSENT-sink pin (PR #238 review P2): a bare createDriverFactory()
     // — the ops registries' exact call shape — keeps today's stderr write.

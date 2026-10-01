@@ -279,7 +279,7 @@ import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
-import { validateStructured } from '../common/structured.js';
+import { compileOutputSchemaFault, validateStructured } from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -519,6 +519,25 @@ export class SubprocessDriver implements Driver {
     const signal = options?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+
+    // --- Structured-output preflight (PR #238 review round 2): the schema
+    // document is caller-authored plain data — compile it BEFORE the CLI is
+    // spawned. An uncompilable document is the uniform LOCAL 'output-invalid'
+    // verdict (the settle-time miss shape), never a provider/harness failure
+    // from a request-setup rejection. No record exists yet (none is created):
+    // zero usage, no denials, no sessionId.
+    if (opInvocation.outputSchema !== undefined) {
+      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
+      if (schemaFault !== undefined) {
+        return {
+          usage: zeroUsage(),
+          denials: [],
+          stopReason: 'error',
+          error: boundedErrorText(`subprocess driver: structured output invalid — ${schemaFault}`),
+          errorClass: 'output-invalid',
+        };
+      }
     }
 
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in

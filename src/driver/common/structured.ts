@@ -190,16 +190,36 @@ export function toOutputSchema(name: string, schema: z.ZodType): OutputSchema {
 }
 
 /**
+ * The shared PRE-DISPATCH compile check (PR #238 review round 2): the
+ * invocation schema is caller-authored plain data, so a lane compiles it
+ * BEFORE shipping the document to its provider — an uncompilable document
+ * (an unresolvable/unrepresentable doc) must surface as the uniform
+ * `output-invalid` verdict compiled locally, never as a provider/harness
+ * failure from a request-setup rejection. Returns the compiler's objection
+ * (the same text `validateStructured` reports), or `undefined` when the
+ * document compiles.
+ */
+export function compileOutputSchemaFault(os: OutputSchema): string | undefined {
+  try {
+    z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
+    return undefined;
+  } catch (err) {
+    return `schema '${os.name}' could not be compiled from its JSON Schema document: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+  }
+}
+
+/**
  * The shared after-settle validator (ADR-0002 §2.3): judge `value` against
  * the SAME stripped document that was sent to the lane. The zod schema is
  * re-derived from `os.schema` (never the caller's original contract), so a
  * lane cannot pass a doc it did not validate against. Never mutates `value`;
  * on `ok` returns the schema-normalised plain JSON (e.g. unknown keys are
  * treated exactly as the emitted document treats them). A document that
- * cannot even COMPILE (the invocation schema is caller-authored plain data —
- * an unresolvable/unrepresentable document must surface as the uniform
- * `output-invalid` verdict, never as a foreign throw past the seam) is an
- * `ok: false` result naming the schema and the compiler's objection.
+ * cannot even COMPILE is an `ok: false` result naming the schema and the
+ * compiler's objection — the same objection {@link compileOutputSchemaFault}
+ * preflights before dispatch.
  */
 export function validateStructured(
   os: OutputSchema,
@@ -207,17 +227,11 @@ export function validateStructured(
 ): { ok: true; value: unknown } | { ok: false; reason: string } {
   // `JsonSchema` is deliberately the loose plain-data seam type; zod's
   // importer wants its own (structurally identical) JSON Schema type.
-  let schema: z.ZodType;
-  try {
-    schema = z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `schema '${os.name}' could not be compiled from its JSON Schema document: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
+  const fault = compileOutputSchemaFault(os);
+  if (fault !== undefined) {
+    return { ok: false, reason: fault };
   }
+  const schema = z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     return { ok: false, reason: z.prettifyError(parsed.error) };

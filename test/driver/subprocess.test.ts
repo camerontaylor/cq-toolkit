@@ -2940,6 +2940,31 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
     });
   });
 
+  test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any spawn (PR #238 review round 2)', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, calls));
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+      );
+      // The uniform schema-miss verdict, compiled locally — the same shape
+      // the settle-time miss flow produces, never a provider/harness
+      // failure from a request-setup rejection. Nothing was spawned and no
+      // session state exists.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.error).toContain('test.broken/v1');
+      expect(result.error).toContain('could not be compiled');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+      expect(calls).toEqual([]); // the CLI never ran
+    });
+  });
+
   test('classifier rows through the lane: quota (claude limit text, spend limit, opencode funds) and rate-limit rows', async () => {
     await withScratch(async (scratchDir) => {
       let runCount = 0;

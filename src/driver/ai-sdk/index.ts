@@ -212,7 +212,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
-import { validateStructured } from '../common/structured.js';
+import { compileOutputSchemaFault, validateStructured } from '../common/structured.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -316,6 +316,26 @@ export class AiSdkDriver implements Driver {
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
+
+    // --- Structured-output preflight (PR #238 review round 2): the schema
+    // document is caller-authored plain data — compile it FIRST, before
+    // even the provider handle is resolved. An uncompilable document is the
+    // uniform LOCAL 'output-invalid' verdict (the settle-time miss shape),
+    // never a provider/harness failure from a request-setup rejection. No
+    // record exists yet (none is created): zero usage, no denials, no
+    // sessionId.
+    if (opInvocation.outputSchema !== undefined) {
+      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
+      if (schemaFault !== undefined) {
+        return {
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'error',
+          error: boundedErrorText(`ai-sdk driver: structured output invalid — ${schemaFault}`),
+          errorClass: 'output-invalid',
+        };
+      }
+    }
 
     // --- Pre-dispatch validation: everything here throws BEFORE the model
     // is contacted and BEFORE any session/workspace exists (fail loudly, no

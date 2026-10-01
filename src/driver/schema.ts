@@ -157,16 +157,27 @@ export const ProviderSignalsSchema: z.ZodType<ProviderSignals> = z
       .array(
         z
           .object({
-            id: z.string(),
-            utilization: z.number().exactOptional(),
+            // Window-value bounds (PR #238 review round 2): the same rows the
+            // shipped conformance suite asserts per result
+            // (src/driver/conformance.ts) and the ProviderSignals doc states —
+            // nonempty ids, utilization 0–1, integral nonnegative remaining
+            // counts, parseable reset instants. Malformed quota evidence must
+            // not parse through the strict mirror as validated data.
+            id: z.string().min(1),
+            utilization: z.number().min(0).max(1).exactOptional(),
             remaining: z
               .object({
-                requests: z.number().exactOptional(),
-                tokens: z.number().exactOptional(),
+                requests: z.number().int().nonnegative().exactOptional(),
+                tokens: z.number().int().nonnegative().exactOptional(),
               })
               .strict()
               .exactOptional(),
-            resetAt: z.string().exactOptional(),
+            resetAt: z
+              .string()
+              .refine((value) => !Number.isNaN(Date.parse(value)), {
+                error: 'must be a parseable instant',
+              })
+              .exactOptional(),
           })
           .strict(),
       )
