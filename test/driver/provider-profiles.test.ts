@@ -296,6 +296,55 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
   });
 
+  // Two blocking windows: BOTH must clear, so every blocking window needs a known
+  // release time and the defer is the MAX across them. An endpoint value that
+  // resolves ONE of them does not make the other resolved.
+  test('two blocked windows: 7d from a targeted endpoint, 5h from its header -> MAX of both', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          // 5h blocked, with a LATE header reset...
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1.0',
+          'anthropic-ratelimit-unified-5h-reset': '1790341200',
+          // ...7d blocked with NO header reset of its own.
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+        },
+      },
+      // Targeted at 7d, but EARLIER than the 5h header reset.
+      { resetsAt: '2026-09-28T00:00:00Z', window: 'weekly' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    // The max, NOT the endpoint value alone: deferring to the 7d endpoint reset
+    // would retry while the 5h wall is still up.
+    expect(verdict.deferUntilMs).toBe(1_790_341_200_000);
+    expect(verdict.deferUntilMs).not.toBe(Date.parse('2026-09-28T00:00:00Z'));
+  });
+
+  test('two blocked windows, both headers missing, endpoint names only one -> NO defer', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1.0',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-utilization': '1.0',
+        },
+      },
+      // Resolves the 7d wall only; the 5h wall has no known release time.
+      { resetsAt: '2026-09-28T00:00:00Z', window: 'weekly' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+    expect(verdict.advisoryReason).toMatch(/needs-human/);
+  });
+
   test('an OpenAI spend or usage-limit 429 is QUOTA, never a retryable throttle', () => {
     // Codes verified against the vendor spend-limits page, fetched 2026-10-01.
     for (const code of [

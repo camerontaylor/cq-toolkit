@@ -59,6 +59,11 @@ export interface QuotaObservation {
   readonly window?: '5h' | '7d' | 'weekly' | 'monthly';
 }
 
+/** Normalize an observation's window label onto the Claude header window ids. */
+function normalizedWindow(window: QuotaObservation['window']): string | undefined {
+  return window === 'weekly' ? '7d' : window;
+}
+
 /** A classification with the defer-until time it can support, if any. */
 export interface ProviderSignalVerdict {
   readonly errorClass: ProviderErrorClass;
@@ -103,65 +108,55 @@ type DeferResolution =
  * blocking when its `-status` is `rejected` or its `-utilization` has reached
  * 1.0.
  *
- * Every blocking window must contribute its OWN readable reset. One that does
- * not yields `unresolved-blocking`, never a substitute: the window that is
- * actually blocking is precisely the one with no known release time, so any
- * other time - the unblocked window's reset included - provably misstates when
- * the wall moves. That is a needs-human decision.
+ * EVERY blocking window must contribute a release time, and the defer is the MAX
+ * across all of them, because all of them must clear before a retry is sound. A
+ * window's time comes from its own `-*-reset` header, or from an endpoint
+ * observation that NAMES that window. One blocking window with neither is
+ * `unresolved-blocking`, never a substitute: the wall actually in the way is
+ * precisely the one with no known release time, so no other time - a sibling
+ * window's header reset, or an endpoint value belonging to a different window -
+ * can stand in for it. That is a needs-human decision.
  *
- * When no window reports blocking, the LATER readable reset is used, which is
- * the only choice that cannot produce an early retry.
+ * When no window reports blocking, the LATER readable header reset is used, which
+ * is the only choice that cannot produce an early retry.
  *
  * A caller that knows a reset is already in the past (a stale header) should
  * treat the result as needs-human too; the wall clock belongs to the runner, not
  * to this pure helper.
  */
-function claudeDeferResolution(signal: ProviderSignal): DeferResolution {
+function claudeDeferResolution(
+  signal: ProviderSignal,
+  observedQuota: QuotaObservation | undefined,
+): DeferResolution {
   const blockingWindows: string[] = [];
   const blockingResets: number[] = [];
   const anyResetMs: number[] = [];
-  let blockingWithoutReset = false;
+  const endpointWindow = normalizedWindow(observedQuota?.window);
+  const endpointResetMs = isoResetMs(observedQuota?.resetsAt);
   for (const [window, statusHeader, utilizationHeader] of CLAUDE_WINDOWS) {
-    const reset = epochSecondsMs(
+    const headerResetMs = epochSecondsMs(
       headerValue(signal, `anthropic-ratelimit-unified-${window}-reset`),
     );
     const status = headerValue(signal, statusHeader);
     const utilization = Number(headerValue(signal, utilizationHeader));
     const blocking = status === 'rejected' || (Number.isFinite(utilization) && utilization >= 1);
-    if (blocking) {
-      blockingWindows.push(window);
-      if (reset === undefined) blockingWithoutReset = true;
-      else blockingResets.push(reset);
+    if (!blocking) {
+      if (headerResetMs !== undefined) anyResetMs.push(headerResetMs);
       continue;
     }
-    if (reset !== undefined) anyResetMs.push(reset);
+    blockingWindows.push(window);
+    const resetMs = headerResetMs ?? (endpointWindow === window ? endpointResetMs : undefined);
+    // This window has no known release time, so NO combination of other times is
+    // a sound defer - not a sibling's header reset, not an endpoint value that
+    // belongs to the other window.
+    if (resetMs === undefined) return { kind: 'unresolved-blocking', blockingWindows };
+    blockingResets.push(resetMs);
   }
-  if (blockingWithoutReset) return { kind: 'unresolved-blocking', blockingWindows };
   if (blockingResets.length > 0) {
     return { kind: 'definite', at: Math.max(...blockingResets), blockingWindows };
   }
   if (anyResetMs.length === 0) return { kind: 'none' };
   return { kind: 'definite', at: Math.max(...anyResetMs), blockingWindows };
-}
-
-/** Normalize an observation's window label onto the header window ids. */
-function normalizedWindow(window: QuotaObservation['window']): string | undefined {
-  return window === 'weekly' ? '7d' : window;
-}
-
-/**
- * An endpoint observation may fill the gap ONLY when it names a blocking window,
- * i.e. only when it is tied to the wall that is actually in the way. An
- * untargeted `resetsAt`, or one naming an unblocked window, is refused: it is a
- * time without an identity, and accepting it is the premature retry.
- */
-function tiedEndpointResetMs(
-  resolution: Extract<DeferResolution, { readonly kind: 'unresolved-blocking' }>,
-  observedQuota: QuotaObservation | undefined,
-): number | undefined {
-  const named = normalizedWindow(observedQuota?.window);
-  if (named === undefined || !resolution.blockingWindows.includes(named)) return undefined;
-  return isoResetMs(observedQuota?.resetsAt);
 }
 
 function epochSecondsMs(raw: string | undefined): number | undefined {
@@ -209,12 +204,12 @@ export function classifyProviderSignal(
   }
   const marker = firstMatchingMarker(profile, signal);
   if (marker !== undefined) {
-    const resolution = claudeDeferResolution(signal);
+    const resolution = claudeDeferResolution(signal, observedQuota);
     const deferUntilMs =
       resolution.kind === 'definite'
         ? resolution.at
         : resolution.kind === 'unresolved-blocking'
-          ? tiedEndpointResetMs(resolution, observedQuota)
+          ? undefined
           : isoResetMs(observedQuota?.resetsAt);
     return {
       errorClass: marker.errorClass,
