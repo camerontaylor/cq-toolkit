@@ -211,14 +211,83 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 
-  test('an observed endpoint resetsAt still supplies a defer time when the headers cannot', () => {
+  // The cross-window trap: an endpoint `resetsAt` carries a time but NOT a window
+  // identity, so it cannot stand in for a blocking window's own missing reset.
+  test('an UNTARGETED endpoint resetsAt does NOT fill a blocking window with no reset', () => {
     const verdict = classifyProviderSignal(
       'claude-subscription',
       {
         httpStatus: 429,
         headers: {
           'anthropic-ratelimit-unified-status': 'rejected',
+          // 5h window is fine and announces an EARLY reset...
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-5h-reset': '1790269200',
+          // ...while the 7d window is the one blocking, with no reset of its own.
           'anthropic-ratelimit-unified-7d-status': 'rejected',
+        },
+      },
+      // A generic endpoint observation, earlier than the 5h reset: using it (or
+      // the 5h reset) would retry straight into the exhausted weekly window.
+      { resetsAt: '2026-09-26T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+    expect(verdict.advisoryReason).toMatch(/needs-human/);
+  });
+
+  test('an endpoint resetsAt is admitted only when it NAMES the blocking window', () => {
+    const tied = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-5h-reset': '1790269200',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+        },
+      },
+      { resetsAt: '2026-10-05T00:00:00Z', window: 'weekly' },
+    );
+    // 'weekly' names the blocking 7d window, so the value is tied to it.
+    expect(tied.errorClass).toBe('quota');
+    expect(tied.deferUntilMs).toBe(Date.parse('2026-10-05T00:00:00Z'));
+  });
+
+  test('an endpoint observation naming the UNBLOCKED window is refused', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-5h-reset': '1790269200',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+        },
+      },
+      // Right time, wrong window: this is the 5-hour window's release, not the
+      // weekly wall's.
+      { resetsAt: '2026-09-26T00:00:00Z', window: '5h' },
+    );
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('with NO blocking window, an endpoint resetsAt is still usable', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-7d-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-utilization': '0.4',
         },
       },
       { resetsAt: '2026-09-28T00:00:00Z' },
