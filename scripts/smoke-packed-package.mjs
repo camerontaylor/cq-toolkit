@@ -69,13 +69,17 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-function exportTarget(value, key) {
+const RUNTIME_CONDITIONS = new Set(['node', 'import', 'default']);
+
+function resolveEsmExportTarget(value, key) {
   if (typeof value === 'string') return value;
+  if (value === null) throw new Error(`Export ${key} is disabled for Node ESM consumers`);
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`Invalid export target for ${key}`);
   }
   for (const [condition, target] of Object.entries(value)) {
-    if (['node', 'import', 'default'].includes(condition)) return exportTarget(target, key);
+    if (condition === 'types') continue;
+    if (RUNTIME_CONDITIONS.has(condition)) return resolveEsmExportTarget(target, key);
   }
   throw new Error(`No Node ESM runtime target for export ${key}`);
 }
@@ -88,13 +92,52 @@ function exportSpecifier(key) {
   return `${PACKAGE_NAME}/${key.slice(2)}`;
 }
 
-async function auditInstalledPackage(consumerDir, expectedVersion) {
-  const packageDir = path.join(consumerDir, 'node_modules', ...PACKAGE_NAME.split('/'));
-  const manifest = JSON.parse(await readFile(path.join(packageDir, 'package.json'), 'utf8'));
-  if (manifest.name !== PACKAGE_NAME) throw new Error(`Installed package identity mismatch: ${manifest.name}`);
-  if (manifest.version !== expectedVersion) {
-    throw new Error(`Installed version mismatch: expected ${expectedVersion}, got ${manifest.version}`);
+function assertNoLocalDependencySpecs(manifest) {
+  const dependencyFields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+  for (const field of dependencyFields) {
+    const dependencies = manifest[field];
+    if (dependencies === undefined) continue;
+    if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) {
+      throw new Error(`Invalid ${field} map in package manifest`);
+    }
+    for (const [name, spec] of Object.entries(dependencies)) {
+      if (typeof spec !== 'string') throw new Error(`Invalid ${field} spec for ${name}`);
+      if (/^(?:file:|link:|workspace:|\.{1,2}[\\/]|[\\/]|[a-z]:[\\/])/i.test(spec)) {
+        throw new Error(`Local dependency spec is not allowed: ${field}.${name}=${spec}`);
+      }
+    }
   }
+}
+
+function validatePackageManifest(manifest, expectedVersion) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Packed package manifest must be an object');
+  }
+  if (manifest.name !== PACKAGE_NAME) throw new Error(`Packed package identity mismatch: ${manifest.name}`);
+  if (manifest.version !== expectedVersion) {
+    throw new Error(`Packed version mismatch: expected ${expectedVersion}, got ${manifest.version}`);
+  }
+  assertNoLocalDependencySpecs(manifest);
+  return manifest;
+}
+
+function readPackedManifest(tarballPath, runCommand = run) {
+  const files = runCommand('tar', ['-tzf', tarballPath]).split(/\r?\n/);
+  const manifests = files.filter((file) => file === 'package/package.json');
+  if (manifests.length !== 1) {
+    throw new Error(`Tarball must contain exactly one package/package.json (found ${manifests.length})`);
+  }
+  const content = runCommand('tar', ['-xOzf', tarballPath, 'package/package.json']);
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    throw new Error(`Tarball package/package.json is invalid JSON: ${error.message}`);
+  }
+}
+
+async function auditInstalledPackage(consumerDir, expectedVersion, runCommand = run) {
+  const packageDir = path.join(consumerDir, 'node_modules', ...PACKAGE_NAME.split('/'));
+  const manifest = validatePackageManifest(JSON.parse(await readFile(path.join(packageDir, 'package.json'), 'utf8')), expectedVersion);
 
   const exportsMap = manifest.exports;
   if (!exportsMap || typeof exportsMap !== 'object' || Array.isArray(exportsMap)) {
@@ -105,7 +148,7 @@ async function auditInstalledPackage(consumerDir, expectedVersion) {
   if (specifiers.length === 0) throw new Error('Package exports map is empty');
 
   for (const key of Object.keys(exportsMap)) {
-    const target = exportTarget(exportsMap[key], key);
+    const target = resolveEsmExportTarget(exportsMap[key], key);
     if (!target.startsWith('./') || target.includes('*')) {
       throw new Error(`Export ${key} must resolve to a concrete package-relative target`);
     }
@@ -121,7 +164,7 @@ async function auditInstalledPackage(consumerDir, expectedVersion) {
   const probePath = path.join(consumerDir, 'smoke-exports.mjs');
   const source = specifiers.map((specifier) => `await import(${JSON.stringify(specifier)});`).join('\n');
   await writeFile(probePath, `${source}\n`, 'utf8');
-  run(process.execPath, [probePath], { cwd: consumerDir });
+  runCommand(process.execPath, [probePath], { cwd: consumerDir });
 
   if (!manifest.bin || typeof manifest.bin !== 'object' || typeof manifest.bin.cq !== 'string') {
     throw new Error('Package is missing the required cq executable');
@@ -133,11 +176,11 @@ async function auditInstalledPackage(consumerDir, expectedVersion) {
     throw new Error('cq executable must resolve to a file inside the installed package');
   }
   const executable = path.join(consumerDir, 'node_modules', '.bin', process.platform === 'win32' ? 'cq.cmd' : 'cq');
-  const help = run(executable, ['--help'], { cwd: consumerDir, shell: process.platform === 'win32' });
+  const help = runCommand(executable, ['--help'], { cwd: consumerDir, shell: process.platform === 'win32' });
   if (!help.trim()) throw new Error('cq --help completed without output');
 }
 
-async function main(argv) {
+async function main(argv, { runCommand = run } = {}) {
   const options = parseArgs(argv);
   if (options.help) {
     process.stdout.write(`${usage()}\n`);
@@ -158,13 +201,14 @@ async function main(argv) {
     if ((await sha256File(auditedTarball)) !== options.sha256) {
       throw new Error('Tarball changed while preparing the isolated consumer');
     }
+    validatePackageManifest(readPackedManifest(auditedTarball, runCommand), options.version);
     await mkdir(consumerDir);
     await writeFile(path.join(consumerDir, 'package.json'), '{"private":true,"type":"module"}\n');
-    run('npm', [
+    runCommand('npm', [
       'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
       '--package-lock=false', '--no-save', auditedTarball,
     ], { cwd: consumerDir, env: { ...process.env, npm_config_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false' } });
-    await auditInstalledPackage(consumerDir, options.version);
+    await auditInstalledPackage(consumerDir, options.version, runCommand);
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
   }
@@ -178,4 +222,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { main, parseArgs, sha256File };
+export {
+  assertNoLocalDependencySpecs,
+  auditInstalledPackage,
+  main,
+  parseArgs,
+  readPackedManifest,
+  resolveEsmExportTarget,
+  sha256File,
+  validatePackageManifest,
+};
