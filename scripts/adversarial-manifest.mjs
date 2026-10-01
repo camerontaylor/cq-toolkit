@@ -89,6 +89,8 @@ for (const name of await readdir(artifactDir).catch(() => [])) {
 
 function safeAttack(row) {
   const attack = row.attack;
+  // Execution means GitHub returned a review created by the verified actor.
+  // Neither the submitted request nor this artifact proves a policy verdict.
   if (row.attackExecuted !== true || attack?.kind !== 'second-identity-review') return null;
   if (!Number.isSafeInteger(attack.reviewId) || attack.reviewId <= 0) return null;
   if (!Number.isSafeInteger(attack.actorId) || attack.actorId <= 0) return null;
@@ -103,6 +105,7 @@ function safeAttack(row) {
     reviewUrl: attack.reviewUrl,
     headSha: attack.headSha,
     actorId: attack.actorId,
+    operation: 'submitted GitHub pull request review',
   };
 }
 
@@ -115,8 +118,10 @@ const rows = ids.map((id) => {
         return {
           profile: report.profile,
           artifact: `artifacts/adversarial-suite/${name}`,
+          profileVerified: report.profileVerified === true,
           attackExecuted: attack !== null,
           attack,
+          outsiderTrust: report.outsiderTrust ?? null,
         };
       }),
   );

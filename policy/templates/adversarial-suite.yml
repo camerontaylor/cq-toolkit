@@ -1,6 +1,7 @@
 # adversarial-suite — manual live §7 probes against an isolated scratch repo.
 # Instantiate with no tokens. Edit this template, not its workflow copy.
-# The script also validates the repository and credentials before any probe.
+# The script also checks owner/admin authority and outsider trust. Both profile
+# legs remain BLOCKED until scratch settings are installed and read back.
 name: adversarial-suite
 
 on:
@@ -34,7 +35,7 @@ jobs:
       matrix:
         profile: [blank, solo-maintainer]
     steps:
-      - name: Check scratch target and distinct test identities
+      - name: Check scratch target and credential availability
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}
           SOURCE_REPOSITORY: ${{ github.repository }}
@@ -72,7 +73,7 @@ jobs:
         with:
           node-version: 24
           cache: ''
-      - name: Run adversarial rows
+      - name: Collect blocked evidence with profile preflight
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}
           PROFILE: ${{ matrix.profile }}

@@ -20,22 +20,29 @@ observed verdict, and evidence location. A fresh auditor at G2 independently
 checks that the attack ran and that its target guard produced the claimed
 result. A unit test alone does not establish a live row verdict.
 
-The initial runner submits A1 and A15 review attacks when given a disposable
-scratch PR number. It records those submissions as BLOCKED because it does
-not yet observe the policy outcome independently. Other W1 live attack
-drivers remain unimplemented. Local regressions document guard behavior but
-do not make a live row green.
+The initial runner contains A1 and A15 review submission drivers, but its
+profile preflight currently blocks submission. Once profile setup and readback
+are implemented, a successful GitHub review creation by the verified second
+identity may set `attackExecuted: true`. That flag means the operation was
+submitted; it does not prove rejection, needs-human, or ineligibility.
+`observedOutcome` stays null and the row stays BLOCKED until an independent,
+head-bound policy probe records the verdict. Other W1 live attack drivers
+remain unimplemented. Local regressions document guard behavior but do not
+make a live row green.
 
 The profiles are `blank` (conservative defaults) and `solo-maintainer`
 (configured relaxation). Every trust row runs under both. A10, A11, and A17
 also require `CQ_SANDBOX=required` with a certified backend. If no certified
 backend exists on the runner, those legs are BLOCKED. Do not interpret a
 fail-closed missing-backend error as a completed confined-worker attack.
-The dispatch matrix labels the two profiles but does not yet configure or
-verify the scratch repository's policy variables for either profile. Its
-evidence therefore cannot establish a profile verdict until that setup is
-implemented and verified. The jobs run serially to avoid cross-profile
-repository-setting races.
+The dispatch matrix labels the two profiles but does not configure or read
+back the scratch repository's policy variables for either profile. The runner
+explicitly fails that preflight and writes BLOCKED evidence without submitting
+an attack. It records the owner/admin and second-identity trust checks when
+credentials permit them. A distinct user ID alone does not establish an
+outsider: the owner/admin must verify the second account is not a collaborator
+or trusted bot and record the applicable trusted associations. The jobs run
+serially to avoid cross-profile repository-setting races after setup is added.
 
 ## Row inventory
 
