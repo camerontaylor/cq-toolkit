@@ -44,6 +44,8 @@ export interface ConfigKey {
   readonly layers: readonly ('default' | 'profile' | 'env' | 'call')[];
   readonly ci: 'vars' | 'secrets' | false;
   readonly outsideWorkspace: boolean;
+  /** Exact HTTPS host used by this bundled provider's credential-bearing usage endpoint. */
+  readonly usageEndpointHost?: string;
   readonly src: 'RS-15 Annex B';
   readonly doc: string;
 }
@@ -399,6 +401,11 @@ const providerMetadata: Readonly<
   QUOTA_ENDPOINT: ['url', null, 'unordered', false],
   MAX_DEFER_MS: ['ms', null, 'smaller', false],
 };
+const providerUsageEndpointHosts: Readonly<Partial<Record<(typeof PROVIDER_IDS)[number], string>>> =
+  {
+    'opencode-go': 'opencode.ai',
+    deepseek: 'api.deepseek.com',
+  };
 export function providerKeysFor(providerIds: readonly string[]): readonly ConfigKey[] {
   return providerIds.flatMap((providerId) =>
     PROVIDER_KEYS.map((suffix) => {
@@ -415,6 +422,13 @@ export function providerKeysFor(providerIds: readonly string[]): readonly Config
         layers: ['default', 'profile', 'env'],
         ci: suffix === 'PROFILE' ? false : 'vars',
         outsideWorkspace: suffix === 'PROFILE',
+        ...(suffix === 'QUOTA_ENDPOINT' &&
+        providerUsageEndpointHosts[providerId as keyof typeof providerUsageEndpointHosts]
+          ? {
+              usageEndpointHost:
+                providerUsageEndpointHosts[providerId as keyof typeof providerUsageEndpointHosts],
+            }
+          : {}),
         src: 'RS-15 Annex B',
         doc: `RS-15 provider key ${suffix}`,
       };

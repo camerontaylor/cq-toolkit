@@ -349,6 +349,14 @@ function parse(
       throw new Error(
         `${key.env}: expected ${proxy ? 'HTTP(S)' : 'HTTPS'} URL without credentials or query`,
       );
+    if (key.env.endsWith('_QUOTA_ENDPOINT')) {
+      if (!key.usageEndpointHost)
+        throw new Error(
+          `${key.env}: no bundled credential-bearing usage endpoint host is registered`,
+        );
+      if (parsed.hostname.toLowerCase() !== key.usageEndpointHost || parsed.port)
+        throw new Error(`${key.env}: host must match the bundled provider usage endpoint`);
+    }
   }
   if (key.type === 'argv' && value.startsWith('<') && value.endsWith('>')) return value;
   if (key.type === 'argv') {

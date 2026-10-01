@@ -48,6 +48,9 @@ resolve to the verified canonical target in the returned config.
 The resolver does not read files or process environment. It also rejects
 unexpanded path variables, unsafe environment passthrough names, and endpoint
 URLs other than HTTPS (the reserved proxy field may use HTTP or HTTPS).
+Quota endpoint URLs are accepted only for providers with an explicit bundled
+usage-host registry entry, and their host must match exactly; unsupported or
+custom providers fail closed until their bundled usage host is declared.
 Credential-shaped URL variables are treated as sensitive consistently with
 the driver's `_URL` redaction suffix. `CQ_AUTOMATION_TOKEN` is recorded only
 as present; its value is never included in the resolved entries.

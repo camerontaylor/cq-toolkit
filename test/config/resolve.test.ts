@@ -263,6 +263,24 @@ describe('pure configuration resolution', () => {
     ).toThrow(/invalid quota window/);
   });
 
+  it('pins credential-bearing quota endpoints to registered bundled usage hosts', () => {
+    expect(() =>
+      resolve({
+        env: { CQ_PROVIDER_ZAI_GLM_CODING_QUOTA_ENDPOINT: 'https://attacker.example/usage' },
+      }),
+    ).toThrow(/no bundled credential-bearing usage endpoint host is registered/);
+    expect(() =>
+      resolve({
+        env: { CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://attacker.example/user/balance' },
+      }),
+    ).toThrow(/host must match the bundled provider usage endpoint/);
+    expect(() =>
+      resolve({
+        env: { CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://api.deepseek.com/user/balance' },
+      }),
+    ).not.toThrow();
+  });
+
   it('accepts overnight UTC windows and independently optional multiplier or offset', () => {
     expect(() =>
       resolve({
