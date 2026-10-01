@@ -28,7 +28,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { access, constants, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { promisify } from 'node:util';
 
 import { buildSandboxLauncherEnv } from './index.js';
@@ -235,6 +235,13 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
 }
 
 const SEATBELT_WORKSPACE_PARENT = '/private/var/tmp';
+/**
+ * Canonical, env-INDEPENDENT parent for compiled sandbox policies (Sol final
+ * audit): os.tmpdir() honors $TMPDIR, and an inherited TMPDIR pointing inside
+ * the model-writable workspace would put the policy within the same-uid
+ * child's reach.  /private/var/tmp is fixed at build time instead.
+ */
+const SEATBELT_POLICY_PARENT = '/private/var/tmp';
 
 /** Symlink-honest: /tmp resolves into /private/tmp, outside the read allowlist. */
 export function seatbeltAdapter(): SandboxBackendAdapter {
@@ -278,15 +285,31 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       const childTmp = join(request.workspace, '.tmp');
       await mkdir(childTmp, { recursive: true });
       env['TMPDIR'] = childTmp;
-      // The policy NEVER lives in the model-writable workspace (Sol review:
-      // a child could plant a symlink at the policy path or race the write
-      // with a permissive replacement before sandbox-exec -f reads it).  It
-      // is written to a fresh 0700 parent-private directory — created by
-      // mkdtemp, so no pre-planted path can exist — with 0600 on the file,
-      // and the directory is destroyed when the launch ends.  A confined
-      // child cannot reach it, and the next launch compiles a fresh profile.
-      const profileDir = await mkdtemp(join(tmpdir(), 'cq-sb-prof-'));
+      // The policy NEVER lives in the model-writable workspace, and its
+      // parent is CANONICAL — never env-derived (Sol final audit: an
+      // inherited TMPDIR pointing inside the workspace would defeat any
+      // 0700 directory, because the confined child is the SAME uid).  It is
+      // written to a fresh 0700 directory under /private/var/tmp — created
+      // by mkdtemp, so no pre-planted path can exist — with 0600 on the
+      // file, and the directory is destroyed when the launch ends.  A
+      // confined child cannot read, list, or write outside the workspace,
+      // and the next launch compiles a fresh profile.
+      const profileDir = await mkdtemp(join(SEATBELT_POLICY_PARENT, 'cq-sb-prof-'));
       try {
+        // Pathological-workspace guard: refuse any workspace that contains
+        // the trusted policy parent itself.
+        if (!relative(request.workspace, profileDir).startsWith('..')) {
+          return {
+            ok: false,
+            exitCode: null,
+            signal: null,
+            stdout: '',
+            stderr: '',
+            timedOut: false,
+            spawnError:
+              'requested workspace contains the trusted policy parent; refusing to place the sandbox policy inside it',
+          };
+        }
         const profilePath = join(profileDir, 'policy.sb');
         await writeFile(profilePath, seatbeltProfile(request.network, request.proxyPort), {
           mode: 0o600,
@@ -316,7 +339,11 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
  * The bubblewrap argv for one launch.  The host root is NOT bound (Sol audit,
  * backend.ts:261 — a root ro-bind exposes host reads): only the OS runtime
  * trees a child needs are bound read-only (`/usr` required; `/bin`, `/sbin`,
- * `/lib`, `/lib64` with `-try`, which skip absent trees).  Host `/etc` is NOT
+ * `/lib`, `/lib64` with `-try`, which skip absent trees).  Because
+ * `/usr/local` lives under `/usr` on Linux, it is MASKED with an empty tmpfs
+ * immediately after the `/usr` bind — structurally, so host files created
+ * there after certification are invisible too (Sol final audit).  Host `/etc`
+ * is NOT
  * bound (delta review): the namespace has no /etc at all, so host
  * configuration never enters; tools that require it may fail, which the
  * workspace control surfaces.  Volatile
@@ -343,6 +370,11 @@ export function bwrapArgv(
     '--ro-bind',
     '/usr',
     '/usr',
+    // /usr/local lives UNDER /usr on Linux, so the ro-bind would expose it —
+    // including files created after certification (Sol final audit).  Mask it
+    // with an empty tmpfs immediately after the /usr bind.
+    '--tmpfs',
+    '/usr/local',
     '--ro-bind-try',
     '/bin',
     '/bin',

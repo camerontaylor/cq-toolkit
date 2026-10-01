@@ -102,6 +102,12 @@ describe('linux and container boundary construction', () => {
     // unconditional read bind is /usr, the rest are -try.
     expect(argv.slice(0, 3)).toEqual(['bwrap', '--ro-bind', '/usr']);
     expect(argv.join(' ')).not.toContain('--ro-bind / /');
+    // /usr/local lives UNDER /usr on Linux — it must be masked with an empty
+    // tmpfs AFTER the /usr bind and BEFORE the workspace bind, so host files
+    // created there after certification stay invisible (Sol final audit).
+    expect(argv.join(' ')).toContain('--tmpfs /usr/local');
+    expect(argv.indexOf('/usr/local')).toBeGreaterThan(argv.indexOf('--ro-bind'));
+    expect(argv.indexOf('/usr/local')).toBeLessThan(argv.indexOf('--bind'));
     for (const tree of ['/bin', '/sbin', '/lib', '/lib64']) {
       const treeAt = argv.indexOf(tree);
       expect(treeAt).toBeGreaterThan(-1);
@@ -406,6 +412,36 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     // And the launcher never wrote through the planted path: the symlink
     // still carries exactly the attacker's content.
     expect(await readFile(evilProfile, 'utf8')).toBe(evilText);
+  }, 30_000);
+
+  test('a poisoned TMPDIR cannot move the compiled policy into the workspace', async () => {
+    const adapter = seatbeltAdapter();
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
+    scratch.push(workspace);
+    const outside = await mkdtemp(join(tmpdir(), 'cq-sbx-outside-'));
+    scratch.push(outside);
+    const outsidePath = join(outside, 'secret.txt');
+    await writeFile(outsidePath, 'outside-secret-value');
+    // An inherited TMPDIR pointing INSIDE the model-writable workspace would
+    // defeat a 0700 policy directory — the confined child is the same uid —
+    // so the policy parent must be canonical and env-independent.
+    const priorTmp = process.env.TMPDIR;
+    process.env.TMPDIR = join(workspace, 'injected-tmp');
+    try {
+      const result = await adapter.launch({
+        workspace,
+        argv: ['/bin/cat', outsidePath],
+        network: 'model-only',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.stdout).not.toContain('outside-secret-value');
+      const listing = await readdir(workspace, { recursive: true });
+      expect(listing.filter((entry) => entry.endsWith('.sb'))).toEqual([]);
+      expect(listing.some((entry) => entry.includes('cq-sb-prof-'))).toBe(false);
+    } finally {
+      if (priorTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = priorTmp;
+    }
   }, 30_000);
 });
 
