@@ -15,7 +15,8 @@
 // --model-proxy composes model-only with a local proxy stand-in: only one
 // loopback port passes and every other egress target must be refused.  A
 // backend that cannot compose a proxy is uncertifiable under that posture
-// and fails closed.
+// and fails closed. Even a passing stand-in cannot certify a production
+// endpoint identity/allowlist; proxy-composed certification is withheld.
 //
 // Exit 0 when at least one backend certified; exit 1 when none did (required
 // mode stays fail-closed); exit 2 on usage/build errors.

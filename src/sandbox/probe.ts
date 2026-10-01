@@ -38,7 +38,7 @@
 // that handoff so no caller can name a backend the probe never ran.
 import { execFile as execFileCb } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, open, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -57,6 +57,7 @@ export type CanaryId =
   | 'workspace-control'
   | 'read-escape'
   | 'read-escape-sibling'
+  | 'proc-link-escape'
   | 'symlink-escape'
   | 'nested-child-escape'
   | 'write-escape'
@@ -116,6 +117,8 @@ export interface ProbeOptions {
    * on a loopback port, grants ONLY that port, and demands both legs (proxy
    * connect succeeds, every other egress refused).  Backends that cannot
    * compose a proxy are uncertifiable under this posture and fail closed.
+   * This stand-in provides diagnostic observations only: it cannot certify
+   * the identity/lifetime or upstream allowlist of a production proxy.
    */
   modelProxy?: boolean;
   timeoutMs?: number;
@@ -303,6 +306,19 @@ interface ProbeScratch {
   sibling: string;
 }
 
+async function removeScratch(paths: readonly string[]): Promise<void> {
+  const cleanups = await Promise.allSettled(
+    paths.map((path) => rm(path, { recursive: true, force: true })),
+  );
+  const failed = cleanups.filter((r) => r.status === 'rejected');
+  if (failed.length > 0) {
+    throw new AggregateError(
+      failed.map((r): unknown => r.reason),
+      'sandbox scratch cleanup failed',
+    );
+  }
+}
+
 async function withScratch<T>(
   adapter: SandboxBackendAdapter,
   run: (scratch: ProbeScratch) => Promise<T>,
@@ -314,15 +330,19 @@ async function withScratch<T>(
   // broad-root allow would have leaked — and a symlink from inside the
   // workspace pointing at it.  The workspace lives in the adapter's runnable
   // parent, so the workspace controls stay positive.
-  const root = await mkdtemp(join(tmpdir(), 'cq-sbx-root-'));
-  const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-ws-'));
-  const sibling = await mkdtemp(join(dirname(workspace), 'cq-sbx-sib-'));
+  const allocated: string[] = [];
   try {
+    const root = await mkdtemp(join(tmpdir(), 'cq-sbx-root-'));
+    allocated.push(root);
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-ws-'));
+    allocated.push(workspace);
+    const sibling = await mkdtemp(join(dirname(workspace), 'cq-sbx-sib-'));
+    allocated.push(sibling);
     return await run({ root, workspace, sibling });
   } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(workspace, { recursive: true, force: true });
-    await rm(sibling, { recursive: true, force: true });
+    // Setup itself can fail partway through. Attempt every removal even if
+    // another cleanup fails, and surface cleanup failures to the caller.
+    await removeScratch(allocated);
   }
 }
 
@@ -401,7 +421,6 @@ async function probeBackendWithLaunch(
     await writeFile(siblingSentinel, 'sibling-escape-target');
     const symlinkEscape = join(workspace, 'link-to-sentinel');
     const homeCanary = join(homedir(), `.cq-probe-canary-${randomBytes(4).toString('hex')}`);
-    await writeFile(homeCanary, 'credential-target');
     const parentEnv: Record<string, string | undefined> = {
       ...process.env,
       CQ_PROBE_CANARY_SECRET: secret,
@@ -419,7 +438,15 @@ async function probeBackendWithLaunch(
         maxOutputChars: 4_000,
       });
 
+    let homeCanaryCreated = false;
     try {
+      const homeFile = await open(homeCanary, 'wx', 0o600);
+      homeCanaryCreated = true;
+      try {
+        await homeFile.writeFile('credential-target');
+      } finally {
+        await homeFile.close();
+      }
       // 1 — control: the launcher must actually execute and grant the workspace.
       const touch = await launch(['/usr/bin/touch', join(workspace, 'cq-canary-out')]);
       const inWs = touch.ok ? await launch(['/bin/cat', join(workspace, 'cq-canary-out')]) : touch;
@@ -452,6 +479,23 @@ async function probeBackendWithLaunch(
       canaries.push(
         denialOutcome('read-escape', escapeRead, readControl.ok, `read a file in ${root}`),
       );
+
+      // Linux procfs magic links can expose a host process's root even
+      // when its filesystem is not mounted. Arm the exact link on the host;
+      // a private PID namespace must make that host PID unreachable.
+      if (process.platform === 'linux') {
+        const procTarget = `/proc/${process.pid}/root${sentinel}`;
+        const procControl = await hostExec(['/bin/cat', procTarget]);
+        const procRead = await launch(['/bin/cat', procTarget]);
+        canaries.push(
+          denialOutcome(
+            'proc-link-escape',
+            procRead,
+            procControl.ok,
+            'read host root through procfs',
+          ),
+        );
+      }
 
       // 3 — the child must not read the SIBLING directory beside the workspace:
       // the exact surface a broad-root allow would have leaked.
@@ -595,6 +639,9 @@ async function probeBackendWithLaunch(
             : !('port' in other)
               ? other.error
               : 'unknown listener failure';
+          // Either listener may have succeeded before the other failed.
+          if ('port' in proxy) await proxy.close();
+          if ('port' in other) await other.close();
           canaries.push({
             id: 'network-proxy',
             verdict: 'inconclusive',
@@ -754,7 +801,7 @@ async function probeBackendWithLaunch(
         }
       }
     } finally {
-      await rm(homeCanary, { force: true });
+      if (homeCanaryCreated) await rm(homeCanary, { force: true });
     }
 
     const controlOk = canaries.find((c) => c.id === 'workspace-control')?.verdict === 'pass';
@@ -764,18 +811,20 @@ async function probeBackendWithLaunch(
       .every((c) => c.verdict === 'pass');
     const blocker = !controlOk
       ? `launcher did not run a child in the workspace: ${canaries.find((c) => c.id === 'workspace-control')?.detail ?? 'no control canary'}`
-      : denied
-        ? undefined
-        : canaries
-            .filter((c) => c.verdict !== 'pass')
-            .map((c) => `${c.id} ${c.verdict}: ${c.detail}`)
-            .join('; ');
+      : modelProxy
+        ? 'proxy stand-in does not bind a production endpoint identity or upstream allowlist; proxy certification is withheld'
+        : denied
+          ? undefined
+          : canaries
+              .filter((c) => c.verdict !== 'pass')
+              .map((c) => `${c.id} ${c.verdict}: ${c.detail}`)
+              .join('; ');
     return {
       record: {
         ...base,
         networkDemonstrated: controlOk && denied ? demonstrated : 'none',
         runnable,
-        certified: controlOk && denied,
+        certified: controlOk && denied && !modelProxy,
         ...(blocker !== undefined ? { blocker } : {}),
         canaries,
       },
@@ -859,8 +908,8 @@ export function certifiedBackendsOf(
  *     swapping adapter.launch after certification is detected and refused
  *     (delta review 3);
  *   - the requested posture must match the demonstrated posture, and a
- *     proxy-composed certification is only valid for launches that carry the
- *     proxy port.
+ *     proxy stand-in observations never authorize production proxy launches.
+ *     Their endpoint identity and upstream allowlist are not certified.
  * Every refusal names its own failure plus the resolver's config hint, so a
  * missing backend can never degrade into a host shell.
  */
@@ -916,6 +965,11 @@ export async function launchCertified(
     );
   }
   const proxyDemonstrated = receipt.networkDemonstrated === 'proxy-loopback';
+  if (proxyDemonstrated) {
+    throw new Error(
+      'sandbox: proxy stand-in observations cannot authorize a production endpoint identity or upstream allowlist; CQ_SANDBOX=required is fail-closed',
+    );
+  }
   if ((request.proxyPort !== undefined) !== proxyDemonstrated) {
     throw new Error(
       `sandbox: ${adapter.backend} was certified with '${receipt.networkDemonstrated}' egress; ` +

@@ -16,8 +16,6 @@
 // else the same probe records the platform blocker instead.  LIVE STATUS: the
 // narrow-allow profile has not yet executed on any host — live evidence at
 // final head is a gate of the fresh protocol sequence, not this suite.
-import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 
 import {
@@ -153,11 +151,31 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
       }
       expect(verdictOf(record, id)).toBe('fail');
     }
+    if (process.platform === 'linux') expect(verdictOf(record, 'proc-link-escape')).toBe('fail');
     expect(verdictOf(record, 'network-loopback')).toBe('fail');
     expect(verdictOf(record, 'network-external')).toBe('fail');
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/read-escape/);
   });
+
+  test.runIf(process.platform === 'linux')(
+    'a proc-link leak fails despite ordinary filesystem denials',
+    async () => {
+      const adapter = fakeAdapter('fs-only');
+      const confined = adapter.launch;
+      adapter.launch = (request) =>
+        request.argv[1]?.startsWith('/proc/')
+          ? Promise.resolve(result({ ok: true, exitCode: 0 }))
+          : confined(request);
+      const record = await probeBackend(adapter, { network: 'allow' });
+      expect(verdictOf(record, 'workspace-control')).toBe('pass');
+      expect(verdictOf(record, 'read-escape')).toBe('pass');
+      expect(verdictOf(record, 'read-escape-sibling')).toBe('pass');
+      expect(verdictOf(record, 'proc-link-escape')).toBe('fail');
+      expect(record.certified).toBe(false);
+      expect(record.blocker).toMatch(/proc-link-escape fail/);
+    },
+  );
 
   test('an inconclusive canary refuses certification — doubt fails closed', async () => {
     const record = await probeBackend(fakeAdapter('env-fails'));
@@ -219,13 +237,14 @@ describe('posture-aware network certification', () => {
     expect(modelOnly.certified).toBe(false);
   });
 
-  test('a proxy-composed boundary passes only the proxy port and only for model-only', async () => {
+  test('a passing proxy stand-in remains diagnostic and cannot certify a production endpoint', async () => {
     const record = await probeBackend(fakeAdapter('proxy-fs-only'), {
       network: 'model-only',
       modelProxy: true,
     });
     expect(verdictOf(record, 'network-proxy')).toBe('pass');
-    expect(record.certified).toBe(true);
+    expect(record.certified).toBe(false);
+    expect(record.blocker).toMatch(/production endpoint identity or upstream allowlist/);
     expect(record.networkDemonstrated).toBe('proxy-loopback');
     // The same boundary probed WITHOUT the proxy demand must refuse the
     // loopback connect (the fake only opens the declared proxy port).
@@ -379,28 +398,26 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     ).rejects.toThrow(/certified under the 'allow' posture.*'model-only'/s);
   });
 
-  test('a proxy-composed certification requires the proxy port on every launch', async () => {
+  test('a proxy stand-in authorizes neither an arbitrary port nor a launch without a port', async () => {
     const adapter = fakeAdapter('proxy-fs-only');
     const certification = await certifyBackends({
       adapters: [adapter],
       network: 'model-only',
       modelProxy: true,
     });
-    expect(certification.networkDemonstrated).toBe('proxy-loopback');
-    await expect(
-      launchCertified(adapter, certification, {
-        workspace: '/tmp/ws',
-        argv: ['/bin/true'],
-        network: 'model-only',
-      }),
-    ).rejects.toThrow(/a proxyPort is required on every launch/);
-    const launched = await launchCertified(adapter, certification, {
-      workspace: '/tmp/ws',
-      argv: ['/bin/true'],
-      network: 'model-only',
-      proxyPort: 45454,
-    });
-    expect(launched.ok).toBe(true);
+    expect(certifiedBackendsOf(certification)).toEqual([]);
+    // Neither absence nor substitution of the port can inherit the transient
+    // listener's observation after it has closed.
+    for (const proxyPort of [undefined, 45454, 1]) {
+      await expect(
+        launchCertified(adapter, certification, {
+          workspace: '/tmp/ws',
+          argv: ['/bin/true'],
+          network: 'model-only',
+          ...(proxyPort === undefined ? {} : { proxyPort }),
+        }),
+      ).rejects.toThrow(/not certified.*production endpoint identity or upstream allowlist/s);
+    }
   });
 
   test('a non-proxy certification refuses a launch that carries a proxy port', async () => {
@@ -445,9 +462,7 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
     expect(certifiedBackendsOf(certification)).toEqual(['seatbelt']);
   }, 180_000);
 
-  test('the live canaries certify seatbelt with proxy-composed model-only', async () => {
-    // One adapter instance for probe AND launch: the receipt binds the exact
-    // object it certified (delta review P1).
+  test('live proxy stand-in observations do not certify a production proxy', async () => {
     const adapter = seatbeltAdapter();
     const certification = await certifyBackends({
       adapters: [adapter],
@@ -455,23 +470,18 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
       modelProxy: true,
     });
     const record = certification.records.find((r) => r.backend === 'seatbelt');
-    expect(record?.certified).toBe(true);
+    expect(record?.certified).toBe(false);
+    expect(record?.blocker).toMatch(/production endpoint identity or upstream allowlist/);
     expect(verdictOf(record, 'network-proxy')).toBe('pass');
-    expect(certification.networkDemonstrated).toBe('proxy-loopback');
-    // The certified receipt authorizes a real launch — through a proxy port —
-    // which the narrow-allow profile permits to that one loopback port.
-    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-live-'));
-    try {
-      const launched = await launchCertified(adapter, certification, {
-        workspace,
+    expect(certifiedBackendsOf(certification)).toEqual([]);
+    await expect(
+      launchCertified(adapter, certification, {
+        workspace: '/tmp/ws',
         argv: ['/bin/true'],
         network: 'model-only',
         proxyPort: 1,
-      });
-      expect(launched.ok).toBe(true);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+      }),
+    ).rejects.toThrow(/not certified for required mode/);
   }, 180_000);
 });
 

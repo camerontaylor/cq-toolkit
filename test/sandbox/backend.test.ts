@@ -144,6 +144,8 @@ describe('linux and container boundary construction', () => {
     expect(argv.slice(bindAt, bindAt + 3)).toEqual(['--bind', '/tmp/cq-ws', '/tmp/cq-ws']);
     expect(argv).toContain('--unshare-net');
     expect(argv).toContain('--die-with-parent');
+    expect(argv.indexOf('--unshare-pid')).toBeLessThan(argv.indexOf('--proc'));
+    expect(argv).toContain('--unshare-pid');
     // The child inherits the launcher process env — env VALUES never appear
     // in argv, where any local user could read them.
     expect(argv).not.toContain('--clearenv');
@@ -245,7 +247,19 @@ describe('adapter options are snapshotted at construction (Sol final-head review
   });
 
   test('mutating container options after construction cannot change the boundary', async () => {
-    const stubA = await stubScript('docker-a', 'STUB-A');
+    const stubA = join(stubDir, 'docker-a');
+    await writeFile(
+      stubA,
+      `#!/bin/sh
+case "$1" in
+  create) echo "$*" > '${stubDir}/created'; printf '%064d\n' 1 ;;
+  start) echo STUB-A; cat '${stubDir}/created' ;;
+  inspect) echo 'false 0' ;;
+  rm) exit 0 ;;
+esac
+`,
+      { mode: 0o700 },
+    );
     const stubB = await stubScript('docker-b', 'STUB-B');
     const options: ContainerAdapterOptions = {
       image: 'orig:latest',

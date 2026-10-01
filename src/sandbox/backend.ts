@@ -26,6 +26,7 @@
 //               syscalls; absent a helper this backend records itself as not
 //               provisioned (the D7 pattern), it is never silently "auto".
 import { execFile as execFileCb } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { access, constants, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -437,6 +438,8 @@ export function bwrapArgv(
     '/lib64',
     '--dev',
     '/dev',
+    // A host PID must never be reachable through /proc/<pid>/root or fd.
+    '--unshare-pid',
     '--proc',
     '/proc',
     '--tmpfs',
@@ -631,13 +634,90 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
         };
       }
       const env = launcherEnv(request);
+      // Create without executing first: a timed-out `docker run` can leave
+      // its daemon-owned child alive after the CLI dies. Only start an ID
+      // returned by a completed create, and forcibly remove that exact ID
+      // after EVERY attach outcome (including timeout/output overflow).
+      const name = `cq-sandbox-${randomUUID()}`;
       const argv = containerArgv(resolved, request.workspace, request.network, env, request.argv);
-      return runChild(argv[0]!, argv.slice(1), {
+      const childOptions = {
         cwd: request.workspace,
         env,
         timeoutMs: request.timeoutMs ?? 30_000,
         maxOutputChars: request.maxOutputChars ?? 64 * 1024,
-      });
+      };
+      const createArgs = argv.slice(3); // omit --rm
+      let identity = name;
+      let outcome: SandboxLaunchResult = {
+        ok: false,
+        exitCode: null,
+        signal: null,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        spawnError: 'container launch did not complete',
+      };
+      try {
+        const created = await runChild(
+          resolved.command,
+          ['create', '--name', name, ...createArgs],
+          { ...childOptions, maxOutputChars: 4_000 },
+        );
+        const id = created.stdout.trim();
+        if (!created.ok) {
+          outcome = created;
+        } else if (!/^[a-f0-9]{64}$/.test(id)) {
+          outcome = {
+            ...created,
+            ok: false,
+            spawnError:
+              'container create returned no valid immutable container ID; refusing to start',
+          };
+        } else {
+          identity = id;
+          outcome = await runChild(resolved.command, ['start', '--attach', id], childOptions);
+          if (outcome.ok) {
+            // CLI success is not the container's exit status. Verify the
+            // daemon reports a stopped child and read its actual exit code.
+            const state = await runChild(
+              resolved.command,
+              ['inspect', '--format', '{{.State.Running}} {{.State.ExitCode}}', id],
+              { ...childOptions, timeoutMs: 15_000, maxOutputChars: 4_000 },
+            );
+            const stopped = /^false (\d+)$/.exec(state.stdout.trim());
+            if (!state.ok || stopped === null) {
+              outcome = {
+                ...outcome,
+                ok: false,
+                spawnError: 'container child exit could not be confirmed by daemon inspection',
+              };
+            } else {
+              const exitCode = Number(stopped[1]);
+              outcome = { ...outcome, ok: exitCode === 0, exitCode };
+            }
+          }
+        }
+      } finally {
+        // A completed rm --force proves the known container is gone. Never
+        // mistake killing the attach CLI for settlement of its descendants.
+        const removed = await runChild(resolved.command, ['rm', '--force', identity], {
+          ...childOptions,
+          timeoutMs: 15_000,
+          maxOutputChars: 4_000,
+        });
+        if (!removed.ok) {
+          outcome = {
+            ok: false,
+            exitCode: null,
+            signal: null,
+            stdout: '',
+            stderr: removed.stderr,
+            timedOut: outcome.timedOut || removed.timedOut,
+            spawnError: `container cleanup unconfirmed for ${identity}: ${removed.spawnError ?? removed.stderr}`,
+          };
+        }
+      }
+      return outcome;
     },
   };
 }
