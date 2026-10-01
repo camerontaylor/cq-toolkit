@@ -39,7 +39,18 @@ with a selected profile, blank values fall through to the profile. The
 currently seeds merge acceptance, protected-path posture, sandbox, network,
 and driver binding values shown in `policy/profiles/solo-maintainer.env`.
 
-The caller must still enforce workspace containment for paths marked
-`outsideWorkspace`, load profile files from the installed package, and attach
-the returned record to journal provenance. This module does not read files or
-process environment by itself.
+The resolver remains pure: the integrating caller passes the environment
+snapshot, canonical `workspaceRootRealpath`, and `verifiedRealpaths` entries
+keyed by config variable. Each entry binds the expanded input path to a
+caller-verified canonical path. Paths marked `outsideWorkspace` fail closed
+without this evidence and are rejected if they resolve inside the workspace.
+The resolver does not read files or process environment. It also rejects
+unexpanded path variables, unsafe environment passthrough names, and endpoint
+URLs other than HTTPS (the reserved proxy field may use HTTP or HTTPS).
+Credential-shaped URL variables are treated as sensitive consistently with
+the driver's `_URL` redaction suffix. `CQ_AUTOMATION_TOKEN` is recorded only
+as present; its value is never included in the resolved entries.
+
+The registry's `ci: false` metadata excludes path, argv, and executable
+settings from both CI variables and secrets. Array and map values are deeply
+frozen before returning the resolution.

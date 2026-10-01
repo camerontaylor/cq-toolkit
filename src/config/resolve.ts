@@ -7,6 +7,7 @@ import {
   type ConfigKey,
   providerKeysFor,
 } from './registry.js';
+import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 
 export type ConfigProfile = 'conservative' | 'solo-maintainer';
 export type ConfigLayer = 'default' | 'profile' | 'env' | 'call';
@@ -40,6 +41,12 @@ export interface ResolveConfigOptions {
   /** Each entry is an exact per-call id, optionally with an authorizing value. */
   readonly optIn?: readonly string[];
   readonly eventName?: string;
+  /** Canonical workspace root supplied by the integrating caller. */
+  readonly workspaceRootRealpath?: string;
+  /** Caller-verified realpaths, keyed by config env name; required for outsideWorkspace paths. */
+  readonly verifiedRealpaths?: Readonly<
+    Record<string, { readonly input: string; readonly realpath: string }>
+  >;
 }
 
 const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
@@ -52,8 +59,16 @@ const secretSuffixes = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
+  '_URL',
   'PRIVATE_KEY',
 ];
+const deniedPassthrough = new Set([
+  'PATH',
+  'NODE_OPTIONS',
+  'SSH_AUTH_SOCK',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'DATABASE_URL',
+]);
 
 function distance(left: string, right: string): number {
   const row = Array.from({ length: right.length + 1 }, (_, index) => index);
@@ -98,6 +113,78 @@ function isSecret(name: string): boolean {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item: unknown) => typeof item === 'string');
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function credentialUrl(value: string | undefined): boolean {
+  if (!value || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
+  } catch {
+    return true;
+  }
+}
+
+function unsafePassthrough(
+  name: string,
+  env: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return (
+    !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
+    name.startsWith('CQ_') ||
+    deniedPassthrough.has(name) ||
+    name.startsWith('AWS_') ||
+    name.startsWith('AZURE_') ||
+    name.startsWith('GOOGLE_') ||
+    name.startsWith('GCP_') ||
+    isSecret(name) ||
+    credentialUrl(env[name])
+  );
+}
+
+function expandPath(
+  value: string,
+  env: Readonly<Record<string, string | undefined>>,
+  key: ConfigKey,
+): string {
+  const expanded = value.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (_match, name: string) => {
+    const replacement = nonblank(env[name]);
+    if (!replacement || !isAbsolute(replacement))
+      throw new Error(`${key.env}: unresolved absolute path variable`);
+    return replacement;
+  });
+  if (expanded.includes('$') || !isAbsolute(expanded))
+    throw new Error(`${key.env}: expected an expanded absolute path`);
+  return resolvePath(expanded);
+}
+
+function assertOutsideWorkspace(
+  key: ConfigKey,
+  input: string,
+  options: ResolveConfigOptions,
+): void {
+  if (!key.outsideWorkspace) return;
+  const root = options.workspaceRootRealpath;
+  const evidence = options.verifiedRealpaths?.[key.env];
+  if (
+    !root ||
+    !isAbsolute(root) ||
+    !evidence ||
+    evidence.input !== input ||
+    !isAbsolute(evidence.realpath)
+  )
+    throw new Error(`${key.env}: verified workspace path evidence required`);
+  const rel = relative(resolvePath(root), resolvePath(evidence.realpath));
+  if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)))
+    throw new Error(`${key.env}: path must resolve outside the workspace`);
 }
 
 function providerName(name: string, env: Readonly<Record<string, string | undefined>>): boolean {
@@ -147,15 +234,7 @@ function parse(
       )
     )
       throw new Error(`${key.env}: structurally excluded bot identity`);
-    if (
-      key.id === 'run.envPassthrough' &&
-      unique.some(
-        (name) =>
-          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
-          name.startsWith('CQ_') ||
-          secretSuffixes.some((suffix) => name.endsWith(suffix)),
-      )
-    )
+    if (key.id === 'run.envPassthrough' && unique.some((name) => unsafePassthrough(name, {})))
       throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
     if (
       key.id === 'driver.acp.envNames' &&
@@ -164,8 +243,16 @@ function parse(
       throw new Error(`${key.env}: CQ_* policy variables cannot be passed to ACP`);
     return unique;
   }
-  if (key.type === 'map') {
-    const entries = isStringArray(raw) ? raw : String(raw).split(',');
+  if (key.type === 'map' || key.type === 'bindings') {
+    const objectEntries =
+      typeof raw === 'object' && !Array.isArray(raw) ? Object.entries(raw) : undefined;
+    if (objectEntries?.some(([, value]) => typeof value !== 'string'))
+      throw new Error(`${key.env}: map values must be strings`);
+    const entries = isStringArray(raw)
+      ? raw
+      : objectEntries
+        ? objectEntries.map(([k, v]) => `${k}:${v}`)
+        : String(raw).split(',');
     const result: Record<string, string> = {};
     for (const entry of entries) {
       const split = String(entry).indexOf(':');
@@ -175,8 +262,13 @@ function parse(
       const value = String(entry)
         .slice(split + 1)
         .trim();
-      if (!/^[a-z0-9*-]+$/.test(name) || !/^[a-z0-9*-]+$/.test(value))
-        throw new Error(`${key.env}: invalid map token`);
+      const valid =
+        key.type === 'bindings'
+          ? /^(?:\*|[a-z0-9-]+)\/(?:\*|[a-z0-9-]+)$/.test(name) && /^[a-z][a-z0-9-]*$/.test(value)
+          : key.env.endsWith('_WINDOW_FRACTIONS')
+            ? /^[a-z0-9*-]+$/.test(name) && /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)
+            : /^[a-z0-9*-]+$/.test(name) && /^[a-z0-9*-]+$/.test(value);
+      if (!valid) throw new Error(`${key.env}: invalid map token`);
       if (name in result) throw new Error(`${key.env}: duplicate map entry '${name}'`);
       result[name] = value;
     }
@@ -236,11 +328,27 @@ function parse(
     throw new Error(`${key.env}: unsupported value '${value}'`);
   if (key.type === 'model' && !/^[a-z0-9-]+\/.+$/.test(value))
     throw new Error(`${key.env}: expected provider/model`);
-  if (
-    key.type === 'url' &&
-    (!/^https?:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value) || value.includes('@'))
-  )
-    throw new Error(`${key.env}: expected URL without userinfo or query`);
+  if (key.type === 'url') {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`${key.env}: expected URL without userinfo or query`);
+    }
+    const proxy = key.env === 'CQ_SANDBOX_PROXY_URL';
+    if (
+      (!proxy && parsed.protocol !== 'https:') ||
+      (proxy && !['https:', 'http:'].includes(parsed.protocol)) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      !parsed.hostname
+    )
+      throw new Error(
+        `${key.env}: expected ${proxy ? 'HTTP(S)' : 'HTTPS'} URL without credentials or query`,
+      );
+  }
   if (key.type === 'argv' && value.startsWith('<') && value.endsWith('>')) return value;
   if (key.type === 'argv') {
     let argv: unknown;
@@ -252,23 +360,73 @@ function parse(
     if (
       !Array.isArray(argv) ||
       argv.length === 0 ||
-      argv.some((part) => typeof part !== 'string' || part.length === 0)
+      argv.some((part) => typeof part !== 'string' || part.length === 0) ||
+      (typeof argv[0] === 'string' && argv[0].includes('/') && !isAbsolute(argv[0]))
     )
       throw new Error(`${key.env}: expected non-empty string argv`);
     return argv as string[];
   }
   if (key.type === 'path' && value.startsWith('<') && value.endsWith('>')) return value;
-  if (key.type === 'path' && !value.startsWith('/') && !value.startsWith('$'))
-    throw new Error(`${key.env}: expected an absolute path`);
+  if (key.type === 'path' && value.includes('$'))
+    throw new Error(`${key.env}: unresolved path variable`);
   if (
-    key.type === 'window' &&
-    !/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:-(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)|\+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun))* \d{2}:\d{2}-\d{2}:\d{2} [A-Za-z_]+\/[A-Za-z0-9_+\-/]+(?:; mult=\d+(?:\.\d+)?; off=\d+(?:\.\d+)?)?$/.test(
-      value,
-    )
+    key.type === 'path' &&
+    !value.startsWith('/') &&
+    !(value.startsWith('<') && value.endsWith('>'))
+  )
+    throw new Error(`${key.env}: expected an absolute path`);
+  if (key.type === 'window') validateWindow(key, value);
+  return value;
+}
+
+function resolveValue(
+  key: ConfigKey,
+  raw: string | boolean | number | readonly string[] | Readonly<Record<string, string>> | null,
+  env: Readonly<Record<string, string | undefined>>,
+  options: ResolveConfigOptions,
+): ConfigValue {
+  let value = parse(key, raw);
+  if (
+    key.outsideWorkspace &&
+    key.type === 'string' &&
+    typeof value === 'string' &&
+    value.startsWith('custom:')
   ) {
-    throw new Error(`${key.env}: invalid quota window`);
+    const path = expandPath(value.slice('custom:'.length), env, key);
+    assertOutsideWorkspace(key, path, options);
+    return `custom:${path}`;
+  }
+  if (
+    key.type === 'path' &&
+    typeof value === 'string' &&
+    !(value.startsWith('<') && value.endsWith('>'))
+  ) {
+    value = expandPath(value, env, key);
+    assertOutsideWorkspace(key, value, options);
   }
   return value;
+}
+
+function validateWindow(key: ConfigKey, value: string): void {
+  const match =
+    /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:-(Mon|Tue|Wed|Thu|Fri|Sat|Sun)|\+(Mon|Tue|Wed|Thu|Fri|Sat|Sun))* (\d{2}):(\d{2})-(\d{2}):(\d{2}) ([A-Za-z_]+\/[A-Za-z0-9_+\-/]+)(?:; mult=(\d+(?:\.\d+)?); off=(\d+(?:\.\d+)?))?$/.exec(
+      value,
+    );
+  if (
+    !match ||
+    Number(match[4]) > 23 ||
+    Number(match[5]) > 59 ||
+    Number(match[6]) > 23 ||
+    Number(match[7]) > 59 ||
+    Number(match[4]) * 60 + Number(match[5]) >= Number(match[6]) * 60 + Number(match[7]) ||
+    (match[8] !== undefined && Number(match[8]) <= 0)
+  )
+    throw new Error(`${key.env}: invalid quota window`);
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: match[8] });
+  } catch {
+    throw new Error(`${key.env}: invalid quota window timezone`);
+  }
 }
 
 function equal(a: ConfigValue, b: ConfigValue): boolean {
@@ -280,7 +438,7 @@ function isSubset(a: ConfigValue, b: ConfigValue): boolean {
 }
 
 function mergeable(key: ConfigKey): boolean {
-  return key.type === 'map' || key.type === 'aliases';
+  return key.type === 'map' || key.type === 'bindings' || key.type === 'aliases';
 }
 
 function overlay(key: ConfigKey, lower: ConfigValue, higher: ConfigValue): ConfigValue {
@@ -333,7 +491,10 @@ function tighter(key: ConfigKey, value: ConfigValue, baseline: ConfigValue): boo
   }
 }
 
-function parseOptIns(optIns: readonly string[]): { ids: Set<string>; values: Map<string, string> } {
+function parseOptIns(optIns: readonly string[]): {
+  ids: Set<string>;
+  values: Map<string, string>;
+} {
   const ids = new Set<string>();
   const values = new Map<string, string>();
   for (const entry of optIns) {
@@ -446,19 +607,22 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       key.blank === null
         ? key.type === 'list'
           ? []
-          : key.type === 'map' || key.type === 'aliases'
+          : key.type === 'map' || key.type === 'bindings' || key.type === 'aliases'
             ? {}
             : null
-        : parse(key, key.blank);
+        : resolveValue(key, key.blank, env, options);
     const seeded =
-      profile === 'solo-maintainer' && key.solo !== undefined ? parse(key, key.solo) : undefined;
+      profile === 'solo-maintainer' && key.solo !== undefined
+        ? resolveValue(key, key.solo, env, options)
+        : undefined;
     let current = seeded === undefined ? defaultValue : overlay(key, defaultValue, seeded);
     let layer: ConfigLayer = seeded === undefined ? 'default' : 'profile';
     let sourceEnv: string | undefined = seeded === undefined ? undefined : 'CQ_PROFILE';
     const raw = nonblank(env[key.env]);
     if (raw !== undefined) {
       if (key.reserved) throw new Error(`${key.env}: reserved; not yet honoured`);
-      const projectValue = parse(key, raw);
+      const projectValue =
+        key.id === 'automation.token' ? null : resolveValue(key, raw, env, options);
       if (key.id === 'merge.trustedAssociations' && !isSubset(projectValue, defaultValue))
         throw new Error(`${key.env}: project values may only narrow the fixed association set`);
       if (key.order === 'union' && !isSubset(defaultValue, projectValue)) {
@@ -467,10 +631,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       if (
         key.id === 'run.envPassthrough' &&
         isStringArray(projectValue) &&
-        projectValue.some(
-          (name) =>
-            name.startsWith('CQ_') || secretSuffixes.some((suffix) => name.endsWith(suffix)),
-        )
+        projectValue.some((name) => unsafePassthrough(name, env))
       ) {
         throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
       }
@@ -484,7 +645,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       (optIns.has(key.id) && key.type === 'bool' ? true : undefined);
     if (callRaw !== undefined) {
       if (!key.perCall) throw new Error(`${key.id}: has no per-call layer`);
-      const next = parse(key, callRaw);
+      const next = resolveValue(key, callRaw, env, options);
       if (!tighter(key, next, current) && !optIns.has(key.id))
         throw new Error(`${key.id}: less-conservative per-call value requires explicit opt-in`);
       current = overlay(key, current, next);
@@ -493,7 +654,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     }
     const relaxed = !tighter(key, current, defaultValue);
     entries[key.id] = Object.freeze({
-      value: current,
+      value: deepFreeze(current),
       layer,
       ...(sourceEnv ? { env: sourceEnv } : {}),
       relaxed,
@@ -527,7 +688,12 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         throw new Error(`${id}: unsupported value '${value}'`);
       if (id === 'budget.breakLock' && !value) throw new Error(`${id}: run id is required`);
     }
-    entries[id] = Object.freeze({ value, layer: 'call', relaxed: true, changed: true });
+    entries[id] = Object.freeze({
+      value: deepFreeze(value),
+      layer: 'call',
+      relaxed: true,
+      changed: true,
+    });
   }
   return Object.freeze({
     registryVersion: 1,

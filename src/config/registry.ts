@@ -7,6 +7,7 @@ export type ConfigType =
   | 'enum'
   | 'list'
   | 'map'
+  | 'bindings'
   | 'aliases'
   | 'string'
   | 'model'
@@ -41,7 +42,7 @@ export interface ConfigKey {
   readonly reserved?: boolean;
   readonly bounds?: Readonly<{ min?: number; max?: number }>;
   readonly layers: readonly ('default' | 'profile' | 'env' | 'call')[];
-  readonly ci: 'vars' | 'secrets';
+  readonly ci: 'vars' | 'secrets' | false;
   readonly outsideWorkspace: boolean;
   readonly src: 'RS-15 Annex B';
   readonly doc: string;
@@ -197,7 +198,7 @@ const rows: readonly (readonly [
   [
     'CQ_DRIVER_BINDINGS',
     'driver.bindings',
-    'map',
+    'bindings',
     '*/zai:ai-sdk,*/anthropic:ai-sdk,*/openai:ai-sdk,*/deepseek:ai-sdk',
     '*/anthropic:claude-agent',
     'unordered',
@@ -329,7 +330,11 @@ const staticKeys: readonly ConfigKey[] = rows.map(
       : perCall
         ? ['default', 'profile', 'env', 'call']
         : ['default', 'profile', 'env'],
-    ci: env.endsWith('_TOKEN') ? 'secrets' : 'vars',
+    ci: env.endsWith('_TOKEN')
+      ? 'secrets'
+      : ['path', 'argv'].includes(type) || ['CQ_GH_BIN', 'CQ_DRIVER_ACP_ENDPOINT'].includes(env)
+        ? false
+        : 'vars',
     outsideWorkspace: [
       'CQ_APPROVAL_SIGNERS',
       'CQ_APPROVAL_LEDGER',
@@ -408,7 +413,7 @@ export function providerKeysFor(providerIds: readonly string[]): readonly Config
         order,
         perCall,
         layers: ['default', 'profile', 'env'],
-        ci: 'vars',
+        ci: suffix === 'PROFILE' ? false : 'vars',
         outsideWorkspace: suffix === 'PROFILE',
         src: 'RS-15 Annex B',
         doc: `RS-15 provider key ${suffix}`,
