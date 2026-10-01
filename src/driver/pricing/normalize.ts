@@ -166,6 +166,14 @@ export function worstCaseRates(
     return values.length === 0 ? undefined : Math.max(...values);
   };
   const complete = unpricedCandidates.length === 0 && missingDirections.length === 0;
+  // NO candidate priced anything: there is no worst case to report. Emitting a
+  // `rates` object here would put explicit ZEROS in front of a caller — an
+  // "input 0, output 0" figure reads as "this model is free", which is the exact
+  // fabrication the price map refuses to make. The completeness metadata still
+  // travels, so a caller can tell an unknown model from a priced one.
+  if (perCandidate.length === 0) {
+    return { complete, unpricedCandidates, missingDirections, candidates };
+  }
   // A direction no candidate prices stays ABSENT (a zero term at cost time), never
   // an explicit 0 that would read as a known price. A DISPUTED direction is absent
   // too, even though some candidate prices it: taking that maximum would price the

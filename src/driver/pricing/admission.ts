@@ -187,17 +187,20 @@ function isoResetMs(raw: string | undefined): number | undefined {
  *
  * Rule order (RS-14 §4, and the G1 reconciliation fold that put the Claude
  * unified-header rule ahead of `retry-after`):
- *   1. a profile rule keyed on the provider error code, the most specific
- *      structured signal;
- *   2. the marker-header rule, whose PRESENCE discriminates a plan window from a
- *      throttle — checked before `retry-after` because the captured Claude 429
- *      carries BOTH a `rejected` unified status and `retry-after: 3741`, and
- *      calling an exhausted plan a throttle busy-retries it for an hour;
- *   3. `retry-after` present ⇒ rate-limit: a vendor that hands back a retry time
+ *   1. a profile rule, resolved by `firstMatchingRule` in discriminator
+ *      specificity — provider error code, then required message shape, then
+ *      endpoint identity, then MARKER HEADER, then a bare HTTP status — with
+ *      every discriminator a rule declares required to match;
+ *   2. `retry-after` present ⇒ rate-limit: a vendor that hands back a retry time
  *      is telling us the condition clears on its own;
- *   4. a profile rule keyed on the HTTP status alone;
- *   5. an endpoint-supplied `resetsAt` ⇒ quota, defer-until-reset;
- *   6. otherwise ⇒ provider-error (never a silent zero, never a silent retry).
+ *   3. an endpoint-supplied `resetsAt` ⇒ quota, defer-until-reset;
+ *   4. otherwise ⇒ provider-error (never a silent zero, never a silent retry).
+ *
+ * Step 1 runs BEFORE the `retry-after` branch, so a profile that documents a
+ * status-only throttle (Claude's "Server is temporarily limiting requests", a 429
+ * with no unified quota headers) classifies from that documented rule and reports
+ * `structured`, while a profile with no such rule (OpenAI) reports `retry-after`.
+ * The class is rate-limit either way; only the narration label differs.
  */
 export function classifyProviderSignal(
   profileId: string | undefined,

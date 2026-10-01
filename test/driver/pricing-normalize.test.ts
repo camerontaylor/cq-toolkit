@@ -122,6 +122,17 @@ describe('resolvePricedModel', () => {
 });
 
 describe('worstCaseRates', () => {
+  test('an entirely unpriced candidate set reports NO rates, not zero rates', () => {
+    // A `rates` object with zeros would read as "this model is free", which is
+    // the fabrication the price map refuses to make. The completeness metadata
+    // still travels so a caller can tell unknown from priced.
+    const worst = worstCaseRates(UNKNOWN, ALIASES, 'ai-sdk');
+    expect(worst.rates).toBeUndefined();
+    expect(worst.complete).toBe(false);
+    expect(worst.unpricedCandidates).toEqual(['claude-never-shipped']);
+    expect(worst.candidates).toEqual(['claude-never-shipped']);
+  });
+
   test('no aliases means the requested id alone bounds the rates', () => {
     const worst = worstCaseRates(HAIKU, ALIASES, 'acp');
     expect(worst.complete).toBe(true);

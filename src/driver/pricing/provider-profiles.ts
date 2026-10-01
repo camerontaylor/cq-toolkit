@@ -270,13 +270,15 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
       // NO bare `429 -> rate-limit` rule on this profile, by design. The vendor
       // documents `retry-after` on a genuine rate-limit 429 and its ABSENCE on
       // the spend-cap 429, so a status-only throttle rule would classify an
-      // exhausted allowance as a throttle and busy-retry it for an hour. What
-      // remains here is fail-closed: a 429 whose code is not
-      // enforced_spend_limit_reached and that carries no retry-after falls
-      // through to the status rule above and settles as QUOTA - deferred, never
-      // retried - rather than as a throttle. A real throttle is classified by
-      // the classifier's retry-after rule, which is the documented
-      // discriminator.
+      // exhausted allowance as a throttle and busy-retry it for an hour.
+      //
+      // What is left is fail-closed: a 429 that carries neither the
+      // enforced_spend_limit_reached code nor a `retry-after` matches NO rule and
+      // settles as provider-error — honestly unattributed, no defer time, no
+      // retry. (It does NOT fall through to a status rule: this profile declares
+      // none, precisely because a bare status cannot tell the two conditions
+      // apart here.) A real throttle is identified by `retry-after`, which is the
+      // discriminator the vendor documents.
     ],
     modelLimits: {
       'claude-haiku-4-5': {
@@ -473,10 +475,10 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
         httpStatus: 429,
         errorClass: 'quota',
         provenance: {
-          kind: 'documented',
+          kind: 'rs14-capture',
           source: `${CAPTURES}zai_headers.txt`,
           asOf: '2026-09-25',
-          note: 'The coding wire answers 200 until the plan allowance is out; the pay-as-you-go wire rejects a plan key with 429 insufficient-balance BY DESIGN. So on this profile a 429 is quota-shaped with no retry-after, i.e. defer to the window reset rather than retry.',
+          note: 'A live 200 carried no quota or rate-limit headers at all, and the pay-as-you-go wire rejects a plan key with 429 insufficient-balance BY DESIGN (owner-verified 2026-09-14 in src/driver/ai-sdk/index.ts, not re-verified by capture). The coding wire answers 200 until the plan allowance is out, so on this profile a 429 is quota-shaped with no retry-after: defer to the window reset rather than retry. Provenance is a CAPTURE, not vendor documentation — no vendor page documents this shape.',
         },
       },
     ],
