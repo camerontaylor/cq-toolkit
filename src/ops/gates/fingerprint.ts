@@ -5,8 +5,9 @@
 // pre-existing failure re-keys to the same fingerprint after small drift
 // while a genuinely new failure still keys differently. LOCATION-LESS
 // failures (line null — vitest's suite/assertion shape) have no position to
-// bucket, so they match by CONTENT instead: a normalized message component
-// (stable test names) alongside the offset bucket. Pure decision code:
+// bucket, so they match by CONTENT instead: the normalized full test name
+// alongside the offset bucket. Duplicate keys receive occurrence ordinals,
+// preserving counts without depending on input order. Pure decision code:
 // zero I/O.
 //
 // Invariants honored here:
@@ -18,14 +19,12 @@
 //     spot is a regression; cross-tool failures never collide); position is
 //     bucketed, never exact (line/column buckets default 20, offset bucket
 //     default 500 — documented coarseness, asserted in tests).
-//   - Two matching regimes: positioned failures match by drift-tolerant
-//     position (message ignored); location-less failures match by content
-//     (normalized message). Residual limitations, documented (Set semantics
-//     cannot count): duplicate IDENTICAL failures — positioned keys
-//     included — collapse to one fingerprint, so one fixed copy of two
-//     identical failures is invisible to the gate; and on the positioned
-//     branch a null column folds to bucket 0 (a column-less failure shares
-//     its line bucket with its column-less siblings).
+//   - Matching regimes: Vitest failures match by full test name regardless
+//     of reported location; other positioned failures match by drift-tolerant
+//     position (message ignored); other location-less failures match by full
+//     normalized message. On the positioned branch a null column folds to
+//     bucket 0 (a column-less failure shares its line bucket with its
+//     column-less siblings).
 //   - Exactness: gate decisions compare FULL canonical keys — JSON of the
 //     component tuple, so components containing `|` (or any delimiter)
 //     cannot collide across splits. The 32-bit FNV form is a compact
@@ -86,11 +85,12 @@ export function fnv1a32Hex(text: string): string {
 
 /**
  * The EXACT identity of one failure: JSON of its component tuple — in
- * spirit `tool|file|ruleId|severity|position|lineBucket:colBucket` for
- * POSITIONED failures and `tool|file|ruleId|severity|message|offN` for
- * LOCATION-LESS ones, but array-encoded so no delimiter in any component
- * can make two different failures key identically. This is what the
- * regression gate compares.
+ * spirit `tool|file|ruleId|severity|testName` for Vitest failures,
+ * `tool|file|ruleId|severity|position|lineBucket:colBucket` for other
+ * positioned failures and `tool|file|ruleId|severity|message|offN` for
+ * other location-less ones, but array-encoded so no delimiter in any
+ * component can make two different failures key identically. This is what
+ * the regression gate compares.
  */
 export function fingerprintKey(f: CheckFailure, cfg?: FingerprintConfig): string {
   return JSON.stringify(keyComponents(f, resolveConfig(cfg)));
@@ -108,23 +108,30 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
 }
 
 /**
- * Every failure of a {@link FailureSet} paired with its EXACT canonical
- * key, the FailureSet's `tool` folded in. The regression gate compares
- * these pair lists so novel/fixed failures can be REPORTED, not just
- * counted — by key equality, deterministically.
+ * Every failure of a {@link FailureSet} paired with its exact canonical
+ * key and an occurrence ordinal, the FailureSet's `tool` folded in. The
+ * ordinal preserves duplicate counts while keeping comparison independent
+ * of failure order, so novel/fixed occurrences can be reported.
  */
 export function fingerprintPairs(
   s: FailureSet,
   cfg?: FingerprintConfig,
 ): Array<{ failure: CheckFailure; key: string }> {
   const effective = { ...cfg, tool: s.tool };
-  return s.failures.map((failure) => ({ failure, key: fingerprintKey(failure, effective) }));
+  const occurrences = new Map<string, number>();
+  return s.failures.map((failure) => {
+    const identity = fingerprintKey(failure, effective);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    return { failure, key: JSON.stringify([identity, occurrence]) };
+  });
 }
 
 /**
- * The canonical-key set of a whole {@link FailureSet} — the unit the
- * regression gate compares. Exact keys, not hashes: Set membership makes
- * the comparison order-invariant AND collision-free.
+ * The occurrence-key set of a whole {@link FailureSet}. Duplicate
+ * canonical identities have distinct ordinals, so the set retains
+ * multiset counts while remaining order-invariant. Keys contain exact
+ * identities, not compact hashes.
  */
 export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<string> {
   return new Set(fingerprintPairs(s, cfg).map((pair) => pair.key));
@@ -134,6 +141,9 @@ export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<stri
 function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
   const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
   const ruleId = f.ruleId ?? '';
+  if (cfg.tool === 'vitest') {
+    return [cfg.tool, file, ruleId, f.severity, 'test-name', normalizeMessage(f.message)];
+  }
   if (typeof f.line === 'number') {
     const lineBucket = Math.floor(f.line / cfg.lineBucketSize);
     const colBucket = Math.floor((f.column ?? 0) / cfg.columnBucketSize);
@@ -152,16 +162,14 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
 }
 
 /**
- * Location-less identity: first line of the message, whitespace runs
- * collapsed, trimmed. Case is PRESERVED — distinct test names that differ
- * only in case stay distinct. NO length cap: hashing is O(n) anyway, and a
+ * Location-less identity: the full message with whitespace runs collapsed
+ * and trimmed. Case is PRESERVED — distinct test names that differ only in
+ * case stay distinct. NO length cap: hashing is O(n) anyway, and a
  * cap would only mint a prefix-collision class (two long distinct names
  * sharing a prefix would key identically).
  */
 function normalizeMessage(message: string): string {
-  const newline = message.indexOf('\n');
-  const firstLine = newline === -1 ? message : message.slice(0, newline);
-  return firstLine.replace(/\s+/g, ' ').trim();
+  return message.replace(/\s+/g, ' ').trim();
 }
 
 /** Backslashes to posix separators, then strip `rootDir` (also posix-normalized) when the path is under it. */
