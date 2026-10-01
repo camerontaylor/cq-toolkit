@@ -101,7 +101,10 @@ describe('resolvePricedModel', () => {
   test('an unobserved served id prices the requested id and stays unobserved', () => {
     const resolved = resolvePricedModel({ lane: 'acp', modelSpec: DEEPSEEK_CHAT });
     expect(resolved.via).toBe('unobserved');
-    expect(resolved.rates).toBeUndefined(); // deepseek-chat is not a table key
+    // `deepseek-chat` IS a vendored table key, so the requested id prices
+    // directly. It is the WIRE's served id (`deepseek-flash`) that needs the
+    // alias set, which is what the next test covers.
+    expect(resolved.rates).toEqual(priceOf(DEEPSEEK_CHAT));
     expect(resolved.candidates).toEqual(['deepseek-chat']);
   });
 

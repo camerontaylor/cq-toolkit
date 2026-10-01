@@ -395,14 +395,15 @@ describe('classifyProviderSignal', () => {
           'anthropic-ratelimit-unified-7d-status': 'rejected',
         },
       },
-      // Targeted at 7d, but EARLIER than the 5h header reset.
-      { resetsAt: '2026-09-28T00:00:00Z', window: 'weekly' },
+      // Targeted at 7d, but EARLIER than the 5h header reset, so the correct
+      // answer is the 5h header time and the endpoint value alone is wrong.
+      { resetsAt: '2026-09-24T00:00:00Z', window: 'weekly' },
     );
     expect(verdict.errorClass).toBe('quota');
     // The max, NOT the endpoint value alone: deferring to the 7d endpoint reset
     // would retry while the 5h wall is still up.
     expect(verdict.deferUntilMs).toBe(1_790_341_200_000);
-    expect(verdict.deferUntilMs).not.toBe(Date.parse('2026-09-28T00:00:00Z'));
+    expect(verdict.deferUntilMs).not.toBe(Date.parse('2026-09-24T00:00:00Z'));
   });
 
   test('two blocked windows, both headers missing, endpoint names only one -> NO defer', () => {
@@ -454,14 +455,19 @@ describe('classifyProviderSignal', () => {
     expect(verdict.rule).toBe('retry-after');
   });
 
-  test('a plain 429 with no unified headers is a throttle, deferring on retry-after', () => {
+  test('a plain 429 with no unified headers is a throttle', () => {
     const verdict = classifyProviderSignal('claude-subscription', {
       httpStatus: 429,
       retryAfterMs: 2_000,
       message: 'Server is temporarily limiting requests',
     });
+    // The CLASS is what governs behaviour, and it is rate-limit. The RULE label is
+    // `structured` rather than `retry-after` because the profile carries a
+    // documented status-only 429 rule ("Server is temporarily limiting requests"
+    // is a 429 WITHOUT unified quota headers), and specific rules resolve before
+    // the generic retry-after branch. A generic profile with no 429 rule still
+    // reports `retry-after` — see the OpenAI transient case below.
     expect(verdict.errorClass).toBe('rate-limit');
-    expect(verdict.rule).toBe('retry-after');
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 

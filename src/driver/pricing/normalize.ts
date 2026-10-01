@@ -166,12 +166,17 @@ export function worstCaseRates(
     return values.length === 0 ? undefined : Math.max(...values);
   };
   const complete = unpricedCandidates.length === 0 && missingDirections.length === 0;
-  // A direction no candidate prices stays ABSENT (a zero term at cost time),
-  // never an explicit 0 that would read as a known price.
-  const input = maximum('input') ?? 0;
-  const output = maximum('output') ?? 0;
-  const cacheRead = maximum('cacheRead');
-  const cacheWrite = maximum('cacheWrite');
+  // A direction no candidate prices stays ABSENT (a zero term at cost time), never
+  // an explicit 0 that would read as a known price. A DISPUTED direction is absent
+  // too, even though some candidate prices it: taking that maximum would price the
+  // direction as if the silent candidate charged it, which is precisely the
+  // claim this module refuses to make.
+  const bounded = (direction: RateDirection): number | undefined =>
+    missingDirections.includes(direction) ? undefined : maximum(direction);
+  const input = bounded('input') ?? 0;
+  const output = bounded('output') ?? 0;
+  const cacheRead = bounded('cacheRead');
+  const cacheWrite = bounded('cacheWrite');
   const rates: PerMillionRates = {
     input,
     output,

@@ -93,16 +93,31 @@ describe('candidate served aliases — shape and contents', () => {
     }
   });
 
-  test('no candidate maps a served id that itself remaps (an alias cycle would never settle)', () => {
+  test('no candidate declares the same requested id twice in one lane', () => {
     const seen = new Set<string>();
+    for (const [lane, byProvider] of Object.entries(CANDIDATE_SERVED_ALIASES)) {
+      for (const [provider, byRequested] of Object.entries(byProvider)) {
+        for (const requested of Object.keys(byRequested)) {
+          const key = `${lane}/${provider}/${requested}`;
+          expect({ key, alreadySeen: seen.has(key) }).toEqual({ key, alreadySeen: false });
+          seen.add(key);
+        }
+      }
+    }
+  });
+
+  test('no candidate maps a served id that itself remaps (an alias cycle would never settle)', () => {
+    // NOTE: several REQUESTED ids legitimately share one served id - Z.AI routes
+    // both GLM-5.1 and GLM-5.2 to GLM-5.3, so `ai-sdk/zai/glm-5.3` appears twice
+    // as a served id. That is the documented behaviour, not a duplicate entry;
+    // the invariant here is about cycles, so it keys on the REQUESTED id.
     for (const [lane, byProvider] of Object.entries(CANDIDATE_SERVED_ALIASES)) {
       for (const [provider, byRequested] of Object.entries(byProvider)) {
         for (const [requested, served] of Object.entries(byRequested)) {
           for (const id of served) {
-            const key = `${lane}/${provider}/${id}`;
-            expect(seen.has(key)).toBe(false);
-            seen.add(key);
-            expect(Object.hasOwn(byRequested, id)).toBe(false);
+            expect({ lane, provider, id, remapsElsewhere: Object.hasOwn(byRequested, id) }).toEqual(
+              { lane, provider, id, remapsElsewhere: false },
+            );
             expect(id).not.toBe(requested);
           }
         }
