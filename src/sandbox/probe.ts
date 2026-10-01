@@ -194,110 +194,128 @@ export async function probeBackend(
         maxOutputChars: 4_000,
       });
 
-    // 1 — control: the launcher must actually execute and grant the workspace.
-    const touch = await launch(['/usr/bin/touch', join(workspace, 'cq-canary-out')]);
-    const inWs = touch.ok ? await launch(['/bin/cat', join(workspace, 'cq-canary-out')]) : touch;
-    canaries.push(
-      inWs.ok
-        ? {
-            id: 'workspace-control',
-            verdict: 'pass',
-            detail: `workspace exec + rw ok (${detail(touch)})`,
-          }
-        : { id: 'workspace-control', verdict: 'fail', detail: detail(inWs) },
-    );
+    try {
+      // 1 — control: the launcher must actually execute and grant the workspace.
+      const touch = await launch(['/usr/bin/touch', join(workspace, 'cq-canary-out')]);
+      const inWs = touch.ok ? await launch(['/bin/cat', join(workspace, 'cq-canary-out')]) : touch;
+      canaries.push(
+        inWs.ok
+          ? {
+              id: 'workspace-control',
+              verdict: 'pass',
+              detail: `workspace exec + rw ok (${detail(touch)})`,
+            }
+          : { id: 'workspace-control', verdict: 'fail', detail: detail(inWs) },
+      );
 
-    // 2 — the child must not read outside the workspace.
-    const escapeRead = await launch(['/bin/cat', sentinel]);
-    canaries.push(
-      escapeRead.ok
-        ? { id: 'read-escape', verdict: 'fail', detail: `read a file in ${root}` }
-        : { id: 'read-escape', verdict: 'pass', detail: detail(escapeRead) },
-    );
+      // 2 — the child must not read outside the workspace.
+      const escapeRead = await launch(['/bin/cat', sentinel]);
+      canaries.push(
+        escapeRead.ok
+          ? { id: 'read-escape', verdict: 'fail', detail: `read a file in ${root}` }
+          : { id: 'read-escape', verdict: 'pass', detail: detail(escapeRead) },
+      );
 
-    // 3 — the child must not write outside the workspace.
-    const escapePath = join(root, 'cq-escape');
-    const escapeWrite = await launch(['/usr/bin/touch', escapePath]);
-    canaries.push(
-      escapeWrite.ok
-        ? { id: 'write-escape', verdict: 'fail', detail: `created ${escapePath}` }
-        : { id: 'write-escape', verdict: 'pass', detail: detail(escapeWrite) },
-    );
+      // 3 — the child must not write outside the workspace.
+      const escapePath = join(root, 'cq-escape');
+      const escapeWrite = await launch(['/usr/bin/touch', escapePath]);
+      canaries.push(
+        escapeWrite.ok
+          ? { id: 'write-escape', verdict: 'fail', detail: `created ${escapePath}` }
+          : { id: 'write-escape', verdict: 'pass', detail: detail(escapeWrite) },
+      );
 
-    // 4 — a parent secret must not reach the child env.  The secret is
-    // verified present in the parent first, so the scrub cannot be vacuous.
-    const envRead = await launch(['/usr/bin/env']);
-    canaries.push(
-      !envRead.ok
-        ? {
-            id: 'credential-env',
-            verdict: 'inconclusive',
-            detail: `env probe failed: ${detail(envRead)}`,
-          }
-        : envRead.stdout.includes(secret)
+      // 4 — a parent secret must not reach the child env.  The bare-host
+      // control proves the secret really is in the parent, so the scrub
+      // cannot be vacuous; `printenv NAME` keeps the child answer tiny, so a
+      // truncated full-env dump cannot hide a leak behind the output cap.
+      const presenceEnv: Record<string, string> = {};
+      for (const [name, value] of Object.entries(parentEnv)) {
+        if (value !== undefined) presenceEnv[name] = value;
+      }
+      const presence = await hostExec(['/usr/bin/printenv', 'CQ_PROBE_CANARY_SECRET'], presenceEnv);
+      const envRead = await launch(['/usr/bin/printenv', 'CQ_PROBE_CANARY_SECRET']);
+      canaries.push(
+        !presence.ok
           ? {
               id: 'credential-env',
-              verdict: 'fail',
-              detail: 'CQ_PROBE_CANARY_SECRET reached the child',
+              verdict: 'inconclusive',
+              detail: `bare-host printenv failed, canary cannot fire: ${presence.stderr}`,
             }
-          : {
-              id: 'credential-env',
-              verdict: 'pass',
-              detail: 'parent secret absent from child env',
-            },
-    );
+          : envRead.ok
+            ? {
+                id: 'credential-env',
+                verdict: 'fail',
+                detail: envRead.stdout.includes(secret)
+                  ? 'CQ_PROBE_CANARY_SECRET reached the child'
+                  : 'printenv found the name with a different value',
+              }
+            : envRead.spawnError !== undefined
+              ? {
+                  id: 'credential-env',
+                  verdict: 'inconclusive',
+                  detail: `printenv did not run: ${envRead.spawnError}`,
+                }
+              : { id: 'credential-env', verdict: 'pass', detail: detail(envRead) },
+      );
 
-    // 5 — the child must not read a credential beside the user's home files.
-    const credRead = await launch(['/bin/cat', homeCanary]);
-    canaries.push(
-      credRead.ok
-        ? { id: 'credential-file', verdict: 'fail', detail: `read ${homeCanary}` }
-        : { id: 'credential-file', verdict: 'pass', detail: detail(credRead) },
-    );
+      // 5 — the child must not read a credential beside the user's home files.
+      const credRead = await launch(['/bin/cat', homeCanary]);
+      canaries.push(
+        credRead.ok
+          ? { id: 'credential-file', verdict: 'fail', detail: `read ${homeCanary}` }
+          : { id: 'credential-file', verdict: 'pass', detail: detail(credRead) },
+      );
 
-    // 6 — network: a loopback listener must be connectable on the bare host
-    // (control) and unreachable inside the boundary.
-    const listener = await loopbackPort();
-    if (!('port' in listener)) {
-      canaries.push({
-        id: 'network-loopback',
-        verdict: 'inconclusive',
-        detail: `listener failed: ${listener.error}`,
-      });
-    } else {
-      try {
-        const port = listener.port;
-        const connect = ['--norc', '-c', `exec 3<>/dev/tcp/127.0.0.1/${port}`];
-        const control = await hostExec(['/bin/bash', ...connect]);
-        const sandboxed = await launch(['/bin/bash', ...connect]);
-        if (!control.ok) {
-          canaries.push({
-            id: 'network-loopback',
-            verdict: 'inconclusive',
-            detail: `bare-host connect failed, canary cannot fire: ${control.stderr}`,
-          });
-        } else if (sandboxed.ok) {
-          canaries.push({
-            id: 'network-loopback',
-            verdict: 'fail',
-            detail: `child connected to 127.0.0.1:${port}`,
-          });
-        } else {
-          // Surface the connect-denial line, not incidental startup noise.
-          const denial =
-            sandboxed.stderr.split('\n').find((line) => /connect|dev\/tcp|network/i.test(line)) ??
-            firstLine(sandboxed.stderr);
-          canaries.push({ id: 'network-loopback', verdict: 'pass', detail: denial });
+      // 6 — network: the loopback listener must be connectable on the bare
+      // host (control); a model-only boundary must refuse the child's
+      // connect, an allow posture must pass it.  Either way this loopback
+      // check never claims general egress isolation.
+      const expectConnect = network === 'allow';
+      const listener = await loopbackPort();
+      if (!('port' in listener)) {
+        canaries.push({
+          id: 'network-loopback',
+          verdict: 'inconclusive',
+          detail: `listener failed: ${listener.error}`,
+        });
+      } else {
+        try {
+          const port = listener.port;
+          const connect = ['--norc', '-c', `exec 3<>/dev/tcp/127.0.0.1/${port}`];
+          const control = await hostExec(['/bin/bash', ...connect]);
+          const sandboxed = await launch(['/bin/bash', ...connect]);
+          if (!control.ok) {
+            canaries.push({
+              id: 'network-loopback',
+              verdict: 'inconclusive',
+              detail: `bare-host connect failed, canary cannot fire: ${control.stderr}`,
+            });
+          } else if (sandboxed.ok !== expectConnect) {
+            canaries.push({
+              id: 'network-loopback',
+              verdict: 'fail',
+              detail: expectConnect
+                ? `child could not connect to 127.0.0.1:${port} under allow posture`
+                : `child connected to 127.0.0.1:${port}`,
+            });
+          } else {
+            // Surface the connect-denial line, not incidental startup noise.
+            const denial =
+              sandboxed.stderr.split('\n').find((line) => /connect|dev\/tcp|network/i.test(line)) ??
+              firstLine(sandboxed.stderr);
+            canaries.push({ id: 'network-loopback', verdict: 'pass', detail: denial });
+          }
+        } finally {
+          await listener.close();
         }
-      } finally {
-        await listener.close();
       }
+    } finally {
+      await rm(homeCanary, { force: true });
     }
 
-    await rm(homeCanary, { force: true });
-
-    const runnable = canaries.some((c) => c.id === 'workspace-control');
     const controlOk = canaries.find((c) => c.id === 'workspace-control')?.verdict === 'pass';
+    const runnable = controlOk;
     const denied = canaries
       .filter((c) => c.id !== 'workspace-control')
       .every((c) => c.verdict === 'pass');

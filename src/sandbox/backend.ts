@@ -140,17 +140,20 @@ function launcherEnv(request: {
 export const SEATBELT_BIN = '/usr/bin/sandbox-exec';
 
 /**
- * The seatbelt profile for a workspace.  Deny-default is the only honest
- * starting point, and `bsd.sb` must be imported: on darwin 24 a deny-default
- * profile without the BSD startup closure SIGABRTs every child before main
- * (observed on darwin 24.6.0, sandbox-exec rc=134).  After the import, reads
- * of the read-only sealed system volume stay allowed for process startup and
- * every user-data zone is denied by path, so the workspace is the only
- * user-writable and user-readable surface.  `model-only` denies all network
- * operations — strictly stronger than the requested posture, which the
- * certification record states rather than implying endpoint filtering.
+ * The seatbelt profile.  Deny-default is the only honest starting point, and
+ * `bsd.sb` must be imported: on darwin 24 a deny-default profile without the
+ * BSD startup closure SIGABRTs every child before main (observed on
+ * darwin 24.6.0, sandbox-exec rc=134).  After the import, reads of the
+ * read-only sealed system volume stay allowed for process startup and every
+ * user-data zone is denied by path, so the workspace is the only
+ * user-writable and user-readable surface.  The workspace rides in as the
+ * `WS` profile PARAMETER (via `sandbox-exec -D`), never as interpolated
+ * profile text: a workspace path is data and cannot rewrite the profile.
+ * `model-only` denies all network operations — strictly stronger than the
+ * requested posture, which the certification record states rather than
+ * implying endpoint filtering.
  */
-export function seatbeltProfile(workspace: string, network: SandboxNetwork): string {
+export function seatbeltProfile(network: SandboxNetwork): string {
   const denies = [
     '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/folders"))',
     ...(network === 'model-only' ? ['(deny network*)'] : []),
@@ -167,7 +170,7 @@ export function seatbeltProfile(workspace: string, network: SandboxNetwork): str
     '(allow ipc-posix-sem)',
     '(allow file-read* (subpath "/"))',
     ...denies,
-    `(allow file-read* file-write* (subpath "${workspace}"))`,
+    '(allow file-read* file-write* (subpath (param "WS")))',
     '(allow file-write* (subpath "/dev/null"))',
     '',
   ].join('\n');
@@ -216,7 +219,7 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       const childTmp = join(request.workspace, '.tmp');
       await mkdir(childTmp, { recursive: true });
       const profilePath = join(request.workspace, '.cq-seatbelt.sb');
-      await writeFile(profilePath, seatbeltProfile(request.workspace, request.network));
+      await writeFile(profilePath, seatbeltProfile(request.network));
       env['TMPDIR'] = childTmp;
       return runChild(
         SEATBELT_BIN,
@@ -237,11 +240,14 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
 // ---------------------------------------------------------------------------
 
 /**
- * The bubblewrap argv for one launch: the root tree is read-only, the
- * workspace is the only writable bind, and model-only posture unshares the
- * whole network namespace.  Built as data so tests can assert the boundary
- * flags on any host; only a host that can actually run bubblewrap can
- * certify it (that proof lives in ./probe.js).
+ * The bubblewrap argv for one launch: the root tree is read-only, volatile
+ * mounts (tmpfs over /tmp and over the host HOME, which the read-only root
+ * bind would otherwise expose with its credentials) land BEFORE the workspace
+ * bind so a workspace nested under either still shadows them, the workspace
+ * is the only writable bind, and model-only posture unshares the whole
+ * network namespace.  Built as data so tests can assert the boundary flags on
+ * any host; only a host that can actually run bubblewrap can certify it (that
+ * proof lives in ./probe.js).
  */
 export function bwrapArgv(
   workspace: string,
@@ -249,20 +255,22 @@ export function bwrapArgv(
   env: Readonly<Record<string, string>>,
   argv: readonly string[],
 ): string[] {
+  const home = env['HOME'];
   return [
     'bwrap',
     '--ro-bind',
     '/',
     '/',
-    '--bind',
-    workspace,
-    workspace,
     '--dev',
     '/dev',
     '--proc',
     '/proc',
     '--tmpfs',
     '/tmp',
+    ...(home !== undefined && home !== '' ? ['--tmpfs', home] : []),
+    '--bind',
+    workspace,
+    workspace,
     '--new-session',
     '--die-with-parent',
     ...(network === 'model-only' ? ['--unshare-net'] : []),

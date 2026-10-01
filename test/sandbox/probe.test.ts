@@ -36,13 +36,17 @@ const result = (over: Partial<SandboxLaunchResult>): SandboxLaunchResult => ({
 });
 
 /**
- * A fake whose verdicts follow one of three behaviors, keyed by what the
+ * A fake whose verdicts follow one of four behaviors, keyed by what the
  * canaries ask the child to do:
  *   grant-all — every child succeeds (a boundary that does not bound);
  *   block-all — no child ever runs (a broken launcher, not confinement);
- *   env-fails — children run except the env probe (an inconclusive canary).
+ *   env-fails — children run except the env probe (an inconclusive canary);
+ *   fs-only   — filesystem denials hold but the child may connect (an
+ *               `allow`-posture boundary, wrong for model-only).
  */
-function fakeAdapter(behavior: 'grant-all' | 'block-all' | 'env-fails'): SandboxBackendAdapter {
+function fakeAdapter(
+  behavior: 'grant-all' | 'block-all' | 'env-fails' | 'fs-only',
+): SandboxBackendAdapter {
   return {
     backend: 'bwrap',
     workspaceParent: () => '/tmp',
@@ -51,18 +55,32 @@ function fakeAdapter(behavior: 'grant-all' | 'block-all' | 'env-fails'): Sandbox
       if (behavior === 'block-all') {
         return Promise.resolve(result({ spawnError: 'fake launcher refuses everything' }));
       }
-      if (behavior === 'env-fails' && request.argv[0] === '/usr/bin/env') {
+      if (behavior === 'env-fails' && request.argv[0] === '/usr/bin/printenv') {
         return Promise.resolve(result({ exitCode: 7 }));
+      }
+      if (behavior === 'fs-only') {
+        // The control canary targets the workspace; every other read/write
+        // target is denied, printenv finds nothing, but the child may
+        // connect — an allow-posture boundary.
+        const denied = request.argv[1]?.startsWith(request.workspace) !== true;
+        if (request.argv[0] === '/bin/bash') {
+          return Promise.resolve(result({ ok: true, exitCode: 0 }));
+        }
+        if (request.argv[0] === '/usr/bin/printenv') {
+          return Promise.resolve(result({ exitCode: 1 }));
+        }
+        if (denied) {
+          return Promise.resolve(result({ exitCode: 1, stderr: 'fake boundary: denied' }));
+        }
+        return Promise.resolve(result({ ok: true, exitCode: 0 }));
       }
       return Promise.resolve(
         result({
           ok: true,
           exitCode: 0,
           stdout:
-            request.argv[0] === '/usr/bin/env'
-              ? Object.entries(request.parentEnv ?? {})
-                  .map(([name, value]) => `${name}=${value}`)
-                  .join('\n')
+            request.argv[0] === '/usr/bin/printenv'
+              ? (request.parentEnv?.[request.argv[1] ?? ''] ?? '')
               : '',
         }),
       );
@@ -76,7 +94,7 @@ const verdictOf = (record: BackendProbeRecord, id: string) =>
 describe('a probe can be forged by neither a broken nor a promiscuous launcher', () => {
   test('a launcher that blocks everything fails its control and stays uncertified', async () => {
     const record = await probeBackend(fakeAdapter('block-all'));
-    expect(record.runnable).toBe(true); // it claims availability…
+    expect(record.runnable).toBe(false); // it claims availability but ran no child
     expect(verdictOf(record, 'workspace-control')).toBe('fail');
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/did not run a child in the workspace/);
@@ -98,6 +116,20 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     expect(verdictOf(record, 'credential-env')).toBe('inconclusive');
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/inconclusive/);
+  });
+
+  test('the network canary follows the configured posture, not a hardcoded deny', async () => {
+    // fs-only is a real allow-posture boundary: filesystem denials hold, the
+    // child may connect.  It certifies for `allow` and must NOT certify for
+    // model-only — and no posture lets the loopback check claim general
+    // egress isolation.
+    const allow = await probeBackend(fakeAdapter('fs-only'), { network: 'allow' });
+    expect(verdictOf(allow, 'network-loopback')).toBe('pass');
+    expect(verdictOf(allow, 'read-escape')).toBe('pass');
+    expect(allow.certified).toBe(true);
+    const modelOnly = await probeBackend(fakeAdapter('fs-only'), { network: 'model-only' });
+    expect(verdictOf(modelOnly, 'network-loopback')).toBe('fail');
+    expect(modelOnly.certified).toBe(false);
   });
 
   test('a backend that cannot run records its exact environmental blocker', async () => {

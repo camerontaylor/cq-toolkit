@@ -2,7 +2,7 @@
 // on any host), while boundary ENFORCEMENT is only claimed where it can
 // actually execute (the darwin seatbelt legs skip elsewhere — certification
 // evidence comes from probe.ts, never from these builders alone).
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -20,31 +20,45 @@ import {
 
 describe('seatbelt boundary construction', () => {
   test('the profile is deny-default with the bsd.sb startup closure', () => {
-    const profile = seatbeltProfile('/private/var/tmp/ws', 'model-only');
+    const profile = seatbeltProfile('model-only');
     expect(profile).toContain('(version 1)');
     expect(profile).toContain('(deny default)');
     expect(profile).toContain('(import "bsd.sb")');
   });
 
   test('model-only denies all network operations; allow does not', () => {
-    expect(seatbeltProfile('/ws', 'model-only')).toContain('(deny network*)');
-    expect(seatbeltProfile('/ws', 'allow')).not.toContain('(deny network*)');
+    expect(seatbeltProfile('model-only')).toContain('(deny network*)');
+    expect(seatbeltProfile('allow')).not.toContain('(deny network*)');
   });
 
-  test('the workspace is the only user-readable and user-writable zone', () => {
-    const profile = seatbeltProfile('/private/var/tmp/cq-ws', 'model-only');
-    expect(profile).toContain('(allow file-read* file-write* (subpath "/private/var/tmp/cq-ws"))');
+  test('the workspace arrives as the WS parameter, never as profile text', () => {
+    const profile = seatbeltProfile('model-only');
+    expect(profile).toContain('(allow file-read* file-write* (subpath (param "WS")))');
     for (const zone of ['/Users', '/Volumes', '/private/tmp', '/private/var/folders']) {
       expect(profile).toContain(`(deny file-read* (subpath "${zone}")`);
     }
+    // A hostile workspace path cannot rewrite the profile: no caller-supplied
+    // path is interpolated into profile text at all.
+    expect(profile).not.toMatch(/\/private\/var\/tmp|cq-ws/);
   });
 });
 
 describe('linux and container boundary construction', () => {
-  test('bwrap binds the root read-only, the workspace writable, unshares net', () => {
-    const argv = bwrapArgv('/ws', 'model-only', { PATH: '/bin' }, ['/bin/sh', '-c', 'echo']);
-    expect(argv.slice(0, 5)).toEqual(['bwrap', '--ro-bind', '/', '/', '--bind']);
-    expect(argv).toContain('/ws');
+  test('bwrap binds the root read-only, masks volatile paths, binds ws last', () => {
+    const argv = bwrapArgv('/tmp/cq-ws', 'model-only', { PATH: '/bin', HOME: '/home/u' }, [
+      '/bin/sh',
+      '-c',
+      'echo',
+    ]);
+    expect(argv.slice(0, 5)).toEqual(['bwrap', '--ro-bind', '/', '/', '--dev']);
+    // /tmp and HOME are masked BEFORE the workspace bind, so a workspace
+    // nested under either still shadows them.
+    expect(argv.indexOf('--tmpfs')).toBeLessThan(argv.indexOf('--bind'));
+    expect(argv).toContain('--tmpfs');
+    expect(argv.join(' ')).toContain('--tmpfs /tmp');
+    expect(argv.join(' ')).toContain('--tmpfs /home/u');
+    const bindAt = argv.indexOf('--bind');
+    expect(argv.slice(bindAt, bindAt + 3)).toEqual(['--bind', '/tmp/cq-ws', '/tmp/cq-ws']);
     expect(argv).toContain('--unshare-net');
     expect(argv).toContain('--clearenv');
     expect(argv).toContain('--die-with-parent');
@@ -53,8 +67,8 @@ describe('linux and container boundary construction', () => {
       'PATH',
       '/bin',
     ]);
-    expect(argv[argv.length - 3]).toBe('--');
-    expect(argv.slice(-2)).toEqual(['/bin/sh', '-c', 'echo']);
+    expect(argv[argv.length - 4]).toBe('--');
+    expect(argv.slice(-3)).toEqual(['/bin/sh', '-c', 'echo']);
   });
 
   test('bwrap keeps the network for an allow posture', () => {
@@ -149,18 +163,21 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     expect(result.stdout).toContain(`TMPDIR=${join(workspace, '.tmp')}`);
   }, 30_000);
 
-  test('the confined child cannot read outside the workspace', async () => {
+  test('the confined child cannot read a real file outside the workspace', async () => {
     const adapter = seatbeltAdapter();
     const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
     scratch.push(workspace);
     const outside = await mkdtemp(join(tmpdir(), 'cq-sbx-outside-'));
     scratch.push(outside);
+    const outsidePath = join(outside, 'secret.txt');
+    await writeFile(outsidePath, 'outside-secret-value');
     const result = await adapter.launch({
       workspace,
-      argv: ['/bin/cat', join(outside, 'no-such-secret')],
+      argv: ['/bin/cat', outsidePath],
       network: 'model-only',
     });
     expect(result.ok).toBe(false);
+    expect(result.stdout).not.toContain('outside-secret-value');
   }, 30_000);
 });
 
