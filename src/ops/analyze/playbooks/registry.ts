@@ -779,6 +779,17 @@ export function makePlaybookDispatchOp(
  * are both STRANDED, because from the caller's point of view they are the
  * same fact — "this file is not back to the pre-dispatch bytes, and here is
  * why".
+ *
+ * AND A LOCK FAULT IS A RESULT, NOT AN EXCEPTION. The mutation lock is a
+ * real filesystem primitive, and it throws in three ordinary ways: the
+ * waiter budget is exhausted (another writer holds it), the release fails,
+ * or the artifact is compromised while held. Letting any of those reject
+ * out of here would escape the op with NO result and NO evidence — the worst
+ * possible outcome, because the applied edits are already on disk and the
+ * caller would be left knowing nothing about them. So a lock fault is
+ * caught and reported: EVERY applied file is marked STRANDED, because a
+ * section whose exclusivity cannot be proven proves no restore, even one
+ * whose bytes were already written back before the fault.
  */
 async function restoreTargets(
   authority: ApprovalAuthority,
@@ -791,7 +802,7 @@ async function restoreTargets(
   const restored: string[] = [];
   const stranded: Array<{ file: string; error: string }> = [];
   const ordered = [...rewritten].sort();
-  const held = await withMutationLock(authority, workspace, async () => {
+  const run = async (): Promise<void> => {
     for (const file of ordered) {
       const before = preApply.get(file);
       if (before === undefined) {
@@ -835,7 +846,26 @@ async function restoreTargets(
         stranded.push({ file, error: messageOf(err) });
       }
     }
-  });
+  };
+  let held: { ok: true; value: void } | { ok: false; reason: string };
+  try {
+    held = await withMutationLock(authority, workspace, run);
+  } catch (err) {
+    // A LOCK FAULT (acquire exhausted, release failed, artifact
+    // compromised). Nothing is claimed as restored: a section whose
+    // exclusivity cannot be proven proves no restore, and every applied
+    // file — including one whose bytes were already written back before the
+    // fault — is reported with the reason, so the caller can never read a
+    // clean rollback out of a run whose lock broke.
+    return {
+      attempted: ordered,
+      restored: [],
+      stranded: ordered.map((file) => ({
+        file,
+        error: `the workspace mutation lock faulted during the rollback (${messageOf(err)}) — the restore could not be run to a provable completion, so this file is not claimed as restored even if its pre-dispatch bytes were already written back`,
+      })),
+    };
+  }
   if (!held.ok) {
     // No lock bound: the restore cannot be made safe, so it is NOT run and
     // every file is reported stranded with the reason.

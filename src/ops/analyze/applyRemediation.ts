@@ -507,11 +507,21 @@ export function makeApplyRemediation(
       });
     } catch (err) {
       if (err instanceof ApplyWriteFault) return { status: 'failed', error: err.message };
-      // A LOCK fault (a contended or compromised mutation lock) is NOT an
-      // approval refusal and must not read as one: it is the op's own
-      // machinery failing, which is `failed`, with the token's fate stated
-      // as unknown rather than guessed.
-      throw err;
+      // A LOCK FAULT (waiter budget exhausted, release failed, artifact
+      // compromised) is a RESULT, not an escape. The mutation lock is a real
+      // filesystem primitive and it throws in ordinary situations; letting
+      // that reject out of the op would hand the caller an exception with no
+      // OpResult at all, while the applied set may be partially on disk.
+      // So it becomes `failed` — the op's own machinery failing, which is
+      // explicitly NOT an approval refusal and must not read as one — and it
+      // states exactly what the caller cannot otherwise know: which files
+      // were in the approved write set (so a partial apply is inspectable)
+      // and that the token may already be spent, which is ADR-0003 §4c's
+      // safe direction rather than a replay risk.
+      return {
+        status: 'failed',
+        error: `remediation: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. The approval was already EXERCISED, so the token is spent (safe: a spent token cannot be replayed), and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a LOCK FAULT is not a proof that any of them was written and not a proof that none was, so inspect the workspace before re-running; this is the op's machinery failing, NOT an approval refusal`,
+      };
     }
     if (approved.status === 'needs-human') {
       return {

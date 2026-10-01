@@ -26,6 +26,7 @@ import type {
   ApprovalState,
   ApprovalStateReader,
   InspectableNonceLedger,
+  MutationLocks,
 } from '../../../../src/ops/analyze/approval.js';
 import type { PlaybookDispatchUnverified } from '../../../../src/ops/analyze/playbooks/registry.js';
 import {
@@ -856,5 +857,133 @@ describe('W4.3 the rollback is conditional and locked (no lost update)', () => {
     // the whole bug.
     expect(events.filter((entry) => entry.startsWith('lock:'))).toHaveLength(2);
     expect(maxHeld).toBe(1);
+  });
+});
+
+// A LOCK FAULT IS A RESULT, NOT AN EXCEPTION. The mutation lock is a real
+// filesystem primitive and it throws in three ordinary ways — the waiter
+// budget is exhausted, the release fails, or the artifact is compromised
+// while held. Before this, any of those rejected straight out of the op
+// with no OpResult and, worse, no evidence: the applied edits were already
+// on disk and the caller learned nothing about them.
+describe('a lock fault during the rollback is reported, never thrown', () => {
+  /** Locks that fail the way the real git mutex can: at acquire, or after the section ran. */
+  function faultingLocks(mode: 'acquire' | 'release'): MutationLocks {
+    const real = makeProcessLocalMutationLocks();
+    return {
+      forWorkspace: (workspace: string) => {
+        const inner = real.forWorkspace(workspace);
+        return {
+          withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+            if (mode === 'acquire') {
+              throw new Error(
+                "git-mutex: could not acquire '/state/mutation-abc.lock' — still held after the waiter budget",
+              );
+            }
+            // The compromise-after-the-fact case: the section RAN (and its
+            // result is discarded, because a compromised section proves
+            // nothing), then the primitive reported the fault.
+            await inner.withLock(fn);
+            throw new Error('git-mutex: lock was compromised while held');
+          },
+        };
+      },
+    };
+  }
+
+  test('a lock fault at ACQUIRE strands every applied file and still returns failed', async () => {
+    const h = harness(FIXTURE, 1);
+    const locks = faultingLocks('acquire');
+    const dispatch = makePlaybookDispatchOp({
+      playbooks: h.playbooks,
+      quarantine: h.quarantine,
+      run: h.run,
+      storeFor: () => h.store,
+      approval: makeApprovalAuthority({
+        approvals: {
+          verifiedFor: (s) =>
+            Promise.resolve({
+              nonce: `nonce-${s.inputDigest.slice(0, 12)}`,
+              state: { workspace: '/ws', headSha: 'head', treeClean: true },
+            }),
+        },
+        ledger: makeInMemoryNonceLedger(),
+        locks,
+        readState: {
+          read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+        },
+      }),
+    });
+    const result = await dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    // No throw escaped: the op produced a result.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    const evidence = dispatchEvidence(result.error);
+    // NOTHING is claimed as restored, and the reason names the lock fault.
+    expect(evidence.restore.restored).toEqual([]);
+    expect(evidence.restore.stranded).toHaveLength(1);
+    expect(evidence.restore.stranded[0]?.file).toBe('src/a.ts');
+    expect(evidence.restore.stranded[0]?.error).toContain('mutation lock faulted');
+    expect(evidence.restore.stranded[0]?.error).toContain('waiter budget');
+    // The playbook is still quarantined — the verdict did not change.
+    expect(evidence.quarantined).toBe(true);
+  });
+
+  test('a lock fault AFTER the section ran claims nothing as restored (exclusivity is unproven)', async () => {
+    const h = harness(FIXTURE, 1);
+    const locks = faultingLocks('release');
+    const dispatch = makePlaybookDispatchOp({
+      playbooks: h.playbooks,
+      quarantine: h.quarantine,
+      run: h.run,
+      storeFor: () => h.store,
+      approval: makeApprovalAuthority({
+        approvals: {
+          verifiedFor: (s) =>
+            Promise.resolve({
+              nonce: `nonce-${s.inputDigest.slice(0, 12)}`,
+              state: { workspace: '/ws', headSha: 'head', treeClean: true },
+            }),
+        },
+        ledger: makeInMemoryNonceLedger(),
+        locks,
+        readState: {
+          read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+        },
+      }),
+    });
+    const result = await dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    const evidence = dispatchEvidence(result.error);
+    // The restore body DID run, but a compromised section proves no
+    // exclusivity, so the bytes must not be reported as a clean rollback.
+    expect(evidence.restore.restored).toEqual([]);
+    expect(evidence.restore.stranded[0]?.error).toContain('compromised');
+    expect(result.error).not.toContain('rolled back to their pre-dispatch bytes');
+  });
+
+  test('POSITIVE CONTROL: with healthy locks the same path still restores fully', async () => {
+    const h = harness(FIXTURE, 1);
+    const before = h.store.backing.get('src/a.ts');
+    const result = await h.dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    const evidence = dispatchEvidence(result.error);
+    expect(evidence.restore.restored).toEqual(['src/a.ts']);
+    expect(evidence.restore.stranded).toEqual([]);
+    expect(h.store.backing.get('src/a.ts')).toBe(before);
   });
 });
