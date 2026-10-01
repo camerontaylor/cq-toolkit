@@ -193,6 +193,13 @@ export const SEATBELT_BIN = '/usr/bin/sandbox-exec';
  * never pass by accident.
  */
 export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): string {
+  // Process execution is narrowed to the accepted P7 trial's trees: /usr/bin,
+  // /bin, /sbin, /usr/libexec.  /usr/local/* is deliberately ABSENT (the
+  // delta review's attack target — e.g. /usr/local/bin/docker stays denied),
+  // and the live local-prefix-exec canary attacks exactly that surface.
+  const execTrees = ['"/usr/bin"', '"/bin"', '"/sbin"', '"/usr/libexec"']
+    .map((tree) => `(subpath ${tree})`)
+    .join(' ');
   const networkRules =
     network === 'allow'
       ? ['(allow network*)']
@@ -203,7 +210,7 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
     '(version 1)',
     '(deny default)',
     '(import "bsd.sb")',
-    '(allow process-exec*)',
+    `(allow process-exec* ${execTrees})`,
     '(allow process-fork)',
     '(allow mach-lookup)',
     '(allow sysctl-read)',
@@ -216,12 +223,9 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
     '  (subpath "/usr/sbin")',
     '  (subpath "/usr/lib")',
     '  (subpath "/usr/share")',
-    '  (subpath "/usr/local/share")',
-    '  (subpath "/usr/local/bin")',
     '  (subpath "/System")',
     '  (subpath "/Library/Apple")',
     '  (subpath "/private/var/db/dyld")',
-    '  (subpath "/private/etc")',
     '  (subpath "/dev"))',
     ...networkRules,
     '(allow file-read* file-write* (subpath (param "WS")))',
@@ -298,7 +302,10 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
  * The bubblewrap argv for one launch.  The host root is NOT bound (Sol audit,
  * backend.ts:261 — a root ro-bind exposes host reads): only the OS runtime
  * trees a child needs are bound read-only (`/usr` required; `/bin`, `/sbin`,
- * `/lib`, `/lib64`, `/etc` with `-try`, which skip absent trees), volatile
+ * `/lib`, `/lib64` with `-try`, which skip absent trees).  Host `/etc` is NOT
+ * bound (delta review): the namespace has no /etc at all, so host
+ * configuration never enters; tools that require it may fail, which the
+ * workspace control surfaces.  Volatile
  * paths are masked (`/tmp`, and `$HOME` so host credentials are never in the
  * mount namespace), and the workspace is the only writable bind, placed AFTER
  * the masks so a workspace nested under either still shadows them.  Model-only
@@ -334,9 +341,6 @@ export function bwrapArgv(
     '--ro-bind-try',
     '/lib64',
     '/lib64',
-    '--ro-bind-try',
-    '/etc',
-    '/etc',
     '--dev',
     '/dev',
     '--proc',
@@ -424,6 +428,25 @@ export interface ContainerAdapterOptions {
 }
 
 /**
+ * Validated at construction (delta review P2): a `--user` override naming
+ * root — `0`, `0:0`, `0:anything` — or a non-numeric identity is refused
+ * outright, so the non-root claim cannot be silently defeated by options.
+ */
+function validatedContainerUser(user: string | undefined): string {
+  const requested = user ?? '65532:65532';
+  const match = /^(\d{1,10})(?::(\d{1,10}))?$/.exec(requested);
+  if (match === null) {
+    throw new Error(`sandbox: container --user '${requested}' must be numeric UID[:GID]`);
+  }
+  if (match[1] === '0' || match[2] === '0') {
+    throw new Error(
+      `sandbox: container --user '${requested}' is refused; the container boundary is certified non-root`,
+    );
+  }
+  return requested;
+}
+
+/**
  * `--cap-drop ALL` and a non-root `--user` are part of the boundary, not
  * optional hardening: the canaries certify the launcher exactly as built
  * here.  `--env NAME` (no value) makes the CLI read each name from its own
@@ -449,7 +472,7 @@ export function containerArgv(
     '--security-opt',
     'no-new-privileges',
     '--user',
-    options.user ?? '65532:65532',
+    validatedContainerUser(options.user),
     '--volume',
     `${workspace}:${workspace}`,
     '--workdir',

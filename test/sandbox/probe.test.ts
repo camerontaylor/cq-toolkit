@@ -75,15 +75,20 @@ function fakeAdapter(
       const inWorkspace = request.argv[1]?.startsWith(request.workspace) === true;
       if (request.argv[0] === '/bin/bash') {
         if (behavior === 'grant-all') return Promise.resolve(result({ ok: true, exitCode: 0 }));
+        // A plain in-boundary exec (the probe's shell control) works for every
+        // behavior that executes children at all.
+        const plainExec = argText.includes('/bin/true');
         // fs-only: any connect passes.  proxy-fs-only: only the declared
         // proxy loopback port passes — non-proxy ports and external hosts are
         // denied even when a proxyPort was granted.
         const allowed =
           behavior === 'fs-only' ||
+          (behavior === 'env-fails' && plainExec) ||
           (behavior === 'proxy-fs-only' &&
-            portMatch !== null &&
-            portMatch[1] === '127.0.0.1' &&
-            Number(portMatch[2]) === request.proxyPort);
+            (plainExec ||
+              (portMatch !== null &&
+                portMatch[1] === '127.0.0.1' &&
+                Number(portMatch[2]) === request.proxyPort)));
         return allowed
           ? Promise.resolve(result({ ok: true, exitCode: 0 }))
           : Promise.resolve(denied());
@@ -118,6 +123,7 @@ const ALL_IDS = [
   'symlink-escape',
   'nested-child-escape',
   'write-escape',
+  'local-prefix-exec',
   'credential-env',
   'credential-file',
 ] as const;
@@ -134,6 +140,12 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
   test('a launcher that grants everything fails every denial canary', async () => {
     const record = await probeBackend(fakeAdapter('grant-all'));
     for (const id of ALL_IDS) {
+      if (id === 'local-prefix-exec') {
+        // Host-dependent: armed (and failed) wherever /usr/local has content;
+        // an empty local prefix records the explicit n/a pass.
+        expect(['fail', 'pass']).toContain(verdictOf(record, id));
+        continue;
+      }
       expect(verdictOf(record, id)).toBe('fail');
     }
     expect(verdictOf(record, 'network-loopback')).toBe('fail');
@@ -214,6 +226,8 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
       records: [],
       certified: ['bwrap'],
     };
+    // A forged object yields nothing to the resolver bridge either.
+    expect(certifiedBackendsOf(forged)).toEqual([]);
     await expect(
       launchCertified(fakeAdapter('fs-only'), forged, {
         workspace: '/tmp/ws',
@@ -224,10 +238,11 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   });
 
   test('launchCertified refuses a backend the probe did not certify', async () => {
-    const certification = await certifyBackends({ adapters: [fakeAdapter('block-all')] });
+    const adapter = fakeAdapter('block-all');
+    const certification = await certifyBackends({ adapters: [adapter] });
     expect(certification.certified).toEqual([]);
     await expect(
-      launchCertified(fakeAdapter('block-all'), certification, {
+      launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
         argv: ['/bin/true'],
         network: 'model-only',
@@ -235,13 +250,59 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     ).rejects.toThrow(/not certified for required mode.*fail-closed/s);
   });
 
-  test('launchCertified executes inside a genuinely probe-certified backend', async () => {
+  test('a different launcher instance sharing the backend name inherits nothing', async () => {
+    const certified = fakeAdapter('fs-only');
     const certification = await certifyBackends({
-      adapters: [fakeAdapter('fs-only')],
+      adapters: [certified],
       network: 'allow',
     });
     expect(certification.certified).toEqual(['bwrap']);
-    const launched = await launchCertified(fakeAdapter('fs-only'), certification, {
+    const impostor = fakeAdapter('grant-all'); // same backend string, new object
+    await expect(
+      launchCertified(impostor, certification, {
+        workspace: '/tmp/ws',
+        argv: ['/bin/true'],
+        network: 'allow',
+      }),
+    ).rejects.toThrow(/launcher object was not probed by this certification/);
+  });
+
+  test('mutating the caller-visible fields cannot widen a launch or the handoff', async () => {
+    const adapter = fakeAdapter('fs-only');
+    const certification = await certifyBackends({
+      adapters: [adapter],
+      network: 'allow',
+    });
+    // Tamper with every informational field a forger would reach for.
+    (certification.certified as string[]).push('container', 'seatbelt');
+    (certification as { networkDemonstrated: string }).networkDemonstrated = 'proxy-loopback';
+    (certification as { network: string }).network = 'model-only';
+    // The receipt still decides: the launch stays bound to the earned posture…
+    await expect(
+      launchCertified(adapter, certification, {
+        workspace: '/tmp/ws',
+        argv: ['/bin/true'],
+        network: 'model-only',
+      }),
+    ).rejects.toThrow(/certified under the 'allow' posture/);
+    // …and the resolver handoff still yields exactly what the probe earned.
+    expect(certifiedBackendsOf(certification)).toEqual(['bwrap']);
+    const launched = await launchCertified(adapter, certification, {
+      workspace: '/tmp/ws',
+      argv: ['/bin/true'],
+      network: 'allow',
+    });
+    expect(launched.ok).toBe(true);
+  });
+
+  test('launchCertified executes inside a genuinely probe-certified backend', async () => {
+    const adapter = fakeAdapter('fs-only');
+    const certification = await certifyBackends({
+      adapters: [adapter],
+      network: 'allow',
+    });
+    expect(certification.certified).toEqual(['bwrap']);
+    const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
       argv: ['/bin/true'],
       network: 'allow',
@@ -250,12 +311,13 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   });
 
   test('certification does not transfer across postures', async () => {
+    const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
-      adapters: [fakeAdapter('fs-only')],
+      adapters: [adapter],
       network: 'allow',
     });
     await expect(
-      launchCertified(fakeAdapter('fs-only'), certification, {
+      launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
         argv: ['/bin/true'],
         network: 'model-only',
@@ -264,20 +326,21 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   });
 
   test('a proxy-composed certification requires the proxy port on every launch', async () => {
+    const adapter = fakeAdapter('proxy-fs-only');
     const certification = await certifyBackends({
-      adapters: [fakeAdapter('proxy-fs-only')],
+      adapters: [adapter],
       network: 'model-only',
       modelProxy: true,
     });
     expect(certification.networkDemonstrated).toBe('proxy-loopback');
     await expect(
-      launchCertified(fakeAdapter('proxy-fs-only'), certification, {
+      launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
         argv: ['/bin/true'],
         network: 'model-only',
       }),
     ).rejects.toThrow(/a proxyPort is required on every launch/);
-    const launched = await launchCertified(fakeAdapter('proxy-fs-only'), certification, {
+    const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
       argv: ['/bin/true'],
       network: 'model-only',
@@ -287,12 +350,13 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   });
 
   test('a non-proxy certification refuses a launch that carries a proxy port', async () => {
+    const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
-      adapters: [fakeAdapter('fs-only')],
+      adapters: [adapter],
       network: 'allow',
     });
     await expect(
-      launchCertified(fakeAdapter('fs-only'), certification, {
+      launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
         argv: ['/bin/true'],
         network: 'allow',
@@ -328,8 +392,11 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
   }, 180_000);
 
   test('the live canaries certify seatbelt with proxy-composed model-only', async () => {
+    // One adapter instance for probe AND launch: the receipt binds the exact
+    // object it certified (delta review P1).
+    const adapter = seatbeltAdapter();
     const certification = await certifyBackends({
-      adapters: [seatbeltAdapter()],
+      adapters: [adapter],
       network: 'model-only',
       modelProxy: true,
     });
@@ -339,7 +406,6 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
     expect(certification.networkDemonstrated).toBe('proxy-loopback');
     // The certified receipt authorizes a real launch — through a proxy port —
     // which the narrow-allow profile permits to that one loopback port.
-    const adapter = seatbeltAdapter();
     const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-live-'));
     try {
       const launched = await launchCertified(adapter, certification, {

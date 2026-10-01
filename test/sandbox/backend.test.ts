@@ -40,15 +40,28 @@ describe('seatbelt boundary construction', () => {
       '"/usr/lib"',
       '"/System"',
       '"/private/var/db/dyld"',
-      '"/private/etc"',
     ]) {
       expect(profile).toContain(`(subpath ${runtime})`);
     }
-    // User-data trees are simply NOT in the allowlist: deny-default denies
-    // them without per-zone deny lines.
+    // The delta review's local-prefix and /etc surfaces are NOT readable:
+    // /usr/local/* and /private/etc are absent from the allowlist entirely.
+    expect(profile).not.toContain('/usr/local');
+    expect(profile).not.toContain('/private/etc');
     expect(profile).not.toContain('"/Users"');
     expect(profile).not.toContain('"/Volumes"');
     expect(profile).not.toContain('"/private/var/folders"');
+  });
+
+  test('process execution is narrowed to the accepted P7 trial trees', () => {
+    const profile = seatbeltProfile('model-only');
+    // The accepted P7 shape — no unrestricted exec, no /usr/local/bin (e.g.
+    // /usr/local/bin/docker stays denied); the probe's local-prefix-exec
+    // canary attacks exactly this surface live.
+    expect(profile).toContain(
+      '(allow process-exec* (subpath "/usr/bin") (subpath "/bin") (subpath "/sbin") (subpath "/usr/libexec"))',
+    );
+    expect(profile).not.toMatch(/\(allow process-exec\*\)/);
+    expect(profile).not.toContain('/usr/local');
   });
 
   test('the workspace arrives as the WS parameter, never as profile text', () => {
@@ -87,11 +100,14 @@ describe('linux and container boundary construction', () => {
     // unconditional read bind is /usr, the rest are -try.
     expect(argv.slice(0, 3)).toEqual(['bwrap', '--ro-bind', '/usr']);
     expect(argv.join(' ')).not.toContain('--ro-bind / /');
-    for (const tree of ['/bin', '/sbin', '/lib', '/lib64', '/etc']) {
+    for (const tree of ['/bin', '/sbin', '/lib', '/lib64']) {
       const treeAt = argv.indexOf(tree);
       expect(treeAt).toBeGreaterThan(-1);
       expect(argv[treeAt - 1]).toBe('--ro-bind-try');
     }
+    // Host /etc never enters the namespace (delta review): no bind of any kind.
+    expect(argv).not.toContain('/etc');
+    expect(argv.join(' ')).not.toContain('--ro-bind /etc');
     // /tmp and HOME are masked BEFORE the workspace bind, so a workspace
     // nested under either still shadows them.
     expect(argv.indexOf('--tmpfs')).toBeLessThan(argv.indexOf('--bind'));
@@ -155,6 +171,20 @@ describe('linux and container boundary construction', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/not provisioned/);
+  });
+
+  test('a container --user override naming root or a non-numeric identity is refused', () => {
+    for (const root of ['0', '0:0', '0:1000', '1000:0', 'root', '65532:root']) {
+      expect(() =>
+        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', {}, ['/bin/true']),
+      ).toThrow(/non-root|numeric/);
+    }
+    // Any other fixed numeric identity is accepted verbatim.
+    const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', {}, [
+      '/bin/true',
+    ]);
+    const userAt = argv.indexOf('--user');
+    expect(argv.slice(userAt, userAt + 2)).toEqual(['--user', '1000:1000']);
   });
 
   test('a container CLI that cannot reach a daemon reports the exact blocker', async () => {

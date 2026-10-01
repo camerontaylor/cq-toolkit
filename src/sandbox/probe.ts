@@ -7,29 +7,38 @@
 // (control failed, canary binary never executed) also refuses certification —
 // doubt fails closed.
 //
-// Canary coverage (Sol audit, probe.ts:208): escape attempts probe the parent
-// temp tree, a SIBLING directory beside the workspace (inside the broad-root
-// allow surface the audit rejected — this canary is what bites that gap), a
-// SYMLINK from inside the workspace to that sibling, and a NESTED child (a
-// shell spawning a grandchild) so the boundary is proven for descendants, not
-// just the direct child.  Network coverage is posture-aware: loopback to a
-// live listener, an EXTERNAL connect to a public resolver (armed only when
-// the bare host demonstrably reaches it — an offline host cannot certify
-// egress denial and fails closed), and for the proxy-composed model-only
-// posture, egress through the ONE permitted local proxy port plus denial of
-// every other port.
+// Canary coverage (Sol audit, probe.ts:208; delta review P2): escape attempts
+// probe the parent temp tree, a SIBLING directory beside the workspace
+// (inside the broad-root allow surface the audit rejected — this canary is
+// what bites that gap), a SYMLINK from inside the workspace to that sibling,
+// and a NESTED child (a shell spawning a grandchild) so the boundary is
+// proven for descendants, not just the direct child.  Every FILE denial is
+// attributed by a positive control proving the target exists and is readable
+// (or the directory writable) on the bare host, and the nested/external legs
+// are armed by an IN-BOUNDARY control proving the shell-execution path itself
+// works inside the boundary — a nonzero exit alone is never evidence (delta
+// review P2).  Network coverage is posture-aware: loopback to a live
+// listener, an EXTERNAL connect to a public resolver (armed only when the
+// bare host demonstrably reaches it — an offline host cannot certify egress
+// denial and fails closed), and for the proxy-composed model-only posture,
+// egress through the ONE permitted local proxy port plus denial of every
+// other port.  A LOCAL-PREFIX canary attacks the accepted P7 deviation
+// surface: executing a host-present /usr/local/bin binary must be refused.
 //
 // `certifyBackends` results carry a probe-internal receipt (a module-private
-// WeakSet).  `launchCertified` refuses any certification object it did not
-// produce, so a caller-forged list — however well shaped — cannot authorize a
-// launch (Sol audit, probe.ts:417).
+// WeakMap): an immutable snapshot binding the certification to the EXACT
+// adapter instances that passed and to the demonstrated posture.  Every
+// `launchCertified` gate reads that receipt, never the caller-visible fields,
+// so caller mutation or a caller-forged list cannot widen what a launch may
+// do, and a different adapter instance sharing the backend name inherits
+// nothing (Sol audit probe.ts:417; delta review P1).
 //
 // The certified list this module emits is the ONLY intended source for
 // `resolveSandboxConfig({ certifiedBackends })`; `certifiedBackendsOf` types
 // that handoff so no caller can name a backend the probe never ran.
 import { execFile as execFileCb } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -51,6 +60,7 @@ export type CanaryId =
   | 'symlink-escape'
   | 'nested-child-escape'
   | 'write-escape'
+  | 'local-prefix-exec'
   | 'credential-env'
   | 'credential-file'
   | 'network-loopback'
@@ -112,18 +122,25 @@ export interface ProbeOptions {
 }
 
 /**
- * Receipt for certifications this module produced.  Plain data can be forged;
- * module identity cannot be copied across a boundary a caller controls.
+ * The probe receipt (Sol delta review, P1): the authoritative record of what
+ * a certification actually earned, keyed by the certification OBJECT and
+ * binding the EXACT adapter instances that were probed.  Every launch gate
+ * reads THIS snapshot, never the caller-visible fields, so mutating a
+ * certification object (or forging one) cannot widen what `launchCertified`
+ * enforces, and a different adapter instance that merely shares the backend
+ * name does not inherit the certification.
  */
-const probeEarned = new WeakSet<object>();
-
-function assertProbeEarned(certification: SandboxCertification): void {
-  if (!probeEarned.has(certification)) {
-    throw new Error(
-      'sandbox: certification was not produced by the RS-13 probe; a caller-forged certification object cannot authorize a launch',
-    );
-  }
+interface ProbeReceipt {
+  platform: NodeJS.Platform;
+  network: SandboxNetwork;
+  networkDemonstrated: NetworkDemonstrated;
+  /** Every probed adapter object → its blocker ('' when it certified). */
+  probedAdapters: ReadonlyMap<SandboxBackendAdapter, string>;
+  /** Frozen certified-backend list `certifiedBackendsOf` hands out. */
+  certified: readonly SandboxBackend[];
 }
+
+const probeReceipts = new WeakMap<SandboxCertification, ProbeReceipt>();
 
 function firstLine(text: string): string {
   return text.split('\n').find((line) => line.trim() !== '') ?? '';
@@ -156,9 +173,22 @@ function executed(r: { spawnError?: string; timedOut: boolean; exitCode: number 
   return r.spawnError === undefined && !r.timedOut && r.exitCode !== 126 && r.exitCode !== 127;
 }
 
-/** A read/touch denial verdict for one target: fail / inconclusive / pass. */
-function denialOutcome(id: CanaryId, result: SandboxLaunchResult, what: string): CanaryOutcome {
+/**
+ * A read/write denial verdict for one target (delta review P2): the exit is
+ * attributed to the boundary only when the canary binary actually ran AND the
+ * positive control proved the same operation succeeds on the bare host (the
+ * target exists and is readable, or the directory writable).  An unarmed or
+ * unexecuted canary is inconclusive — a nonzero exit alone is not evidence.
+ */
+function denialOutcome(
+  id: CanaryId,
+  result: SandboxLaunchResult,
+  armed: boolean,
+  what: string,
+): CanaryOutcome {
   if (result.ok) return { id, verdict: 'fail', detail: what };
+  if (!armed)
+    return { id, verdict: 'inconclusive', detail: `control did not arm: ${detail(result)}` };
   if (!executed(result))
     return { id, verdict: 'inconclusive', detail: `canary never ran: ${detail(result)}` };
   return { id, verdict: 'pass', detail: detail(result) };
@@ -175,6 +205,29 @@ async function hostExec(
   } catch (error) {
     const err = error as NodeJS.ErrnoException & { stderr?: string; message?: string };
     return { ok: false, stderr: firstLine(err.stderr ?? err.message ?? '') };
+  }
+}
+
+/**
+ * Whether a binary RAN on the bare host at all — ok or nonzero, but not
+ * missing/unreadable.  Arms the local-prefix canary: the control only needs
+ * to prove the target is executable OUTSIDE the boundary.
+ */
+async function hostRan(
+  file: string,
+  args: readonly string[],
+): Promise<{ ran: boolean; ok: boolean; stderr: string }> {
+  try {
+    await execFile(file, args, { timeout: 10_000 });
+    return { ran: true, ok: true, stderr: '' };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & {
+      code?: string;
+      stderr?: string;
+      message?: string;
+    };
+    const ran = err.code !== 'ENOENT' && err.code !== 'EACCES';
+    return { ran, ok: false, stderr: firstLine(err.stderr ?? err.message ?? '') };
   }
 }
 
@@ -221,6 +274,24 @@ async function loopbackPort(): Promise<
       });
     });
   });
+}
+
+/**
+ * First entry under /usr/local/bin, else /usr/local/share — the local-prefix
+ * attack surface for the P7 deviation probe.  undefined when the host carries
+ * no local-prefix content at all.
+ */
+async function firstLocalPrefixTarget(): Promise<string | undefined> {
+  for (const dir of ['/usr/local/bin', '/usr/local/share']) {
+    try {
+      const entries = await readdir(dir);
+      const file = entries.find((name) => !name.startsWith('.'));
+      if (file !== undefined) return join(dir, file);
+    } catch {
+      // Prefix absent on this host — the caller records the n/a verdict.
+    }
+  }
+  return undefined;
 }
 
 interface ProbeScratch {
@@ -336,46 +407,63 @@ export async function probeBackend(
           : { id: 'workspace-control', verdict: 'fail', detail: detail(inWs) },
       );
 
+      // In-boundary shell control (delta review P2): a grandchild spawned via
+      // `bash -c` must EXECUTE inside the boundary before any bash -c canary
+      // (nested-child, external, proxy connects) can attribute a nonzero exit
+      // to the boundary rather than to a broken execution path.
+      const shellControl = await launch(['/bin/bash', '-c', '/bin/true']);
+      const shellArmed = shellControl.ok;
+
+      // Bare-host read/write controls (delta review P2): each file-denial
+      // canary is attributed only when the SAME operation demonstrably
+      // succeeds outside the boundary.
+      const readControl = await hostExec(['/bin/cat', sentinel]);
+      const writeControl = await hostExec(['/usr/bin/touch', join(root, 'cq-write-control')]);
+      const credControl = await hostExec(['/bin/cat', homeCanary]);
+
       // 2 — the child must not read outside the workspace (parent temp tree).
       const escapeRead = await launch(['/bin/cat', sentinel]);
-      canaries.push(denialOutcome('read-escape', escapeRead, `read a file in ${root}`));
+      canaries.push(
+        denialOutcome('read-escape', escapeRead, readControl.ok, `read a file in ${root}`),
+      );
 
       // 3 — the child must not read the SIBLING directory beside the workspace:
       // the exact surface a broad-root allow would have leaked.
       const siblingControl = await hostExec(['/bin/cat', siblingSentinel]);
-      if (!siblingControl.ok) {
-        canaries.push({
-          id: 'read-escape-sibling',
-          verdict: 'inconclusive',
-          detail: `bare host cannot read the sibling sentinel, canary cannot fire: ${siblingControl.stderr}`,
-        });
-      } else {
-        const siblingRead = await launch(['/bin/cat', siblingSentinel]);
-        canaries.push(
-          denialOutcome('read-escape-sibling', siblingRead, 'read a sibling of the workspace'),
-        );
-      }
+      const siblingRead = await launch(['/bin/cat', siblingSentinel]);
+      canaries.push(
+        denialOutcome(
+          'read-escape-sibling',
+          siblingRead,
+          siblingControl.ok,
+          'read a sibling of the workspace',
+        ),
+      );
 
       // 4 — a symlink INSIDE the workspace must not smuggle an outside read:
-      // the link targets the sibling sentinel, which exists on the host, so
-      // only the boundary can stop the read.
+      // the link targets the sibling sentinel, which the bare host reads
+      // THROUGH THE LINK (control) — only the boundary can stop the child.
       await symlink(siblingSentinel, symlinkEscape);
+      const symlinkControl = await hostExec(['/bin/cat', symlinkEscape]);
       const symlinkRead = await launch(['/bin/cat', symlinkEscape]);
       canaries.push(
         denialOutcome(
           'symlink-escape',
           symlinkRead,
+          symlinkControl.ok,
           `read through a workspace symlink to ${siblingSentinel}`,
         ),
       );
 
       // 5 — the boundary must hold for DESCENDANTS: a nested child (a shell
-      // spawning a grandchild) attempting the sibling escape.
+      // spawning a grandchild) attempting the sibling escape.  Armed by the
+      // in-boundary shell control, so a nonzero exit is attributable.
       const nestedRead = await launch(['/bin/bash', '-c', `/bin/cat '${siblingSentinel}'`]);
       canaries.push(
         denialOutcome(
           'nested-child-escape',
           nestedRead,
+          shellArmed,
           'a nested child read the sibling sentinel',
         ),
       );
@@ -383,7 +471,43 @@ export async function probeBackend(
       // 6 — the child must not write outside the workspace.
       const escapePath = join(root, 'cq-escape');
       const escapeWrite = await launch(['/usr/bin/touch', escapePath]);
-      canaries.push(denialOutcome('write-escape', escapeWrite, `created ${escapePath}`));
+      canaries.push(
+        denialOutcome('write-escape', escapeWrite, writeControl.ok, `created ${escapePath}`),
+      );
+
+      // 6b — LOCAL-PREFIX attack control (delta review): the accepted P7
+      // trial denies exec outside /usr/bin,/bin,/sbin,/usr/libexec — prove a
+      // host-present /usr/local/bin binary cannot EXEC inside the boundary.
+      // When the host has no local-prefix content there is nothing to attack
+      // and the canary records that explicitly (the allowlist itself is
+      // construction-tested); where content exists, the verdict is earned.
+      const localBin = await firstLocalPrefixTarget();
+      if (localBin === undefined) {
+        canaries.push({
+          id: 'local-prefix-exec',
+          verdict: 'pass',
+          detail:
+            'no /usr/local content on this host to attack; /usr/local is absent from the read and exec allowlists (construction-tested)',
+        });
+      } else {
+        const arm = await hostRan(localBin, ['--version']);
+        const sandboxed = await launch([localBin, '--version']);
+        canaries.push(
+          !arm.ran
+            ? {
+                id: 'local-prefix-exec',
+                verdict: 'inconclusive',
+                detail: `bare host cannot run ${localBin}, canary cannot fire: ${arm.stderr}`,
+              }
+            : sandboxed.ok
+              ? { id: 'local-prefix-exec', verdict: 'fail', detail: `executed ${localBin}` }
+              : {
+                  id: 'local-prefix-exec',
+                  verdict: 'pass',
+                  detail: `exec of ${localBin} refused: ${detail(sandboxed)}`,
+                },
+        );
+      }
 
       // 7 — a parent secret must not reach the child env.  The bare-host
       // control proves the secret really is in the parent, so the scrub
@@ -427,7 +551,9 @@ export async function probeBackend(
 
       // 8 — the child must not read a credential beside the user's home files.
       const credRead = await launch(['/bin/cat', homeCanary]);
-      canaries.push(denialOutcome('credential-file', credRead, `read ${homeCanary}`));
+      canaries.push(
+        denialOutcome('credential-file', credRead, credControl.ok, `read ${homeCanary}`),
+      );
 
       // 9-11 — network, posture-aware.  The bare-host controls arm each
       // canary; a control that cannot fire leaves the canary inconclusive and
@@ -467,6 +593,12 @@ export async function probeBackend(
                 id: 'network-proxy',
                 verdict: 'inconclusive',
                 detail: `bare-host control failed, canary cannot fire: ${!proxyArm.ok ? proxyArm.stderr : !otherArm.ok ? otherArm.stderr : externalArm.detail}`,
+              });
+            } else if (!shellArmed) {
+              canaries.push({
+                id: 'network-proxy',
+                verdict: 'inconclusive',
+                detail: `in-boundary shell control failed, connect attempts are not attributable: ${detail(shellControl)}`,
               });
             } else if (
               !executed(proxyConnect) ||
@@ -557,6 +689,12 @@ export async function probeBackend(
             verdict: 'inconclusive',
             detail: `bare host cannot reach ${external.host}:${external.port}; offline hosts cannot certify egress denial (${externalArm.detail})`,
           });
+        } else if (!shellArmed) {
+          canaries.push({
+            id: 'network-external',
+            verdict: 'inconclusive',
+            detail: `in-boundary shell control failed, connect attempts are not attributable: ${detail(shellControl)}`,
+          });
         } else {
           const externalConnect = await launch([
             '/bin/bash',
@@ -622,8 +760,14 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
   const modelProxy = options.modelProxy === true && network === 'model-only';
   const adapters = options.adapters ?? adaptersForPlatform(platform);
   const records: BackendProbeRecord[] = [];
+  const probedAdapters = new Map<SandboxBackendAdapter, string>();
   for (const adapter of adapters) {
-    records.push(await probeBackend(adapter, { ...options, platform, network }));
+    const record = await probeBackend(adapter, { ...options, platform, network });
+    records.push(record);
+    probedAdapters.set(
+      adapter,
+      record.certified ? '' : (record.blocker ?? 'probe did not certify this launcher'),
+    );
   }
   const certification: SandboxCertification = {
     platform,
@@ -631,30 +775,47 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
     network,
     networkDemonstrated: network === 'allow' ? 'allow' : modelProxy ? 'proxy-loopback' : 'none',
     records,
-    certified: records.filter((r) => r.certified).map((r) => r.backend),
+    certified: Object.freeze(records.filter((r) => r.certified).map((r) => r.backend)),
   };
-  probeEarned.add(certification);
+  // The receipt is the authoritative record (Sol delta review, P1): it binds
+  // this certification object to the EXACT adapter instances that were probed
+  // and to the demonstrated posture.  The caller-visible fields are
+  // informational copies; the launch gates below read only the receipt.
+  probeReceipts.set(certification, {
+    platform,
+    network,
+    networkDemonstrated: certification.networkDemonstrated,
+    probedAdapters,
+    certified: certification.certified,
+  });
   return certification;
 }
 
-/** The only certified list a caller may hand to `resolveSandboxConfig`. */
+/**
+ * The only certified list a caller may hand to `resolveSandboxConfig`.  It
+ * comes from the probe receipt, not from the (mutable) public fields, so a
+ * mutated or forged certification yields the empty list — fail closed.
+ */
 export function certifiedBackendsOf(
   certification: SandboxCertification,
 ): readonly SandboxBackend[] {
-  return certification.certified;
+  return probeReceipts.get(certification)?.certified ?? [];
 }
 
 /**
  * Required-mode execution primitive: run a command INSIDE a probe-certified
- * backend, or fail closed.  Three gates, each naming its own failure: the
- * certification must have been PRODUCED by this probe (a caller-forged
- * object is refused outright); the backend must be certified for required
- * mode; and the requested posture must match what the probe demonstrated —
- * a model-only certification does not authorize an allow launch, and a
- * proxy-composed certification is only valid for launches that carry the
- * proxy port.  Absent all three, the error carries the exact blocker plus
- * the resolver's config hint, so a missing backend can never degrade into a
- * host shell.
+ * backend, or fail closed.  The gates read the probe RECEIPT, never the
+ * caller-visible fields, and bind to the EXACT adapter instance that was
+ * certified (Sol delta review, P1):
+ *   - the certification must have been PRODUCED by this probe — a forged
+ *     object has no receipt and is refused outright;
+ *   - the ADAPTER must be one of the exact instances whose canaries passed —
+ *     a different instance sharing the backend name inherits nothing;
+ *   - the requested posture must match the demonstrated posture, and a
+ *     proxy-composed certification is only valid for launches that carry the
+ *     proxy port.
+ * Every refusal names its own failure plus the resolver's config hint, so a
+ * missing backend can never degrade into a host shell.
  */
 export async function launchCertified(
   adapter: SandboxBackendAdapter,
@@ -670,26 +831,37 @@ export async function launchCertified(
     maxOutputChars?: number;
   },
 ): Promise<SandboxLaunchResult> {
-  assertProbeEarned(certification);
-  if (!certification.certified.includes(adapter.backend)) {
-    const record = certification.records.find((r) => r.backend === adapter.backend);
-    const blocker = record?.blocker ?? 'backend was not probed by this certification';
+  const receipt = probeReceipts.get(certification);
+  if (receipt === undefined) {
+    throw new Error(
+      'sandbox: certification was not produced by the RS-13 probe; a caller-forged certification object cannot authorize a launch',
+    );
+  }
+  const blocker = receipt.probedAdapters.get(adapter);
+  if (blocker === undefined) {
+    throw new Error(
+      `sandbox: this ${adapter.backend} launcher object was not probed by this certification — ` +
+        'a receipt binds the exact adapter instances it probed, and a different instance ' +
+        'sharing the backend name inherits nothing; CQ_SANDBOX=required is fail-closed',
+    );
+  }
+  if (blocker !== '') {
     throw new Error(
       `sandbox: ${adapter.backend} is not certified for required mode (${blocker}); ` +
         'CQ_SANDBOX=required is fail-closed until a certified backend launcher is configured',
     );
   }
-  if (request.network !== certification.network) {
+  if (request.network !== receipt.network) {
     throw new Error(
-      `sandbox: ${adapter.backend} was certified under the '${certification.network}' posture, ` +
+      `sandbox: ${adapter.backend} was certified under the '${receipt.network}' posture, ` +
         `not the requested '${request.network}'; certification does not transfer across postures ` +
         'and CQ_SANDBOX=required is fail-closed',
     );
   }
-  const proxyDemonstrated = certification.networkDemonstrated === 'proxy-loopback';
+  const proxyDemonstrated = receipt.networkDemonstrated === 'proxy-loopback';
   if ((request.proxyPort !== undefined) !== proxyDemonstrated) {
     throw new Error(
-      `sandbox: ${adapter.backend} was certified with '${certification.networkDemonstrated}' egress; ` +
+      `sandbox: ${adapter.backend} was certified with '${receipt.networkDemonstrated}' egress; ` +
         (proxyDemonstrated
           ? 'a proxyPort is required on every launch'
           : 'proxyPort is not permitted on a launch certified without a proxy') +
