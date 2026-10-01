@@ -245,9 +245,11 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
  * bind would otherwise expose with its credentials) land BEFORE the workspace
  * bind so a workspace nested under either still shadows them, the workspace
  * is the only writable bind, and model-only posture unshares the whole
- * network namespace.  Built as data so tests can assert the boundary flags on
- * any host; only a host that can actually run bubblewrap can certify it (that
- * proof lives in ./probe.js).
+ * network namespace.  The child inherits the launcher process environment —
+ * already the scrubbed launcher env — so env VALUES never appear in argv,
+ * where any local user could read them.  Built as data so tests can assert
+ * the boundary flags on any host; only a host that can actually run
+ * bubblewrap can certify it (that proof lives in ./probe.js).
  */
 export function bwrapArgv(
   workspace: string,
@@ -274,8 +276,6 @@ export function bwrapArgv(
     '--new-session',
     '--die-with-parent',
     ...(network === 'model-only' ? ['--unshare-net'] : []),
-    '--clearenv',
-    ...Object.entries(env).flatMap(([name, value]) => ['--setenv', name, value]),
     '--',
     ...argv,
   ];
@@ -328,6 +328,12 @@ export interface ContainerAdapterOptions {
   command?: string;
 }
 
+/**
+ * `--env NAME` (no value): the CLI reads each name from its own environment —
+ * the scrubbed launcher env passed by `launch` — so env VALUES never appear
+ * in argv, where any local user could read them.
+ */
+
 export function containerArgv(
   options: ContainerAdapterOptions,
   workspace: string,
@@ -350,7 +356,7 @@ export function containerArgv(
     workspace,
     '--tmpfs',
     '/tmp',
-    ...Object.entries(env).flatMap(([name, value]) => ['--env', `${name}=${value}`]),
+    ...Object.entries(env).flatMap(([name]) => ['--env', name]),
     options.image,
     ...argv,
   ];

@@ -147,6 +147,17 @@ async function loopbackPort(): Promise<
 }
 
 /**
+ * True only when the requested binary actually RAN: a spawn failure, a
+ * timeout, or a 126/127 exit (could not exec / not found) means the canary's
+ * command never executed, so a nonzero exit is NOT evidence of a boundary —
+ * it is an inconclusive answer.  A genuine denial exits 1 with an
+ * "Operation not permitted"-class error.
+ */
+function executed(r: { spawnError?: string; timedOut: boolean; exitCode: number | null }): boolean {
+  return r.spawnError === undefined && !r.timedOut && r.exitCode !== 126 && r.exitCode !== 127;
+}
+
+/**
  * Probe ONE adapter with the live canaries.  Every canary that asserts a
  * denial has a positive control somewhere — either the workspace controls
  * inside the same launcher or the bare-host twin beside it — so a launcher
@@ -213,7 +224,13 @@ export async function probeBackend(
       canaries.push(
         escapeRead.ok
           ? { id: 'read-escape', verdict: 'fail', detail: `read a file in ${root}` }
-          : { id: 'read-escape', verdict: 'pass', detail: detail(escapeRead) },
+          : !executed(escapeRead)
+            ? {
+                id: 'read-escape',
+                verdict: 'inconclusive',
+                detail: `cat never ran: ${detail(escapeRead)}`,
+              }
+            : { id: 'read-escape', verdict: 'pass', detail: detail(escapeRead) },
       );
 
       // 3 — the child must not write outside the workspace.
@@ -222,7 +239,13 @@ export async function probeBackend(
       canaries.push(
         escapeWrite.ok
           ? { id: 'write-escape', verdict: 'fail', detail: `created ${escapePath}` }
-          : { id: 'write-escape', verdict: 'pass', detail: detail(escapeWrite) },
+          : !executed(escapeWrite)
+            ? {
+                id: 'write-escape',
+                verdict: 'inconclusive',
+                detail: `touch never ran: ${detail(escapeWrite)}`,
+              }
+            : { id: 'write-escape', verdict: 'pass', detail: detail(escapeWrite) },
       );
 
       // 4 — a parent secret must not reach the child env.  The bare-host
@@ -250,13 +273,19 @@ export async function probeBackend(
                   ? 'CQ_PROBE_CANARY_SECRET reached the child'
                   : 'printenv found the name with a different value',
               }
-            : envRead.spawnError !== undefined
+            : !executed(envRead)
               ? {
                   id: 'credential-env',
                   verdict: 'inconclusive',
-                  detail: `printenv did not run: ${envRead.spawnError}`,
+                  detail: `printenv never ran: ${detail(envRead)}`,
                 }
-              : { id: 'credential-env', verdict: 'pass', detail: detail(envRead) },
+              : envRead.exitCode !== 1
+                ? {
+                    id: 'credential-env',
+                    verdict: 'inconclusive',
+                    detail: `printenv failed: ${detail(envRead)}`,
+                  }
+                : { id: 'credential-env', verdict: 'pass', detail: detail(envRead) },
       );
 
       // 5 — the child must not read a credential beside the user's home files.
@@ -264,7 +293,13 @@ export async function probeBackend(
       canaries.push(
         credRead.ok
           ? { id: 'credential-file', verdict: 'fail', detail: `read ${homeCanary}` }
-          : { id: 'credential-file', verdict: 'pass', detail: detail(credRead) },
+          : !executed(credRead)
+            ? {
+                id: 'credential-file',
+                verdict: 'inconclusive',
+                detail: `cat never ran: ${detail(credRead)}`,
+              }
+            : { id: 'credential-file', verdict: 'pass', detail: detail(credRead) },
       );
 
       // 6 — network: the loopback listener must be connectable on the bare
@@ -290,6 +325,12 @@ export async function probeBackend(
               id: 'network-loopback',
               verdict: 'inconclusive',
               detail: `bare-host connect failed, canary cannot fire: ${control.stderr}`,
+            });
+          } else if (!executed(sandboxed)) {
+            canaries.push({
+              id: 'network-loopback',
+              verdict: 'inconclusive',
+              detail: `bash never ran inside the boundary: ${detail(sandboxed)}`,
             });
           } else if (sandboxed.ok !== expectConnect) {
             canaries.push({
@@ -392,6 +433,13 @@ export async function launchCertified(
     throw new Error(
       `sandbox: ${adapter.backend} is not certified for required mode (${blocker}); ` +
         'CQ_SANDBOX=required is fail-closed until a certified backend launcher is configured',
+    );
+  }
+  if (request.network !== certification.network) {
+    throw new Error(
+      `sandbox: ${adapter.backend} was certified under the '${certification.network}' posture, ` +
+        `not the requested '${request.network}'; certification does not transfer across postures ` +
+        'and CQ_SANDBOX=required is fail-closed',
     );
   }
   return adapter.launch(request);

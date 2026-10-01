@@ -178,6 +178,23 @@ describe('required-mode execution is bounded by the certification', () => {
     expect(launched.ok).toBe(true);
   });
 
+  test('certification does not transfer across postures', async () => {
+    const certification = {
+      platform: 'linux' as NodeJS.Platform,
+      probedAt: new Date().toISOString(),
+      network: 'model-only' as const,
+      records: [],
+      certified: ['bwrap'] as const,
+    };
+    await expect(
+      launchCertified(fakeAdapter('fs-only'), certification, {
+        workspace: '/tmp/ws',
+        argv: ['/bin/true'],
+        network: 'allow',
+      }),
+    ).rejects.toThrow(/certified under the 'model-only' posture.*'allow'/s);
+  });
+
   test('the certified list is exactly what the probe earned', async () => {
     const certification = await certifyBackends({ adapters: [fakeAdapter('grant-all')] });
     expect(certifiedBackendsOf(certification)).toEqual([]);

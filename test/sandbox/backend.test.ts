@@ -60,13 +60,12 @@ describe('linux and container boundary construction', () => {
     const bindAt = argv.indexOf('--bind');
     expect(argv.slice(bindAt, bindAt + 3)).toEqual(['--bind', '/tmp/cq-ws', '/tmp/cq-ws']);
     expect(argv).toContain('--unshare-net');
-    expect(argv).toContain('--clearenv');
     expect(argv).toContain('--die-with-parent');
-    expect(argv.slice(argv.indexOf('--setenv'), argv.indexOf('--setenv') + 3)).toEqual([
-      '--setenv',
-      'PATH',
-      '/bin',
-    ]);
+    // The child inherits the launcher process env — env VALUES never appear
+    // in argv, where any local user could read them.
+    expect(argv).not.toContain('--clearenv');
+    expect(argv).not.toContain('--setenv');
+    expect(argv.join(' ')).not.toContain('PATH=');
     expect(argv[argv.length - 4]).toBe('--');
     expect(argv.slice(-3)).toEqual(['/bin/sh', '-c', 'echo']);
   });
@@ -76,9 +75,13 @@ describe('linux and container boundary construction', () => {
   });
 
   test('container runs no-network, read-only, no-new-privileges, workspace-mounted', () => {
-    const argv = containerArgv({ image: 'cq-sandbox:latest' }, '/ws', 'model-only', {}, [
-      '/bin/true',
-    ]);
+    const argv = containerArgv(
+      { image: 'cq-sandbox:latest' },
+      '/ws',
+      'model-only',
+      { PATH: '/bin' },
+      ['/bin/true'],
+    );
     expect(argv.slice(0, 2)).toEqual(['docker', 'run']);
     expect(argv.join(' ')).toContain('--network none');
     expect(argv).toContain('--read-only');
@@ -87,6 +90,11 @@ describe('linux and container boundary construction', () => {
       '--volume',
       '/ws:/ws',
     ]);
+    // --env NAME without a value: the CLI reads the scrubbed launcher env, so
+    // no secret value lands in argv.
+    const envAt = argv.indexOf('--env');
+    expect(argv.slice(envAt, envAt + 2)).toEqual(['--env', 'PATH']);
+    expect(argv.join(' ')).not.toContain('PATH=');
     expect(argv[argv.length - 2]).toBe('cq-sandbox:latest');
     expect(argv[argv.length - 1]).toBe('/bin/true');
   });
