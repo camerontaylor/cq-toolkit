@@ -1,8 +1,8 @@
 # instantiated from policy/templates/adversarial-suite.yml — edit the template, not this file
 # adversarial-suite — manual live §7 probes against an isolated scratch repo.
 # Instantiate with no tokens. Edit this template, not its workflow copy.
-# The script also checks owner/admin authority and outsider trust. Both profile
-# legs remain BLOCKED until scratch settings are installed and read back.
+# The script checks owner/admin authority, outsider trust, applies the selected
+# scratch repository variables, then reads them back. No scheduled trigger.
 name: adversarial-suite
 
 on:
@@ -74,7 +74,7 @@ jobs:
         with:
           node-version: 24
           cache: ''
-      - name: Collect blocked evidence with profile preflight
+      - name: Apply and verify scratch profile; collect row evidence
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}
           PROFILE: ${{ matrix.profile }}
@@ -82,6 +82,7 @@ jobs:
           ROWS: ${{ inputs.rows }}
           GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
           CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
+          CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ secrets.CQ_ADVERSARIAL_PROFILE_TOKEN }}
         run: |
           set -euo pipefail
           node scripts/adversarial-suite.mjs \

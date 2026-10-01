@@ -119,6 +119,7 @@ const rows = ids.map((id) => {
           profile: report.profile,
           artifact: `artifacts/adversarial-suite/${name}`,
           profileVerified: report.profileVerified === true,
+          profileSettings: report.profileSettings ?? null,
           attackExecuted: attack !== null,
           attack,
           outsiderTrust: report.outsiderTrust ?? null,

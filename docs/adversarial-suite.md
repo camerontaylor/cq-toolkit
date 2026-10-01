@@ -20,9 +20,11 @@ observed verdict, and evidence location. A fresh auditor at G2 independently
 checks that the attack ran and that its target guard produced the claimed
 result. A unit test alone does not establish a live row verdict.
 
-The initial runner contains A1 and A15 review submission drivers, but its
-profile preflight currently blocks submission. Once profile setup and readback
-are implemented, a successful GitHub review creation by the verified second
+The initial runner contains A1 and A15 review submission drivers. Its profile
+preflight requires a separate scratch Variables write credential, applies the
+selected repository settings, reads back every profile key, and blocks on an
+unavailable API, a mismatch, or a shadowing environment `CQ_*` variable. With
+those checks satisfied, a successful GitHub review creation by the verified second
 identity may set `attackExecuted: true`. That flag means the operation was
 submitted; it does not prove rejection, needs-human, or ineligibility.
 `observedOutcome` stays null and the row stays BLOCKED until an independent,
@@ -35,14 +37,17 @@ The profiles are `blank` (conservative defaults) and `solo-maintainer`
 also require `CQ_SANDBOX=required` with a certified backend. If no certified
 backend exists on the runner, those legs are BLOCKED. Do not interpret a
 fail-closed missing-backend error as a completed confined-worker attack.
-The dispatch matrix labels the two profiles but does not configure or read
-back the scratch repository's policy variables for either profile. The runner
-explicitly fails that preflight and writes BLOCKED evidence without submitting
-an attack. It records the owner/admin and second-identity trust checks when
-credentials permit them. A distinct user ID alone does not establish an
+The dispatch matrix runs the two profiles serially. For `blank`, the runner
+deletes the §3.1 repository profile keys and verifies they are absent; unset
+keys select conservative defaults. For `solo-maintainer`, it writes the exact
+§3.1 values and verifies them. The plan leaves `CQ_SANDBOX_BACKEND` and
+`CQ_RUN_ENV_PASSTHROUGH` unspecified for solo projects, so this suite requires
+them absent. Provider-specific quota limits are outside this profile and remain
+an A18/W2 dependency. The evidence records requested values, absent keys,
+observed values and timestamps, and environment variable names. A distinct user ID alone does not establish an
 outsider: the owner/admin must verify the second account is not a collaborator
-or trusted bot and record the applicable trusted associations. The jobs run
-serially to avoid cross-profile repository-setting races after setup is added.
+or trusted bot and record the applicable trusted associations. No profile has
+been applied or read back by this change; live evidence remains BLOCKED.
 
 ## Row inventory
 
@@ -78,6 +83,10 @@ release PRs #216, #228, or #229.
 The dispatch environment `adversarial-scratch` needs a primary credential in
 `CQ_ADVERSARIAL_TOKEN` scoped to the scratch repo and a **different account's**
 credential in `CQ_ADVERSARIAL_SECOND_TOKEN` with permission to review its PRs.
+It also needs `CQ_ADVERSARIAL_PROFILE_TOKEN`, an owner or installed App token
+with scratch repository Variables read/write and access to list environments
+and their variables. GitHub's repository Actions variable API expresses the
+§3.1 keys; environment overrides are inspected and block the profile if found.
 The available owner credential created the private repository and PR,
 but it is a broad owner credential and is not provisioned to the dispatch
-environment. Neither required environment secret is currently confirmed.
+environment. None of these environment secrets is currently confirmed.

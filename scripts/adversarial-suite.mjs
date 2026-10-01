@@ -16,6 +16,37 @@ const DEPENDENT = {
   A19: 'W3 layered config and provenance implementation',
 };
 const EXPECTED = 'rejected / needs-human / not eligible';
+// §3.1: blank means absent repository variables, not explicit default values.
+const PROFILE_KEYS = [
+  'CQ_MERGE_REQUIRE_HUMAN_APPROVAL',
+  'CQ_MERGE_ACCEPT_REVIEW_STATES',
+  'CQ_MERGE_TRUSTED_BOTS',
+  'CQ_MERGE_TRUSTED_ASSOCIATIONS',
+  'CQ_MERGE_SETTLE_MS',
+  'CQ_MERGE_PROTECTED_PATHS',
+  'CQ_EXTERNAL_INPUT',
+  'CQ_SANDBOX',
+  'CQ_SANDBOX_BACKEND',
+  'CQ_SANDBOX_NETWORK',
+  'CQ_RUN_TOOL',
+  'CQ_RUN_ENV_PASSTHROUGH',
+  'CQ_BUDGET_ALLOW_ADVISORY',
+  'CQ_BUDGET_REQUIRE_CAP',
+];
+const SOLO_PROFILE = {
+  CQ_MERGE_REQUIRE_HUMAN_APPROVAL: 'false',
+  CQ_MERGE_ACCEPT_REVIEW_STATES: 'APPROVED,COMMENTED',
+  CQ_MERGE_TRUSTED_BOTS: 'coderabbitai[bot]',
+  CQ_MERGE_TRUSTED_ASSOCIATIONS: 'OWNER,MEMBER,COLLABORATOR',
+  CQ_MERGE_SETTLE_MS: '600000',
+  CQ_MERGE_PROTECTED_PATHS: 'diff-check',
+  CQ_EXTERNAL_INPUT: 'ignore',
+  CQ_SANDBOX: 'off',
+  CQ_SANDBOX_NETWORK: 'allow',
+  CQ_RUN_TOOL: 'on',
+  CQ_BUDGET_ALLOW_ADVISORY: 'false',
+  CQ_BUDGET_REQUIRE_CAP: 'true',
+};
 const args = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
     const match = /^--([a-z]+)=(.*)$/.exec(arg);
@@ -88,6 +119,111 @@ async function github(path, token, { method = 'GET', body, allow404 = false } = 
     throw new Error(`GitHub API ${method} ${path}: ${response.status} ${message}`);
   }
   return data;
+}
+
+async function repositoryVariables(token) {
+  const path = `/repos/${SCRATCH_REPO}/actions/variables?per_page=100`;
+  const result = await github(path, token);
+  if (!Number.isSafeInteger(result.total_count) || !Array.isArray(result.variables)) {
+    throw new Error('Repository variable list response is incomplete');
+  }
+  if (result.total_count !== result.variables.length) {
+    throw new Error('Repository variable list exceeds one page; refusing incomplete readback');
+  }
+  const variables = new Map();
+  for (const item of result.variables) {
+    if (typeof item.name !== 'string' || typeof item.value !== 'string') {
+      throw new Error('Repository variable list has a malformed entry');
+    }
+    variables.set(item.name, item);
+  }
+  return variables;
+}
+
+async function verifyEnvironmentOverrides(token) {
+  const result = await github(`/repos/${SCRATCH_REPO}/environments?per_page=100`, token);
+  if (
+    !Number.isSafeInteger(result.total_count) ||
+    !Array.isArray(result.environments) ||
+    result.total_count !== result.environments.length
+  ) {
+    throw new Error('Scratch environment list is incomplete');
+  }
+  const observed = [];
+  evidence.profileSettings.environments = observed;
+  for (const environment of result.environments) {
+    if (typeof environment.name !== 'string') throw new Error('Malformed scratch environment');
+    const path = `/repos/${SCRATCH_REPO}/environments/${encodeURIComponent(environment.name)}/variables?per_page=100`;
+    const variables = await github(path, token);
+    if (
+      !Number.isSafeInteger(variables.total_count) ||
+      !Array.isArray(variables.variables) ||
+      variables.total_count !== variables.variables.length
+    ) {
+      throw new Error(`Scratch environment variable list is incomplete: ${environment.name}`);
+    }
+    const keys = variables.variables
+      .map((item) => item.name)
+      .filter((name) => typeof name === 'string' && name.startsWith('CQ_'));
+    observed.push({ name: environment.name, cqVariables: keys });
+    if (keys.length)
+      throw new Error(
+        `Scratch environment ${environment.name} has shadowing CQ variables: ${keys.join(', ')}`,
+      );
+  }
+}
+
+async function configureProfile(token) {
+  const expected = profile === 'blank' ? {} : SOLO_PROFILE;
+  evidence.profileSettings = {
+    api: 'repository Actions variables',
+    expected,
+    absentKeys: PROFILE_KEYS.filter((key) => !(key in expected)),
+    before: null,
+    observed: null,
+  };
+  if (!token)
+    throw new Error('CQ_ADVERSARIAL_PROFILE_TOKEN with scratch Variables read/write is required');
+  const path = `/repos/${SCRATCH_REPO}/actions/variables`;
+  const before = await repositoryVariables(token);
+  evidence.profileSettings.before = Object.fromEntries(
+    PROFILE_KEYS.map((key) => [key, before.get(key)?.value ?? null]),
+  );
+  const unsupported = [...before.keys()].filter(
+    (key) => key.startsWith('CQ_') && !PROFILE_KEYS.includes(key),
+  );
+  if (unsupported.length) {
+    throw new Error(`Unmodeled scratch CQ variables require review: ${unsupported.join(', ')}`);
+  }
+  await verifyEnvironmentOverrides(token);
+  for (const key of PROFILE_KEYS) {
+    const present = before.has(key);
+    const value = expected[key];
+    if (value === undefined && present) {
+      await github(`${path}/${key}`, token, { method: 'DELETE' });
+    } else if (value !== undefined && !present) {
+      await github(path, token, { method: 'POST', body: { name: key, value } });
+    } else if (value !== undefined && before.get(key).value !== value) {
+      await github(`${path}/${key}`, token, { method: 'PATCH', body: { name: key, value } });
+    }
+  }
+  const after = await repositoryVariables(token);
+  evidence.profileSettings.observed = Object.fromEntries(
+    PROFILE_KEYS.map((key) => {
+      const item = after.get(key);
+      return [
+        key,
+        item ? { value: item.value, createdAt: item.created_at, updatedAt: item.updated_at } : null,
+      ];
+    }),
+  );
+  for (const key of PROFILE_KEYS) {
+    if ((after.get(key)?.value ?? undefined) !== expected[key]) {
+      throw new Error(`Scratch profile readback mismatch for ${key}`);
+    }
+  }
+  await verifyEnvironmentOverrides(token);
+  evidence.profileVerified = true;
 }
 
 async function identity(token) {
@@ -177,8 +313,9 @@ async function preflight() {
     return { reason: 'Two distinct authenticated GitHub user IDs are required' };
   }
   evidence.identities = { primary, outsider };
+  let repo;
   try {
-    const repo = await github(`/repos/${SCRATCH_REPO}`, first);
+    repo = await github(`/repos/${SCRATCH_REPO}`, first);
     if (repo.full_name?.toLowerCase() !== SCRATCH_REPO || repo.archived || repo.disabled) {
       return { reason: 'Scratch repository identity/state failed verification' };
     }
@@ -186,14 +323,15 @@ async function preflight() {
     evidence.defaultBranch = repo.default_branch;
     evidence.outsiderTrust = await verifyOutsider(first, primary, outsider, repo);
   } catch (error) {
-    return { reason: `Scratch repository inaccessible: ${String(error)}` };
+    return { reason: `Scratch repository or outsider trust preflight failed: ${String(error)}` };
   }
-  // A CLI profile name is only a requested test condition. The runner does
-  // not yet install and read back the scratch repository's profile variables,
-  // so no live attack may be submitted under either requested profile.
-  return {
-    reason: `Scratch ${profile} profile setup/readback is not implemented; requested label is not proof`,
-  };
+  try {
+    await configureProfile(process.env.CQ_ADVERSARIAL_PROFILE_TOKEN);
+    evidence.outsiderTrust = await verifyOutsider(first, primary, outsider, repo);
+  } catch (error) {
+    return { reason: `Scratch ${profile} profile setup/readback failed: ${String(error)}` };
+  }
+  return { first, second, primary, outsider };
 }
 
 async function fixturePr(context) {
