@@ -921,39 +921,70 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
     expect(replay).toBe('spent');
   });
 
-  test('a TORN tail fails the ledger closed: no append, and a FRESH instance still refuses', async () => {
-    // The corruption path. A short write that wrote SOME bytes leaves a
+  test('a TORN partial record fails closed on the same instance AND a fresh one', async () => {
+    // The corruption path. A short write that lands SOME bytes leaves a
     // partial record; because the next append is O_APPEND, the following
-    // record fuses onto it and the two lines merge into something that
-    // matches NEITHER nonce. A fresh instance absorbing that garbage would
-    // not see the real nonce as spent, and would permit the replay.
+    // record would fuse onto it into a line matching NEITHER nonce, and a
+    // fresh instance absorbing that merged line would not see the real nonce
+    // as spent.
     const dir = mkdtempSync(join(tmpdir(), 'cq-torn-'));
     const ledgerPath = join(dir, 'approvals.ndjson');
     const nonce = 'a'.repeat(32);
-    // A writer that lays down a prefix and then fails: the torn tail.
+    // The writer lays down six bytes ONCE, honouring the offset and length
+    // it is handed, and then makes no progress. (Writing six bytes on EVERY
+    // call and returning 6 would be a different, broken fixture: writeAll
+    // would keep looping while the writer re-wrote the same six bytes, and
+    // the failure it eventually reported would be the over-report guard
+    // rather than the no-progress one.)
+    let calls = 0;
     const torn = makeFileNonceLedger(ledgerPath, {
-      write: (handle, buffer) => {
-        writeSync(handle, buffer, 0, 6);
-        return 6;
+      write: (handle, buffer, offset, length) => {
+        calls += 1;
+        if (calls > 1) return 0;
+        const count = Math.min(6, length);
+        writeSync(handle, buffer, offset, count);
+        return count;
       },
     });
-    // It reports success for the prefix it wrote, so the tear is only
-    // visible afterwards — exactly the shape a partial write can take.
-    expect(await torn.consume(nonce)).toBe('consumed');
-    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce.slice(0, 6)}`);
+    // The consume itself FAILS: a partial record is never reported as a
+    // consumption, which is the whole point.
+    await expect(torn.consume(nonce)).rejects.toThrow(/made no progress/);
+    // Exactly six bytes landed, and they are a PREFIX of the real nonce.
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(nonce.slice(0, 6));
 
-    // The SECOND consume on the SAME instance refuses: the tail is
-    // unterminated, and appending would fuse the two records.
-    await expect(torn.consume(nonce)).rejects.toThrow(/unterminated record/);
+    // The SAME instance refuses again, and so does a FRESH one (a new
+    // process, a resumed run) — neither is allowed to read the torn bytes as
+    // history. A malformed record fails the read closed, which is the guard
+    // that fires first here: the partial bytes are not a valid nonce shape.
+    await expect(torn.consume(nonce)).rejects.toThrow(/malformed/);
+    const fresh = makeFileNonceLedger(ledgerPath);
+    await expect(fresh.consume(nonce)).rejects.toThrow(/malformed/);
+    // Neither refusal appended anything: the file is exactly as torn as it
+    // was, so no record was fused and nothing was lost.
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(nonce.slice(0, 6));
+  });
 
-    // And the decisive case: a FRESH instance over the same file — a new
-    // process, a resumed run — also refuses rather than reading the torn
-    // bytes as history and letting the full nonce through again.
+  test('a record that lost only its NEWLINE is refused by the torn-tail guard', async () => {
+    // The realistic tear: every byte of the record landed, but the
+    // terminating newline did not (the classic partial-write boundary, and
+    // the case the append guard exists for). Here the record IS a
+    // well-formed nonce, so the read succeeds and the TORN-TAIL guard is the
+    // thing that must refuse — a distinct path from the malformed one.
+    const dir = mkdtempSync(join(tmpdir(), 'cq-torn-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const other = 'b'.repeat(32);
+    const nonce = 'c'.repeat(32);
+    // 32 valid hex bytes, no newline.
+    writeFileSync(ledgerPath, other);
+    const ledger = makeFileNonceLedger(ledgerPath);
+    // The SAME instance: the tail guard refuses the append.
+    await expect(ledger.consume(nonce)).rejects.toThrow(/unterminated record/);
+    // And a FRESH instance, which reads the unterminated record as a spent
+    // nonce but still must not append onto it.
     const fresh = makeFileNonceLedger(ledgerPath);
     await expect(fresh.consume(nonce)).rejects.toThrow(/unterminated record/);
-
-    // Nothing was appended by either refusal: the file is unchanged.
-    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce.slice(0, 6)}`);
+    // Nothing was appended by either refusal.
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(other);
   });
 
   test('a MALFORMED record fails the ledger closed (history is never read wrong)', async () => {
