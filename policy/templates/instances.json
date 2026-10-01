@@ -2,6 +2,11 @@
   "schemaVersion": 1,
   "instances": [
     {
+      "workflow": "adversarial-suite.yml",
+      "template": "adversarial-suite.yml",
+      "tokens": {}
+    },
+    {
       "workflow": "cq-accept.yml",
       "template": "cq-accept.yml",
       "tokens": {}

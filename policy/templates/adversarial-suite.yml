@@ -1,0 +1,96 @@
+# adversarial-suite — manual live §7 probes against an isolated scratch repo.
+# Instantiate with no tokens. Edit this template, not its workflow copy.
+# The script also validates the repository and credentials before any probe.
+name: adversarial-suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Existing scratch repository (owner/cq-scratch-v11-adversarial)'
+        required: true
+        type: string
+      fixture_pr:
+        description: 'Existing scratch pull request number for review and thread probes'
+        required: true
+        type: number
+      rows:
+        description: 'Comma-separated §7 row IDs; empty uses the W1-ready set'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: adversarial-scratch
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: [blank, solo-maintainer]
+    steps:
+      - name: Check scratch target and distinct test identities
+        env:
+          SCRATCH_REPOSITORY: ${{ inputs.repository }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
+          CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$SCRATCH_REPOSITORY" != "camerontaylor/cq-scratch-v11-adversarial" ]] || \
+             [[ "$SCRATCH_REPOSITORY" == "$SOURCE_REPOSITORY" ]]; then
+            echo 'refusing: target must be the dedicated cq-scratch-v11-adversarial repository'
+            exit 1
+          fi
+          if [[ -z "$GH_TOKEN" || -z "$CQ_ADVERSARIAL_SECOND_TOKEN" ]]; then
+            echo 'refusing: both scratch credentials are required'
+            exit 1
+          fi
+          first="$(gh api user --jq .id)"
+          second="$(GH_TOKEN="$CQ_ADVERSARIAL_SECOND_TOKEN" gh api user --jq .id)"
+          if [[ -z "$first" || -z "$second" || "$first" == "$second" ]]; then
+            echo 'refusing: scratch credentials must represent two distinct test identities'
+            exit 1
+          fi
+          actual="$(gh api "repos/$SCRATCH_REPOSITORY" --jq .full_name)"
+          if [[ "$actual" != "$SCRATCH_REPOSITORY" ]]; then
+            echo 'refusing: scratch repository lookup did not match the requested target'
+            exit 1
+          fi
+      - name: Check out trusted suite code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Run adversarial rows
+        env:
+          SCRATCH_REPOSITORY: ${{ inputs.repository }}
+          PROFILE: ${{ matrix.profile }}
+          CQ_ADVERSARIAL_PR: ${{ inputs.fixture_pr }}
+          ROWS: ${{ inputs.rows }}
+          GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
+          CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
+        run: |
+          set -euo pipefail
+          node scripts/adversarial-suite.mjs \
+            --repo="$SCRATCH_REPOSITORY" \
+            --profile="$PROFILE" \
+            --rows="$ROWS"
+      - name: Preserve probe evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: adversarial-${{ matrix.profile }}
+          path: artifacts/adversarial-suite/evidence-${{ matrix.profile }}.json
+          if-no-files-found: warn
+          retention-days: 30
