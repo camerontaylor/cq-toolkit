@@ -216,10 +216,10 @@ describe('pure configuration resolution', () => {
 
   it('requires expanded, caller-verified paths outside the workspace', () => {
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '<x>' } })).toThrow(
-      /unresolved absolute path variable/,
+      /expected an expanded absolute path/,
     );
     expect(() => resolve({ env: { CQ_APPROVAL_SIGNERS: '<x>' } })).toThrow(
-      /unresolved absolute path variable/,
+      /expected an expanded absolute path/,
     );
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '$HOME/sessions' } })).toThrow(
       /unresolved absolute path variable/,
@@ -229,11 +229,11 @@ describe('pure configuration resolution', () => {
     );
     expect(() =>
       resolve({
-        env: { CQ_DRIVER_SESSIONS_DIR: '/workspace/sessions' },
+        env: { CQ_APPROVAL_SIGNERS: '/workspace/signers' },
         verifiedRealpaths: {
-          CQ_DRIVER_SESSIONS_DIR: {
-            input: '/workspace/sessions',
-            realpath: '/workspace/sessions',
+          CQ_APPROVAL_SIGNERS: {
+            input: '/workspace/signers',
+            realpath: '/workspace/signers',
           },
         },
       }),
