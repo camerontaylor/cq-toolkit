@@ -88,11 +88,19 @@ test('preserves conditional export keys and targets instead of deduplicating bra
   }
 });
 
-test('CLI baseline comparison detects edits in a re-exported declaration leaf', async () => {
+test('CLI baseline comparison detects re-export leaf and side-effect augmentation edits', async () => {
   const root = await fixture({ '.': './dist/index.js' });
   try {
     await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
-    await writeFile(path.join(root, 'dist/index.d.ts'), 'export * from "./leaf.js";\n');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      'import "./augmentation.js";\nexport * from "./leaf.js";\n',
+    );
+    const augmentationPath = path.join(root, 'dist/augmentation.d.ts');
+    await writeFile(
+      augmentationPath,
+      'declare global { interface Window { cq?: boolean } }\nexport {};\n',
+    );
     const leafPath = path.join(root, 'dist/leaf.d.ts');
     await writeFile(leafPath, 'export declare function run(): void;\n');
     const baselinePath = path.join(root, 'approved-api-report.json');
@@ -112,6 +120,19 @@ test('CLI baseline comparison detects edits in a re-exported declaration leaf', 
     });
     assert.equal(drifts.status, 1);
     assert.match(drifts.stderr, /differs from baseline/);
+
+    await writeFile(leafPath, 'export declare function run(): void;\n');
+    await writeFile(
+      augmentationPath,
+      'declare global { interface Window { cq?: boolean; enabled: true } }\nexport {};\n',
+    );
+    const augmentationDrifts = spawnSync(
+      process.execPath,
+      [scriptPath, '--baseline', baselinePath],
+      { cwd: root, encoding: 'utf8' },
+    );
+    assert.equal(augmentationDrifts.status, 1);
+    assert.match(augmentationDrifts.stderr, /differs from baseline/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

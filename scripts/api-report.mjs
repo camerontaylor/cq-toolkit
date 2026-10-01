@@ -56,10 +56,17 @@ function declarationPath(target) {
 function declarationReferences(source) {
   const references = new Set();
   const fromPattern = /\bfrom\s*(['"])([^'"]+)\1/g;
+  const sideEffectImportPattern = /\bimport\s*(['"])([^'"]+)\1/g;
   const importTypePattern = /\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
   const requirePattern = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
   const referencePathPattern = /\/\/\/\s*<reference\s+path\s*=\s*(['"])([^'"]+)\1/g;
-  for (const pattern of [fromPattern, importTypePattern, requirePattern, referencePathPattern]) {
+  for (const pattern of [
+    fromPattern,
+    sideEffectImportPattern,
+    importTypePattern,
+    requirePattern,
+    referencePathPattern,
+  ]) {
     for (const match of source.matchAll(pattern)) references.add(match[2]);
   }
   return [...references].sort(compareStrings);
