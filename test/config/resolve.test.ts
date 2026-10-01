@@ -215,6 +215,12 @@ describe('pure configuration resolution', () => {
   });
 
   it('requires expanded, caller-verified paths outside the workspace', () => {
+    expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '<x>' } })).toThrow(
+      /unresolved absolute path variable/,
+    );
+    expect(() => resolve({ env: { CQ_APPROVAL_SIGNERS: '<x>' } })).toThrow(
+      /unresolved absolute path variable/,
+    );
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '$HOME/sessions' } })).toThrow(
       /unresolved absolute path variable/,
     );
@@ -244,6 +250,9 @@ describe('pure configuration resolution', () => {
   });
 
   it('rejects relative executable paths, non-HTTPS endpoints, and malformed semantic windows', () => {
+    expect(entryValue('driver.acp.command', resolve())).toBe('<endpoint-argv>');
+    expect(() => resolve({ env: { CQ_DRIVER_ACP_COMMAND: '<x>' } })).toThrow(/JSON argv/);
+    expect(entryValue('driver.subprocess.routing', resolve())).toBe('<default-routing-table>');
     expect(() =>
       resolve({
         env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["bin/claude"]' },

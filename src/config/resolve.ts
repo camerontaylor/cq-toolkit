@@ -358,7 +358,6 @@ function parse(
         throw new Error(`${key.env}: host must match the bundled provider usage endpoint`);
     }
   }
-  if (key.type === 'argv' && value.startsWith('<') && value.endsWith('>')) return value;
   if (key.type === 'argv') {
     let argv: unknown;
     try {
@@ -375,7 +374,6 @@ function parse(
       throw new Error(`${key.env}: expected non-empty string argv`);
     return argv as string[];
   }
-  if (key.type === 'path' && value.startsWith('<') && value.endsWith('>')) return value;
   if (key.type === 'window') validateWindow(key, value);
   return value;
 }
@@ -385,7 +383,14 @@ function resolveValue(
   raw: string | boolean | number | readonly string[] | Readonly<Record<string, string>> | null,
   env: Readonly<Record<string, string | undefined>>,
   options: ResolveConfigOptions,
+  allowDefaultSentinel = false,
 ): ConfigValue {
+  if (
+    allowDefaultSentinel &&
+    ((key.env === 'CQ_DRIVER_SUBPROCESS_ROUTING' && raw === '<default-routing-table>') ||
+      (key.env === 'CQ_DRIVER_ACP_COMMAND' && raw === '<endpoint-argv>'))
+  )
+    return raw;
   let value = parse(key, raw);
   if (
     key.outsideWorkspace &&
@@ -396,11 +401,7 @@ function resolveValue(
     const path = expandPath(value.slice('custom:'.length), env, key);
     return `custom:${assertOutsideWorkspace(key, path, options) ?? path}`;
   }
-  if (
-    key.type === 'path' &&
-    typeof value === 'string' &&
-    !(value.startsWith('<') && value.endsWith('>'))
-  ) {
+  if (key.type === 'path' && typeof value === 'string') {
     value = expandPath(value, env, key);
     value = assertOutsideWorkspace(key, value, options) ?? value;
   }
@@ -618,7 +619,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
           : key.type === 'map' || key.type === 'bindings' || key.type === 'aliases'
             ? {}
             : null
-        : resolveValue(key, key.blank, env, options);
+        : resolveValue(key, key.blank, env, options, true);
     const seeded =
       profile === 'solo-maintainer' && key.solo !== undefined
         ? resolveValue(key, key.solo, env, options)
