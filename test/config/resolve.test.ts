@@ -156,11 +156,17 @@ describe('pure configuration resolution', () => {
       entryValue(
         'driver.bindings',
         resolve({
-          values: { 'driver.bindings': { '*/zai': 'ai-sdk' } },
+          values: { 'driver.bindings': { 'custom/vendor': 'ai-sdk' } },
           optIn: ['driver.bindings'],
         }),
       ),
-    ).toEqual({ '*/zai': 'ai-sdk' });
+    ).toMatchObject({
+      '*/zai': 'ai-sdk',
+      '*/anthropic': 'ai-sdk',
+      '*/openai': 'ai-sdk',
+      '*/deepseek': 'ai-sdk',
+      'custom/vendor': 'ai-sdk',
+    });
     expect(() => resolve({ values: { 'driver.bindings': { bad: {} } as never } })).toThrow(
       /map values must be strings/,
     );
@@ -194,16 +200,23 @@ describe('pure configuration resolution', () => {
     expect(() =>
       resolve({
         env: {
-          CQ_RUN_ENV_PASSTHROUGH: 'SAFE_URL',
-          SAFE_URL: 'https://user:pass@example.test',
+          CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT',
+          SAFE_ENDPOINT: 'https://user:pass@example.test',
         },
+      }),
+    ).toThrow(/cannot be passed through/);
+    expect(() =>
+      resolve({
+        values: { 'run.envPassthrough': ['SAFE_ENDPOINT'] },
+        optIn: ['run.envPassthrough'],
+        env: { SAFE_ENDPOINT: 'https://user:pass@example.test' },
       }),
     ).toThrow(/cannot be passed through/);
   });
 
   it('requires expanded, caller-verified paths outside the workspace', () => {
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '$HOME/sessions' } })).toThrow(
-      /unresolved path variable/,
+      /unresolved absolute path variable/,
     );
     expect(() => resolveConfig({ env: { TMPDIR: '/tmp', XDG_STATE_HOME: '/tmp' } })).toThrow(
       /verified workspace path evidence required/,
@@ -219,6 +232,15 @@ describe('pure configuration resolution', () => {
         },
       }),
     ).toThrow(/outside the workspace/);
+    const canonical = '/var/tmp/canonical-sessions';
+    const expanded = resolve({
+      env: { CQ_DRIVER_SESSIONS_DIR: '$TMPDIR/cq-harness/sessions' },
+      verifiedRealpaths: {
+        CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: canonical },
+      },
+    });
+    expect(entryValue('driver.sessionsDir', expanded)).toBe(canonical);
+    expect(entryValue('approval.ledger', resolve())).toBe('/tmp/cq/approvals.ndjson');
   });
 
   it('rejects relative executable paths, non-HTTPS endpoints, and malformed semantic windows', () => {
@@ -239,6 +261,19 @@ describe('pure configuration resolution', () => {
         env: { CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Mon 25:00-26:00 UTC' },
       }),
     ).toThrow(/invalid quota window/);
+  });
+
+  it('accepts overnight UTC windows and independently optional multiplier or offset', () => {
+    expect(() =>
+      resolve({
+        env: { CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Mon 23:00-02:00 UTC; mult=1.5' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      resolve({
+        env: { CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Tue 08:00-09:00 Asia/Singapore; off=2' },
+      }),
+    ).not.toThrow();
   });
 
   it('deep freezes returned arrays', () => {

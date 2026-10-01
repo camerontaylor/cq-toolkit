@@ -12,8 +12,8 @@ sets nothing.” `CQ_PROFILE` accepts `conservative` or `solo-maintainer`.
 Unknown `CQ_*` names fail resolution with a nearest-key hint when available.
 A per-call value that relaxes a policy requires an opt-in naming that exact
 key; there are no wildcard opt-ins. `optIn` accepts an exact id or
-`<id>=<value>`, and a disagreeing typed value is rejected. Maps and served
-aliases merge by entry. List duplicates and empty items fail; `none` is the
+`<id>=<value>`, and a disagreeing typed value is rejected. Maps, driver
+bindings, and served aliases merge by entry. List duplicates and empty items fail; `none` is the
 explicit empty-list value. Plan JSON, operation input, and workspace files
 are not configuration sources.
 
@@ -43,7 +43,8 @@ The resolver remains pure: the integrating caller passes the environment
 snapshot, canonical `workspaceRootRealpath`, and `verifiedRealpaths` entries
 keyed by config variable. Each entry binds the expanded input path to a
 caller-verified canonical path. Paths marked `outsideWorkspace` fail closed
-without this evidence and are rejected if they resolve inside the workspace.
+without this evidence, are rejected if they resolve inside the workspace, and
+resolve to the verified canonical target in the returned config.
 The resolver does not read files or process environment. It also rejects
 unexpanded path variables, unsafe environment passthrough names, and endpoint
 URLs other than HTTPS (the reserved proxy field may use HTTP or HTTPS).

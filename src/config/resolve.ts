@@ -170,8 +170,8 @@ function assertOutsideWorkspace(
   key: ConfigKey,
   input: string,
   options: ResolveConfigOptions,
-): void {
-  if (!key.outsideWorkspace) return;
+): string | undefined {
+  if (!key.outsideWorkspace) return undefined;
   const root = options.workspaceRootRealpath;
   const evidence = options.verifiedRealpaths?.[key.env];
   if (
@@ -185,6 +185,7 @@ function assertOutsideWorkspace(
   const rel = relative(resolvePath(root), resolvePath(evidence.realpath));
   if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)))
     throw new Error(`${key.env}: path must resolve outside the workspace`);
+  return resolvePath(evidence.realpath);
 }
 
 function providerName(name: string, env: Readonly<Record<string, string | undefined>>): boolean {
@@ -367,14 +368,6 @@ function parse(
     return argv as string[];
   }
   if (key.type === 'path' && value.startsWith('<') && value.endsWith('>')) return value;
-  if (key.type === 'path' && value.includes('$'))
-    throw new Error(`${key.env}: unresolved path variable`);
-  if (
-    key.type === 'path' &&
-    !value.startsWith('/') &&
-    !(value.startsWith('<') && value.endsWith('>'))
-  )
-    throw new Error(`${key.env}: expected an absolute path`);
   if (key.type === 'window') validateWindow(key, value);
   return value;
 }
@@ -393,8 +386,7 @@ function resolveValue(
     value.startsWith('custom:')
   ) {
     const path = expandPath(value.slice('custom:'.length), env, key);
-    assertOutsideWorkspace(key, path, options);
-    return `custom:${path}`;
+    return `custom:${assertOutsideWorkspace(key, path, options) ?? path}`;
   }
   if (
     key.type === 'path' &&
@@ -402,30 +394,38 @@ function resolveValue(
     !(value.startsWith('<') && value.endsWith('>'))
   ) {
     value = expandPath(value, env, key);
-    assertOutsideWorkspace(key, value, options);
+    value = assertOutsideWorkspace(key, value, options) ?? value;
   }
   return value;
 }
 
 function validateWindow(key: ConfigKey, value: string): void {
   const match =
-    /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:-(Mon|Tue|Wed|Thu|Fri|Sat|Sun)|\+(Mon|Tue|Wed|Thu|Fri|Sat|Sun))* (\d{2}):(\d{2})-(\d{2}):(\d{2}) ([A-Za-z_]+\/[A-Za-z0-9_+\-/]+)(?:; mult=(\d+(?:\.\d+)?); off=(\d+(?:\.\d+)?))?$/.exec(
+    /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:[-+](?:Mon|Tue|Wed|Thu|Fri|Sat|Sun))* (\d{2}):(\d{2})-(\d{2}):(\d{2}) (UTC|[A-Za-z_]+\/[A-Za-z0-9_+\-/]+)(?:; (?:mult=(\d+(?:\.\d+)?)|off=(\d+(?:\.\d+)?))(?:; (?:mult=(\d+(?:\.\d+)?)|off=(\d+(?:\.\d+)?)))?)?$/.exec(
       value,
     );
   if (
     !match ||
-    Number(match[4]) > 23 ||
-    Number(match[5]) > 59 ||
-    Number(match[6]) > 23 ||
-    Number(match[7]) > 59 ||
-    Number(match[4]) * 60 + Number(match[5]) >= Number(match[6]) * 60 + Number(match[7]) ||
-    (match[8] !== undefined && Number(match[8]) <= 0)
+    (match[6] !== undefined && match[8] !== undefined) ||
+    (match[7] !== undefined && match[9] !== undefined) ||
+    Number(match[1]) > 23 ||
+    Number(match[2]) > 59 ||
+    Number(match[3]) > 23 ||
+    Number(match[4]) > 59 ||
+    (match[1] === match[3] && match[2] === match[4]) ||
+    [match[6], match[7], match[8], match[9]].some(
+      (part) => part !== undefined && !Number.isFinite(Number(part)),
+    ) ||
+    [match[6], match[8]].some((part) => part !== undefined && Number(part) <= 0) ||
+    [match[7], match[9]].some((part) => part !== undefined && Number(part) < 0)
   )
     throw new Error(`${key.env}: invalid quota window`);
-  try {
-    new Intl.DateTimeFormat('en', { timeZone: match[8] });
-  } catch {
-    throw new Error(`${key.env}: invalid quota window timezone`);
+  if (match[5] !== 'UTC') {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: match[5] });
+    } catch {
+      throw new Error(`${key.env}: invalid quota window timezone`);
+    }
   }
 }
 
@@ -646,6 +646,12 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     if (callRaw !== undefined) {
       if (!key.perCall) throw new Error(`${key.id}: has no per-call layer`);
       const next = resolveValue(key, callRaw, env, options);
+      if (
+        key.id === 'run.envPassthrough' &&
+        isStringArray(next) &&
+        next.some((name) => unsafePassthrough(name, env))
+      )
+        throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
       if (!tighter(key, next, current) && !optIns.has(key.id))
         throw new Error(`${key.id}: less-conservative per-call value requires explicit opt-in`);
       current = overlay(key, current, next);
