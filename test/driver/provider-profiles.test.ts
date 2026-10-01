@@ -1,10 +1,13 @@
 // RS-14 profile data and admission helpers — pure data, no network, no clock
 // dependency (every helper takes its instant explicitly), no model calls.
 //
-// These pin the three rules the W2.6 admission work will lean on, and the
-// fail-closed ceiling that keeps an unknown provider ADVISORY:
+// These pin the rules the W2.6 admission work leans on, and the fail-closed
+// ceiling that keeps an unknown provider ADVISORY:
 //
-// - a structured signal (provider error code, then HTTP status) outranks text;
+// - rules are consulted by discriminator specificity — provider error code, then
+//   required message shape, then endpoint identity, then MARKER HEADER, then bare
+//   HTTP status — and a rule matches only when EVERY discriminator it declares
+//   matches. A provider's own header set outranks its status code;
 // - the Claude unified-quota header set is checked BEFORE `retry-after`, because
 //   the captured 429 carried both and calling an exhausted plan a throttle
 //   busy-retries it for an hour;
@@ -12,6 +15,7 @@
 //   retry time when none does — an unresettable quota is a human decision.
 import { describe, expect, test } from 'vitest';
 import { PROVIDER_PROFILES, providerProfile } from '../../src/driver/pricing/provider-profiles.js';
+import type { ProviderSignal } from '../../src/driver/pricing/admission.js';
 import {
   admissionVerdict,
   classifyProviderSignal,
@@ -459,6 +463,75 @@ describe('classifyProviderSignal', () => {
     expect(verdict.errorClass).toBe('rate-limit');
     expect(verdict.rule).toBe('retry-after');
     expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  // ORDERING: a marker header outranks a bare status. Without this, the Claude
+  // subscription profile's status-only 429 (rate-limit) shadows its marker rule
+  // (quota), and every unified-quota 429 — the one that also carries retry-after,
+  // precisely the case the marker rule exists for — busy-retries an exhausted
+  // plan window instead of deferring to it.
+  test('a marker header wins over a status-only rule that would also match', () => {
+    const verdict = classifyProviderSignal('claude-subscription', CLAUDE_EXHAUSTED_429);
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.rule).toBe('marker-header:anthropic-ratelimit-unified-status');
+    expect(verdict.deferUntilMs).toBe(1_790_269_200_000);
+  });
+
+  test('structurally: no marker rule is ever shadowed by a status-only sibling', () => {
+    // Walks every profile: wherever a marker rule and a status-only rule both
+    // match the SAME observation, the marker's class must be the one returned.
+    let shadowed = 0;
+    for (const profile of Object.values(PROVIDER_PROFILES)) {
+      const markerRules = profile.errorSignals.filter((fact) => fact.markerHeader !== undefined);
+      const statusOnlyRules = profile.errorSignals.filter(
+        (fact) =>
+          fact.httpStatus !== undefined &&
+          fact.providerCode === undefined &&
+          fact.messagePrefix === undefined &&
+          fact.endpointMatch === undefined &&
+          fact.markerHeader === undefined,
+      );
+      for (const marker of markerRules) {
+        for (const statusOnly of statusOnlyRules) {
+          // statusOnlyRules only ever holds rules that DECLARE an httpStatus.
+          const status: number = statusOnly.httpStatus as number;
+          const signal: ProviderSignal = {
+            httpStatus: status,
+            headers: { [marker.markerHeader as string]: 'rejected' },
+          };
+          const verdict = classifyProviderSignal(profile.id, signal);
+          expect({
+            profile: profile.id,
+            marker: marker.markerHeader,
+            status,
+            got: verdict.errorClass,
+            want: marker.errorClass,
+          }).toEqual({
+            profile: profile.id,
+            marker: marker.markerHeader,
+            status,
+            got: marker.errorClass,
+            want: marker.errorClass,
+          });
+          shadowed += 1;
+        }
+      }
+    }
+    // Non-vacuous: at least one such shadowing pair must exist, or this test
+    // would pass with nothing to check.
+    expect(shadowed).toBeGreaterThan(0);
+  });
+
+  test('the status-only path still works when NO marker header is present', () => {
+    // The counterpart to the ordering test: removing the marker must fall
+    // through to the status rule, so the ordering change did not simply disable
+    // status matching on this profile.
+    expect(classifyProviderSignal('claude-subscription', { httpStatus: 429 }).errorClass).toBe(
+      'rate-limit',
+    );
+    expect(classifyProviderSignal('deepseek', { httpStatus: 429 }).errorClass).toBe('rate-limit');
+    expect(classifyProviderSignal('deepseek', { httpStatus: 402 }).errorClass).toBe('quota');
+    expect(classifyProviderSignal('zai-glm-coding', { httpStatus: 429 }).errorClass).toBe('quota');
   });
 
   test('an undocumented 429 splits by profile, and never by guesswork', () => {

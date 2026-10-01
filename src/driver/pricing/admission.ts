@@ -276,12 +276,23 @@ function firstMatchingRule(
   profile: ProviderProfile,
   signal: ProviderSignal,
 ): ProviderProfile['errorSignals'][number] | undefined {
+  // Specificity order, most specific first: a provider error code, then a
+  // required message shape, then an endpoint identity, then a MARKER HEADER, and
+  // only then a bare HTTP status.
+  //
+  // Marker-header presence ranks ABOVE a bare status deliberately. The Claude
+  // subscription profile carries both a marker rule (unified quota headers =>
+  // quota) and a status-only 429 rule (plain throttle); if status were consulted
+  // first, every unified-quota 429 - the one that also carries `retry-after`,
+  // exactly the case the marker rule exists to capture - would resolve to
+  // rate-limit and busy-retry an exhausted plan window for an hour. A provider's
+  // own header set says more than its status code.
   const order = [
     (fact: ErrorSignalFact): boolean => fact.providerCode !== undefined,
     (fact: ErrorSignalFact): boolean => fact.messagePrefix !== undefined,
     (fact: ErrorSignalFact): boolean => fact.endpointMatch !== undefined,
-    (fact: ErrorSignalFact): boolean => fact.httpStatus !== undefined,
     (fact: ErrorSignalFact): boolean => fact.markerHeader !== undefined,
+    (fact: ErrorSignalFact): boolean => fact.httpStatus !== undefined,
   ];
   for (const hasDiscriminator of order) {
     const match = profile.errorSignals.find(
