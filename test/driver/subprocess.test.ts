@@ -2903,6 +2903,43 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
     });
   });
 
+  test('a PARSED payload on a budget verdict stays absent (the served-model check judges completes)', async () => {
+    await withScratch(async (scratchDir) => {
+      // The cap fired AFTER the CLI produced a valid object: the payload is
+      // still not a consumable outcome — withServedModelAssertion judges
+      // only completes, so a payload riding a budget verdict would bypass
+      // the observed-model check (parity with the ai-sdk lane; PR #238
+      // review).
+      const capped = s3Driver(scratchDir, [
+        s3InitLine(['StructuredOutput']),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          structured_output: { answer: 'ok' },
+          usage: {
+            input_tokens: 120_000,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        }),
+      ]);
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          toolPolicy: { allow: [], mode: 'none' },
+          budget: { maxTokens: 1000 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.structuredOutput).toBeUndefined();
+      expect(cappedResult.usage).toBeDefined();
+    });
+  });
+
   test('classifier rows through the lane: quota (claude limit text, spend limit, opencode funds) and rate-limit rows', async () => {
     await withScratch(async (scratchDir) => {
       let runCount = 0;

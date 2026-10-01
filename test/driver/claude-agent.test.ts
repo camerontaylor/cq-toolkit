@@ -2640,6 +2640,40 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     }
   });
 
+  test('a PARSED payload on a budget verdict stays absent (the served-model check judges completes)', async () => {
+    // The cap fired AFTER the CLI produced a valid object: the payload is
+    // still not a consumable outcome — withServedModelAssertion judges only
+    // completes, so a payload riding a budget verdict would bypass the
+    // observed-model check (parity with the ai-sdk lane; PR #238 review).
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
+    try {
+      const capped = streamDriver(scratchDir, () => [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'agent-cli-s3',
+          result: 'prose',
+          structured_output: { answer: 'ok' },
+          usage: AGENT_USAGE,
+          permission_denials: [],
+        },
+      ]);
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: ANSWER_OUTPUT_SCHEMA,
+          toolPolicy: { allow: [], mode: 'none' },
+          budget: { maxTokens: 1 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.structuredOutput).toBeUndefined();
+      expect(cappedResult.usage).toBeDefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('an assistant frame with the structured error rate_limit classifies quota', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {
@@ -2742,6 +2776,32 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     }
   });
 
+  test('a bare rate_limit_error (no stated retry-after) is provider-error, never rate-limit', async () => {
+    // The 'rate-limit' class MEANS "429 WITH retry-after" (types.ts; the
+    // ai-sdk lane's bare-429 row): without a backoff to honor the same
+    // vendor condition is a permanent provider failure — the two lanes
+    // must not classify one condition differently.
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
+    try {
+      const driver = streamDriver(scratchDir, () => [
+        {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          session_id: 'agent-cli-s3',
+          errors: ['rate_limit_error: Rate limit exceeded.'],
+          usage: AGENT_USAGE,
+        },
+      ]);
+      const result = await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('provider-error');
+      expect(result.providerSignals).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('enforced_spend_limit_reached classifies quota whatever the wrapper', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {
@@ -2801,7 +2861,9 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     });
     expect(limit.errorClass).toBe('quota');
     expect(limit.providerSignals?.windows?.[0]?.id).toBe('5h');
-    // Cut 3: rate_limit_error → rate-limit, retry-after only when stated.
+    // Cut 3: rate_limit_error with a stated retry-after → rate-limit; a
+    // bare 429 states no backoff, so it is provider-error (the class
+    // contract "429 WITH retry-after"; ai-sdk bare-429 parity).
     const rate = classifyFailure({
       ...base,
       texts: ['rate_limit_error: Rate limit exceeded. Try again in 12 seconds.'],
@@ -2809,7 +2871,7 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     expect(rate.errorClass).toBe('rate-limit');
     expect(rate.providerSignals?.retryAfterMs).toBe(12_000);
     const bare = classifyFailure({ ...base, texts: ['rate_limit_error'] });
-    expect(bare.errorClass).toBe('rate-limit');
+    expect(bare.errorClass).toBe('provider-error');
     expect(bare.providerSignals).toBeUndefined(); // never invented
     // Cut 4: local failure surfaces are harness.
     expect(

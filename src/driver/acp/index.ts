@@ -1810,7 +1810,12 @@ export class AcpDriver implements Driver {
       // fact, leg m; header). RAW id only — the `builtin:<provider>`
       // normalization is the S4 served-model wrapper's job, not this lane's.
       ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
-      ...(inputs.structured !== undefined ? { structuredOutput: inputs.structured } : {}),
+      // The payload rides a COMPLETE verdict only (parity with the ai-sdk
+      // lane): the served-model wrapper judges only completes, so a payload
+      // on a budget verdict would bypass the observed-model check.
+      ...(effectiveStopReason === 'complete' && inputs.structured !== undefined
+        ? { structuredOutput: inputs.structured }
+        : {}),
       usage,
       ...cost,
       sessionId,

@@ -516,7 +516,7 @@ describe('the agentic importer resolves (the subprocess floor lane, composed at 
     // mapping settles as `needs-human` (a misconfiguration is the human's
     // to fix — `failed` would claim a definitive worker outcome the op
     // never observed, and a bare `indeterminate` would hide the class).
-    expect(['failed', 'indeterminate', 'needs-human']).toContain(result.status);
+    expect(result.status).toBe('needs-human');
   }, 20_000);
 });
 

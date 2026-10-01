@@ -205,6 +205,25 @@ describe('driver factory — resolution', () => {
     await probe(resolved.driver, /ai-sdk driver: unknown provider/); // the AI-SDK lane ran
   });
 
+  test('the alias rides the ai-sdk lane even when the zai provider carries a role override', async () => {
+    // The alias means the ai-sdk LANE on provider 'zai' (its notice says
+    // so): a fixer/zai→subprocess override must catch only a LITERAL
+    // provider 'zai', never re-route the legacy alias — while the resolved
+    // spec still normalises to 'zai' (the alias never reaches a lane).
+    const factory = createDriverFactory({ bindings: { fixer: { zai: 'subprocess' } } });
+    const resolved = factory.resolve({
+      role: 'fixer',
+      modelSpec: { provider: 'ai-sdk', model: 'glm-4.6' },
+    });
+    expect(resolved.lane).toBe('ai-sdk');
+    expect(resolved.modelSpec).toEqual({ provider: 'zai', model: 'glm-4.6' });
+    await probe(resolved.driver, /ai-sdk driver: unknown provider/); // the AI-SDK lane ran
+    // The override still binds the literal provider it names.
+    expect(
+      factory.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'glm-4.6' } }).lane,
+    ).toBe('subprocess');
+  });
+
   test('the acp and claude-agent lanes exist only through explicit bindings', async () => {
     const factory = createDriverFactory({
       bindings: { remediator: { vendor: 'acp' }, fixer: { vendor: 'claude-agent' } },

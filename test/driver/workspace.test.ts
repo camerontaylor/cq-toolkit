@@ -46,6 +46,11 @@ describe('shared driver workspace binding', () => {
       await expect(
         resumedRecordOrThrow(store, 'unknown', undefined, 'ai-sdk driver'),
       ).rejects.toThrow('ai-sdk driver: unknown sessionRef');
+      // An unknown sessionRef is a caller misconfiguration like the other
+      // pre-dispatch rows: the throw carries the structured 'config' class.
+      await expect(
+        resumedRecordOrThrow(store, 'unknown', undefined, 'ai-sdk driver'),
+      ).rejects.toMatchObject({ dispatchClass: 'config' });
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

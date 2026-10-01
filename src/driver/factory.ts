@@ -335,14 +335,20 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
       // the alias never reaches a binding lookup, a lane, or a journal.
       let provider = request.modelSpec.provider;
       let modelSpec = request.modelSpec;
+      // The alias MEANS the ai-sdk lane (its own notice says so): the lane
+      // is pinned for the alias even when the zai provider carries a role
+      // override; only a literal provider 'zai' consults the bindings.
+      let lane: LaneId;
       if (provider === 'ai-sdk') {
         onDeprecatedAlias(
           "cq: modelSpec.provider 'ai-sdk' is deprecated and is removed in the next major — it now means the 'ai-sdk' lane on provider 'zai'; put the normalised spec (provider 'zai') on the invocation\n",
         );
         provider = 'zai';
         modelSpec = { ...modelSpec, provider: 'zai' };
+        lane = 'ai-sdk';
+      } else {
+        lane = laneForRole(request.role, provider, config.bindings);
       }
-      const lane = laneForRole(request.role, provider, config.bindings);
       const inner = constructLane(lane, request, config);
       const reaping =
         request.sessionRetention === 'reap-on-settle'

@@ -878,7 +878,12 @@ export class ClaudeAgentDriver implements Driver {
       // The observed served model: what the agent reported it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
       ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
-      ...(structured !== undefined ? { structuredOutput: structured } : {}),
+      // The payload rides a COMPLETE verdict only (parity with the ai-sdk
+      // lane): the served-model wrapper judges only completes, so a payload
+      // on a budget/aborted verdict would bypass the observed-model check.
+      ...(effectiveStopReason === 'complete' && structured !== undefined
+        ? { structuredOutput: structured }
+        : {}),
       usage,
       ...cost,
       sessionId,
@@ -1444,14 +1449,16 @@ export function classifyFailure(inputs: FailureClassInputs): FailureClassificati
   if (CLI_LIMIT_TEXT.test(joined)) {
     return quotaWithResetSignal(joined);
   }
-  // Cut 3: the API's rate-limit error type → rate-limit (retry-after when
-  // the vendor's text states one).
+  // Cut 3: the API's rate-limit error type is 'rate-limit' only WITH a
+  // stated retry-after (the class contract: "429 WITH retry-after",
+  // types.ts; the ai-sdk lane's bare-429 row is the parity) — a bare 429
+  // carries no backoff to honor, so it is a permanent provider failure.
   if (/\brate_limit_error\b/.test(joined)) {
     const retryAfterMs = retryAfterMsFromText(joined);
-    return {
-      errorClass: 'rate-limit',
-      ...(retryAfterMs !== undefined ? { providerSignals: { retryAfterMs } } : {}),
-    };
+    if (retryAfterMs !== undefined) {
+      return { errorClass: 'rate-limit', providerSignals: { retryAfterMs } };
+    }
+    return { errorClass: 'provider-error' };
   }
   // Cut 4: the CLI's own failure surfaces are local (harness) — a spawn/
   // exit/crash dispatch throw, or a death with no result event at all.

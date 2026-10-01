@@ -2458,6 +2458,29 @@ describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invali
     });
   });
 
+  test('a PARSED payload on a budget verdict stays absent (the served-model check judges completes)', async () => {
+    await withScratch(async (scratchDir) => {
+      // The cap fired AFTER the turn produced a valid object: the payload
+      // is still not a consumable outcome — withServedModelAssertion judges
+      // only completes, so a payload riding a budget verdict would bypass
+      // the observed-model check (parity with the ai-sdk lane; PR #238
+      // review).
+      const capped = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          prompt: 'capped payload run',
+          budget: { maxTokens: 1 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.structuredOutput).toBeUndefined();
+      expect(cappedResult.usage).toBeDefined();
+    });
+  });
+
   test('classifier rows: connection failure → harness; refusal → provider-error; an unresolved stop reason → unknown; child death → harness; a JSON-RPC prompt error → provider-error', async () => {
     await withScratch(async (scratchDir) => {
       let runCount = 0;

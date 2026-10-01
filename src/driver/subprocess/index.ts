@@ -978,7 +978,12 @@ export class SubprocessDriver implements Driver {
       // The observed served model: what the endpoint reports it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
       ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
-      ...(structured !== undefined ? { structuredOutput: structured } : {}),
+      // The payload rides a COMPLETE verdict only (parity with the ai-sdk
+      // lane): the served-model wrapper judges only completes, so a payload
+      // on a budget/aborted verdict would bypass the observed-model check.
+      ...(effectiveStopReason === 'complete' && structured !== undefined
+        ? { structuredOutput: structured }
+        : {}),
       usage,
       ...cost,
       sessionId,

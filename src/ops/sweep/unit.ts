@@ -556,6 +556,20 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         reason: `sweep.unit ${unit.package}: the fixer driver could not dispatch — ${messageOf(err)}`,
       };
     }
+    // A RESOLVED governed cancellation — the governor's signal fired and a
+    // conforming driver settled the aborted run with stopReason 'aborted'
+    // (§2.1) — is the same I8 posture as the thrown-abort path above: no
+    // verdict on potentially partial work → 'indeterminate' (resumable),
+    // never 'failed' (which would claim the fixer ran and broke on work it
+    // never finished).
+    if (stopReason === 'aborted') {
+      return {
+        status: 'indeterminate',
+        detail:
+          `sweep.unit ${unit.package}: the fixer dispatch was cancelled (stopReason 'aborted')` +
+          (sessionId !== undefined ? ` (session ${sessionId})` : ''),
+      };
+    }
     if (stopReason !== 'complete') {
       return {
         status: 'failed',

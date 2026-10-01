@@ -535,4 +535,72 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       }
     },
   );
+
+  test(
+    'a RESOLVED governed cancellation (stopReason aborted) is indeterminate, never failed (I8; PR #238 P1)',
+    { timeout: 120_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'd4-unit-abort-'));
+      try {
+        const repo = join(root, 'repo');
+        await generateScratchRepo(repo);
+        // The conforming cancellation settle: the governor's signal fired
+        // and the driver RESOLVES with stopReason 'aborted' (§2.1) — no
+        // throw for the catch's thrown-abort path to see.
+        const base = {
+          repoRoot: repo,
+          worktreesDir: 'worktrees',
+          runPrefix: 'cq/unit-abort',
+          base: 'main',
+          adapter: 'tsc-lines' as const,
+          runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+          checkCommand: (unit: WorkUnit, worktreePath: string) => ({
+            command: process.execPath,
+            args: ['scripts/check.js', unit.package],
+            cwd: worktreePath,
+            timeoutMs: 30_000,
+          }),
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'aborted' as const,
+              sessionId: 'unit-aborted-s1',
+            }),
+          },
+          modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          prompt: () => 'cancelled mid-run',
+          git: async () => ({ code: 0, stdout: '', stderr: '' }),
+        };
+        const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
+        const cancelled = await makeSweepUnitOp(base)(unit);
+        // No verdict on potentially partial work — indeterminate (the job
+        // can resume), never 'failed' (which would claim the fixer ran and
+        // broke on work it never finished).
+        expect(cancelled.status).toBe('indeterminate');
+        if (cancelled.status === 'indeterminate') {
+          expect(cancelled.detail).toContain('cancelled');
+          expect(cancelled.detail).toContain("stopReason 'aborted'");
+          expect(cancelled.detail).toContain('unit-aborted-s1');
+        }
+        // The mapping rides the stopReason exactly: a resolved provider
+        // failure still fails — the P1 never widens to every non-complete.
+        const failed = await makeSweepUnitOp({
+          ...base,
+          driver: {
+            run: async () => ({
+              usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'error' as const,
+              error: 'the vendor 500ed',
+              errorClass: 'provider-error' as const,
+            }),
+          },
+        })(unit);
+        expect(failed.status).toBe('failed');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

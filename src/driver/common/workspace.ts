@@ -34,7 +34,13 @@ export async function resumedRecordOrThrow(
 ): Promise<SessionRecord> {
   const record = await store.load(sessionRef);
   if (record === undefined) {
-    throw new Error(`${lane}: unknown sessionRef '${sessionRef}' — no recorded session to resume`);
+    // A sessionRef naming no stored session is a caller misconfiguration
+    // like the other pre-dispatch validation rows — structured 'config'
+    // (seam v2 §2.2), never an unclassified lane defect.
+    throw new DispatchError(
+      'config',
+      `${lane}: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
+    );
   }
   let recordedWorkspace = record.workspace;
   try {
