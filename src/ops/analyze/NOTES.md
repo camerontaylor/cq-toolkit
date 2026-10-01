@@ -348,19 +348,40 @@ resolutions are decisions with a stated alternative, not defaults.
   documents too), and the ledger is a plain file, not a MAC'd one — it is
   trusted because it lives in the P1-trusted layer (ADR §1), not because it
   is tamper-evident.
-- **The append is write-ALL, and fails closed.** `fs.writeSync` RETURNS a
-  byte count and does not promise the whole buffer, so the first version's
-  single unchecked call could `fdatasync` a TRUNCATED line, report
-  `consumed`, and leave the full nonce absent from the ledger — after which
-  that same token replays cleanly, the exact outcome the ledger exists to
-  prevent. The write now loops to completion, and a write that cannot make
-  progress (or that over-reports) THROWS, which `exercise` turns into a
-  `needs-human` refusal with the nonce UNSPENT. A torn record is
-  deliberately NOT truncated away: the file is shared, and truncating to a
-  remembered length could discard a CONCURRENT append, turning a safe
-  failure into an unsafe replay of another writer's token. A torn line is
-  inert — it parses as one meaningless nonce string and cannot make a real
-  128-bit nonce look spent.
+- **The append is write-ALL, fails closed, and a torn ledger is CORRUPTION
+  — not history.** `fs.writeSync` RETURNS a byte count and does not promise
+  the whole buffer, so the first version's single unchecked call could
+  `fdatasync` a TRUNCATED line, report `consumed`, and leave the full nonce
+  absent from the ledger — after which that same token replays cleanly, the
+  exact outcome the ledger exists to prevent. The write now loops to
+  completion, and a write that cannot make progress (or that over-reports)
+  THROWS, which `exercise` turns into a `needs-human` refusal with the
+  nonce UNSPENT.
+  A torn record is deliberately NOT truncated away: the file is shared, and
+  truncating to a remembered length could discard a CONCURRENT append,
+  turning a safe failure into an unsafe replay of another writer's token.
+  It is instead made DETECTABLE and fatal, because a torn tail is not inert
+  after all — the next O_APPEND fuses the partial record with the following
+  one into a line matching neither nonce, and a fresh instance absorbing
+  that merged line would never see the real nonce as spent. So the durable
+  ledger (a) refuses to append when the file ends with an unterminated
+  record, and (b) validates EVERY record it reads against ADR-0003 §2's
+  nonce shape (32 lowercase hex), failing the whole read closed on any
+  malformed line. Reading history wrong is worse than refusing to read it:
+  the operator must inspect and repair the file. The in-process ledger has
+  no such corruption mode and validates nothing, which is stated on it.
+
+### A lock fault reports the phase it actually reached
+
+The exercise runs INSIDE the mutation lock, so a fault ACQUIRING the lock has
+not spent the token, while a fault releasing or compromising it has. An
+earlier handler claimed "already EXERCISED, so the token is spent" for every
+lock fault, which is false for the acquire case — a message that asserts a
+fact it cannot know. `applyRemediation` now records whether the write was
+entered and reports the matching fate (UNSPENT and re-approvable vs spent
+and unreplayable), while the dispatch's rollback still marks every applied
+file STRANDED, because a section whose exclusivity cannot be proven proves
+no restore either way.
 
 ### Open integration lease (for the #238 / kernel owner, NOT done here)
 

@@ -598,10 +598,24 @@ describe('the durable operator ledger (ADR-0003 §5)', () => {
   test('a token spent in one run is refused in a LATER run against the same ledger', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cq-ledger-'));
     const ledgerPath = join(dir, 'approvals.ndjson');
+    // ADR-shaped nonces (32 lowercase hex), because the durable ledger now
+    // validates every record against that shape. Using the fixture's
+    // human-readable nonce here would make this test pass for the WRONG
+    // reason — refused as MALFORMED rather than refused as SPENT — and it
+    // would stop testing the replay case it exists for.
+    const nonce = '9'.repeat(32);
+    const verified = {
+      verifiedFor: (candidate: ApprovalSubject) =>
+        Promise.resolve({
+          nonce,
+          state: { ...CLEAN_STATE, workspace: candidate.workspace },
+        }),
+    };
     const firstRun = grantingAuthority({
       op: OP,
       workspace: WORKSPACE,
       targets: TARGETS,
+      approvals: verified,
       ledger: makeFileNonceLedger(ledgerPath),
     });
     const first = await withApprovedMutation(
@@ -610,12 +624,14 @@ describe('the durable operator ledger (ADR-0003 §5)', () => {
       writeSpy().run,
     );
     expect(first.status).toBe('ok');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce}\n`);
     // A fresh process would look exactly like this: a NEW authority over the
     // same operator ledger, with no memory of the first run.
     const secondRun = grantingAuthority({
       op: OP,
       workspace: WORKSPACE,
       targets: TARGETS,
+      approvals: verified,
       ledger: makeFileNonceLedger(ledgerPath),
     });
     const replayWrite = writeSpy();
@@ -625,6 +641,8 @@ describe('the durable operator ledger (ADR-0003 §5)', () => {
       replayWrite.run,
     );
     expect(replay.status).toBe('needs-human');
+    // Refused as SPENT — the ADR §5 replay case — not as malformed.
+    expect(replay.status === 'needs-human' ? replay.reason : '').toContain('already consumed');
     expect(replayWrite.calls).toBe(0);
   });
 });
@@ -866,11 +884,12 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
     // queued in a buffer. (The fdatasync/dir-fsync that make it survive a
     // POWER loss are not observable from a test process, and are not claimed
     // to be beyond the journal's own F_FULLFSYNC residual.)
-    return ledger.consume('nonce-durable').then((outcome) => {
+    const nonce = 'e'.repeat(32);
+    return ledger.consume(nonce).then((outcome) => {
       expect(outcome).toBe('consumed');
       expect(existsSync(ledgerPath)).toBe(true);
-      expect(readFileSync(ledgerPath, 'utf8')).toBe('nonce-durable\n');
-      return ledger.consume('nonce-durable');
+      expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce}\n`);
+      return ledger.consume(nonce);
     });
   });
 
@@ -891,15 +910,76 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
         return writeSync(handle, buffer, offset, count);
       },
     });
-    const outcome = await ledger.consume('nonce-short-write');
+    const outcome = await ledger.consume('f'.repeat(32));
     expect(outcome).toBe('consumed');
     // It really did take several writes, and the file holds the WHOLE
     // record — not a prefix that would parse as a different nonce.
     expect(calls.length).toBeGreaterThan(1);
-    expect(readFileSync(ledgerPath, 'utf8')).toBe('nonce-short-write\n');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${'f'.repeat(32)}\n`);
     // And the full nonce is genuinely spent, so the replay is refused.
-    const replay = await ledger.consume('nonce-short-write');
+    const replay = await ledger.consume('f'.repeat(32));
     expect(replay).toBe('spent');
+  });
+
+  test('a TORN tail fails the ledger closed: no append, and a FRESH instance still refuses', async () => {
+    // The corruption path. A short write that wrote SOME bytes leaves a
+    // partial record; because the next append is O_APPEND, the following
+    // record fuses onto it and the two lines merge into something that
+    // matches NEITHER nonce. A fresh instance absorbing that garbage would
+    // not see the real nonce as spent, and would permit the replay.
+    const dir = mkdtempSync(join(tmpdir(), 'cq-torn-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const nonce = 'a'.repeat(32);
+    // A writer that lays down a prefix and then fails: the torn tail.
+    const torn = makeFileNonceLedger(ledgerPath, {
+      write: (handle, buffer) => {
+        writeSync(handle, buffer, 0, 6);
+        return 6;
+      },
+    });
+    // It reports success for the prefix it wrote, so the tear is only
+    // visible afterwards — exactly the shape a partial write can take.
+    expect(await torn.consume(nonce)).toBe('consumed');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce.slice(0, 6)}`);
+
+    // The SECOND consume on the SAME instance refuses: the tail is
+    // unterminated, and appending would fuse the two records.
+    await expect(torn.consume(nonce)).rejects.toThrow(/unterminated record/);
+
+    // And the decisive case: a FRESH instance over the same file — a new
+    // process, a resumed run — also refuses rather than reading the torn
+    // bytes as history and letting the full nonce through again.
+    const fresh = makeFileNonceLedger(ledgerPath);
+    await expect(fresh.consume(nonce)).rejects.toThrow(/unterminated record/);
+
+    // Nothing was appended by either refusal: the file is unchanged.
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(`${nonce.slice(0, 6)}`);
+  });
+
+  test('a MALFORMED record fails the ledger closed (history is never read wrong)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-malformed-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    // A well-formed record followed by one that is not a nonce shape: the
+    // fused-line outcome, or any external corruption. Reading it as history
+    // would silently mark a nonce spent that was never spent (or vice
+    // versa), so the whole read fails instead.
+    writeFileSync(ledgerPath, `${'b'.repeat(32)}\nnot-a-nonce\n`);
+    const ledger = makeFileNonceLedger(ledgerPath);
+    await expect(ledger.consume('c'.repeat(32))).rejects.toThrow(/malformed/);
+    // The well-formed record before it is not enough to make the read
+    // succeed: one bad record invalidates the file's trustworthiness.
+  });
+
+  test('a well-formed ledger still works end to end (positive control for the validation)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-ok-'));
+    const ledgerPath = join(dir, 'approvals.ndjson');
+    const first = makeFileNonceLedger(ledgerPath);
+    const nonce = 'd'.repeat(32);
+    expect(await first.consume(nonce)).toBe('consumed');
+    // A fresh instance sees it spent — which is the whole point of the
+    // ledger, and must survive the validation added above.
+    const second = makeFileNonceLedger(ledgerPath);
+    expect(await second.consume(nonce)).toBe('spent');
   });
 
   test('a write that cannot progress is REFUSED before any consumption is claimed', async () => {
@@ -911,7 +991,7 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
     const ledger = makeFileNonceLedger(ledgerPath, {
       write: () => 0,
     });
-    await expect(ledger.consume('nonce-zero-write')).rejects.toThrow(/made no progress/);
+    await expect(ledger.consume('0'.repeat(32))).rejects.toThrow(/made no progress/);
   });
 
   test('an over-reporting writer is refused too (it is not honouring the contract)', async () => {
@@ -923,7 +1003,7 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
         return buffer.length + 10;
       },
     });
-    await expect(ledger.consume('nonce-over-report')).rejects.toThrow(/not honouring/);
+    await expect(ledger.consume('1'.repeat(32))).rejects.toThrow(/not honouring/);
   });
 
   test('a short-write ledger still makes the op refuse rather than write (end to end, fail-closed)', async () => {
@@ -933,7 +1013,7 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
       approvals: {
         verifiedFor: (candidate) =>
           Promise.resolve({
-            nonce: 'nonce-short-e2e',
+            nonce: '2'.repeat(32),
             state: { ...CLEAN_STATE, workspace: candidate.workspace },
           }),
       },

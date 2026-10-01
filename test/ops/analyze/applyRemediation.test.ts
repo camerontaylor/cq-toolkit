@@ -15,6 +15,7 @@ import type {
   ApprovalState,
   ApprovalStateReader,
   InspectableNonceLedger,
+  MutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 import {
   makeApprovalAuthority,
@@ -1055,5 +1056,118 @@ describe('W4.3 approval at the mutation boundary (applyRemediation)', () => {
     // There was no write, so no human decision was spent on one.
     expect(ledger.spent()).toBe(0);
     expect(store.written.size).toBe(0);
+  });
+});
+
+// A lock fault's report must not assert a fact it cannot know. The exercise
+// happens INSIDE the mutation lock, so an ACQUIRE fault has not spent the
+// token while a RELEASE/COMPROMISE fault has. The first version of the
+// handler said "already EXERCISED, so the token is spent" for every fault,
+// which is false for the acquire case.
+describe('W4.3 a lock fault reports the token fate the phase allows', () => {
+  function approvedStore(): AnalyzeFileStore & { written: Map<string, Uint8Array> } {
+    return memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+  }
+
+  /** Locks that fault on the FIRST acquire — before the exercise ever runs. */
+  function acquireFaultLocks(): { locks: MutationLocks; attempted: () => number } {
+    let attempted = 0;
+    return {
+      attempted: () => attempted,
+      locks: {
+        forWorkspace: () => ({
+          withLock: async <T>(): Promise<T> => {
+            attempted += 1;
+            throw new Error(
+              "git-mutex: could not acquire '/state/mutation-abc.lock' — still held after the waiter budget",
+            );
+          },
+        }),
+      },
+    };
+  }
+
+  test('an ACQUIRE fault reports the token UNSPENT, and nothing was written', async () => {
+    const store = approvedStore();
+    const { locks, attempted } = acquireFaultLocks();
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: () =>
+          Promise.resolve({
+            nonce: '9'.repeat(32),
+            state: { workspace: '/ws', headSha: 'head', treeClean: true },
+          }),
+      },
+      ledger,
+      locks,
+      readState: {
+        read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+      },
+    });
+    const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(attempted()).toBe(1);
+    // A RESULT, not an escaping exception.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    const error = result.error;
+    expect(error).toContain('mutation lock faulted');
+    // THE ASSERTION THAT MATTERS: the nonce was never spent, because the
+    // exercise runs inside the lock and the lock was never acquired.
+    expect(error).toContain('was NOT exercised');
+    expect(error).toContain('UNSPENT');
+    expect(error).not.toContain('the approval WAS exercised');
+    // And the ledger agrees: nothing was spent, so the same token is
+    // re-approvable once the lock is healthy.
+    expect(ledger.spent()).toBe(0);
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a fault AFTER the write reports the token SPENT (the same handler, the other phase)', async () => {
+    const store = approvedStore();
+    let taken = 0;
+    const real = makeProcessLocalMutationLocks();
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: () =>
+          Promise.resolve({
+            nonce: '8'.repeat(32),
+            state: { workspace: '/ws', headSha: 'head', treeClean: true },
+          }),
+      },
+      ledger,
+      locks: {
+        forWorkspace: (workspace: string) => {
+          const inner = real.forWorkspace(workspace);
+          return {
+            withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+              taken += 1;
+              // First section (the approved write) completes and then the
+              // primitive reports the artifact compromised — the token IS
+              // spent by then. The section's result is discarded on purpose:
+              // a compromised section proves nothing.
+              await inner.withLock(fn);
+              throw new Error('git-mutex: lock was compromised while held');
+            },
+          };
+        },
+      },
+      readState: {
+        read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+      },
+    });
+    const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
+    expect(taken).toBe(1);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    // The opposite claim, correctly: spent, because the write was entered.
+    expect(result.error).toContain('the approval WAS exercised');
+    expect(result.error).toContain('token is spent');
+    expect(result.error).not.toContain('was NOT exercised');
+    expect(ledger.spent()).toBe(1);
   });
 });

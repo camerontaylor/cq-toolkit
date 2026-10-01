@@ -867,33 +867,53 @@ describe('W4.3 the rollback is conditional and locked (no lost update)', () => {
 // with no OpResult and, worse, no evidence: the applied edits were already
 // on disk and the caller learned nothing about them.
 describe('a lock fault during the rollback is reported, never thrown', () => {
-  /** Locks that fail the way the real git mutex can: at acquire, or after the section ran. */
-  function faultingLocks(mode: 'acquire' | 'release'): MutationLocks {
+  /**
+   * Locks that fault the way the real git mutex can — at acquire, or after
+   * the section ran — but ONLY ON THE SECOND SECTION.
+   *
+   * That "second only" is the point: the dispatch takes the mutation lock
+   * TWICE, once for the approved apply and once for the rollback. A fixture
+   * that faults on every acquisition fails the FIRST one, so the verifier
+   * never runs and the test asserts nothing about the rollback it claims to
+   * cover. The first section must therefore succeed, and every test below
+   * asserts the verifier ran, which is what proves the rollback was reached
+   * at all.
+   */
+  function faultingLocks(mode: 'acquire' | 'release'): {
+    locks: MutationLocks;
+    sections: () => number;
+  } {
     const real = makeProcessLocalMutationLocks();
+    let taken = 0;
     return {
-      forWorkspace: (workspace: string) => {
-        const inner = real.forWorkspace(workspace);
-        return {
-          withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
-            if (mode === 'acquire') {
-              throw new Error(
-                "git-mutex: could not acquire '/state/mutation-abc.lock' — still held after the waiter budget",
-              );
-            }
-            // The compromise-after-the-fact case: the section RAN (and its
-            // result is discarded, because a compromised section proves
-            // nothing), then the primitive reported the fault.
-            await inner.withLock(fn);
-            throw new Error('git-mutex: lock was compromised while held');
-          },
-        };
+      sections: () => taken,
+      locks: {
+        forWorkspace: (workspace: string) => {
+          const inner = real.forWorkspace(workspace);
+          return {
+            withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+              taken += 1;
+              if (taken === 1) return inner.withLock(fn);
+              if (mode === 'acquire') {
+                throw new Error(
+                  "git-mutex: could not acquire '/state/mutation-abc.lock' — still held after the waiter budget",
+                );
+              }
+              // The compromise-after-the-fact case: the section RAN (and its
+              // result is discarded, because a compromised section proves
+              // nothing), then the primitive reported the fault.
+              await inner.withLock(fn);
+              throw new Error('git-mutex: lock was compromised while held');
+            },
+          };
+        },
       },
     };
   }
 
   test('a lock fault at ACQUIRE strands every applied file and still returns failed', async () => {
     const h = harness(FIXTURE, 1);
-    const locks = faultingLocks('acquire');
+    const { locks, sections } = faultingLocks('acquire');
     const dispatch = makePlaybookDispatchOp({
       playbooks: h.playbooks,
       quarantine: h.quarantine,
@@ -919,6 +939,12 @@ describe('a lock fault during the rollback is reported, never thrown', () => {
       dir: '/ws',
       targets: ['src/a.ts'],
     });
+    // PROOF THE ROLLBACK WAS REACHED: the apply took the first section
+    // (healthy), the verifier really ran, and only the SECOND section — the
+    // rollback's — faulted. A fixture that faulted section one would fail
+    // here and never get this far.
+    expect(sections()).toBe(2);
+    expect(h.run.verifierCalls).toHaveLength(1);
     // No throw escaped: the op produced a result.
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') return;
@@ -935,7 +961,7 @@ describe('a lock fault during the rollback is reported, never thrown', () => {
 
   test('a lock fault AFTER the section ran claims nothing as restored (exclusivity is unproven)', async () => {
     const h = harness(FIXTURE, 1);
-    const locks = faultingLocks('release');
+    const { locks, sections } = faultingLocks('release');
     const dispatch = makePlaybookDispatchOp({
       playbooks: h.playbooks,
       quarantine: h.quarantine,
@@ -961,6 +987,10 @@ describe('a lock fault during the rollback is reported, never thrown', () => {
       dir: '/ws',
       targets: ['src/a.ts'],
     });
+    // Same proof: the apply's section was healthy, the verifier ran, and the
+    // rollback's section is the one that faulted.
+    expect(sections()).toBe(2);
+    expect(h.run.verifierCalls).toHaveLength(1);
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') return;
     const evidence = dispatchEvidence(result.error);

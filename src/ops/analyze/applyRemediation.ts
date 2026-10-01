@@ -437,9 +437,21 @@ export function makeApplyRemediation(
         timeoutMs: input.timeoutMs,
       }),
     };
+    // Whether the approved WRITE was actually entered. The exercise happens
+    // INSIDE the mutation lock, immediately before the write, so a fault
+    // acquiring the lock has NOT spent the token while a fault releasing or
+    // compromising it HAS. A catch clause cannot tell those apart by
+    // inspection, so the phase is recorded as it happens rather than
+    // guessed at in the message — claiming "spent" unconditionally would
+    // assert a fact that is false for the acquire case, and "unspent" would
+    // be false for the release case.
+    let writeEntered = false;
     let approved: ApprovedMutation<RemediationFileApplied[]>;
     try {
       approved = await withApprovedMutation(approval, subject, async () => {
+        // Entering this callback is proof the exercise granted, i.e. the
+        // nonce is spent.
+        writeEntered = true;
         const appliedFiles: RemediationFileApplied[] = [];
         for (const item of pending) {
           const file = item.file;
@@ -513,14 +525,21 @@ export function makeApplyRemediation(
       // that reject out of the op would hand the caller an exception with no
       // OpResult at all, while the applied set may be partially on disk.
       // So it becomes `failed` — the op's own machinery failing, which is
-      // explicitly NOT an approval refusal and must not read as one — and it
-      // states exactly what the caller cannot otherwise know: which files
-      // were in the approved write set (so a partial apply is inspectable)
-      // and that the token may already be spent, which is ADR-0003 §4c's
-      // safe direction rather than a replay risk.
+      // explicitly NOT an approval refusal and must not read as one.
+      //
+      // The token's fate is reported as the PHASE allows, never assumed:
+      // `writeEntered` is true only once the exercise granted, so a fault
+      // before the write means the nonce is still UNSPENT and re-approval
+      // after a repair is possible, while a fault after it means the token
+      // is spent and cannot be replayed. Either way the write set is named,
+      // because a lock fault proves neither that those files were written
+      // nor that they were not.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent (safe: a spent token cannot be replayed)'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT and may be re-approved once the lock is healthy';
       return {
         status: 'failed',
-        error: `remediation: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. The approval was already EXERCISED, so the token is spent (safe: a spent token cannot be replayed), and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a LOCK FAULT is not a proof that any of them was written and not a proof that none was, so inspect the workspace before re-running; this is the op's machinery failing, NOT an approval refusal`,
+        error: `remediation: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. ${tokenFate}, and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a LOCK FAULT is not a proof that any of them was written and not a proof that none was, so inspect the workspace before re-running; this is the op's machinery failing, NOT an approval refusal`,
       };
     }
     if (approved.status === 'needs-human') {

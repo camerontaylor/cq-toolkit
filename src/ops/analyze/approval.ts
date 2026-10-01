@@ -327,16 +327,43 @@ export function makeFileNonceLedger(
     // process may have appended since. A missing file is an empty ledger
     // (nothing spent yet); an unreadable one throws and the exercise fails
     // closed, which is the fail-closed direction ADR §4c wants.
+    //
+    // EVERY RECORD IS VALIDATED, and this is a correctness fix, not
+    // tidiness. A torn record (a short write that wrote SOME bytes before
+    // failing) leaves a partial line; because the next append is O_APPEND,
+    // the following record lands IMMEDIATELY after that partial line and
+    // the two fuse into one line that matches neither nonce. A fresh
+    // instance would absorb the fused garbage, never see the real full
+    // nonce as spent, and permit the replay this ledger exists to prevent.
+    // Accepting any non-empty string as a nonce is what let that happen, so
+    // a record that is not a well-formed nonce is CORRUPTION and the whole
+    // read fails closed — refusing every consume beats reading history wrong.
     if (!existsSync(path)) return;
-    for (const line of readFileSync(path, 'utf8').split('\n')) {
-      const nonce = line.trim();
-      if (nonce !== '') known.add(nonce);
-    }
+    const lines = readFileSync(path, 'utf8').split('\n');
+    lines.forEach((line, index) => {
+      const record = line.trim();
+      if (record === '') return;
+      if (!NONCE_PATTERN.test(record)) {
+        throw new Error(
+          `approval ledger: record ${String(index + 1)} of '${path}' is malformed (${JSON.stringify(record.slice(0, 64))}, expected ${NONCE_SHAPE}) — the ledger is fail-closed: a torn or corrupted record is never read as history, so no consume is allowed until an operator inspects it`,
+        );
+      }
+      known.add(record);
+    });
   };
   return {
     consume: async (nonce) => {
       absorb();
       if (known.has(nonce)) return 'spent';
+      // TORN-TAIL GUARD, before the O_APPEND. A previous write that failed
+      // part-way can leave bytes with no terminating newline; appending now
+      // would fuse the partial record with this one and corrupt BOTH. So an
+      // unterminated tail is refused outright rather than papered over.
+      if (hasUnterminatedTail(path)) {
+        throw new Error(
+          `approval ledger: '${path}' ends with an unterminated record (a previous write appears to have been torn) — appending would fuse it with the next record and corrupt both, so the consume is refused; an operator must inspect and repair the ledger`,
+        );
+      }
       // Synchronous on purpose: the append must be COMPLETE before this
       // promise resolves, or the exercise would report "consumed" for a
       // nonce that is still only a promise of a byte on disk.
@@ -589,6 +616,24 @@ export interface FileNonceLedgerConfig {
    * returning how many were written. Defaults to `fs.writeSync`.
    */
   write?: (handle: number, buffer: Buffer, offset: number, length: number) => number;
+}
+
+/**
+ * The nonce shape ADR-0003 §2 specifies: 128 bits of randomness, 32
+ * lowercase hex characters. The DURABLE ledger validates every record
+ * against it, which is what turns a torn record into a detectable fault
+ * instead of a silently merged line.
+ */
+const NONCE_PATTERN = /^[0-9a-f]{32}$/;
+
+/** The same shape, as prose, for error messages. */
+const NONCE_SHAPE = '32 lowercase hex characters';
+
+/** True when the ledger file exists, is non-empty, and lacks its final newline. */
+function hasUnterminatedTail(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const contents = readFileSync(path, 'utf8');
+  return contents !== '' && !contents.endsWith('\n');
 }
 
 /** The default write seam: node:fs, whose short-count behaviour is the reason for the loop. */
