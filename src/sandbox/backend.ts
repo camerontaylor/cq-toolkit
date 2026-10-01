@@ -26,7 +26,7 @@
 //               syscalls; absent a helper this backend records itself as not
 //               provisioned (the D7 pattern), it is never silently "auto".
 import { execFile as execFileCb } from 'node:child_process';
-import { access, constants, mkdir, writeFile } from 'node:fs/promises';
+import { access, constants, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -277,19 +277,33 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
       // this profile's read allowlist, so TMPDIR moves into the workspace.
       const childTmp = join(request.workspace, '.tmp');
       await mkdir(childTmp, { recursive: true });
-      const profilePath = join(request.workspace, '.cq-seatbelt.sb');
-      await writeFile(profilePath, seatbeltProfile(request.network, request.proxyPort));
       env['TMPDIR'] = childTmp;
-      return runChild(
-        SEATBELT_BIN,
-        ['-D', `WS=${request.workspace}`, '-f', profilePath, '--', ...request.argv],
-        {
-          cwd: request.workspace,
-          env,
-          timeoutMs: request.timeoutMs ?? 30_000,
-          maxOutputChars: request.maxOutputChars ?? 64 * 1024,
-        },
-      );
+      // The policy NEVER lives in the model-writable workspace (Sol review:
+      // a child could plant a symlink at the policy path or race the write
+      // with a permissive replacement before sandbox-exec -f reads it).  It
+      // is written to a fresh 0700 parent-private directory — created by
+      // mkdtemp, so no pre-planted path can exist — with 0600 on the file,
+      // and the directory is destroyed when the launch ends.  A confined
+      // child cannot reach it, and the next launch compiles a fresh profile.
+      const profileDir = await mkdtemp(join(tmpdir(), 'cq-sb-prof-'));
+      try {
+        const profilePath = join(profileDir, 'policy.sb');
+        await writeFile(profilePath, seatbeltProfile(request.network, request.proxyPort), {
+          mode: 0o600,
+        });
+        return await runChild(
+          SEATBELT_BIN,
+          ['-D', `WS=${request.workspace}`, '-f', profilePath, '--', ...request.argv],
+          {
+            cwd: request.workspace,
+            env,
+            timeoutMs: request.timeoutMs ?? 30_000,
+            maxOutputChars: request.maxOutputChars ?? 64 * 1024,
+          },
+        );
+      } finally {
+        await rm(profileDir, { recursive: true, force: true });
+      }
     },
   };
 }

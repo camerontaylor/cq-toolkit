@@ -48,7 +48,7 @@ const result = (over: Partial<SandboxLaunchResult>): SandboxLaunchResult => ({
 const denied = () => result({ exitCode: 1, stderr: 'fake boundary: Operation not permitted' });
 
 /**
- * A fake whose verdicts follow one of five behaviors, keyed by what the
+ * A fake whose verdicts follow one of six behaviors, keyed by what the
  * canaries ask the child to do:
  *   grant-all    — every child succeeds (a boundary that does not bound);
  *   block-all    — no child ever runs (a broken launcher, not confinement);
@@ -56,10 +56,12 @@ const denied = () => result({ exitCode: 1, stderr: 'fake boundary: Operation not
  *   fs-only      — filesystem denials hold but the child may connect (an
  *                  `allow`-posture boundary, wrong for model-only);
  *   proxy-fs-only— fs denials hold and ONLY the declared proxy port passes —
- *                  the proxy-composed model-only boundary.
+ *                  the proxy-composed model-only boundary;
+ *   broken-bash  — fs denials hold but bash cannot exec in-boundary, so
+ *                  every bash -c canary must go INCONCLUSIVE, not "denied".
  */
 function fakeAdapter(
-  behavior: 'grant-all' | 'block-all' | 'env-fails' | 'fs-only' | 'proxy-fs-only',
+  behavior: 'grant-all' | 'block-all' | 'env-fails' | 'fs-only' | 'proxy-fs-only' | 'broken-bash',
 ): SandboxBackendAdapter {
   return {
     backend: 'bwrap',
@@ -69,6 +71,9 @@ function fakeAdapter(
     launch: (request) => {
       if (behavior === 'block-all') {
         return Promise.resolve(result({ spawnError: 'fake launcher refuses everything' }));
+      }
+      if (behavior === 'broken-bash' && request.argv[0] === '/bin/bash') {
+        return Promise.resolve(result({ spawnError: 'fake bash cannot exec inside the boundary' }));
       }
       const argText = request.argv.join(' ');
       const portMatch = argText.match(/dev\/tcp\/([^/]+)\/(\d+)/);
@@ -183,6 +188,20 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/cannot compose a loopback proxy/);
     expect(record.canaries).toEqual([]);
+  });
+
+  test('a launcher whose bash cannot exec yields INCONCLUSIVE shell canaries, not denials', async () => {
+    // Non-vacuity (Sol review): the workspace control passes without bash, so
+    // a naive probe could read every bash -c refusal as a boundary.  With the
+    // in-boundary shell control failed, the shell-dependent canaries must be
+    // inconclusive and nothing certifies.
+    const record = await probeBackend(fakeAdapter('broken-bash'));
+    expect(verdictOf(record, 'workspace-control')).toBe('pass');
+    expect(verdictOf(record, 'nested-child-escape')).toBe('inconclusive');
+    expect(verdictOf(record, 'network-loopback')).toBe('inconclusive');
+    expect(verdictOf(record, 'network-external')).toBe('inconclusive');
+    expect(record.certified).toBe(false);
+    expect(record.blocker).toMatch(/inconclusive/);
   });
 });
 

@@ -5,7 +5,7 @@
 // STATUS of the narrow-allow seatbelt profile is recorded in backend.ts: it
 // replaces the audit-rejected broad-root read and has not yet executed on
 // any host; live evidence at final head is a gate of the fresh protocol.
-import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -227,7 +227,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true });
   });
 
-  test('a child reads and writes the workspace and the profile is on disk', async () => {
+  test('a child reads and writes the workspace; no policy file lands in it', async () => {
     const adapter = seatbeltAdapter();
     const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
     scratch.push(workspace);
@@ -239,10 +239,12 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     expect(result.spawnError).toBeUndefined();
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain('in-boundary');
-    const profile = await readFile(join(workspace, '.cq-seatbelt.sb'), 'utf8');
-    expect(profile).toContain('(deny default)');
-    // The on-disk profile matches the constructor: no whole-volume read.
-    expect(profile).not.toContain('(subpath "/")');
+    // The policy is compiled from parent-PRIVATE storage (Sol review: the
+    // workspace is model-writable, so a policy there is attacker-replaceable);
+    // nothing policy-shaped is ever created in the workspace.
+    const listing = await readdir(workspace);
+    expect(listing).not.toContain('.cq-seatbelt.sb');
+    expect(listing.filter((name) => name.endsWith('.sb'))).toEqual([]);
   }, 30_000);
 
   test('the launcher env scrub reaches the confined child, and TMPDIR moves inside', async () => {
@@ -295,7 +297,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     expect(result.stdout).not.toContain('sibling-secret-value');
   }, 30_000);
 
-  test('a proxyPort launch permits the proxy port in the on-disk profile', async () => {
+  test('a proxyPort launch compiles the single-port egress rule', async () => {
     const adapter = seatbeltAdapter();
     const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
     scratch.push(workspace);
@@ -305,10 +307,40 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
       network: 'model-only',
       proxyPort: 45454,
     });
+    // The launch succeeding proves sandbox-exec compiled the proxy rule
+    // (profile source is private per-launch storage, destroyed afterwards —
+    // the rule content itself is construction-tested in seatbeltProfile).
     expect(result.ok).toBe(true);
-    const profile = await readFile(join(workspace, '.cq-seatbelt.sb'), 'utf8');
-    expect(profile).toContain('(allow network-outbound (remote ip "127.0.0.1:45454"))');
-    expect(profile.match(/network-outbound/g)).toHaveLength(1);
+    const listing = await readdir(workspace);
+    expect(listing.filter((name) => name.endsWith('.sb'))).toEqual([]);
+  }, 30_000);
+
+  test('a pre-planted workspace policy cannot replace the boundary (attack path)', async () => {
+    const adapter = seatbeltAdapter();
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-test-'));
+    scratch.push(workspace);
+    const outside = await mkdtemp(join(tmpdir(), 'cq-sbx-outside-'));
+    scratch.push(outside);
+    const outsidePath = join(outside, 'secret.txt');
+    await writeFile(outsidePath, 'outside-secret-value');
+    // The attacker plants a permissive profile at the OLD policy path — both
+    // as a plain file overwrite target and as the classic symlink swap.
+    const evilProfile = join(workspace, 'evil.sb');
+    const evilText = '(version 1)\n(allow default)\n';
+    await writeFile(evilProfile, evilText);
+    await symlink(evilProfile, join(workspace, '.cq-seatbelt.sb'));
+    const result = await adapter.launch({
+      workspace,
+      argv: ['/bin/cat', outsidePath],
+      network: 'model-only',
+    });
+    // The planted profile is ignored: the compiled boundary still denies the
+    // out-of-workspace read (under `(allow default)` it would have leaked).
+    expect(result.ok).toBe(false);
+    expect(result.stdout).not.toContain('outside-secret-value');
+    // And the launcher never wrote through the planted path: the symlink
+    // still carries exactly the attacker's content.
+    expect(await readFile(evilProfile, 'utf8')).toBe(evilText);
   }, 30_000);
 });
 

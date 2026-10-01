@@ -681,6 +681,14 @@ async function probeBackendWithLaunch(
                 verdict: 'inconclusive',
                 detail: `bare-host connect failed, canary cannot fire: ${control.stderr}`,
               });
+            } else if (!shellArmed) {
+              // Non-vacuity (Sol review): without the in-boundary shell
+              // control, a refusal could mean the child never truly ran.
+              canaries.push({
+                id: 'network-loopback',
+                verdict: 'inconclusive',
+                detail: `in-boundary shell control failed, connect refusal is not attributable: ${detail(shellControl)}`,
+              });
             } else if (!executed(sandboxed)) {
               canaries.push({
                 id: 'network-loopback',
