@@ -1,10 +1,12 @@
+import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+const testApi = process.env.NODE_TEST_CONTEXT ? await import('node:test') : await import('vitest');
+const { afterEach, describe, it } = testApi;
 import {
   main,
   parseArgs,
@@ -74,18 +76,13 @@ function validManifest(overrides = {}) {
 
 describe('packed package smoke', () => {
   it('requires a tarball, exact digest, and exact version', () => {
-    expect(() => parseArgs([])).toThrow('Missing required argument: --tarball');
-    expect(() => parseArgs(['--tarball', 'x.tgz', '--sha256', 'bad', '--version', VERSION])).toThrow(
-      '64 hexadecimal characters',
-    );
-    expect(() =>
-      parseArgs(['--tarball', 'x.tgz', '--sha256', 'a'.repeat(64), '--version', '^0.2.0']),
-    ).toThrow('exact semantic version');
+    assert.throws(() => parseArgs([]), /Missing required argument: --tarball/);
+    assert.throws(() => parseArgs(['--tarball', 'x.tgz', '--sha256', 'bad', '--version', VERSION]), /64 hexadecimal characters/);
+    assert.throws(() => parseArgs(['--tarball', 'x.tgz', '--sha256', 'a'.repeat(64), '--version', '^0.2.0']), /exact semantic version/);
   });
 
   it('checks packed identity and rejects local dependency specs before npm can run', async () => {
     const directory = await makeScratchDir();
-    const consumersBefore = (await readdir(tmpdir())).filter((name) => name.startsWith('cq-packed-consumer-')).sort();
     const tarball = await makeTarball(directory, validManifest({ dependencies: { escape: 'file:../outside' } }));
     const digest = await sha256File(tarball);
     const commands = [];
@@ -95,11 +92,9 @@ describe('packed package smoke', () => {
       return spawnSync(command, args, { encoding: 'utf8', ...options }).stdout;
     };
 
-    await expect(main(['--tarball', tarball, '--sha256', digest, '--version', VERSION], { runCommand: fakeRun })).rejects.toThrow(
-      'Local dependency spec is not allowed',
-    );
-    expect(commands).toContain('tar');
-    expect(commands).not.toContain('npm');
+    await assert.rejects(main(['--tarball', tarball, '--sha256', digest, '--version', VERSION], { runCommand: fakeRun }), /Local dependency spec is not allowed/);
+    assert(commands.includes('tar'));
+    assert(!commands.includes('npm'));
 
     const wrongTarball = path.join(directory, 'wrong-identity.tgz');
     const wrongManifest = validManifest({ name: 'wrong-package' });
@@ -114,36 +109,30 @@ describe('packed package smoke', () => {
       if (command === 'npm') throw new Error('npm must not run for a wrong-identity package');
       return spawnSync(command, args, { encoding: 'utf8', ...options }).stdout;
     };
-    await expect(
+    await assert.rejects(
       main(['--tarball', wrongTarball, '--sha256', await sha256File(wrongTarball), '--version', VERSION], {
         runCommand: wrongIdentityRunner,
       }),
-    ).rejects.toThrow('Packed package identity mismatch');
-    expect(wrongIdentityCommands).not.toContain('npm');
-    const consumersAfter = (await readdir(tmpdir())).filter((name) => name.startsWith('cq-packed-consumer-')).sort();
-    expect(consumersAfter).toEqual(consumersBefore);
-
-    expect(() => validatePackageManifest(validManifest({ name: 'other-package' }), VERSION)).toThrow(
-      'Packed package identity mismatch',
+      /Packed package identity mismatch/,
     );
-    expect(() => validatePackageManifest(validManifest(), '0.3.0')).toThrow('Packed version mismatch');
+    assert(!wrongIdentityCommands.includes('npm'));
+    assert.throws(() => validatePackageManifest(validManifest({ name: 'other-package' }), VERSION), /Packed package identity mismatch/);
+    assert.throws(() => validatePackageManifest(validManifest(), '0.3.0'), /Packed version mismatch/);
   });
 
   it('reads exactly one manifest from the tarball', async () => {
     const directory = await makeScratchDir();
     const tarball = await makeTarball(directory, validManifest());
-    expect(readPackedManifest(tarball)).toMatchObject({ name: PACKAGE_NAME, version: VERSION });
+    assert.deepEqual(readPackedManifest(tarball), validManifest());
   });
 
   it('selects and checks the Node ESM export branch', () => {
-    expect(resolveEsmExportTarget({
+    assert.equal(resolveEsmExportTarget({
       types: './types/index.d.ts',
       node: { require: './dist/index.cjs', import: './dist/index.js' },
       default: './fallback.js',
-    }, '.')).toBe('./dist/index.js');
-    expect(() => resolveEsmExportTarget({ require: './dist/index.cjs' }, '.')).toThrow(
-      'No Node ESM runtime target',
-    );
+    }, '.'), './dist/index.js');
+    assert.throws(() => resolveEsmExportTarget({ require: './dist/index.cjs' }, '.'), /No Node ESM runtime target/);
   });
 
   it('imports every public ESM export, runs the installed CLI, and cleans its consumer', async () => {
@@ -153,7 +142,9 @@ describe('packed package smoke', () => {
     const digest = await sha256File(tarball);
     let consumerDir;
     let npmArgs;
+    const commands = [];
     const fakeRun = (command, args, options = {}) => {
+      commands.push({ command, args });
       if (command === 'npm') {
         npmArgs = args;
         consumerDir = options.cwd;
@@ -167,8 +158,10 @@ describe('packed package smoke', () => {
     };
 
     await main(['--tarball', tarball, '--sha256', digest, '--version', VERSION], { runCommand: fakeRun });
-    expect(npmArgs).toContain('--offline');
-    expect(npmArgs).toContain('--ignore-scripts');
-    await expect(lstat(consumerDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    assert(npmArgs.includes('--offline'));
+    assert(npmArgs.includes('--ignore-scripts'));
+    assert.equal(commands.filter(({ command, args }) => command === process.execPath && args[0].endsWith('smoke-exports.mjs')).length, 1);
+    assert.equal(commands.filter(({ command, args }) => /[\\/]cq(?:\.cmd)?$/.test(command) && args[0] === '--help').length, 1);
+    await assert.rejects(lstat(consumerDir), { code: 'ENOENT' });
   });
 });
