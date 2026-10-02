@@ -347,11 +347,7 @@ describe('ai-sdk driver specifics (mock model)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-preflight-'));
     try {
       const driver = new AiSdkDriver({
-        providers: {
-          mock: () => {
-            throw new Error('the provider must never be consulted for an uncompilable schema');
-          },
-        },
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
         sessionsDir: join(scratchDir, 'sessions'),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sandboxConfig: {
@@ -367,9 +363,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
           outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
         }),
       );
-      // The uniform schema-miss verdict, compiled locally — the same shape
-      // the settle-time miss flow produces, never a provider/harness
-      // failure from a request-setup rejection. No session state exists.
+      // The uniform schema-miss verdict, compiled locally — the settle-time
+      // miss flow's shape, but produced BEFORE the provider dispatch: the
+      // pre-dispatch preflight's objection names the COMPILER (a dispatched
+      // run would carry the mock's reply-miss text and a fresh sessionId).
       expect(result.stopReason).toBe('error');
       expect(result.errorClass).toBe('output-invalid');
       expect(result.error).toContain('test.broken/v1');
@@ -1444,6 +1441,16 @@ describe('ai-sdk driver failure classes (#210)', () => {
       'x-ratelimit-remaining-tokens': '1',
     });
     expect(withRetry?.retryAfterMs).toBe(3_741_000);
+    // A remaining COUNT is a nonnegative integer: malformed header values
+    // are dropped, never recorded as fabricated quota evidence (PR #238
+    // review round 2 — the mirror now rejects fractional/negative counts).
+    const malformed = providerSignalsFromHeaders({
+      'x-ratelimit-remaining-requests': '45.5',
+      'x-ratelimit-remaining-tokens': '-3',
+    });
+    expect(malformed?.windows).toBeUndefined();
+    const zeroCount = providerSignalsFromHeaders({ 'x-ratelimit-remaining-requests': '0' });
+    expect(zeroCount?.windows?.[0]?.remaining).toEqual({ requests: 0 });
     // Case-insensitive header names.
     expect(providerSignalsFromHeaders({ 'RETRY-AFTER': '2' })?.retryAfterMs).toBe(2000);
     // HTTP-date form parses against the current clock.

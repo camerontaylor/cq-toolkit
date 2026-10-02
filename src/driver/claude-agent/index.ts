@@ -266,7 +266,11 @@ import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
-import { compileOutputSchemaFault, validateStructured } from '../common/structured.js';
+import {
+  compileOutputSchemaFault,
+  uncompilableSchemaVerdict,
+  validateStructured,
+} from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -470,15 +474,7 @@ export class ClaudeAgentDriver implements Driver {
     if (opInvocation.outputSchema !== undefined) {
       const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
       if (schemaFault !== undefined) {
-        return {
-          usage: zeroUsage(),
-          denials: [],
-          stopReason: 'error',
-          error: boundedErrorText(
-            `claude-agent driver: structured output invalid — ${schemaFault}`,
-          ),
-          errorClass: 'output-invalid',
-        };
+        return uncompilableSchemaVerdict('claude-agent', schemaFault);
       }
     }
 

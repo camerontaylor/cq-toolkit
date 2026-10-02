@@ -17,7 +17,7 @@
 // fixture ops (test/fixtures/cli-ops) through the governed kernel, so no
 // network, model, or real filesystem target is touched. Deterministic: tmp
 // dirs only, cleaned up.
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,11 +198,16 @@ describe('sample: agentic-class op through the real registry', () => {
         join(scratch, 'quoted.ts'),
         "import x from '../../driver/subprocess/index.js';\nexport default x;\n",
       );
-      // The scan names both files (its path slice is relative to the live
-      // src/ops tree, so fixture names are compared by basename).
-      const hits = await laneImports(scratch);
-      expect(hits.map((hit) => hit.replaceAll('\\', '/').split('/').pop())).toEqual([
+      // A nested hit is named relative to the SCAN ROOT (the root threads
+      // through the recursion), matching the live tree's naming.
+      await mkdir(join(scratch, 'nested'), { recursive: true });
+      await writeFile(
+        join(scratch, 'nested', 'deep.ts'),
+        'const mod = await import(`../../driver/ai-sdk/index.js`);\nexport default mod;\n',
+      );
+      expect(await laneImports(scratch)).toEqual([
         'backtick.ts',
+        join('nested', 'deep.ts'),
         'quoted.ts',
       ]);
     } finally {

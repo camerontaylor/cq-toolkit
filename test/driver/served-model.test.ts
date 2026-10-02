@@ -8,6 +8,7 @@
 // fewer-parameter wrapper would compile and silently drop the signal).
 import { describe, expect, test, vi } from 'vitest';
 import {
+  LANE_IDS,
   normaliseModelId,
   servedModelCheck,
   withServedModelAssertion,
@@ -166,6 +167,15 @@ describe('served-model assertion — the m-ii matrix', () => {
       lane: 'subprocess',
     }).run(invocation());
     expect(verdict).toBe(failed);
+  });
+});
+
+describe('the lane set (LANE_IDS — the runtime statement of the LaneId union)', () => {
+  test('is exactly the closed four-lane set (PR #238 review round 2)', () => {
+    // The factory's binding validation checks decoded/JS config against
+    // this array — it must name exactly the four first-party lanes, never
+    // drift from the union it mirrors.
+    expect([...LANE_IDS].sort()).toEqual(['acp', 'ai-sdk', 'claude-agent', 'subprocess']);
   });
 });
 

@@ -30,6 +30,14 @@ import type { Driver, OpInvocation, RunOptions, WorkerResult } from './types.js'
 export type LaneId = 'ai-sdk' | 'claude-agent' | 'subprocess' | 'acp';
 
 /**
+ * The lane set as a RUNTIME value — the single statement of the union
+ * above, shared with the driver factory's binding validation (a decoded/JS
+ * config value must be checked against this, since types don't exist at
+ * runtime). Adding a lane updates exactly this line.
+ */
+export const LANE_IDS: readonly LaneId[] = ['ai-sdk', 'claude-agent', 'subprocess', 'acp'];
+
+/**
  * Per-lane served-model policy (ADR-0002 §2.6):
  *   - `aliases` — declared wire remaps, LANE-scoped: lane → provider →
  *     requested id → admitted served ids. Keys and members are compared in

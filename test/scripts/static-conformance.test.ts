@@ -128,13 +128,14 @@ describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () =>
       join(scratch, 'quoted.ts'),
       "import x from '../../src/kernel/runner.js';\nexport default x;\n",
     );
-    // The scan names both files (its path slice is relative to the repo
-    // root, so fixture names are compared by basename).
-    const hits = kernelImports(scratch);
-    expect(hits.map((hit) => hit.replaceAll('\\', '/').split('/').pop())).toEqual([
-      'backtick.ts',
-      'quoted.ts',
-    ]);
+    // A nested hit is named relative to the SCAN ROOT (the root threads
+    // through the recursion), matching the live tree's naming.
+    mkdirSync(join(scratch, 'nested'), { recursive: true });
+    writeFileSync(
+      join(scratch, 'nested', 'deep.ts'),
+      'const mod = await import(`../../src/kernel/schema.js`);\nexport default mod;\n',
+    );
+    expect(kernelImports(scratch)).toEqual(['backtick.ts', join('nested', 'deep.ts'), 'quoted.ts']);
   });
   it('counts projected files, imported files, configs and inputs outside lint traversal', () => {
     const root = fixture();

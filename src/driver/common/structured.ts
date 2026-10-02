@@ -22,7 +22,8 @@
 // Driver-family rule: no imports from src/kernel.
 
 import { z } from 'zod';
-import type { JsonSchema, OutputSchema } from '../types.js';
+import { boundedErrorText } from '../error-text.js';
+import type { JsonSchema, OutputSchema, WorkerResult } from '../types.js';
 
 /**
  * Keywords whose content is arbitrary DATA, never a subschema — copied
@@ -208,6 +209,23 @@ export function compileOutputSchemaFault(os: OutputSchema): string | undefined {
       err instanceof Error ? err.message : String(err)
     }`;
   }
+}
+
+/**
+ * The uniform LOCAL verdict for an invocation schema that failed the
+ * preflight (PR #238 review round 2) — the settle-time miss shape, built in
+ * one place so every lane that ships the document to a provider settles an
+ * uncompilable schema identically: zero usage, no denials, no sessionId (no
+ * record exists), the objection bounded and secret-redacted.
+ */
+export function uncompilableSchemaVerdict(lane: string, fault: string): WorkerResult {
+  return {
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+    stopReason: 'error',
+    error: boundedErrorText(`${lane} driver: structured output invalid — ${fault}`),
+    errorClass: 'output-invalid',
+  };
 }
 
 /**

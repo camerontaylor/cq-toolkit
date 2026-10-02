@@ -43,7 +43,7 @@ import type { ClaudeAgentDriverOptions } from './claude-agent/index.js';
 import { DispatchError } from './errors.js';
 import type { PerMillionRates } from './pricing/index.js';
 import { withServedModelAssertion } from './served-model.js';
-import type { LaneId, ServedModelPolicy } from './served-model.js';
+import { LANE_IDS, type LaneId, type ServedModelPolicy } from './served-model.js';
 import { SubprocessDriver } from './subprocess/index.js';
 import type { SubprocessDriverOptions } from './subprocess/index.js';
 import type { Driver, ModelSpec, WorkerResult } from './types.js';
@@ -169,9 +169,6 @@ const DEFAULT_PROVIDERS: readonly string[] = ['zai', 'anthropic', 'openai', 'dee
 
 /** The default lane for the default providers — the in-process lane. */
 const DEFAULT_LANE: LaneId = 'ai-sdk';
-
-/** The closed lane set, for runtime validation of decoded/JS binding values. */
-const LANE_IDS: readonly LaneId[] = ['ai-sdk', 'claude-agent', 'subprocess', 'acp'];
 
 /**
  * Mirrors every lane's private `defaultSessionsDir()` (they all share it):
