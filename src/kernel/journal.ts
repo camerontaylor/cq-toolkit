@@ -20,8 +20,14 @@
 // line, and a line whose event.runId does not match the file's run: a hole
 // or misattribution in complete evidence is corruption, not a torn write,
 // and silently accepting it would poison the fold.
-import { appendFile, mkdir, open, readFile, readdir, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { createConnection, createServer, type Server } from 'node:net';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { z } from 'zod';
 import { JournalEventSchema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
 
@@ -39,6 +45,242 @@ export function assertSafeRunId(runId: string): void {
       `journal: runId must match /^[A-Za-z0-9][A-Za-z0-9._-]*$/ (no slashes, not empty): '${runId}'`,
     );
   }
+}
+
+const PlanLockRecordSchema = z
+  .object({
+    nonce: z.string().uuid(),
+    socketPath: z.string().startsWith('/'),
+    pid: z.number().int().positive(),
+    host: z.string().min(1),
+    bootId: z.string().min(1),
+    runId: z.string().regex(RUN_ID_PATTERN),
+    released: z.literal(true).optional(),
+  })
+  .strict();
+type PlanLockRecord = z.infer<typeof PlanLockRecordSchema>;
+
+/** Internal runner lease; the record beside the journal is the rendezvous. */
+export interface PlanLock {
+  assertHeld(): Promise<void>;
+  release(): Promise<void>;
+}
+
+async function bootIdentity(): Promise<string> {
+  if (process.platform === 'linux') {
+    return (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
+  }
+  if (process.platform === 'darwin') {
+    const { stdout } = await promisify(execFile)('/usr/sbin/sysctl', ['-n', 'kern.boottime'], {
+      timeout: 2000,
+    });
+    return stdout.trim();
+  }
+  throw new Error(`journal: plan lock requires a supported local POSIX host (${process.platform})`);
+}
+
+function errorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+}
+
+async function readLockRecord(path: string): Promise<PlanLockRecord> {
+  const raw = await readFile(path, 'utf8');
+  const parsed = PlanLockRecordSchema.safeParse(JSON.parse(raw) as unknown);
+  if (!parsed.success) throw new Error(`journal: corrupt or half-written plan lock '${path}'`);
+  return parsed.data;
+}
+
+/** A full or paused socket backlog is alive; all unknown errors fail closed. */
+function socketIsAlive(path: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(path);
+    const timer = setTimeout(() => finish(true), 1000);
+    const finish = (alive: boolean): void => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(alive);
+    };
+    socket.once('connect', () => finish(true));
+    socket.once('error', (error) => {
+      const code = errorCode(error);
+      if (code === 'ENOENT' || code === 'ECONNREFUSED') finish(false);
+      else if (code === 'EAGAIN') finish(true);
+      else {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(error);
+      }
+    });
+  });
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === 'ESRCH') return false;
+    // EPERM and PID reuse can only prevent reclamation, never grant it.
+    return true;
+  }
+}
+
+function listen(server: Server, path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ path, backlog: 16 }, () => {
+      server.removeListener('error', reject);
+      resolve();
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+/**
+ * ADR-0003 §2.5: exclusive record creation, recorded socket + pid/boot
+ * liveness, and nonce fences. No timestamp lease: SIGSTOP is never death.
+ * Invalid/half-written and foreign-host records refuse without stealing.
+ * Releasing marks OUR inode through its fd instead of unlinking a rival's
+ * replacement. The released record remains as a reclaimable tombstone.
+ */
+export async function acquirePlanLock(
+  journalDir: string,
+  planId: string,
+  runId: string,
+): Promise<PlanLock> {
+  assertSafeRunId(planId);
+  assertSafeRunId(runId);
+  await mkdir(journalDir, { recursive: true });
+  const path = join(journalDir, `${planId}.lock.json`);
+  const nonce = randomUUID();
+  const record: PlanLockRecord = {
+    nonce,
+    // Keep sun_path short on macOS. Contenders always READ this path from
+    // the journal record, so differing TMPDIR values cannot split the lock.
+    socketPath: `/tmp/cq-j-${nonce}.sock`,
+    pid: process.pid,
+    host: hostname(),
+    bootId: await bootIdentity(),
+    runId,
+  };
+  if (record.bootId.length === 0) throw new Error('journal: cannot determine host boot identity');
+
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, 'wx+', 0o600);
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+    let previous: PlanLockRecord;
+    try {
+      previous = await readLockRecord(path);
+    } catch (readError) {
+      throw new Error(
+        `journal: corrupt or half-written plan lock '${path}' — refusing acquisition`,
+        {
+          cause: readError,
+        },
+      );
+    }
+    if (previous.host !== record.host) {
+      throw new Error(
+        `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
+      );
+    }
+    if (
+      previous.released !== true &&
+      ((await socketIsAlive(previous.socketPath)) ||
+        (previous.bootId === record.bootId && pidIsAlive(previous.pid)))
+    ) {
+      throw new Error(`journal: plan locked by '${previous.runId}'`);
+    }
+    // Publish a complete durable replacement, never truncate the shared
+    // rendezvous while acquiring. Racing stealers must pass the nonce fence.
+    const temporary = `${path}.${nonce}.tmp`;
+    handle = await open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+      await handle.sync();
+      await rename(temporary, path);
+    } finally {
+      await handle.close();
+      await unlink(temporary).catch((cleanupError: unknown) => {
+        if (!isEnoent(cleanupError)) throw cleanupError;
+      });
+    }
+    handle = await open(path, 'r+');
+  }
+
+  // A probe needs only a successful connect. Destroy immediately so a peer
+  // withholding EOF cannot hold server.close (and lease release) forever.
+  const server = createServer((socket) => socket.destroy());
+  let listening = false;
+  let released = false;
+  let ownInode = false;
+  const markReleased = async (): Promise<void> => {
+    const bytes = Buffer.from(`${JSON.stringify({ ...record, released: true })}\n`);
+    await handle.write(bytes, 0, bytes.length, 0);
+    await handle.truncate(bytes.length);
+    await handle.sync();
+  };
+  const assertHeld = async (): Promise<void> => {
+    const current = await readLockRecord(path);
+    if (current.nonce !== nonce || current.released === true) {
+      throw new Error(`journal: lock-lost for plan '${planId}' run '${runId}'`);
+    }
+  };
+  try {
+    // For a wx creator this is the first record write. A stealer verifies
+    // the inode it opened after rename before touching it.
+    const contents = await handle.readFile('utf8');
+    if (contents.length === 0) {
+      ownInode = true;
+      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+      await handle.sync();
+    } else if (PlanLockRecordSchema.parse(JSON.parse(contents) as unknown).nonce !== nonce) {
+      throw new Error(`journal: lock-lost while acquiring plan '${planId}'`);
+    } else {
+      ownInode = true;
+    }
+    await syncDir(journalDir);
+    await listen(server, record.socketPath);
+    listening = true;
+    await assertHeld();
+  } catch (error) {
+    try {
+      if (listening) await closeServer(server);
+      if (ownInode) await markReleased();
+    } finally {
+      await handle.close();
+    }
+    throw error;
+  }
+
+  return {
+    assertHeld,
+    async release(): Promise<void> {
+      if (released) return;
+      released = true;
+      try {
+        await closeServer(server);
+        // The fd retained from acquire pins OUR inode. A rival's rename
+        // cannot redirect the release write onto the replacement record.
+        await markReleased();
+      } finally {
+        await handle.close();
+        await unlink(record.socketPath).catch((error: unknown) => {
+          if (!isEnoent(error)) throw error;
+        });
+      }
+    },
+  };
 }
 
 /**

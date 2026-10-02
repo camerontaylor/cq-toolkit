@@ -145,6 +145,7 @@
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import {
+  acquirePlanLock,
   assertNoSeqGap,
   assertSafeRunId,
   candidateRunsForPlan,
@@ -505,6 +506,23 @@ export async function runPlan(
   registry: OpRegistryView,
   gov?: Governance,
 ): Promise<RunReport> {
+  // The lifecycle owns release even when folding fails before the run's
+  // signal listener exists. Keep this wrapper separate from run semantics.
+  const lease: { lock?: Awaited<ReturnType<typeof acquirePlanLock>> } = {};
+  try {
+    return await runPlanUnderLease(plan, opts, registry, gov, lease);
+  } finally {
+    await lease.lock?.release();
+  }
+}
+
+async function runPlanUnderLease(
+  plan: Plan,
+  opts: RunOptions,
+  registry: OpRegistryView,
+  gov: Governance | undefined,
+  lease: { lock?: Awaited<ReturnType<typeof acquirePlanLock>> },
+): Promise<RunReport> {
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —
   // there would be no admission gate and no spend observation to enforce it.
   if ((opts.maxUsd !== undefined || opts.maxTokens !== undefined) && gov === undefined) {
@@ -599,6 +617,18 @@ export async function runPlan(
   // mode-independent by construction.
   const journalDir = opts.journalDir;
   const runLog: RunLog | undefined = journalDir !== undefined ? openRunLog(journalDir) : undefined;
+  // One failure authority, shared by BOTH emit paths and every dispatch.
+  // An infrastructure failure cancels the governed ladders and waiters;
+  // already dispatched jobs still settle while the wave drains. The run
+  // rejects with the original error instead of returning a success report.
+  let runFailure: { error: unknown } | undefined;
+  const failRun = (error: unknown): void => {
+    runFailure ??= { error };
+    if (governedDispatch) governor?.tripSignal(`journal: run stopped after ${messageOf(error)}`);
+  };
+  const throwIfFailed = (): void => {
+    if (runFailure !== undefined) throw runFailure.error;
+  };
   // THE LINE-COUNT LEDGER (W2.3 fix round, comp 2): every emitted event is
   // counted and the total rides run-finished as `eventCount`, so the resume
   // fold's line-count check (journal.foldOrderRuns) can detect a line
@@ -608,7 +638,12 @@ export async function runPlan(
   let journalledCount = 0;
   const emit = async (event: JournalEvent): Promise<void> => {
     journalledCount += 1;
-    if (runLog) await runLog.append(runId, event);
+    try {
+      if (runLog) await runLog.append(runId, event);
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
   };
   // The WRITE-AHEAD channel (W2.3): reservation-opened must be durable
   // BEFORE the dispatch runs and reservation-settled BEFORE the outcome is
@@ -617,8 +652,32 @@ export async function runPlan(
   // resume, A12b) instead of silent lost spend.
   const emitDurable = async (event: JournalEvent): Promise<void> => {
     journalledCount += 1;
-    if (runLog) await runLog.append(runId, event, { durable: true });
+    try {
+      if (runLog) await runLog.append(runId, event, { durable: true });
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
   };
+
+  // Hold the plan's lease before inspecting or seeding ANY shared history,
+  // including plain runs and the ungoverned-over-governed escape.
+  const planLock =
+    journalDir !== undefined ? await acquirePlanLock(journalDir, plan.id, runId) : undefined;
+  if (planLock !== undefined) lease.lock = planLock;
+  const fenceDispatch = async (): Promise<void> => {
+    throwIfFailed();
+    try {
+      await planLock?.assertHeld();
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
+    // A sibling emit may have failed while the fence read was in flight.
+    throwIfFailed();
+  };
+
+  await planLock?.assertHeld();
 
   // --- Fold: EVERY prior run of this plan, v1-then-v2 ----------------------
   // EVERY run over a journal dir folds (ADR-0003 §2.1 is unqualified: a run
@@ -1044,7 +1103,7 @@ export async function runPlan(
       // p-limit starts queued tasks when a slot frees; re-check the stop flag at
       // actual start so "do not START any further jobs" holds while in-flight
       // ones still complete.
-      if (stop.requested) return;
+      if (stop.requested || runFailure !== undefined) return;
 
       await emit({
         type: 'job-started',
@@ -1055,6 +1114,7 @@ export async function runPlan(
         attempt: 1, // ungoverned dispatches are single-attempt by construction
       });
 
+      await fenceDispatch();
       const result = await executeOp(job, (name) => registry.get(name));
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
@@ -1078,7 +1138,7 @@ export async function runPlan(
     const governedRunOne = async (job: ManifestJob): Promise<void> => {
       if (governor === undefined) return; // unreachable behind governedDispatch
       // p-limit start re-check (same rule as the plain path).
-      if (stop.requested) return;
+      if (stop.requested || runFailure !== undefined) return;
 
       // A12c (W2.3): an ADVISORY-classified dispatch is refused UNATTENDED
       // without an explicit escape (`attended: true`, or `allowAdvisory`).
@@ -1437,6 +1497,10 @@ export async function runPlan(
               throw err;
             });
             reservation = granted;
+            // Durable write-ahead, then ownership fence, then dispatch.
+            // A lost fence retains the durable reservation for full-charge
+            // settlement/quarantine instead of dispatching with a stale cap.
+            await fenceDispatch();
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
@@ -1448,6 +1512,7 @@ export async function runPlan(
           // UNCAPPED (reservation-less): the W2.2 dispatch unchanged —
           // evidence folds roll the ledger and the token cap binds; there is
           // no USD capacity to hold a reservation against.
+          await fenceDispatch();
           try {
             result = await runDispatchLadder(admission.attempt);
           } catch (err) {
@@ -1536,72 +1601,92 @@ export async function runPlan(
     const runOne = governedDispatch ? governedRunOne : plainRunOne;
 
     for (const wave of waveJobs) {
-      if (stop.requested) break;
+      if (stop.requested || runFailure !== undefined) break;
       const submissions: Array<Promise<void>> = [];
-      for (const job of wave) {
-        // Already classified (quarantined this run — W2.3): never dispatched,
-        // the row stands as the quarantine pass set it.
-        if (entries.has(job.id)) continue;
-        // Ready iff every dependency ended ok (skipped-replayed jobs count as
-        // done — they carry a verified prior ok).
-        const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
-        if (!ready) {
-          // Under a signal stop the row stays UNCLASSIFIED here — it may be
-          // merely unresolved (the cancel landed before its dependency could
-          // dispatch), and fabricating `blocked` at dispatch time would lie
-          // about it; the stop sweep below owns the classification.
-          if (!cancelledRun()) {
-            entries.set(job.id, {
-              result: blockedResult(job),
-              state: 'blocked',
-              origin: 'blocked',
-            });
+      try {
+        for (const job of wave) {
+          if (runFailure !== undefined) break;
+          // Already classified (quarantined this run — W2.3): never dispatched,
+          // the row stands as the quarantine pass set it.
+          if (entries.has(job.id)) continue;
+          // Ready iff every dependency ended ok (skipped-replayed jobs count as
+          // done — they carry a verified prior ok).
+          const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
+          if (!ready) {
+            // Under a signal stop the row stays UNCLASSIFIED here — it may be
+            // merely unresolved (the cancel landed before its dependency could
+            // dispatch), and fabricating `blocked` at dispatch time would lie
+            // about it; the stop sweep below owns the classification.
+            if (!cancelledRun()) {
+              entries.set(job.id, {
+                result: blockedResult(job),
+                state: 'blocked',
+                origin: 'blocked',
+              });
+            }
+            continue;
           }
-          continue;
+          // Replay skip: terminal ok + same op + same input hash → zero
+          // invocation, outcome reconstructed from the journal event. Re-attested
+          // with a finish-only event so THIS run's journal stays self-contained
+          // for the next resume — copying usage AND costUSD (annex §3 rule 1;
+          // the ledger seed prices a run from its own journal, so a dropped
+          // costUSD would make the re-attested spend invisible).
+          const prior = replay.get(job.id);
+          if (
+            prior !== undefined &&
+            prior.opId === job.op &&
+            prior.inputsHash === job.inputsHash &&
+            prior.result.status === 'ok'
+          ) {
+            await emit({
+              type: 'job-finished',
+              runId,
+              at: now(),
+              jobId: job.id,
+              opId: prior.opId,
+              inputsHash: prior.inputsHash,
+              result: prior.result,
+              ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+              ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
+            });
+            entries.set(job.id, {
+              result: prior.result,
+              state: 'done',
+              ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+              ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
+              origin: 'replayed',
+            });
+            continue;
+          }
+          // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
+          // flow through the same gate. The job is left unclassified; the stop
+          // sweep marks it queued (or blocked) and the honest-stop pass below
+          // owns the budget attribution.
+          if (governedDispatch && governor !== undefined && governor.tripped) {
+            break;
+          }
+          // Catch immediately, including while the producer awaits a replay
+          // emit, so no rejected job promise can become unhandled before the
+          // wave's drain attaches. failRun preserves the original rejection.
+          submissions.push(
+            limit(async () => {
+              try {
+                await runOne(job);
+              } catch (error) {
+                failRun(error);
+              }
+            }),
+          );
         }
-        // Replay skip: terminal ok + same op + same input hash → zero
-        // invocation, outcome reconstructed from the journal event. Re-attested
-        // with a finish-only event so THIS run's journal stays self-contained
-        // for the next resume — copying usage AND costUSD (annex §3 rule 1;
-        // the ledger seed prices a run from its own journal, so a dropped
-        // costUSD would make the re-attested spend invisible).
-        const prior = replay.get(job.id);
-        if (
-          prior !== undefined &&
-          prior.opId === job.op &&
-          prior.inputsHash === job.inputsHash &&
-          prior.result.status === 'ok'
-        ) {
-          await emit({
-            type: 'job-finished',
-            runId,
-            at: now(),
-            jobId: job.id,
-            opId: prior.opId,
-            inputsHash: prior.inputsHash,
-            result: prior.result,
-            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
-            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
-          });
-          entries.set(job.id, {
-            result: prior.result,
-            state: 'done',
-            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
-            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
-            origin: 'replayed',
-          });
-          continue;
-        }
-        // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
-        // flow through the same gate. The job is left unclassified; the stop
-        // sweep marks it queued (or blocked) and the honest-stop pass below
-        // owns the budget attribution.
-        if (governedDispatch && governor !== undefined && governor.tripped) {
-          break;
-        }
-        submissions.push(limit(() => runOne(job)));
+      } catch (error) {
+        failRun(error);
       }
-      await Promise.all(submissions);
+      const settled = await Promise.allSettled(submissions);
+      for (const result of settled) {
+        if (result.status === 'rejected') failRun(result.reason as unknown);
+      }
+      throwIfFailed();
     }
 
     // --- Stop sweep: classify jobs this run never started --------------------
@@ -1629,7 +1714,11 @@ export async function runPlan(
         if (entries.has(job.id)) continue;
         const anyNotOk = job.dependsOn.some(definitivelyNotOk);
         if (anyNotOk) {
-          entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+          entries.set(job.id, {
+            result: blockedResult(job),
+            state: 'blocked',
+            origin: 'blocked',
+          });
         } else {
           entries.set(job.id, {
             result: { status: 'indeterminate', detail: 'queued: run stopped before dispatch' },
