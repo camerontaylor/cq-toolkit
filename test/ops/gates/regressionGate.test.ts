@@ -233,7 +233,10 @@ describe('regressionGate decision table', () => {
     if (reduced.status !== 'ok') {
       return;
     }
-    expect(reduced.value.verdict).toBe('regression');
+    // A dropped duplicate occurrence is one FIXED failure, not a regression:
+    // nothing novel appeared and no test total moved, so the verdict is
+    // no-regression while fixedFailures still reports the dropped copy.
+    expect(reduced.value.verdict).toBe('no-regression');
     expect(reduced.value.novelFailures).toEqual([]);
     expect(reduced.value.fixedFailures).toEqual([second]);
     expect(reduced.value.preExistingCount).toBe(1);

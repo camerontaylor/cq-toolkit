@@ -5,10 +5,11 @@
 // pre-existing failure re-keys to the same fingerprint after small drift
 // while a genuinely new failure still keys differently. LOCATION-LESS
 // failures (line null — vitest's suite/assertion shape) have no position to
-// bucket, so they match by CONTENT instead: the normalized full test name
-// alongside the offset bucket. Duplicate keys receive occurrence ordinals,
-// preserving counts without depending on input order. Pure decision code:
-// zero I/O.
+// bucket, so they match by CONTENT instead: the normalized message — for
+// vitest the FULL test name, since `adapters/vitest.ts` carries the test's
+// `fullName` (or `ancestorTitles`+`title`) in `message`. Duplicate canonical
+// identities receive occurrence ordinals, preserving counts without
+// depending on input order. Pure decision code: zero I/O.
 //
 // Invariants honored here:
 //   - Determinism: the same failure always yields the same fingerprint —
@@ -21,10 +22,11 @@
 //     default 500 — documented coarseness, asserted in tests).
 //   - Matching regimes: Vitest failures match by full test name regardless
 //     of reported location; other positioned failures match by drift-tolerant
-//     position (message ignored); other location-less failures match by full
-//     normalized message. On the positioned branch a null column folds to
-//     bucket 0 (a column-less failure shares its line bucket with its
-//     column-less siblings).
+//     position (message ignored); other location-less failures match by the
+//     FIRST LINE of the normalized message plus the offset bucket, so
+//     volatile free-form tool text still keys stably. On the positioned
+//     branch a null column folds to bucket 0 (a column-less failure shares
+//     its line bucket with its column-less siblings).
 //   - Exactness: gate decisions compare FULL canonical keys — JSON of the
 //     component tuple, so components containing `|` (or any delimiter)
 //     cannot collide across splits. The 32-bit FNV form is a compact
@@ -108,10 +110,15 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
 }
 
 /**
- * Every failure of a {@link FailureSet} paired with its exact canonical
- * key and an occurrence ordinal, the FailureSet's `tool` folded in. The
- * ordinal preserves duplicate counts while keeping comparison independent
- * of failure order, so novel/fixed occurrences can be reported.
+ * Every failure of a {@link FailureSet} paired with its OCCURRENCE key — the
+ * exact canonical {@link fingerprintKey} with a `#<ordinal>` suffix — the
+ * FailureSet's `tool` folded in. The ordinal preserves duplicate counts while
+ * keeping comparison independent of failure order (occurrences of one
+ * identity are interchangeable, so shuffling them cannot change the set).
+ *
+ * The composite is collision-free: the canonical key is JSON text, the
+ * appended ordinal is decimal digits, and neither can contain `#`, so the
+ * LAST `#` is always the separator and `(identity, ordinal)` is recoverable.
  */
 export function fingerprintPairs(
   s: FailureSet,
@@ -123,15 +130,15 @@ export function fingerprintPairs(
     const identity = fingerprintKey(failure, effective);
     const occurrence = occurrences.get(identity) ?? 0;
     occurrences.set(identity, occurrence + 1);
-    return { failure, key: JSON.stringify([identity, occurrence]) };
+    return { failure, key: `${identity}#${occurrence}` };
   });
 }
 
 /**
  * The occurrence-key set of a whole {@link FailureSet}. Duplicate
  * canonical identities have distinct ordinals, so the set retains
- * multiset counts while remaining order-invariant. Keys contain exact
- * identities, not compact hashes.
+ * multiset counts while remaining order-invariant. Keys are canonical
+ * identities plus an ordinal suffix, never compact hashes.
  */
 export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<string> {
   return new Set(fingerprintPairs(s, cfg).map((pair) => pair.key));
@@ -142,7 +149,7 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
   const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
   const ruleId = f.ruleId ?? '';
   if (cfg.tool === 'vitest') {
-    return [cfg.tool, file, ruleId, f.severity, 'test-name', normalizeMessage(f.message)];
+    return [cfg.tool, file, ruleId, f.severity, 'test-name', normalizeTestName(f.message)];
   }
   if (typeof f.line === 'number') {
     const lineBucket = Math.floor(f.line / cfg.lineBucketSize);
@@ -162,14 +169,32 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
 }
 
 /**
- * Location-less identity: the full message with whitespace runs collapsed
- * and trimmed. Case is PRESERVED — distinct test names that differ only in
- * case stay distinct. NO length cap: hashing is O(n) anyway, and a
- * cap would only mint a prefix-collision class (two long distinct names
- * sharing a prefix would key identically).
+ * Vitest identity: the FULL message with whitespace runs collapsed and
+ * trimmed. `adapters/vitest.ts` already funnels the test's `fullName` (or
+ * `ancestorTitles`+`title`) into `message`, so for a named test this is the
+ * whole test name; a suite-level failure has no test name, and its message
+ * is the whole error text, which is exactly what distinguishes it from a
+ * sibling suite failure. Case is PRESERVED — distinct names differing only
+ * in case stay distinct. NO length cap: hashing is O(n) anyway, and a cap
+ * would only mint a prefix-collision class (two long distinct names sharing
+ * a prefix would key identically).
+ */
+function normalizeTestName(message: string): string {
+  return message.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Location-less identity for every OTHER tool: the FIRST line of the
+ * message, whitespace runs collapsed and trimmed. First-line truncation is
+ * what keeps free-form tool text (stack traces, diffs, timings)
+ * drift-tolerant; the vitest regime above does not need it because a test
+ * name is one line. Case is PRESERVED — distinct messages differing only in
+ * case stay distinct.
  */
 function normalizeMessage(message: string): string {
-  return message.replace(/\s+/g, ' ').trim();
+  const newline = message.indexOf('\n');
+  const firstLine = newline === -1 ? message : message.slice(0, newline);
+  return firstLine.replace(/\s+/g, ' ').trim();
 }
 
 /** Backslashes to posix separators, then strip `rootDir` (also posix-normalized) when the path is under it. */

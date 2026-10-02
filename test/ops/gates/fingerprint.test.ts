@@ -189,15 +189,16 @@ describe('fingerprintFailure location-less content matching (line null keys by m
     ).toBe(canonical);
   });
 
-  test('the full test name includes nested names split across lines', () => {
-    const suiteAndTest = fingerprintFailure(
-      failureOf({ ...locationLess, message: 'outer suite\ninner suite\ntest name' }),
-    );
-    expect(
-      fingerprintFailure(
-        failureOf({ ...locationLess, message: 'outer suite\ninner suite\nrenamed test' }),
-      ),
-    ).not.toBe(suiteAndTest);
+  test('the vitest full test name includes nested names split across lines', () => {
+    // The vitest regime keys on the WHOLE message, so a name the reporter
+    // split across lines keeps its whole identity: renaming the innermost
+    // segment changes the fingerprint.
+    const vitest = { ...locationLess } as const;
+    const vitestKey = (message: string): string =>
+      fingerprintFailure(failureOf({ ...vitest, message }), { tool: 'vitest' });
+    const suiteAndTest = vitestKey('outer suite\ninner suite\ntest name');
+    expect(vitestKey('outer suite\ninner suite\nrenamed test')).not.toBe(suiteAndTest);
+    expect(vitestKey('outer suite\ninner suite\ntest name')).toBe(suiteAndTest);
   });
 
   test('long messages keep full-length distinctness: NO prefix-collision cap', () => {
@@ -245,7 +246,7 @@ describe('canonical keys vs compact hash (exact matching)', () => {
     expect(fingerprintFailure(failure)).toMatch(/^[0-9a-f]{8}$/);
     expect(
       fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 }).has(
-        JSON.stringify([fingerprintKey(failure, { tool: 'vitest' }), 0]),
+        `${fingerprintKey(failure, { tool: 'vitest' })}#0`,
       ),
     ).toBe(true);
   });
@@ -269,8 +270,40 @@ describe('fingerprintSet', () => {
       failures: [failureOf({ line: 3 }), failureOf({ line: 7 }), failureOf({ line: 300 })],
     });
     expect(pairs[0]?.key).not.toBe(pairs[1]?.key);
-    expect(pairs[0]?.key).toContain(fingerprintKey(failureOf({ line: 3 }), { tool: 'eslint' }));
+    expect(pairs[0]?.key).toBe(`${fingerprintKey(failureOf({ line: 3 }), { tool: 'eslint' })}#0`);
+    expect(pairs[1]?.key).toBe(`${fingerprintKey(failureOf({ line: 7 }), { tool: 'eslint' })}#1`);
     expect(set.has(pairs[2]?.key ?? '')).toBe(true);
+  });
+
+  test('duplicate identities are order-invariant: shuffling occurrences cannot change the key set', () => {
+    // Occurrences of ONE identity are interchangeable, so input order must
+    // not move a key in or out of the set (the ordinal disambiguates
+    // duplicates, it does not make the comparison order-sensitive).
+    const at3 = failureOf({ line: 3, message: 'same identity' });
+    const at7 = failureOf({ line: 7, message: 'same identity' });
+    const ordered = fingerprintSet({ tool: 'vitest', failures: [at3, at7], exitCode: 1 });
+    const shuffled = fingerprintSet({ tool: 'vitest', failures: [at7, at3], exitCode: 1 });
+    const single = fingerprintSet({ tool: 'vitest', failures: [at3], exitCode: 1 });
+
+    expect(ordered.size).toBe(2);
+    expect([...shuffled].sort()).toEqual([...ordered].sort());
+    expect([...ordered].filter((key) => !single.has(key))).toHaveLength(1);
+  });
+
+  test('a non-vitest location-less failure keys by the FIRST message line (drift tolerance)', () => {
+    const noisy = (headline: string, detail: string): CheckFailure =>
+      failureOf({ line: null, column: 1200, message: `${headline}\n${detail}` });
+    const keyOf = (failure: CheckFailure): string =>
+      fingerprintPairs({ tool: 'eslint', failures: [failure], exitCode: 1 })[0]?.key ?? '';
+
+    // Same first line, different trailing detail → same identity (drift).
+    expect(keyOf(noisy('parse error at token', 'expected `;` but found `}`'))).toBe(
+      keyOf(noisy('parse error at token', 'line 4, column 9')),
+    );
+    // Different first line → different identity.
+    expect(keyOf(noisy('parse error at token', 'expected `;`'))).not.toBe(
+      keyOf(noisy('unterminated string literal', 'line 9')),
+    );
   });
 
   test('multiset keys expose added and removed duplicate occurrences', () => {
