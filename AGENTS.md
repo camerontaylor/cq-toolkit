@@ -5,25 +5,53 @@ SDK of atomic code-quality operations, a deterministic plan runner, and
 adoptable merge-queue and doctrine policy templates. It is self-hosting —
 the toolkit's own quality gates run on the toolkit itself.
 
-## Gates (green before claiming done)
+## Gates (focused locally, full-gate authority in CI)
+
+**Canonical contract: [docs/focused-checks-contract.md](docs/focused-checks-contract.md).**
+It supersedes the old 3× full-gate rule everywhere that rule was stated.
+
+Your local duty, on a coherent change:
 
 - `npm run check:static` — TS7 compiler ratchet plus typed Oxlint;
   `npm run lint` and `npm run typecheck` are aliases (run only one)
 - `npm run format:check`
-- `npm run test`
-- `npm run knip`
+- `npx vitest run <affected test files>` — the tests your diff affects, not
+  the suite
+- `npm run knip` when entrypoints, exports, dependencies or config change
 
-CI additionally runs the build, the from-source smoke plan, and the
-denylist scan + self-test. Never alter source or baselines to hide a
-failure; baselines only tighten (doctrine I5).
+**Zero local full gates per PR.** No protocol step runs a local full
+`npm run test` / `test:unit`, and a clean review adds no deterministic run.
+The full suite — plus the build, the from-source smoke plan, the coverage
+ratchet and the denylist scan + self-test — runs in required CI on every
+push/PR, and **green required CI on the exact candidate SHA** (the
+`merge-queue` commit the promotion gate resolves) is the sole full-gate
+authority. A green PR head is not candidate evidence: required status checks
+are not strict (`policy/templates/github-settings.json`), so a head can be
+green while stale against its base. Local full runs remain legal as
+coordinator-owned diagnostics or rollback evidence, recorded as such.
+
+Escalate a shared interface, dependency/tooling or config change — or any
+uncertain impact — to the coordinator with the reason, rather than launching a
+broad run yourself. Never alter source or baselines to hide a failure;
+baselines only tighten (doctrine I5).
 
 ## Agent loop
 
-Use `npm run lint:fast -- <owned-file...>` for syntactic feedback and
-`npm run fix -- <owned-file...>` for safe lint fixes, formatting and the full
-static gate. Lists must be explicit; never format the repository per turn.
-`npm run check` runs formatting checks, the static gate once, tests and Knip.
-Changed-file lint does not establish correctness of dependents.
+Use `npm run lint:fast -- <owned-file...>` for syntactic feedback. Lists must
+be explicit; never format the repository per turn. Changed-file lint does not
+establish correctness of dependents.
+
+`npm run fix -- <owned-file...>` is **not** file-scoped: it always ends with
+the full project static gate (`scripts/fix.mjs`), even for a deleted-only
+list. For per-file fixes use the leaf tools on an explicit list:
+`npx oxlint --config .oxlintrc.json --disable-nested-config --fix <files>`,
+then `npx oxfmt <files>` (`npx oxfmt --check <files>` to verify). `npm run
+check` is a composite — formatting, static gate, the full suite and Knip — and
+its full-suite leg belongs to CI.
+
+Any local timing cited as evidence carries a load stamp (host uptime + load
+average at measurement time), and no protocol or record cites `--maxWorkers`:
+`vitest.config.ts` sets `fileParallelism: false`, which makes it a no-op.
 
 ## GLM peak-hour blackout
 
@@ -56,9 +84,12 @@ full intended PR diff before creating a PR. Full protocol:
   results.
 - Run the deterministic gates three times: before cycle 1, after cycle-1
   addressing (before cycle 2), and after cycle-2 addressing. Both cycles
-  include their addressing. Whitespace/conflict-marker checks cover the
-  pinned base through HEAD, staged changes, and unstaged tracked changes
-  separately (commands in the protocol §5); stage your own new files first.
+  include their addressing. Those gates are the cheap deterministic ones plus
+  the affected tests — `npm run test` is CI's (see
+  [docs/focused-checks-contract.md](docs/focused-checks-contract.md)).
+  Whitespace/conflict-marker checks cover the pinned base through HEAD,
+  staged changes, and unstaged tracked changes separately (commands in the
+  protocol §5); stage your own new files first.
 - Adjudicate every critical/major finding: fix the technically valid ones,
   reject false positives with concrete reasons. Minor findings only when
   materially beneficial. Record dispositions concisely.
