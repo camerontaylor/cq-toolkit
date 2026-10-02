@@ -467,7 +467,23 @@ export type JournalEvent =
 export interface OpRegistryEntry<I = unknown, R = unknown> {
   name: string;
   inputSchema: z.ZodType<I>;
-  importer: () => Promise<Op<I, R>>;
+  /**
+   * Resolve the op module and bind its dependencies. MAY take the
+   * dispatch-time WIRING the dispatching host binds (PR #238 review P2):
+   * an importer that constructs a driver factory threads
+   * `onDeprecatedAlias` into `DriverFactoryConfig` so the host's narration
+   * contract holds — the CLI passes a SILENT sink in `--json` machine mode
+   * (stderr stays EMPTY, like every suppressed narration line) and none in
+   * human mode, where the library default already writes the same `cq:`
+   * stderr line. OPTIONAL: every other caller ignores it (the kernel runner
+   * passes none — plan data never carries a narration contract; the CLI
+   * wraps the registry-view entries it hands the runner, src/cli/run-plan.ts),
+   * and an importer is free to bind its library defaults unchanged.
+   */
+  importer: (wiring?: {
+    /** Sink for the driver factory's deprecated-alias notice (review-debt #186). */
+    onDeprecatedAlias?: (message: string) => void;
+  }) => Promise<Op<I, R>>;
 }
 
 /** Registry entry for one plan. Runtime-only: never persisted. */
