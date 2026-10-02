@@ -175,7 +175,9 @@ function compareFailures(a: CheckFailure | undefined, b: CheckFailure | undefine
     (a.line ?? -1) - (b.line ?? -1) ||
     (a.column ?? -1) - (b.column ?? -1) ||
     compareText(a.message, b.message) ||
-    compareNullableText(a.file, b.file)
+    compareNullableText(a.file, b.file) ||
+    compareNullableText(a.ruleId, b.ruleId) ||
+    compareText(a.severity, b.severity)
   );
 }
 

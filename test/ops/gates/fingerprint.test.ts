@@ -354,6 +354,16 @@ describe('fingerprintSet', () => {
     expect(keyFor([nullFile, emptyFile], nullFile)).toBe(keyFor([emptyFile, nullFile], nullFile));
   });
 
+  test('null and empty-string rule ids never alias in duplicate ordering', () => {
+    const nullRule = failureOf({ ruleId: null, line: null, message: 'same' });
+    const emptyRule = failureOf({ ruleId: '', line: null, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'eslint', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullRule, emptyRule], nullRule)).toBe(keyFor([emptyRule, nullRule], nullRule));
+  });
+
   test('a suite-level vitest failure keys by the first message line, not the full error text', () => {
     const suite = (message: string): string =>
       fingerprintFailure(failureOf({ line: null, message, ruleId: 'vitest-suite' }), {
