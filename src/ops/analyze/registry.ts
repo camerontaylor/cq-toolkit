@@ -51,6 +51,8 @@ import { COMPONENT_MAX_CHARS, NOTE_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../led
 import type { LedgerEntry } from '../ledger/store.js';
 import type { LedgerView } from '../ledger/ledger.js';
 import type { Cluster, ClusterErrorsInput, ClusterErrorsReport } from './clusterErrors.js';
+import type { ApprovalAuthority } from './approval.js';
+import { DENY_ALL_APPROVALS } from './approval.js';
 import type { CollectFailuresInput } from './collectFailures.js';
 import type { AgenticRemediationInput } from './agenticRemediation.js';
 import type { ApplyRemediationInput } from './applyRemediation.js';
@@ -363,6 +365,52 @@ export const PlaybookQuarantineListInputSchema: z.ZodType<PlaybookQuarantineList
 let sharedPlaybooks: PlaybookRegistry | undefined;
 let sharedQuarantine: QuarantineLedger | undefined;
 
+// THE APPROVAL AUTHORITY BINDING (W4.3; ADR-0003). The two mutating ops in
+// this family — `analyze.applyRemediation` and `analyze.playbookDispatch` —
+// authorize their WRITE through an `ApprovalAuthority`, never through a
+// plan-JSON `approved: true`. The authority is process-wide for the same
+// reason the playbook registry and quarantine ledger are: an approval that
+// resolved per-importer would let two dispatch paths disagree about what is
+// approved, which is the property the whole mechanism exists to prevent.
+//
+// FAIL-CLOSED BY DEFAULT. Unbound means DENY_ALL, so an op resolved before
+// anyone calls the setter refuses every write with `needs-human` and an
+// untouched workspace. There is deliberately NO permissive default and NO
+// fallback that derives an approval from the input: a `approved: true` in
+// plan JSON must never be able to authorize a write, so the only thing that
+// can change that answer is an authority the KERNEL verified.
+//
+// EXACT CONTRACT FOR THE KERNEL OWNER (the governed-runner lane): bind an
+// authority built over ADR-0003 §4a's signer/ledger SNAPSHOT and §4b's
+// verification — i.e. one whose `VerifiedApprovals.verifiedFor` returns
+// `{ nonce, state }` ONLY for a token whose signature, kid, `exp`/TTL and
+// `inputsHash` already verified, and whose `state` is the claim's SIGNED
+// state rather than a re-read (see ops/analyze/approval.ts for why that
+// distinction is load-bearing). NO SUCH PRODUCER EXISTS YET: there is no
+// approval module in src/kernel, so this binding is the seam it will land
+// on, and until it is bound these two ops refuse every write by design.
+// Passing `undefined` restores the deny-all default.
+let sharedApproval: ApprovalAuthority = DENY_ALL_APPROVALS;
+
+/**
+ * Bind the process-wide approval authority for the analyze family's mutating
+ * ops, or pass `undefined` to restore the deny-all default. See the block
+ * comment above for the exact contract the kernel's authority must satisfy.
+ *
+ * Binding an authority does NOT make any approval valid by itself — it only
+ * lets the ops ask. Every mutation still has to present a grant this
+ * authority recognises, be exercised at the mutation, and consume its nonce
+ * in one critical section of the workspace mutation lock.
+ */
+export function setAnalyzeApprovalAuthority(authority: ApprovalAuthority | undefined): void {
+  sharedApproval = authority ?? DENY_ALL_APPROVALS;
+}
+
+/** The approval authority the mutating ops currently resolve (deny-all unless bound). */
+export function analyzeApprovalAuthority(): ApprovalAuthority {
+  return sharedApproval;
+}
+
 /** Analyze-lane op registry (G1: failure-set aggregation; signature clustering). */
 export const registry: OpRegistryEntry[] = [
   {
@@ -460,6 +508,10 @@ export const registry: OpRegistryEntry[] = [
           m.makeApplyRemediation(
             (input) => s.pathAnalysisFileStore(input.dir ?? dirname(input.sidecarPath)),
             runner.subprocessRunCheck,
+            // The authority the write is authorized by — deny-all unless the
+            // kernel bound one (see setAnalyzeApprovalAuthority). NEVER the
+            // input's `approved` flag: that is a declared intent, not a proof.
+            sharedApproval,
           ) as Op<unknown, unknown>,
       ),
   },
@@ -503,6 +555,10 @@ export const registry: OpRegistryEntry[] = [
           quarantine: sharedQuarantine,
           run: runner.subprocessRunCheck,
           storeFor: (input) => s.pathAnalysisFileStore(input.dir),
+          // Deny-all unless the kernel bound a verified authority — the
+          // dispatch's write is authorized by the grant this exercises, never
+          // by anything in the op input.
+          approval: sharedApproval,
         }) as Op<unknown, unknown>;
       }),
   },
