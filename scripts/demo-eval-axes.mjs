@@ -15,7 +15,7 @@
 // Plan's OpenAI-COMPATIBLE endpoint — the ai-sdk driver's zai provider
 // defaults to it (owner-verified 2026-09-14: /api/paas/v4 is the
 // pay-as-you-go wire, unfunded by design; /api/coding/paas/v4 is the
-// plan-funded OpenAI-compat wire) — see makeDriver and
+// plan-funded OpenAI-compat wire) — see makeResolved and
 // docs/eval-axes-demo.md.
 //
 // THE ACP CELL (T1.8; conductor decision 2026-09-14 — eval wires REQUEST
@@ -63,14 +63,7 @@
 // network). EXIT CODE: 0 only when every selected cell passed (identity,
 // fixture, and fold checks green); any failed cell sets exit 1. Usage:
 // zsh -lic 'node scripts/demo-eval-axes.mjs'
-import {
-  AcpDriver,
-  AiSdkDriver,
-  ClaudeAgentDriver,
-  SessionStore,
-  SubprocessDriver,
-  runLadder,
-} from '../dist/index.js';
+import { SessionStore, createDriverFactory, runLadder } from '../dist/index.js';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import dns from 'node:dns';
 import net from 'node:net';
@@ -144,9 +137,9 @@ const ACP_BUDGET = { maxUsd: 2, maxTokens: 200_000 };
 const POLICY = { allow: [], mode: 'none' };
 const SANDBOX = { level: 'none' };
 
-const invocationFor = (provider, model, budget = BUDGET) => ({
+const invocationFor = (modelSpec, budget = BUDGET) => ({
   prompt: PROMPT,
-  modelSpec: { provider, model },
+  modelSpec,
   toolPolicy: POLICY,
   sandboxPolicy: SANDBOX,
   budget,
@@ -165,29 +158,46 @@ function recomputeCost(modelSpec, usage) {
   );
 }
 
-async function makeDriver(lane, provider, scratchDir) {
+/**
+ * The DRIVER FACTORY binding for one lane axis (ADR-0002 §2.5 — plan/eval
+ * data never constructs a lane class): each cell's deployment binds its
+ * 'eval-cell' role to the axis lane with '*' (any provider), and the
+ * factory constructs + wraps the lane (the served-model assertion is part
+ * of what the cells exercise). The invocation carries NO outputSchema:
+ * this fixture is a PLAIN-TEXT completion whose acceptance is the
+ * transcript-phrase check below — a structured-output schema would demand
+ * JSON and fail every honest prose reply. The ai-sdk cell leaves
+ * ZAI_BASE_URL unset so the zai provider's DEFAULT base URL applies (the
+ * GLM Coding Plan's OpenAI-compatible endpoint, owner-verified 2026-09-14
+ * — the plan-funded wire; the pay-as-you-go /api/paas/v4 rejects the plan
+ * key with 429 by design).
+ */
+async function makeResolved(lane, provider, model, scratchDir) {
   const sessionsDir = join(scratchDir, `sessions-${lane}`);
-  if (lane === 'ai-sdk') {
-    // The standard zai provider construction (defaultProviders) now carries
-    // the GLM Coding Plan's OpenAI-compatible endpoint as its DEFAULT base
-    // URL (owner-verified 2026-09-14 — the plan-funded wire; the
-    // pay-as-you-go /api/paas/v4 rejects the plan key with 429 by design).
-    // The script leaves ZAI_BASE_URL unset so that default applies.
-    return new AiSdkDriver({ sessionsDir });
-  }
-  if (lane === 'claude-agent') return new ClaudeAgentDriver({ sessionsDir });
-  if (lane === 'subprocess') return new SubprocessDriver({ sessionsDir });
-  if (lane === 'acp') {
-    // The mode pin (session/set_config_option mode=build before ANY prompt —
-    // sessions open in `yolo`, which never asks) and the binary resolution
-    // (zcode-acp-server via PATH — the operator's global install) are the
-    // DRIVER's own job; this script configures neither. modelEnv makes the
-    // requested model a REAL request on the vendor's own channel (the
-    // driver's documented REQUEST transport) — the served id remains what
-    // the identity guard verifies.
-    return new AcpDriver({ sessionsDir, modelEnv: 'ZCODE_MODEL' });
-  }
-  throw new Error(`unknown lane ${lane}`);
+  const resolved = createDriverFactory({
+    bindings: { 'eval-cell': { '*': lane } },
+    sessionsDir,
+    ...(lane === 'acp'
+      ? {
+          // The mode pin (session/set_config_option mode=build before ANY
+          // prompt — sessions open in `yolo`, which never asks) and the
+          // binary resolution (zcode-acp-server via PATH — the operator's
+          // global install) are the DRIVER's own job; the lane config here
+          // is only modelEnv: it makes the requested model a REAL request
+          // on the vendor's own channel (the driver's documented REQUEST
+          // transport) — the served id remains what the identity guard
+          // verifies.
+          lanes: { acp: { modelEnv: 'ZCODE_MODEL' } },
+          // The cell requests glm-5.3-flash; this wire serves it under the
+          // probe-recorded `builtin:bigmodel\GLM-5.3` encoding (normalised
+          // 'glm-5.3'). The LANE-SCOPED alias (ADR-0002 §2.6) is the seam's
+          // declared way to admit exactly that remap — the same fact the
+          // expectedServed comparison below asserts on the raw id.
+          servedModel: { aliases: { acp: { zai: { 'glm-5.3-flash': ['glm-5.3'] } } } },
+        }
+      : {}),
+  }).resolve({ role: 'eval-cell', modelSpec: { provider, model } });
+  return resolved;
 }
 
 const u = (n) => (n === undefined ? '—' : String(n));
@@ -205,7 +215,11 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
   const attempts = [];
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const driver = await makeDriver(lane, provider, scratchDir);
+      // The factory resolution carries the invocation's modelSpec (the
+      // normalised spec — ADR-0002 §2.5: ops/scripts put resolved.modelSpec
+      // on the invocation, never the raw input spec).
+      const resolved = await makeResolved(lane, provider, model, scratchDir);
+      const driver = resolved.driver;
       const startedAt = Date.now();
       try {
         // GOVERNED DISPATCH (the kernel's own channel): every live call runs
@@ -215,7 +229,7 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
         // retry loop NEVER issues another paid call once a cell produced a
         // completed result.
         const ladderOutcome = await runLadder(
-          () => driver.run(invocationFor(provider, model, budget)),
+          (ctx) => driver.run(invocationFor(resolved.modelSpec, budget), { signal: ctx.signal }),
           { wallClockMs: WALL_CLOCK_MS },
           { op: 'eval-axes', jobKey: `eval-axes/${lane}/${model}`, attempt },
         );
@@ -232,6 +246,26 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
         // for a CORRECT fold.
         const pricedModel = result.model ?? model;
         const recomputed = recomputeCost({ provider, model: pricedModel }, result.usage);
+        // A FACTORY-ADJUDICATED remap arrives as stopReason 'error' /
+        // errorClass 'served-model-mismatch' with the RAW served id kept
+        // (seam v2 §2.6): endpoint configuration, not a transient — record
+        // the evidence and NEVER re-pay for the same answer (the same
+        // no-retry rule the raw-id remap check below applies).
+        if (result.stopReason === 'error' && result.errorClass === 'served-model-mismatch') {
+          attempts.push({
+            attempt,
+            stopReason: result.stopReason,
+            servedModelMismatch: {
+              requested: model,
+              ...(expectedServed !== undefined ? { expectedServed } : {}),
+              served: result.model ?? null,
+              usage: result.usage,
+              driverCostUSD: result.costUSD ?? null,
+              recomputed,
+            },
+          });
+          break;
+        }
         // Fixture validation (the acceptance bar for a PASS): the verdict
         // must be stopReason 'complete' — a 'budget' or 'error' stopReason
         // records the cell as failed-with-evidence — AND the assistant
