@@ -194,10 +194,15 @@ function approvedAuthority(readState?: ApprovalStateReader): {
     // changed inputs are a different subject with no token at all.
     approvals: {
       verifiedFor: (subject) =>
-        Promise.resolve({
+        (readState === undefined
+          ? Promise.resolve({ ...approvedState, workspace: subject.workspace })
+          : // A custom reader reports its own workspace spelling; the claim
+            // signs exactly what that reader observed.
+            readState.read(subject.workspace)
+        ).then((state) => ({
           nonce: `nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`,
-          state: { ...approvedState, workspace: subject.workspace },
-        }),
+          state,
+        })),
     },
     ledger,
     locks: makeProcessLocalMutationLocks(),

@@ -40,6 +40,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type {
   ApprovalState,
+  ApprovalStateReader,
   ApprovalSubject,
   ExercisedScope,
   MutationLock,
@@ -255,24 +256,35 @@ describe('TOCTOU — the state moves between admission and the write', () => {
 
   test('TOCTOU over a REAL git repository: a commit between admission and the write denies it', async () => {
     const repo = realRepo();
+    const reader = makeGitApprovalStateReader();
+    // The commit lands in the window the ADR calls out: AFTER the op's own
+    // admission read, BEFORE its exercise re-check, with no lock held by
+    // anyone. Calling admit() separately and committing before
+    // withApprovedMutation would only exercise a fresh, legitimate admission
+    // against the moved HEAD — not the window.
+    let reads = 0;
+    const windowedReader: ApprovalStateReader = {
+      read: async (workspace) => {
+        const state = await reader.read(workspace);
+        reads += 1;
+        if (reads === 1) git(repo, ['commit', '--allow-empty', '-m', 'the window commit']);
+        return state;
+      },
+    };
     const authority = makeApprovalAuthority({
       approvals: {
-        verifiedFor: (candidate) =>
-          Promise.resolve({
-            nonce: 'nonce-real',
-            state: { ...CLEAN_STATE, workspace: candidate.workspace },
-          }),
+        // The kernel signs the state it observed: the REAL repo's state, not a
+        // fabricated HEAD (a made-up sha is correctly refused at admission).
+        verifiedFor: async (candidate) => ({
+          nonce: 'nonce-real',
+          state: await reader.read(candidate.workspace),
+        }),
       },
       ledger: makeInMemoryNonceLedger(),
       locks: makeProcessLocalMutationLocks(),
-      readState: makeGitApprovalStateReader(),
+      readState: windowedReader,
     });
     const bound = { op: OP, workspace: repo, targets: ['src/a.ts'], inputDigest: 'sha256:real' };
-    const admitted = await authority.admit(bound);
-    expect(admitted.granted).toBe(true);
-    // A commit lands in the window the ADR calls out: after admission, before
-    // the exercise re-check, with no lock held by anyone.
-    git(repo, ['commit', '--allow-empty', '-m', 'the window commit']);
     let writes = 0;
     const outcome = await withApprovedMutation(authority, bound, async () => {
       writes += 1;
