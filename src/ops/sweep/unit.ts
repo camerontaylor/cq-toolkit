@@ -23,7 +23,7 @@
 //     construction and the served-model assertion, ADR-0002 §2.5/§2.6: plan
 //     data never names an executable or a lane class), real probes over
 //     subprocessRunCheck, the real git push (args-array
-//     `push -u origin <branch>`, outside the local git mutex).
+//     `push origin <branch>`, outside the local git mutex).
 //     LIMITS, honestly: the prompt is a caller TEMPLATE
 //     ({package}/{fixer}/{worktree} placeholders; the shipped default is
 //     deliberately generic — the toolkit bakes in no vendor prompt), and a
@@ -47,6 +47,7 @@ import { isProtectedStagePath, PROTECTED_STAGE_PATTERNS } from '../gates/protect
 import { regressionGate } from '../gates/regressionGate.js';
 import type { RegressionReport } from '../gates/regressionGate.js';
 import { makeGhRunner } from '../review/gh.js';
+import { runArgvCommand } from '../../harness/run.js';
 import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
@@ -196,7 +197,10 @@ export interface SweepUnitBindings {
   repoRoot: string;
   /** Parent dir for worktree checkouts (the worktreeFor seam). */
   worktreesDir: string;
-  /** Dependency install hook, called only for a newly created checkout before its first probe. */
+  /**
+   * Dependency install hook, run before a probe in any checkout (worker or
+   * detached final-probe) that has not yet recorded a successful install.
+   */
   installDeps?: (worktreePath: string) => Promise<void>;
   /** The run's reserved branch prefix. */
   runPrefix: string;
@@ -416,7 +420,7 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *   9. commit — skipped when nothing is staged (an idempotent re-run's
  *      no-op fixer); commits exactly the scanned set.
  *  10. push — with a push binding and a fresh commit, publish the unit's
- *      branch (`push -u origin <branch>` in the shipped binding); skipped
+ *      branch (`push origin <branch>` in the shipped binding); skipped
  *      when nothing was committed or no binding is present. On the
  *      no-commit leg, a branch carrying commits beyond the base is an
  *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
@@ -440,7 +444,7 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *   8. commit — skipped when nothing is staged (an idempotent re-run's
  *      no-op fixer); commits exactly the scanned set.
  *   9. push — with a push binding and a fresh commit, publish the unit's
- *      branch (`push -u origin <branch>` in the shipped binding); skipped
+ *      branch (`push origin <branch>` in the shipped binding); skipped
  *      when nothing was committed or no binding is present. On the
  *      no-commit leg, a branch carrying commits beyond the base is an
  *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
@@ -1012,6 +1016,33 @@ async function withBaseOwnedFinalTree(
   }
 }
 
+/** Run the install hook unless this checkout already recorded a successful install. */
+async function ensureInstalled(
+  bindings: SweepUnitBindings,
+  installDeps: (worktreePath: string) => Promise<void>,
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    const marker = await bindings.git([
+      '-C',
+      worktreePath,
+      'rev-parse',
+      '--git-path',
+      'cq-install-complete',
+    ]);
+    if (marker.code !== 0 || marker.stdout.trim() === '') {
+      return `cannot locate the install marker — ${marker.stderr.trim()}`;
+    }
+    const markerPath = resolve(worktreePath, marker.stdout.trim());
+    if (existsSync(markerPath)) return null;
+    await installDeps(worktreePath);
+    await writeFile(markerPath, '');
+    return null;
+  } catch (err) {
+    return messageOf(err);
+  }
+}
+
 /** One probe leg, creating the worktree on the baseline leg when not in hand yet. */
 async function probeLeg(
   probe: ReturnType<typeof makeBaselineProbe>,
@@ -1034,18 +1065,20 @@ async function probeLeg(
       };
     }
     worktree = result.value;
-    if (!worktree.reused && bindings.installDeps !== undefined) {
-      try {
-        await bindings.installDeps(worktree.path);
-      } catch (err) {
-        return {
-          worktree,
-          fault: tagged(
-            'infra',
-            `sweep.unit ${unit.package}: dependency install failed — ${messageOf(err)}`,
-          ),
-        };
-      }
+  }
+  // Both the worker checkout and the detached final-probe checkout need
+  // dependencies. Completion is recorded in the checkout's private Git dir,
+  // so a failed install is retried on reuse rather than trusted.
+  if (bindings.installDeps !== undefined) {
+    const installFault = await ensureInstalled(bindings, bindings.installDeps, worktree.path);
+    if (installFault !== null) {
+      return {
+        worktree,
+        fault: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: dependency install failed — ${installFault}`,
+        ),
+      };
     }
   }
   const input: BaselineProbeInput = {
@@ -1403,8 +1436,8 @@ export interface SweepUnitDriverConfig {
   model: string;
   /** Tool policy; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
-  /** Budget caps; required for shipped dispatch. */
-  budget?: Budget;
+  /** Budget caps; at least one cap is required. */
+  budget: Budget;
 }
 
 /** The JSON-serializable probe binding of a dispatch input. */
@@ -1432,7 +1465,7 @@ export interface SweepUnitDispatchInput {
   repoRoot: string;
   /** Defaults to `<repo-parent>/worktrees/cq`, outside the repository. */
   worktreesDir?: string;
-  /** Optional argv-based dependency install hook for new worktrees only. */
+  /** Optional argv-based dependency install hook (see SweepUnitBindings.installDeps). */
   install?: { command: string; args: string[]; timeoutMs?: number };
   runPrefix: string;
   base: string;
@@ -1476,7 +1509,7 @@ export interface SweepUnitDispatchInput {
   /** Wall-clock cap for one git subprocess; default the family's 600s. */
   gitTimeoutMs?: number;
   /**
-   * Push the unit's branch after a commit (`push -u origin <branch>` outside
+   * Push the unit's branch after a commit (`push origin <branch>` outside
    * the git mutex). DEFAULT TRUE — a fleet's branches must exist on the
    * remote before pr.assemblePrs; set false ONLY for local-only sweeps.
    */
@@ -1507,11 +1540,11 @@ const GIT_NO_AUTO_MAINTENANCE_ENV = {
 } as const;
 
 /**
- * The shipped push leg: `git push -u origin <branch>` run in `repoRoot` with
+ * The shipped push leg: `git push origin <branch>` run in `repoRoot` with
  * an execFile ARGS ARRAY (never a shell string), bounded by the worktreeFor
- * family's default wall clock, and serialized through a git mutex on
- * `lockPath` (default `<runStateDir>/git-mutex.lock` — the SAME lockfile the
- * worktree mutations serialize on). Resolves void; REJECTS with the captured
+ * family's default wall clock, and run OUTSIDE the local git mutex. No `-u`:
+ * setting upstream tracking writes the shared `.git/config`, which concurrent
+ * sibling pushes would contend for. Resolves void; REJECTS with the captured
  * stderr on a non-zero exit (the op folds the rejection into a `failed`
  * result naming the branch).
  */
@@ -1524,11 +1557,23 @@ export function makePushBranch(opts?: {
     env: { ...GIT_NO_AUTO_MAINTENANCE_ENV },
   });
   return async (repoRoot: string, branch: string): Promise<void> => {
-    const pushed = await git(['-C', repoRoot, 'push', '-u', 'origin', branch]);
+    const pushed = await git(['-C', repoRoot, 'push', 'origin', branch]);
     if (pushed.code !== 0) {
-      throw new Error(pushed.stderr.trim() || `git push -u origin ${branch} failed`);
+      throw new Error(pushed.stderr.trim() || `git push origin ${branch} failed`);
     }
   };
+}
+
+/** Retained bytes per install output stream (failure detail only). */
+const INSTALL_OUTPUT_MAX_BYTES = 64 * 1024;
+
+/** The parent environment as plain strings, for the install subprocess. */
+function inheritedEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
 }
 
 /** Exponential backoff retries whose nominal waiter span covers one Git call. */
@@ -1634,14 +1679,24 @@ export function bindingsFromDispatch(
       ? {}
       : {
           installDeps: async (worktreePath: string): Promise<void> => {
-            const run = makeGhRunner({
-              bin: input.install?.command ?? '',
-              cwd: worktreePath,
-              timeoutMs: input.install?.timeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
-            });
-            const result = await run(input.install?.args ?? []);
-            if (result.code !== 0) {
-              throw new Error(result.stderr.trim() || `install exited ${String(result.code)}`);
+            // Own process group: a timeout kills lifecycle-script descendants
+            // too, and a relative command resolves inside the new worktree.
+            const outcome = await runArgvCommand(
+              input.install?.command ?? '',
+              input.install?.args ?? [],
+              {
+                cwd: worktreePath,
+                env: inheritedEnv(),
+                maxBytes: INSTALL_OUTPUT_MAX_BYTES,
+                timeoutMs: input.install?.timeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
+              },
+            );
+            if (outcome.kind === 'spawn-error') throw new Error(messageOf(outcome.error));
+            if (outcome.kind === 'killed') {
+              throw new Error(outcome.stderr.trim() || 'install was killed (timeout or signal)');
+            }
+            if (outcome.code !== 0) {
+              throw new Error(outcome.stderr.trim() || `install exited ${String(outcome.code)}`);
             }
           },
         }),

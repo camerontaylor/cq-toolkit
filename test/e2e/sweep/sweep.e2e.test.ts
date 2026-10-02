@@ -117,7 +117,7 @@ async function scenario(runPrefix: string): Promise<Scenario> {
   CLEANUP.push(root);
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
-  // The push recorder: a LOCAL BARE origin — the real `git push -u origin`
+  // The push recorder: a LOCAL BARE origin — the real `git push origin`
   // binding works offline against it, and the tests read its refs back as
   // evidence of what was pushed (and what correctly was not).
   const origin = join(root, 'origin.git');

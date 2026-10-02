@@ -14,7 +14,7 @@
 //      bindings carry resolved.driver + the RESOLVED modelSpec.
 //   4. THE PUSH LEG (jSKJL): the shipped makePushBranch publishes a local
 //      branch to a real LOCAL BARE origin (offline), with the args-array
-//      `push -u origin <branch>` argv.
+//      `push origin <branch>` argv (no `-u`: no shared config write).
 import { execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -326,6 +326,60 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     },
   );
 
+  test(
+    'a failed install is not trusted on reuse — the next dispatch retries it before probing',
+    { timeout: 120_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'sweep-install-retry-'));
+      CLEANUP.push(root);
+      const repoRoot = join(root, 'repo');
+      for (const args of [
+        ['init', '-q', '-b', 'main', repoRoot],
+        ['-C', repoRoot, 'config', 'user.email', 't@example.invalid'],
+        ['-C', repoRoot, 'config', 'user.name', 'T'],
+      ]) {
+        execFileSync('git', args, { timeout: 10_000 });
+      }
+      writeFileSync(join(repoRoot, 'seed.txt'), 'seed\n');
+      execFileSync('git', ['-C', repoRoot, 'add', 'seed.txt'], { timeout: 10_000 });
+      execFileSync('git', ['-C', repoRoot, 'commit', '-q', '-m', 'seed'], { timeout: 10_000 });
+      const timeline: string[] = [];
+      let installs = 0;
+      const op = makeSweepUnitOp({
+        ...bindingsFromDispatch(
+          {
+            ...VALID,
+            repoRoot,
+            worktreesDir: join(root, 'trees'),
+            runPrefix: 'cq/install-retry',
+            mode: 'prep',
+            push: false,
+          },
+          fakeFactory,
+        ),
+        installDeps: async () => {
+          installs += 1;
+          timeline.push('install');
+          if (installs === 1) throw new Error('transient install failure');
+        },
+        runCheck: async () => {
+          timeline.push('probe');
+          return { stdout: '', stderr: '', exitCode: 0 };
+        },
+      });
+      const unit = { package: VALID.package, fixer: VALID.fixer, files: VALID.files };
+      await op(unit);
+      expect(timeline).toEqual(['install']);
+
+      timeline.length = 0;
+      const second = await op(unit);
+      expect(second.status).toBe('ok');
+      if (second.status !== 'ok') return;
+      expect(second.value.worktree.reused).toBe(true);
+      expect(timeline).toEqual(['install', 'probe']);
+    },
+  );
+
   test('placeholder substitution is literal — `$&`/`` $` `` never become replacement tokens (#175 item 7)', () => {
     const bindings = bindingsFromDispatch(
       {
@@ -415,6 +469,11 @@ describe('makePushBranch (the shipped push binding, real git smoke)', () => {
       await push(repo, 'cq/x/fix/alpha');
       const heads = await git(['-C', repo, 'ls-remote', '--heads', 'origin'], repo);
       expect(heads).toContain('cq/x/fix/alpha');
+      // No upstream tracking is written: concurrent sibling pushes outside the
+      // mutex must not contend for the shared .git/config lock.
+      await expect(
+        git(['-C', repo, 'config', '--get', 'branch.cq/x/fix/alpha.remote'], repo),
+      ).rejects.toThrow();
 
       // A repo with no origin rejects (the op folds the rejection into `failed`
       // naming the push failure).
