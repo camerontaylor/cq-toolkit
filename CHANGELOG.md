@@ -14,6 +14,13 @@ Draft change list — every PR merged to `merge-queue` after the `v1.0.1`
 source milestone, through `70de728` (#238). Generated from merged PR titles
 on 2026-10-02; the reviewed release PR finalizes grouping and wording.
 
+- Driver fixes after `v1.0.1`: strip the draft-2020-12 meta-schema URI
+  before the claude CLI sees the schema
+  ([#211](https://github.com/camerontaylor/cq-toolkit/pull/211)); bound the
+  ai-sdk tool loop and classify its failure causes
+  ([#212](https://github.com/camerontaylor/cq-toolkit/pull/212)); populate
+  `WorkerResult.error` on the subprocess error path
+  ([#213](https://github.com/camerontaylor/cq-toolkit/pull/213))
 - W0 self-host safety and hygiene: harden self-host automation and worker
   environment ([#214](https://github.com/camerontaylor/cq-toolkit/pull/214));
   split unit and e2e workflows ([#215](https://github.com/camerontaylor/cq-toolkit/pull/215))

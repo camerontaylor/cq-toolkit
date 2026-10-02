@@ -31,7 +31,7 @@ first-party producer already emits nonnegative values —
   `Math.max(0, at - Date.now())`.
 - claude-agent `retryAfterMsFromText` (`src/driver/claude-agent/index.ts:1525`):
   captures `\d+` seconds only.
-- subprocess/harness: no `retryAfterMs` producer exists.
+- acp, subprocess and harness: no `retryAfterMs` producer exists.
 
 Classification: **bounded fix, no producer-side dependency, no
 declaration-surface change expected** (declared type stays `number`).
