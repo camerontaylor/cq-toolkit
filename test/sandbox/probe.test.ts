@@ -16,7 +16,16 @@
 // else the same probe records the platform blocker instead.  LIVE STATUS: the
 // narrow-allow profile has not yet executed on any host — live evidence at
 // final head is a gate of the fresh protocol sequence, not this suite.
-import { describe, expect, test } from 'vitest';
+import { realpath } from 'node:fs/promises';
+import { describe, expect, test, vi } from 'vitest';
+
+// Measured scheduling margin (final head, concurrent authorized testing):
+// each probe runs its controls as REAL bare-host processes, and process
+// spawn latency on the shared host reached ~9s per spawn at load ~104 on
+// 6 cores — far past the 5s vitest default for control-heavy tests.  This
+// file-scoped bound is test scheduling margin only; product launch and
+// probe timeouts are untouched.
+vi.setConfig({ testTimeout: 120_000 });
 
 import {
   seatbeltAdapter,
@@ -51,8 +60,9 @@ const denied = () => result({ exitCode: 1, stderr: 'fake boundary: Operation not
  *   grant-all    — every child succeeds (a boundary that does not bound);
  *   block-all    — no child ever runs (a broken launcher, not confinement);
  *   env-fails    — children run except the env probe (an inconclusive canary);
- *   fs-only      — filesystem denials hold but the child may connect (an
- *                  `allow`-posture boundary, wrong for model-only);
+ *   fs-only      — filesystem denials hold (bash file operations included)
+ *                  but connect attempts pass (an `allow`-posture boundary,
+ *                  wrong for model-only);
  *   proxy-fs-only— fs denials hold and ONLY the declared proxy port passes —
  *                  the proxy-composed model-only boundary;
  *   broken-bash  — fs denials hold but bash cannot exec in-boundary, so
@@ -66,7 +76,7 @@ function fakeAdapter(
     workspaceParent: () => '/tmp',
     ...(behavior === 'proxy-fs-only' ? { supportsProxyModelOnly: true as const } : {}),
     available: async () => ({ available: true }),
-    launch: (request) => {
+    launch: async (request) => {
       if (behavior === 'block-all') {
         return Promise.resolve(result({ spawnError: 'fake launcher refuses everything' }));
       }
@@ -75,24 +85,26 @@ function fakeAdapter(
       }
       const argText = request.argv.join(' ');
       const portMatch = argText.match(/dev\/tcp\/([^/]+)\/(\d+)/);
-      const inWorkspace = request.argv[1]?.startsWith(request.workspace) === true;
       if (request.argv[0] === '/bin/bash') {
         if (behavior === 'grant-all') return Promise.resolve(result({ ok: true, exitCode: 0 }));
         // A plain in-boundary exec (the probe's shell control) works for every
-        // behavior that executes children at all.
-        const plainExec = argText.includes('/bin/true');
-        // fs-only: any connect passes.  proxy-fs-only: only the declared
-        // proxy loopback port passes — non-proxy ports and external hosts are
-        // denied even when a proxyPort was granted.
-        const allowed =
-          behavior === 'fs-only' ||
-          (behavior === 'env-fails' && plainExec) ||
-          (behavior === 'proxy-fs-only' &&
-            (plainExec ||
-              (portMatch !== null &&
+        // behavior that executes children at all.  Kept in sync with the
+        // probe's control argv (/bin/bash --norc -c /usr/bin/true).
+        const plainExec = argText.includes('/usr/bin/true');
+        // fs-only: filesystem denials hold — a bash -c FILE operation is
+        // denied like any other read; only connect attempts (and the plain
+        // shell control) pass, which is what makes the posture `allow`-shaped.
+        // proxy-fs-only: only the declared proxy loopback port passes —
+        // non-proxy ports and external hosts are denied even when a proxyPort
+        // was granted.
+        const bashAllowed =
+          plainExec ||
+          (portMatch !== null &&
+            (behavior === 'fs-only' ||
+              (behavior === 'proxy-fs-only' &&
                 portMatch[1] === '127.0.0.1' &&
                 Number(portMatch[2]) === request.proxyPort)));
-        return allowed
+        return bashAllowed
           ? Promise.resolve(result({ ok: true, exitCode: 0 }))
           : Promise.resolve(denied());
       }
@@ -110,7 +122,27 @@ function fakeAdapter(
         return Promise.resolve(result({ exitCode: 1 }));
       }
       if (behavior === 'grant-all') return Promise.resolve(result({ ok: true, exitCode: 0 }));
-      return inWorkspace
+      // A plain exec with no file target (the probe's launch probe itself)
+      // succeeds: exec is permitted in-boundary; only file OPERATIONS are
+      // contained.
+      if (request.argv[0] === '/usr/bin/true') {
+        return Promise.resolve(result({ ok: true, exitCode: 0 }));
+      }
+      // A real fs-only boundary evaluates the file the operation RESOLVES to:
+      // a workspace path that symlinks outside is denied like any outside
+      // read (Sol review's symlink-escape leg).  Model that with realpath
+      // containment; an unresolvable target (touch-style creates) rides on
+      // the lexical path.
+      const target = request.argv[1] ?? '';
+      let inside = target.startsWith(request.workspace);
+      if (inside) {
+        try {
+          inside = (await realpath(target)).startsWith(await realpath(request.workspace));
+        } catch {
+          // Create-style target does not exist yet: lexical containment holds.
+        }
+      }
+      return inside
         ? Promise.resolve(result({ ok: true, exitCode: 0 }))
         : Promise.resolve(denied());
     },
@@ -144,9 +176,11 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     const record = await probeBackend(fakeAdapter('grant-all'));
     for (const id of ALL_IDS) {
       if (id === 'local-prefix-exec') {
-        // Host-dependent: armed (and failed) wherever /usr/local has content;
-        // an empty local prefix records the explicit n/a pass.
-        expect(['fail', 'pass']).toContain(verdictOf(record, id));
+        // Host-dependent: a 'fail' wherever the launcher grants the exec and
+        // /usr/local has content to attack; 'inconclusive' on a host with an
+        // empty local prefix (no synthetic pass — the denial was not
+        // demonstrable there).
+        expect(['fail', 'inconclusive']).toContain(verdictOf(record, id));
         continue;
       }
       expect(verdictOf(record, id)).toBe('fail');
@@ -246,11 +280,14 @@ describe('posture-aware network certification', () => {
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/production endpoint identity or upstream allowlist/);
     expect(record.networkDemonstrated).toBe('proxy-loopback');
-    // The same boundary probed WITHOUT the proxy demand must refuse the
-    // loopback connect (the fake only opens the declared proxy port).
+    // The same boundary probed WITHOUT the proxy demand refuses the loopback
+    // connect (the fake only opens the declared proxy port).  The probe
+    // classifies an honest, executed denial as a pass — so this stricter
+    // boundary EARNS certification under plain model-only, exactly as a real
+    // boundary of this shape would.
     const strict = await probeBackend(fakeAdapter('proxy-fs-only'), { network: 'model-only' });
-    expect(verdictOf(strict, 'network-loopback')).toBe('fail');
-    expect(strict.certified).toBe(false);
+    expect(verdictOf(strict, 'network-loopback')).toBe('pass');
+    expect(strict.certified).toBe(true);
   });
 });
 
@@ -269,7 +306,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(fakeAdapter('fs-only'), forged, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'model-only',
       }),
     ).rejects.toThrow(/not produced by the RS-13 probe/);
@@ -282,7 +319,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'model-only',
       }),
     ).rejects.toThrow(/not certified for required mode.*fail-closed/s);
@@ -299,7 +336,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(impostor, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'allow',
       }),
     ).rejects.toThrow(/launcher object was not probed by this certification/);
@@ -323,7 +360,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'model-only',
       }),
     ).rejects.toThrow(/certified under the 'allow' posture/);
@@ -331,7 +368,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     expect(certifiedBackendsOf(certification)).toEqual(['bwrap']);
     const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'allow',
     });
     expect(launched.ok).toBe(true);
@@ -362,7 +399,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     // With the certified function restored, the same launch is authorized.
     const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'allow',
     });
     expect(launched.ok).toBe(true);
@@ -377,7 +414,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     expect(certification.certified).toEqual(['bwrap']);
     const launched = await launchCertified(adapter, certification, {
       workspace: '/tmp/ws',
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'allow',
     });
     expect(launched.ok).toBe(true);
@@ -392,7 +429,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'model-only',
       }),
     ).rejects.toThrow(/certified under the 'allow' posture.*'model-only'/s);
@@ -412,7 +449,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
       await expect(
         launchCertified(adapter, certification, {
           workspace: '/tmp/ws',
-          argv: ['/bin/true'],
+          argv: ['/usr/bin/true'],
           network: 'model-only',
           ...(proxyPort === undefined ? {} : { proxyPort }),
         }),
@@ -429,7 +466,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'allow',
         proxyPort: 45454,
       }),
@@ -477,7 +514,7 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
     await expect(
       launchCertified(adapter, certification, {
         workspace: '/tmp/ws',
-        argv: ['/bin/true'],
+        argv: ['/usr/bin/true'],
         network: 'model-only',
         proxyPort: 1,
       }),

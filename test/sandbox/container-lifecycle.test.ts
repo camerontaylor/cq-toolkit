@@ -2,7 +2,14 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+
+// Measured scheduling margin (final head, concurrent authorized testing):
+// every launch chains several real stub-CLI spawns, and process spawn
+// latency on the shared host reached ~9s per spawn at load ~104 on 6 cores —
+// past the 5s vitest default.  File-scoped test scheduling margin only;
+// the adapter's own launch timeouts under test are untouched.
+vi.setConfig({ testTimeout: 120_000 });
 
 import { containerAdapter } from '../../src/sandbox/backend.js';
 
@@ -44,7 +51,7 @@ describe('daemon-owned container lifetime', () => {
     const { adapter, dir, log } = await stub('exec /bin/sleep 2');
     const result = await adapter.launch({
       workspace: dir,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
       timeoutMs: 100,
     });
@@ -62,7 +69,11 @@ describe('daemon-owned container lifetime', () => {
       'echo child-output',
       'echo daemon-unreachable >&2; exit 1',
     );
-    const result = await adapter.launch({ workspace: dir, argv: ['/bin/true'], network: 'allow' });
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'allow',
+    });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/container cleanup unconfirmed.*daemon-unreachable/);
     expect(await readFile(log, 'utf8')).toContain(`rm --force ${id}`);
@@ -84,7 +95,11 @@ describe('daemon-owned container lifetime', () => {
 
   test('a still-running container cannot produce a successful launch', async () => {
     const { adapter, dir, log } = await stub('exit 0', 'exit 0', "printf '%064d\\n' 1", 'true 0');
-    const result = await adapter.launch({ workspace: dir, argv: ['/bin/true'], network: 'allow' });
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'allow',
+    });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/child exit could not be confirmed/);
     expect(await readFile(log, 'utf8')).toContain(`rm --force ${id}`);
@@ -92,7 +107,11 @@ describe('daemon-owned container lifetime', () => {
 
   test('failed create never starts and still attempts cleanup by its unique name', async () => {
     const { adapter, dir, log } = await stub('exit 0', 'exit 0', 'exit 1');
-    const result = await adapter.launch({ workspace: dir, argv: ['/bin/true'], network: 'allow' });
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'allow',
+    });
     expect(result.ok).toBe(false);
     const calls = await readFile(log, 'utf8');
     expect(calls).not.toContain('start --attach');
@@ -101,7 +120,11 @@ describe('daemon-owned container lifetime', () => {
 
   test('invalid creation identity never starts a container', async () => {
     const { adapter, dir, log } = await stub('exit 0', 'exit 0', 'echo invalid-id');
-    const result = await adapter.launch({ workspace: dir, argv: ['/bin/true'], network: 'allow' });
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'allow',
+    });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/no valid immutable container ID/);
     const calls = await readFile(log, 'utf8');

@@ -25,17 +25,14 @@
 //   landlock  — needs a compiled helper binary that issues the landlock(2)
 //               syscalls; absent a helper this backend records itself as not
 //               provisioned (the D7 pattern), it is never silently "auto".
-import { execFile as execFileCb } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, constants, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { accessSync, constants } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
-import { promisify } from 'node:util';
-
+import { delimiter, join, relative } from 'node:path';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
-
-const execFile = promisify(execFileCb);
 
 /** A command to execute inside a backend boundary. */
 export interface SandboxLaunchRequest {
@@ -92,7 +89,16 @@ export interface SandboxBackendAdapter {
   launch(request: SandboxLaunchRequest): Promise<SandboxLaunchResult>;
 }
 
-async function runChild(
+/**
+ * Run a launcher child to settlement and classify what happened.  The child
+ * gets its OWN PROCESS GROUP (final-head review): on timeout the group is
+ * SIGKILLed, and after the direct child exits the group is swept once more —
+ * an execFile-based predecessor killed only the direct child, so a background
+ * grandchild with inherited stdio pipes survived the launch (and kept the
+ * launch's result from settling until it happened to exit).  `ok` means the
+ * child exited 0; a launcher that could not spawn says so via `spawnError`.
+ */
+function runChild(
   file: string,
   args: readonly string[],
   options: {
@@ -102,48 +108,126 @@ async function runChild(
     maxOutputChars: number;
   },
 ): Promise<SandboxLaunchResult> {
-  const result: SandboxLaunchResult = {
-    ok: false,
-    exitCode: null,
-    signal: null,
-    stdout: '',
-    stderr: '',
-    timedOut: false,
-  };
-  try {
-    const { stdout, stderr } = await execFile(file, [...args], {
-      cwd: options.cwd,
-      env: options.env,
-      timeout: options.timeoutMs,
-      killSignal: 'SIGKILL',
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    result.stdout = stdout.slice(0, options.maxOutputChars);
-    result.stderr = stderr.slice(0, options.maxOutputChars);
-    result.exitCode = 0;
-    result.ok = true;
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException & {
-      code?: string | number;
-      signal?: NodeJS.Signals;
-      stdout?: string;
-      stderr?: string;
-      killed?: boolean;
+  return new Promise((resolve) => {
+    const result: SandboxLaunchResult = {
+      ok: false,
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      timedOut: false,
     };
-    if (err.code === 'ENOENT') {
-      result.spawnError = `launcher not found: ${file}`;
-    } else if (typeof err.code === 'number') {
-      result.exitCode = err.code;
+    // Hard capture cap matching the previous execFile maxBuffer (16 MiB);
+    // overflow kills the child group and is classified as a timeout.
+    const captureCap = 16 * 1024 * 1024;
+    let outBytes = 0;
+    let errBytes = 0;
+    let out = '';
+    let err = '';
+    let overflowed = false;
+    let spawnErrorMessage: string | undefined;
+    let spawnErrored = false;
+    let finished = false;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, [...args], {
+        cwd: options.cwd,
+        env: options.env,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      result.spawnError = (error as Error).message;
+      resolve(result);
+      return;
     }
-    result.signal = err.signal ?? null;
-    result.timedOut = err.killed === true;
-    result.stdout = (err.stdout ?? '').slice(0, options.maxOutputChars);
-    result.stderr = (err.stderr ?? err.message ?? '').slice(0, options.maxOutputChars);
-    if (result.spawnError === undefined && result.exitCode === null && result.signal === null) {
-      result.spawnError = err.message;
+    const killGroup = (signal: NodeJS.Signals): void => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // The group is already gone — nothing to sweep.
+      }
+    };
+    const timer = setTimeout(() => {
+      result.timedOut = true;
+      killGroup('SIGKILL');
+    }, options.timeoutMs);
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      // Settlement sweep: any descendants the child left in its group still
+      // hold this launch's pipes.  Kill the group so nothing outlives the
+      // launch, then classify what is known.
+      if (!spawnErrored) killGroup('SIGKILL');
+      if (overflowed) result.timedOut = true;
+      if (spawnErrorMessage !== undefined) result.spawnError = spawnErrorMessage;
+      result.stdout = out.slice(0, options.maxOutputChars);
+      result.stderr = (err !== '' ? err : (spawnErrorMessage ?? '')).slice(
+        0,
+        options.maxOutputChars,
+      );
+      resolve(result);
+    };
+    const capture = (current: string, chunk: Buffer, currentBytes: number): string => {
+      if (currentBytes >= captureCap) {
+        overflowed = true;
+        return current;
+      }
+      if (currentBytes + chunk.byteLength > captureCap) {
+        overflowed = true;
+        return current + chunk.toString('utf8', 0, captureCap - currentBytes);
+      }
+      return current + chunk.toString('utf8');
+    };
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      spawnErrored = true;
+      spawnErrorMessage = error.code === 'ENOENT' ? `launcher not found: ${file}` : error.message;
+      killGroup('SIGKILL');
+      finish();
+    });
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out = capture(out, chunk, outBytes);
+      outBytes = Math.min(outBytes + chunk.byteLength, captureCap);
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      err = capture(err, chunk, errBytes);
+      errBytes = Math.min(errBytes + chunk.byteLength, captureCap);
+    });
+    child.on('close', (code, signal) => {
+      result.exitCode = code;
+      result.signal = signal ?? null;
+      if (code === 0 && signal === null && !result.timedOut) result.ok = true;
+      finish();
+    });
+  });
+}
+
+/**
+ * Resolve a bare launcher name to an ABSOLUTE path ONCE per adapter
+ * (final-head review): the certification probe and every later launch must
+ * execute the SAME binary even when a request supplies a parentEnv whose PATH
+ * differs — a PATH pointing into the workspace could otherwise select a
+ * planted launcher while adapter identity still matches the receipt.
+ * Resolution deliberately uses the ADAPTER process environment (the env the
+ * probe's availability check ran under), never the per-request parent env.
+ * An unresolvable bare name is kept as-is so the launch reports the familiar
+ * launcher-not-found spawnError instead of a resolution guess.
+ */
+function resolveLauncher(name: string): string {
+  if (name.includes('/')) return name;
+  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+    if (dir === '') continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching the remaining PATH entries.
     }
   }
-  return result;
+  return name;
 }
 
 /** Build the launcher child env from the parent env through the shared scrub. */
@@ -221,7 +305,11 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
     network === 'allow'
       ? ['(allow network*)']
       : port !== undefined
-        ? [`(allow network-outbound (remote ip "127.0.0.1:${port}"))`]
+        ? // SBPL rejects numeric addresses here ("host must be * or localhost
+          // in network address" — surfaced by the first live execution of
+          // this rule at final head); `localhost` is the accepted loopback
+          // spelling.
+          [`(allow network-outbound (remote ip "localhost:${port}"))`]
         : [];
   return [
     '(version 1)',
@@ -272,7 +360,7 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
         return { available: false, blocker: 'sandbox-exec exists only on darwin' };
       }
       try {
-        await access(SEATBELT_BIN, constants.X_OK);
+        accessSync(SEATBELT_BIN, constants.X_OK);
       } catch {
         return { available: false, blocker: `${SEATBELT_BIN} is not present/executable` };
       }
@@ -458,11 +546,14 @@ export function bwrapArgv(
 
 export function bwrapAdapter(): SandboxBackendAdapter {
   const backend: SandboxBackend = 'bwrap';
+  // Fixed for the adapter's lifetime (final-head review): probes and launches
+  // execute the SAME binary regardless of any request's parentEnv PATH.
+  const launcher = resolveLauncher('bwrap');
   return {
     backend,
     workspaceParent: tmpdir,
     async available() {
-      const probe = await runChild('bwrap', ['--version'], {
+      const probe = await runChild(launcher, ['--version'], {
         env: launcherEnv({}),
         timeoutMs: 10_000,
         maxOutputChars: 4_000,
@@ -496,7 +587,7 @@ export function bwrapAdapter(): SandboxBackendAdapter {
         launcherEnv(request),
         request.argv,
       );
-      return runChild(argv[0]!, argv.slice(1), {
+      return runChild(launcher, argv.slice(1), {
         cwd: request.workspace,
         env: launcherEnv(request),
         timeoutMs: request.timeoutMs ?? 30_000,
@@ -602,11 +693,16 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
     image: options.image,
     user: validatedContainerUser(options.user),
   });
+  // The CLI binary is fixed at construction (final-head review): a bare name
+  // is resolved to its absolute path ONCE here, so a launch request carrying
+  // a parentEnv with a different PATH — one pointing into the workspace —
+  // cannot select a different executable after certification.
+  const launcher = resolveLauncher(resolved.command);
   return {
     backend,
     workspaceParent: tmpdir,
     async available() {
-      const probe = await runChild(resolved.command, ['info', '--format', 'ok'], {
+      const probe = await runChild(launcher, ['info', '--format', 'ok'], {
         env: launcherEnv({}),
         timeoutMs: 15_000,
         maxOutputChars: 4_000,
@@ -658,11 +754,10 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
         spawnError: 'container launch did not complete',
       };
       try {
-        const created = await runChild(
-          resolved.command,
-          ['create', '--name', name, ...createArgs],
-          { ...childOptions, maxOutputChars: 4_000 },
-        );
+        const created = await runChild(launcher, ['create', '--name', name, ...createArgs], {
+          ...childOptions,
+          maxOutputChars: 4_000,
+        });
         const id = created.stdout.trim();
         if (!created.ok) {
           outcome = created;
@@ -675,12 +770,12 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
           };
         } else {
           identity = id;
-          outcome = await runChild(resolved.command, ['start', '--attach', id], childOptions);
+          outcome = await runChild(launcher, ['start', '--attach', id], childOptions);
           if (outcome.ok) {
             // CLI success is not the container's exit status. Verify the
             // daemon reports a stopped child and read its actual exit code.
             const state = await runChild(
-              resolved.command,
+              launcher,
               ['inspect', '--format', '{{.State.Running}} {{.State.ExitCode}}', id],
               { ...childOptions, timeoutMs: 15_000, maxOutputChars: 4_000 },
             );
@@ -700,7 +795,7 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
       } finally {
         // A completed rm --force proves the known container is gone. Never
         // mistake killing the attach CLI for settlement of its descendants.
-        const removed = await runChild(resolved.command, ['rm', '--force', identity], {
+        const removed = await runChild(launcher, ['rm', '--force', identity], {
           ...childOptions,
           timeoutMs: 15_000,
           maxOutputChars: 4_000,
@@ -737,11 +832,14 @@ export interface LandlockAdapterOptions {
 
 export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBackendAdapter {
   const backend: SandboxBackend = 'landlock';
-  // Snapshot at construction (Sol final-head review): options.helperPath is
-  // caller-owned mutable state — reading it at launch time would let a
-  // post-certification mutation swap the helper that executes while
-  // adapter.launch stays identity-fixed.
-  const helperPath = options.helperPath;
+  // Snapshot AND resolve at construction (Sol final-head review):
+  // options.helperPath is caller-owned mutable state — reading it at launch
+  // time would let a post-certification mutation swap the helper that
+  // executes while adapter.launch stays identity-fixed.  A bare name is
+  // resolved to its absolute path once, for the same PATH-identity reason as
+  // the other launchers.
+  const helperPath =
+    options.helperPath === undefined ? undefined : resolveLauncher(options.helperPath);
   return {
     backend,
     workspaceParent: tmpdir,

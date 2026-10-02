@@ -82,7 +82,9 @@ describe('seatbelt boundary construction', () => {
 
   test('a proxy-composed model-only permits exactly the proxy loopback port', () => {
     const profile = seatbeltProfile('model-only', 9053);
-    expect(profile).toContain('(allow network-outbound (remote ip "127.0.0.1:9053"))');
+    // `localhost`, not a numeric address: SBPL rejects the latter ("host must
+    // be * or localhost in network address" — first live execution, final head).
+    expect(profile).toContain('(allow network-outbound (remote ip "localhost:9053"))');
     // No other egress rule may appear: one port, nothing else.
     expect(profile.match(/network-outbound/g)).toHaveLength(1);
     expect(profile).not.toContain('(allow network*)');
@@ -156,7 +158,7 @@ describe('linux and container boundary construction', () => {
   });
 
   test('bwrap keeps the network for an allow posture', () => {
-    expect(bwrapArgv('/ws', 'allow', {}, ['/bin/true'])).not.toContain('--unshare-net');
+    expect(bwrapArgv('/ws', 'allow', {}, ['/usr/bin/true'])).not.toContain('--unshare-net');
   });
 
   test('container drops all capabilities and runs as a fixed non-root UID', () => {
@@ -165,7 +167,7 @@ describe('linux and container boundary construction', () => {
       '/ws',
       'model-only',
       { PATH: '/bin' },
-      ['/bin/true'],
+      ['/usr/bin/true'],
     );
     expect(argv.slice(0, 2)).toEqual(['docker', 'run']);
     expect(argv.join(' ')).toContain('--network none');
@@ -185,7 +187,7 @@ describe('linux and container boundary construction', () => {
     expect(argv.slice(envAt, envAt + 2)).toEqual(['--env', 'PATH']);
     expect(argv.join(' ')).not.toContain('PATH=');
     expect(argv[argv.length - 2]).toBe('cq-sandbox:latest');
-    expect(argv[argv.length - 1]).toBe('/bin/true');
+    expect(argv[argv.length - 1]).toBe('/usr/bin/true');
   });
 
   test('an unprovisioned landlock backend names its blocker instead of passing', async () => {
@@ -195,7 +197,7 @@ describe('linux and container boundary construction', () => {
     expect(availability.blocker).toMatch(/landlock helper/);
     const result = await adapter.launch({
       workspace: '/ws',
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(false);
@@ -207,17 +209,17 @@ describe('linux and container boundary construction', () => {
     // (delta review): `00`, `000:1000` and `1000:00` are all root forms.
     for (const root of ['0', '0:0', '0:1000', '1000:0', '00', '000:1000', '1000:00']) {
       expect(() =>
-        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', {}, ['/bin/true']),
+        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', {}, ['/usr/bin/true']),
       ).toThrow(/non-root/);
     }
     for (const malformed of ['root', '65532:root', '-1']) {
       expect(() =>
-        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', {}, ['/bin/true']),
+        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', {}, ['/usr/bin/true']),
       ).toThrow(/numeric/);
     }
     // Any other fixed numeric identity is accepted verbatim.
     const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', {}, [
-      '/bin/true',
+      '/usr/bin/true',
     ]);
     const userAt = argv.indexOf('--user');
     expect(argv.slice(userAt, userAt + 2)).toEqual(['--user', '1000:1000']);
@@ -274,7 +276,7 @@ esac
     options.user = '0:0';
     const result = await adapter.launch({
       workspace: stubDir,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(true);
@@ -284,7 +286,12 @@ esac
     expect(result.stdout).toContain('orig:latest');
     expect(result.stdout).not.toContain('evil:latest');
     expect(result.stdout).not.toContain('0:0');
-  });
+    // Bounded per-test margin, measured (final head, concurrent authorized
+    // testing): process spawn latency on the shared host reached ~9s per
+    // spawn at load ~104/6 cores; this test chains four sequential CLI
+    // stub spawns.  The 60s bound is test scheduling margin only — product
+    // launch timeouts are untouched.
+  }, 60_000);
 
   test('mutating landlock helperPath after construction cannot swap the helper', async () => {
     const stubA = await stubScript('landlock-a', 'STUB-A');
@@ -294,7 +301,7 @@ esac
     options.helperPath = stubB;
     const result = await adapter.launch({
       workspace: stubDir,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(true);
@@ -303,7 +310,8 @@ esac
     // Availability reads the same snapshot: still the constructed helper.
     const availability = await adapter.available();
     expect(availability.available).toBe(true);
-  });
+    // Same measured-margin rationale as the container snapshot test above.
+  }, 60_000);
 });
 
 describe('adapter selection per platform', () => {
@@ -407,7 +415,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     scratch.push(workspace);
     const result = await adapter.launch({
       workspace,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
       proxyPort: 45454,
     });
@@ -492,7 +500,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     const before = new Set(await readdir('/private/var/tmp'));
     const result = await adapter.launch({
       workspace: workspaceThroughLink,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(false);
@@ -517,7 +525,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     const before = new Set(await readdir('/private/var/tmp'));
     const result = await adapter.launch({
       workspace: workspaceThroughLink,
-      argv: ['/bin/true'],
+      argv: ['/usr/bin/true'],
       network: 'model-only',
     });
     expect(result.ok).toBe(false);

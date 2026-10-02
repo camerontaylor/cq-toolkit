@@ -170,13 +170,20 @@ function detail(result: {
 
 /**
  * True only when the requested binary actually RAN: a spawn failure, a
- * timeout, or a 126/127 exit (could not exec / not found) means the canary's
- * command never executed, so a nonzero exit is NOT evidence of a boundary —
- * it is an inconclusive answer.  A genuine denial exits 1 with an
- * "Operation not permitted"-class error.
+ * timeout, a 126/127 exit (could not exec / not found), or a SIGNAL death
+ * (exitCode null — e.g. the darwin deny-default SIGABRT before main) means
+ * the canary's command never provably executed, so a nonzero exit is NOT
+ * evidence of a boundary — it is an inconclusive answer.  A genuine denial
+ * exits 1 with an "Operation not permitted"-class error.
  */
 function executed(r: { spawnError?: string; timedOut: boolean; exitCode: number | null }): boolean {
-  return r.spawnError === undefined && !r.timedOut && r.exitCode !== 126 && r.exitCode !== 127;
+  return (
+    r.spawnError === undefined &&
+    !r.timedOut &&
+    r.exitCode !== null &&
+    r.exitCode !== 126 &&
+    r.exitCode !== 127
+  );
 }
 
 /**
@@ -198,6 +205,28 @@ function denialOutcome(
   if (!executed(result))
     return { id, verdict: 'inconclusive', detail: `canary never ran: ${detail(result)}` };
   return { id, verdict: 'pass', detail: detail(result) };
+}
+
+/**
+ * Whether a non-ok launch of an OUTSIDE-ALLOWLIST binary is attributable to
+ * the boundary refusing the exec — not to an unrelated launcher failure or
+ * (exit-1-class) tool behavior.  The binary never ran, so its stdout must be
+ * empty, and the failure itself must name exec/permission machinery
+ * (sandbox-exec's "execvp ... Operation not permitted", bwrap's
+ * "Can't execute", the container CLI's OCI exec refusal, or an ENOENT from a
+ * namespace that hides the target).  Anything else is unattributable.
+ */
+function execRefusalAttributable(target: string, r: SandboxLaunchResult): boolean {
+  if (r.stdout.trim() !== '') return false;
+  const evidence = `${r.spawnError ?? ''}\n${r.stderr}`;
+  if (!evidence.toLowerCase().includes(target.toLowerCase())) {
+    // A namespace that hides the target can only fail with a generic
+    // not-found; require the launcher's own exec machinery to speak.
+    return /execvp|can't execute|cannot execute|oci runtime|operation not permitted/i.test(
+      evidence,
+    );
+  }
+  return /exec|permission|not permitted|not allowed|denied|no such file/i.test(evidence);
 }
 
 /** Executed on the bare host — the control that proves a canary CAN fire. */
@@ -463,8 +492,11 @@ async function probeBackendWithLaunch(
       // In-boundary shell control (delta review P2): a grandchild spawned via
       // `bash -c` must EXECUTE inside the boundary before any bash -c canary
       // (nested-child, external, proxy connects) can attribute a nonzero exit
-      // to the boundary rather than to a broken execution path.
-      const shellControl = await launch(['/bin/bash', '-c', '/bin/true']);
+      // to the boundary rather than to a broken execution path.  `/usr/bin/true`
+      // (not /bin/true — absent on some macOS installs) and `--norc`: bash's
+      // rshd heuristic sources ~/.bashrc on a socket stdin, and the boundary
+      // rightly denies that read — the control must not fail on its own noise.
+      const shellControl = await launch(['/bin/bash', '--norc', '-c', '/usr/bin/true']);
       const shellArmed = shellControl.ok;
 
       // Bare-host read/write controls (delta review P2): each file-denial
@@ -548,16 +580,17 @@ async function probeBackendWithLaunch(
       // 6b — LOCAL-PREFIX attack control (delta review): the accepted P7
       // trial denies exec outside /usr/bin,/bin,/sbin,/usr/libexec — prove a
       // host-present /usr/local/bin binary cannot EXEC inside the boundary.
-      // When the host has no local-prefix content there is nothing to attack
-      // and the canary records that explicitly (the allowlist itself is
-      // construction-tested); where content exists, the verdict is earned.
+      // Every verdict here is earned: a host with no local-prefix content
+      // cannot demonstrate the denial and stays inconclusive (a synthetic
+      // pass would certify an unproven boundary), and a launch that timed
+      // out, failed to spawn, or crashed is never read as a refusal.
       const localBin = await firstLocalPrefixTarget();
       if (localBin === undefined) {
         canaries.push({
           id: 'local-prefix-exec',
-          verdict: 'pass',
+          verdict: 'inconclusive',
           detail:
-            'no /usr/local content on this host to attack; /usr/local is absent from the read and exec allowlists (construction-tested)',
+            'no /usr/local content on this host to attack; the exec allowlist omits /usr/local (construction-tested) but the denial itself was not demonstrable',
         });
       } else {
         const arm = await hostRan(localBin, ['--version']);
@@ -571,11 +604,23 @@ async function probeBackendWithLaunch(
               }
             : sandboxed.ok
               ? { id: 'local-prefix-exec', verdict: 'fail', detail: `executed ${localBin}` }
-              : {
-                  id: 'local-prefix-exec',
-                  verdict: 'pass',
-                  detail: `exec of ${localBin} refused: ${detail(sandboxed)}`,
-                },
+              : !executed(sandboxed)
+                ? {
+                    id: 'local-prefix-exec',
+                    verdict: 'inconclusive',
+                    detail: `canary never ran: ${detail(sandboxed)}`,
+                  }
+                : execRefusalAttributable(localBin, sandboxed)
+                  ? {
+                      id: 'local-prefix-exec',
+                      verdict: 'pass',
+                      detail: `exec of ${localBin} refused: ${detail(sandboxed)}`,
+                    }
+                  : {
+                      id: 'local-prefix-exec',
+                      verdict: 'inconclusive',
+                      detail: `refusal not attributable to an exec denial: ${detail(sandboxed)}`,
+                    },
         );
       }
 
@@ -758,7 +803,14 @@ async function probeBackendWithLaunch(
                   .split('\n')
                   .find((line) => /connect|dev\/tcp|network/i.test(line)) ??
                 firstLine(sandboxed.stderr);
-              canaries.push({ id: 'network-loopback', verdict: 'pass', detail: denial });
+              canaries.push({
+                id: 'network-loopback',
+                verdict: 'pass',
+                detail:
+                  denial.trim() !== ''
+                    ? denial
+                    : `child connected to 127.0.0.1:${port} under allow posture`,
+              });
             }
           } finally {
             await listener.close();
@@ -783,12 +835,18 @@ async function probeBackendWithLaunch(
             '-c',
             `exec 3<>/dev/tcp/${external.host}/${external.port}`,
           ]);
+          // Posture-aware (final-head review): the SAME connect demonstrates
+          // egress under `allow` (refusal is the violation) and confinement
+          // under `model-only` (reachability is the violation).
           canaries.push(
-            externalConnect.ok
+            externalConnect.ok !== (network === 'allow')
               ? {
                   id: 'network-external',
                   verdict: 'fail',
-                  detail: `child reached external ${external.host}:${external.port}`,
+                  detail:
+                    network === 'allow'
+                      ? `child could not reach external ${external.host}:${external.port} under allow posture`
+                      : `child reached external ${external.host}:${external.port}`,
                 }
               : !executed(externalConnect)
                 ? {
@@ -796,7 +854,14 @@ async function probeBackendWithLaunch(
                     verdict: 'inconclusive',
                     detail: `bash never ran inside the boundary: ${detail(externalConnect)}`,
                   }
-                : { id: 'network-external', verdict: 'pass', detail: detail(externalConnect) },
+                : {
+                    id: 'network-external',
+                    verdict: 'pass',
+                    detail:
+                      network === 'allow'
+                        ? `child reached external ${external.host}:${external.port} under allow posture`
+                        : detail(externalConnect),
+                  },
           );
         }
       }
@@ -979,5 +1044,22 @@ export async function launchCertified(
         ' — the launch profile must be the profile the canaries proved; CQ_SANDBOX=required is fail-closed',
     );
   }
-  return adapter.launch(request);
+  // Hand the adapter a frozen SNAPSHOT of the request (final-head review):
+  // the caller keeps a reference to the object it passed, and adapters read
+  // request fields asynchronously (the seatbelt profile is compiled after
+  // filesystem awaits).  Mutating `network`/`proxyPort`/`argv` mid-launch
+  // would otherwise change the boundary after these certification checks
+  // have passed.  The snapshot is validated HERE, so what the adapter reads
+  // is exactly what was checked.
+  const snapshot: Parameters<SandboxBackendAdapter['launch']>[0] = Object.freeze({
+    ...request,
+    argv: Object.freeze([...request.argv]),
+    ...(request.parentEnv !== undefined
+      ? { parentEnv: Object.freeze({ ...request.parentEnv }) }
+      : {}),
+    ...(request.envPassthrough !== undefined
+      ? { envPassthrough: Object.freeze([...request.envPassthrough]) }
+      : {}),
+  });
+  return adapter.launch(snapshot);
 }
