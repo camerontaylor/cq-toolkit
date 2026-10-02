@@ -53,7 +53,40 @@ function declarationPath(target) {
   throw new Error(`export target has no supported declaration mapping: ${target}`);
 }
 
-function declarationReferences(source) {
+// Blank out comments (keeping `/// <reference path>` directives and string literals)
+// so imports quoted in JSDoc examples are not counted as declaration dependencies.
+function stripComments(source) {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < source.length && source[j] !== ch) j += source[j] === '\\' ? 2 : 1;
+      out += source.slice(i, j + 1);
+      i = j + 1;
+    } else if (ch === '/' && next === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? source.length : end + 2;
+      out += ' ';
+    } else if (ch === '/' && next === '/') {
+      const end = source.indexOf('\n', i);
+      const stop = end === -1 ? source.length : end;
+      if (/^\/\/\/\s*<reference\s+path\s*=/.test(source.slice(i, stop))) {
+        out += source.slice(i, stop);
+      }
+      i = stop;
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function declarationReferences(rawSource) {
+  const source = stripComments(rawSource);
   const references = new Set();
   const fromPattern = /\bfrom\s*(['"])([^'"]+)\1/g;
   const sideEffectImportPattern = /\bimport\s*(['"])([^'"]+)\1/g;
@@ -201,7 +234,11 @@ async function main() {
     const report = await makeReport();
     if (options.draft) {
       process.stdout.write(
-        stableJson({ ...report, draft: true, baselineStatus: 'not-established' }),
+        stableJson({
+          ...report,
+          draft: true,
+          baselineStatus: 'not-established',
+        }),
       );
       return;
     }

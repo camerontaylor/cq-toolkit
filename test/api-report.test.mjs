@@ -44,6 +44,33 @@ test('reports deterministic hashes for the reachable declaration graph', async (
   }
 });
 
+test('ignores imports quoted inside declaration comments', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      [
+        '/**',
+        ' * @example',
+        ' * import { ghost } from "./missing.js";',
+        ' */',
+        '// export * from "./also-missing.js";',
+        'export * from "./leaf.js";',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export declare function run(): void;\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path: declaration }) => declaration),
+      ['./dist/index.d.ts', './dist/leaf.d.ts'],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('preserves conditional export keys and targets instead of deduplicating branches', async () => {
   const root = await fixture({
     '.': { import: './dist/esm.js', require: './dist/cjs.cjs' },
@@ -59,7 +86,10 @@ test('preserves conditional export keys and targets instead of deduplicating bra
       require: './dist/cjs.cjs',
     });
     assert.deepEqual(
-      report.entries[0].targets.map(({ conditions, target }) => ({ conditions, target })),
+      report.entries[0].targets.map(({ conditions, target }) => ({
+        conditions,
+        target,
+      })),
       [
         { conditions: ['import'], target: './dist/esm.js' },
         { conditions: ['require'], target: './dist/cjs.cjs' },
@@ -70,7 +100,9 @@ test('preserves conditional export keys and targets instead of deduplicating bra
       path.join(root, 'package.json'),
       JSON.stringify({
         name: 'fixture',
-        exports: { '.': { require: './dist/cjs.cjs', import: './dist/esm.js' } },
+        exports: {
+          '.': { require: './dist/cjs.cjs', import: './dist/esm.js' },
+        },
       }),
     );
     assert.notDeepEqual(await makeReport(root), report);
@@ -79,7 +111,9 @@ test('preserves conditional export keys and targets instead of deduplicating bra
       path.join(root, 'package.json'),
       JSON.stringify({
         name: 'fixture',
-        exports: { '.': { import: './dist/cjs.cjs', require: './dist/esm.js' } },
+        exports: {
+          '.': { import: './dist/cjs.cjs', require: './dist/esm.js' },
+        },
       }),
     );
     assert.notDeepEqual(await makeReport(root), report);
