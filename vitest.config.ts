@@ -12,14 +12,103 @@
 // sub-granularity and must never decide a ratchet) — plus `text` for the
 // human-readable table. Opt-in per run via --coverage; plain `vitest run` is
 // unchanged.
+//
+// Projects (execution-policy slice 2, component D): every test/**/*.test.ts
+// is classified in test/suite-classes.json as pure | process | integration |
+// live. The projects below derive their file lists from that manifest, so
+// the classification is auditable and a file absent from the manifest falls
+// into `process` (conservative: real-process budgets, serial). Selection:
+//   npm run test:unit == --project pure --project process --project live
+//   npm run test:e2e  == --project integration
+// Coverage and reporters stay ROOT-level (they are absent from the
+// per-project options), so the ratchet's bare `vitest run --coverage` still
+// runs every project and writes one coverage/coverage-summary.json.
+import { existsSync, readFileSync } from 'node:fs';
 import { configDefaults, defineConfig } from 'vitest/config';
+
+type SuiteClass = 'pure' | 'process' | 'integration' | 'live';
+
+const manifest = JSON.parse(
+  readFileSync(new URL('./test/suite-classes.json', import.meta.url), 'utf8'),
+) as Record<string, SuiteClass>;
+const filesOf = (cls: SuiteClass): string[] =>
+  Object.entries(manifest)
+    .filter(([, c]) => c === cls)
+    .map(([file]) => file);
+
+for (const file of Object.keys(manifest)) {
+  // Drift is loud: a stale manifest entry would silently shrink a project.
+  if (!existsSync(new URL(`./${file}`, import.meta.url))) {
+    throw new Error(`test/suite-classes.json lists a missing file: ${file}`);
+  }
+}
+
+const classified = [...filesOf('pure'), ...filesOf('integration'), ...filesOf('live')];
 
 export default defineConfig({
   test: {
-    // Process-backed suites have real startup and termination deadlines.
-    // Run files serially so competing fixtures do not consume those budgets.
-    fileParallelism: false,
     exclude: [...configDefaults.exclude, '**/dist/**'],
+    projects: [
+      {
+        // No process, git, network or env/cwd mutation; own tmp dirs only.
+        // fileParallelism stays false: the parallel-safety gate (3 green
+        // parallel runs + 1 shuffled run of this project) was NOT executed
+        // because testing was waived by the owner for this change. Enabling
+        // it later means `fileParallelism: true` plus a distinct
+        // `sequence.groupOrder` (projects with different worker counts must
+        // not share one, and groups run one after another — so a parallel
+        // pure group saves at most its own wall time, ~4% ceiling:
+        // opportunistic, never a metric).
+        extends: true,
+        test: {
+          name: 'pure',
+          include: filesOf('pure'),
+          testTimeout: 5_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Real child processes (git, the fake agent CLI, node subprocesses)
+        // with genuine startup/termination deadlines: serial files so
+        // competing fixtures do not consume those budgets. Also the home of
+        // every unclassified file.
+        extends: true,
+        test: {
+          name: 'process',
+          include: ['test/**/*.test.ts'],
+          exclude: [...configDefaults.exclude, '**/dist/**', ...classified],
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Opt-in live-service legs (skipped unless their env flag is set);
+        // same budgets as process, which they drive for real.
+        extends: true,
+        test: {
+          name: 'live',
+          include: filesOf('live'),
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Today's `test:e2e` selection. Budgets are pinned to the vitest
+        // defaults these files already run under (5s/10s) — they carry their
+        // own explicit per-test timeouts, which the project must not shrink
+        // or raise.
+        extends: true,
+        test: {
+          name: 'integration',
+          include: filesOf('integration'),
+          testTimeout: 5_000,
+          hookTimeout: 10_000,
+          fileParallelism: false,
+        },
+      },
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary'],
