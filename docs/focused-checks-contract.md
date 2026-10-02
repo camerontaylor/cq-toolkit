@@ -37,7 +37,7 @@ suite; they do not revisit this contract.
   job-level `cq-state` settle-ledger exclusion in `.github/workflows/ci.yml`),
   and the `static` job runs `test:unit` + `test:e2e`. The `ratchet` job re-runs
   the suite with coverage. The four declarations of the required set —
-  `policy/protected-paths.json`, `scripts/denylist-scan`
+  `policy/protected-paths.json`, `scripts/denylist-scan`'s
   `REQUIRED_WORKFLOW_CHECKS`, the promotion gate's check list, and
   `policy/templates/github-settings.json` — all name `static` and `denylist`;
   they disagree about `ratchet`, `from-source` and `pack-audit`, and that
@@ -105,29 +105,30 @@ first; it rejects a path outside the repository, a `.git`/`node_modules`/
 before any tool runs:
 
 ```bash
-# 1. validate AND filter → /tmp/owned-files.txt: the surviving regular files, one path per
-#    line, and an EMPTY file when nothing survives (no trailing newline, so an empty
-#    result stays empty)
-node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync("/tmp/owned-files.txt", ownedFiles(process.argv.slice(1)).join("\n"));' -- <files>
+# 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
+#    (paths containing spaces survive), and an EMPTY file when nothing survives
+OWNED=$(mktemp)
+OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
 # 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded)
-if [ -s /tmp/owned-files.txt ]; then
-  xargs node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < /tmp/owned-files.txt
+if [ -s "$OWNED" ]; then
+  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED"
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
 # 3. formatting for exactly the same paths
-if [ -s /tmp/owned-files.txt ]; then
-  xargs node node_modules/oxfmt/bin/oxfmt < /tmp/owned-files.txt
+if [ -s "$OWNED" ]; then
+  xargs -0 node node_modules/oxfmt/bin/oxfmt < "$OWNED"
 else
   echo "owned-files: nothing to format (empty or deleted-only list)"
 fi
+rm -f "$OWNED"
 ```
 
 **Validate-then-substitute: steps 2 and 3 consume step 1's output, never the
 original `<files>` list.** `ownedFiles()` deliberately accepts a deleted path and
 then omits it from its return value, and it also de-duplicates; passing the raw
 list on would hand deleted or repeated paths to a mutating tool. A deleted-only
-diff yields an empty `/tmp/owned-files.txt`, both `if` branches take the
+diff yields an empty `$OWNED` list, both `if` branches take the
 `else` path, and the sequence ends as a no-op — the same outcome
 `scripts/fix.mjs` reports for deleted-only inputs. A mixed diff formats and fixes
 only the files that still exist. The guard must test emptiness rather than

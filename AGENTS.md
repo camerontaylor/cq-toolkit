@@ -21,7 +21,7 @@ Your local duty, on a coherent change:
   touches entrypoints, exports, dependencies or configuration, and skip it
   otherwise (canonical condition: the contract's §1)
 
-**Zero local full gates per PR.** No protocol step runs a local full
+**Zero local full gates per PR.** No protocol step requires of a worker a local full
 `npm run test` / `test:unit`, and a clean review adds no run beyond the review
 protocol's own three fixed checkpoints (which are the cheap deterministic
 gates plus the affected tests, never the suite).
@@ -55,20 +55,23 @@ first and pass its **output** to the leaves — the canonical spelling, repeated
 verbatim from contract §3:
 
 ```bash
-# 1. validate AND filter → /tmp/owned-files.txt (empty file when nothing survives)
-node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync("/tmp/owned-files.txt", ownedFiles(process.argv.slice(1)).join("\n"));' -- <files>
-# 2. safe lint fixes for THAT list (never the original list)
-if [ -s /tmp/owned-files.txt ]; then
-  xargs node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < /tmp/owned-files.txt
+# 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
+#    (paths containing spaces survive), and an EMPTY file when nothing survives
+OWNED=$(mktemp)
+OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
+# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded)
+if [ -s "$OWNED" ]; then
+  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED"
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
 # 3. formatting for exactly the same paths
-if [ -s /tmp/owned-files.txt ]; then
-  xargs node node_modules/oxfmt/bin/oxfmt < /tmp/owned-files.txt
+if [ -s "$OWNED" ]; then
+  xargs -0 node node_modules/oxfmt/bin/oxfmt < "$OWNED"
 else
   echo "owned-files: nothing to format (empty or deleted-only list)"
 fi
+rm -f "$OWNED"
 ```
 
 `npm run check` is a composite whose legs include the full suite; it is **not a
