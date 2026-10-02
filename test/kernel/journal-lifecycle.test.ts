@@ -584,7 +584,7 @@ test('closed ladder cannot invoke a resumed importer while a sibling holds the l
   const calls: string[] = [];
   const clock = ladderClock();
   const governor = createGovernor(
-    { maxUsd: 10, perJobWallClockMs: 10, abortGraceMs: 1, killGraceMs: 1 },
+    { maxUsd: 10, inFlightCeiling: 2, perJobWallClockMs: 10, abortGraceMs: 1, killGraceMs: 1 },
     clock,
   );
   hooks.before = async (event) => {
