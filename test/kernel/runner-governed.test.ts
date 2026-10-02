@@ -1572,13 +1572,16 @@ describe('governed journal v2 + resume', () => {
       string,
       unknown
     >;
+    expect(released.nonce).toMatch(/^[0-9a-f-]{36}$/);
+    expect(released.bootId).toMatch(/\S/);
+    expect(released.runId).toMatch(/^plan-gov-mark-nohistory--[0-9a-z]+--[0-9a-f]+$/i);
     expect(released).toEqual({
-      nonce: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      nonce: released.nonce,
       socketPath: `/tmp/cq-j-${String(released.nonce)}.sock`,
       pid: process.pid,
       host: hostname(),
-      bootId: expect.stringMatching(/\S/),
-      runId: expect.stringMatching(/^plan-gov-mark-nohistory--[0-9a-z]+--[0-9a-f]+$/i),
+      bootId: released.bootId,
+      runId: released.runId,
       released: true,
     });
     const contender = await acquirePlanLock(dir, 'plan-gov-mark-nohistory', 'refusal-contender');
@@ -1591,9 +1594,10 @@ describe('governed journal v2 + resume', () => {
       string,
       unknown
     >;
+    expect(nextReleased.nonce).toMatch(/^[0-9a-f-]{36}$/);
     expect(nextReleased).toEqual({
       ...released,
-      nonce: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      nonce: nextReleased.nonce,
       socketPath: `/tmp/cq-j-${String(nextReleased.nonce)}.sock`,
       runId: 'refusal-contender',
     });
