@@ -110,7 +110,8 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       },
       "required": [
         "provider",
-        "model"
+        "model",
+        "budget"
       ],
       "type": "object"
     },
