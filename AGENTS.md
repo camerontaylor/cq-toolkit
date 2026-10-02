@@ -20,7 +20,9 @@ Your local duty, on a coherent change:
 - `npm run knip` when entrypoints, exports, dependencies or config change
 
 **Zero local full gates per PR.** No protocol step runs a local full
-`npm run test` / `test:unit`, and a clean review adds no deterministic run.
+`npm run test` / `test:unit`, and a clean review adds no run beyond the review
+protocol's own three fixed checkpoints (which are the cheap deterministic
+gates plus the affected tests, never the suite).
 The full suite — plus the build, the from-source smoke plan, the coverage
 ratchet and the denylist scan + self-test — runs in required CI on every
 push/PR, and **green required CI on the exact candidate SHA** (the

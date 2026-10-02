@@ -18,9 +18,12 @@ suite; they do not revisit this contract.
   `npm run lint` and `npm run typecheck` are aliases of `npm run check:static` —
   run one, never several.
 - **Zero local full gates per PR.** No protocol step requires a local full
-  `npm run test` or full `npm run test:unit`. A clean review requires zero new
-  deterministic runs: completing a review cycle is not a reason to re-run
-  anything.
+  `npm run test` or full `npm run test:unit`. A clean review adds **zero runs
+  beyond the review protocol's own three fixed checkpoints** — before cycle 1,
+  after cycle-1 addressing, after cycle-2 addressing
+  (`docs/coderabbit-review.md` §5). Those three cheap deterministic gate sets
+  are the cadence itself, not review-triggered work, and completing a review
+  cycle is never a reason to run anything more — least of all a full gate.
 - **The full suite is CI's job, and CI alone is the authority.** Required CI
   runs the whole suite on every push and pull request with no path or branch
   filters: the `static` job runs `test:unit` + `test:e2e`

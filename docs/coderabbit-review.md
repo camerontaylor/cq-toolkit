@@ -132,9 +132,10 @@ affected by the diff (`npx vitest run <affected test files>`), and the three
 whitespace/conflict-marker checks below. The **full suite is not a local
 gate**: `npm run test` / `test:unit` runs in required CI on every push/PR, and
 green required CI on the exact candidate SHA is the sole full-gate authority —
-see [focused-checks-contract.md](focused-checks-contract.md). A clean review
-adds no deterministic run. Use the immutable `BASE` from §3 and stage your own
-new files before these checks so they are covered:
+see [focused-checks-contract.md](focused-checks-contract.md). The three
+checkpoints are the cadence itself, not review-triggered work: a clean review
+adds nothing beyond them, and never a full gate. Use the immutable `BASE` from
+§3 and stage your own new files before these checks so they are covered:
 
 ```bash
 git diff --check "$BASE" HEAD  # committed PR changes
