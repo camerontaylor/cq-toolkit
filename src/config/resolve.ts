@@ -191,7 +191,9 @@ function assertOutsideWorkspace(
 function providerName(name: string, env: Readonly<Record<string, string | undefined>>): boolean {
   if (!name.startsWith('CQ_PROVIDER_')) return false;
   return providerKeySuffixes.some((suffix) => {
-    const encodedId = name.slice('CQ_PROVIDER_'.length, -suffix.length);
+    const separated = `_${suffix}`;
+    if (!name.endsWith(separated)) return false;
+    const encodedId = name.slice('CQ_PROVIDER_'.length, -separated.length);
     const id = encodedId.toLowerCase().replaceAll('_', '-');
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) return false;
     if (PROVIDER_IDS.includes(id as (typeof PROVIDER_IDS)[number])) return true;
