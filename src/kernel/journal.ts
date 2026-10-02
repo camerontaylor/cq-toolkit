@@ -369,14 +369,12 @@ async function acquirePlanLockRecord(
       if (!isEnoent(cleanupError)) throw cleanupError;
     });
   }
-  const handle = await open(path, 'r+');
-
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   // A probe needs only a successful connect. Destroy immediately so a peer
   // withholding EOF cannot hold server.close (and lease release) forever.
   const server = createServer((socket) => socket.destroy());
   let listening = false;
   let released = false;
-  let ownInode = false;
   const markReleased = async (): Promise<void> => {
     // Publish the tombstone atomically, and only over OUR inode: a rival's
     // replacement (lock lost) is never clobbered. A live owner's unreleased
@@ -385,12 +383,17 @@ async function acquirePlanLockRecord(
     const tombstone = `${path}.${nonce}.released.tmp`;
     try {
       await writeDurable(tombstone, `${JSON.stringify({ ...record, released: true })}\n`);
-      const ours = await handle.stat();
+      const ours = await handle?.stat();
       const current = await stat(path).catch((error: unknown) => {
         if (isEnoent(error)) return undefined;
         throw error;
       });
-      if (current?.dev !== ours.dev || current.ino !== ours.ino) return;
+      if (current === undefined) return;
+      // Before the post-publication open there is no handle: our nonce in
+      // the record is then the ownership proof.
+      if (ours === undefined) {
+        if ((await readLockRecord(path)).nonce !== nonce) return;
+      } else if (current.dev !== ours.dev || current.ino !== ours.ino) return;
       await rename(tombstone, path);
       await syncDir(journalDir);
     } finally {
@@ -406,12 +409,12 @@ async function acquirePlanLockRecord(
     }
   };
   try {
+    handle = await open(path, 'r+');
     // Verify the inode opened after publication before touching it.
     const contents = await handle.readFile('utf8');
     if (PlanLockRecordSchema.parse(JSON.parse(contents) as unknown).nonce !== nonce) {
       throw new Error(`journal: lock-lost while acquiring plan '${planId}'`);
     }
-    ownInode = true;
     await syncDir(journalDir);
     await listen(server, record.socketPath);
     listening = true;
@@ -419,27 +422,33 @@ async function acquirePlanLockRecord(
   } catch (error) {
     try {
       if (listening) await closeServer(server);
-      if (ownInode) await markReleased();
+      // Publication and owner setup are one rollback scope; markReleased
+      // only ever replaces a record that is provably ours.
+      await markReleased();
     } finally {
-      await handle.close();
+      await handle?.close();
     }
     throw error;
   }
 
+  const owned = handle;
+  let serverClosed = false;
   return {
     assertHeld,
     async release(): Promise<void> {
       if (released) return;
-      released = true;
-      try {
+      // Only a published tombstone completes release; a failure leaves the
+      // handle open so a retry can still fence on our inode.
+      if (!serverClosed) {
         await closeServer(server);
-        await markReleased();
-      } finally {
-        await handle.close();
-        await unlink(record.socketPath).catch((error: unknown) => {
-          if (!isEnoent(error)) throw error;
-        });
+        serverClosed = true;
       }
+      await markReleased();
+      released = true;
+      await owned.close();
+      await unlink(record.socketPath).catch((error: unknown) => {
+        if (!isEnoent(error)) throw error;
+      });
     },
   };
 }

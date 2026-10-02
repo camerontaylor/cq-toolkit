@@ -512,6 +512,12 @@ async function executeOp(
   }
 }
 
+interface LeaseState {
+  lock?: Awaited<ReturnType<typeof acquirePlanLock>>;
+  /** A killed op's body was detached and may still run: never release. */
+  detached?: boolean;
+}
+
 /**
  * Run one plan to completion (or honest early stop) and return its report.
  * See the header for the full contract. The optional `gov` handle turns the
@@ -526,7 +532,7 @@ export async function runPlan(
 ): Promise<RunReport> {
   // The lifecycle owns release even when folding fails before the run's
   // signal listener exists. Keep this wrapper separate from run semantics.
-  const lease: { lock?: Awaited<ReturnType<typeof acquirePlanLock>> } = {};
+  const lease: LeaseState = {};
   let report: RunReport;
   try {
     report = await runPlanUnderLease(plan, opts, registry, gov, lease);
@@ -534,10 +540,14 @@ export async function runPlan(
     // The run's own failure is the root cause: a release that fails too
     // (often the same disk fault) must not replace it. An unreleased record
     // of a finished process stays reclaimable by pid/socket liveness.
-    await lease.lock?.release().catch(() => undefined);
+    // A detached op body may still be running: keep the lease fenced.
+    if (lease.detached !== true) await lease.lock?.release().catch(() => undefined);
     throw error;
   }
-  await lease.lock?.release();
+  // Fail closed: a killed in-process op is detached, not stopped. Its record
+  // stays unreleased so no overlapping run can enter the job; it becomes
+  // reclaimable only when this process dies (pid/socket liveness).
+  if (lease.detached !== true) await lease.lock?.release();
   return report;
 }
 
@@ -546,7 +556,7 @@ async function runPlanUnderLease(
   opts: RunOptions,
   registry: OpRegistryView,
   gov: Governance | undefined,
-  lease: { lock?: Awaited<ReturnType<typeof acquirePlanLock>> },
+  lease: LeaseState,
 ): Promise<RunReport> {
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —
   // there would be no admission gate and no spend observation to enforce it.
@@ -1454,6 +1464,7 @@ async function runPlanUnderLease(
         // Rung 3 fired: the op was killed — detached in-process with
         // its rejections suppressed — and the honest known-cause
         // verdict is recorded in its place (I9).
+        lease.detached = true;
         governor.record({
           kind: 'completed',
           op: job.op,
