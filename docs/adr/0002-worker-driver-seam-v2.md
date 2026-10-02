@@ -3,8 +3,8 @@
 > Publication note (W7.2): copied from `toolkit-research` branch `research/g1-adr-reconciliation` at `bf5f540`. The status above records the later owner G1 decision. References below to pending G1 approval or draft status describe the source text at its drafting date; accepted preconditions and residuals remain binding.
 
 Status: **accepted** (owner G1 sign-off, 2026-09-26; binding work-item preconditions and residuals retained)
-dispositions in [`adr-0002-r1-dispositions.md`](adr-0002-r1-dispositions.md). Critic round 2 (final) returned ITERATE
-(10 residual findings, 4 major). Pending owner approval at G1 (the G1 preconditions are in §7).
+Critic round 1 findings and their dispositions are not published in this repository (they live in the private
+`toolkit-research` repository). Critic round 2 (final) returned ITERATE (10 residual findings, 4 major). Pending owner approval at G1 (the G1 preconditions are in §7).
 **Reconciled (G1 prep): 2026-09-25.** The residuals of `adr-0002-critic-r2-verdict.md` (`research/adr-0002-critic-r2`
 @ `95bcf63`) are folded, together with the cross-ADR items of `adr-0003-critic-r2-verdict.md`
 (`research/adr-0003-critic-r2` @ `f4ebca6`), RS-14 (`research/rs14-provider-limits` @ `ab671be`) and RS-7
@@ -14,8 +14,9 @@ Date: 2026-09-25
 Amends: ADR-0001 (seam contract; served-model clause, see §2.6). Paired with: ADR-0003 (governed runner). Together
 they are the **single P2 thaw** (plan §2 P2, §5).
 Evidence: `research/research-20260925-v11/rs5-seam-v2.md` (all anchors against cq-toolkit `5e52707`).
-Annex slots: **A — MCP harness server (RS-12)**; **B — configuration keys (RS-15)**. Both are placeholders. Their
-spikes fill them without changing §2–§7.
+Annexes: **A — MCP harness server (RS-12)**, [`0002-annex-a-mcp-harness.md`](0002-annex-a-mcp-harness.md); **B —
+configuration keys (RS-15)**, [`0002-annex-b-config.md`](0002-annex-b-config.md). Those files carry the annex bodies and
+supersede the slot text at the end of this file; §2–§7 are unchanged.
 
 ## 1. Context
 
@@ -614,7 +615,7 @@ This ADR can be accepted at G1 only when:
 
 ## Annex A — MCP harness server (RS-12) — _slot_
 
-Filled by RS-12. The fixed constraints from this ADR:
+The body is [`0002-annex-a-mcp-harness.md`](0002-annex-a-mcp-harness.md), which supersedes this slot. The fixed constraints from this ADR:
 
 - The server binds to `invocation.workspace`, resolved by the driver, and to `DriverRequest.harness`.
 - It adds no `OpInvocation` fields.
@@ -622,7 +623,7 @@ Filled by RS-12. The fixed constraints from this ADR:
 
 ## Annex B — configuration keys (RS-15) — _slot_
 
-Placeholders, to be named by RS-15:
+The body is [`0002-annex-b-config.md`](0002-annex-b-config.md), which supersedes this slot. The keys it defines cover:
 
 - the factory bindings (`CQ_DRIVER_<ROLE>_LANE`-shaped), plus the `solo-maintainer` profile's
   `anthropic → claude-agent` binding;
