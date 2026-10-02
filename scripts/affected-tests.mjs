@@ -5,7 +5,9 @@
 //
 // Usage:
 //   node scripts/affected-tests.mjs [--base <ref>] [--json] [<changed-file>...]
-//   npx vitest run $(node scripts/affected-tests.mjs --base origin/merge-queue)
+//   files=$(node scripts/affected-tests.mjs --base origin/merge-queue)
+//   [ -z "$files" ] || npx vitest run $files   # empty = nothing to run; a bare
+//                                              # `vitest run` would be the FULL suite
 //
 // With no explicit files, the changed set is `git diff --name-only <base>...HEAD`
 // (default base origin/merge-queue). Output: one test file per line, or with
@@ -14,7 +16,7 @@
 // non-import map in scripts/lib/affected-tests.mjs; unknown impact — or a failed
 // import-graph query — falls back to EVERY unit test file (the whole suite).
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { selectAffected } from './lib/affected-tests.mjs';
 
 const argv = process.argv.slice(2);
@@ -33,9 +35,18 @@ const changed =
         .split('\0')
         .filter(Boolean);
 
-const allTests = Object.keys(JSON.parse(readFileSync('test/suite-classes.json', 'utf8'))).filter(
-  (file) => !file.startsWith('test/e2e/') && file !== 'test/driver/acp.test.ts',
-);
+// Classified files plus every discovered test absent from the manifest: those
+// run in the conservative `process` project (vitest.config.ts), so a PR that
+// adds an unclassified suite must still select it.
+const discovered = ['test', 'lint']
+  .flatMap((dir) => readdirSync(dir, { recursive: true }).map((f) => `${dir}/${f}`))
+  .filter((f) => f.endsWith('.test.ts'));
+const allTests = [
+  ...new Set([
+    ...Object.keys(JSON.parse(readFileSync('test/suite-classes.json', 'utf8'))),
+    ...discovered,
+  ]),
+].filter((file) => !file.startsWith('test/e2e/') && file !== 'test/driver/acp.test.ts');
 
 let related = [];
 const sources = changed.filter((f) => /^(src|scripts)\//.test(f) && /\.(ts|mts|js|mjs)$/.test(f));

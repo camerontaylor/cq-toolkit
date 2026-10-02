@@ -15,21 +15,30 @@
 /** [path pattern, test-file patterns]; first matching rows all contribute. */
 export const NON_IMPORT_MAP = [
   [/^src\/.*\.prompt$/, [/^test\/(driver|kernel|plans|ops)\//]],
-  [/^test\/fixtures\//, [/^test\/(driver|harness|ops|cli|e2e)\//]],
+  // Fixtures are consumed across areas (sweep, ratchet-baseline, ...) and
+  // fixture paths are not part of the related-source query: select every test.
+  [/^test\/fixtures\//, [/^test\//]],
   [/^test\/helpers\//, [/^test\//]],
   [/^scripts\//, [/^test\/scripts\//, /^test\/workflows\//]],
-  [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//]],
+  [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//, /^test\/ops\/gates\//]],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
   [/^docs\/ops\//, [/^test\/scripts\//]],
-  [/^baselines\//, [/^test\/scripts\//, /^test\/ops\/ratchet\//]],
+  [/^baselines\//, [/^test\/(scripts|workflows)\//, /^test\/ops\/(ratchet|gates)\//]],
+  // Docs and prompts that code or tests read at runtime.
+  [/^(docs\/(dd-1-|methods-)|src\/.*\.md$)/, [/^test\//]],
   [/^(vitest\.config\.ts|test\/suite-classes\.json)$/, [/^test\//]],
-  [/^(package\.json|package-lock\.json|tsconfig[^/]*\.json)$/, [/^test\/scripts\//]],
+  // Dependency and compiler inputs affect every test project.
+  [/^(package\.json|package-lock\.json|tsconfig[^/]*\.json)$/, [/^test\//]],
 ];
 
 /** Paths whose edits no test reads: prose and repo metadata. */
-export const INERT = [/^docs\/(?!ops\/)/, /\.md$/, /^LICENSE/, /^\.github\/(?!workflows\/)/];
+export const INERT = [
+  /^docs\/(?!ops\/|dd-1-|methods-)/,
+  /^(README|LICENSE|CHANGELOG|AGENTS|CLAUDE)[^/]*$/,
+  /^\.github\/(?!workflows\/)/,
+];
 
-const isTest = (path) => /^test\/.*\.test\.ts$/.test(path);
+const isTest = (path) => /^(test|lint)\/.*\.test\.ts$/.test(path);
 // src/** is delegated to the import graph: `related` is an aggregate answer,
 // so a src file with no importing test selects nothing rather than falling back.
 const isSource = (path) => /^src\/.*\.(ts|mts|js|mjs)$/.test(path);
