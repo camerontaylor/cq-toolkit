@@ -12,17 +12,25 @@
 // With no explicit files, the changed set is `git diff --name-only <base>...HEAD`
 // (default base origin/merge-queue). Output: one test file per line, or with
 // --json {"files":[...],"fallback":bool,"reason":"..."}. Selection = the static
-// import graph (`vitest list --filesOnly --json --related`) ∪ the reviewed
+// import graph (vitest's `getRelevantTestSpecifications` with `related` set —
+// the query behind `vitest related`, minus running the tests; the `list`
+// command has no `--related` flag) ∪ the reviewed
 // non-import map in scripts/lib/affected-tests.mjs; unknown impact — or a failed
 // import-graph query — falls back to EVERY unit test file (the whole suite).
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
+import { relative } from 'node:path';
+import { createVitest } from 'vitest/node';
 import { selectAffected } from './lib/affected-tests.mjs';
 
 const argv = process.argv.slice(2);
 const json = argv.includes('--json');
 const baseAt = argv.indexOf('--base');
 const base = baseAt === -1 ? 'origin/merge-queue' : argv[baseAt + 1];
+if (base === undefined || base.startsWith('--')) {
+  process.stderr.write('affected-tests: --base requires a ref\n');
+  process.exit(2);
+}
 const explicit = argv.filter((a, i) => !a.startsWith('--') && argv[i - 1] !== '--base');
 
 const run = (cmd, args) =>
@@ -52,8 +60,13 @@ let related = [];
 const sources = changed.filter((f) => /^(src|scripts)\//.test(f) && /\.(ts|mts|js|mjs)$/.test(f));
 if (sources.length > 0) {
   try {
-    const out = run('npx', ['vitest', 'list', '--filesOnly', '--json', '--related', ...sources]);
-    related = JSON.parse(out).map((entry) => entry.file.replace(`${process.cwd()}/`, ''));
+    const vitest = await createVitest('test', { related: sources, watch: false, run: true });
+    try {
+      const specs = await vitest.getRelevantTestSpecifications();
+      related = specs.map((spec) => relative(process.cwd(), spec.moduleId));
+    } finally {
+      await vitest.close();
+    }
   } catch {
     related = null;
   }
