@@ -407,6 +407,31 @@ the mutation critical section rather than trusting bytes captured before the
 lock, which changes when the capture happens and is a behavioral change to
 step 3a. Recorded as a residual rather than absorbed silently.
 
+### Public surface changed — W3.1 handoff (API lane owns the baseline)
+
+This patch DID change the family's public surface, and no "no public API
+change" claim is made for it:
+
+- `makeAstGrepCodemod(run, storeFor)` gained two OPTIONAL parameters —
+  `approval` (an `ApprovalAuthority`, defaulting to deny-all) and `inherited`
+  (an `ExercisedScope`). Source-compatible for existing callers; the default
+  is fail-closed, so an unbinding caller that only passed two arguments now
+  has its applies REFUSED until it binds an authority. That is a behavioral
+  change on the public API and must appear in the next W3.1 report.
+- New public exports from `ops/analyze/approval.ts`: `ExercisedScope`,
+  `isExercisedScope`, `canonicalWorkspace`, `contentFingerprint`,
+  `withMutationLock`, `FileNonceLedgerConfig`, and the authority/ledger/lock
+  factories. The family barrel `index.ts` is deliberately NOT re-exporting
+  them (public-surface curation is the API lane's), so the published surface
+  only changes by the signature above until that lane acts.
+- `setAnalyzeApprovalAuthority` is exported from the family's `registry.ts`
+  (the injection point for the kernel authority) and is likewise not
+  re-exported from the barrel.
+
+Handoff: regenerate the API report/baseline AFTER this lands, and record the
+`makeAstGrepCodemod` signature change explicitly — a consumer that composed
+the engine directly must now pass an authority or bind the shared one.
+
 ### Open integration lease (for the #238 / kernel owner, NOT done here)
 
 1. `src/ops/analyze/registry.ts` is now **edited** (the lease was extended

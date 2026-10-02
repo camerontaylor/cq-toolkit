@@ -639,6 +639,107 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
       }
     });
 
+    test('cross-workspace: a scope minted for one tree does not authorize another', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      const authority = trustedAuthority('/ws');
+      let refused = '';
+      // The outer approval covers '/ws'; the nested op aims at '/elsewhere'.
+      await withApprovedMutation(
+        authority,
+        {
+          op: 'analyze.playbookDispatch',
+          workspace: '/ws',
+          targets: ['src/a.ts'],
+          inputDigest: 'sha256:cross',
+        },
+        async (scope) => {
+          const engine = makeAstGrepCodemod(run, () => store, undefined, scope);
+          const result = await engine({
+            dir: '/elsewhere',
+            rule: 'r',
+            files: ['src/a.ts'],
+            dryRun: false,
+            approved: true,
+          });
+          if (result.status === 'failed') refused = result.error;
+          return result;
+        },
+      );
+      // A scope authorizes exactly the workspace it was minted for, so a
+      // different tree is refused rather than riding the same approval.
+      expect(refused).toContain('authorizes exactly the workspace');
+      expect(store.written.size).toBe(0);
+    });
+
+    test('containment: a scope does not authorize targets outside its approved set', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      const authority = trustedAuthority('/ws');
+      let refused = '';
+      await withApprovedMutation(
+        authority,
+        {
+          op: 'analyze.playbookDispatch',
+          workspace: '/ws',
+          // The approval covered ONE file ...
+          targets: ['src/a.ts'],
+          inputDigest: 'sha256:contain',
+        },
+        async (scope) => {
+          // ... but the nested op would write a second, unapproved one.
+          const engine = makeAstGrepCodemod(run, () => store, undefined, scope);
+          const result = await engine({
+            dir: '/ws',
+            rule: 'r',
+            files: ['src/a.ts', 'src/b.ts'],
+            dryRun: false,
+            approved: true,
+          });
+          if (result.status === 'failed') refused = result.error;
+          return result;
+        },
+      );
+      expect(refused).toContain('authorizes exactly the targets');
+      expect(refused).toContain('src/b.ts');
+      expect(store.written.size).toBe(0);
+    });
+
+    test('a RETAINED scope is refused on reuse after its section ended', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      const authority = trustedAuthority();
+      let retained: unknown;
+      await withApprovedMutation(
+        authority,
+        {
+          op: 'analyze.playbookDispatch',
+          workspace: '/ws',
+          targets: ['src/a.ts'],
+          inputDigest: 'sha256:retain',
+        },
+        async (scope) => {
+          retained = scope;
+          return 'written';
+        },
+      );
+      // Outside the section now, so the same primitive call that was legal
+      // inside it is refused — otherwise a captured capability would be a
+      // permanent write token.
+      const engine = makeAstGrepCodemod(run, () => store, undefined, retained as ExercisedScope);
+      const result = await engine({
+        dir: '/ws',
+        rule: 'r',
+        files: ['src/a.ts'],
+        dryRun: false,
+        approved: true,
+      });
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') return;
+      expect(result.error).toContain('not live');
+      expect(store.written.size).toBe(0);
+    });
+
     test('the direct path spends exactly one nonce for the same write the nested path performs', async () => {
       const direct = trustedAuthority();
       const store = memoryStore(FIXTURE_FILES);

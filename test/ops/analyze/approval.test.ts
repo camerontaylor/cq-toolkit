@@ -41,13 +41,16 @@ import { describe, expect, test } from 'vitest';
 import type {
   ApprovalState,
   ApprovalSubject,
+  ExercisedScope,
   MutationLock,
   MutationLocks,
   VerifiedApproval,
 } from '../../../src/ops/analyze/approval.js';
 import {
   approvalInputDigest,
+  canonicalWorkspace,
   DENY_ALL_APPROVALS,
+  isExercisedScope,
   makeApprovalAuthority,
   makeFileNonceLedger,
   makeGitApprovalStateReader,
@@ -644,6 +647,100 @@ describe('the durable operator ledger (ADR-0003 §5)', () => {
     // Refused as SPENT — the ADR §5 replay case — not as malformed.
     expect(replay.status === 'needs-human' ? replay.reason : '').toContain('already consumed');
     expect(replayWrite.calls).toBe(0);
+  });
+});
+
+// D1 (delta review): the scope brand is a RUNTIME symbol. `declare const
+// ... : unique symbol` type-checked, emitted no binding, and threw
+// `ReferenceError` at the mint — so every approved mutation would have
+// faulted, and `tsc` said nothing. These pin that the brand and the live
+// lifetime are real at runtime, not merely in the type system.
+describe('the ExercisedScope capability is a real runtime capability', () => {
+  test('a scope minted inside an approved mutation is LIVE and branded', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
+    let seen: unknown;
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(['src/a.ts']),
+      async (scope) => {
+        seen = scope;
+        // Liveness at the moment of use — this is the check that a
+        // `declare const` brand would have made unreachable.
+        expect(isExercisedScope(scope)).toBe(true);
+        return 'written';
+      },
+    );
+    expect(outcome.status).toBe('ok');
+    // ...and NOT live once the section has settled and the lock released.
+    expect(isExercisedScope(seen)).toBe(false);
+  });
+
+  test('a RETAINED scope is refused after its section ends — the brand outlives it, liveness does not', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
+    let retained: unknown;
+    await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(['src/a.ts']),
+      async (scope) => {
+        retained = scope;
+        return 'written';
+      },
+    );
+    // The brand still says "real scope"; only liveness has expired. A
+    // brand-only check would happily honor this stale capability forever.
+    expect(isExercisedScope(retained)).toBe(false);
+  });
+
+  test('a scope is RETIRED even when the write throws, so a failed section leaks no capability', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
+    let captured: unknown;
+    const outcome = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(['src/a.ts']),
+      async (scope) => {
+        captured = scope;
+        throw new Error('the write faulted');
+      },
+    );
+    // The fault propagates (the lock is released on the way out) ...
+    await expect(outcome).rejects.toThrow('the write faulted');
+    // ... and the scope captured on the way out is already dead.
+    expect(isExercisedScope(captured)).toBe(false);
+  });
+
+  test('each section mints its OWN scope; a scope is never reused across sections', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
+    const minted: unknown[] = [];
+    for (const _attempt of [1, 2]) {
+      await withApprovedMutation(
+        fixture.authority,
+        fixture.subjectOf(['src/a.ts']),
+        async (scope) => {
+          minted.push(scope);
+          return 'written';
+        },
+      );
+    }
+    expect(minted).toHaveLength(2);
+    expect(minted[0]).not.toBe(minted[1]);
+    for (const scope of minted) expect(isExercisedScope(scope)).toBe(false);
+  });
+
+  test('a scope carries the CANONICAL workspace and the approved targets it bounds', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
+    let captured: ExercisedScope | undefined;
+    await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(['src/a.ts']),
+      async (scope) => {
+        captured = scope;
+        return 'written';
+      },
+    );
+    // Captured before retirement, so these assert the mint's CONTENT.
+    expect(captured?.op).toBe(OP);
+    expect(captured?.targets).toEqual(['src/a.ts']);
+    expect(captured?.workspace).toBe(canonicalWorkspace(WORKSPACE));
   });
 });
 

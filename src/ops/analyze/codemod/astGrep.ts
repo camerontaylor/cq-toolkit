@@ -67,6 +67,7 @@ import type {
 } from '../approval.js';
 import {
   approvalInputDigest,
+  canonicalWorkspace,
   DENY_ALL_APPROVALS,
   isExercisedScope,
   withApprovedMutation,
@@ -915,14 +916,38 @@ export function makeAstGrepCodemod(
     // second exercise — re-exercising would throw on at-most-once.
     if (inherited !== undefined) {
       if (!isExercisedScope(inherited)) {
-        // A value this module did not mint is a caller bug or a forgery. It
-        // is REFUSED, never ignored: ignoring it would fall through to
-        // authorizing the write on the input flag alone, which is the exact
-        // hole this whole change closes.
+        // A value this module did not mint, OR one whose originating section
+        // has already settled (a retained scope). It is REFUSED, never
+        // ignored: ignoring it would fall through to authorizing the write on
+        // the input flag alone, which is the exact hole this change closes.
         return {
           status: 'failed',
           error:
-            'ast-grep codemod: an inherited approval scope was supplied that this module did not mint — refused rather than ignored, because ignoring it would fall through to authorizing the write on the input flag alone',
+            'ast-grep codemod: the inherited approval scope is not live — it was either not minted by the approval module or its critical section has already ended; refused rather than ignored, because ignoring it would fall through to authorizing the write on the input flag alone',
+        };
+      }
+      // WORKSPACE IDENTITY. The scope authorizes ONE workspace; a nested
+      // op aimed at a different tree is not covered by it, whatever the
+      // caller intends. Compared canonically, so a symlinked spelling of the
+      // same tree (or /var vs /private/var) is recognized as the SAME
+      // workspace rather than diverging on the string.
+      const here = canonicalWorkspace(input.dir);
+      const covered = canonicalWorkspace(inherited.workspace);
+      if (here !== covered) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: the inherited approval covers workspace '${covered}', but this op targets '${here}' — an inherited scope authorizes exactly the workspace it was minted for; refused, and nothing was written`,
+        };
+      }
+      // TARGET CONTAINMENT. The approval covered a specific target set; a
+      // nested op reaching for ANY file outside it exceeds what was approved
+      // even though the workspace matches.
+      const approvedTargets = new Set(inherited.targets);
+      const outside = pending.map((item) => item.file).filter((file) => !approvedTargets.has(file));
+      if (outside.length > 0) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: the inherited approval covered [${inherited.targets.join(', ')}] but this op would also write [${outside.join(', ')}] — an inherited scope authorizes exactly the targets it was minted for; refused, and nothing was written`,
         };
       }
       try {

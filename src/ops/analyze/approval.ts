@@ -876,24 +876,81 @@ export type ApprovedMutation<T> =
  *    already inside the critical section, and the lock is released when that
  *    callback settles.
  */
-declare const scopeBrand: unique symbol;
+/**
+ * The brand is a REAL runtime symbol, not a `declare const`.
+ *
+ * That distinction is the whole defect this replaced: `declare const
+ * scopeBrand: unique symbol` type-checks and satisfies the compiler, but
+ * emits NO binding, so every runtime use — minting the scope and testing the
+ * brand — threw `ReferenceError: scopeBrand is not defined`. `tsc` reported
+ * nothing, and every approved mutation in the family would have faulted at the
+ * mint. A brand that authorizes a write MUST exist at runtime, because the
+ * only thing standing between a forged object and a mutation is the runtime
+ * check on it.
+ */
+const scopeBrand: unique symbol = Symbol('cq.approval.scopeBrand');
+
+/**
+ * LIVE SCOPES. Membership here — not the brand alone — is what makes a scope
+ * usable, and it is what makes it SINGLE-SECTION: a scope is added when its
+ * critical section opens and removed in a `finally` when that section settles.
+ * So a scope retained by its recipient and used later, after the lock was
+ * released, is REFUSED rather than honored — which a brand check alone cannot
+ * do, since the brand outlives the section. Held in a WeakSet so a retained
+ * reference cannot keep the entry alive.
+ */
+const liveScopes = new WeakSet<object>();
 
 /** See {@link ExercisedScope}. Minted only inside an approved mutation's critical section. */
 export interface ExercisedScope {
   readonly [scopeBrand]: true;
   /** The op whose approval was exercised — for refusal wording, never for authorization. */
   readonly op: string;
-  /** The workspace whose mutation lock is currently held. */
+  /** The CANONICAL workspace whose mutation lock is currently held. */
   readonly workspace: string;
+  /** The CANONICAL target files that approval covered — the containment bound. */
+  readonly targets: readonly string[];
 }
 
-/** True only for a scope this module minted inside a live critical section. */
+/** Mint a live scope for one critical section. Only {@link retireScope} closes it. */
+function mintScope(op: string, workspace: string, targets: readonly string[]): ExercisedScope {
+  const scope: ExercisedScope = {
+    [scopeBrand]: true,
+    op,
+    workspace: canonicalWorkspace(workspace),
+    targets: [...targets],
+  };
+  liveScopes.add(scope);
+  return scope;
+}
+
+/** Close a scope when its section settles, in a `finally`. */
+function retireScope(scope: ExercisedScope): void {
+  liveScopes.delete(scope);
+}
+
+/**
+ * True only for a scope this module minted AND whose critical section is
+ * still open. A forged object fails the brand; a RETAINED scope fails
+ * liveness. Both are refused by the same check, deliberately: the op's
+ * response is identical either way, and distinguishing them in the message
+ * would only tell an attacker which half of the guard they cleared.
+ */
 export function isExercisedScope(value: unknown): value is ExercisedScope {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { [scopeBrand]?: unknown })[scopeBrand] === true
-  );
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as { [scopeBrand]?: unknown };
+  return candidate[scopeBrand] === true && liveScopes.has(value);
+}
+
+/**
+ * Canonical workspace identity for the containment checks: the `realpath`,
+ * with a not-yet-existing path resolved through its longest existing
+ * ancestor. Two spellings of one tree must compare EQUAL (a symlinked
+ * checkout, `/var` versus `/private/var`), so a scope minted for one cannot be
+ * silently spent against the other.
+ */
+export function canonicalWorkspace(path: string): string {
+  return realpathOrSelf(path);
 }
 
 export async function withApprovedMutation<T>(
@@ -919,7 +976,7 @@ export async function withApprovedMutation<T>(
       if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
       return { status: 'ok', value: await write(scope) };
     },
-    subject.op,
+    { op: subject.op, targets: subject.targets },
   );
   if (!held.ok) return { status: 'needs-human', reason: held.reason };
   return held.value;
@@ -943,8 +1000,8 @@ export async function withMutationLock<T>(
   authority: ApprovalAuthority,
   workspace: string,
   fn: (scope: ExercisedScope) => Promise<T>,
-  /** The op the scope will report — wording only, never authorization. */
-  op = '',
+  /** What the scope reports and bounds: op name (wording) and the approved targets. */
+  meta: { readonly op?: string; readonly targets?: readonly string[] } = {},
 ): Promise<
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string }
 > {
@@ -956,13 +1013,20 @@ export async function withMutationLock<T>(
         "approval refused: the authority exposes no mutation lock, so this workspace's mutations are not serialized; nothing was written",
     };
   }
-  // The scope is minted INSIDE the critical section, so it cannot exist —
-  // and therefore cannot be passed anywhere — except while this lock is held.
+  // The scope is minted INSIDE the critical section and retired in a `finally`
+  // when that section settles — so it cannot exist outside the lock, and a
+  // recipient that retains it past the section holds a scope that no longer
+  // passes {@link isExercisedScope}.
   return {
     ok: true,
-    value: await locks
-      .forWorkspace(workspace)
-      .withLock(async () => fn({ [scopeBrand]: true, op, workspace })),
+    value: await locks.forWorkspace(workspace).withLock(async () => {
+      const scope = mintScope(meta.op ?? '', workspace, meta.targets ?? []);
+      try {
+        return await fn(scope);
+      } finally {
+        retireScope(scope);
+      }
+    }),
   };
 }
 
