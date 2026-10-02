@@ -40,8 +40,10 @@ describe('SelfhostDefaults', () => {
     // The governor wall-clock ladder on the merge dispatch paths (#137).
     expect(SelfhostDefaults.perJobWallClockMs).toBe(300_000);
     // The SERVED id per the recorded conductor decision — requesting any
-    // other id is rejected by the served-model-mismatch guard.
-    expect(SelfhostDefaults.driver).toEqual({ provider: 'ai-sdk', model: 'glm-5.3-flash' });
+    // other id is rejected by the served-model-mismatch guard. The provider
+    // handle is the normalised 'zai' (the deprecated 'ai-sdk' alias stays
+    // out of shipped config).
+    expect(SelfhostDefaults.driver).toEqual({ provider: 'zai', model: 'glm-5.3-flash' });
     // The repo's own merge conventions.
     expect(SelfhostDefaults.baseBranch).toBe('merge-queue');
     expect(SelfhostDefaults.protectedBranch).toBe('main');

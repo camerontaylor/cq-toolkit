@@ -487,19 +487,19 @@ reference implements no structured output at all. The claude-agent lane's
 native path (src/driver/README.md) has NO analog here. Strategy, same
 posture as the weakest existing lane, stated without cosmetics:
 
-- When `outputSchema` is constructed in, the driver APPENDS the JSON
+- When the INVOCATION carries `outputSchema` (seam v2 — there is no
+  construction-time schema), the driver APPENDS the JSON
   schema and a reply-with-only-JSON instruction to the prompt
   (prompt-directed JSON), assembles the final assistant text from the
-  `agent_message_chunk` stream, and post-settle validates it with zod
-  against the constructor schema. Parse/validation success →
+  `agent_message_chunk` stream, and post-settle validates it with the
+  SHARED validator against that same document. Parse/validation success →
   `WorkerResult.structuredOutput`.
 - **The honest gap:** the model may refuse, prepend prose, or malform —
-  identical to every prompt-directed scheme. A failing payload is
-  DROPPED to narration (the raw text never lands in
-  `structuredOutput`), `structuredOutput` stays absent, and the run
-  verdict stays what the wire said — the claude-agent lane's
-  dropped-to-narration rule, without even a native fallback to hide
-  behind. Conformance exercises the scripted-JSON path through the fake
+  identical to every prompt-directed scheme. A failing payload never
+  lands in `structuredOutput` and the run settles the UNIFORM
+  error/`output-invalid` verdict (seam v2 §2.3), usage and cost kept —
+  this lane has no native retry or repair turn to hide behind.
+  Conformance exercises the scripted-JSON path through the fake
   server; the LIVE harness's fidelity is a model+vendor fact.
 - **DD-4 (GLM/DeepSeek schema fidelity) is RECORDED, not solved:** this
   lane adds a THIRD wire shape for exactly the two vendors DD-4 is

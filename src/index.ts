@@ -5,18 +5,37 @@
 // governor + rescue lane.
 export type {
   Budget,
+  // Aliased (seam v2, lane decision O-1 treatment): the kernel governor's
+  // `BudgetReservation` keeps the root-barrel name (explicit export above);
+  // the driver seam's plain-data reservation rides under `DriverBudgetReservation`.
+  BudgetReservation as DriverBudgetReservation,
   Driver,
+  // Aliased (seam v2, lane decision O-1): the kernel plan-run `RunOptions`
+  // keeps the root-barrel name (explicit export above); the seam's
+  // runtime-only per-call options ride under `DriverRunOptions`. An explicit
+  // export beats the driver star-export at the barrel tail, so both are
+  // deliberate, non-shadowed surface.
+  RunOptions as DriverRunOptions,
   DriverStopReason,
+  JsonSchema,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   SandboxLevel,
   SandboxPolicy,
   ToolDenial,
   ToolPolicy,
   ToolPolicyMode,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
+  WorkspaceBinding,
 } from './driver/types.js';
+// Driver seam values + pre-dispatch errors (seam v2) — re-export only.
+export { SEAM_VERSION } from './driver/types.js';
+export { DispatchError, errorClassOf } from './driver/errors.js';
+export type { DispatchErrorClass } from './driver/errors.js';
 export type {
   Job,
   JobFinishedJournalEvent,
@@ -66,7 +85,9 @@ export {
   ModelSpecSchema,
   OpInvocationSchema,
   OpResultSchema,
+  OutputSchemaSchema,
   PlanSchema,
+  ProviderSignalsSchema,
   QuarantineReleasedJournalEventSchema,
   ReservationOpenedJournalEventSchema,
   ReservationRefusedJournalEventSchema,
@@ -83,7 +104,9 @@ export {
   ToolPolicyModeSchema,
   ToolPolicySchema,
   UsageSchema,
+  WorkerErrorClassSchema,
   WorkerResultSchema,
+  WorkspaceBindingSchema,
   opResultSchema,
 } from './kernel/schema.js';
 // Kernel runtime surface (T1.2) — re-export only, no logic: the plan runner,

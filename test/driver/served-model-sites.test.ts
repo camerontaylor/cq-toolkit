@@ -27,12 +27,13 @@ async function constructionSites(directory: string): Promise<string[]> {
   return sites.sort();
 }
 
-test('driver construction inventory: new ops sites require served-model construction coverage', async () => {
-  expect(await constructionSites(ROOT)).toEqual([
-    'analyze/registry.ts', // S1
-    'merge/resolveConflict.ts', // S3
-    'review/fixReviewItem.ts', // S4; S5 wraps plain injection in this file
-    'review/registry.ts', // S4 perHarness AiSdkDriver injection
-    'sweep/unit.ts', // S2
-  ]);
+test('driver construction inventory: ops sites require served-model construction coverage', async () => {
+  // ADR-0002 §2.5/§2.6: the FACTORY is the one served-model hook for
+  // toolkit dispatch, so ops construct no lane class at all. The S4b
+  // migration is COMPLETE: merge/resolveConflict, analyze/registry, the two
+  // review sites, and sweep/unit (S4b-B2 — bindingsFromDispatch resolves
+  // through the DriverFactory, which constructs and wraps the lane) all
+  // resolve through the factory. When this list is empty it STAYS empty: a
+  // new lane construction under src/ops fails here.
+  expect(await constructionSites(ROOT)).toEqual([]);
 });

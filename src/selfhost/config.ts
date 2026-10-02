@@ -52,14 +52,20 @@ export interface SelfhostDefaultsConfig {
   perJobWallClockMs: number;
   /**
    * The driver binding for every agent dispatch (conflict resolutions, fix
-   * workers): provider 'ai-sdk' — the Z.AI coding endpoint is the ai-sdk
-   * default route (the GLM Coding Plan's OpenAI-compatible wire) — and
-   * model 'glm-5.3-flash', THE SERVED MODEL ID per the run's recorded
-   * decision (docs/eval-axes-demo.md, conductor decision 2026-09-14): the
-   * coding wire observed serving glm-5.3-flash for a glm-4.6 request, and
-   * requesting anything else trips the drivers' served-model-mismatch
-   * guard. Config requests the served id so every dispatch runs. NOTE
-   * (review r2): the served id is UNPRICED — `glm-5.3-flash` has no
+   * workers): provider 'zai' — the Z.AI coding endpoint is that provider's
+   * default route on the factory's default 'ai-sdk' lane (the GLM Coding
+   * Plan's OpenAI-compatible wire) — and model 'glm-5.3-flash', THE SERVED
+   * MODEL ID per the run's recorded decision (docs/eval-axes-demo.md,
+   * conductor decision 2026-09-14): the coding wire observed serving
+   * glm-5.3-flash for a glm-4.6 request. NO alias is declared: the
+   * served-model assertion (the factory's wrapper, W1.6 — the guard this
+   * comment once promised is now real) fails any dispatch whose observed id
+   * is not the requested id, so config requests the served id so every
+   * dispatch runs; this also matches the fixtures eval axis, which requests
+   * the served id with no aliases. The provider handle is the normalised
+   * 'zai', never the deprecated 'ai-sdk' alias (which now means lane
+   * 'ai-sdk' on provider 'zai' and prints a `cq:` deprecation notice).
+   * NOTE (review r2): the served id is UNPRICED — `glm-5.3-flash` has no
    * published list rates (`src/driver/pricing/data.ts`, docs/dd-2), so a
    * dispatch reports usage with no costUSD and the governor's DD-9
    * unpriced-usage trip fires under a configured maxUsd. Pricing the
@@ -90,7 +96,7 @@ export interface SelfhostDefaultsConfig {
 export const SelfhostDefaults: SelfhostDefaultsConfig = deepFreeze({
   maxUsd: 1,
   perJobWallClockMs: 300_000,
-  driver: { provider: 'ai-sdk', model: 'glm-5.3-flash' },
+  driver: { provider: 'zai', model: 'glm-5.3-flash' },
   baseBranch: 'merge-queue',
   protectedBranch: 'main',
 });
