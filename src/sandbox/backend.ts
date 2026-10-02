@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join, relative } from 'node:path';
+import { delimiter, join, relative, resolve } from 'node:path';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
 
@@ -141,6 +141,14 @@ function runChild(
       resolve(result);
       return;
     }
+    // Group kill is PID-scoped to THIS child's own group.  Residual race,
+    // documented (delta review): after the child exits AND its group has
+    // fully vanished, the numeric group ID could in principle be recycled by
+    // an unrelated group before the sweep below — then the sweep would signal
+    // that unrelated group.  Existing descendants PRESERVE the group, so the
+    // sweep always reaches them; only the vanished-group case is exposed, and
+    // the window is a single scheduling step.  A /proc-scoped descendant walk
+    // would close it at the cost of portability; not taken.
     const killGroup = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
       try {
@@ -149,6 +157,16 @@ function runChild(
         // The group is already gone — nothing to sweep.
       }
     };
+    const settle = (): void => {
+      // Sweep the group the moment the DIRECT child is gone: descendants
+      // holding the stdio pipes would otherwise delay settlement until the
+      // timeout (delta review).  Spawn failures have no group to sweep.
+      if (!spawnErrored && !settled) {
+        settled = true;
+        killGroup('SIGKILL');
+      }
+    };
+    let settled = false;
     const timer = setTimeout(() => {
       result.timedOut = true;
       killGroup('SIGKILL');
@@ -157,10 +175,7 @@ function runChild(
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      // Settlement sweep: any descendants the child left in its group still
-      // hold this launch's pipes.  Kill the group so nothing outlives the
-      // launch, then classify what is known.
-      if (!spawnErrored) killGroup('SIGKILL');
+      settle();
       if (overflowed) result.timedOut = true;
       if (spawnErrorMessage !== undefined) result.spawnError = spawnErrorMessage;
       result.stdout = out.slice(0, options.maxOutputChars);
@@ -184,42 +199,58 @@ function runChild(
     child.on('error', (error: NodeJS.ErrnoException) => {
       spawnErrored = true;
       spawnErrorMessage = error.code === 'ENOENT' ? `launcher not found: ${file}` : error.message;
-      killGroup('SIGKILL');
+      settle();
       finish();
     });
     child.stdout?.on('data', (chunk: Buffer) => {
       out = capture(out, chunk, outBytes);
       outBytes = Math.min(outBytes + chunk.byteLength, captureCap);
+      // Overflow must not be survivable (delta review): kill the group now so
+      // a later exit 0 can never be classified ok after the cap was blown.
+      if (overflowed) {
+        result.timedOut = true;
+        killGroup('SIGKILL');
+      }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       err = capture(err, chunk, errBytes);
       errBytes = Math.min(errBytes + chunk.byteLength, captureCap);
+      if (overflowed) {
+        result.timedOut = true;
+        killGroup('SIGKILL');
+      }
     });
+    child.on('exit', () => settle());
     child.on('close', (code, signal) => {
       result.exitCode = code;
       result.signal = signal ?? null;
-      if (code === 0 && signal === null && !result.timedOut) result.ok = true;
+      if (code === 0 && signal === null && !result.timedOut && !overflowed) result.ok = true;
       finish();
     });
   });
 }
 
 /**
- * Resolve a bare launcher name to an ABSOLUTE path ONCE per adapter
+ * Resolve a launcher name to an ABSOLUTE path ONCE per adapter
  * (final-head review): the certification probe and every later launch must
  * execute the SAME binary even when a request supplies a parentEnv whose PATH
  * differs — a PATH pointing into the workspace could otherwise select a
  * planted launcher while adapter identity still matches the receipt.
  * Resolution deliberately uses the ADAPTER process environment (the env the
  * probe's availability check ran under), never the per-request parent env.
- * An unresolvable bare name is kept as-is so the launch reports the familiar
- * launcher-not-found spawnError instead of a resolution guess.
+ * Relative names (with or without slashes) are anchored to the ADAPTER
+ * process cwd; PATH candidates are absolutized the same way, so a relative
+ * PATH entry cannot turn into a cwd-dependent launcher.  `undefined` when
+ * nothing absolute can be bound: callers fail closed (availability reports
+ * the blocker; launch refuses) instead of falling back to a per-invocation
+ * PATH lookup that would undo the binding.
  */
-function resolveLauncher(name: string): string {
-  if (name.includes('/')) return name;
+function resolveLauncher(name: string): string | undefined {
+  const absolute = (candidate: string): string => resolve(candidate);
+  if (name.includes('/')) return absolute(name);
   for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
     if (dir === '') continue;
-    const candidate = join(dir, name);
+    const candidate = absolute(join(dir, name));
     try {
       accessSync(candidate, constants.X_OK);
       return candidate;
@@ -227,7 +258,7 @@ function resolveLauncher(name: string): string {
       // Keep searching the remaining PATH entries.
     }
   }
-  return name;
+  return undefined;
 }
 
 /** Build the launcher child env from the parent env through the shared scrub. */
@@ -548,11 +579,15 @@ export function bwrapAdapter(): SandboxBackendAdapter {
   const backend: SandboxBackend = 'bwrap';
   // Fixed for the adapter's lifetime (final-head review): probes and launches
   // execute the SAME binary regardless of any request's parentEnv PATH.
+  // Unresolvable = fail closed (never a per-invocation PATH fallback).
   const launcher = resolveLauncher('bwrap');
   return {
     backend,
     workspaceParent: tmpdir,
     async available() {
+      if (launcher === undefined) {
+        return { available: false, blocker: 'bwrap not found on the adapter PATH' };
+      }
       const probe = await runChild(launcher, ['--version'], {
         env: launcherEnv({}),
         timeoutMs: 10_000,
@@ -567,6 +602,17 @@ export function bwrapAdapter(): SandboxBackendAdapter {
       return { available: true };
     },
     async launch(request) {
+      if (launcher === undefined) {
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError: 'bwrap launcher was not resolved at construction; refusing a PATH fallback',
+        };
+      }
       if (request.proxyPort !== undefined) {
         // --unshare-net denies loopback with the rest of the network; there is
         // no proxy composition.  Refuse rather than silently downgrade.
@@ -702,6 +748,12 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
     backend,
     workspaceParent: tmpdir,
     async available() {
+      if (launcher === undefined) {
+        return {
+          available: false,
+          blocker: `${resolved.command} not found on the adapter PATH`,
+        };
+      }
       const probe = await runChild(launcher, ['info', '--format', 'ok'], {
         env: launcherEnv({}),
         timeoutMs: 15_000,
@@ -716,6 +768,17 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
       return { available: true };
     },
     async launch(request) {
+      if (launcher === undefined) {
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError: `${resolved.command} launcher was not resolved at construction; refusing a PATH fallback`,
+        };
+      }
       if (request.proxyPort !== undefined) {
         // --network none denies loopback with the rest; no proxy composition.
         return {
@@ -848,7 +911,9 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
         return {
           available: false,
           blocker:
-            'no landlock helper binary provided; landlock(2) needs a compiled ruleset launcher the toolkit does not ship',
+            options.helperPath === undefined
+              ? 'no landlock helper binary provided; landlock(2) needs a compiled ruleset launcher the toolkit does not ship'
+              : `landlock helper '${options.helperPath}' could not be resolved to an absolute path`,
         };
       }
       const probe = await runChild(helperPath, ['--version'], {
@@ -873,7 +938,10 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
           stdout: '',
           stderr: '',
           timedOut: false,
-          spawnError: 'landlock is not provisioned: no helper binary',
+          spawnError:
+            options.helperPath === undefined
+              ? 'landlock is not provisioned: no helper binary'
+              : `landlock helper '${options.helperPath}' was not resolved at construction; refusing a PATH fallback`,
         };
       }
       return runChild(

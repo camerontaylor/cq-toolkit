@@ -217,16 +217,19 @@ function denialOutcome(
  * namespace that hides the target).  Anything else is unattributable.
  */
 function execRefusalAttributable(target: string, r: SandboxLaunchResult): boolean {
+  // The binary must not have produced output (it never ran), and the
+  // LAUNCHER'S OWN EXEC MACHINERY must name the target and report the failed
+  // exec (delta review round 2): sandbox-exec's "execvp() of '<target>'
+  // failed", bwrap's "Can't execute <target>", the container CLI's OCI
+  // runtime exec refusal.  A bare permission message is NOT sufficient — a
+  // binary that executed and then failed an internal file operation could
+  // print one too.
   if (r.stdout.trim() !== '') return false;
   const evidence = `${r.spawnError ?? ''}\n${r.stderr}`;
-  if (!evidence.toLowerCase().includes(target.toLowerCase())) {
-    // A namespace that hides the target can only fail with a generic
-    // not-found; require the launcher's own exec machinery to speak.
-    return /execvp|can't execute|cannot execute|oci runtime|operation not permitted/i.test(
-      evidence,
-    );
-  }
-  return /exec|permission|not permitted|not allowed|denied|no such file/i.test(evidence);
+  return (
+    evidence.toLowerCase().includes(target.toLowerCase()) &&
+    /execvp|can't execute|cannot execute|exec format|oci runtime/i.test(evidence)
+  );
 }
 
 /** Executed on the bare host — the control that proves a canary CAN fire. */
@@ -992,6 +995,25 @@ export async function launchCertified(
     maxOutputChars?: number;
   },
 ): Promise<SandboxLaunchResult> {
+  // Snapshot BEFORE any validation (delta review round 2): every check below
+  // and the adapter launch read THIS frozen copy, so a getter that returns
+  // different values across reads cannot validate one posture and launch
+  // another.  An omitted parentEnv is captured here too — the adapter must
+  // never fall back to the live, mutable process.env after an await.
+  const snapshot: Parameters<SandboxBackendAdapter['launch']>[0] = Object.freeze({
+    workspace: request.workspace,
+    argv: Object.freeze([...request.argv]),
+    parentEnv: Object.freeze({
+      ...(request.parentEnv ?? { ...process.env }),
+    }) as Readonly<Record<string, string | undefined>>,
+    ...(request.envPassthrough !== undefined
+      ? { envPassthrough: Object.freeze([...request.envPassthrough]) }
+      : {}),
+    network: request.network,
+    ...(request.proxyPort !== undefined ? { proxyPort: request.proxyPort } : {}),
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+    ...(request.maxOutputChars !== undefined ? { maxOutputChars: request.maxOutputChars } : {}),
+  });
   const receipt = probeReceipts.get(certification);
   if (receipt === undefined) {
     throw new Error(
@@ -1022,10 +1044,10 @@ export async function launchCertified(
         'CQ_SANDBOX=required is fail-closed until a certified backend launcher is configured',
     );
   }
-  if (request.network !== receipt.network) {
+  if (snapshot.network !== receipt.network) {
     throw new Error(
       `sandbox: ${adapter.backend} was certified under the '${receipt.network}' posture, ` +
-        `not the requested '${request.network}'; certification does not transfer across postures ` +
+        `not the requested '${snapshot.network}'; certification does not transfer across postures ` +
         'and CQ_SANDBOX=required is fail-closed',
     );
   }
@@ -1035,7 +1057,7 @@ export async function launchCertified(
       'sandbox: proxy stand-in observations cannot authorize a production endpoint identity or upstream allowlist; CQ_SANDBOX=required is fail-closed',
     );
   }
-  if ((request.proxyPort !== undefined) !== proxyDemonstrated) {
+  if ((snapshot.proxyPort !== undefined) !== proxyDemonstrated) {
     throw new Error(
       `sandbox: ${adapter.backend} was certified with '${receipt.networkDemonstrated}' egress; ` +
         (proxyDemonstrated
@@ -1044,22 +1066,5 @@ export async function launchCertified(
         ' — the launch profile must be the profile the canaries proved; CQ_SANDBOX=required is fail-closed',
     );
   }
-  // Hand the adapter a frozen SNAPSHOT of the request (final-head review):
-  // the caller keeps a reference to the object it passed, and adapters read
-  // request fields asynchronously (the seatbelt profile is compiled after
-  // filesystem awaits).  Mutating `network`/`proxyPort`/`argv` mid-launch
-  // would otherwise change the boundary after these certification checks
-  // have passed.  The snapshot is validated HERE, so what the adapter reads
-  // is exactly what was checked.
-  const snapshot: Parameters<SandboxBackendAdapter['launch']>[0] = Object.freeze({
-    ...request,
-    argv: Object.freeze([...request.argv]),
-    ...(request.parentEnv !== undefined
-      ? { parentEnv: Object.freeze({ ...request.parentEnv }) }
-      : {}),
-    ...(request.envPassthrough !== undefined
-      ? { envPassthrough: Object.freeze([...request.envPassthrough]) }
-      : {}),
-  });
   return adapter.launch(snapshot);
 }

@@ -52,7 +52,14 @@ const result = (over: Partial<SandboxLaunchResult>): SandboxLaunchResult => ({
   ...over,
 });
 
-const denied = () => result({ exitCode: 1, stderr: 'fake boundary: Operation not permitted' });
+// Shaped as a launcher exec refusal naming its target: the probe's
+// exec-refusal attribution (rightly) accepts only launcher-machinery
+// evidence, so the fake's denials must look like a real boundary's.
+const denied = (argv0 = '/usr/bin/false') =>
+  result({
+    exitCode: 1,
+    stderr: `fake boundary: execvp() of '${argv0}' failed: Operation not permitted`,
+  });
 
 /**
  * A fake whose verdicts follow one of six behaviors, keyed by what the
@@ -106,7 +113,7 @@ function fakeAdapter(
                 Number(portMatch[2]) === request.proxyPort)));
         return bashAllowed
           ? Promise.resolve(result({ ok: true, exitCode: 0 }))
-          : Promise.resolve(denied());
+          : Promise.resolve(denied(String(request.argv[0])));
       }
       if (request.argv[0] === '/usr/bin/printenv') {
         if (behavior === 'env-fails') return Promise.resolve(result({ exitCode: 7 }));
@@ -134,17 +141,19 @@ function fakeAdapter(
       // containment; an unresolvable target (touch-style creates) rides on
       // the lexical path.
       const target = request.argv[1] ?? '';
-      let inside = target.startsWith(request.workspace);
+      const within = (path: string, root: string): boolean =>
+        path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
+      let inside = within(target, request.workspace);
       if (inside) {
         try {
-          inside = (await realpath(target)).startsWith(await realpath(request.workspace));
+          inside = within(await realpath(target), await realpath(request.workspace));
         } catch {
           // Create-style target does not exist yet: lexical containment holds.
         }
       }
       return inside
         ? Promise.resolve(result({ ok: true, exitCode: 0 }))
-        : Promise.resolve(denied());
+        : Promise.resolve(denied(String(request.argv[0])));
     },
   };
 }
