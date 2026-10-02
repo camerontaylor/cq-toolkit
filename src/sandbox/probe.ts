@@ -216,20 +216,40 @@ function denialOutcome(
  * "Can't execute", the container CLI's OCI exec refusal, or an ENOENT from a
  * namespace that hides the target).  Anything else is unattributable.
  */
-function execRefusalAttributable(target: string, r: SandboxLaunchResult): boolean {
-  // The binary must not have produced output (it never ran), and the
-  // LAUNCHER'S OWN EXEC MACHINERY must name the target and report the failed
-  // exec (delta review round 2): sandbox-exec's "execvp() of '<target>'
-  // failed", bwrap's "Can't execute <target>", the container CLI's OCI
-  // runtime exec refusal.  A bare permission message is NOT sufficient — a
-  // binary that executed and then failed an internal file operation could
-  // print one too.
+function execRefusalAttributable(
+  backend: SandboxBackend,
+  target: string,
+  r: SandboxLaunchResult,
+): boolean {
+  // Provenance must come from the LAUNCHER'S OWN EXEC-MACHINERY REPORT, not
+  // from any permission-flavored text (delta review round 3): a binary that
+  // executed and then failed internally can print "<target>: cannot execute
+  // ...: Permission denied", so substring-plus-signature is forgeable by
+  // coincidence.  Each anchor is the launcher's structured error line —
+  // line-anchored launcher prefix, the execverb, and the EXACT target — or
+  // the canonical execvp failure form.  Anything else is inconclusive; a
+  // genuine denial the launcher reports in another shape withholds
+  // certification rather than earning it.
   if (r.stdout.trim() !== '') return false;
   const evidence = `${r.spawnError ?? ''}\n${r.stderr}`;
-  return (
-    evidence.toLowerCase().includes(target.toLowerCase()) &&
-    /execvp|can't execute|cannot execute|exec format|oci runtime/i.test(evidence)
-  );
+  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Residual limit, stated honestly: stderr is a shared channel, so a binary
+  // that executed could PARODY its launcher's line shape.  The anchors raise
+  // the bar to launcher-shaped, target-exact, exec-specific lines; perfect
+  // provenance would need an out-of-band launcher protocol (a redesign, not
+  // this lane).  A genuine denial reported in another shape is inconclusive.
+  const anchored: Record<string, RegExp> = {
+    seatbelt: new RegExp(`^sandbox-exec: execvp\\(\\) of '${escaped}' failed:`, 'm'),
+    bwrap: new RegExp(
+      `^bwrap:\\s*(?:execvp|can't execute|cannot execute|exec)\\b[^\\n]*${escaped}`,
+      'im',
+    ),
+    container: new RegExp(`^(?:docker:|.*oci runtime.*exec:)\\b[^\\n]*${escaped}`, 'im'),
+    landlock: new RegExp(`^landlock.*exec[^\\n]*${escaped}`, 'im'),
+  };
+  const canonical = new RegExp(`execvp\\(\\) of '${escaped}' failed:`, 'm');
+  const pattern = anchored[backend];
+  return (pattern !== undefined && pattern.test(evidence)) || canonical.test(evidence);
 }
 
 /** Executed on the bare host — the control that proves a canary CAN fire. */
@@ -613,7 +633,7 @@ async function probeBackendWithLaunch(
                     verdict: 'inconclusive',
                     detail: `canary never ran: ${detail(sandboxed)}`,
                   }
-                : execRefusalAttributable(localBin, sandboxed)
+                : execRefusalAttributable(adapter.backend, localBin, sandboxed)
                   ? {
                       id: 'local-prefix-exec',
                       verdict: 'pass',

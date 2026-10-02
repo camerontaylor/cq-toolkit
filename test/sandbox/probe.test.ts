@@ -143,12 +143,23 @@ function fakeAdapter(
       const target = request.argv[1] ?? '';
       const within = (path: string, root: string): boolean =>
         path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
-      let inside = within(target, request.workspace);
+      // Containment is evaluated on RESOLVED paths: normalize `..`/`.` first,
+      // then resolve what exists.  A create-style target under an escaping
+      // directory symlink resolves through its PARENT (round-3 review); a
+      // target whose parent is also unresolvable is treated as outside.
+      const { resolve: resolvePath, dirname, join, basename } = await import('node:path');
+      const rootResolved = resolvePath(request.workspace);
+      let inside = within(resolvePath(target), rootResolved);
       if (inside) {
         try {
-          inside = within(await realpath(target), await realpath(request.workspace));
+          inside = within(await realpath(target), await realpath(rootResolved));
         } catch {
-          // Create-style target does not exist yet: lexical containment holds.
+          try {
+            const parent = await realpath(dirname(target));
+            inside = within(join(parent, basename(target)), await realpath(rootResolved));
+          } catch {
+            inside = false;
+          }
         }
       }
       return inside

@@ -157,17 +157,20 @@ function runChild(
         // The group is already gone — nothing to sweep.
       }
     };
-    const settle = (): void => {
-      // Sweep the group the moment the DIRECT child is gone: descendants
-      // holding the stdio pipes would otherwise delay settlement until the
-      // timeout (delta review).  Spawn failures have no group to sweep.
-      if (!spawnErrored && !settled) {
-        settled = true;
-        killGroup('SIGKILL');
-      }
-    };
     let settled = false;
+    const settle = (): void => {
+      // Sweep the group the moment the DIRECT child is gone (delta review):
+      // descendants holding the stdio pipes would otherwise delay settlement
+      // until the timeout.  The child has EXITED — stop the timeout clock so
+      // a slow pipe drain can neither signal a vanished (possibly recycled)
+      // group nor misclassify an exited child as timed out (round-3 review).
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!spawnErrored) killGroup('SIGKILL');
+    };
     const timer = setTimeout(() => {
+      if (settled) return;
       result.timedOut = true;
       killGroup('SIGKILL');
     }, options.timeoutMs);
@@ -207,7 +210,9 @@ function runChild(
       outBytes = Math.min(outBytes + chunk.byteLength, captureCap);
       // Overflow must not be survivable (delta review): kill the group now so
       // a later exit 0 can never be classified ok after the cap was blown.
-      if (overflowed) {
+      // After settlement the child is gone — late buffered chunks must not
+      // signal a recycled group or re-mark the result.
+      if (overflowed && !settled) {
         result.timedOut = true;
         killGroup('SIGKILL');
       }
@@ -215,7 +220,7 @@ function runChild(
     child.stderr?.on('data', (chunk: Buffer) => {
       err = capture(err, chunk, errBytes);
       errBytes = Math.min(errBytes + chunk.byteLength, captureCap);
-      if (overflowed) {
+      if (overflowed && !settled) {
         result.timedOut = true;
         killGroup('SIGKILL');
       }
