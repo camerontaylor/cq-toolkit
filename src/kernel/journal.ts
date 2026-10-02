@@ -22,7 +22,17 @@
 // and silently accepting it would poison the fold.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rmdir,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -159,6 +169,39 @@ export async function acquirePlanLock(
   assertSafeRunId(planId);
   assertSafeRunId(runId);
   await mkdir(journalDir, { recursive: true });
+  // Atomic exclusion covers eligibility THROUGH publication/listen/fence,
+  // for creators and reclaimers alike. Never reclaim this short-lived guard
+  // by timestamp/PID/read+unlink: that would recreate the stale-check race.
+  // A crash during acquisition leaves it fail-closed, like a half-written
+  // record; administrative recovery is outside this internal lease API.
+  const publication = join(journalDir, `${planId}.lock.acquiring`);
+  try {
+    await mkdir(publication, { mode: 0o700 });
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+    throw new Error(`journal: plan lock acquisition in progress or interrupted for '${planId}'`);
+  }
+  let acquired: PlanLock;
+  try {
+    acquired = await acquirePlanLockRecord(journalDir, planId, runId);
+  } catch (error) {
+    await rmdir(publication);
+    throw error;
+  }
+  try {
+    await rmdir(publication);
+  } catch (error) {
+    await acquired.release();
+    throw error;
+  }
+  return acquired;
+}
+
+async function acquirePlanLockRecord(
+  journalDir: string,
+  planId: string,
+  runId: string,
+): Promise<PlanLock> {
   const path = join(journalDir, `${planId}.lock.json`);
   const nonce = randomUUID();
   const record: PlanLockRecord = {
@@ -201,8 +244,9 @@ export async function acquirePlanLock(
     ) {
       throw new Error(`journal: plan locked by '${previous.runId}'`);
     }
-    // Publish a complete durable replacement, never truncate the shared
-    // rendezvous while acquiring. Racing stealers must pass the nonce fence.
+    // The publication guard excludes other eligibility checks until this
+    // replacement is durable, listening, and fenced. No stale reclaimer can
+    // publish over an owner that acquired after its eligibility decision.
     const temporary = `${path}.${nonce}.tmp`;
     handle = await open(temporary, 'wx', 0o600);
     try {

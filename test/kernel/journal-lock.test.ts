@@ -1,7 +1,7 @@
 // W2.4 process proofs. No TTL stealing, TMPDIR split, or stale-owner unlink.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline';
 import { afterEach, expect, test } from 'vitest';
 import { z } from 'zod';
 import { createGovernor } from '../../src/kernel/governor.js';
-import { acquirePlanLock } from '../../src/kernel/journal.js';
+import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { Op, OpRegistryEntry } from '../../src/kernel/types.js';
 
@@ -35,11 +35,16 @@ let pending;
 lines.on('line', line => { if (pending) { const done = pending; pending = undefined; done(line); } else commands.push(line); });
 const next = () => commands.length ? Promise.resolve(commands.shift()) : new Promise(done => { pending = done; });
 const send = value => console.log(JSON.stringify(value));
+if (process.env.J_TEST_CLAIM_ONLY === 'yes') {
+  const seq = await claimSeq(process.env.J_TEST_DIR, 'locked', 1);
+  send({ status: 'claimed', seq });
+  process.exit(0);
+}
 if (process.env.J_TEST_RACE === 'yes') { send({ status: 'waiting' }); await next(); }
 let lease;
 try {
   lease = await acquirePlanLock(process.env.J_TEST_DIR, 'locked', process.env.J_TEST_RUN);
-  const seq = await claimSeq(process.env.J_TEST_DIR);
+  const seq = await claimSeq(process.env.J_TEST_DIR, 'locked', 1);
   if (process.env.J_TEST_CRASH === 'yes') {
     const runId = process.env.J_TEST_RUN;
     const log = openRunLog(process.env.J_TEST_DIR);
@@ -230,6 +235,11 @@ test('SIGKILL recovery charges an unresolved durable reservation and quarantines
   expect(governor.quarantinedJobs.has('a')).toBe(true);
   expect(governor.outstandingCount).toBe(0);
   expect(governor.inFlight).toBe(0);
+  const recoveryEvents = await openRunLog(dir).read(report.runId);
+  expect(recoveryEvents.find((event) => event.type === 'run-started')).toMatchObject({
+    journalVersion: 2,
+    seq: 2,
+  });
   const verdict = report.jobs[0]?.result;
   expect(verdict?.status).toBe('needs-human');
   if (verdict?.status !== 'needs-human') throw new Error('missing quarantine verdict');
@@ -264,7 +274,7 @@ test('racing reclaimers fence by nonce and stale release cannot clobber the winn
   const seqs = acquired
     .filter((message) => message.status === 'acquired')
     .map((message) => message.seq);
-  expect(seqs.length).toBeGreaterThan(0);
+  expect(seqs).toHaveLength(1); // exclusion, not merely eventual nonce convergence
   expect(new Set(seqs).size).toBe(seqs.length);
   const winner = await record(dir);
   const statuses = await Promise.all(
@@ -303,4 +313,25 @@ test('foreign-host record refuses even with dead-looking PID/socket evidence', a
   await writeFile(path, bytes);
   await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('foreign host');
   expect(await readFile(path, 'utf8')).toBe(bytes);
+});
+
+test('independent child sequence claims use the real plan and unique positive ordinals', async () => {
+  const dir = await directory();
+  const contenders = [
+    start(dir, 'claim-one', { J_TEST_CLAIM_ONLY: 'yes' }),
+    start(dir, 'claim-two', { J_TEST_CLAIM_ONLY: 'yes' }),
+  ];
+  const claims = await Promise.all(contenders.map((worker) => worker.next()));
+  expect(claims.map((message) => message.status)).toEqual(['claimed', 'claimed']);
+  expect(claims.map((message) => message.seq).sort()).toEqual([1, 2]);
+});
+
+test('an interrupted publication guard refuses without unsafe automatic reclamation', async () => {
+  const dir = await directory();
+  const guard = join(dir, 'locked.lock.acquiring');
+  await mkdir(guard);
+  await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow(
+    'acquisition in progress or interrupted',
+  );
+  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });

@@ -172,6 +172,7 @@ import type {
   JobOutcome,
   JobState,
   JournalEvent,
+  Op,
   OpRegistryEntry,
   OpResult,
   Plan,
@@ -388,8 +389,9 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * then the lazily imported op. Every failure mode — a throwing registry
  * lookup, a missing registry entry, schema violation, a throwing op or
  * importer, a contract-violating return, a non-serializable return — becomes
- * an honest `failed` OpResult. This function never throws, so a bad op (or a
- * bad registry) can never corrupt the journal or kill the run.
+ * an honest `failed` OpResult. Ordinary op errors never throw, so a bad op
+ * (or registry) cannot corrupt the journal or kill the run. The private
+ * infrastructure guard rejects to the run's shared failure authority.
  *
  * `onDispatchUnknown` marks every post-invocation failure the returned
  * verdict cannot carry: the op BODY rejecting, or a body that RESOLVED to
@@ -406,6 +408,7 @@ async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
   onDispatchUnknown?: () => void,
+  guard?: { beforeBody(): Promise<void>; assertAllowed(): void },
 ): Promise<OpResult<unknown>> {
   // The lookup itself is guarded: a registry.get that throws must fail THIS
   // job, not reject the whole run.
@@ -427,15 +430,25 @@ async function executeOp(
   } catch (err) {
     return { status: 'failed', error: messageOf(err) };
   }
+  let op: Op<never, never>;
   try {
-    const op = await entry.importer();
+    op = await entry.importer();
+  } catch (err) {
+    return { status: 'failed', error: messageOf(err) };
+  }
+  // Validation and import may await arbitrarily. Recheck immediately before
+  // entering the body, OUTSIDE the ordinary op-error conversion. The sync
+  // check closes the failure microtask window after the async nonce read.
+  await guard?.beforeBody();
+  guard?.assertAllowed();
+  try {
     let raw: OpResult<unknown>;
     try {
       raw = await op(parsed as never);
     } catch (err) {
       // The op BODY rejected: the dispatch was entered, so spend may exist
       // that no evidence fold will ever see. Signal it, then fall into the
-      // shared handler below (the never-throws contract is unchanged).
+      // shared handler below (ordinary op-error conversion is unchanged).
       onDispatchUnknown?.();
       throw err;
     }
@@ -1115,7 +1128,10 @@ async function runPlanUnderLease(
       });
 
       await fenceDispatch();
-      const result = await executeOp(job, (name) => registry.get(name));
+      const result = await executeOp(job, (name) => registry.get(name), undefined, {
+        beforeBody: fenceDispatch,
+        assertAllowed: throwIfFailed,
+      });
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
       await emit({
@@ -1282,6 +1298,25 @@ async function runPlanUnderLease(
       // (the settle's basis reads the dispatch's ending), and the composed
       // dispatch signal's cleanup.
       let reservation: BudgetReservation | undefined;
+      let preserveOpenedReservation = false;
+      const dispatchGuard = {
+        async beforeBody(): Promise<void> {
+          try {
+            await fenceDispatch();
+          } catch (error) {
+            preserveOpenedReservation = true;
+            throw error;
+          }
+        },
+        assertAllowed(): void {
+          try {
+            throwIfFailed();
+          } catch (error) {
+            preserveOpenedReservation = true;
+            throw error;
+          }
+        },
+      };
       let settledCharge:
         | { charged: number; basis: 'observed' | 'full'; priced: boolean }
         | undefined;
@@ -1289,7 +1324,8 @@ async function runPlanUnderLease(
       // The op body's own rejection, or a post-invocation value the contract
       // rejects — the UNKNOWN-status endings executeOp's contract flattens
       // into a `failed` verdict. The settle's basis reads the signal; the
-      // ladder's 'threw' outcome cannot, because executeOp never rejects.
+      // ladder's 'threw' outcome cannot distinguish these from a private
+      // invocation-guard rejection, which preserves the opened fact instead.
       let dispatchUnknown = false;
       // The dispatch-closed guard: once the ladder settles, the dispatch's
       // evidence window is CLOSED — a detached (killed) op promise's late
@@ -1374,9 +1410,8 @@ async function runPlanUnderLease(
             elapsedMs: ladderOutcome.elapsedMs,
             atMs: governor.now(),
           });
-          // The runner's failure semantics stay in charge: convert the
-          // unexpected throw (executeOp itself never throws) into the
-          // honest per-job failure so the run continues.
+          // The runner's catch retains ordinary per-job failure semantics;
+          // a private infrastructure guard instead rejects the whole run.
           throw ladderOutcome.error;
         }
         // Rung 3 fired: the op was killed — detached in-process with
@@ -1409,6 +1444,7 @@ async function runPlanUnderLease(
               () => {
                 dispatchUnknown = true;
               },
+              dispatchGuard,
             );
           },
           governor.ladderSpec,
@@ -1498,13 +1534,14 @@ async function runPlanUnderLease(
             });
             reservation = granted;
             // Durable write-ahead, then ownership fence, then dispatch.
-            // A lost fence retains the durable reservation for full-charge
-            // settlement/quarantine instead of dispatching with a stale cap.
-            await fenceDispatch();
+            // A lost fence leaves the durable reservation unresolved for
+            // full loss charging/quarantine on resume, without invocation.
+            await dispatchGuard.beforeBody();
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
               dispatchClosed = true; // a 'threw' outcome escapes interpretOutcome — closed here
+              throwIfFailed(); // infrastructure failures reject the run, not an OpResult
               result = { status: 'failed', error: messageOf(err) };
             }
           }
@@ -1512,15 +1549,23 @@ async function runPlanUnderLease(
           // UNCAPPED (reservation-less): the W2.2 dispatch unchanged —
           // evidence folds roll the ledger and the token cap binds; there is
           // no USD capacity to hold a reservation against.
-          await fenceDispatch();
+          await dispatchGuard.beforeBody();
           try {
             result = await runDispatchLadder(admission.attempt);
           } catch (err) {
             dispatchClosed = true; // same as above
+            throwIfFailed();
             result = { status: 'failed', error: messageOf(err) };
           }
         }
       } finally {
+        if (reservation !== undefined && preserveOpenedReservation) {
+          // The durable opened fact behind a failed invocation fence stays
+          // UNRESOLVED (ADR §2.2 step 6). Release only local capacity; resume
+          // charges the durable amount in full and quarantines until release.
+          governor.abandonReservation(reservation);
+          reservation = undefined;
+        }
         if (reservation !== undefined) {
           // SETTLE — durable BEFORE the job's outcome is journalled. The
           // basis is 'full' when the dispatch ended in UNKNOWN status
