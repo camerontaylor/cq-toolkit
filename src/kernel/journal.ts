@@ -77,15 +77,56 @@ export interface PlanLock {
   release(): Promise<void>;
 }
 
-async function bootIdentity(): Promise<string> {
+// Process startup/completion only: observed good helper max 7580ms and sysctl
+// 5223ms (healthy windows 39–145ms). 10s adds headroom to these samples, not
+// a guaranteed host bound: exceeding it still refuses. Operation and socket
+// probe budgets are separate and unchanged.
+const PUBLICATION_STARTUP_MS = 10_000;
+let bootIdentityPromise: Promise<string> | undefined;
+
+function bootIdentity(): Promise<string> {
+  if (bootIdentityPromise !== undefined) return bootIdentityPromise;
+  const pending = readBootIdentity().then((identity) => {
+    if (identity.length === 0) throw new Error('journal: cannot determine host boot identity');
+    return identity;
+  });
+  // Share in-flight work and retain successful identity for this process.
+  // A failed first lookup must not poison later independent acquisitions.
+  bootIdentityPromise = pending.catch((error: unknown) => {
+    bootIdentityPromise = undefined;
+    throw error;
+  });
+  return bootIdentityPromise;
+}
+
+async function readBootIdentity(): Promise<string> {
   if (process.platform === 'linux') {
     return (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
   }
   if (process.platform === 'darwin') {
-    const { stdout } = await promisify(execFile)('/usr/sbin/sysctl', ['-n', 'kern.boottime'], {
-      timeout: 2000,
-    });
-    return stdout.trim();
+    try {
+      const { stdout } = await promisify(execFile)('/usr/sbin/sysctl', ['-n', 'kern.boottime'], {
+        timeout: PUBLICATION_STARTUP_MS,
+      });
+      return stdout.trim();
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === null &&
+        'killed' in error &&
+        error.killed === true &&
+        'signal' in error &&
+        error.signal === 'SIGTERM'
+      ) {
+        throw new Error(
+          `journal: boot identity startup/completion deadline exceeded after ${PUBLICATION_STARTUP_MS}ms (possible slow host)`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
   throw new Error(`journal: plan lock requires a supported local POSIX host (${process.platform})`);
 }
@@ -255,13 +296,15 @@ async function acquirePublicationGuard(
         try {
           const ended = await closed;
           if (context.signal.aborted)
-            throw new Error('journal: publication lock helper deadline exceeded');
+            throw new Error(
+              `journal: publication lock helper startup/completion deadline exceeded after ${PUBLICATION_STARTUP_MS}ms (possible slow host)`,
+            );
           return ended;
         } finally {
           context.signal.removeEventListener('abort', kill);
         }
       },
-      { wallClockMs: 2000, abortGraceMs: 0, killGraceMs: 0 },
+      { wallClockMs: PUBLICATION_STARTUP_MS, abortGraceMs: 0, killGraceMs: 0 },
       { op: 'journal-publication-lock', jobKey: planId, attempt: 1 },
     );
     // A ladder can detach its task. Reap the helper before releasing our fd:
@@ -270,7 +313,9 @@ async function acquirePublicationGuard(
     await closed;
     if (outcome.outcome === 'threw') throw outcome.error;
     if (outcome.outcome === 'killed')
-      throw new Error('journal: publication lock helper deadline exceeded');
+      throw new Error(
+        `journal: publication lock helper startup/completion deadline exceeded after ${PUBLICATION_STARTUP_MS}ms (possible slow host)`,
+      );
     const ended = outcome.value;
     if (ended.error !== undefined)
       throw new Error('journal: publication lock helper capability failed', { cause: ended.error });

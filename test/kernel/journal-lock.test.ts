@@ -66,6 +66,19 @@ import { acquirePlanLock, claimSeq, openRunLog } from ${JSON.stringify(journalUr
 import { createInterface } from 'node:readline';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import { promisify } from 'node:util';
+let bootCalls = 0;
+if (process.env.J_TEST_BOOT_CACHE === 'yes') {
+  const original = promisify(cp.execFile);
+  const intercepted = () => { throw new Error('unexpected callback boot invocation'); };
+  intercepted[promisify.custom] = async (...args) => {
+    bootCalls++;
+    if (bootCalls === 1) throw Object.assign(new Error('injected lookup timeout'), { code: null, killed: true, signal: 'SIGTERM', stderr: '' });
+    return original(...args);
+  };
+  cp.execFile = intercepted;
+  syncBuiltinESMExports();
+}
 if (process.env.J_TEST_PAUSE_PUBLICATION === 'yes') {
   const original = cp.spawn;
   cp.spawn = (...args) => {
@@ -88,6 +101,18 @@ let pending;
 lines.on('line', line => { if (pending) { const done = pending; pending = undefined; done(line); } else commands.push(line); });
 const next = () => commands.length ? Promise.resolve(commands.shift()) : new Promise(done => { pending = done; });
 const send = value => console.log(JSON.stringify(value));
+if (process.env.J_TEST_BOOT_CACHE === 'yes') {
+  for (const runId of ['first', 'second', 'third']) {
+    try {
+      const current = await acquirePlanLock(process.env.J_TEST_DIR, 'locked', runId);
+      await current.release();
+      send({ status: 'released', bootCalls });
+    } catch (error) {
+      send({ status: 'refused', error: error.message, bootCalls });
+    }
+  }
+  process.exit(0);
+}
 if (process.env.J_TEST_CLAIM_ONLY === 'yes') {
   const seq = await claimSeq(process.env.J_TEST_DIR, 'locked', 1);
   send({ status: 'claimed', seq });
@@ -436,7 +461,7 @@ test('missing flock helper refuses and closes its guard descriptor', async () =>
   await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-test('hung flock helper is killed and reaped before capability refusal', async () => {
+test('hung flock helper is killed and reaped before startup/completion deadline refusal', async () => {
   const dir = await directory();
   const child = new EventEmitter() as unknown as ChildProcess;
   let reaped = false;
@@ -449,7 +474,9 @@ test('hung flock helper is killed and reaped before capability refusal', async (
   });
   child.kill = kill;
   helperHooks.spawn = () => child;
-  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow('deadline exceeded');
+  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow(
+    'startup/completion deadline exceeded after 10000ms (possible slow host)',
+  );
   expect(kill).toHaveBeenCalledWith('SIGKILL');
   expect(reaped).toBe(true);
   await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -547,4 +574,22 @@ test('live inherited-descriptor flock retains same-process exclusion after helpe
     await first.close().catch(() => undefined);
     await second.close();
   }
+}, 30000);
+
+test('boot identity timeout remains retryable; a successful lookup is reused per process', async (context) => {
+  if (process.platform !== 'darwin') {
+    context.skip();
+    return;
+  }
+  const dir = await directory();
+  const worker = start(dir, 'cache', { J_TEST_BOOT_CACHE: 'yes' });
+  expect(await worker.next()).toMatchObject({
+    status: 'refused',
+    bootCalls: 1,
+    error:
+      'journal: boot identity startup/completion deadline exceeded after 10000ms (possible slow host)',
+  });
+  expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
+  expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
+  await worker.exited;
 }, 30000);
