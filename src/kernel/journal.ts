@@ -24,6 +24,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
+  link,
   lstat,
   mkdir,
   open,
@@ -209,9 +210,10 @@ function closeServer(server: Server): Promise<void> {
 /**
  * ADR-0003 §2.5: exclusive record creation, recorded socket + pid/boot
  * liveness, and nonce fences. No timestamp lease: SIGSTOP is never death.
- * Invalid/half-written and foreign-host records refuse without stealing.
- * Releasing marks OUR inode through its fd instead of unlinking a rival's
- * replacement. The released record remains as a reclaimable tombstone.
+ * Records are published whole (link/rename of a synced temporary).
+ * Invalid/half-written and unreleased foreign-host records refuse without
+ * stealing. Release renames a tombstone over OUR inode only, never over or
+ * unlinking a rival's replacement; the tombstone remains reclaimable.
  */
 export async function acquirePlanLock(
   journalDir: string,
@@ -356,51 +358,18 @@ async function acquirePlanLockRecord(
   };
   if (record.bootId.length === 0) throw new Error('journal: cannot determine host boot identity');
 
-  let handle: Awaited<ReturnType<typeof open>>;
+  // Every publication is a complete, synced record: a crash can leave only
+  // an unreferenced temporary, never an empty or partial canonical record.
+  const temporary = `${path}.${nonce}.tmp`;
   try {
-    handle = await open(path, 'wx+', 0o600);
-  } catch (error) {
-    if (errorCode(error) !== 'EEXIST') throw error;
-    let previous: PlanLockRecord;
-    try {
-      previous = await readLockRecord(path);
-    } catch (readError) {
-      throw new Error(
-        `journal: corrupt or half-written plan lock '${path}' — refusing acquisition`,
-        {
-          cause: readError,
-        },
-      );
-    }
-    if (previous.host !== record.host) {
-      throw new Error(
-        `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
-      );
-    }
-    if (
-      previous.released !== true &&
-      ((await socketIsAlive(previous.socketPath)) ||
-        (previous.bootId === record.bootId && pidIsAlive(previous.pid)))
-    ) {
-      throw new Error(`journal: plan locked by '${previous.runId}'`);
-    }
-    // The publication guard excludes other eligibility checks until this
-    // replacement is durable, listening, and fenced. No stale reclaimer can
-    // publish over an owner that acquired after its eligibility decision.
-    const temporary = `${path}.${nonce}.tmp`;
-    handle = await open(temporary, 'wx', 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
-      await handle.sync();
-      await rename(temporary, path);
-    } finally {
-      await handle.close();
-      await unlink(temporary).catch((cleanupError: unknown) => {
-        if (!isEnoent(cleanupError)) throw cleanupError;
-      });
-    }
-    handle = await open(path, 'r+');
+    await writeDurable(temporary, `${JSON.stringify(record)}\n`);
+    await publishRecord(path, temporary, record);
+  } finally {
+    await unlink(temporary).catch((cleanupError: unknown) => {
+      if (!isEnoent(cleanupError)) throw cleanupError;
+    });
   }
+  const handle = await open(path, 'r+');
 
   // A probe needs only a successful connect. Destroy immediately so a peer
   // withholding EOF cannot hold server.close (and lease release) forever.
@@ -409,10 +378,26 @@ async function acquirePlanLockRecord(
   let released = false;
   let ownInode = false;
   const markReleased = async (): Promise<void> => {
-    const bytes = Buffer.from(`${JSON.stringify({ ...record, released: true })}\n`);
-    await handle.write(bytes, 0, bytes.length, 0);
-    await handle.truncate(bytes.length);
-    await handle.sync();
+    // Publish the tombstone atomically, and only over OUR inode: a rival's
+    // replacement (lock lost) is never clobbered. A live owner's unreleased
+    // record is never reclaimable, so no rival can publish between the
+    // inode check and the rename.
+    const tombstone = `${path}.${nonce}.released.tmp`;
+    try {
+      await writeDurable(tombstone, `${JSON.stringify({ ...record, released: true })}\n`);
+      const ours = await handle.stat();
+      const current = await stat(path).catch((error: unknown) => {
+        if (isEnoent(error)) return undefined;
+        throw error;
+      });
+      if (current?.dev !== ours.dev || current.ino !== ours.ino) return;
+      await rename(tombstone, path);
+      await syncDir(journalDir);
+    } finally {
+      await unlink(tombstone).catch((cleanupError: unknown) => {
+        if (!isEnoent(cleanupError)) throw cleanupError;
+      });
+    }
   };
   const assertHeld = async (): Promise<void> => {
     const current = await readLockRecord(path);
@@ -421,18 +406,12 @@ async function acquirePlanLockRecord(
     }
   };
   try {
-    // For a wx creator this is the first record write. A stealer verifies
-    // the inode it opened after rename before touching it.
+    // Verify the inode opened after publication before touching it.
     const contents = await handle.readFile('utf8');
-    if (contents.length === 0) {
-      ownInode = true;
-      await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
-      await handle.sync();
-    } else if (PlanLockRecordSchema.parse(JSON.parse(contents) as unknown).nonce !== nonce) {
+    if (PlanLockRecordSchema.parse(JSON.parse(contents) as unknown).nonce !== nonce) {
       throw new Error(`journal: lock-lost while acquiring plan '${planId}'`);
-    } else {
-      ownInode = true;
     }
+    ownInode = true;
     await syncDir(journalDir);
     await listen(server, record.socketPath);
     listening = true;
@@ -454,8 +433,6 @@ async function acquirePlanLockRecord(
       released = true;
       try {
         await closeServer(server);
-        // The fd retained from acquire pins OUR inode. A rival's rename
-        // cannot redirect the release write onto the replacement record.
         await markReleased();
       } finally {
         await handle.close();
@@ -465,6 +442,57 @@ async function acquirePlanLockRecord(
       }
     },
   };
+}
+
+async function writeDurable(path: string, contents: string): Promise<void> {
+  const handle = await open(path, 'wx', 0o600);
+  try {
+    await handle.writeFile(contents, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Exclusive create via link(2); otherwise reclaim an eligible record by rename. */
+async function publishRecord(
+  path: string,
+  temporary: string,
+  record: PlanLockRecord,
+): Promise<void> {
+  try {
+    await link(temporary, path);
+    return;
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+  }
+  let previous: PlanLockRecord;
+  try {
+    previous = await readLockRecord(path);
+  } catch (readError) {
+    throw new Error(`journal: corrupt or half-written plan lock '${path}' — refusing acquisition`, {
+      cause: readError,
+    });
+  }
+  if (previous.released !== true) {
+    // A foreign host's liveness evidence is unverifiable from here; only
+    // its explicit release tombstone makes the record reclaimable.
+    if (previous.host !== record.host) {
+      throw new Error(
+        `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
+      );
+    }
+    if (
+      (await socketIsAlive(previous.socketPath)) ||
+      (previous.bootId === record.bootId && pidIsAlive(previous.pid))
+    ) {
+      throw new Error(`journal: plan locked by '${previous.runId}'`);
+    }
+  }
+  // The publication guard excludes other eligibility checks until this
+  // replacement is durable, listening, and fenced. No stale reclaimer can
+  // publish over an owner that acquired after its eligibility decision.
+  await rename(temporary, path);
 }
 
 /**

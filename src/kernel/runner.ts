@@ -527,11 +527,18 @@ export async function runPlan(
   // The lifecycle owns release even when folding fails before the run's
   // signal listener exists. Keep this wrapper separate from run semantics.
   const lease: { lock?: Awaited<ReturnType<typeof acquirePlanLock>> } = {};
+  let report: RunReport;
   try {
-    return await runPlanUnderLease(plan, opts, registry, gov, lease);
-  } finally {
-    await lease.lock?.release();
+    report = await runPlanUnderLease(plan, opts, registry, gov, lease);
+  } catch (error) {
+    // The run's own failure is the root cause: a release that fails too
+    // (often the same disk fault) must not replace it. An unreleased record
+    // of a finished process stays reclaimable by pid/socket liveness.
+    await lease.lock?.release().catch(() => undefined);
+    throw error;
   }
+  await lease.lock?.release();
+  return report;
 }
 
 async function runPlanUnderLease(

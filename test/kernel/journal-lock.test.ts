@@ -13,6 +13,7 @@ import {
   mkdtemp,
   open,
   readFile,
+  readdir,
   rename,
   rm,
   stat,
@@ -444,6 +445,35 @@ test(
     await writeFile(path, bytes);
     await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('foreign host');
     expect(await readFile(path, 'utf8')).toBe(bytes);
+  },
+  CHILD_STEP_MS + 5_000,
+);
+
+// Enclosure: one acquisition reclaiming a moved journal's tombstone.
+test(
+  'foreign-host released tombstone is reclaimable and release publishes a whole tombstone',
+  async () => {
+    const dir = await directory();
+    const path = join(dir, 'locked.lock.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        nonce: randomUUID(),
+        socketPath: '/tmp/no-such-cq-j.sock',
+        pid: 2147483647,
+        host: 'foreign-host',
+        bootId: 'old-boot',
+        runId: 'foreign',
+        released: true,
+      }),
+    );
+    const lease = await acquirePlanLock(dir, 'locked', 'contender');
+    const held = await record(dir);
+    expect(held).toMatchObject({ runId: 'contender' });
+    expect(held).not.toHaveProperty('released');
+    await lease.release();
+    expect(await record(dir)).toEqual({ ...held, released: true });
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   },
   CHILD_STEP_MS + 5_000,
 );
