@@ -31,7 +31,6 @@
 //     binds its lane through DriverFactoryConfig — bindings + per-lane
 //     construction knobs — and hands the factory to this seam).
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -50,6 +49,7 @@ import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex } from './gitMutex.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { SweepWorkspace, WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';

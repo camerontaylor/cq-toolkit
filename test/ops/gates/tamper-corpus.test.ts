@@ -234,7 +234,7 @@ describe('RS-10 detector and totals regressions', () => {
           '',
           "describe('payment', () => {",
           "  it('never fails to charge the card once', () => {",
-          '    expect(1).toBe(1);',
+          '    expect(false).toBe(true);',
           '  });',
           '});',
           '',
@@ -245,7 +245,9 @@ describe('RS-10 detector and totals regressions', () => {
       await git(['commit', '-q', '-m', 'base']);
       writeFileSync(
         join(root, '.gitattributes'),
-        ['victim.test.ts binary -diff diff=hostile', '*.ts -diff', ''].join('\n'),
+        // Last match wins per attribute, so the victim line comes after the
+        // glob and `diff=hostile` after `binary`'s implied `-diff`.
+        ['*.ts -diff', 'victim.test.ts binary diff=hostile', ''].join('\n'),
       );
       // The worker's actual target: remove the failing test declaration while
       // the hostile attributes would hide the edit. The verdict must identify
@@ -261,6 +263,18 @@ describe('RS-10 detector and totals regressions', () => {
         ].join('\n'),
       );
       await git(['add', '.']);
+      expect(await git(['check-attr', 'diff', '--', 'victim.test.ts'])).toBe(
+        'victim.test.ts: diff: hostile\n',
+      );
+      // Negative control: without --no-textconv the hostile driver hides the
+      // removed bytes, so the shared flags below are what expose them.
+      const withTextconv = await git([
+        'diff',
+        '--cached',
+        ...SWEEP_DIFF_FLAGS.filter((flag) => flag !== '--no-textconv'),
+        '--',
+      ]).catch(() => '');
+      expect(withTextconv).not.toContain("-  it('never fails to charge the card once', () => {");
 
       const diff = await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']);
       expect(diff).toContain('--- a/victim.test.ts');

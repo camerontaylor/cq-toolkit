@@ -26,7 +26,6 @@
 //      pinned to the PUBLISHED vectors in test/ops/gates/fingerprint.test.ts,
 //      so this chain inherits a non-circular anchor), and RangeError on an
 //      empty/non-string tool — the fingerprint default-tool trap.
-import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
 import { describe, expect, test } from 'vitest';
 import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,6 +37,7 @@ import { fingerprintFailure, fnv1a32Hex } from '../../../src/ops/gates/fingerpri
 import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
 import type { LedgerQueryInput, LedgerStore, LedgerView } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
+import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
 import {
   SWEEP_UNIT_OP,
   changedFilesArgs,
