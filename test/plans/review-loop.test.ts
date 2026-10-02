@@ -562,14 +562,20 @@ const runLoop = async (
       }),
   };
   // The fix op dispatches through a registry view whose review.fixItem binds
-  // the scripted Driver — the same governed runPlan seam the CLI uses.
+  // a factory resolving to the scripted Driver (ADR-0002 §2.5) — the same
+  // governed runPlan seam the CLI uses.
   const view: OpRegistryView = {
     get: (name) =>
       name === 'review.fixItem'
         ? ({
             name: 'review.fixItem',
             inputSchema: FixReviewItemInputSchema,
-            importer: async () => makeFixReviewItem({ driver }),
+            importer: async () =>
+              makeFixReviewItem({
+                drivers: {
+                  resolve: (req) => ({ driver, lane: 'ai-sdk', modelSpec: req.modelSpec }),
+                },
+              }),
           } as unknown as OpRegistryEntry<never, never>)
         : undefined,
   };

@@ -39,7 +39,11 @@
 // planner over the scratch repo → phase-B expanded graph with the driver/
 // check bindings) and runs each through the same built CLI via
 // `run-plan --plan=<file>`; the real SubprocessDriver then spawns the fake
-// sweep agent once per unit (asserted from the driver's session files).
+// sweep agent once per unit (asserted from the factory lane's session
+// files). S4b-B2 (ADR-0002 §2.5): the plan JSON's driver section carries
+// only {provider, model} — the lane is bound by the fixture deployment's
+// factory family (test/fixtures/cli-smoke-ops/sweepfix, dispatched with
+// --ops-root), mirroring how a real deployment binds its sweep lane.
 // review-loop, merge-prs and analyze have no hermetic real instance here:
 // their real builders need per-run state (fetched review threads, conflicting
 // PRs, a real analysis target) and, for the agent-backed review/merge ops, a
@@ -92,7 +96,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST_CLI = join(ROOT, 'dist', 'cli.js');
 const FAKE_GH = join(ROOT, 'test', 'fixtures', 'gh', 'fake-gh.mjs');
 const SMOKE_OPS = join(ROOT, 'test', 'fixtures', 'cli-smoke-ops');
-const SWEEP_AGENT = join(ROOT, 'test', 'fixtures', 'scratch-repo', 'sweep-agent.mjs');
 
 /** Hard per-CLI budget: a hung plan child must fail the smoke, not stall CI. */
 const CLI_TIMEOUT_MS = 180_000;
@@ -269,23 +272,16 @@ async function buildRealSweepFamilyPlan(kind: 'sweep' | 'test-fix'): Promise<Rea
   }
   const sessionsDir = join(planDir, `sessions-${kind}`);
   const runStateDir = join(planDir, `run-state-${kind}`);
+  // S4b-B2 (ADR-0002 §2.5): the plan JSON's driver section is the factory's
+  // RESOLUTION INPUT — {provider, model} only, no executable/routing/
+  // session knobs (the registry schema rejects them). The lane itself is
+  // bound by the fixture deployment's factory config
+  // (test/fixtures/cli-smoke-ops/sweepfix — the real-instance legs dispatch
+  // with --ops-root so the BUILT CLI resolves sweep.planSweep/sweep.unit
+  // through it).
   const driver: SweepUnitDriverConfig = {
-    binary: [process.execPath, SWEEP_AGENT],
     provider: 'cq-t43-smoke',
     model: 'sweep-fake',
-    sessionsDir,
-    routingTable: {
-      endpoints: {
-        'cq-t43-smoke': {
-          baseUrlEnv: 'CQ_T43_SMOKE_URL',
-          baseUrlDefault: 'http://127.0.0.1:9',
-          keyEnv: 'CQ_T43_SMOKE_KEY',
-          models: ['sweep-fake'],
-          notes:
-            'T4.3 real-plan smoke: the sweep agent fixture is the model; the URL is never contacted',
-        },
-      },
-    },
   };
   const check: SweepUnitCheckConfig = {
     adapter: 'tsc-lines',
@@ -314,6 +310,15 @@ async function buildRealSweepFamilyPlan(kind: 'sweep' | 'test-fix'): Promise<Rea
   const planId = kind === 'sweep' ? SWEEP_PLAN_ID : TEST_FIX_PLAN_ID;
   return { plan: { ...full, id: planId, jobs }, sessionsDir };
 }
+
+test('the sweep fixture registry exposes both real deployment operations', async () => {
+  const { registry } = await import('../fixtures/cli-smoke-ops/sweepfix/registry.js');
+  expect(registry.map((entry) => entry.name)).toEqual(['sweep.planSweep', 'sweep.unit']);
+  for (const entry of registry) {
+    expect(entry.inputSchema.safeParse({}).success).toBe(false);
+    expect(typeof entry.importer).toBe('function');
+  }
+});
 
 describe('the plan smoke table covers the registry (generation contract)', () => {
   test('exactly the discovered plan set is exercised', async () => {
@@ -468,10 +473,22 @@ describe('the built CLI still drives the subprocess driver + fake agent', () => 
         writeFileSync(planPath, JSON.stringify(built.plan), 'utf8');
         const env = hermeticEnv();
         // The driver route's key VALUE (fake — the URL is a black hole; the
-        // fake sweep agent IS the model).
+        // fake sweep agent IS the model), plus the fixture factory lane's
+        // sessions dir (the spawn evidence read back below).
         env.CQ_T43_SMOKE_KEY = 't43-smoke-fake-key';
+        env.CQ_SWEEP_FIXTURE_SESSIONS_DIR = built.sessionsDir;
         const res = runCli(
-          ['run-plan', `--plan=${planPath}`, '--json', '--concurrency=1'],
+          [
+            'run-plan',
+            `--plan=${planPath}`,
+            '--json',
+            '--concurrency=1',
+            // S4b-B2: sweep.unit's central importer binds the DEFAULT
+            // factory; the real-instance legs dispatch through the fixture
+            // deployment's factory family (sweepfix) instead, which binds
+            // the subprocess lane over the fake agent for the fake provider.
+            `--ops-root=${SMOKE_OPS}`,
+          ],
           env,
           scratchRepo,
         );
