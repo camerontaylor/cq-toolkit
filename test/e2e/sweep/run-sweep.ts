@@ -7,12 +7,14 @@
 //   phase B  buildSweepPlan(config, report) → runPlan through the CENTRAL
 //            registry: 'sweep.unit' dispatches through its REGISTERED entry
 //            (bindingsFromDispatch → real subprocess worktree effects, the
-//            REAL subprocess driver over the input's driver section — the
-//            fake agent CLI fixture IS that driver's binary — real probes,
-//            the real git push against the scratch repo's LOCAL bare
-//            origin), and `pr.assemblePrs` is the ONE override (the injected
-//            fake gh — no forge is contacted; tracker-branch creation on a
-//            real forge is the deferred WS-K surface, review-debt #173).
+//            DRIVER FACTORY's resolution of the input's driver section — the
+//            fake agent CLI fixture is bound as the factory's subprocess
+//            lane, ADR-0002 §2.5: plan data names no executable — real
+//            probes, the real git push against the scratch repo's LOCAL
+//            bare origin), and `pr.assemblePrs` is the ONE forge override
+//            (the injected fake gh — no forge is contacted; tracker-branch
+//            creation on a real forge is the deferred WS-K surface,
+//            review-debt #173).
 //
 // Every git leg (worktrees, check.js probes, diffs, commits, pushes) is
 // real, in tmpdirs. The journal is the runner's own NDJSON (one file per run
@@ -24,6 +26,7 @@
 // (one entry per unit tree; lastStep = the LAST job-finished event in
 // journal order), and runs the REAL salvage op over the inventory.
 import { join, resolve } from 'node:path';
+import type { DriverFactory } from '../../../src/driver/factory.js';
 import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
 import type {
   JournalEvent,
@@ -60,6 +63,8 @@ import {
 import type { PlanSweepReport, WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import {
   RETRYABLE_FAULT_CLASSES,
+  bindingsFromDispatch,
+  makeSweepUnitOp,
   sweepUnitFaultClass,
   sweepUnitSegments,
 } from '../../../src/ops/sweep/unit.js';
@@ -68,6 +73,7 @@ import type {
   SweepUnitDispatchInput,
   SweepUnitDriverConfig,
 } from '../../../src/ops/sweep/unit.js';
+import { SweepUnitDispatchInputSchema } from '../../../src/ops/sweep/registry.js';
 import { readCommittedMarkers } from '../../../src/ops/sweep/unit.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import type { SalvageEntry, SalvagePlan } from '../../../src/ops/sweep/salvage.js';
@@ -163,8 +169,17 @@ export interface RunSweepOpts {
   journalDir: string;
   /** The injected forge (makeFakeGh) — no real gh is ever spawned. */
   gh: PrEffects;
-  /** The JSON driver binding (the fake agent CLI + fake endpoint), per unit job. */
+  /** The JSON driver binding ({provider, model} — the factory's resolution input), per unit job. */
   driver: SweepUnitDriverConfig;
+  /**
+   * The DRIVER FACTORY bound to the scenario's fake agent (ADR-0002 §2.5):
+   * the deployment-config seam — the factory binds role 'fixer' for the
+   * scenario's provider to its subprocess lane over the fake agent CLI and
+   * owns the served-model assertion. The sweep.unit dispatch override below
+   * hands it to bindingsFromDispatch (the central registry's importer binds
+   * the DEFAULT factory, which no fake provider can resolve on).
+   */
+  drivers: DriverFactory;
   /** The JSON probe binding (the scratch check.js command template), per unit job. */
   check: SweepUnitCheckConfig;
   /** The per-unit fixer prompt TEMPLATE — the scenario steering (faults ride here). */
@@ -268,7 +283,12 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
 
   // The dispatch view: the CENTRAL registry (sweep.planSweep AND the
   // registered sweep.unit — the e2e exercises the real dispatch path), with
-  // the ONE injected seam: pr.assemblePrs over the fake forge.
+  // TWO injected seams: pr.assemblePrs over the fake forge, and sweep.unit
+  // re-bound over the SCENARIO's factory (the central importer binds the
+  // default createDriverFactory(), whose conservative bindings cannot
+  // resolve the fake provider — the scenario's factory binds its subprocess
+  // lane to the fake agent CLI, exactly like a deployment's factory config
+  // would).
   const central = new Map((await list()).map((entry) => [entry.name, entry] as const));
   if (!central.has('sweep.unit')) throw new Error('e2e setup: sweep.unit is not registered');
   if (!central.has('pr.assemblePrs'))
@@ -284,6 +304,22 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
             unknown,
             unknown
           >,
+      },
+    ],
+    [
+      'sweep.unit',
+      {
+        name: 'sweep.unit',
+        inputSchema: SweepUnitDispatchInputSchema,
+        importer: async () =>
+          (async (input: SweepUnitDispatchInput) => {
+            const unitOp = makeSweepUnitOp(bindingsFromDispatch(input, opts.drivers));
+            return await unitOp({
+              package: input.package,
+              fixer: input.fixer,
+              files: input.files,
+            });
+          }) as Op<unknown, unknown>,
       },
     ],
   ]);

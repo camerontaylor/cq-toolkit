@@ -1,9 +1,10 @@
 // fixReviewItem — E4 slice 1 (goal E4; ws-e item 4): the agentic fix half of
 // the review loop. One review item in, one worker invocation out: the op
 // composes the prompt, maps the harness config onto the frozen driver-seam
-// policies, runs ONE isolated invocation through the INJECTED Driver (the
-// op's only runtime seam — the registry binds the default SubprocessDriver
-// at importer time, gates precedent), and folds the WorkerResult into the
+// policies, runs ONE isolated invocation through a DriverFactory-resolved
+// driver (ADR-0002 §2.5 — the op never constructs a lane class; the caller/
+// registry injects the factory, one resolve per op call, and the factory
+// owns the served-model assertion), and folds the WorkerResult into the
 // frozen OpResult taxonomy.
 //
 // Invariants honored here:
@@ -42,39 +43,51 @@
 // fired — the system prompt cap or any comment cap — so a caller never
 // mistakes a clipped context for the full one.
 //
+// THE INVOCATION (ADR-0002 §2.4/§2.3): the PR worktree rides as the
+// invocation's workspace binding (the driver binds cwd and harness
+// confinement to realpath(workspace.path) — no pre-created session record,
+// so no sessionRef), the fix contract rides as the invocation's
+// outputSchema (a schema-valid contract object or an 'output-invalid'
+// error), and the governed signal rides RunOptions (§2.1). The invocation's
+// modelSpec is the FACTORY-NORMALISED spec — a deprecated provider alias
+// never reaches a lane or a journal. Session records a workspace-bound run
+// creates are reaped once the run settles (DriverRequest
+// sessionRetention 'reap-on-settle', the op's `retainSessions` dep) unless
+// retention was explicitly requested — the audit trail for a loop run is
+// the run JOURNAL, not raw session files (round-3 item 14).
+//
 // STOP-REASON → OpResult MAPPING (mechanical, total):
 //   'complete' + parseable structured output (an object with EXACTLY the
 //     contract keys and value shapes, or a string holding one JSON line)
 //     → ok; a complete run whose structured output is missing, unparseable,
 //     or wrong-shaped is a DEFINITIVE contract violation → failed (never a
 //     guessed ok).
-//   'budget' → budget-exhausted; 'error' → failed; 'aborted' →
-//     indeterminate (no verdict on partial work). A driver that REJECTS
-//     (throws at or below the seam) is `needs-human`: the op cannot know
-//     whether the worker ran, and the common cause is a dispatch-time
-//     environment gap (unknown provider handle, missing key, no host CLI
-//     for the provider's route) a human must arrange — never `failed`
-//     (baselineProbe's crashed-runner precedent, review-debt #186).
+//   'budget' → budget-exhausted; 'error' → failed with the structured
+//     errorClass named in the text for humans only (ADR-0002 §2.9 — the
+//     class itself is forwarded nowhere); 'aborted' → indeterminate (no
+//     verdict on partial work). A THROWN factory.resolve() or driver.run()
+//     is mapped per §2.9: under an already-aborted governed signal it is
+//     the governed cancellation (I8) → `indeterminate`; any other throw —
+//     the seam's 'config'/'auth' dispatch classes (an unbound role/provider
+//     binding, a missing key env, no host CLI for the provider's route) or
+//     an UNCLASSIFIED throw — is a dispatch-time environment gap a human
+//     must arrange → `needs-human`, never `failed` (which would claim a
+//     definitive worker outcome the op never observed; baselineProbe's
+//     crashed-runner precedent, review-debt #186).
 //   On ok, WorkerResult.usage becomes result.usage, WorkerResult.costUSD
 //   (when the driver's price map knew the model) becomes result.costUSD,
 //   and denials pass through verbatim; on every other status the worker's
 //   evidence has no result to ride (the frozen OpResult carries none) —
 //   but its USAGE/COST is still reported to the governor through the job
 //   context, so a bounded run's spend is observed (review-debt #185).
-import { mkdtempSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { z } from 'zod';
+import { toOutputSchema } from '../../driver/common/structured.js';
+import { boundedErrorText } from '../../driver/error-text.js';
+import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
 import { deepFreeze, defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { SessionStore } from '../../harness/session.js';
-import { SubprocessDriver } from '../../driver/subprocess/index.js';
-import { withServedModelAssertion } from '../../driver/served-model.js';
-import { boundedErrorText } from '../../driver/error-text.js';
 import type {
   Budget,
-  Driver,
   ModelSpec,
   OpInvocation,
   ToolDenial,
@@ -125,11 +138,12 @@ export interface FixReviewItemInput {
   /**
    * The resolved per-PR worktree the worker must fix and commit in —
    * resolved upstream by prWorktree.resolvePrWorktree. This op NEVER runs
-   * git: it composes the worktree into the prompt and the sandbox policy,
-   * nothing else.
+   * git: it composes the worktree into the prompt, and it binds it as the
+   * invocation's workspace (the driver owns cwd and harness confinement
+   * there — ADR-0002 §2.4), nothing else.
    */
   worktree: { path: string; branch: string };
-  /** Model identity as plain data (ModelSpec); passed through to the invocation verbatim. */
+  /** Model identity as plain data (ModelSpec); resolved through the DriverFactory (the invocation carries the FACTORY-NORMALISED spec — a deprecated provider alias never reaches a lane or a journal). */
   driver: ModelSpec;
   /**
    * Per-op harness config (R4: the tool allowlist + prompt budget are
@@ -220,12 +234,12 @@ export const MAX_FIX_COMMITS = 10;
 export const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
- * The structured-output schema the DISPATCHED inner driver hands the CLI
- * (`--json-schema`, Codex 2j): without it a worker that prints the fix
- * contract as a text line never populates structured_output and every
- * honest run would fail the parse. parseFixOutput stays as defense in
- * depth (exact keys, changed↔commits tie, bounds) — the schema is the
- * vendor-boundary contract, the parse is the loop's own gate.
+ * The structured-output contract the INVOCATION carries (ADR-0002 §2.3 —
+ * rendered once as plain data via {@link toOutputSchema}; the lane must
+ * settle a schema-valid contract object or an 'output-invalid' error,
+ * Codex 2j). parseFixOutput stays as defense in depth (exact keys,
+ * changed↔commits tie, bounds) — the schema is the vendor-boundary
+ * contract, the parse is the loop's own gate.
  */
 export const FixReviewItemOutputSchema = z
   .object({
@@ -234,6 +248,9 @@ export const FixReviewItemOutputSchema = z
     commits: z.array(z.string()),
   })
   .strict();
+
+/** The invocation's structured-output contract, rendered once (module doc). */
+const FIX_CONTRACT_OUTPUT_SCHEMA = toOutputSchema('review.fixItem/v1', FixReviewItemOutputSchema);
 
 /** Head-truncate text to maxChars; reports whether the cap fired. */
 const headCapped = (text: string, maxChars: number): { text: string; truncated: boolean } =>
@@ -477,133 +494,77 @@ const parseFixOutput = (
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * The fix-worker seam source. Two forms:
- *   - a plain {@link Driver} — the caller supplies the seam (tests,
- *     in-process callers that enforce the harness themselves); the op
- *     applies the served-model assertion;
- *   - `{ perHarness }` — the DISPATCHED form (the registry binds it): the
- *     driver is built FROM THE INPUT'S HARNESS, WORKTREE, AND ModelSpec per
- *     invocation. Needed because {@link toolPolicyFor} reduces the harness
- *     to tool NAMES — command/path restrictions (run.commandPatterns,
- *     pathPatterns) cannot ride the frozen OpInvocation (Codex P1) — and
- *     because the worker must run IN THE PR WORKTREE (round-2 finding 1,
- *     HIGH): the registry binds it to
- *     `worktreeFixDriver({ harnessConfig: harness, worktreePath:
- *     worktree.path })`, whose session record makes the worktree the
- *     invocation's workspace. The ModelSpec rides the binding so the
- *     factory can select the DRIVER KIND from the provider handle (review-
- *     debt #186): 'ai-sdk' binds the in-process AiSdkDriver (no host CLI),
- *     any other handle binds the SubprocessDriver host-CLI lane. The op
- *     also asserts the returned driver, including caller-supplied factories.
+ * Build the `review.fixItem` op over the injected DriverFactory (ADR-0002
+ * §2.5 — the worker seam; the op never constructs a lane class and adds no
+ * served-model assertion: the factory wraps every resolved driver). The op
+ * is otherwise pure composition + parsing: it runs exactly one invocation
+ * per call (I6 — a fresh isolated worker per item, no session reuse, no
+ * retries; attempt policy is the caller's), resolves ONE DriverRequest per
+ * call (role 'fixer', the input's ModelSpec, the input's harness, the
+ * session-retention flag below), maps the stop reason per the module-doc
+ * table, and on ok parses the structured output STRICTLY — a complete run
+ * without a parseable fix contract (or with a changed↔commits
+ * contradiction) is a definitive contract violation (`failed`), never a
+ * guessed ok.
  */
-export type FixDriverSource =
-  | Driver
-  | {
-      perHarness: (
-        harness: HarnessConfig,
-        worktree: { path: string; branch: string },
-        modelSpec: ModelSpec,
-      ) => Driver;
-    };
-
-/**
- * Build the `review.fixItem` op over the injected runtime seam (see
- * {@link FixDriverSource}). The op is otherwise pure composition + parsing:
- * it runs exactly one invocation per call (I6 — a fresh isolated worker per
- * item, no session reuse, no retries; attempt policy is the caller's), maps
- * the stop reason per the module-doc table, and on ok parses the structured
- * output STRICTLY — a complete run without a parseable fix contract (or
- * with a changed↔commits contradiction) is a definitive contract violation
- * (`failed`), never a guessed ok.
- */
-export interface WorktreeFixDriverOptions {
-  /** The harness the inner driver binds its tool surface to. */
-  harnessConfig: HarnessConfig;
-  /** The PR worktree the worker must run in (the session record's workspace). */
-  worktreePath: string;
-  /** Injectable for tests; default: mkdtemp under os.tmpdir(). */
-  sessionsDir?: string;
-  /** Injectable inner-driver seam; default: `new SubprocessDriver({ harnessConfig, sessionsDir, outputSchema })`. */
-  makeInner?: (sessionsDir: string) => Driver;
+export function makeFixReviewItem(deps: {
   /**
-   * Keep the per-adapter sessions dir after runs (default FALSE: it is
-   * removed best-effort, recursively, once the inner run settles). The
-   * audit trail for a loop run is the run JOURNAL, not raw session files;
-   * retention is an explicit debugging opt-out.
+   * The worker seam: the factory resolves ONE request per op call —
+   * role 'fixer', the input's ModelSpec, the harness below, the retention
+   * flag below — to the constructed, served-model-wrapped lane. The
+   * factory's default binding puts the 'fixer' role on the ai-sdk lane for
+   * the default providers; a provider that is neither a default provider
+   * nor bound for the role throws 'config' pre-dispatch (the op folds it
+   * to `needs-human`, module doc).
+   */
+  drivers: DriverFactory;
+  /**
+   * Keep the fresh session record a workspace-bound run created (default
+   * FALSE: it is reaped once the run settles, whatever the verdict —
+   * DriverRequest sessionRetention 'reap-on-settle'). The audit trail for
+   * a loop run is the run JOURNAL, not raw session files; retention is an
+   * explicit debugging opt-out (round-3 item 14).
    */
   retainSessions?: boolean;
-}
-
-/**
- * The dispatched fix-worker seam (round-2 finding 1, HIGH): SubprocessDriver
- * creates a FRESH temp workspace for every fresh invocation and the frozen
- * OpInvocation carries no workspace — so a driver bound from defaults alone
- * runs the worker in a scratch dir the prompt's PR worktree never reaches.
- * The adapter closes that gap with the SHIPPED seams only:
- *   - it owns a fresh sessionsDir (mkdtemp under os.tmpdir(), injectable);
- *   - per run(): `new SessionStore(sessionsDir).create(worktreePath)` — a
- *     FRESH session record per invocation (I6: no session reuse) whose
- *     workspace IS the PR worktree;
- *   - then delegates to the inner driver with that `sessionRef` — the
- *     resume path loads the record and binds the tool surface (cwd, read/
- *     edit confinement) to the worktree.
- * The inner driver is injectable (`makeInner`) so tests can observe the
- * session wiring; the default binds `new SubprocessDriver({ harnessConfig,
- * sessionsDir })`.
- */
-export function worktreeFixDriver(
-  opts: WorktreeFixDriverOptions,
-): Driver & { sessionsDir: string } {
-  const sessionsDir = opts.sessionsDir ?? mkdtempSync(join(tmpdir(), 'cq-fix-worktree-'));
-  const rawInner = opts.makeInner
-    ? opts.makeInner(sessionsDir)
-    : new SubprocessDriver({
-        harnessConfig: opts.harnessConfig,
-        sessionsDir,
-        outputSchema: FixReviewItemOutputSchema,
-      });
-  const inner = withServedModelAssertion(rawInner, 'default');
-  const driver: Driver = {
-    run: async (invocation) => {
-      const store = new SessionStore(sessionsDir);
-      const record = await store.create(opts.worktreePath);
-      try {
-        return await inner.run({ ...invocation, sessionRef: record.sessionId });
-      } finally {
-        // The session record is not the audit trail (the run journal is) —
-        // the dir is reaped once the run settles unless retention was
-        // explicitly requested (round-3 item 14; revises the earlier
-        // evidence-only disposition: one adapter per item would otherwise
-        // accumulate un-reaped dirs of untrusted prompt content).
-        if (opts.retainSessions !== true) {
-          await rm(sessionsDir, { recursive: true, force: true }).catch(() => undefined);
-        }
-      }
-    },
-  };
-  return Object.assign(driver, { sessionsDir });
-}
-
-export function makeFixReviewItem(deps: {
-  driver: FixDriverSource;
 }): Op<FixReviewItemInput, FixReviewItemResult> {
-  // The perHarness form builds the driver from the invocation's OWN harness
-  // AND worktree (the dispatched seam must run in the PR worktree — see
-  // worktreeFixDriver). Assert both forms here: caller-supplied factories
-  // need the same guarantee as plain drivers and the registry binding.
-  const driverFor = (input: FixReviewItemInput): Driver => {
-    const source = deps.driver;
-    if ('perHarness' in source) {
-      return withServedModelAssertion(
-        source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver),
-        'default',
-      );
-    }
-    return withServedModelAssertion(source, 'default');
-  };
   return async (input: FixReviewItemInput) => {
-    const driver = driverFor(input);
     const harness = input.harness ?? defaultHarnessConfig;
+    // RESOLVE ONCE, BEFORE ANY COMPOSED CONTEXT IS SENT (ADR-0002 §2.5):
+    // role + provider → the constructed, served-model-wrapped lane. The
+    // input's harness and worktree are the request's plan data — the
+    // harness rides the DriverRequest (toolPolicyFor reduces it to tool
+    // NAMES; command/path restrictions cannot ride the frozen
+    // OpInvocation, Codex P1) and the worktree rides the invocation as its
+    // workspace binding (§2.4). A resolve throw is a PRE-DISPATCH failure
+    // carrying a structured class (an unbound provider/role is 'config') —
+    // mapped by the §2.9 throw rows below, exactly like a run() throw.
+    let resolved: ResolvedDriver;
+    try {
+      resolved = deps.drivers.resolve({
+        role: 'fixer',
+        modelSpec: input.driver,
+        harness,
+        sessionRetention: deps.retainSessions === true ? 'keep' : 'reap-on-settle',
+      });
+    } catch (err) {
+      // A THROWN resolve() with the governor's signal already aborted is
+      // the governed cancellation (I8): no verdict on partial work →
+      // `indeterminate` (the pre-#186 behavior, preserved for the ladder).
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `fixReviewItem: the fix worker could not be resolved (cancelled): ${messageOf(err)}`,
+        };
+      }
+      // Otherwise it is a PRE-DISPATCH misconfiguration (an unbound
+      // role/provider binding, a missing API key, a runtime with no host
+      // CLI for the provider's route) — the human's to arrange, so
+      // `needs-human`, never `failed` (review-debt #186).
+      return {
+        status: 'needs-human',
+        reason: `fixReviewItem: the fix worker could not dispatch: ${messageOf(err)}`,
+      };
+    }
     const system = headCapped(
       input.promptOverride ?? defaultFixPrompt,
       harness.promptBudget.maxSystemPromptChars,
@@ -612,14 +573,22 @@ export function makeFixReviewItem(deps: {
     const truncated = system.truncated || user.truncated;
     const invocation: OpInvocation = {
       prompt: `${system.text}\n\n${user.text}`,
-      modelSpec: input.driver,
+      // The FACTORY-NORMALISED spec — a deprecated provider alias never
+      // reaches a lane or a journal (ADR-0002 §2.5).
+      modelSpec: resolved.modelSpec,
       toolPolicy: toolPolicyFor(harness),
       sandboxPolicy: { level: 'workspace-write' },
+      // The PR worktree IS the workspace (§2.4): the driver binds cwd and
+      // confinement to it — no pre-created session record, no sessionRef.
+      workspace: { path: input.worktree.path },
+      outputSchema: FIX_CONTRACT_OUTPUT_SCHEMA,
       budget: input.budget ?? {},
     };
     let worker: WorkerResult;
     try {
-      worker = await driver.run(invocation);
+      // The governed signal rides RunOptions (§2.1) — never the invocation
+      // (OpInvocation stays plain data).
+      worker = await resolved.driver.run(invocation, { signal: currentJobContext()?.signal });
     } catch (err) {
       // A THROWN run() with the governor's signal already aborted is the
       // governed cancellation (I8): no verdict on partial work →
@@ -662,9 +631,14 @@ export function makeFixReviewItem(deps: {
     if (worker.stopReason === 'error') {
       const session = worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`;
       const detail = worker.error === undefined ? '' : `: ${boundedErrorText(worker.error)}`;
+      // ADR-0002 §2.9: EVERY error verdict → 'failed', with the structured
+      // class named in the text (errorClass=<x>) for humans only — the
+      // structured class itself is forwarded nowhere (the invocation gate
+      // records it on reservation-settled).
+      const classText = worker.errorClass === undefined ? '' : `; errorClass=${worker.errorClass}`;
       return {
         status: 'failed',
-        error: `fixReviewItem: driver reported an error stop${session}${detail}`,
+        error: `fixReviewItem: driver reported an error stop${session}${classText}${detail}`,
       };
     }
     const parsed = parseFixOutput(worker.structuredOutput);

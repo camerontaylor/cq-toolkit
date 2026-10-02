@@ -297,3 +297,26 @@ describe('session file modes (issue #18: not world-readable)', () => {
     });
   });
 });
+
+describe('SessionStore reap cleanup', () => {
+  test('removes only the record and known resume sidecar', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      const sidecar = join(scratchDir, `${record.sessionId}.cq-cli-session`);
+      const unrelated = join(scratchDir, `${record.sessionId}.other`);
+      const retained = await store.create(scratchDir);
+      const retainedSidecar = join(scratchDir, `${retained.sessionId}.cq-cli-session`);
+      await writeFile(sidecar, 'resume-id');
+      await writeFile(unrelated, 'preserve');
+      await writeFile(retainedSidecar, 'retained-resume');
+      await store.remove(record.sessionId);
+      expect(await store.load(record.sessionId)).toBeUndefined();
+      await expect(stat(sidecar)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await stat(unrelated)).isFile()).toBe(true);
+      expect((await stat(retainedSidecar)).isFile()).toBe(true);
+      expect((await stat(scratchDir)).isDirectory()).toBe(true);
+      await store.remove(record.sessionId); // repeat removal is a no-op
+    });
+  });
+});

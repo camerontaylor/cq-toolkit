@@ -149,6 +149,10 @@ async function cwdOfPid(pid) {
 // ---------------------------------------------------------------------------
 // Lane runners — each returns { driver, invocation } for the shared measurement
 // ---------------------------------------------------------------------------
+// BARE LANES BY DESIGN: the spike is the measurement instrument for a LANE's
+// own abort seam, so it constructs the lane directly (the one sanctioned
+// non-op construction site — ops resolve through the DriverFactory). The
+// factory's wrappers sit upstream of the behavior being measured.
 
 function aiSdkLane(scratchDir) {
   const driver = new AiSdkDriver({
@@ -282,8 +286,13 @@ async function measure(laneName) {
   const startedAt = Date.now();
   let verdict;
   const ladderOutcome = await runLadder(
-    async () => {
-      const result = await driver.run(invocation);
+    async (ctx) => {
+      // Seam v2 (ADR-0002 §2.1): the lane obeys the signal the CALLER passes
+      // — the governed rung-1 signal rides RunOptions explicitly. (The
+      // lanes' ambient currentJobContext fallback is removed in seam v2's
+      // S6; a lane that dropped an unpassed signal would never settle
+      // 'aborted' here, which is exactly the failure this spike hunts.)
+      const result = await driver.run(invocation, { signal: ctx.signal });
       verdict = result;
       return result;
     },
