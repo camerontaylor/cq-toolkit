@@ -22,9 +22,10 @@ suite; they do not revisit this contract.
 - **Knip's condition (canonical here; another document may restate it only
   alongside a link to this section).** `npm run knip` is whole-project, not
   file-scoped: run it when the diff
-  touches entrypoints, exports, dependencies or configuration, or removes or
-  rewires the last import of a file or package (`knip.json` enables `files` and
-  `dependencies`, so a source-only edit can orphan either) — where dead code
+  touches entrypoints, exports, dependencies or configuration, adds a file, or
+  removes or rewires the last import of a file or package (`knip.json` enables
+  `files` and `dependencies`, so a source-only edit can orphan either, and a new
+  file nothing imports is itself an orphan) — where dead code
   can actually appear — and skip it otherwise.
 - **Zero local full gates per PR.** No protocol step requires a local full
   `npm run test` or full `npm run test:unit`. A clean review adds **zero runs
@@ -119,9 +120,10 @@ trap 'rm -f "$OWNED"' EXIT
 #    (paths containing spaces survive), and an EMPTY file when nothing survives
 OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
 # 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
-#    xargs maps oxlint's tolerated exit 1 to 123, so only 123 is accepted here
+#    oxlint's exit 1 (findings left, nothing lintable, or a config error) is tolerated INSIDE
+#    the per-batch wrapper; any higher exit fails xargs (123 GNU, 1 BSD) and `set -e` stops
 if [ -s "$OWNED" ]; then
-  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED" || [ $? -eq 123 ]
+  xargs -0 sh -c 'node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix "$@" || [ $? -eq 1 ]' sh < "$OWNED"
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
@@ -151,7 +153,9 @@ verbatim rather than varying it. Invoke the pinned binaries through `node`
 rather than `npx`, which can resolve a newer oxlint/oxfmt than the pinned
 devDependency. On a docs-only list `oxlint` reports "No files found to lint" and
 exits 1 — the level `scripts/fix.mjs` tolerates (it throws only above 1) — while
-the formatting step still applies.
+the formatting step still applies. Exit 1 is also oxlint's status for remaining
+findings and for an unreadable configuration, so a green block is not a lint
+verdict: read its output, and take the verdict from `lint:fast` or the static gate.
 
 Validation is a separate process from the mutation, so this is check-then-act,
 not a lock: re-run step 1 whenever the list changes. Batch supported files into

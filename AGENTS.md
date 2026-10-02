@@ -18,8 +18,8 @@ Your local duty, on a coherent change:
 - `npx vitest run <affected test files>` — the tests your diff affects, not
   the suite
 - `npm run knip` — whole-project, not file-scoped: run it when the diff
-  touches entrypoints, exports, dependencies or configuration, or removes
-  or rewires the last import of a file or package, and skip it
+  touches entrypoints, exports, dependencies or configuration, adds a file,
+  or removes or rewires the last import of a file or package, and skip it
   otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** No protocol step requires of a worker a local full
@@ -64,9 +64,10 @@ trap 'rm -f "$OWNED"' EXIT
 #    (paths containing spaces survive), and an EMPTY file when nothing survives
 OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
 # 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
-#    xargs maps oxlint's tolerated exit 1 to 123, so only 123 is accepted here
+#    oxlint's exit 1 (findings left, nothing lintable, or a config error) is tolerated INSIDE
+#    the per-batch wrapper; any higher exit fails xargs (123 GNU, 1 BSD) and `set -e` stops
 if [ -s "$OWNED" ]; then
-  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED" || [ $? -eq 123 ]
+  xargs -0 sh -c 'node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix "$@" || [ $? -eq 1 ]' sh < "$OWNED"
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
