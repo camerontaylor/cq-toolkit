@@ -28,18 +28,46 @@ silently orphans the required context while every id-keyed check stays
 green. Checkouts in required-check jobs are pinned to immutable commit SHAs
 and set `persist-credentials: false` — they run repo code and never push.
 
-## Worked example — this repo's static job, plus its from-source companion
+## Worked example — this repo's static job, its macOS mirror, plus its from-source companion
 
-`{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the six command steps below are this repo's
+`{{RUNNER}}`, `{{MACOS_RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}`
+are the instantiation tokens; the seven command steps below are this repo's
 `{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, test, Knip, build, and the generated-op-docs drift check. This repo's
+format check, `test:unit`, `test:e2e`, Knip, build, and the generated-op-docs drift
+check. This repo's
 `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
-tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
+tokens (`ubuntu-latest`, `macos-latest`, `24`, `npm ci`) and adding the
+provenance header. Substitution is literal per token, so the instance is
+byte-for-byte the fenced block below once the header line is prepended.
 The `from-source` companion job below mirrors ci.yml's second job exactly
 (tokens swapped) so a regeneration carries it instead of silently dropping
 it; it is deliberately not a required check — see its comment.
+
+### Two runners, two explicit job bodies — why not a matrix
+
+The macOS job needs a runner the Linux job does not use, so a single
+`{{RUNNER}}` slot cannot carry both, and the `{{COMMANDS...}}` slot is
+hand-replaced anyway (no placeholder text is substituted). This template
+therefore spells out **two job bodies** — `static` (Linux, required) and
+`static-macos` (macOS, non-required) — each carrying the full command set,
+with `{{RUNNER}}` and `{{MACOS_RUNNER}}` as the only difference between
+them. A `strategy.matrix` over `runs-on` was rejected on purpose:
+
+- a matrix reports one job whose name varies per leg (`static (ubuntu-latest)`),
+  and GitHub reports a matrix job's check runs under the leg names — so a
+  required matrix leg cannot be paired with a stable check name, and this
+  template's own I4 pairing (workflow file + job id) is exactly a stable
+  check name;
+- a matrix collapses per-leg duration into one reported job, which is the
+  per-OS timing this macOS leg exists to measure (`p90 <= 15 min`, `max < 20 min`);
+- a shared matrix body makes the macOS-only reporter/upload steps of later
+  revisions a conditional tangle, where a separate job is a plain
+  step-level difference.
+
+Instantiation stays deterministic either way (literal per-token
+substitution); explicit bodies simply keep the check names stable and the
+legs independently editable.
 
 ```yaml
 name: ci
@@ -85,8 +113,13 @@ jobs:
         run: npm run check:static
       - name: Check formatting
         run: npm run format:check
-      - name: Test
-        run: npm run test
+      # The split mirrors the two npm scripts (`test:unit` excludes the e2e
+      # tree, `test:e2e` selects it), so a red unit run and a red e2e run
+      # are two separate reports instead of one `npm run test` line.
+      - name: Test unit
+        run: npm run test:unit
+      - name: Test e2e/acp
+        run: npm run test:e2e
       - name: Check unused files and dependencies
         run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
@@ -99,6 +132,83 @@ jobs:
       # (missing, changed, or stale docs/ops/*.md) without writing. It reads
       # the BUILT registry, so this step follows the build above; its output
       # is deterministic (no timestamps, no absolute paths).
+      - name: Check generated op docs
+        run: npm run gen:op-docs:check
+
+  # Portable-suite probe — the macOS gate venue, NON-REQUIRED. It runs the
+  # SAME seven command steps as the static job above, on a macOS runner,
+  # because a true full-gate mirror is the honest measurement: a
+  # macOS-only failure in the compiler ratchet, the formatter, Knip, the
+  # build or the generated-docs drift check is exactly as visible as a
+  # macOS-only test failure. (The portable-suite criterion this job exists
+  # to satisfy names `test:unit` and `test:e2e` specifically; narrowing the
+  # job to just those two steps is part of the PROMOTION change below, not
+  # of adding the venue.)
+  #
+  # NON-REQUIRED BY CONSTRUCTION. It is deliberately absent from
+  # REQUIRED_WORKFLOW_CHECKS in scripts/denylist-scan, from
+  # `requiredChecks` in policy/protected-paths.json, and from the ruleset
+  # template policy/templates/github-settings.json, so no branch-protection
+  # wait and no promotion-gate wait can key on a context this job produces.
+  # Adding a context to one of those lists without the others is exactly
+  # the four-way disagreement the promotion change must reconcile; adding
+  # the job alone cannot dangle a wait.
+  #
+  # PROMOTION is a governed, outward-facing change and happens in ONE edit
+  # across every declaration of the required set (this template,
+  # protected-paths.json, denylist-scan's REQUIRED_WORKFLOW_CHECKS,
+  # github-settings.json, the merge-queue-gate.yml template's check list,
+  # and the live rulesets), gated on a 10-candidate pilot measured from the
+  # merge of the suite's spawn-reduction work: p90 <= 15 min, max < 20 min
+  # (the promotion gate's hard wait bound — see timeout-minutes below), and
+  # zero infra-only failures. Any later breach demotes the job through the
+  # same set of files, with the reason recorded. Runs before that merge are
+  # BASELINE data, not pilot candidates.
+  #
+  # Queue time is expected and is NOT hidden here: macOS runner pools are
+  # smaller than Linux's, so the wait counts toward time-to-verdict and is
+  # recorded separately from run time by the baseline report. This job's
+  # config says nothing about either number — it reports only its own run.
+  static-macos:
+    runs-on: {{MACOS_RUNNER}}
+    # Same cq-state skip as the static job (review-debt #226): the ledger
+    # push is not a reviewable change. Job-level, never a trigger filter.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    # The promotion gate refuses a candidate whose required checks have not
+    # all reported within 20 minutes, so a PROMOTED macOS job must finish
+    # under that bound: `max < 20 min` is a promotion test, not only
+    # `p90 <= 15 min`. This is the documented ceiling — it reports a hang as
+    # a red job with a timeout, it never converts a slow or failing run into
+    # a pass.
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: {{NODE_VERSION}}
+          cache: npm
+      - name: Install dependencies
+        run: {{INSTALL_CMD}}
+      # Mirrored from the static job above, verbatim: the mirror is the
+      # point, so an edit to one body's steps is an edit to both.
+      - name: Static gate
+        run: npm run check:static
+      - name: Check formatting
+        run: npm run format:check
+      - name: Test unit
+        run: npm run test:unit
+      - name: Test e2e/acp
+        run: npm run test:e2e
+      - name: Check unused files and dependencies
+        run: npm run knip
+      - name: Build
+        run: npm run build
       - name: Check generated op docs
         run: npm run gen:op-docs:check
 
@@ -140,7 +250,14 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the six
+permissions shape exactly as shown, swap the tokens, and replace the seven
 command steps with your own `{{COMMANDS...}}` — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
+
+Drop the `static-macos` job entirely if you are not running a portable
+venue. If you are, keep it non-required until a pilot says otherwise, and
+promote it in one change across every declaration of the required set. A
+job added here without that discipline is a job whose context nothing
+declares — harmless, and useless: a check no gate waits for protects
+nothing.
