@@ -32,14 +32,14 @@
 //
 // The fold-ordering unit rules themselves live in journal-v2.test.ts — this
 // file pins only the runner's USE of that order.
-import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
 import type { Governance, GovernorEvent } from '../../src/kernel/governor.js';
-import { openRunLog } from '../../src/kernel/journal.js';
+import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type {
@@ -1562,7 +1562,43 @@ describe('governed journal v2 + resume', () => {
       'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
     );
     expect(calls).toEqual([]); // never dispatched
-    expect(await readdir(dir)).toEqual([]); // nothing claimed or emitted — before any state
+    // Inspecting shared history requires a lease even when the refusal
+    // creates no run journal or seq claim. Release retains its lock record.
+    const lockName = 'plan-gov-mark-nohistory.lock.json';
+    const files = await readdir(dir);
+    expect(files.filter((name) => name.endsWith('.ndjson') || name.includes('.seq.'))).toEqual([]);
+    expect(files).toEqual([lockName]);
+    const released = JSON.parse(await readFile(join(dir, lockName), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(released).toEqual({
+      nonce: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      socketPath: `/tmp/cq-j-${String(released.nonce)}.sock`,
+      pid: process.pid,
+      host: hostname(),
+      bootId: expect.stringMatching(/\S/),
+      runId: expect.stringMatching(/^plan-gov-mark-nohistory--[0-9a-z]+--[0-9a-f]+$/i),
+      released: true,
+    });
+    const contender = await acquirePlanLock(dir, 'plan-gov-mark-nohistory', 'refusal-contender');
+    try {
+      await contender.assertHeld();
+    } finally {
+      await contender.release();
+    }
+    const nextReleased = JSON.parse(await readFile(join(dir, lockName), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(nextReleased).toEqual({
+      ...released,
+      nonce: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      socketPath: `/tmp/cq-j-${String(nextReleased.nonce)}.sock`,
+      runId: 'refusal-contender',
+    });
+    expect(nextReleased.nonce).not.toBe(released.nonce);
+    expect(await readdir(dir)).toEqual([lockName]);
   });
 
   test('replay-skip re-attestation copies the prior finish\u2019s costUSD, not just usage (composition M2)', async () => {
