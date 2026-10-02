@@ -17,7 +17,7 @@
 //    when its limits are known, its observation channel is real, and nothing in
 //    the profile is unknown. Anything else is ADVISORY, and an UNKNOWN profile is
 //    ADVISORY too — never "unmetered".
-import { providerProfile } from './provider-profiles.js';
+import { ownEntry, providerProfile } from './provider-profiles.js';
 import type { ErrorSignalFact, ProviderProfile } from './provider-profiles.js';
 import type { Usage } from '../types.js';
 
@@ -79,6 +79,29 @@ export interface QuotaObservation {
 /** Normalize an observation's window label onto the Claude header window ids. */
 function normalizedWindow(window: QuotaObservation['window']): string | undefined {
   return window === 'weekly' ? '7d' : window;
+}
+
+/**
+ * The release time a set of endpoint observations supports: the LATEST reset
+ * among the observations that do not report headroom, because every exhausted
+ * window must clear before a retry is sound. A lane with several windows
+ * (OpenCode Go's 5-hour, weekly and monthly) can have more than one exhausted at
+ * once, and the earliest reset would retry against a wall that has not moved.
+ * An observation that says it IS exhausted but carries no readable reset makes
+ * the whole answer unknown — no other window's time can stand in for it.
+ */
+function observedReleaseMs(observations: readonly QuotaObservation[]): number | undefined {
+  const resets: number[] = [];
+  for (const observation of observations) {
+    if (observation.exhausted === false) continue;
+    const resetMs = isoResetMs(observation.resetsAt);
+    if (resetMs === undefined) {
+      if (observation.exhausted === true) return undefined;
+      continue;
+    }
+    resets.push(resetMs);
+  }
+  return resets.length === 0 ? undefined : Math.max(...resets);
 }
 
 /** A classification with the defer-until time it can support, if any. */
@@ -143,13 +166,19 @@ type DeferResolution =
  */
 function claudeDeferResolution(
   signal: ProviderSignal,
-  observedQuota: QuotaObservation | undefined,
+  observations: readonly QuotaObservation[],
 ): DeferResolution {
   const blockingWindows: string[] = [];
   const blockingResets: number[] = [];
   const anyResetMs: number[] = [];
-  const endpointWindow = normalizedWindow(observedQuota?.window);
-  const endpointResetMs = isoResetMs(observedQuota?.resetsAt);
+  /** The latest endpoint reset among observations that NAME `window`. */
+  const endpointResetMs = (window: string): number | undefined => {
+    const resets = observations
+      .filter((observation) => normalizedWindow(observation.window) === window)
+      .map((observation) => isoResetMs(observation.resetsAt))
+      .filter((resetMs): resetMs is number => resetMs !== undefined);
+    return resets.length === 0 ? undefined : Math.max(...resets);
+  };
   for (const [window, statusHeader, utilizationHeader] of CLAUDE_WINDOWS) {
     const headerResetMs = epochSecondsMs(
       headerValue(signal, `anthropic-ratelimit-unified-${window}-reset`),
@@ -162,7 +191,7 @@ function claudeDeferResolution(
       continue;
     }
     blockingWindows.push(window);
-    const resetMs = headerResetMs ?? (endpointWindow === window ? endpointResetMs : undefined);
+    const resetMs = headerResetMs ?? endpointResetMs(window);
     // This window has no known release time, so NO combination of other times is
     // a sound defer - not a sibling's header reset, not an endpoint value that
     // belongs to the other window.
@@ -212,8 +241,19 @@ function isoResetMs(raw: string | undefined): number | undefined {
 export function classifyProviderSignal(
   profileId: string | undefined,
   signal: ProviderSignal,
-  observedQuota?: QuotaObservation,
+  /**
+   * Endpoint quota observations. Pass EVERY window the endpoint reported: a
+   * lane with several windows can have more than one exhausted at once, and a
+   * single observation can only carry one of their resets.
+   */
+  observedQuota?: QuotaObservation | readonly QuotaObservation[],
 ): ProviderSignalVerdict {
+  const observations: readonly QuotaObservation[] =
+    observedQuota === undefined
+      ? []
+      : Array.isArray(observedQuota)
+        ? observedQuota
+        : [observedQuota];
   const profile = providerProfile(profileId);
   if (profile === undefined) {
     return {
@@ -224,7 +264,7 @@ export function classifyProviderSignal(
   }
   const marker = firstMatchingRule(profile, signal);
   if (marker !== undefined) {
-    const resolution = claudeDeferResolution(signal, observedQuota);
+    const resolution = claudeDeferResolution(signal, observations);
     // Retry-after precedence reaches the RULE path too, not just the generic
     // branch below. A rule that is NOT the unified marker-header set describes a
     // TRANSIENT condition (claude-subscription's documented status-only 429,
@@ -248,7 +288,7 @@ export function classifyProviderSignal(
         ? resolution.at
         : resolution.kind === 'unresolved-blocking'
           ? undefined
-          : isoResetMs(observedQuota?.resetsAt);
+          : observedReleaseMs(observations);
     return {
       errorClass: marker.errorClass,
       ...(deferUntilMs === undefined ? {} : { deferUntilMs }),
@@ -268,8 +308,7 @@ export function classifyProviderSignal(
   // A reset time is evidence of exhaustion only when the observation does not
   // say the allowance still has headroom: a rolling window reports `resetsAt`
   // even when it is nowhere near spent.
-  const resetsAt =
-    observedQuota?.exhausted === false ? undefined : isoResetMs(observedQuota?.resetsAt);
+  const resetsAt = observedReleaseMs(observations);
   // A `Retry-After` is evidence of a transient throttle only on a lane that
   // documents throttling: a profile with no rate-limit headers and no throttle
   // rule (codex-chatgpt — RS-14 captured no rate-limit headers at all in
@@ -327,8 +366,8 @@ export function classifyProviderSignal(
  * The most specific rule that matches this observation, or `undefined`.
  *
  * Rules are tried by discriminator specificity - provider error code, then
- * message shape, then endpoint identity, then HTTP status, then marker-header
- * presence - and a rule matches only when EVERY discriminator it declares
+ * message shape, then endpoint identity, then marker-header presence, then HTTP
+ * status - and a rule matches only when EVERY discriminator it declares
  * matches. That AND is what keeps a rule from admitting a neighbouring condition
  * that shares its status: the Anthropic spend-limit 400 needs its documented
  * message as well as its code, and the OpenCode Go 402 needs the Go endpoint
@@ -372,12 +411,25 @@ function ruleMatches(fact: ErrorSignalFact, signal: ProviderSignal): boolean {
   if (fact.messagePrefix !== undefined && !startsWith(signal.message, fact.messagePrefix)) {
     return false;
   }
-  if (fact.endpointMatch !== undefined && fact.endpointMatch !== signal.endpoint) return false;
+  if (fact.endpointMatch !== undefined && !endpointWithin(signal.endpoint, fact.endpointMatch)) {
+    return false;
+  }
   if (fact.httpStatus !== undefined && fact.httpStatus !== signal.httpStatus) return false;
   if (fact.markerHeader !== undefined && headerValue(signal, fact.markerHeader) === undefined) {
     return false;
   }
   return true;
+}
+
+/**
+ * Whether `endpoint` is the rule's wire: the origin+path itself, or any path
+ * beneath it on a segment boundary. A rule names the wire's base (`/zen/go/v1`)
+ * while an observation carries the request it made (`/zen/go/v1/chat/completions`);
+ * strict equality would never match a real request. The segment boundary keeps a
+ * sibling wire (`/zen/v1/...`, or a `/zen/go/v1beta`) out.
+ */
+function endpointWithin(endpoint: string | undefined, base: string): boolean {
+  return endpoint !== undefined && (endpoint === base || endpoint.startsWith(`${base}/`));
 }
 
 /** Case-insensitive prefix test that treats an absent message as no match. */
@@ -437,7 +489,7 @@ export function creditsForUsage(
    */
   mcpCalls?: number,
 ): number | undefined {
-  const burn = profile.quota?.burnModels?.[model];
+  const burn = ownEntry(profile.quota?.burnModels, model);
   if (burn === undefined) return undefined;
   const { tokenMultiplier, divisor } = burn;
   const tokens =
@@ -468,7 +520,7 @@ export function creditsAreLowerBound(
   model: string,
   mcpCalls?: number,
 ): boolean {
-  const burn = profile.quota?.burnModels?.[model];
+  const burn = ownEntry(profile.quota?.burnModels, model);
   if (burn?.tokenMultiplier.mcpCall === undefined) return false;
   return mcpCalls === undefined;
 }
@@ -533,7 +585,7 @@ export function admissionVerdict(
   if (evidence.model === undefined) {
     reasons.push('model-limits-unverified');
   } else {
-    const limits = profile.modelLimits?.[evidence.model];
+    const limits = ownEntry(profile.modelLimits, evidence.model);
     if (limits?.maxInputTokens === undefined || limits?.maxOutputTokens === undefined) {
       reasons.push('model-limits-unverified');
     }

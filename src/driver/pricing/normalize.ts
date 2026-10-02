@@ -31,6 +31,7 @@
 //     served-model check is on with `requireObserved: true`; `requireObserved:
 //     false` makes the lane ADVISORY for USD (ADR-0002 §2.6, ADR-0003 m-d).
 import { priceOf } from './index.js';
+import { ownEntry } from './provider-profiles.js';
 import type { PerMillionRates } from './data.js';
 import type { ModelSpec } from '../types.js';
 
@@ -57,7 +58,12 @@ export function servedAliasIds(
   provider: string,
   requested: string,
 ): readonly string[] {
-  return table?.[lane]?.[provider]?.[requested] ?? [];
+  // Own keys only: a lane, provider or model id such as `constructor` would
+  // otherwise resolve to an `Object.prototype` member, and spreading that as an
+  // alias list throws instead of answering "nothing declared".
+  const byProvider = ownEntry(table, lane);
+  const byRequested = byProvider === undefined ? undefined : ownEntry(byProvider, provider);
+  return (byRequested === undefined ? undefined : ownEntry(byRequested, requested)) ?? [];
 }
 
 /** How the observed served id was reconciled with the requested (canonical) id. */
@@ -80,15 +86,6 @@ export interface PricedModel {
   readonly candidates: readonly string[];
 }
 
-/**
- * Normalize one invocation's served model to its canonical price key.
- *
- * - observed id equals the requested id → `exact`;
- * - observed id is a declared alias for this lane/provider/requested → `alias`;
- * - nothing observed → `unobserved` (the lane's `requireObserved` decision is the
- *   seam wrapper's; this module only prices what was asked for);
- * - observed id outside the declared set → `undeclared-remap`, NO price.
- */
 /**
  * The ids that must be priced for one invocation: the requested id first, then
  * every DECLARED served alias, with the requested id filtered out of its own
@@ -122,6 +119,15 @@ function pricedCandidates(
   return Object.freeze(candidates);
 }
 
+/**
+ * Normalize one invocation's served model to its canonical price key.
+ *
+ * - observed id equals the requested id → `exact`;
+ * - observed id is a declared alias for this lane/provider/requested → `alias`;
+ * - nothing observed → `unobserved` (the lane's `requireObserved` decision is the
+ *   seam wrapper's; this module only prices what was asked for);
+ * - observed id outside the declared set → `undeclared-remap`, NO price.
+ */
 export function resolvePricedModel(args: {
   readonly lane: string;
   readonly modelSpec: ModelSpec;

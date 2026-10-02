@@ -50,6 +50,18 @@ describe('servedAliasIds', () => {
     expect(servedAliasIds(ALIASES, 'subprocess', 'anthropic', 'claude-opus-4-1')).toEqual([]);
     expect(servedAliasIds(undefined, 'subprocess', 'anthropic', 'claude-haiku-4-5')).toEqual([]);
   });
+
+  test('an Object.prototype member name is not a declared alias at any level', () => {
+    // A plain index answers `constructor` with a function; spreading that as
+    // the alias list threw instead of reporting nothing declared.
+    expect(servedAliasIds(ALIASES, 'constructor', 'anthropic', 'claude-haiku-4-5')).toEqual([]);
+    expect(servedAliasIds(ALIASES, 'subprocess', 'toString', 'claude-haiku-4-5')).toEqual([]);
+    expect(servedAliasIds(ALIASES, 'subprocess', 'anthropic', 'constructor')).toEqual([]);
+    expect(
+      worstCaseRates({ provider: 'anthropic', model: 'constructor' }, ALIASES, 'subprocess')
+        .candidates,
+    ).toEqual(['constructor']);
+  });
 });
 
 describe('resolvePricedModel', () => {

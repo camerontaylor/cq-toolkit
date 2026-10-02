@@ -783,7 +783,19 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
   },
 };
 
+/**
+ * An OWN entry of a data record, or `undefined`. A plain index would answer an
+ * id such as `constructor` or `toString` with an `Object.prototype` member, and
+ * the caller would then crash on it instead of failing closed to ADVISORY.
+ */
+export function ownEntry<T>(
+  record: Readonly<Record<string, T>> | undefined,
+  key: string,
+): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 /** Look a profile up by id; `undefined` when the id is unknown. Never a default profile. */
 export function providerProfile(id: string | undefined): ProviderProfile | undefined {
-  return id === undefined ? undefined : PROVIDER_PROFILES[id];
+  return id === undefined ? undefined : ownEntry(PROVIDER_PROFILES, id);
 }

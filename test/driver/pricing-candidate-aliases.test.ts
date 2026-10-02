@@ -45,9 +45,10 @@ describe('candidate served aliases — shape and contents', () => {
     ).toEqual([]);
   });
 
-  test('the zai group records the three documented auto-routes', () => {
+  test('the zai group records the three documented auto-routes and the observed glm-4.6 remap', () => {
     const zai = CANDIDATE_ZAI_ROUTING_ALIASES['ai-sdk']?.zai ?? {};
     expect(zai).toEqual({
+      'glm-4.6': ['glm-5.3-flash'],
       'glm-4.7': ['glm-5.3-flash'],
       'glm-5.1': ['glm-5.3'],
       'glm-5.2': ['glm-5.3'],

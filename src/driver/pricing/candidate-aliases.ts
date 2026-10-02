@@ -100,10 +100,18 @@ export const CANDIDATE_DEEPSEEK_SERVED_ALIASES: ServedAliasTable = {
  * is unpriced and therefore ADVISORY. The entries exist so the served-id
  * mismatch is recognised as a DECLARED remap rather than an unexplained one —
  * they buy narration, not a price.
+ *
+ * `glm-4.6` → `glm-5.3-flash` is a different status: OBSERVED + DOCS-SILENT, like
+ * the DeepSeek remap. The vendor page above does not list it, but the ai-sdk
+ * coding wire served `glm-5.3-flash` for a `glm-4.6` request live (recorded in
+ * docs/eval-axes-demo.md, where the served-model guard rejected the cell). Both
+ * ids ARE keys in ./data.ts, so unlike the documented routes this one prices:
+ * the worst case is the higher `glm-4.6` row.
  */
 export const CANDIDATE_ZAI_ROUTING_ALIASES: ServedAliasTable = {
   'ai-sdk': {
     zai: {
+      'glm-4.6': ['glm-5.3-flash'],
       'glm-4.7': ['glm-5.3-flash'],
       'glm-5.1': ['glm-5.3'],
       'glm-5.2': ['glm-5.3'],

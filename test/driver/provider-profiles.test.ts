@@ -367,6 +367,24 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 
+  test('a Go-wire 402 on a real request path beneath the Go origin is quota', () => {
+    // The observation carries the request it made, not the wire's base; strict
+    // equality against the origin never matched a real chat-completions call.
+    const verdict = classifyProviderSignal('opencode-go', {
+      httpStatus: 402,
+      endpoint: 'https://opencode.ai/zen/go/v1/chat/completions',
+    });
+    expect(verdict.errorClass).toBe('quota');
+  });
+
+  test('a sibling path that merely shares the Go origin as a string prefix is not the Go wire', () => {
+    const verdict = classifyProviderSignal('opencode-go', {
+      httpStatus: 402,
+      endpoint: 'https://opencode.ai/zen/go/v1beta/chat/completions',
+    });
+    expect(verdict.errorClass).toBe('provider-error');
+  });
+
   test('a 402 with NO endpoint identity fails closed on the Go profile', () => {
     const verdict = classifyProviderSignal('opencode-go', { httpStatus: 402 });
     expect(verdict.errorClass).toBe('provider-error');
@@ -668,6 +686,45 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
   });
 
+  test('several exhausted windows defer to the LATEST reset, not whichever was passed first', () => {
+    const verdict = classifyProviderSignal(
+      'opencode-go',
+      { httpStatus: 402, endpoint: 'https://opencode.ai/zen/go/v1' },
+      [
+        { window: '5h', resetsAt: '2026-09-28T05:00:00Z', exhausted: true },
+        { window: 'monthly', resetsAt: '2026-10-01T00:00:00Z', exhausted: true },
+        // Headroom: a routine boundary, not a release time, even though later.
+        { window: 'weekly', resetsAt: '2026-10-05T00:00:00Z', exhausted: false },
+      ],
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(Date.parse('2026-10-01T00:00:00Z'));
+  });
+
+  test('an exhausted window with no readable reset leaves the quota verdict needs-human', () => {
+    const verdict = classifyProviderSignal(
+      'opencode-go',
+      { httpStatus: 402, endpoint: 'https://opencode.ai/zen/go/v1' },
+      [
+        { window: '5h', resetsAt: '2026-09-28T05:00:00Z', exhausted: true },
+        { window: 'monthly', exhausted: true },
+      ],
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+    expect(verdict.advisoryReason).toBeDefined();
+  });
+
+  test('a NON-exhausted observation does not defer a matched quota rule either', () => {
+    const verdict = classifyProviderSignal(
+      'opencode-go',
+      { httpStatus: 402, endpoint: 'https://opencode.ai/zen/go/v1' },
+      { resetsAt: '2026-09-28T00:00:00Z', exhausted: false },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
   test('a resetsAt from a NON-exhausted endpoint observation is not quota evidence', () => {
     const verdict = classifyProviderSignal(
       'opencode-go',
@@ -947,5 +1004,25 @@ describe('admissionVerdict', () => {
       verdict: 'advisory',
       reasons: ['unknown-profile'],
     });
+  });
+
+  test('an Object.prototype member name is an unknown profile, not a crash', () => {
+    for (const id of ['constructor', 'toString', '__proto__']) {
+      expect(providerProfile(id)).toBeUndefined();
+      expect(admissionVerdict(id)).toEqual({ verdict: 'advisory', reasons: ['unknown-profile'] });
+      expect(classifyProviderSignal(id, { httpStatus: 429 }).rule).toBe('unknown-profile');
+    }
+    expect(admissionVerdict('anthropic-api', { model: 'constructor' }).reasons).toContain(
+      'model-limits-unverified',
+    );
+    if (ZAI === undefined) throw new Error('zai profile missing');
+    expect(
+      creditsForUsage(
+        ZAI,
+        'toString',
+        { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        THURSDAY_UTC_MIDNIGHT,
+      ),
+    ).toBeUndefined();
   });
 });
