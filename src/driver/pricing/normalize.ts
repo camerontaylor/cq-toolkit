@@ -137,7 +137,15 @@ export function resolvePricedModel(args: {
   }
   const via: PricingResolutionVia =
     served === undefined ? 'unobserved' : served === requested ? 'exact' : 'alias';
-  const canonicalRates = priceOf(args.modelSpec);
+  // An observed alias that is itself a priced model is billed at ITS rates (a
+  // `deepseek-chat` request served as `deepseek-flash` costs the flash row);
+  // only an alias with no table entry of its own (a dated Anthropic id) falls
+  // back to the canonical key's rates.
+  const servedRates =
+    via === 'alias' && served !== undefined
+      ? priceOf({ ...args.modelSpec, model: served })
+      : undefined;
+  const canonicalRates = servedRates ?? priceOf(args.modelSpec);
   return {
     canonicalModel: requested,
     ...(canonicalRates === undefined ? {} : { rates: canonicalRates }),

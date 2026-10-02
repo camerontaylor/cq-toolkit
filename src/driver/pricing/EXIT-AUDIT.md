@@ -82,11 +82,13 @@ approving a HARD row.
 W2.1 also asks for a "static/conformance guard against unreported
 `driver.run`". Today:
 
-- `src/ops/**` constructs lanes directly (`src/ops/sweep/unit.ts:33` imports
-  `SubprocessDriver` and builds it) and calls `driver.run(...)`, bypassing any
-  governed wrapper — which ADR-0003 §2.6 says must be the ONE hook
-  (`governDriverFactory`). Those call sites are INV/owner-SW/J territory, not
-  pricing-lane territory, and are recorded here as a finding only.
+- `src/ops/**` no longer constructs lanes directly: `src/ops/sweep/unit.ts`
+  takes a `DriverFactory` (`src/driver/factory.ts`) and resolves its worker
+  through the deployment's `DriverFactoryConfig`. The only remaining
+  direct-construction site is the factory itself. ADR-0003 §2.6 still wants ONE
+  governed hook (`governDriverFactory`); whether the factory applies it is
+  INV/owner-SW/J territory, not pricing-lane territory, and is recorded here as a
+  finding only.
 - `test/driver/conformance.ts` pins derived-only cost (absent `costUSD` for the
   unpriced conformance model) but asserts nothing about the ERROR/ABORT exits'
   spend, which is why rows #5–#8 and #12 went unnoticed.

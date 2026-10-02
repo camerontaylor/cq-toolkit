@@ -159,6 +159,16 @@ describe('candidate served aliases — what they would do to pricing if enabled'
     expect(worst.rates?.output).toBe(0.6);
   });
 
+  test('an alias that is itself priced is billed at the served model rates', () => {
+    const resolved = resolvePricedModel({
+      lane: 'ai-sdk',
+      modelSpec: { provider: 'deepseek', model: 'deepseek-chat' },
+      servedModel: 'deepseek-flash',
+      aliases: CANDIDATE_DEEPSEEK_SERVED_ALIASES,
+    });
+    expect(resolved.rates?.output).toBe(0.6);
+  });
+
   test('the anthropic candidate is UNBOUNDED as written, because the dated id is unpriced', () => {
     const worst = worstCaseRates(
       { provider: 'anthropic', model: 'claude-haiku-4-5' },
@@ -169,7 +179,7 @@ describe('candidate served aliases — what they would do to pricing if enabled'
     expect(worst.unpricedCandidates).toEqual(['claude-haiku-4-5-20251001']);
   });
 
-  test('a zai auto-routed request still resolves to no price until the table gains the id', () => {
+  test('a zai auto-routed request is billed at the priced served model', () => {
     const resolved = resolvePricedModel({
       lane: 'ai-sdk',
       modelSpec: { provider: 'zai', model: 'glm-4.7' },
@@ -178,7 +188,7 @@ describe('candidate served aliases — what they would do to pricing if enabled'
     });
     expect(resolved.via).toBe('alias');
     expect(resolved.canonicalModel).toBe('glm-4.7');
-    expect(resolved.rates).toBeUndefined();
+    expect(resolved.rates?.output).toBe(0.5);
   });
 
   test('with no candidates injected the normalizer behaves exactly as before', () => {

@@ -755,7 +755,10 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
         note: 'GET /zen/go/v1/usage returned rolling/weekly/monthly status, percent used and resetsAt. Undocumented by the vendor; captured live with a 200.',
       },
     },
-    rateLimitHeaders: ['x-opencode-endpoint-id', 'x-opencode-upstream-model-id'],
+    // Empty: `x-opencode-endpoint-id` / `x-opencode-upstream-model-id` are routing
+    // metadata, not throttling signals, and a non-empty list would make a bare
+    // Retry-After classify as `rate-limit` on a profile with no documented throttle.
+    rateLimitHeaders: [],
     errorSignals: [
       {
         // SCOPED TO THE GO WIRE. The same vendor answers 402 on the Zen

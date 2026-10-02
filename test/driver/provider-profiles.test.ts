@@ -668,6 +668,22 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
   });
 
+  test('a resetsAt from a NON-exhausted endpoint observation is not quota evidence', () => {
+    const verdict = classifyProviderSignal(
+      'opencode-go',
+      { httpStatus: 500 },
+      { resetsAt: '2026-09-28T00:00:00Z', exhausted: false },
+    );
+    expect(verdict.errorClass).toBe('provider-error');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('opencode-go documents no throttle, so a bare Retry-After is not a rate-limit', () => {
+    expect(providerProfile('opencode-go')?.rateLimitHeaders).toEqual([]);
+    const verdict = classifyProviderSignal('opencode-go', { retryAfterMs: 1_000 });
+    expect(verdict.errorClass).not.toBe('rate-limit');
+  });
+
   test('an unclassifiable failure is provider-error, never a silent zero or retry', () => {
     const verdict = classifyProviderSignal('deepseek', { message: 'socket hang up' });
     expect(verdict.errorClass).toBe('provider-error');
@@ -779,8 +795,8 @@ describe('creditsForUsage', () => {
   test('the published MCP term is applied when the caller supplies the count', () => {
     const withoutMcp = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
     const withMcp = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK, 10)!;
-    // 10 calls x the GLM-5.3-Flash output multiplier (8) / 10,000, at peak.
-    expect(withMcp - withoutMcp).toBeCloseTo((10 * 8) / 10_000, 12);
+    // 10 calls x the GLM-5.3-Flash output multiplier (8), a separate charge NOT scaled by the 10,000 divisor.
+    expect(withMcp - withoutMcp).toBeCloseTo(10 * 8, 9);
   });
 
   test('a figure is a LOWER BOUND exactly when the MCP term was not supplied', () => {

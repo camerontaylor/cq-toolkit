@@ -67,6 +67,13 @@ export interface ProviderSignal {
 export interface QuotaObservation {
   readonly resetsAt?: string;
   readonly window?: '5h' | '7d' | 'weekly' | 'monthly';
+  /**
+   * `false` when the endpoint reported the allowance as NOT exhausted (status /
+   * utilization below the limit). `resetsAt` is then a routine window boundary,
+   * not a release time, and does not by itself make a failure a `quota` one.
+   * Absent means the caller did not carry the evidence.
+   */
+  readonly exhausted?: boolean;
 }
 
 /** Normalize an observation's window label onto the Claude header window ids. */
@@ -258,7 +265,11 @@ export function classifyProviderSignal(
         : {}),
     };
   }
-  const resetsAt = isoResetMs(observedQuota?.resetsAt);
+  // A reset time is evidence of exhaustion only when the observation does not
+  // say the allowance still has headroom: a rolling window reports `resetsAt`
+  // even when it is nowhere near spent.
+  const resetsAt =
+    observedQuota?.exhausted === false ? undefined : isoResetMs(observedQuota?.resetsAt);
   // A `Retry-After` is evidence of a transient throttle only on a lane that
   // documents throttling: a profile with no rate-limit headers and no throttle
   // rule (codex-chatgpt — RS-14 captured no rate-limit headers at all in
@@ -432,9 +443,11 @@ export function creditsForUsage(
   const tokens =
     usage.input * tokenMultiplier.input +
     usage.cacheRead * tokenMultiplier.cachedInput +
-    usage.output * tokenMultiplier.output +
-    (mcpCalls ?? 0) * (tokenMultiplier.mcpCall ?? 0);
-  return (tokens / divisor) * peakMultiplier(profile, instantMs);
+    usage.output * tokenMultiplier.output;
+  // The MCP term is a SEPARATE charge (calls × output multiplier), not part of
+  // the token expression the divisor scales.
+  const mcpCredits = (mcpCalls ?? 0) * (tokenMultiplier.mcpCall ?? 0);
+  return (tokens / divisor + mcpCredits) * peakMultiplier(profile, instantMs);
 }
 
 /**
