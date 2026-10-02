@@ -30,15 +30,23 @@ function parseArgs(args) {
   return options;
 }
 
-function collectTargets(value, conditions = [], targets = []) {
+// A string `types` sibling supplies the declaration for every runtime branch of the
+// same conditional object, so those branches need no colocated `.d.ts` of their own.
+function collectTargets(value, conditions = [], targets = [], typesTarget = undefined) {
   if (typeof value === 'string') {
-    targets.push({ conditions, target: value });
+    targets.push({ conditions, target: value, typesTarget });
     return targets;
   }
   if (Array.isArray(value)) throw new Error('array export targets are unsupported');
   if (value && typeof value === 'object') {
+    const sibling = typeof value.types === 'string' ? value.types : typesTarget;
     for (const [condition, child] of Object.entries(value)) {
-      collectTargets(child, [...conditions, condition], targets);
+      collectTargets(
+        child,
+        [...conditions, condition],
+        targets,
+        condition === 'types' ? undefined : sibling,
+      );
     }
     return targets;
   }
@@ -58,12 +66,51 @@ function declarationPath(target) {
 // inside string literal types are not counted as declaration dependencies.
 function maskSource(source) {
   const strings = [];
+  const templateDepths = [];
   let out = '';
   let i = 0;
+  // Mask one template-literal chunk starting after a backtick or `}`; stop at the
+  // closing backtick or at a `${` so interpolated type expressions are still scanned.
+  const maskTemplateChunk = (start) => {
+    let j = start;
+    while (
+      j < source.length &&
+      source[j] !== '`' &&
+      !(source[j] === '$' && source[j + 1] === '{')
+    ) {
+      j += source[j] === '\\' ? 2 : 1;
+    }
+    strings.push(source.slice(start, j));
+    out += `\0${strings.length - 1}\0`;
+    if (source[j] === '$' && source[j + 1] === '{') {
+      out += '${';
+      templateDepths.push(0);
+      return j + 2;
+    }
+    out += '`';
+    return j + 1;
+  };
   while (i < source.length) {
     const ch = source[i];
     const next = source[i + 1];
-    if (ch === '"' || ch === "'" || ch === '`') {
+    if (ch === '`') {
+      out += '`';
+      i = maskTemplateChunk(i + 1);
+    } else if (templateDepths.length > 0 && ch === '{') {
+      templateDepths[templateDepths.length - 1] += 1;
+      out += ch;
+      i += 1;
+    } else if (templateDepths.length > 0 && ch === '}') {
+      if (templateDepths[templateDepths.length - 1] === 0) {
+        templateDepths.pop();
+        out += '}';
+        i = maskTemplateChunk(i + 1);
+      } else {
+        templateDepths[templateDepths.length - 1] -= 1;
+        out += ch;
+        i += 1;
+      }
+    } else if (ch === '"' || ch === "'") {
       let j = i + 1;
       while (j < source.length && source[j] !== ch) j += source[j] === '\\' ? 2 : 1;
       strings.push(source.slice(i + 1, j));
@@ -88,17 +135,32 @@ function maskSource(source) {
   return { masked: out, strings };
 }
 
+function decodeStringLiteral(raw) {
+  if (!raw.includes('\\')) return raw;
+  const simple = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' };
+  return raw.replace(
+    /\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(\r\n|[\s\S]))/g,
+    (_, braced, unicode, hex, other) => {
+      const code = braced ?? unicode ?? hex;
+      if (code !== undefined) return String.fromCodePoint(Number.parseInt(code, 16));
+      if (other === '\n' || other === '\r\n' || other === '\r') return '';
+      return simple[other] ?? other;
+    },
+  );
+}
+
 function declarationReferences(rawSource) {
   const { masked, strings } = maskSource(rawSource);
   const references = new Set();
   const literal = String.raw`(['"])\0(\d+)\0\1`;
   const fromPattern = new RegExp(String.raw`\bfrom\s*${literal}`, 'g');
   const sideEffectImportPattern = new RegExp(String.raw`\bimport\s*${literal}`, 'g');
-  const importTypePattern = new RegExp(String.raw`\bimport\s*\(\s*${literal}\s*\)`, 'g');
+  const importTypePattern = new RegExp(String.raw`\bimport\s*\(\s*${literal}\s*(?:,[^)]*)?\)`, 'g');
   const requirePattern = new RegExp(String.raw`\brequire\s*\(\s*${literal}\s*\)`, 'g');
   const referencePathPattern = /\/\/\/\s*<reference\s+path\s*=\s*(['"])([^'"]+)\1/g;
   for (const pattern of [fromPattern, sideEffectImportPattern, importTypePattern, requirePattern]) {
-    for (const match of masked.matchAll(pattern)) references.add(strings[Number(match[2])]);
+    for (const match of masked.matchAll(pattern))
+      references.add(decodeStringLiteral(strings[Number(match[2])]));
   }
   // `/// <reference path>` is file-relative even when written bare (`foo.d.ts`),
   // unlike module specifiers, so normalize it to a relative form to keep it in the graph.
@@ -110,6 +172,7 @@ function declarationReferences(rawSource) {
 }
 
 function declarationCandidates(target) {
+  if (target.endsWith('.json')) return [target];
   if (/\.d\.(?:ts|mts|cts)$/.test(target)) return [target];
   if (target.endsWith('.mjs')) return [target.replace(/\.mjs$/, '.d.mts')];
   if (target.endsWith('.cjs')) return [target.replace(/\.cjs$/, '.d.cts')];
@@ -166,6 +229,7 @@ async function declarationGraph(root, entry) {
       path: `./${path.relative(root, actual).split(path.sep).join('/')}`,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     });
+    if (actual.endsWith('.json')) continue;
     const source = bytes.toString('utf8');
     for (const reference of declarationReferences(source)) {
       if (reference.startsWith('.'))
@@ -187,13 +251,17 @@ async function makeReport(root = ROOT) {
   root = await realpath(path.resolve(root));
   const pkgPath = path.join(root, 'package.json');
   const pkg = JSON.parse(await readFile(pkgPath, 'utf8'));
-  if (!pkg.exports || typeof pkg.exports !== 'object' || Array.isArray(pkg.exports)) {
-    throw new Error('package.json must declare an exports object');
+  if (
+    !pkg.exports ||
+    !['string', 'object'].includes(typeof pkg.exports) ||
+    Array.isArray(pkg.exports)
+  ) {
+    throw new Error('package.json must declare an exports object or string');
   }
 
   // Node treats an exports object whose keys are all conditions (no leading `.`)
   // as the root entry's conditional map; mixing both key kinds is invalid.
-  const keys = Object.keys(pkg.exports);
+  const keys = typeof pkg.exports === 'string' ? [] : Object.keys(pkg.exports);
   const subpathKeys = keys.filter((key) => key.startsWith('.'));
   if (subpathKeys.length > 0 && subpathKeys.length !== keys.length) {
     throw new Error('package.json exports mixes subpath and condition keys');
@@ -206,14 +274,25 @@ async function makeReport(root = ROOT) {
   )) {
     const targets = collectTargets(exportValue);
     const reportedTargets = [];
-    for (const { conditions, target } of targets) {
+    for (const { conditions, target, typesTarget } of targets) {
+      if (target.includes('*')) {
+        throw new Error(`${specifier} uses an unsupported wildcard target: ${target}`);
+      }
       if (!target.startsWith('./') || target.includes('..')) {
         throw new Error(`${specifier} has an unsafe or non-relative target: ${target}`);
       }
       const jsPath = path.resolve(root, target);
       if (!isInside(root, jsPath)) throw new Error(`${specifier} target escapes package root`);
       await resolveInside(root, jsPath, `${specifier} target`);
-      const declaration = declarationPath(target);
+      const declaration =
+        conditions.at(-1) === 'types' || !typesTarget ? declarationPath(target) : typesTarget;
+      if (
+        !declaration.startsWith('./') ||
+        declaration.includes('..') ||
+        declaration.includes('*')
+      ) {
+        throw new Error(`${specifier} has an unsafe or non-relative types target: ${declaration}`);
+      }
       const declarationFile = path.resolve(root, declaration);
       if (!isInside(root, declarationFile))
         throw new Error(`${specifier} declaration escapes package root`);

@@ -122,6 +122,74 @@ test('preserves conditional export keys and targets instead of deduplicating bra
   }
 });
 
+test('accepts string exports, explicit types conditions, and rejects wildcard targets', async () => {
+  const root = await fixture('./dist/index.js');
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export {};\n');
+    assert.equal((await makeReport(root)).entries[0].specifier, '.');
+
+    await mkdir(path.join(root, 'types'), { recursive: true });
+    await writeFile(path.join(root, 'types/shared.d.ts'), 'export {};\n');
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        name: 'fixture',
+        exports: { '.': { types: './types/shared.d.ts', import: './dist/other.js' } },
+      }),
+    );
+    await writeFile(path.join(root, 'dist/other.js'), 'export {};\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets.map(({ declaration }) => declaration),
+      ['./types/shared.d.ts', './types/shared.d.ts'],
+    );
+
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'fixture', exports: { './f/*': './dist/*.js' } }),
+    );
+    await assert.rejects(makeReport(root), /unsupported wildcard target/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('follows import attributes, escaped specifiers, template interpolations and JSON', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      [
+        'export type A = import("./a.js", { with: { "resolution-mode": "import" } }).A;',
+        'export * from "./fo\\u006f.js";',
+        'export type T = `x${import("./t.js").T}y`;',
+        'import data from "./data.json";',
+        'export { data };',
+        '',
+      ].join('\n'),
+    );
+    for (const name of ['a', 'foo', 't']) {
+      await writeFile(path.join(root, `dist/${name}.d.ts`), 'export {};\n');
+    }
+    await writeFile(path.join(root, 'dist/data.json'), '{"a":1}\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path: declaration }) => declaration),
+      [
+        './dist/a.d.ts',
+        './dist/data.json',
+        './dist/foo.d.ts',
+        './dist/index.d.ts',
+        './dist/t.d.ts',
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // Spawns the CLI per assertion; allow headroom on loaded hosts.
 test('CLI baseline comparison detects re-export leaf and side-effect augmentation edits', async () => {
   const root = await fixture({ '.': './dist/index.js' });

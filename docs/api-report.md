@@ -34,6 +34,10 @@ Direct tooling tests can be run without the repository's full test suite:
 npx vitest run test/api-report.test.mjs
 ```
 
+Wildcard (`*`) export targets and array targets are rejected explicitly rather
+than expanded. A string `types` condition supplies the declaration for its
+sibling runtime conditions.
+
 The report is intentionally byte-sensitive: harmless declaration formatting
 changes also change a digest. It does not normalize TypeScript types or
 enumerate symbol signatures. It follows relative declaration imports and
