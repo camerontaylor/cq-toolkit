@@ -71,8 +71,8 @@
 // ratchet lane's hardened argv and a scrubbed child env, because a state
 // read a repo-local config redirect could answer wrongly is not a state
 // read. Every seam is injectable, so the direct tests never spawn anything.
-import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -82,10 +82,10 @@ import {
   readFileSync,
   realpathSync,
   writeSync,
-} from 'node:fs';
-import { basename, dirname, join, sep } from 'node:path';
-import { GIT_HARDEN } from '../ratchet/git.js';
-import { makeGitMutex } from '../sweep/gitMutex.js';
+} from "node:fs";
+import { basename, dirname, join, sep } from "node:path";
+import { GIT_HARDEN } from "../ratchet/git.js";
+import { makeGitMutex } from "../sweep/gitMutex.js";
 
 /** The workspace state an approval binds to (ADR-0003 §2 `state`, §4c step 1). */
 export interface ApprovalState {
@@ -148,7 +148,10 @@ export interface ApprovalAuthority {
    * caller shape that does both, and a bare `exercise` elsewhere is a
    * caller bug this module cannot detect.
    */
-  exercise(grant: ApprovalGrant, subject: ApprovalSubject): Promise<ApprovalExercise>;
+  exercise(
+    grant: ApprovalGrant,
+    subject: ApprovalSubject,
+  ): Promise<ApprovalExercise>;
 }
 
 /** The mutation lock guarding one workspace's mutations. */
@@ -173,12 +176,12 @@ export const DENY_ALL_APPROVALS: ApprovalAuthority = {
   admit: (subject) =>
     Promise.resolve({
       granted: false as const,
-      reason: denyReason(subject, 'no approval authority is bound to this op'),
+      reason: denyReason(subject, "no approval authority is bound to this op"),
     }),
   exercise: (_grant, subject) =>
     Promise.resolve({
       granted: false as const,
-      reason: denyReason(subject, 'no approval authority is bound to this op'),
+      reason: denyReason(subject, "no approval authority is bound to this op"),
     }),
 };
 
@@ -233,7 +236,7 @@ export interface VerifiedApprovals {
  * concurrent callers.
  */
 export interface NonceLedger {
-  consume(nonce: string): Promise<'consumed' | 'spent'>;
+  consume(nonce: string): Promise<"consumed" | "spent">;
 }
 
 /** A ledger that can also answer the "left UNSPENT" question the tests assert. */
@@ -256,9 +259,9 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
   const spent = new Set<string>();
   return {
     consume: async (nonce) => {
-      if (spent.has(nonce)) return 'spent';
+      if (spent.has(nonce)) return "spent";
       spent.add(nonce);
-      return 'consumed';
+      return "consumed";
     },
     spent: () => spent.size,
     isSpent: (nonce) => spent.has(nonce),
@@ -339,10 +342,10 @@ export function makeFileNonceLedger(
     // a record that is not a well-formed nonce is CORRUPTION and the whole
     // read fails closed — refusing every consume beats reading history wrong.
     if (!existsSync(path)) return;
-    const lines = readFileSync(path, 'utf8').split('\n');
+    const lines = readFileSync(path, "utf8").split("\n");
     lines.forEach((line, index) => {
       const record = line.trim();
-      if (record === '') return;
+      if (record === "") return;
       if (!NONCE_PATTERN.test(record)) {
         throw new Error(
           `approval ledger: record ${String(index + 1)} of '${path}' is malformed (${JSON.stringify(record.slice(0, 64))}, expected ${NONCE_SHAPE}) — the ledger is fail-closed: a torn or corrupted record is never read as history, so no consume is allowed until an operator inspects it`,
@@ -354,7 +357,7 @@ export function makeFileNonceLedger(
   return {
     consume: async (nonce) => {
       absorb();
-      if (known.has(nonce)) return 'spent';
+      if (known.has(nonce)) return "spent";
       // TORN-TAIL GUARD, before the O_APPEND. A previous write that failed
       // part-way can leave bytes with no terminating newline; appending now
       // would fuse the partial record with this one and corrupt BOTH. So an
@@ -368,8 +371,8 @@ export function makeFileNonceLedger(
       // promise resolves, or the exercise would report "consumed" for a
       // nonce that is still only a promise of a byte on disk.
       const isNew = !dirSynced;
-      const line = Buffer.from(`${nonce}\n`, 'utf8');
-      const handle = openSync(path, 'a');
+      const line = Buffer.from(`${nonce}\n`, "utf8");
+      const handle = openSync(path, "a");
       try {
         // WRITE-ALL, then one fsync of the completed record: the record
         // that reaches the platter is the whole nonce, never a prefix.
@@ -383,7 +386,7 @@ export function makeFileNonceLedger(
         syncDirSync(dirname(path));
       }
       known.add(nonce);
-      return 'consumed';
+      return "consumed";
     },
     spent: () => {
       absorb();
@@ -444,7 +447,9 @@ export function makeProcessLocalMutationLocks(): MutationLocks {
  * git mutex (the same proper-lockfile discipline the ledger store and the
  * worktree safety code use), NOT a new lock subsystem.
  */
-export function makeLedgerBesideMutationLocks(ledgerPath: string): MutationLocks {
+export function makeLedgerBesideMutationLocks(
+  ledgerPath: string,
+): MutationLocks {
   const trustedDir = realpathOrSelf(dirname(ledgerPath));
   const cache = new Map<string, MutationLock>();
   return {
@@ -452,7 +457,14 @@ export function makeLedgerBesideMutationLocks(ledgerPath: string): MutationLocks
       const key = workspaceKey(workspace);
       const existing = cache.get(key);
       if (existing !== undefined) return existing;
-      const mutex = makeGitMutex({ lockPath: join(trustedDir, `mutation-${key}.lock`) });
+      // NO `.lock` suffix here: makeGitMutex derives the on-disk artifact as
+      // `${lockPath}.lock` (proper-lockfile's documented convention, same as
+      // the guided `<repoRoot>/.cq/git-mutex.lock` default), so spelling the
+      // extension at the call site produced `mutation-<key>.lock.lock` — two
+      // artifacts for one lock, and an O-5 record whose name misdescribes it.
+      const mutex = makeGitMutex({
+        lockPath: join(trustedDir, `mutation-${key}`),
+      });
       cache.set(key, mutex);
       return mutex;
     },
@@ -461,7 +473,10 @@ export function makeLedgerBesideMutationLocks(ledgerPath: string): MutationLocks
 
 /** `sha256(realpath(workspace))`, hex-truncated to 32 — the O-5 lock key. */
 function workspaceKey(workspace: string): string {
-  return createHash('sha256').update(realpathOrSelf(workspace)).digest('hex').slice(0, 32);
+  return createHash("sha256")
+    .update(realpathOrSelf(workspace))
+    .digest("hex")
+    .slice(0, 32);
 }
 
 /**
@@ -481,7 +496,9 @@ function realpathOrSelf(path: string): string {
   for (;;) {
     try {
       const resolved = realpathSync(current);
-      return segments.length === 0 ? resolved : join(resolved, ...segments.reverse());
+      return segments.length === 0
+        ? resolved
+        : join(resolved, ...segments.reverse());
     } catch {
       const parent = dirname(current);
       if (parent === current) return path; // reached the root without resolving
@@ -511,44 +528,50 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
   return {
     read: async (workspace) => {
       const root = realpathSync(workspace);
-      const headSha = await git(root, ['rev-parse', 'HEAD']);
-      const status = await git(root, ['status', '--porcelain=v1', '--untracked-files=all']);
-      return { workspace: root, headSha, treeClean: status === '' };
+      const headSha = await git(root, ["rev-parse", "HEAD"]);
+      const status = await git(root, [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+      ]);
+      return { workspace: root, headSha, treeClean: status === "" };
     },
   };
 }
 
 /** Env redirections that could answer a state read from a different repository. */
 const SCRUBBED_ENV = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_COMMON_DIR',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_NAMESPACE',
-  'GIT_REPLACE_REF_BASE',
-  'GIT_CONFIG',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_CONFIG_COUNT',
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_NAMESPACE",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
 ];
 
 /** One read-only git command over the hardened argv and a scrubbed env; trimmed stdout. */
 async function git(cwd: string, args: string[]): Promise<string> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_ENV) delete env[key];
-  env['GIT_CONFIG_NOSYSTEM'] = '1';
-  env['GIT_TERMINAL_PROMPT'] = '0';
-  env['GIT_OPTIONAL_LOCKS'] = '0';
-  env['GIT_NO_REPLACE_OBJECTS'] = '1';
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  env["GIT_TERMINAL_PROMPT"] = "0";
+  env["GIT_OPTIONAL_LOCKS"] = "0";
+  env["GIT_NO_REPLACE_OBJECTS"] = "1";
   return new Promise<string>((resolvePromise, rejectPromise) => {
     execFile(
-      'git',
-      [...GIT_HARDEN, '-C', cwd, ...args],
-      { env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
+      "git",
+      [...GIT_HARDEN, "-C", cwd, ...args],
+      { env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
       (err, stdout) => {
         if (err !== null) {
           rejectPromise(
-            new Error(`approval state: git ${args.join(' ')} failed in '${cwd}' — ${err.message}`),
+            new Error(
+              `approval state: git ${args.join(" ")} failed in '${cwd}' — ${err.message}`,
+            ),
           );
           return;
         }
@@ -590,10 +613,10 @@ export interface ApprovalAuthorityConfig {
  * the file.
  */
 function syncDirSync(dir: string): void {
-  const SOFT_ERRORS = new Set(['EPERM', 'EACCES', 'EINVAL', 'ENOSYS']);
+  const SOFT_ERRORS = new Set(["EPERM", "EACCES", "EINVAL", "ENOSYS"]);
   let handle: number | undefined;
   try {
-    handle = openSync(dir, 'r');
+    handle = openSync(dir, "r");
     fsyncSync(handle);
   } catch (err) {
     const code = (err as { code?: string }).code;
@@ -615,7 +638,12 @@ export interface FileNonceLedgerConfig {
    * Write up to `length` bytes from `buffer` at `offset` to `handle`,
    * returning how many were written. Defaults to `fs.writeSync`.
    */
-  write?: (handle: number, buffer: Buffer, offset: number, length: number) => number;
+  write?: (
+    handle: number,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+  ) => number;
 }
 
 /**
@@ -627,17 +655,17 @@ export interface FileNonceLedgerConfig {
 const NONCE_PATTERN = /^[0-9a-f]{32}$/;
 
 /** The same shape, as prose, for error messages. */
-const NONCE_SHAPE = '32 lowercase hex characters';
+const NONCE_SHAPE = "32 lowercase hex characters";
 
 /** True when the ledger file exists, is non-empty, and lacks its final newline. */
 function hasUnterminatedTail(path: string): boolean {
   if (!existsSync(path)) return false;
-  const contents = readFileSync(path, 'utf8');
-  return contents !== '' && !contents.endsWith('\n');
+  const contents = readFileSync(path, "utf8");
+  return contents !== "" && !contents.endsWith("\n");
 }
 
 /** The default write seam: node:fs, whose short-count behaviour is the reason for the loop. */
-const defaultWrite: NonNullable<FileNonceLedgerConfig['write']> = (
+const defaultWrite: NonNullable<FileNonceLedgerConfig["write"]> = (
   handle,
   buffer,
   offset,
@@ -655,7 +683,7 @@ const defaultWrite: NonNullable<FileNonceLedgerConfig['write']> = (
 function writeAll(
   handle: number,
   line: Buffer,
-  write: NonNullable<FileNonceLedgerConfig['write']>,
+  write: NonNullable<FileNonceLedgerConfig["write"]>,
   nonce: string,
 ): void {
   let written = 0;
@@ -676,7 +704,7 @@ function writeAll(
 }
 
 /** The lock provider an authority was built with, reachable for the write-through lock. */
-const LOCKS = Symbol('cq.approval.locks');
+const LOCKS = Symbol("cq.approval.locks");
 
 /** An authority plus the lock provider {@link withApprovedMutation} needs. */
 type BoundAuthority = ApprovalAuthority & { [LOCKS]: MutationLocks };
@@ -696,7 +724,9 @@ type BoundAuthority = ApprovalAuthority & { [LOCKS]: MutationLocks };
  * and a grant whose exercise was REFUSED is retired as well — a caller that
  * retries the same grant after a refusal gets the throw, not a retry.
  */
-export function makeApprovalAuthority(config: ApprovalAuthorityConfig): ApprovalAuthority {
+export function makeApprovalAuthority(
+  config: ApprovalAuthorityConfig,
+): ApprovalAuthority {
   const readState = config.readState ?? makeGitApprovalStateReader();
   const locks = config.locks;
   const exercised = new WeakSet<object>();
@@ -742,16 +772,16 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
         return {
           granted: false,
           reason:
-            'approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state',
+            "approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state",
         };
       }
       const verified = await config.approvals.verifiedFor(subject);
-      if (verified === undefined || verified.nonce === '') {
+      if (verified === undefined || verified.nonce === "") {
         return {
           granted: false,
           reason: denyReason(
             subject,
-            'no verified approval token was issued for this op on these exact inputs in this exact workspace state',
+            "no verified approval token was issued for this op on these exact inputs in this exact workspace state",
           ),
         };
       }
@@ -776,7 +806,10 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           reason: `approval state changed since approval: ${gap} — the workspace moved between the kernel's verification of this token and this op's admission, so the approval cannot be shown to cover the current state; nothing was written and the token is UNSPENT (re-approve against the current state)`,
         };
       }
-      return { granted: true, grant: { subject, nonce: verified.nonce, state } };
+      return {
+        granted: true,
+        grant: { subject, nonce: verified.nonce, state },
+      };
     },
     exercise: async (grant, subject) => {
       if (exercised.has(grant)) {
@@ -809,7 +842,7 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           reason: `approval state changed since approval: ${drift} — the approval was issued against a different workspace state, so the write is refused; nothing was written and the token is UNSPENT`,
         };
       }
-      let outcome: 'consumed' | 'spent';
+      let outcome: "consumed" | "spent";
       try {
         outcome = await config.ledger.consume(grant.nonce);
       } catch (err) {
@@ -818,11 +851,11 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
           reason: `approval refused: the approval ledger could not be read or appended — ${messageOf(err)}; the ledger is fail-closed, so nothing was written and the token is UNSPENT`,
         };
       }
-      if (outcome === 'spent') {
+      if (outcome === "spent") {
         return {
           granted: false,
           reason:
-            'approval refused: this approval token was already consumed (nonce spent) — a token grants one write and a replay is refused; nothing was written',
+            "approval refused: this approval token was already consumed (nonce spent) — a token grants one write and a replay is refused; nothing was written",
         };
       }
       return { granted: true, consumed: { nonce: grant.nonce } };
@@ -833,8 +866,8 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
 
 /** The op-facing result: the write happened under a spent approval, or it did not happen. */
 export type ApprovedMutation<T> =
-  | { readonly status: 'ok'; readonly value: T }
-  | { readonly status: 'needs-human'; readonly reason: string };
+  | { readonly status: "ok"; readonly value: T }
+  | { readonly status: "needs-human"; readonly reason: string };
 
 /**
  * The mutation seam an op calls INSTEAD of writing: admit (nothing spent),
@@ -888,7 +921,7 @@ export type ApprovedMutation<T> =
  * only thing standing between a forged object and a mutation is the runtime
  * check on it.
  */
-const scopeBrand: unique symbol = Symbol('cq.approval.scopeBrand');
+const scopeBrand: unique symbol = Symbol("cq.approval.scopeBrand");
 
 /**
  * LIVE SCOPES. Membership here — not the brand alone — is what makes a scope
@@ -913,7 +946,11 @@ export interface ExercisedScope {
 }
 
 /** Mint a live scope for one critical section. Only {@link retireScope} closes it. */
-function mintScope(op: string, workspace: string, targets: readonly string[]): ExercisedScope {
+function mintScope(
+  op: string,
+  workspace: string,
+  targets: readonly string[],
+): ExercisedScope {
   const scope: ExercisedScope = {
     [scopeBrand]: true,
     op,
@@ -937,7 +974,7 @@ function retireScope(scope: ExercisedScope): void {
  * would only tell an attacker which half of the guard they cleared.
  */
 export function isExercisedScope(value: unknown): value is ExercisedScope {
-  if (typeof value !== 'object' || value === null) return false;
+  if (typeof value !== "object" || value === null) return false;
   const candidate = value as { [scopeBrand]?: unknown };
   return candidate[scopeBrand] === true && liveScopes.has(value);
 }
@@ -959,13 +996,14 @@ export async function withApprovedMutation<T>(
   write: (scope: ExercisedScope) => Promise<T>,
 ): Promise<ApprovedMutation<T>> {
   const admitted = await authority.admit(subject);
-  if (!admitted.granted) return { status: 'needs-human', reason: admitted.reason };
+  if (!admitted.granted)
+    return { status: "needs-human", reason: admitted.reason };
   const locks = (authority as Partial<BoundAuthority>)[LOCKS];
   if (locks === undefined) {
     return {
-      status: 'needs-human',
+      status: "needs-human",
       reason:
-        'approval refused: the authority exposes no mutation lock, so the state re-check could not be atomic with the write; nothing was written and the token is UNSPENT',
+        "approval refused: the authority exposes no mutation lock, so the state re-check could not be atomic with the write; nothing was written and the token is UNSPENT",
     };
   }
   const held = await withMutationLock(
@@ -973,12 +1011,13 @@ export async function withApprovedMutation<T>(
     subject.workspace,
     async (scope): Promise<ApprovedMutation<T>> => {
       const exercised = await authority.exercise(admitted.grant, subject);
-      if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
-      return { status: 'ok', value: await write(scope) };
+      if (!exercised.granted)
+        return { status: "needs-human", reason: exercised.reason };
+      return { status: "ok", value: await write(scope) };
     },
     { op: subject.op, targets: subject.targets },
   );
-  if (!held.ok) return { status: 'needs-human', reason: held.reason };
+  if (!held.ok) return { status: "needs-human", reason: held.reason };
   return held.value;
 }
 
@@ -1003,7 +1042,8 @@ export async function withMutationLock<T>(
   /** What the scope reports and bounds: op name (wording) and the approved targets. */
   meta: { readonly op?: string; readonly targets?: readonly string[] } = {},
 ): Promise<
-  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string }
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly reason: string }
 > {
   const locks = (authority as Partial<BoundAuthority>)[LOCKS];
   if (locks === undefined) {
@@ -1020,7 +1060,7 @@ export async function withMutationLock<T>(
   return {
     ok: true,
     value: await locks.forWorkspace(workspace).withLock(async () => {
-      const scope = mintScope(meta.op ?? '', workspace, meta.targets ?? []);
+      const scope = mintScope(meta.op ?? "", workspace, meta.targets ?? []);
       try {
         return await fn(scope);
       } finally {
@@ -1038,7 +1078,7 @@ export async function withMutationLock<T>(
  * writer's edit gets clobbered, which is the wrong place for that trade.
  */
 export function contentFingerprint(bytes: Uint8Array): string {
-  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 /** A structural admission fault (no state read, no token lookup), or null when admissible. */
@@ -1047,7 +1087,7 @@ function preAdmissionFault(
   trustedLayerDir: string | undefined,
 ): string | null {
   if (subject.targets.length === 0) {
-    return 'the mutation has no target files — there is nothing to approve, and an approval over an empty target set would bind nothing';
+    return "the mutation has no target files — there is nothing to approve, and an approval over an empty target set would bind nothing";
   }
   // ARGUMENT ORDER IS LOAD-BEARING: `isInside(parent, child)` asks whether
   // CHILD is nested in PARENT, so the question here is "is the trusted layer
@@ -1056,7 +1096,10 @@ function preAdmissionFault(
   // workspace nested in the trusted layer?"), which refuses legitimate
   // layouts — a ledger under $HOME state with a workspace under $HOME — and
   // lets the actual tamper vector through.
-  if (trustedLayerDir !== undefined && isInside(subject.workspace, trustedLayerDir)) {
+  if (
+    trustedLayerDir !== undefined &&
+    isInside(subject.workspace, trustedLayerDir)
+  ) {
     return `the trusted approval layer '${trustedLayerDir}' is inside the workspace under approval ('${subject.workspace}') — the subject would be able to edit the record that spends its own approval`;
   }
   return null;
@@ -1091,7 +1134,10 @@ function sameSubject(a: ApprovalSubject, b: ApprovalSubject): boolean {
  * unhandled: there is no grant to compare against, because a dirty state
  * never produced one.
  */
-function stateDrift(approved: ApprovalState, current: ApprovalState): string | null {
+function stateDrift(
+  approved: ApprovalState,
+  current: ApprovalState,
+): string | null {
   if (approved.workspace !== current.workspace) {
     return `workspace ${current.workspace} ≠ ${approved.workspace}`;
   }
@@ -1100,8 +1146,8 @@ function stateDrift(approved: ApprovalState, current: ApprovalState): string | n
   }
   if (approved.treeClean !== current.treeClean) {
     return current.treeClean
-      ? 'the tree is clean again, but the approval was not taken over a clean tree'
-      : 'the tree is dirty (an untracked file counts)';
+      ? "the tree is clean again, but the approval was not taken over a clean tree"
+      : "the tree is dirty (an untracked file counts)";
   }
   return null;
 }
@@ -1110,26 +1156,30 @@ function stateDrift(approved: ApprovalState, current: ApprovalState): string | n
  * The op-level input digest binding an approval to the EXACT inputs of one
  * invocation: a sha256 over a canonical JSON rendering (keys sorted at every
  * level, `undefined` members dropped), so two structurally identical
- * invocations hash identically and ANY input change — including
- * `approved` itself — changes the digest. This is the analyze family's
+ * invocations hash identically and ANY change to the digested value
+ * changes the digest. Callers choose that value: the current op call
+ * sites digest their operative inputs and do NOT include the `approved`
+ * flag (it is checked separately, before admission). This is the analyze family's
  * stand-in for the kernel's manifest `inputsHash`; when the kernel
  * verifier is bound (S's wiring) the manifest hash is authoritative and
  * this one is redundant, never weaker.
  */
 export function approvalInputDigest(value: unknown): string {
-  return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
 
 /** Canonical JSON: object keys sorted at every depth, `undefined` members dropped. */
 function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  if (value === null || typeof value !== "object")
+    return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value))
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, member]) => member !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return `{${entries
     .map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`)
-    .join(',')}}`;
+    .join(",")}}`;
 }
 
 /** Error message of an unknown throwable, for refusal reasons. */

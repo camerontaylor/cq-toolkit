@@ -549,6 +549,26 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     });
   }
 
+  /**
+   * A scan runner scoped to the files the op was ASKED to touch. The shared
+   * {@link scanRunner} answers with edits for BOTH fixture files, so an op
+   * asked for `src/a.ts` alone meets the pre-existing canonicalization rule
+   * that rejects a reported match outside the requested set — a real fault,
+   * correctly raised. These tests are about the APPROVAL boundary, not about
+   * multi-file scans, so the fake must answer for the request it is given.
+   */
+  function scanRunnerFor(...files: string[]): RunCheck & { commands: unknown[] } {
+    return fakeRunner({
+      stdout: JSON.stringify(
+        EDITS.filter((edit) => files.includes(edit.file)).map((edit) =>
+          matchOf(edit.file, edit.startByte, edit.endByte, edit.replacement),
+        ),
+      ),
+      stderr: '',
+      exitCode: 0,
+    });
+  }
+
   function makeOp(store: AnalyzeFileStore, run: RunCheck = scanRunner()) {
     return makeAstGrepCodemod(run, () => store, trustedAuthority());
   }
@@ -560,7 +580,7 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
   describe('the mutation is authorized by an approval, not by the input flag', () => {
     test('deny-all: approved:true alone writes nothing', async () => {
       const store = memoryStore(FIXTURE_FILES);
-      const run = scanRunner();
+      const run = scanRunnerFor('src/a.ts');
       // NO authority bound — the shipped default for an unbound caller.
       const op = makeAstGrepCodemod(run, () => store);
       const result = await op({
@@ -580,7 +600,7 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
 
     test('a forged inherited scope is REFUSED, not ignored', async () => {
       const store = memoryStore(FIXTURE_FILES);
-      const run = scanRunner();
+      const run = scanRunnerFor('src/a.ts');
       // A forgery is exactly this: a well-shaped object that is NOT branded,
       // so the cast is what a bypass attempt would have to do.
       const forged = {
@@ -599,13 +619,16 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
       // write on the input flag alone.
       expect(result.status).toBe('failed');
       if (result.status !== 'failed') return;
-      expect(result.error).toContain('did not mint');
+      expect(result.error).toContain('not minted by the approval module');
+      // ...and explicitly NOT ignored, because ignoring is the fall-through
+      // to authorizing the write on the input flag alone.
+      expect(result.error).toContain('refused rather than ignored');
       expect(store.written.size).toBe(0);
     });
 
     test('NESTED (ADR-0003 §6): an inherited scope writes under the OUTER approval, with no second exercise', async () => {
       const store = memoryStore(FIXTURE_FILES);
-      const run = scanRunner();
+      const run = scanRunnerFor('src/a.ts');
       const authority = trustedAuthority();
       const subject = {
         op: 'analyze.playbookDispatch',
@@ -641,7 +664,7 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
 
     test('cross-workspace: a scope minted for one tree does not authorize another', async () => {
       const store = memoryStore(FIXTURE_FILES);
-      const run = scanRunner();
+      const run = scanRunnerFor('src/a.ts');
       const authority = trustedAuthority('/ws');
       let refused = '';
       // The outer approval covers '/ws'; the nested op aims at '/elsewhere'.
@@ -707,7 +730,7 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
 
     test('a RETAINED scope is refused on reuse after its section ended', async () => {
       const store = memoryStore(FIXTURE_FILES);
-      const run = scanRunner();
+      const run = scanRunnerFor('src/a.ts');
       const authority = trustedAuthority();
       let retained: unknown;
       await withApprovedMutation(
@@ -744,7 +767,7 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
       const direct = trustedAuthority();
       const store = memoryStore(FIXTURE_FILES);
       const result = await makeAstGrepCodemod(
-        scanRunner(),
+        scanRunnerFor('src/a.ts'),
         () => store,
         direct,
       )({

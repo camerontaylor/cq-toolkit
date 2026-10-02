@@ -822,6 +822,25 @@ export function makeAstGrepCodemod(
         },
       };
     }
+    // NOTHING TO APPROVE (the honest empty apply): a plan with zero edits
+    // writes no byte, so demanding — and spending — an approval token for it
+    // would refuse a no-op (`needs-human`) that nothing on disk contradicts,
+    // and would burn a token an operator can never re-use for the real run.
+    // This is the same rule applyRemediation states for its empty plan. The
+    // A16/deny-all boundary is untouched: it guards MUTATIONS, and an empty
+    // plan is not one.
+    if (plannedEdits.length === 0) {
+      return {
+        status: 'ok',
+        value: {
+          mode: 'applied',
+          plannedEdits: 0,
+          unfixedMatches: scan.outcome.unfixedMatches,
+          files: [],
+          ...(note === undefined ? {} : { note }),
+        },
+      };
+    }
     // SPLICING IS PREFLIGHTED (the applyRemediation treatment, Y1/Y2):
     // every target's remediated bytes (and diffs) are computed — pure, no
     // writes — before the write phase begins, so a splice/render fault

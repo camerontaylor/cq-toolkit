@@ -149,6 +149,15 @@ interface Harness {
   quarantine: ReturnType<typeof makeQuarantineLedger>;
   playbooks: ReturnType<typeof makePlaybookRegistry>;
   dispatch: ReturnType<typeof makePlaybookDispatchOp>;
+  /**
+   * Re-point the scripted verifier at a different exit code. A dispatch whose
+   * verifier is scripted to fail ALWAYS reports `failed`, so a test that wants
+   * to observe a later PASS has to be able to change the verdict between
+   * dispatches — the alternative (asserting `ok` while the verifier still
+   * exits 1) only passes if the engine matched nothing at all, which proves
+   * the opposite of what the test claims.
+   */
+  setVerifierExit: (exitCode: number | null, output?: string) => void;
 }
 
 /**
@@ -162,10 +171,13 @@ interface Harness {
  */
 function harness(
   files: Record<string, string>,
-  verifierExit: number | null,
-  verifierOutput = '',
+  initialVerifierExit: number | null,
+  initialVerifierOutput = '',
   playbook: Playbook = playbookOf(),
+  beforeVerifierCommand: () => void = () => {},
 ): Harness {
+  let verifierExit = initialVerifierExit;
+  let verifierOutput = initialVerifierOutput;
   const run = (async (cmd: Parameters<RunCheck>[0]): Promise<RawCheckOutput> => {
     if (cmd.command === 'ast-grep') {
       run.scans.push(cmd);
@@ -189,6 +201,13 @@ function harness(
       return { stdout: JSON.stringify(matches), stderr: '', exitCode: 0 };
     }
     run.verifierCalls.push(cmd);
+    // The seam a concurrent-writer test uses: landing a second playbook's
+    // edit HERE is the real interleaving (B's apply commits while A is
+    // between its own write and its rollback). It has to run inside the
+    // runner the dispatch op actually holds — mutating `harness.run`
+    // afterwards would rebind a field the op already captured, and the
+    // "concurrent" write would never happen.
+    beforeVerifierCommand();
     return { stdout: '', stderr: verifierOutput, exitCode: verifierExit };
   }) as Harness['run'];
   run.scans = [];
@@ -204,7 +223,17 @@ function harness(
     approval: approvedAuthority().authority,
   });
   playbooks.register(playbook);
-  return { run, store, quarantine, playbooks, dispatch };
+  return {
+    run,
+    store,
+    quarantine,
+    playbooks,
+    dispatch,
+    setVerifierExit: (exitCode, output = '') => {
+      verifierExit = exitCode;
+      verifierOutput = output;
+    },
+  };
 }
 
 const FIXTURE = { 'src/a.ts': 'const x = foo_bar;\nconst y = foo_bar;\n' };
@@ -545,18 +574,34 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
 
   test('after an explicit unquarantine the playbook is dispatchable again (and only then)', async () => {
     const h = harness(FIXTURE, 1);
-    await h.dispatch({ playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] });
+    // Each dispatch is a SEPARATE operator action and needs its OWN token.
+    // The fixture derives a nonce from the subject by design (ADR §5: one
+    // token binds one op+inputs, and re-presenting it is the replay case), so
+    // re-using one authority across three dispatches would have #2 and #3
+    // refused as SPENT — before the quarantine or the in-flight check — and
+    // the test would prove nothing about the unquarantine. The registry (and
+    // therefore the quarantine and in-flight state) is still shared.
+    const dispatchFresh = () =>
+      makePlaybookDispatchOp({
+        playbooks: h.playbooks,
+        quarantine: h.quarantine,
+        run: h.run,
+        storeFor: () => h.store,
+        approval: approvedAuthority().authority,
+      });
+    const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
+    await dispatchFresh()(input);
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(true);
-    expect(
-      (await h.dispatch({ playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] })).status,
-    ).toBe('needs-human');
+    expect((await dispatchFresh()(input)).status).toBe('needs-human');
     // THE explicit consumer action — nothing in the codebase calls this.
     h.quarantine.unquarantine('fix-foo-bar');
-    const again = await h.dispatch({
-      playbookId: 'fix-foo-bar',
-      dir: '/ws',
-      targets: ['src/a.ts'],
-    });
+    // The verifier now PASSES, so `ok` means what the test says it means: the
+    // dispatch ran end to end. Before the W4.3 rollback fix, this assertion
+    // passed only because the rollback left the applied bytes behind, so the
+    // re-dispatch matched nothing and short-circuited — a green test resting
+    // on a broken rollback.
+    h.setVerifierExit(0);
+    const again = await dispatchFresh()(input);
     expect(again.status).toBe('ok');
   });
 
@@ -594,14 +639,21 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       expect(rejected.reason).toContain('re-apply the rule');
       expect(rejected.reason).toContain('re-dispatch deliberately');
     }
-    expect(h.run.scans).toHaveLength(1);
-    expect(h.run.verifierCalls).toHaveLength(0); // #1 parked pre-record; #2 never invoked one
+    // The duplicate invoked NO verifier: #1 is parked at the gate, and the
+    // duplicate never reached one either.
+    expect(h.run.verifierCalls).toHaveLength(0);
     // Settle the in-flight dispatch (fail → quarantine). Its slot frees,
     // and a NEW dispatch proceeds normally — through the quarantine check,
     // which now refuses on the RECORD (a different refusal than the
     // in-flight one).
     releaseVerifier?.();
     const firstResult = await first;
+    // ONE scan for the whole pair, counted only now that both have settled:
+    // the duplicate's refusal resolves before #1 has necessarily reached its
+    // own scan (the approval/lock boundary puts real awaits between the two
+    // dispatches), so asserting "exactly one" at that earlier point would be
+    // measuring scheduling order, not the duplicate's behaviour.
+    expect(h.run.scans).toHaveLength(1);
     expect(firstResult.status).toBe('failed');
     if (firstResult.status === 'failed') {
       expect(dispatchEvidence(firstResult.error).quarantined).toBe(true);
@@ -749,18 +801,15 @@ describe('W4.3 the rollback is conditional and locked (no lost update)', () => {
     files: Record<string, string>,
     verifierExit: number | null,
   ): Harness {
-    const h = harness(files, verifierExit);
     // The scripted runner answers the verifier command. Landing a second
     // playbook's edit THERE is the real interleaving: B's apply commits
-    // while A is between its own write and its rollback.
-    const inner = h.run;
-    h.run = Object.assign(
-      async (cmd: Parameters<RunCheck>[0]): Promise<RawCheckOutput> => {
-        if (cmd.command !== 'ast-grep') h.store.backing.set('src/a.ts', CONCURRENT_EDIT);
-        return inner(cmd);
-      },
-      { scans: [], verifierCalls: [] },
-    ) as Harness['run'];
+    // while A is between its own write and its rollback. Installed through
+    // the harness's runner seam, so it is the runner the dispatch op holds.
+    let store: Harness['store'] | undefined;
+    const h = harness(files, verifierExit, '', playbookOf(), () => {
+      store?.backing.set('src/a.ts', CONCURRENT_EDIT);
+    });
+    store = h.store;
     return h;
   }
 

@@ -283,7 +283,14 @@ describe('TOCTOU — the state moves between admission and the write', () => {
     expect(reason).toContain('HEAD');
     expect(reason).toContain('UNSPENT');
     expect(writes).toBe(0);
-  });
+    // PROCESS-BACKED, like the other real-`git` suites in this repo (see
+    // test/ops/analyze/registry.ts): `realRepo()` alone spawns six `git`
+    // processes (init, two config, add, commit, realpath). Measured at
+    // 8745ms on a loaded host — past vitest's 5000ms default before a single
+    // assertion runs. The budget is for subprocess startup; NO assertion,
+    // baseline or production timing is relaxed, and the same budget the
+    // neighbouring real-git suites already use.
+  }, 20_000);
 
   test('an unreadable state denies at admission and at exercise (never "unchanged")', async () => {
     const admitFixture = grantingAuthority({
@@ -543,9 +550,15 @@ describe('the mutation lock is held THROUGH the write', () => {
     const log: string[] = [];
     let depth = 0;
     let maxDepth = 0;
+    // ONE process-local lock provider for the whole test. Building a fresh
+    // `makeProcessLocalMutationLocks()` inside forWorkspace would hand each
+    // caller its own chain map, so the two sections would not contend at all
+    // and the exclusivity this test exists to prove would be measured against
+    // a provider that never serialized anything.
+    const provider = makeProcessLocalMutationLocks();
     const instrumented: MutationLocks = {
       forWorkspace: (workspace) => {
-        const inner = makeProcessLocalMutationLocks().forWorkspace(workspace);
+        const inner = provider.forWorkspace(workspace);
         return {
           withLock: async <T>(fn: () => T | Promise<T>): Promise<T> =>
             inner.withLock(async () => {
@@ -694,24 +707,34 @@ describe('the ExercisedScope capability is a real runtime capability', () => {
   test('a scope is RETIRED even when the write throws, so a failed section leaks no capability', async () => {
     const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
     let captured: unknown;
-    const outcome = await withApprovedMutation(
-      fixture.authority,
-      fixture.subjectOf(['src/a.ts']),
-      async (scope) => {
+    // The fault PROPAGATES out of withApprovedMutation (the lock is released
+    // on the way out), so the assertion is on the promise, not on an awaited
+    // result: awaiting first would throw here and never reach the retirement
+    // check that is the actual subject of the test.
+    await expect(
+      withApprovedMutation(fixture.authority, fixture.subjectOf(['src/a.ts']), async (scope) => {
         captured = scope;
         throw new Error('the write faulted');
-      },
-    );
-    // The fault propagates (the lock is released on the way out) ...
-    await expect(outcome).rejects.toThrow('the write faulted');
+      }),
+    ).rejects.toThrow('the write faulted');
     // ... and the scope captured on the way out is already dead.
     expect(isExercisedScope(captured)).toBe(false);
   });
 
   test('each section mints its OWN scope; a scope is never reused across sections', async () => {
-    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: ['src/a.ts'] });
     const minted: unknown[] = [];
-    for (const _attempt of [1, 2]) {
+    for (const attempt of [1, 2]) {
+      // A DISTINCT subject per section, and therefore a distinct token. The
+      // fixture's nonce is derived from the subject by design (ADR §5: one
+      // token binds one op+inputs, and re-presenting it is the replay case),
+      // so re-using one subject here would have the second section refused as
+      // SPENT — the test would pass on the wrong count.
+      const fixture = grantingAuthority({
+        op: OP,
+        workspace: WORKSPACE,
+        targets: ['src/a.ts'],
+        inputDigest: `sha256:section-${String(attempt)}`,
+      });
       await withApprovedMutation(
         fixture.authority,
         fixture.subjectOf(['src/a.ts']),
@@ -944,7 +967,11 @@ describe('a dirty workspace is not an approvable state (the clean BOOLEAN is not
     expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain('workspace dirty');
     expect(spy.calls).toBe(0);
     expect(ledger.spent()).toBe(0);
-  });
+    // PROCESS-BACKED (see the sibling TOCTOU test above): `realRepo()` plus
+    // three real `git status` reads exceed vitest's 5000ms default on a
+    // loaded host before any assertion runs. Startup budget only; no
+    // assertion or baseline is relaxed.
+  }, 20_000);
 
   test('TOCTOU: an untracked file appearing between admission and the write is refused, unspent', async () => {
     // The specific hole: same HEAD, still "dirty" on both sides of the

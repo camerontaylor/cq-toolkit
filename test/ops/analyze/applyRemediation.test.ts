@@ -527,6 +527,20 @@ describe('applyRemediation store-relative path discipline (M1 regressions)', () 
     const result = await makeOp(
       store,
       codemodRunner(FIXTURE_FILES),
+      // The op's workspace is the RESOLVED nested root, not '/ws', so the
+      // state reader has to report that same workspace. The default reader is
+      // pinned to '/ws'; leaving it in place would have admission refuse the
+      // (correct) approval on the kernel-to-admission state comparison, and
+      // the test would be measuring the state binding rather than path
+      // discipline.
+      approvedAuthority({
+        read: () =>
+          Promise.resolve({
+            workspace: resolve(root),
+            headSha: 'head-at-approval',
+            treeClean: true,
+          }),
+      }).authority,
     )({
       ...baseInput(),
       sidecarPath,
