@@ -204,6 +204,11 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // ASSEMBLE job is REMOVED from this plan: it is dispatched separately
   // below, composed from the units' committed markers (jTPa8 — the static
   // Job cannot know which units committed until they have run).
+  if (opts.testFixPlan && opts.stagePathAllowlist !== undefined) {
+    throw new Error(
+      'e2e setup: testFixPlan pins the shipped allowlist; stagePathAllowlist would be ignored',
+    );
+  }
   const fullPlan = opts.testFixPlan
     ? buildTestFixPlan(opts.config, planner)
     : buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
@@ -372,7 +377,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     };
     if (assembleInput.packages.length > 0) {
       const assemblePlan = {
-        id: SWEEP_PLAN_ID,
+        id: fullPlan.id,
         label: 'sweep: marker-filtered fleet assembly (the committed units only)',
         jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
       };

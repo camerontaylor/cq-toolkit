@@ -1018,6 +1018,11 @@ describe('sweep e2e: rescue lane and prep mode', () => {
           (event) => event.type === 'job-started' && event.jobId === 'sweep-alpha-test-fix-r2',
         ),
       ).toBe(true);
+
+      // The rescued fleet assembles under the same selected plan id.
+      expect(outcome.assembleRun).toBeDefined();
+      const assembleEvents = await runEventsAt(scene.journalDir, TEST_FIX_PLAN_ID, 2);
+      expect(assembleEvents[0]).toMatchObject({ type: 'run-started', planId: TEST_FIX_PLAN_ID });
     },
   );
 
