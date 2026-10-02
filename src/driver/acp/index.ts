@@ -911,6 +911,10 @@ export class AcpDriver implements Driver {
     }
 
     let signalFired = false;
+    // The prompt may settle and the child may close before the stdin write
+    // callback runs. Keep the cancel evidence inside the bounded race so
+    // settle can persist it before taking the narration snapshot.
+    let cancelWriteCompletion: Promise<void> | undefined;
     // True when the write of a permission ANSWER failed — the enforcement
     // channel is broken and the verdict is pinned to 'error' even if a
     // prompt response somehow arrived afterward (Codex P1).
@@ -1253,17 +1257,25 @@ export class AcpDriver implements Driver {
         // ordering is preserved: the vendor sees the cancel before the
         // SIGTERM.
         const cancelWrite = wire.notify(ACP_METHODS.sessionCancel, { sessionId: target });
-        void cancelWrite.then(
-          () =>
-            observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
-          (err: unknown) =>
-            observation.narration.push(
-              JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) }),
-            ),
+        let cancelWriteEvidenceOpen = true;
+        const cancelWriteEvidence = cancelWrite.then(
+          () => {
+            if (cancelWriteEvidenceOpen) {
+              observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target }));
+            }
+          },
+          (err: unknown) => {
+            if (cancelWriteEvidenceOpen) {
+              observation.narration.push(
+                JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) }),
+              );
+            }
+          },
         );
-        raceWithGrace(cancelWrite, this.cancelWriteGraceMs)
-          .then((outcome) => {
+        cancelWriteCompletion = raceWithGrace(cancelWriteEvidence, this.cancelWriteGraceMs).then(
+          (outcome) => {
             if (outcome === 'stalled') {
+              cancelWriteEvidenceOpen = false;
               observation.narration.push(
                 JSON.stringify({
                   cq: 'cancel-write-stalled',
@@ -1272,6 +1284,10 @@ export class AcpDriver implements Driver {
                 }),
               );
             }
+          },
+        );
+        void cancelWriteCompletion
+          .then(() => {
             // The decided kill, gated on NOTHING the child controls (the
             // prompt-phase kill rung; Codex P1).
             return terminateAcpProcess(child, graceOpts(), onRung);
@@ -1529,6 +1545,11 @@ export class AcpDriver implements Driver {
     // settles (its SIGKILL rung force-resolves).
     await terminateAcpProcess(child, graceOpts(), onRung);
     signal?.removeEventListener('abort', onAbort);
+    // Cancellation's bounded race already runs alongside prompt settlement
+    // and termination. Await its recorded outcome before persistence so a
+    // late write callback cannot append evidence after the narration has
+    // been snapshotted. The kill path itself never waits on the write.
+    await cancelWriteCompletion;
 
     // --- The never-asks tripwire, evaluated AT SETTLE (first-channel-
     // wins per toolCallId — header): any tool_call stream id with NO

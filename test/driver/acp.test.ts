@@ -142,6 +142,45 @@ function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {
   };
 }
 
+/** Hold the cancel write callback until after the child closes to pin the settle/persist race. */
+function closeDeferredCancelSpawn(
+  calls: SpawnCall[],
+  extraEnv: Record<string, string> = {},
+): AcpSpawnFn {
+  return (opts) => {
+    calls.push({ command: opts.command, args: [...opts.args], env: { ...opts.env } });
+    const child = spawnAcpProcess({ ...opts, env: { ...opts.env, ...extraEnv } });
+    const stdin = child.stdin;
+    if (stdin === null) return child;
+    const write = stdin.write.bind(stdin) as (
+      chunk: string | Uint8Array,
+      callback?: (error?: Error | null) => void,
+    ) => boolean;
+    stdin.write = ((chunk: string | Uint8Array, callback?: (error?: Error | null) => void) => {
+      const frame = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      if (!frame.includes('"method":"session/cancel"') || callback === undefined) {
+        return write(chunk, callback);
+      }
+      let flushed = false;
+      let closed = false;
+      let writeError: Error | null | undefined;
+      const release = (): void => {
+        if (flushed && closed) setImmediate(() => callback(writeError));
+      };
+      child.once('close', () => {
+        closed = true;
+        release();
+      });
+      return write(chunk, (error) => {
+        writeError = error;
+        flushed = true;
+        release();
+      });
+    }) as typeof stdin.write;
+    return child;
+  };
+}
+
 /** Base driver options shared by every test: fake binary, scratch dirs, env injection. */
 function acpSidecarPath(sessionsDir: string, sessionId: string): string {
   return join(sessionsDir, `${sessionId}${ACP_SESSION_FILE}`);
@@ -1444,17 +1483,20 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
-  test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
+  test('cancel evidence is persisted when the cancel write callback trails child close', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
       const driver = new AcpDriver({
         ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        spawn: closeDeferredCancelSpawn(calls, { FAKE_ACP_MODE: 'block-until-abort' }),
         termGraceMs: 500,
         killGraceMs: 500,
+        cancelWriteGraceMs: 1_000,
       });
-      // wallClockMs lands MID-PROMPT (after the handshake): the governed
-      // signal fires → session/cancel → the cancelled prompt response
-      // (usage null) settles the run.
+      // The fixture consumes session/cancel and returns the cancelled
+      // prompt response. The spawn seam delays only that write's callback
+      // until after SIGTERM closes the child, so settle reaches persistence
+      // before the detached continuation would record its evidence.
       const outcome = await runLadder(
         async (ctx) => driver.run(invocation({ prompt: 'cancel run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
