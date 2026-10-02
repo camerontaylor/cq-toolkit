@@ -78,6 +78,14 @@ const evidence = {
   profile,
   profileVerified: false,
   expected: EXPECTED,
+  workflowRun: {
+    runId: process.env.GITHUB_RUN_ID ?? null,
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+    url:
+      process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+        : null,
+  },
   startedAt: new Date().toISOString(),
   rows: [],
 };
@@ -351,13 +359,16 @@ async function fixturePr(context) {
       'Fixture PR must be open with both head and base in the verified scratch repository',
     );
   }
+  if (pr.base?.ref !== evidence.defaultBranch) {
+    throw new Error('Fixture PR base must be the scratch repository policy-bearing default branch');
+  }
   if (!pr.head.ref.startsWith('adversarial/')) {
     throw new Error('Fixture PR head must use adversarial/ branch prefix');
   }
   if (pr.user?.id === context.outsider.id) {
     throw new Error('Second identity cannot review its own fixture PR');
   }
-  return { number, headSha: pr.head.sha, url: pr.html_url };
+  return { number, headSha: pr.head.sha, baseRef: pr.base.ref, url: pr.html_url };
 }
 
 // A live mutation alone is insufficient to judge policy. These attacks stay
@@ -379,13 +390,14 @@ async function outsiderReview(id, context) {
       context.second,
       {
         method: 'POST',
-        body: { body, event: id === 'A1' ? 'APPROVE' : 'COMMENT' },
+        body: { body, event: id === 'A1' ? 'APPROVE' : 'COMMENT', commit_id: pr.headSha },
       },
     );
     if (
       !Number.isSafeInteger(review.id) ||
       review.id <= 0 ||
-      review.user?.id !== context.outsider.id
+      review.user?.id !== context.outsider.id ||
+      review.commit_id !== pr.headSha
     ) {
       return blocked(id, 'Review response did not prove submission by the verified outsider');
     }
@@ -400,6 +412,7 @@ async function outsiderReview(id, context) {
           reviewUrl: review.html_url,
           prUrl: pr.url,
           headSha: pr.headSha,
+          baseRef: pr.baseRef,
           actorId: context.outsider.id,
         },
       },
