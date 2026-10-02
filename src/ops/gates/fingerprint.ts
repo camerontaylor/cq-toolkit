@@ -1,7 +1,7 @@
 // Gates lane C2 — failure fingerprints that survive diff drift (R2 D5):
 // a baseline/regression gate comparing raw failure positions would block on
 // every harmless line shift; the fingerprint instead buckets position and
-// deliberately EXCLUDES the message text for positioned failures, so a
+// deliberately EXCLUDES the message text for positioned non-Vitest failures, so a
 // pre-existing failure re-keys to the same fingerprint after small drift
 // while a genuinely new failure still keys differently. LOCATION-LESS
 // failures (line null — vitest's suite/assertion shape) have no position to
@@ -92,7 +92,8 @@ export function fnv1a32Hex(text: string): string {
  * positioned failures and `tool|file|ruleId|severity|message|offN` for
  * other location-less ones, but array-encoded so no delimiter in any
  * component can make two different failures key identically. This is what
- * the regression gate compares.
+ * the regression gate compares once an occurrence ordinal is appended (see
+ * {@link fingerprintPairs}).
  */
 export function fingerprintKey(f: CheckFailure, cfg?: FingerprintConfig): string {
   return JSON.stringify(keyComponents(f, resolveConfig(cfg)));
@@ -101,9 +102,10 @@ export function fingerprintKey(f: CheckFailure, cfg?: FingerprintConfig): string
 /**
  * The drift-surviving COMPACT form of {@link fingerprintKey}: FNV-1a 32-bit
  * over the key, as 8 lowercase hex digits — for display and ledgers. Gate
- * decisions never use this form. The message is not a positioned-failure
- * component (message rewording is exactly the drift survived); it IS the
- * identity of a location-less failure (stable test names).
+ * decisions never use this form. The message is not a component of
+ * other tools' positioned failures (message rewording is exactly the drift
+ * survived); it IS the identity of a Vitest failure (test name, wherever
+ * reported) and of a location-less failure (stable text).
  */
 export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
   return fnv1a32Hex(fingerprintKey(f, resolveConfig(cfg)));
@@ -116,9 +118,10 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
  * keeping comparison independent of failure order (occurrences of one
  * identity are interchangeable, so shuffling them cannot change the set).
  *
- * The composite is collision-free: the canonical key is JSON text, the
- * appended ordinal is decimal digits, and neither can contain `#`, so the
- * LAST `#` is always the separator and `(identity, ordinal)` is recoverable.
+ * The composite is collision-free: the canonical key is JSON array text that
+ * always ends in `]` (components may themselves contain `#`), and the
+ * appended ordinal is decimal digits, so the LAST `#` is always the separator
+ * and `(identity, ordinal)` is recoverable.
  */
 export function fingerprintPairs(
   s: FailureSet,
