@@ -35,7 +35,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
-import { prepareProcessSignalCleanup } from './process-signals.js';
+import { prepareProcessSignalCleanup } from '../shared/process-signals.js';
 import type {
   GovernanceOptIn,
   JournalEvent,

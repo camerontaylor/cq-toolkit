@@ -186,7 +186,7 @@ describe('buildRunInput (the pure input builder)', () => {
       prs: [],
       protectedBranch: 'main', // SelfhostDefaults.protectedBranch
       wallClockMs: 300_000, // SelfhostDefaults.perJobWallClockMs (the #137 ladder)
-      modelSpec: { provider: 'ai-sdk', model: 'glm-5.3-flash' }, // SelfhostDefaults.driver
+      modelSpec: { provider: 'zai', model: 'glm-5.3-flash' }, // SelfhostDefaults.driver
       sessionsDir: '/j/sessions',
       nowMs: 1234,
     });

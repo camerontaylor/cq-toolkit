@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { registerProcessSignalCleanup } from '../kernel/process-signals.js';
+import { registerProcessSignalCleanup } from '../shared/process-signals.js';
 
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';

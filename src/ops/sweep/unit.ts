@@ -11,31 +11,31 @@
 //
 // TWO BINDING SURFACES:
 //   - makeSweepUnitOp(bindings) — the SDK seam: every effect injected (git,
-//     the check runner, the Driver, the pusher). Library consumers inject
-//     fakes; the binding knobs are plain data.
-//   - bindingsFromDispatch(input) — the registry seam: builds the bindings
-//     from the JSON-serializable SweepUnitDispatchInput (the plan job's
-//     input), binding the REAL effects input-driven exactly like
+//     the check runner, the RESOLVED Driver, the pusher). Library consumers
+//     inject fakes (or a factory-resolved driver); the binding knobs are
+//     plain data.
+//   - bindingsFromDispatch(input, drivers) — the registry seam: builds the
+//     bindings from the JSON-serializable SweepUnitDispatchInput (the plan
+//     job's input), binding the REAL effects input-driven exactly like
 //     worktreeFor's registry entry: real subprocess worktree effects, the
-//     REAL subprocess driver over the input's driver section (binary,
-//     provider/model over a RoutingTable — plain data; keys read from env at
-//     dispatch), real probes over subprocessRunCheck, the real git push
-//     (args-array `push -u origin <branch>`, inside a git mutex on the
-//     run-state dir). LIMITS, honestly: the prompt is a caller TEMPLATE
+//     DRIVER FACTORY's resolution of the input's driver section (role
+//     'fixer' + {provider, model} — plain plan data; the FACTORY owns lane
+//     construction and the served-model assertion, ADR-0002 §2.5/§2.6: plan
+//     data never names an executable or a lane class), real probes over
+//     subprocessRunCheck, the real git push (args-array
+//     `push -u origin <branch>`, inside a git mutex on the run-state dir).
+//     LIMITS, honestly: the prompt is a caller TEMPLATE
 //     ({package}/{fixer}/{worktree} placeholders; the shipped default is
 //     deliberately generic — the toolkit bakes in no vendor prompt), and a
-//     custom Driver OBJECT cannot cross the JSON boundary (pass its config:
-//     binary + routing table + sessions dir).
+//     custom Driver OBJECT cannot cross the JSON boundary (a deployment
+//     binds its lane through DriverFactoryConfig — bindings + per-lane
+//     construction knobs — and hands the factory to this seam).
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { SWEEP_DIFF_FLAGS } from './gitDiffFlags.js';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
-import { SubprocessDriver } from '../../driver/subprocess/index.js';
-import { withServedModelAssertion } from '../../driver/served-model.js';
-import { defaultRoutingTable } from '../../driver/subprocess/routing.js';
-import type { RoutingTable } from '../../driver/subprocess/routing.js';
-import { SessionStore } from '../../harness/session.js';
+import type { DriverFactory } from '../../driver/factory.js';
+import { currentJobContext } from '../../kernel/governor.js';
 import type { AdapterName, CheckCommand, FailureSet, RunCheck } from '../gates/checkRunner.js';
 import { subprocessRunCheck } from '../gates/checkRunner.js';
 import { makeBaselineProbe } from '../gates/baselineProbe.js';
@@ -242,12 +242,21 @@ export interface SweepUnitBindings {
   runCheck: RunCheck;
   /** The per-package check command, resolved against the unit's worktree. */
   checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
-  /** The fixer worker, on the frozen Driver seam (vendor-neutral, I1). */
+  /**
+   * The fixer worker on the frozen Driver seam (vendor-neutral, I1) — the
+   * FACTORY-RESOLVED driver (ADR-0002 §2.5): the binder resolved ONE
+   * DriverRequest (role 'fixer', the dispatch input's provider/model) to the
+   * constructed, served-model-wrapped lane instance. Ops never construct a
+   * lane; the invocation's modelSpec is the factory's NORMALISED spec below.
+   */
   driver: Driver;
-  /** Model identity for the fixer invocation (plain data, never a vendor handle). */
+  /**
+   * The fixer invocation's model identity — the FACTORY-RESOLVED spec
+   * (`resolved.modelSpec`, never the dispatch input's raw spec): a
+   * deprecated provider alias is already normalised away, so it can never
+   * reach a lane or a journal.
+   */
   modelSpec: ModelSpec;
-  /** Sessions dir backing the per-unit session record (the workspace IS the worktree). */
-  sessionsDir: string;
   /** Tool policy for the fixer invocation; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
   /**
@@ -483,9 +492,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       return { status: 'ok', value: prepReport };
     }
 
-    // 5. The fixer: one Driver run whose workspace IS the worktree (a fresh
-    // session record in the caller's sessions dir; the record's messages
-    // never touch the tree). The PRE-DRIVER HEAD is pinned first
+    // 5. The fixer: one Driver run whose workspace IS the worktree (the
+    // lane binds the fresh session record to that workspace, ADR-0002
+    // §2.4; the record's messages never touch the tree). The PRE-DRIVER
+    // HEAD is pinned first
     // (review-debt #174): a driver that self-commits moves HEAD before the
     // stage gates run, and the staged-diff scan can never see bytes that
     // are already in the tree.
@@ -501,27 +511,64 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     }
     let stopReason: string;
     let denial: string | undefined;
+    let errorClass: string | undefined;
+    let sessionId: string | undefined;
     try {
-      const store = new SessionStore(bindings.sessionsDir);
-      const record = await store.create(worktree.path);
-      const worker = await bindings.driver.run({
-        prompt: bindings.prompt(unit, worktree),
-        modelSpec: bindings.modelSpec,
-        toolPolicy: bindings.toolPolicy ?? { allow: ['edit'], mode: 'allowlist' },
-        sandboxPolicy: bindings.sandboxPolicy ?? { level: 'none' },
-        sessionRef: record.sessionId,
-        budget: bindings.budget ?? {},
-      });
+      // NO pre-created session record: the worktree rides the invocation as
+      // its workspace binding (ADR-0002 §2.4) — the lane creates the fresh
+      // record INSIDE that workspace (retention: the factory default 'keep',
+      // today's sweep behaviour — the record is worker evidence). The
+      // governed signal rides RunOptions (§2.1); modelSpec is the
+      // FACTORY-NORMALISED spec — a deprecated provider alias never reaches
+      // a lane or a journal. No outputSchema: sweep reads no structured
+      // output (the fixer verdict comes from re-running the checks).
+      const worker = await bindings.driver.run(
+        {
+          prompt: bindings.prompt(unit, worktree),
+          modelSpec: bindings.modelSpec,
+          toolPolicy: bindings.toolPolicy ?? { allow: ['edit'], mode: 'allowlist' },
+          sandboxPolicy: bindings.sandboxPolicy ?? { level: 'none' },
+          workspace: { path: worktree.path },
+          budget: bindings.budget ?? {},
+        },
+        { signal: currentJobContext()?.signal },
+      );
       stopReason = worker.stopReason;
       const first = worker.denials[0];
       if (first !== undefined) denial = `${first.tool}: ${first.reason}`;
+      if (worker.errorClass !== undefined) errorClass = worker.errorClass;
+      if (worker.sessionId !== undefined) sessionId = worker.sessionId;
     } catch (err) {
+      // A THROWN run() with the governor's signal aborted is the governed
+      // cancellation (I8): no verdict on partial work → indeterminate.
+      // Otherwise it is a PRE-DISPATCH misconfiguration (an unbound
+      // provider/role, a missing key env, a workspace realpath mismatch —
+      // ADR-0002 §2.9's throw rows) — the human's to arrange, so
+      // `needs-human`, never `failed` (which would claim the fixer ran and
+      // broke; review-debt #186).
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `sweep.unit ${unit.package}: the fixer dispatch was cancelled: ${messageOf(err)}`,
+        };
+      }
       return {
-        status: 'failed',
-        error: tagged(
-          'infra',
-          `sweep.unit ${unit.package}: the fixer driver failed — ${messageOf(err)}`,
-        ),
+        status: 'needs-human',
+        reason: `sweep.unit ${unit.package}: the fixer driver could not dispatch — ${messageOf(err)}`,
+      };
+    }
+    // A RESOLVED governed cancellation — the governor's signal fired and a
+    // conforming driver settled the aborted run with stopReason 'aborted'
+    // (§2.1) — is the same I8 posture as the thrown-abort path above: no
+    // verdict on potentially partial work → 'indeterminate' (resumable),
+    // never 'failed' (which would claim the fixer ran and broke on work it
+    // never finished).
+    if (stopReason === 'aborted') {
+      return {
+        status: 'indeterminate',
+        detail:
+          `sweep.unit ${unit.package}: the fixer dispatch was cancelled (stopReason 'aborted')` +
+          (sessionId !== undefined ? ` (session ${sessionId})` : ''),
       };
     }
     if (stopReason !== 'complete') {
@@ -530,7 +577,9 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         error: tagged(
           'infra',
           `sweep.unit ${unit.package}: the fixer worker stopped with reason '${stopReason}'` +
-            (denial !== undefined ? ` — ${denial}` : ''),
+            (errorClass !== undefined ? `; errorClass=${errorClass}` : '') +
+            (denial !== undefined ? ` — ${denial}` : '') +
+            (sessionId !== undefined ? ` (session ${sessionId})` : ''),
         ),
       };
     }
@@ -1296,25 +1345,22 @@ export const DEFAULT_UNIT_PROMPT_TEMPLATE =
   "smallest possible edits to the package's own files, then report exactly what changed. " +
   'Never touch anything outside the checkout.';
 
-/** The JSON-serializable Driver binding of a dispatch input (jSKJF). */
+/**
+ * The JSON-serializable Driver binding of a dispatch input (jSKJF).
+ *
+ * PLAN DATA, so it names NO executable and NO lane (ADR-0002 §2.5, P1):
+ * `{provider, model}` is the factory RESOLUTION INPUT — role 'fixer' plus
+ * this ModelSpec — and the deployment's DriverFactoryConfig (bindings +
+ * per-lane construction knobs such as the subprocess binary/routing table/
+ * sessions dir) decides what actually runs. Carrying `binary`/
+ * `routingTable`/`sessionsDir` here was the S4b-B2 shape; the registry
+ * schema now REJECTS those keys (plan data never names an executable).
+ */
 export interface SweepUnitDriverConfig {
-  /**
-   * The agent CLI: a bare command/path or a full leading-argv template
-   * (e.g. `['node', '/path/to/agent.mjs']`).
-   */
-  binary: string | readonly string[];
-  /** The routing-table endpoint handle (the frozen ModelSpec.provider). */
+  /** The routing handle the factory resolves (the frozen ModelSpec.provider). */
   provider: string;
-  /** The model id (allowlist-verified against the endpoint at dispatch). */
+  /** The requested model id (the factory's served-model assertion checks the served id against it). */
   model: string;
-  /** Sessions dir for the fixer workers' records; default the driver's own tmp default. */
-  sessionsDir?: string;
-  /**
-   * The routing table (PLAIN DATA — JSON-serializable); default
-   * defaultRoutingTable(). Endpoint auth VALUES are never carried here:
-   * the driver reads each endpoint's key from its env var at dispatch.
-   */
-  routingTable?: RoutingTable;
   /** Tool policy; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
   /** Budget caps; default uncapped. */
@@ -1491,17 +1537,28 @@ export function pushLockOptions(
 }
 
 /**
- * The registry binding (jSKJF): SweepUnitDispatchInput → SweepUnitBindings
- * over the REAL effects, input-driven exactly like the worktreeFor entry.
- * THROWS (honestly, naming the field) when `driver` or `check` is absent —
- * the registry schema admits them as optional so a plan can be authored
- * before its wiring is chosen, but a DISPATCH without them is a
- * misconfiguration, never a silent no-op.
+ * The registry binding (jSKJF): SweepUnitDispatchInput + DriverFactory →
+ * SweepUnitBindings over the REAL effects, input-driven exactly like the
+ * worktreeFor entry. THROWS (honestly, naming the field) when `driver` or
+ * `check` is absent — the registry schema admits them as optional so a plan
+ * can be authored before its wiring is chosen, but a DISPATCH without them
+ * is a misconfiguration, never a silent no-op. The FACTORY RESOLVES ONCE
+ * (ADR-0002 §2.5): role 'fixer' + the input's {provider, model} → the
+ * constructed, served-model-wrapped lane; a resolve failure throws
+ * pre-dispatch (`errorClassOf` → 'config' for an unbound provider/role —
+ * configuration, not a worker outcome) and the registry importer maps it to
+ * `needs-human`. The bindings carry `resolved.driver` and the RESOLVED
+ * modelSpec — the plan's raw spec never reaches the invocation. The harness
+ * is NOT part of sweep's input: the factory applies its own default harness
+ * for the lane.
  */
-export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBindings {
+export function bindingsFromDispatch(
+  input: SweepUnitDispatchInput,
+  drivers: DriverFactory,
+): SweepUnitBindings {
   if (input.driver === undefined) {
     throw new Error(
-      'sweep.unit: the dispatch input carries no driver config — the shipped dispatch requires a fixer (driver: {binary, provider, model})',
+      'sweep.unit: the dispatch input carries no driver config — the shipped dispatch requires a fixer (driver: {provider, model})',
     );
   }
   if (input.check === undefined) {
@@ -1509,6 +1566,13 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
+  // The factory resolves BEFORE any effect is constructed: an unresolvable
+  // binding (unknown provider, no lane bound for the role) is a
+  // configuration refusal, not a half-bound sweep.
+  const resolved = drivers.resolve({
+    role: 'fixer',
+    modelSpec: { provider: input.driver.provider, model: input.driver.model },
+  });
   const runStateDir = sweepRunStateDir(input.repoRoot, input.worktreesDir, input.runPrefix);
   // jVgCc: the dispatch mutex DEFAULTS to a repo-level lock on the run-state
   // dir (family timings), so sibling units dispatched concurrently serialize
@@ -1531,15 +1595,10 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
           branch: `${input.runPrefix}/${input.kind}/${input.slug}`,
         }
       : derived;
-  const driver = withServedModelAssertion(
-    new SubprocessDriver({
-      binary:
-        typeof input.driver.binary === 'string' ? [input.driver.binary] : [...input.driver.binary],
-      routingTable: input.driver.routingTable ?? defaultRoutingTable(),
-      ...(input.driver.sessionsDir !== undefined ? { sessionsDir: input.driver.sessionsDir } : {}),
-    }),
-    'default',
-  );
+  // ADR-0002 §2.5: the factory constructs and wraps the lane (the S4b
+  // subprocess-lane construction + withServedModelAssertion wrap lived here
+  // and is deleted — plan data never named an executable, and the served-
+  // model assertion is the factory's hook, §2.6).
   return {
     repoRoot: input.repoRoot,
     worktreesDir: input.worktreesDir,
@@ -1566,9 +1625,9 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       cwd: worktreePath,
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
-    driver,
-    modelSpec: { model: input.driver.model, provider: input.driver.provider },
-    sessionsDir: input.driver.sessionsDir ?? defaultSessionsDir(),
+    driver: resolved.driver,
+    // The RESOLVED spec (the alias normalised away) — never the input's raw spec.
+    modelSpec: resolved.modelSpec,
     ...(input.driver.toolPolicy !== undefined ? { toolPolicy: input.driver.toolPolicy } : {}),
     ...(input.sandboxPolicy !== undefined ? { sandboxPolicy: input.sandboxPolicy } : {}),
     ...(input.gitTimeoutMs !== undefined ? { gitTimeoutMs: input.gitTimeoutMs } : {}),
@@ -1601,11 +1660,6 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       ? { stagePathAllowlist: input.stagePathAllowlist }
       : {}),
   };
-}
-
-/** The subprocess driver's own default sessions dir (kept in sync, never imported: driver-internal). */
-function defaultSessionsDir(): string {
-  return join(tmpdir(), 'cq-harness', 'sessions');
 }
 
 // ---------------------------------------------------------------------------

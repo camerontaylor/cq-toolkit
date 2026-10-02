@@ -7,8 +7,10 @@
 // typed against the FROZEN OpRegistryEntry (src/kernel/types.ts). All
 // importers resolve through DYNAMIC imports, so loading the registry never
 // loads an op module: module scope imports only zod, `dirname` from
-// node:path (the applyRemediation store binding's `dir` default), the
-// ledger's bound constants, the kernel's PURE zod mirrors of the frozen
+// node:path (the applyRemediation store binding's `dir` default),
+// `createDriverFactory` from the driver factory (NOT a lane module — the
+// agenticRemediation entry's one construction seam; see its entry comment),
+// the ledger's bound constants, the kernel's PURE zod mirrors of the frozen
 // driver-seam types (kernel/schema.js — zod + types only, the same
 // eager-import class as the ledger constants), and types (the type-only
 // imports are erased at compile time) — the gates registry's lazy-import
@@ -17,6 +19,13 @@
 // not.
 import { dirname } from 'node:path';
 import { z } from 'zod';
+// The driver factory (ADR-0002 §2.5) is the ONE driver-family value this
+// registry binds at module scope: it is NOT a lane module (the banned
+// import class — ops never import src/driver/<lane>/), and binding it here
+// is what lets the agenticRemediation importer compose the op without
+// constructing a lane itself (the factory owns lane construction and the
+// served-model assertion).
+import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 // The kernel's zod mirrors of the FROZEN driver-seam types (pure module:
 // zod + types only) — one definition, never re-mirrored here.
@@ -408,25 +417,28 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'analyze.agenticRemediation',
     inputSchema: AgenticRemediationInputSchema,
-    // The subprocess driver (the null-hypothesis floor lane) is composed at
-    // the importer with the op's PROPOSAL SCHEMA (the frozen OpInvocation
-    // cannot carry a schema): the lane serializes it to --json-schema and
-    // validates the settle-time structured_output against it, so a
-    // dispatched run's ok result carries the remediation proposal.
-    // Construction spawns nothing; a run is one fresh invocation (I6). The
-    // op returns the driver's WorkerResult and NEVER applies anything
-    // itself; its consumer decides outside the autonomous path.
-    importer: () =>
-      Promise.all([
-        import('./agenticRemediation.js'),
-        import('../../driver/subprocess/index.js'),
-        import('../../driver/served-model.js'),
-      ]).then(
-        ([m, d, s]) =>
+    // The DRIVER FACTORY mediates construction (ADR-0002 §2.5): the
+    // importer binds the default factory (default binding: remediator →
+    // the ai-sdk lane for every default provider; an unbound provider is a
+    // 'config' throw the op maps to needs-human) and the op resolves its
+    // 'remediator' request at the point of dispatch. The proposal schema
+    // rides the invocation's outputSchema (the op renders it), so the
+    // importer carries no schema and constructs no lane. A run is one
+    // fresh invocation (I6). The op returns the driver's WorkerResult and
+    // NEVER applies anything itself; its consumer decides outside the
+    // autonomous path.
+    importer: (wiring) =>
+      import('./agenticRemediation.js').then(
+        (m) =>
           m.makeAgenticRemediation(
-            s.withServedModelAssertion(
-              new d.SubprocessDriver({ outputSchema: m.AGENTIC_PROPOSAL_SCHEMA }),
-              'default',
+            createDriverFactory(
+              // Dispatch wiring (PR #238 review P2): the host's alias-notice
+              // sink rides the factory config; absent (every library
+              // caller), the library default — one stderr line — is
+              // unchanged.
+              wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {},
             ),
           ) as Op<unknown, unknown>,
       ),

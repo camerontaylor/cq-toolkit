@@ -24,19 +24,6 @@
 // (JobStartedJournalEventSchema).
 import { z } from 'zod';
 import type {
-  Budget,
-  DriverStopReason,
-  ModelSpec,
-  OpInvocation,
-  SandboxLevel,
-  SandboxPolicy,
-  ToolDenial,
-  ToolPolicy,
-  ToolPolicyMode,
-  Usage,
-  WorkerResult,
-} from '../driver/types.js';
-import type {
   GovernanceRecord,
   Job,
   JobOutcome,
@@ -53,135 +40,32 @@ import type {
 } from './types.js';
 
 // ---------------------------------------------------------------------------
-// Driver seam — serializable parts (everything except the Driver interface)
+// Driver seam mirrors — the schema definitions LIVE in the driver family
+// (src/driver/schema.ts, seam v2: the shipped conformance suite binds the
+// one-directional rule that src/driver never imports src/kernel); this
+// module re-exports every name so the kernel's and the root barrel's public
+// mirror surface is unchanged. `UsageSchema` is imported for value use in
+// the kernel schemas below.
 // ---------------------------------------------------------------------------
 
-export const UsageSchema: z.ZodType<Usage> = z
-  .object({
-    // Mirror-only tightening (review-debt #17, PR #7 Major/P2): token counts
-    // are cardinalities — non-negative integers. The frozen Usage type is
-    // untouched; a negative or fractional count is malformed at the mirror
-    // exactly like the CLI lanes' own wire gates.
-    input: z.number().int().nonnegative(),
-    output: z.number().int().nonnegative(),
-    cacheRead: z.number().int().nonnegative(),
-    cacheWrite: z.number().int().nonnegative(),
-    reasoning: z.number().int().nonnegative().exactOptional(),
-  })
-  .strict();
-
-export const DriverStopReasonSchema: z.ZodType<DriverStopReason> = z.enum([
-  'complete',
-  'aborted',
-  'budget',
-  'error',
-]);
-
-export const ModelSpecSchema: z.ZodType<ModelSpec> = z
-  .object({
-    model: z.string(),
-    provider: z.string(),
-  })
-  .strict();
-
-export const ToolPolicyModeSchema: z.ZodType<ToolPolicyMode> = z.enum([
-  'allowlist',
-  'unrestricted',
-  'none',
-]);
-
-export const ToolPolicySchema: z.ZodType<ToolPolicy> = z
-  .object({
-    allow: z.array(z.string()),
-    mode: ToolPolicyModeSchema.exactOptional(),
-  })
-  .strict();
-
-export const SandboxLevelSchema: z.ZodType<SandboxLevel> = z.enum([
-  'none',
-  'workspace-write',
-  'read-only',
-]);
-
-export const SandboxPolicySchema: z.ZodType<SandboxPolicy> = z
-  .object({
-    level: SandboxLevelSchema,
-  })
-  .strict();
-
-export const BudgetSchema: z.ZodType<Budget> = z
-  .object({
-    // Mirror-only tightening (review-debt #17): a negative USD cap is
-    // malformed — the frozen RunOptions type is untouched.
-    maxUsd: z.number().nonnegative().exactOptional(),
-    maxTokens: z.number().exactOptional(),
-    wallClockMs: z.number().exactOptional(),
-    maxAttempts: z.number().exactOptional(),
-  })
-  .strict();
-
-export const ToolDenialSchema: z.ZodType<ToolDenial> = z
-  .object({
-    tool: z.string(),
-    reason: z.string(),
-  })
-  .strict();
-
-export const OpInvocationSchema: z.ZodType<OpInvocation> = z
-  .object({
-    prompt: z.string(),
-    modelSpec: ModelSpecSchema,
-    toolPolicy: ToolPolicySchema,
-    sandboxPolicy: SandboxPolicySchema,
-    sessionRef: z.string().exactOptional(),
-    budget: BudgetSchema,
-  })
-  .strict();
-
-export const WorkerResultSchema: z.ZodType<WorkerResult> = z
-  .object({
-    model: z.string().exactOptional(),
-    structuredOutput: z.unknown().optional(),
-    usage: UsageSchema,
-    costUSD: z.number().exactOptional(),
-    costBasis: z.enum(['modeled', 'billed']).exactOptional(),
-    sessionId: z.string().exactOptional(),
-    denials: z.array(ToolDenialSchema),
-    // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
-    error: z.string().min(1).max(513).exactOptional(),
-    stopReason: DriverStopReasonSchema,
-  })
-  .strict()
-  // DD-9 cost pairing, wire schema only: costBasis is present EXACTLY when
-  // costUSD is — a priced result carries both, an unpriced result carries
-  // neither. Mirror-only tightening (same recorded precedent as the
-  // RunOptions bounds): the frozen WorkerResult type is untouched — the
-  // type-level half of this coupling is a post-freeze note.
-  .superRefine((result, ctx) => {
-    if (result.costUSD !== undefined && result.costBasis === undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'costBasis is required when costUSD is present',
-        path: ['costBasis'],
-      });
-    }
-    if (result.costUSD === undefined && result.costBasis !== undefined) {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'costBasis must be omitted when costUSD is absent',
-        path: ['costBasis'],
-      });
-    }
-    // Mirror the frozen type's documented contract: `error` rides only a
-    // driver-level failure verdict (stopReason 'error').
-    if (result.error !== undefined && result.stopReason !== 'error') {
-      ctx.addIssue({
-        code: 'custom',
-        message: "error is only allowed when stopReason is 'error'",
-        path: ['error'],
-      });
-    }
-  });
+export {
+  BudgetSchema,
+  DriverStopReasonSchema,
+  ModelSpecSchema,
+  OpInvocationSchema,
+  OutputSchemaSchema,
+  ProviderSignalsSchema,
+  SandboxLevelSchema,
+  SandboxPolicySchema,
+  ToolDenialSchema,
+  ToolPolicyModeSchema,
+  ToolPolicySchema,
+  UsageSchema,
+  WorkerErrorClassSchema,
+  WorkerResultSchema,
+  WorkspaceBindingSchema,
+} from '../driver/schema.js';
+import { UsageSchema } from '../driver/schema.js';
 
 // ---------------------------------------------------------------------------
 // Kernel: op result taxonomy
