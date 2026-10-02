@@ -408,7 +408,10 @@ async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
   onDispatchUnknown?: () => void,
-  guard?: { beforeBody(): Promise<void>; assertAllowed(): void },
+  guard?: {
+    beforeBody(): Promise<OpResult<unknown> | undefined | void>;
+    assertAllowed(): OpResult<unknown> | undefined | void;
+  },
 ): Promise<OpResult<unknown>> {
   // The lookup itself is guarded: a registry.get that throws must fail THIS
   // job, not reject the whole run.
@@ -439,8 +442,10 @@ async function executeOp(
   // Validation and import may await arbitrarily. Recheck immediately before
   // entering the body, OUTSIDE the ordinary op-error conversion. The sync
   // check closes the failure microtask window after the async nonce read.
-  await guard?.beforeBody();
-  guard?.assertAllowed();
+  const preparationRefusal = await guard?.beforeBody();
+  if (preparationRefusal !== undefined) return preparationRefusal;
+  const entryRefusal = guard?.assertAllowed();
+  if (entryRefusal !== undefined) return entryRefusal;
   try {
     let raw: OpResult<unknown>;
     try {
@@ -1299,23 +1304,13 @@ async function runPlanUnderLease(
       // dispatch signal's cleanup.
       let reservation: BudgetReservation | undefined;
       let preserveOpenedReservation = false;
-      const dispatchGuard = {
-        async beforeBody(): Promise<void> {
-          try {
-            await fenceDispatch();
-          } catch (error) {
-            preserveOpenedReservation = true;
-            throw error;
-          }
-        },
-        assertAllowed(): void {
-          try {
-            throwIfFailed();
-          } catch (error) {
-            preserveOpenedReservation = true;
-            throw error;
-          }
-        },
+      const fenceInvocation = async (): Promise<void> => {
+        try {
+          await fenceDispatch();
+        } catch (error) {
+          preserveOpenedReservation = true;
+          throw error;
+        }
       };
       let settledCharge:
         | { charged: number; basis: 'observed' | 'full'; priced: boolean }
@@ -1355,6 +1350,41 @@ async function runPlanUnderLease(
                 'cancelled: the run-level signal tripped the governor before this queued dispatch ran',
             }
           : { status: 'budget-exhausted' };
+      };
+
+      let dispatchSignal: AbortSignal | undefined;
+      const invocationPermission = (): OpResult<unknown> | undefined => {
+        // Infrastructure failure remains a run rejection with an unresolved
+        // opened fact. Ordinary cancellation instead follows normal settlement.
+        try {
+          throwIfFailed();
+        } catch (error) {
+          preserveOpenedReservation = true;
+          throw error;
+        }
+        if (dispatchClosed) {
+          // A detached preparation cannot reopen an already settled dispatch,
+          // or append fresh governor evidence after its slot was released.
+          return { status: 'indeterminate', detail: 'cancelled: dispatch already closed' };
+        }
+        if (governor.tripped) return queuedRefusal(governor.tripKind === 'signal');
+        if (dispatchSignal?.aborted === true) {
+          return {
+            status: 'indeterminate',
+            detail: 'cancelled: dispatch signal aborted before invocation',
+          };
+        }
+        return undefined;
+      };
+      const dispatchGuard = {
+        async beforeBody(): Promise<OpResult<unknown> | undefined> {
+          const refusal = invocationPermission();
+          if (refusal !== undefined) return refusal;
+          await fenceInvocation();
+          return invocationPermission();
+        },
+        // No await separates this check from entry into the operation body.
+        assertAllowed: invocationPermission,
       };
 
       // Interpret ONE ladder outcome into the job's verdict: the completion
@@ -1436,7 +1466,8 @@ async function runPlanUnderLease(
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
         const ladderOutcome = await runLadder(
-          () => {
+          (context) => {
+            dispatchSignal = context.signal;
             dispatchUnknown = false;
             return executeOp(
               job,
@@ -1481,9 +1512,8 @@ async function runPlanUnderLease(
         // whether the charge is 'observed' (definitive verdict) or 'full'
         // (killed / indeterminate / threw — unknown status).
         outcome = ladderOutcome;
-        const interpreted = interpretOutcome(ladderOutcome, attempt);
-        dispatchClosed = true; // close the evidence window BEFORE the settle reads it
-        return interpreted;
+        dispatchClosed = true; // close invocation and evidence before interpretation/settlement
+        return interpretOutcome(ladderOutcome, attempt);
       };
 
       try {
@@ -1536,7 +1566,7 @@ async function runPlanUnderLease(
             // Durable write-ahead, then ownership fence, then dispatch.
             // A lost fence leaves the durable reservation unresolved for
             // full loss charging/quarantine on resume, without invocation.
-            await dispatchGuard.beforeBody();
+            await fenceInvocation();
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
@@ -1549,7 +1579,7 @@ async function runPlanUnderLease(
           // UNCAPPED (reservation-less): the W2.2 dispatch unchanged —
           // evidence folds roll the ledger and the token cap binds; there is
           // no USD capacity to hold a reservation against.
-          await dispatchGuard.beforeBody();
+          await fenceInvocation();
           try {
             result = await runDispatchLadder(admission.attempt);
           } catch (err) {

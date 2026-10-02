@@ -495,3 +495,153 @@ test.each(invocationCases)(
     }
   },
 );
+
+test.each(['capped', 'uncapped'] as const)(
+  '%s canceled importer refuses body entry and settles normally',
+  async (mode) => {
+    const dir = await directory();
+    const parked = deferred();
+    const resume = deferred();
+    const abort = new AbortController();
+    const calls: string[] = [];
+    const governor = createGovernor(mode === 'capped' ? { maxUsd: 10 } : {});
+    const entry: OpRegistryEntry<never, never> = {
+      name: 'work',
+      inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
+      importer: async () => {
+        parked.resolve();
+        await resume.promise;
+        return (async () => {
+          calls.push('a');
+          return { status: 'ok', value: 'a' };
+        }) as unknown as Op<never, never>;
+      },
+    };
+    const running = runPlan(
+      { id: plan.id, jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      { get: () => entry },
+      { governor, signal: abort.signal, allowAdvisory: true },
+    );
+    await parked.promise;
+    abort.abort();
+    resume.resolve();
+    const report = await running;
+    expect(calls).toEqual([]);
+    expect(report.jobs[0]?.result.status).toBe('indeterminate');
+    expect(governor.tripKind).toBe('signal');
+    expect(governor.inFlight).toBe(0);
+    expect(governor.outstandingCount).toBe(0);
+    const journal = await events(dir);
+    expect(journal.some((event) => event.type === 'run-finished')).toBe(true);
+    if (mode === 'capped') {
+      expect(journal.filter((event) => event.type === 'reservation-settled')).toEqual([
+        expect.objectContaining({ jobId: 'a', charged: 10, basis: 'full' }),
+      ]);
+    }
+  },
+);
+
+// Advance only ladder time; deferred imports and durable append barriers
+// determine the schedule independently of host timers.
+function ladderClock() {
+  let now = 0;
+  let ordinal = 0;
+  const pending = new Map<number, { at: number; fn: () => void }>();
+  return {
+    now: () => now,
+    setTimeout(fn: () => void, ms: number): unknown {
+      const id = ++ordinal;
+      pending.set(id, { at: now + ms, fn });
+      return id;
+    },
+    clearTimeout(handle: unknown): void {
+      pending.delete(handle as number);
+    },
+    advance(ms: number): void {
+      const end = now + ms;
+      for (;;) {
+        const next = [...pending.entries()]
+          .filter(([, timer]) => timer.at <= end)
+          .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+        if (next === undefined) break;
+        pending.delete(next[0]);
+        now = next[1].at;
+        next[1].fn();
+      }
+      now = end;
+    },
+  };
+}
+
+test('closed ladder cannot invoke a resumed importer while a sibling holds the lease', async () => {
+  const dir = await directory();
+  const parked = deferred();
+  const resume = deferred();
+  const firstSettled = deferred();
+  const siblingStarted = deferred();
+  const finishSibling = deferred();
+  const calls: string[] = [];
+  const clock = ladderClock();
+  const governor = createGovernor(
+    { maxUsd: 10, perJobWallClockMs: 10, abortGraceMs: 1, killGraceMs: 1 },
+    clock,
+  );
+  hooks.before = async (event) => {
+    if (event.type === 'job-started' && event.jobId === 'b') await firstSettled.promise;
+  };
+  hooks.after = async (event) => {
+    if (event.type === 'reservation-settled' && event.jobId === 'a') firstSettled.resolve();
+  };
+  const entry = (id: string): OpRegistryEntry<never, never> => ({
+    name: id,
+    inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
+    importer: async () => {
+      if (id === 'a') {
+        parked.resolve();
+        await resume.promise;
+      }
+      return (async () => {
+        calls.push(id);
+        if (id === 'b') {
+          siblingStarted.resolve();
+          await finishSibling.promise;
+        }
+        return { status: 'ok', value: id };
+      }) as unknown as Op<never, never>;
+    },
+  });
+  const entries = new Map(['a', 'b'].map((id) => [id, entry(id)]));
+  const running = runPlan(
+    { id: plan.id, jobs: ['a', 'b'].map((id) => ({ id, op: id, input: { id } })) },
+    { concurrency: 2, stopOnError: false, journalDir: dir },
+    { get: (name) => entries.get(name) },
+    { governor, allowAdvisory: true },
+  );
+  try {
+    await parked.promise;
+    clock.advance(12);
+    await siblingStarted.promise;
+    expect(governor.inFlight).toBe(1);
+    expect(governor.outstandingCount).toBe(1);
+    resume.resolve();
+    // Drain the detached import continuation while the sibling retains its
+    // reservation/slot and the plan lease, rather than relying on lease loss.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).toEqual(['b']);
+    await expect(acquirePlanLock(dir, plan.id, 'contender')).rejects.toThrow('plan locked');
+    expect(governor.tripped).toBe(false);
+  } finally {
+    resume.resolve();
+    finishSibling.resolve();
+  }
+  const report = await running;
+  expect(report.jobs.find((job) => job.jobId === 'a')?.result.status).toBe('budget-exhausted');
+  expect(report.jobs.find((job) => job.jobId === 'b')?.result.status).toBe('ok');
+  expect(governor.inFlight).toBe(0);
+  expect(governor.outstandingCount).toBe(0);
+  expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([
+    expect.objectContaining({ jobId: 'a', charged: 5, basis: 'full' }),
+    expect.objectContaining({ jobId: 'b', charged: 0, basis: 'observed' }),
+  ]);
+});

@@ -172,8 +172,9 @@ export async function acquirePlanLock(
   // Atomic exclusion covers eligibility THROUGH publication/listen/fence,
   // for creators and reclaimers alike. Never reclaim this short-lived guard
   // by timestamp/PID/read+unlink: that would recreate the stale-check race.
-  // A crash during acquisition leaves it fail-closed, like a half-written
-  // record; administrative recovery is outside this internal lease API.
+  // Unresolved R1: a crash leaves this guard behind and blocks even complete
+  // dead-owner records. This does NOT satisfy the accepted recovery contract;
+  // replacing it requires process-death-released atomic publication exclusion.
   const publication = join(journalDir, `${planId}.lock.acquiring`);
   try {
     await mkdir(publication, { mode: 0o700 });
