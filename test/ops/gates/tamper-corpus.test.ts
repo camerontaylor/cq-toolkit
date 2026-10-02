@@ -10,7 +10,7 @@ import { hackDetector } from '../../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
 import { classifyStagePaths } from '../../../src/ops/sweep/unit.js';
 import { isProtectedStagePath } from '../../../src/ops/gates/protectedPaths.js';
-import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
 
 const execFileAsync = promisify(execFile);
 const CLEANUP: string[] = [];

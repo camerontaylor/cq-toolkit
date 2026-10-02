@@ -27,7 +27,7 @@
 //     as an orphan, never silently dropped: the report must account for
 //     every file the dep showed it.
 import { execFile } from 'node:child_process';
-import { SWEEP_DIFF_FLAGS } from './gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { fingerprintFailure } from '../gates/fingerprint.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { makeLedgerQuery } from '../ledger/ledger.js';

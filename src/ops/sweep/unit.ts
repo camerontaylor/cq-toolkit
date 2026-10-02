@@ -31,7 +31,7 @@
 //     binds its lane through DriverFactoryConfig — bindings + per-lane
 //     construction knobs — and hands the factory to this seam).
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { SWEEP_DIFF_FLAGS } from './gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
