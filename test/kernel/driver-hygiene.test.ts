@@ -32,6 +32,15 @@ const PATTERN = /setTimeout|AbortController/;
 
 /** The one exclusion: src/driver/<name>/process.{ts,js,mjs} (T1.5's kill-ladder home). */
 const PROCESS_HELPER = /^driver\/[^/]+\/process\.(?:ts|js|mjs)$/;
+/**
+ * The other exclusion: the SHIPPED conformance suite (seam v2, ADR-0002 §4).
+ * It constructs caller-side `AbortController`s and `setTimeout`s to EXERCISE
+ * `RunOptions.signal` (legs b-iii/b-v) — the suite owns no wall clock and
+ * decides nothing about production aborts; it plays the caller's role, the
+ * same way the test tree does, because it ships as driver-family code so
+ * third-party lanes can run it.
+ */
+const CONFORMANCE_SUITE = /^driver\/conformance\.ts$/;
 
 /** Every .ts/.js/.mjs source under `dir`, sorted (relative to src/, forward slashes), recursively. */
 async function sourceFilesUnder(dir: string): Promise<string[]> {
@@ -62,6 +71,7 @@ describe('I8 hygiene — the grep check', () => {
     const offenders: string[] = [];
     for (const rel of files) {
       if (PROCESS_HELPER.test(rel)) continue; // T1.5 SIGTERM→SIGKILL helpers may own timers
+      if (CONFORMANCE_SUITE.test(rel)) continue; // the shipped suite plays the CALLER (legs b-iii/b-v)
       const text = await readFile(join(SRC, rel), 'utf8');
       if (PATTERN.test(text)) offenders.push(rel);
     }

@@ -1,11 +1,11 @@
 // review-live helpers — E5 (goal E5; ws-e acceptance: the live, dispatch-
 // gated e2e of the shipped review loop). Everything here is FIXTURE
 // machinery for test/e2e/review/live.test.ts: a scratch GitHub repo seeded
-// through the real `gh` CLI, the fake fixer agent the SubprocessDriver
-// spawns as `node <script>`, and a recording gh proxy for the run-2
-// zero-mutation assertion. Inert at import: no I/O and no env reads at
-// module scope — the live test only calls into this module from inside its
-// LIVE_GH-gated beforeAll.
+// through the real `gh` CLI, the fake fixer agent the driver factory's
+// subprocess lane spawns as `node <script>` (ADR-0002 §2.5), and a
+// recording gh proxy for the run-2 zero-mutation assertion. Inert at
+// import: no I/O and no env reads at module scope — the live test only
+// calls into this module from inside its LIVE_GH-gated beforeAll.
 //
 // THE SINGLE-IDENTITY DEVIATION (recorded, ws-e): the seeded review thread
 // is created through the REST API under the SAME token identity that
@@ -446,15 +446,16 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
 
 /**
  * Write the fake fixer agent (an executable node script) into `root` and
- * return its path. Spawned by the SubprocessDriver as `node <path>` with
- * cwd = the PR worktree (worktreeFixDriver's session record) and the fixer
- * prompt on STDIN (buildArgs `-p` print mode — the prompt rides stdin, not
- * argv). It performs the fix IN ITS CWD: rewrites the marker, `git add -A`,
- * commits with the review item id IN THE SUBJECT (the loop's per-item
- * attribution rule), and answers ONE stream-json `result` line whose
- * structured_output is the fix contract {"changed","summary","commits"}.
- * The stream-json envelope is what the driver folds: a bare contract JSON
- * line on stdout would be narration and an 'error' verdict, never a fix.
+ * return its path. Spawned by the driver factory's subprocess lane as
+ * `node <path>` with cwd = the PR worktree (the invocation's workspace
+ * binding) and the fixer prompt on STDIN (buildArgs `-p` print mode — the
+ * prompt rides stdin, not argv). It performs the fix IN ITS CWD: rewrites
+ * the marker, `git add -A`, commits with the review item id IN THE SUBJECT
+ * (the loop's per-item attribution rule), and answers ONE stream-json
+ * `result` line whose structured_output is the fix contract
+ * {"changed","summary","commits"}. The stream-json envelope is what the
+ * driver folds: a bare contract JSON line on stdout would be narration and
+ * an 'error' verdict, never a fix.
  */
 export async function writeFakeFixerAgent(root: string): Promise<string> {
   const path = join(root, 'e5-fake-fixer.mjs');
