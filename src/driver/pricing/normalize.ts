@@ -107,7 +107,19 @@ function pricedCandidates(
 ): readonly string[] {
   const requested = modelSpec.model;
   const declared = servedAliasIds(aliases, lane, modelSpec.provider, requested);
-  return Object.freeze([requested, ...declared.filter((id) => id !== requested)]);
+  // First occurrence wins, so the requested id keeps position 0 and a repeated
+  // alias is reported once. Filtering only `id !== requested` was not enough: an
+  // alias list that repeats an id (a provider policy that lists the same served
+  // model twice) reported that candidate twice, which double-counted it in
+  // `unpricedCandidates`.
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const id of [requested, ...declared]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    candidates.push(id);
+  }
+  return Object.freeze(candidates);
 }
 
 export function resolvePricedModel(args: {

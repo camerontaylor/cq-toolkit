@@ -218,8 +218,26 @@ export function classifyProviderSignal(
   const marker = firstMatchingRule(profile, signal);
   if (marker !== undefined) {
     const resolution = claudeDeferResolution(signal, observedQuota);
-    const deferUntilMs =
-      resolution.kind === 'definite'
+    // Retry-after precedence reaches the RULE path too, not just the generic
+    // branch below. A rule that is NOT the unified marker-header set describes a
+    // TRANSIENT condition (claude-subscription's documented status-only 429,
+    // "Server is temporarily limiting requests"), and on such a rule an
+    // `observedQuota.resetsAt` belongs to a different channel: the Claude
+    // resolution above returned `none` precisely because no unified window
+    // blocked, so there is no exhausted window for that reset to release. Taking
+    // it anyway inverted the F2 precedence through the back door - a throttle the
+    // vendor asked us to retry in 3,741s was deferred a month, past the retry,
+    // to a quota time that never applied. A vendor's own retry hint wins here;
+    // `deferUntilMs` stays absent so the caller applies that hint itself (this
+    // helper takes no clock). A `quota` rule keeps its reset unconditionally:
+    // an exhausted allowance must never lose its release time.
+    const retryAfterTakesPrecedence =
+      marker.markerHeader === undefined &&
+      marker.errorClass !== 'quota' &&
+      signal.retryAfterMs !== undefined;
+    const deferUntilMs = retryAfterTakesPrecedence
+      ? undefined
+      : resolution.kind === 'definite'
         ? resolution.at
         : resolution.kind === 'unresolved-blocking'
           ? undefined
@@ -263,8 +281,10 @@ export function classifyProviderSignal(
   // Header-channel profiles (claude-subscription, anthropic-api, openai-api) are
   // deliberately UNAFFECTED: for them `retry-after` keeps precedence, because the
   // vendor documents it as the throttle discriminator and the Claude rules are
-  // built around it. With no `resetsAt` this branch does not fire, so a throttle
-  // on an endpoint lane still classifies as rate-limit exactly as before.
+  // built around it. That precedence is enforced in the rule path above as well,
+  // so this branch cannot reintroduce it through a bare status rule. With no
+  // `resetsAt` this branch does not fire, so a throttle on an endpoint lane still
+  // classifies as rate-limit exactly as before.
   //
   // Caller contract: the observation must come from THIS profile's documented
   // `observability.usageEndpoint` — the same identity discipline that

@@ -440,7 +440,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
       burnModels: {
         'glm-5.3-flash': {
           divisor: 10_000,
-          tokenMultiplier: { input: 2.3, cachedInput: 0.56, output: 8 },
+          tokenMultiplier: { input: 2.3, cachedInput: 0.56, output: 8, mcpCall: 8 },
           provenance: {
             kind: 'documented',
             source: DOC_ZAI,
@@ -450,7 +450,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
         },
         'glm-5.3': {
           divisor: 10_000,
-          tokenMultiplier: { input: 6.9, cachedInput: 1.7, output: 24 },
+          tokenMultiplier: { input: 6.9, cachedInput: 1.7, output: 24, mcpCall: 24 },
           provenance: {
             kind: 'documented',
             source: DOC_ZAI,
