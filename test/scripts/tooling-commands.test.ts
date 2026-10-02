@@ -67,7 +67,7 @@ function command(
   args: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
 ) {
-  if (script === 'ratchet-typecheck' || script === 'fix') copyRatchetEngine(ROOT, root);
+  if (script === 'ratchet-typecheck') copyRatchetEngine(ROOT, root);
   return spawnSync(process.execPath, [`scripts/${script}.mjs`, ...args], {
     cwd: root,
     env,

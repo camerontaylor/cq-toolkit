@@ -63,6 +63,9 @@ function newestSrcMtimeMs() {
   return newest;
 }
 
+/** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
+let distPrepared = false;
+
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
@@ -78,8 +81,6 @@ function newestSrcMtimeMs() {
  * the trust-critical path and it never reuses. TS7 is checked-emit: a build
  * error fails loudly here, never downstream.
  */
-let distPrepared = false;
-
 export function ensureDist() {
   // Build-once per process: every consumer in one invocation reuses the first
   // preparation instead of re-walking src/ or re-running `npm run build`.
