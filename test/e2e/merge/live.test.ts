@@ -123,14 +123,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
+import { createDriverFactory } from '../../../src/driver/factory.js';
 import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
 import { realMergeEffects } from '../../../src/ops/merge/effects.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
-import {
-  MergeConflictDecisionSchema,
-  makeResolveConflictOp,
-} from '../../../src/ops/merge/resolveConflict.js';
+import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
 import { runMergePrs } from '../../../src/ops/merge/runPrs.js';
 import type { MergePrsCandidate } from '../../../src/ops/merge/runPrs.js';
 import type { ReviewSummary } from '../../../src/ops/review/threads.js';
@@ -715,14 +712,24 @@ const reportSummary = (report: ExecutionReport): string =>
         await chmod(agentPath, 0o755);
         const sessionsDir = join(scratchDir, 'sessions');
         await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
-        const driver = new SubprocessDriver({
-          binary: agentPath,
-          outputSchema: MergeConflictDecisionSchema,
-          sessionsDir,
-          routingTable: FAKE_ROUTING_TABLE,
+        // The DRIVER FACTORY binds the fixture's fake route (ADR-0002
+        // §2.5): role 'conflict-resolver' + provider 'f5fake' → the
+        // subprocess lane over the scripted agent binary. The decision
+        // schema rides the invocation's outputSchema (the op renders it),
+        // so the lane config carries only its transport knobs; the factory
+        // owns the served-model assertion.
+        const drivers = createDriverFactory({
+          bindings: { 'conflict-resolver': { f5fake: 'subprocess' } },
+          lanes: {
+            subprocess: {
+              binary: agentPath,
+              sessionsDir,
+              routingTable: FAKE_ROUTING_TABLE,
+            },
+          },
         });
-        const resolveOp = makeResolveConflictOp({ driver, sessionsDir });
-        log('step 5 scripted conflict agent + SubprocessDriver wired (fake f5fake route)');
+        const resolveOp = makeResolveConflictOp({ drivers });
+        log('step 5 scripted conflict agent bound through the driver factory (fake f5fake route)');
 
         // --- STEP 6: RUN THE PLAN TO CONVERGENCE --------------------------------
         const allThreeMerged = async (): Promise<boolean> => {
@@ -753,7 +760,6 @@ const reportSummary = (report: ExecutionReport): string =>
               resolveConcurrency: 2,
               nowMs: Date.now(),
               modelSpec: { model: 'f5fake-model', provider: 'f5fake' },
-              sessionsDir,
             },
             {
               effects: realMergeEffects({ repoRoot: cloneDir }),

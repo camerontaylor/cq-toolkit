@@ -2,11 +2,14 @@
 // item 4; UC §3 row 44): the WRITE-CAPABLE worker that resolves a PR's merge
 // conflict inside a prepared worktree and pushes the resolved branch. It is
 // the repo's FIRST driver-consuming op: the worker is reached only through
-// the frozen Driver seam (src/driver/types.js — run(OpInvocation) →
-// WorkerResult), never through a vendor SDK, and every other I/O surface
-// (git/gh via MergeEffects, the session store, the prompt file, the output
-// parser) arrives as an injectable dep — the whole flow below is testable
-// with zero real processes, networks, or filesystems.
+// the frozen Driver seam (src/driver/types.js — run(OpInvocation,
+// RunOptions?) → WorkerResult), never through a vendor SDK, and the worker
+// itself arrives through a DriverFactory (ADR-0002 §2.5 — the op never
+// constructs a lane class; the factory binds role + provider → lane and
+// owns the served-model assertion). Every other I/O surface (git/gh via
+// MergeEffects, the prompt file, the output parser) arrives as an
+// injectable dep — the whole flow below is testable with zero real
+// processes, networks, or filesystems.
 //
 // THE SANDBOX TRAP (UC row 44, I11-adjacent — read before touching the
 // invocation): the frozen SandboxPolicy carries an isolation LEVEL and no
@@ -16,9 +19,9 @@
 // Level 'none' — "no isolation requested" — is the only honest request for
 // a network-needing op under this policy. It is not a grant of anarchy —
 // but neither is it confinement: there is NO OS-level confinement on this
-// seam. The worktree cwd (the driver runs the CLI with cwd = the prepared
-// worktree) is a CONVENTION the prompt enforces, not an OS bound; the
-// bounds that remain are the allowlisted tool surface ({read, edit, run}
+// seam. The worktree is bound as the invocation's workspace (the driver
+// binds cwd and harness confinement to it); the bounds that remain are
+// the allowlisted tool surface ({read, edit, run}
 // in allowlist mode), the prompt's hard constraints (no force, no squash,
 // no rebase, no amend, no protected-branch destination), and the
 // wall-clock budget REQUEST (Budget.wallClockMs) — a request on the seam,
@@ -53,7 +56,7 @@
 //   c. withPreparedWorktree (effects.js) owns prepare → fn →
 //      remove-in-finally; the op never calls worktreePrepare/Remove
 //      itself. A throw out of it (spawn-level worktree failure, or a
-//      session/prompt fault inside fn) is an op OUTCOME here → 'failed'
+//      fault inside fn) is an op OUTCOME here → 'failed'
 //      with the message, not a crash. KNOWN WEDGE (review-debt #143): a
 //      non-acted outcome after the agent started can leave a DIRTY tree,
 //      which the frozen no-force worktreeRemove refuses (and which the
@@ -62,17 +65,24 @@
 //      existing path), but recovery until then is manual: git worktree
 //      remove --force / prune. A guarded cleanup shape in the effects
 //      allowlist is the deferred fix.
-//   d. Inside: a fresh session record is created in the worktree (its
-//      sessionId is the OpInvocation.sessionRef; the driver runs the CLI
-//      with cwd = that workspace) and the prompt is rendered from
-//      prompts/conflict.default.md with the seven vars.
-//   e. ONE driver.run: toolPolicy allow ['read','edit','run'] mode
-//      'allowlist'; sandboxPolicy level 'none' (the trap above);
-//      budget.wallClockMs default DEFAULT_RESOLVE_WALL_CLOCK_MS.
+//   d. Inside: the prompt is rendered from prompts/conflict.default.md
+//      with the seven vars.
+//   e. ONE resolved.driver.run: toolPolicy allow ['read','edit','run']
+//      mode 'allowlist'; sandboxPolicy level 'none' (the trap above);
+//      budget.wallClockMs default DEFAULT_RESOLVE_WALL_CLOCK_MS. The
+//      invocation binds the prepared worktree as its workspace
+//      (ADR-0002 §2.4 — the driver owns cwd and confinement; no
+//      pre-created session record, so no sessionRef) and carries the
+//      decision schema (§2.3 — a schema-valid decision object or an
+//      'output-invalid' error). The governed signal rides RunOptions
+//      (§2.1). DriverRequest.sessionRetention stays at its 'keep'
+//      default: the session record a workspace-bound run creates is
+//      worker evidence, and the failure payloads below point humans at
+//      the WorkerResult's sessionId when the driver reported one.
 //   f. stopReason mapped FIRST: aborted → 'indeterminate' (partial work
 //      may exist in the worktree), budget → 'budget-exhausted', error →
-//      'failed' (denials as the narration hint); only 'complete' reaches
-//      the parser.
+//      'failed' (the errorClass named in the text for humans; denials as
+//      the narration hint); only 'complete' reaches the parser.
 //   g. parse(structuredOutput) — object or raw-text tolerant path; a
 //      MergeConflictContractError → 'failed' (fail closed — silence is
 //      never success).
@@ -86,23 +96,22 @@
 //      Escalation NEVER lands in a value, and an unverified acted is
 //      never 'ok'.
 //
-// SESSIONS-DIR COUPLING: DEFAULT_RESOLVE_SESSIONS_DIR below MUST mirror
-// the subprocess driver's internal defaultSessionsDir (module-private) —
-// the default createSession writes records there and the default driver
-// reads them from its own default; a caller-provided input.sessionsDir
-// threads to BOTH sides, which is what keeps them aligned.
+// STATUS MAPPING FOR THROWS (ADR-0002 §2.9, normative): a thrown
+// factory.resolve() or driver.run() under an already-aborted governed
+// signal is the governed cancellation (I8) → 'indeterminate'; any other
+// throw — the seam's 'config'/'auth' dispatch classes (an unknown
+// provider/role binding, a missing key env) or an UNCLASSIFIED throw —
+// is a misconfiguration or a lane bug the human arranges → 'needs-human'
+// (review-debt #186). The op never rethrows a dispatch outcome.
 import { readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { SubprocessDriver } from '../../driver/subprocess/index.js';
-import { AiSdkDriver } from '../../driver/ai-sdk/index.js';
-import { withServedModelAssertion } from '../../driver/served-model.js';
+import { createDriverFactory } from '../../driver/factory.js';
+import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
+import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
-import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
+import type { ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { SessionStore } from '../../harness/session.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { ModelSpecSchema } from '../../kernel/schema.js';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -138,16 +147,29 @@ export interface RawMergeConflictDecision {
 }
 
 /**
- * The worker-facing decision schema — the default driver's outputSchema
- * AND the parser's object gate. Deliberately NOT `.strict()`: unknown keys
- * are tolerated (zod strips them) exactly as the parser's object contract
- * demands — a strict mirror here would make the driver DROP decisions the
- * contract accepts, flipping a tolerable output into a fabricated failure.
+ * The worker-facing decision schema — the invocation's outputSchema (the
+ * contract the lane enforces, §2.3) AND the parser's object gate.
+ * Deliberately NOT `.strict()`: unknown keys are tolerated (zod strips
+ * them) exactly as the parser's object contract demands — a strict mirror
+ * here would make the lane DROP decisions the contract accepts, flipping a
+ * tolerable output into a fabricated failure.
  */
 export const MergeConflictDecisionSchema: z.ZodType<RawMergeConflictDecision> = z.object({
   decision: z.enum(['acted', 'escalate', 'escalated']),
   summary: z.string().exactOptional(),
 });
+
+/**
+ * The invocation's structured-output contract (ADR-0002 §2.3): the SAME
+ * tolerant schema the parser judges, rendered once as plain data. The
+ * lane must settle a schema-valid decision object or an
+ * 'output-invalid' error — either way the op's own strict parse (g)
+ * stays the output gate.
+ */
+const RESOLVE_DECISION_OUTPUT_SCHEMA = toOutputSchema(
+  'merge.resolveConflict/v1',
+  MergeConflictDecisionSchema,
+);
 
 /** The contract text every violation message states (the UC row 44 output
  * contract), so an operator reading the error sees the required shape. */
@@ -285,8 +307,6 @@ export interface ResolveConflictInput {
   /** The branch the agent may never push to (prompt constraint); default
    * 'main'. */
   protectedBranch?: string;
-  /** SessionStore dir — must match what the driver reads. */
-  sessionsDir?: string;
 }
 
 /**
@@ -305,7 +325,6 @@ export const MergeConflictInputSchema: z.ZodType<ResolveConflictInput> = z
     modelSpec: ModelSpecSchema.exactOptional(),
     wallClockMs: z.number().int().positive().exactOptional(),
     protectedBranch: z.string().min(1).exactOptional(),
-    sessionsDir: z.string().min(1).exactOptional(),
   })
   .strict();
 
@@ -318,17 +337,6 @@ export const MergeConflictInputSchema: z.ZodType<ResolveConflictInput> = z
  * conflict-agent bound), forwarded as Budget.wallClockMs.
  */
 export const DEFAULT_RESOLVE_WALL_CLOCK_MS = 20 * 60 * 1000;
-
-/**
- * The default sessions dir — MUST mirror the subprocess driver's internal
- * defaultSessionsDir() (module-private there): the default createSession
- * writes session records here and the default driver reads them from ITS
- * default when no caller sessionsDir is given. The two stay equal by
- * contract, not by import; a divergence would make the op create sessions
- * the driver cannot find. A caller-provided sessionsDir threads to both
- * sides, which is the alignment mechanism when it is overridden.
- */
-export const DEFAULT_RESOLVE_SESSIONS_DIR = join(tmpdir(), 'cq-harness', 'sessions');
 
 /**
  * Render the conflict prompt: a simple global `{{key}}` replace, no
@@ -378,27 +386,30 @@ export interface ResolveConflictDeps {
   /** Default: realMergeEffects({ repoRoot: input.repoRoot, protectedBranch? })
    * built lazily per call. */
   effects?: MergeEffects;
-  /** Default: provider 'ai-sdk' → an in-process AiSdkDriver, else a
-   * SubprocessDriver, both bound to MergeConflictDecisionSchema (the
-   * caller's sessionsDir threads through when given). */
-  driver?: Driver;
   /**
-   * Harness config threaded to the default SubprocessDriver (tool surface
-   * plus the sandbox/path restrictions the harness maps per lane). The
-   * SHIPPED default is `defaultHarnessConfig` — run-deny-all: on an
-   * in-process lane the agent cannot execute git commands; on the
-   * subprocess lane tool execution rides the HOST CLI's own permission
-   * model (`--allowedTools` carries names only). A live-capable config is
-   * wired by the caller (F5 exercises the scripted-agent path via
-   * `deps.driver`).
+   * The worker seam (ADR-0002 §2.5): the factory resolves ONE request per
+   * op call — role 'conflict-resolver', the input's modelSpec, the harness
+   * below — to the constructed, served-model-wrapped lane. Default:
+   * createDriverFactory() (the conservative bindings: every default
+   * provider on the ai-sdk lane; an unbound provider throws 'config').
+   */
+  drivers?: DriverFactory;
+  /**
+   * The deprecated-alias notice sink carried onto the DEFAULT factory's
+   * DriverFactoryConfig (PR #238 review P2) — the dispatch wiring the
+   * registry importer binds. Inert when `drivers` is supplied (an explicit
+   * factory IS the notice surface). Default: none — the library default,
+   * one stderr line.
+   */
+  onDeprecatedAlias?: (message: string) => void;
+  /**
+   * Harness config carried on the DriverRequest (tool surface plus the
+   * sandbox/path restrictions the harness maps per lane). The SHIPPED
+   * default is `defaultHarnessConfig` — run-deny-all. A live-capable
+   * config is wired by the caller (F5 exercises the scripted-agent path
+   * via a factory bound to the fixture lane).
    */
   harnessConfig?: HarnessConfig;
-  /** SessionStore dir for the default createSession; default
-   * DEFAULT_RESOLVE_SESSIONS_DIR (mirrors the driver's own default). */
-  sessionsDir?: string;
-  /** Default: SessionStore(sessionsDir).create(workspace) →
-   * record.sessionId. */
-  createSession?: (workspace: string) => Promise<string>;
   /** Default: reads prompts/conflict.default.md beside this module. */
   loadPrompt?: () => Promise<string>;
   /** Default: the real tolerant parser. */
@@ -408,29 +419,6 @@ export interface ResolveConflictDeps {
 /** The conflict prompt template, read beside this module. */
 const defaultLoadPrompt = async (): Promise<string> =>
   readFile(fileURLToPath(new URL('./prompts/conflict.default.md', import.meta.url)), 'utf8');
-
-/**
- * The default driver: provider 'ai-sdk' (the self-host config's DRIVER
- * handle — review-debt #186) binds the in-process AiSdkDriver, which needs
- * no host CLI; any other provider binds a SubprocessDriver bound to the
- * decision schema. Both share the caller's sessionsDir/harnessConfig; under
- * exactOptionalPropertyTypes an absent option is OMITTED so the driver
- * falls back to ITS OWN default — the dir DEFAULT_RESOLVE_SESSIONS_DIR
- * mirrors by contract, and the harness default is defaultHarnessConfig
- * (run-deny-all; see ResolveConflictDeps.harnessConfig).
- */
-const defaultDriver = (
-  sessionsDir: string | undefined,
-  harnessConfig: HarnessConfig | undefined,
-  modelSpec: ModelSpec,
-): Driver => {
-  const common = {
-    outputSchema: MergeConflictDecisionSchema,
-    ...(sessionsDir !== undefined ? { sessionsDir } : {}),
-    ...(harnessConfig !== undefined ? { harnessConfig } : {}),
-  };
-  return modelSpec.provider === 'ai-sdk' ? new AiSdkDriver(common) : new SubprocessDriver(common);
-};
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -486,22 +474,47 @@ export function makeResolveConflictOp(
       };
     }
 
-    const callerSessionsDir = input.sessionsDir ?? deps.sessionsDir;
-    const sessionsDir = callerSessionsDir ?? DEFAULT_RESOLVE_SESSIONS_DIR;
     const wallClockMs = input.wallClockMs ?? DEFAULT_RESOLVE_WALL_CLOCK_MS;
     const protectedBranch = input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
     const parse = deps.parse ?? parseMergeConflictDecision;
     const loadPrompt = deps.loadPrompt ?? defaultLoadPrompt;
-    const createSession =
-      deps.createSession ??
-      (async (workspace: string): Promise<string> => {
-        const record = await new SessionStore(sessionsDir).create(workspace);
-        return record.sessionId;
+    // RESOLVE ONCE, BEFORE ANY EFFECT (ADR-0002 §2.5): role + provider →
+    // the constructed, served-model-wrapped lane. The factory wraps the
+    // served-model assertion itself, so the op adds none. A resolve throw
+    // is a PRE-DISPATCH failure carrying a structured class (an unbound
+    // provider/role is 'config') — mapped by the §2.9 throw rows: under an
+    // already-aborted governed signal the dispatch died before it started
+    // → 'indeterminate'; any other throw is a misconfiguration or a lane
+    // bug the human arranges → 'needs-human'. Fail-closed ordering: this
+    // precedes the truth fetch, so an unresolvable binding never creates a
+    // worktree.
+    let resolved: ResolvedDriver;
+    try {
+      resolved = (
+        deps.drivers ??
+        createDriverFactory(
+          // The dispatch wiring's alias-notice sink (PR #238 review P2)
+          // rides the DEFAULT factory's config; absent, the library default
+          // — one stderr line — is unchanged.
+          deps.onDeprecatedAlias !== undefined ? { onDeprecatedAlias: deps.onDeprecatedAlias } : {},
+        )
+      ).resolve({
+        role: 'conflict-resolver',
+        modelSpec,
+        ...(deps.harnessConfig !== undefined ? { harness: deps.harnessConfig } : {}),
       });
-    const driver = withServedModelAssertion(
-      deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec),
-      'default',
-    );
+    } catch (err) {
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `resolveConflict: the conflict agent could not be resolved for pr ${input.pr} (cancelled): ${errorMessage(err)}`,
+        };
+      }
+      return {
+        status: 'needs-human',
+        reason: `resolveConflict: the conflict agent could not dispatch for pr ${input.pr}: ${errorMessage(err)}`,
+      };
+    }
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the
     // truth is unavailable — fail closed before any worktree exists.
@@ -550,9 +563,9 @@ export function makeResolveConflictOp(
         input.pr,
         ref,
         async (worktree): Promise<OpResult<ConflictResolutionValue>> => {
-          // (d) A fresh session in the worktree (the sessionRef the driver
-          // continues; the CLI's cwd is this workspace), then the prompt.
-          const sessionRef = await createSession(worktree);
+          // (d) The prompt — rendered from the template with the seven
+          // vars. No pre-created session record: the worktree below rides
+          // the invocation as its workspace binding (e).
           const prompt = renderConflictPrompt(await loadPrompt(), {
             pr: String(input.pr),
             headBranch: input.headBranch,
@@ -571,20 +584,27 @@ export function makeResolveConflictOp(
           // request for a network-needing op under the frozen policy,
           // which carries no network field and whose workspace-write a
           // lane MAY map onto an egress-blocking sandbox (the recorded
-          // UC-row-44 trap). The worktree cwd is a prompt-enforced
-          // convention, NOT an OS bound — the bounds that remain are this
-          // allowlist, the prompt's constraints, and the wall-clock
-          // budget request.
+          // UC-row-44 trap). The worktree rides as the workspace binding —
+          // the driver binds cwd and confinement to it (ADR-0002 §2.4) —
+          // so that convention is now data on the seam, not just prompt
+          // text. The decision schema rides the invocation (§2.3); the
+          // governed signal rides RunOptions (§2.1). modelSpec is the
+          // FACTORY-NORMALISED spec — a deprecated provider alias never
+          // reaches a lane or a journal.
           let result: WorkerResult;
           try {
-            result = await driver.run({
-              prompt,
-              modelSpec,
-              toolPolicy: { allow: ['read', 'edit', 'run'], mode: 'allowlist' },
-              sandboxPolicy: { level: 'none' },
-              sessionRef,
-              budget: { wallClockMs },
-            });
+            result = await resolved.driver.run(
+              {
+                prompt,
+                modelSpec: resolved.modelSpec,
+                toolPolicy: { allow: ['read', 'edit', 'run'], mode: 'allowlist' },
+                sandboxPolicy: { level: 'none' },
+                workspace: { path: worktree },
+                outputSchema: RESOLVE_DECISION_OUTPUT_SCHEMA,
+                budget: { wallClockMs },
+              },
+              { signal: currentJobContext()?.signal },
+            );
           } catch (err) {
             // A THROWN run() with the governor's signal aborted is the
             // governed cancellation (I8): no verdict on partial work →
@@ -632,9 +652,16 @@ export function makeResolveConflictOp(
               result.denials.length > 0
                 ? `${result.denials.length} tool use(s) denied by policy (see the session record for narration)`
                 : 'no denials recorded (see the session record for narration)';
+            // ADR-0002 §2.9: EVERY error verdict → 'failed', with the
+            // structured class named in the text (errorClass=<x>) for
+            // humans only — the structured class itself is forwarded
+            // nowhere (the invocation gate records it on
+            // reservation-settled).
+            const classText =
+              result.errorClass === undefined ? '' : `; errorClass=${result.errorClass}`;
             return {
               status: 'failed',
-              error: `conflict agent failed: ${hint}${result.error === undefined ? '' : `; ${boundedErrorText(result.error)}`}${sessionSuffix(result)}`,
+              error: `conflict agent failed: ${hint}${classText}${result.error === undefined ? '' : `; ${boundedErrorText(result.error)}`}${sessionSuffix(result)}`,
             };
           }
 

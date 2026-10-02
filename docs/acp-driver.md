@@ -182,8 +182,9 @@ message (review-debt #45).
   settles on the cancelled PROMPT RESPONSE (stopReason `cancelled` →
   `aborted`), never on the cancel write. `maxTokens` is post-hoc
   classification over the folded usage; no request timeouts, no retries.
-- **Structured output** (no ACP carrier exists): the constructor's
-  `outputSchema` appends the JSON schema + a reply-with-only-JSON
-  instruction to the prompt; the assembled text is validated post-settle;
-  a failing payload is dropped to narration, never trusted (DD-4's
+- **Structured output** (no ACP carrier exists): the invocation's
+  `outputSchema` (seam v2) appends the JSON schema + a reply-with-only-JSON
+  instruction to the prompt; the assembled text is validated post-settle
+  by the shared validator; a failing payload settles the uniform
+  error/`output-invalid` verdict, never trusted (DD-4's
   malformation rate is recorded, not solved).

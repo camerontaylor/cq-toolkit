@@ -64,7 +64,7 @@ import {
   qualifiedToolName,
 } from '../../src/harness/surface.js';
 import type { HarnessManifest, McpCallToolResult } from '../../src/harness/surface.js';
-import { CONFORMANCE_MODEL, CONFORMANCE_PROVIDER } from './conformance.js';
+import { CONFORMANCE_MODEL, CONFORMANCE_PROVIDER } from '../../src/driver/conformance.js';
 
 process.env.CONFORMANCE_API_KEY ??= 'conformance-fake-key';
 
