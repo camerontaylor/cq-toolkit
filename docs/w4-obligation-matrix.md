@@ -40,8 +40,13 @@ from each other.
 
 Both promotion gates are `active` on GitHub today
 (`actions/workflows/merge-queue-gate.yml` → `state: active`;
-`actions/workflows/gate.yml` → `state: active`). They are not alternatives: the
-legacy gate fired on the last candidate push (run `36952171986`,
+`actions/workflows/gate.yml` → `state: active`). Both are live, and they are
+**alternative promoters, not an AND**: each fast-forwards `main` on its own
+prerequisites with a compare-and-swap on the queue tip
+(`policy/templates/README.md:174-176`), so the first gate whose own set is
+green promotes. During C1 the effective promotion obligation is therefore the
+**intersection** of S3 and S7, not their union. The legacy gate fired on the
+last candidate push (run `36952171986`,
 `push`/`merge-queue`, `2026-10-02T01:41:55Z`) while the successor's
 `workflow_run` leg has fired 4 times against 96 `schedule` sweeps in the
 retained API window. `policy/templates/README.md:14` calls the legacy one
@@ -77,13 +82,16 @@ The spec's framing is right and incomplete. Precisely:
    repository: `checkVerifiedRun` (`src/selfhost/promote-gate.ts:487-536`)
    requires `conclusion === 'success'` on the newest `push` run for that file
    on the tip **and every job in that run `completed`/`success`** (`:520-527`).
-   So `ci.yml` and `denylist.yml` are promotion-blocking **in full**,
+   So `ci.yml` and `denylist.yml` bind the successor gate **in full**,
    including `from-source`, while `ratchet.yml` is not in the list at all and
    is represented instead by the `cq/ratchet` verdict.
 
 Consequence 5 is the one that matters most for the macOS work: **a job added to
-`ci.yml` is promotion-blocking the moment it exists**, under S7, whether or not
-any list names it. "Initially non-required" is only true with respect to S1–S6.
+`ci.yml` is binding on the successor gate the moment it exists**, under S7,
+whether or not any list names it. While the legacy gate is also live it can
+still promote without that job (§1.1: the gates are alternatives), so the job
+becomes fully promotion-blocking only at C2, when S7 is the sole promoter.
+"Initially non-required" is only true with respect to S1–S6, and only until C2.
 
 ### 1.3 What actually ran on the candidate SHA (measured, not asserted)
 
@@ -187,8 +195,12 @@ supersession stays `ratchet` → `cq/ratchet`, and its documentation assertion
 evidence says it is already binding for promotion: it lives in `ci.yml`, whose
 run S7 requires job-by-job (`promote-gate.ts:520-527`), it reports on every
 push and pull_request unfiltered (I4-clean), and it costs **12–13s** measured
-(§1.3). Registering it changes no enforcement outcome; it only makes an
-invisible obligation visible in the places an operator reads.
+(§1.3). It is not yet binding everywhere, though: S3 does not require it, and
+while both promoters are live the legacy gate can promote a tip whose
+`from-source` failed (§1.1). Registering it in S3 therefore **does** change an
+enforcement outcome during C1 — it closes that legacy-gate path, a pure
+tightening — and after C2 it only makes S7's existing obligation visible in the
+places an operator reads.
 
 Consequences of the recommendation, all owner-governed:
 
@@ -204,9 +216,9 @@ Consequences of the recommendation, all owner-governed:
 - The legacy gate list becomes `static,from-source,denylist,ratchet`
   (S1 ≡ S3 by Rule R), and `from-source` is push-produced, so the gate's wait
   is satisfiable.
-- Live protection on **both** branches must gain it; `main` does not have it
-  today (S5), which is the one place where adding a requirement is a pure
-  tightening.
+- Live classic protection on `main` must gain it before C2; `main` does not have
+  it today (S5), a pure tightening. (At C2 the target state has no required-check
+  rule on `main` at all — §2.6 item 7.)
 
 The rejected alternative — make it genuinely advisory — requires moving it out
 of `ci.yml` into its own workflow file, which _weakens_ promotion protection
@@ -237,18 +249,22 @@ direction) in the same owner-governed pass that applies R2.
 
 Ordered; every row is applied together or not at all.
 
-| order | site                                                                              | change                                                                                                                                                                                                                    | outward-facing?                                                                         |
-| ----- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 1     | `policy/templates/required-check.md:105-113` (+ `:31-42` prose)                   | rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1)                                                                | no (template, then regenerate)                                                          |
-| 2     | `.github/workflows/ci.yml`                                                        | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                   | no (generated instance)                                                                 |
-| 3     | `scripts/denylist-scan:165-173`                                                   | add `{ ci.yml: from-source }`; at promotion add `{ ci-macos.yml: static-macos }`                                                                                                                                          | **yes** — protected path (`protected-paths.json:13`)                                    |
-| 4     | `policy/protected-paths.json:15`                                                  | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                        | **yes** — protected path                                                                |
-| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58` | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                             | no (repo) / **yes** (D11 judges the producer change)                                    |
-| 6     | `policy/templates/github-settings.json:65-73`                                     | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are | **yes** — target state of live settings                                                 |
-| 7     | live rulesets on both branches + classic protection on both branches              | add `from-source` to `main`; add `static-macos` at promotion; decide the `main`/`pack-audit` asymmetry                                                                                                                    | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) or the API |
+| order | site                                                                              | change                                                                                                                                                                                                                                                                                                    | outward-facing?                                                              |
+| ----- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1     | `policy/templates/required-check.md:105-113` (+ `:31-42` prose)                   | rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1)                                                                                                                                                | no (template, then regenerate)                                               |
+| 2     | `.github/workflows/ci.yml`                                                        | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                                                                                                   | no (generated instance)                                                      |
+| 3     | `scripts/denylist-scan:165-173`                                                   | add `{ ci.yml: from-source }`; at promotion add `{ ci-macos.yml: static-macos }`                                                                                                                                                                                                                          | **yes** — protected path (`protected-paths.json:13`)                         |
+| 4     | `policy/protected-paths.json:15`                                                  | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                                                                                                        | **yes** — protected path                                                     |
+| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58` | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                                                                                                             | no (repo) / **yes** (D11 judges the producer change)                         |
+| 6     | `policy/templates/github-settings.json:65-73`                                     | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are                                                                                 | **yes** — target state of live settings                                      |
+| 7a    | live classic protection (S5/S6), **pre-C2 only**                                  | add `from-source` to `main`; add `static-macos` to both branches at promotion if it precedes C2; decide the `main`/`pack-audit` asymmetry                                                                                                                                                                 | **yes** — owner-only, via the API                                            |
+| 7b    | live rulesets (S4), **at C2**                                                     | apply R0/R1/R2 as templated (item 6). The target has `classicBranchProtection: null` for both branches (`github-settings.json:80-83`), so the wizard _removes_ S5/S6 rather than updating them, and R2 targets only `merge-queue` (`:39-45`) — `main` keeps R1's `update` rule and no required-check rule | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) |
 
-Item 7 is the only genuinely outward-facing step and the only one this lane
-cannot perform. Everything above it is reviewable in a normal PR.
+Items 7a and 7b are the only genuinely outward-facing steps and the only ones
+this lane cannot perform. They are separate passes: 7a edits the classic
+protection that exists today, 7b replaces it at C2; applying 7a's `main` edits
+after 7b would recreate exactly what the target reports as drift. Everything
+above them is reviewable in a normal PR.
 
 **What must NOT change:** the legacy gate's 20-minute deadline unless §3.3's
 evidence demands it; `strict_required_status_checks_policy` (`:63`) is
@@ -326,8 +342,13 @@ before the evidence is a pure cost; (ii) `gate.yml`'s `decide` job has a fixed
 40-minute timeout (`gate.yml:129`) and `policy/templates/README.md:53` warns
 that the wait plus checkout/install/build must stay inside it — raising the wait
 without re-deriving that bound trades one fail-closed mode (a clear refusal) for
-another (a killed job with no report). Both instances must move together; they
-are the same token in two files and the render test compares them.
+another (a killed job with no report). Both instances must move together while
+both promoters are live; they are the same token in two files, and **nothing
+enforces that**: the render test
+(`test/workflows/template-render.test.ts:145-160`) reads only the `gate.yml`
+instance and bounds it at ≤ 25, never comparing it with the
+`merge-queue-gate.yml` instance. Equality is an unenforced operational
+requirement of the promotion change set.
 
 Queue time and run time must be recorded separately in the promotion decision
 (spec §C bullet 4): a macOS pool is smaller, so a 15-minute run can arrive
@@ -337,9 +358,13 @@ inside 20 minutes or not at all depending on queueing.
 
 Demotion is the exact inverse of §2.6's table with the §3.2 caveat: remove
 `static-macos` from S6/S4 first (outward-facing, owner), then from S1 and S3
-together (they are machine-tied), then from S2, and — if the job lives in
-`ci.yml` — **remove the job itself**, because S7 keeps it binding until it is
-gone. Record the breach reason in the PR. Never leave S7 binding an obligation
+together (they are machine-tied), then from S2, then from S7 — under the
+recommended layout, remove `ci-macos.yml` from `GATE_WORKFLOWS`
+(`policy/templates/instances.json:33`) and regenerate `gate.yml`, otherwise the
+successor gate keeps requiring the run and a slow or flaky macOS leg still
+freezes promotion; if the job lives in `ci.yml` instead, **remove the job
+itself**, because S7 keeps it binding until it is gone. Record the breach
+reason in the PR. Never leave S7 binding an obligation
 no list names: that is the "silent obligation" state this document was written
 to eliminate.
 
@@ -363,16 +388,16 @@ coverage, in parallel, in the same ~5-minute window.
 
 ### 4.2 Subject/trust equivalence, dimension by dimension (superseded plan §4)
 
-| dimension                         | `static`                                                       | `ratchet`                                                                   | equivalent? |
-| --------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- | ----------- |
-| subject (PR head / push tip)      | head tree of the event's sha                                   | head tree of the event's sha                                                | **yes**     |
-| trust ref                         | none (head-defined)                                            | none (head-defined), and `ratchet.yml:4-5` says so explicitly               | **yes**     |
-| producer permissions              | `contents: read`, no credential persistence                    | `contents: read`, no credential persistence                                 | **yes**     |
-| toolchain                         | `ubuntu-latest`, node 24, `npm ci`, same immutable action pins | identical                                                                   | **yes**     |
-| triggers                          | unfiltered `push` + `pull_request`                             | unfiltered `push` + `pull_request` + dispatch                               | **yes**     |
-| suite membership                  | default discovery, split in two invocations                    | default discovery, one instrumented invocation                              | **yes**     |
-| test evidence class               | plain pass/fail over the suite                                 | pass/fail **with instrumentation**, plus a metric derived from the same run | **no**      |
-| other obligations in the same job | 6 non-test gates                                               | 3 ratchet gates, one of which needs full history                            | **no**      |
+| dimension                         | `static`                                                       | `ratchet`                                                                   | equivalent?                                                                                                                                                                                                                           |
+| --------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| subject (PR head / push tip)      | head tree of the event's sha                                   | head tree of the event's sha                                                | **yes**                                                                                                                                                                                                                               |
+| trust ref                         | none (head-defined)                                            | none (head-defined), and `ratchet.yml:4-5` says so explicitly               | **yes**                                                                                                                                                                                                                               |
+| producer permissions              | `contents: read`, no credential persistence                    | `contents: read`, no credential persistence                                 | **yes**                                                                                                                                                                                                                               |
+| toolchain                         | `ubuntu-latest`, node 24, `npm ci`, same immutable action pins | identical                                                                   | **yes**                                                                                                                                                                                                                               |
+| triggers                          | unfiltered `push` + `pull_request`                             | unfiltered `push` + `pull_request` + `workflow_dispatch`                    | **no** — equal for automatic push/PR runs only; a dispatched `ratchet` on the tip adds a same-name suite that the legacy gate folds in (`merge-queue-gate.yml:104-136`), so a pending or failed dispatch can hold or refuse promotion |
+| suite membership                  | default discovery, split in two invocations                    | default discovery, one instrumented invocation                              | **yes**                                                                                                                                                                                                                               |
+| test evidence class               | plain pass/fail over the suite                                 | pass/fail **with instrumentation**, plus a metric derived from the same run | **no**                                                                                                                                                                                                                                |
+| other obligations in the same job | 6 non-test gates                                               | 3 ratchet gates, one of which needs full history                            | **no**                                                                                                                                                                                                                                |
 
 ### 4.3 Why the equivalence does not license removal anyway
 
@@ -424,16 +449,17 @@ and its own PR. It is not this one.
 
 ### 4.5 Equivalent executions removed — reported
 
-**Zero.** Not one duplicate whole-suite execution is removed by this proposal,
-and that is the recommendation, not an omission. The full ledger of duplicates
+**Zero.** Not one duplicate execution is removed by this proposal — whole-suite
+or otherwise — and that is the recommendation, not an omission. The full
+ledger of duplicates
 examined:
 
-| duplicate                                                                         | per push | verdict                                                                                                                                                                                                                                                            |
-| --------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| whole suite, plain vs instrumented                                                | 2        | **retained** — different evidence class, carrier retiring, trust direction wrong (§4.3)                                                                                                                                                                            |
-| `npm run build` (`ci.yml:54-55` vs `ratchet.yml:87`)                              | 2        | **retained** — not equivalent: `static`'s `dist/` is consumed in-job by `gen:op-docs:check` (`:61-62`); `ratchet`'s `dist/` _is_ the judge binary (`dist/cli.js`). Removing either needs a cross-job artifact handoff, which forfeits the emit gate's independence |
-| `tsc` invocation (`check:static`'s compiler ratchet vs `ratchet.yml:96-100`)      | 2        | **not equivalent** — pass/fail-on-any-error vs a count that must not increase. A count-ratchet pass does not imply type-clean                                                                                                                                      |
-| `denylist-scan` over the worktree vs over the unpacked tarball (`pack-audit.yml`) | 2        | **not equivalent** — different trees, different `patterns.yml` (the tarball's own)                                                                                                                                                                                 |
+| duplicate                                                                         | per push | verdict                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| whole suite, plain vs instrumented                                                | 2        | **retained** — different evidence class, carrier retiring, trust direction wrong (§4.3)                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `npm run build` (`ci.yml:54-55` vs `ratchet.yml:87`)                              | 2        | **retained** — not equivalent: `static`'s `dist/` is consumed in-job by `gen:op-docs:check` (`:61-62`); `ratchet`'s `dist/` _is_ the judge binary (`dist/cli.js`). Removing either needs a cross-job artifact handoff, which forfeits the emit gate's independence                                                                                                                                                                                                                                      |
+| `tsc` invocation (`check:static`'s compiler ratchet vs `ratchet.yml:96-100`)      | 2        | **equivalent, retained** — both are `checkRatchet` over the same `tsc --noEmit -p tsconfig.json --pretty false` (`scripts/ratchet-lib.mjs:207-219`) and the same `typecheck/typecheck-count` baseline, which is already `0` and can only tighten, so either pass implies type-clean. Retained because the `ratchet` carrier is retiring (§4.3) and `cq-verify` recomputes the same count from the trust ref; removing the `static` leg would leave the head-defined path with no compiler gate after C2 |
+| `denylist-scan` over the worktree vs over the unpacked tarball (`pack-audit.yml`) | 2        | **not equivalent** — different trees, different `patterns.yml` (the tarball's own)                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ## 5. The fail-closed aggregate, and rollback
 
@@ -491,9 +517,14 @@ Rollback is the recorded inverse of §2.6 / §3.4, and it is **not** quiet:
   required check's producer gets a `required-check` finding (`:654-658`), and a
   subject that removes the producer outright gets `removed required check X`
   (`:659-660`).
-- Therefore: **promotion is quiet and demotion is loud.** Adding
-  `static-macos` (new context + new job) trips nothing, because at judgement
-  time the trust list does not contain it and the `static` job is untouched.
+- Therefore: **promotion needs a human, and demotion is louder.** Adding
+  `static-macos` raises no `required-check` or `entry-removed` finding, because
+  at judgement time the trust list does not contain it and the `static` job is
+  untouched — but it is not quiet: a new `.github/workflows/ci-macos.yml` always
+  draws `workflow-new` (`src/ops/gates/workflowScan.ts:1365-1369`), a
+  `needs-human` verdict (`test/ops/gates/policyDiff.test.ts:651-660`), and the
+  `scripts/denylist-scan` edit draws `protected-path`. The change set that
+  introduces the workflow must budget for and record that adjudication.
   Retiring it — job, context, or list entry — trips D11 and requires a human to
   accept a `cq/policy` finding with the reason recorded. That asymmetry is
   correct doctrine (weakening the required set must be visible) and it means a
@@ -518,8 +549,10 @@ Rollback is the recorded inverse of §2.6 / §3.4, and it is **not** quiet:
 2. `main` and `merge-queue` protection differ today (§1.2 item 4).
 3. `ratchet` is app-unpinned on `merge-queue` (S6, `app_id: null`) — any App can
    report that context there.
-4. Both promotion gates are simultaneously active with different required sets;
-   today the effective obligation is their union.
+4. Both promotion gates are simultaneously active with different required sets,
+   and each promotes on its own; today the effective obligation is their
+   **intersection** — a check only one gate requires (e.g. `from-source`, S7
+   only) does not block promotion.
 5. `bypass_actors` include `actor_id: 5` with `bypass_mode: always`
    (S4 `:77`) — repository admins always bypass every required check.
 
