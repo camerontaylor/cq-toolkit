@@ -77,12 +77,31 @@ describe.each(profiles)('§7 trust attacks under $name', ({ merge, review: revie
     });
   });
 
-  test('A3 a later bot COMMENTED review does not erase CHANGES_REQUESTED', () => {
-    const pr = candidate([
-      review('review-bot', 'CHANGES_REQUESTED', '2026-09-26T00:05:00Z'),
-      review('review-bot', 'COMMENTED', '2026-09-26T00:20:00Z'),
-    ]);
-    expect(classifyPr(pr, NOW, merge).verdict).not.toBe('eligible');
+  test('A3 only the objecting trusted actor can clear its standing objection', () => {
+    const trustedMerge = { ...merge, trustedAssociations: ['MEMBER'] };
+    const trustedReview = (
+      actor: string,
+      state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED',
+      submittedAt: string,
+    ) => ({ ...review(actor, state, submittedAt), authorAssociation: 'MEMBER' });
+    const objection = trustedReview('first-reviewer', 'CHANGES_REQUESTED', '2026-09-26T00:05:00Z');
+    const comment = trustedReview('first-reviewer', 'COMMENTED', '2026-09-26T00:20:00Z');
+    const secondApproval = trustedReview('second-reviewer', 'APPROVED', '2026-09-26T00:25:00Z');
+
+    for (const reviews of [
+      [objection],
+      [objection, comment],
+      [objection, comment, secondApproval],
+    ]) {
+      expect(classifyPr(candidate(reviews), NOW, trustedMerge)).toMatchObject({
+        verdict: 'awaiting',
+        reason: 'merge_objection_outstanding',
+      });
+    }
+    const withdrawn = trustedReview('first-reviewer', 'APPROVED', '2026-09-26T00:30:00Z');
+    expect(
+      classifyPr(candidate([objection, comment, secondApproval, withdrawn]), NOW, trustedMerge),
+    ).toMatchObject({ verdict: 'eligible', reason: 'explicit_all_clear' });
   });
 
   test('A15 a human skip marker remains feedback, not an automation notice', () => {

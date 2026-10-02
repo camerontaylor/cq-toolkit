@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { selectToolNames } from '../../src/harness/surface.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../../src/sandbox/index.js';
@@ -42,7 +43,8 @@ describe('§7 worker and protected-path attacks', () => {
   });
 
   test('A14 privileged gate and promotion workflow edits enter the protected path gate', () => {
-    const policy = JSON.parse(readFileSync('policy/protected-paths.json', 'utf8')) as {
+    const policyPath = resolve(import.meta.dirname, '../../policy/protected-paths.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as {
       protectedPaths: string[];
     };
     expect(
