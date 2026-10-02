@@ -113,16 +113,26 @@ Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.gi
 
 Run `npm run check:static` for the TS7 compiler ratchet and typed Oxlint.
 `npm run lint` and `npm run typecheck` are compatibility aliases; run only one.
-Formatting is `npm run format:check`, runtime tests are `npm run test`, and
-checked declaration emit is `npm run build`. See [the local static policy](lint/README.md)
+Formatting is `npm run format:check`, the tests you need are the ones your diff
+affects (`npx vitest run <affected test files>`), and checked declaration emit is
+`npm run build`. **The full suite is not a local gate**: `npm run test` /
+`test:unit` runs in CI, and green required CI on the exact candidate SHA is the
+sole full-gate authority — see
+[docs/focused-checks-contract.md](docs/focused-checks-contract.md). See
+[the local static policy](lint/README.md)
 for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-Use `npm run check` for read-only formatting, static checks, tests and Knip. `lint` and
+`npm run check` is a composite of the whole-tree obligations (format check,
+static gate, the full suite, Knip); with the full suite now CI's, prefer the
+focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
+`lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `npm run lint:fast -- <file...>`
 or `npm run fix -- <file...>`. The latter applies safe lint fixes and formatting,
-then checks the whole package. Build, smoke and denylist remain separate gates.
+then runs the full-project static gate — use the contract's validated leaf
+commands when you want fixes without that gate. Build, smoke and denylist remain
+separate gates.
 See [local static policy](lint/README.md) for pins, compiler fallback evidence,
 rule decisions and compatibility changes.

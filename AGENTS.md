@@ -17,25 +17,28 @@ Your local duty, on a coherent change:
 - `npm run format:check`
 - `npx vitest run <affected test files>` — the tests your diff affects, not
   the suite
-- `npm run knip` when entrypoints, exports, dependencies or config change
+- `npm run knip` — whole-project, not file-scoped: run it when the diff
+  touches entrypoints, exports, dependencies or configuration, and skip it
+  otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** No protocol step runs a local full
 `npm run test` / `test:unit`, and a clean review adds no run beyond the review
 protocol's own three fixed checkpoints (which are the cheap deterministic
 gates plus the affected tests, never the suite).
 The full suite — plus the build, the from-source smoke plan, the coverage
-ratchet and the denylist scan + self-test — runs in required CI on every
-push/PR, and **green required CI on the exact candidate SHA** (the
-`merge-queue` commit the promotion gate resolves) is the sole full-gate
-authority. A green PR head is not candidate evidence: required status checks
-are not strict (`policy/templates/github-settings.json`), so a head can be
-green while stale against its base. Local full runs remain legal as
-coordinator-owned diagnostics or rollback evidence, recorded as such.
+ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
+**green required CI on the exact candidate SHA** (the `merge-queue` commit the
+promotion gate resolves) is the sole full-gate authority. A green PR head is
+not candidate evidence, because required status checks are not strict here
+(mechanism, the four required-set declarations and the one sanctioned CI skip:
+contract §1). Local full runs remain legal as coordinator-owned diagnostics or
+rollback evidence, recorded as such.
 
-Escalate a shared interface, dependency/tooling or config change — or any
-uncertain impact — to the coordinator with the reason, rather than launching a
-broad run yourself. Never alter source or baselines to hide a failure;
-baselines only tighten (doctrine I5).
+Escalate a shared interface, dependency/tooling or config change — and any
+impact you cannot classify — to the coordinator with the reason, rather than
+launching a broad run yourself; broad selection is the coordinator's decision,
+made after escalation (contract §2). Never alter source or baselines to hide a
+failure; baselines only tighten (doctrine I5).
 
 ## Agent loop
 
@@ -44,16 +47,24 @@ be explicit; never format the repository per turn. Changed-file lint does not
 establish correctness of dependents.
 
 `npm run fix -- <owned-file...>` is **not** file-scoped: it always ends with
-the full project static gate (`scripts/fix.mjs`), even for a deleted-only
-list. For per-file fixes use the leaf tools on an explicit list:
-`npx oxlint --config .oxlintrc.json --disable-nested-config --fix <files>`,
-then `npx oxfmt <files>` (`npx oxfmt --check <files>` to verify). `npm run
-check` is a composite — formatting, static gate, the full suite and Knip — and
-its full-suite leg belongs to CI.
+the full-project static gate (`scripts/fix.mjs`), even for a deleted-only
+list. Invoking the leaf tools directly bypasses that script's containment
+checks, so validate the same list through `scripts/lib/owned-files.mjs` first
+and then run the leaves — the canonical spelling, repeated verbatim from
+contract §3:
+
+```bash
+node --input-type=module -e 'import { ownedFiles } from "./scripts/lib/owned-files.mjs"; console.log(`owned-files OK: ${ownedFiles(process.argv.slice(1)).length} file(s)`);' -- <files>
+node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix <files>
+node node_modules/oxfmt/bin/oxfmt <files>
+```
+
+`npm run check` is a composite — formatting, static gate, the full suite and
+Knip — and its full-suite leg belongs to CI.
 
 Any local timing cited as evidence carries a load stamp (host uptime + load
-average at measurement time), and no protocol or record cites `--maxWorkers`:
-`vitest.config.ts` sets `fileParallelism: false`, which makes it a no-op.
+average at measurement time), and no protocol or record cites `--maxWorkers`
+(mechanism, and the caveat that a later slice may change it: contract §5).
 
 ## GLM peak-hour blackout
 
@@ -87,7 +98,8 @@ full intended PR diff before creating a PR. Full protocol:
 - Run the deterministic gates three times: before cycle 1, after cycle-1
   addressing (before cycle 2), and after cycle-2 addressing. Both cycles
   include their addressing. Those gates are the cheap deterministic ones plus
-  the affected tests — `npm run test` is CI's (see
+  the affected tests — the full suite is CI's, and Knip runs per the contract's
+  condition (see
   [docs/focused-checks-contract.md](docs/focused-checks-contract.md)).
   Whitespace/conflict-marker checks cover the pinned base through HEAD,
   staged changes, and unstaged tracked changes separately (commands in the
