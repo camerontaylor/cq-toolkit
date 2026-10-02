@@ -16,7 +16,10 @@ function resolve(input: Parameters<typeof resolveConfig>[0] = {}) {
       )
       .map(([name, value]) => [
         name,
-        { input: value!.slice('custom:'.length), realpath: value!.slice('custom:'.length) },
+        {
+          input: value!.slice('custom:'.length),
+          realpath: value!.slice('custom:'.length),
+        },
       ]),
   );
   return resolveConfig({
@@ -173,7 +176,9 @@ describe('pure configuration resolution', () => {
     expect(
       entryValue(
         'provider.zai-glm-coding.windowFractions',
-        resolve({ env: { CQ_PROVIDER_ZAI_GLM_CODING_WINDOW_FRACTIONS: 'coding:0.5' } }),
+        resolve({
+          env: { CQ_PROVIDER_ZAI_GLM_CODING_WINDOW_FRACTIONS: 'coding:0.5' },
+        }),
       ),
     ).toEqual({ coding: '0.5' });
   });
@@ -275,17 +280,23 @@ describe('pure configuration resolution', () => {
   it('pins credential-bearing quota endpoints to registered bundled usage hosts', () => {
     expect(() =>
       resolve({
-        env: { CQ_PROVIDER_ZAI_GLM_CODING_QUOTA_ENDPOINT: 'https://attacker.example/usage' },
+        env: {
+          CQ_PROVIDER_ZAI_GLM_CODING_QUOTA_ENDPOINT: 'https://attacker.example/usage',
+        },
       }),
     ).toThrow(/no bundled credential-bearing usage endpoint host is registered/);
     expect(() =>
       resolve({
-        env: { CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://attacker.example/user/balance' },
+        env: {
+          CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://attacker.example/user/balance',
+        },
       }),
     ).toThrow(/host must match the bundled provider usage endpoint/);
     expect(() =>
       resolve({
-        env: { CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://api.deepseek.com/user/balance' },
+        env: {
+          CQ_PROVIDER_DEEPSEEK_QUOTA_ENDPOINT: 'https://api.deepseek.com/user/balance',
+        },
       }),
     ).not.toThrow();
   });
@@ -293,12 +304,16 @@ describe('pure configuration resolution', () => {
   it('accepts overnight UTC windows and independently optional multiplier or offset', () => {
     expect(() =>
       resolve({
-        env: { CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Mon 23:00-02:00 UTC; mult=1.5' },
+        env: {
+          CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Mon 23:00-02:00 UTC; mult=1.5',
+        },
       }),
     ).not.toThrow();
     expect(() =>
       resolve({
-        env: { CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Tue 08:00-09:00 Asia/Singapore; off=2' },
+        env: {
+          CQ_PROVIDER_ZAI_GLM_CODING_PEAK_WINDOWS: 'Tue 08:00-09:00 Asia/Singapore; off=2',
+        },
       }),
     ).not.toThrow();
   });
@@ -323,5 +338,34 @@ describe('pure configuration resolution', () => {
     )) {
       expect(key.ci).toBe(false);
     }
+  });
+
+  describe('review-hardening of config resolution', () => {
+    it('rejects lowercase provider variable names and malformed foreign base URLs', () => {
+      expect(() => resolve({ env: { CQ_PROVIDER_deepseek_RPM: '12' } })).toThrow(
+        /unknown configuration variable/,
+      );
+      expect(() => resolve({ env: { ZAI_BASE_URL: 'https://example.com:abc' } })).toThrow(
+        /expected HTTPS URL/,
+      );
+    });
+
+    it('treats whitespace-only CQ secrets as unset and denies passthrough case-insensitively', () => {
+      expect(resolve({ env: { CQ_AUTOMATION_TOKEN: '   ' } }).secrets).toEqual({});
+      expect(() => resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'node_options' } })).toThrow(
+        /cannot be passed through/,
+      );
+    });
+
+    it('applies the registered list grammar to call-only lists', () => {
+      const quarantine = (value: string) =>
+        resolve({ values: { 'budget.releaseQuarantine': value } }).entries[
+          'budget.releaseQuarantine'
+        ]?.value;
+      expect(quarantine('none')).toEqual([]);
+      expect(quarantine('run-b,run-a')).toEqual(['run-a', 'run-b']);
+      expect(() => quarantine('run-a,,run-b')).toThrow(/empty list item/);
+      expect(() => quarantine('run-a,run-a')).toThrow(/duplicate list item/);
+    });
   });
 });

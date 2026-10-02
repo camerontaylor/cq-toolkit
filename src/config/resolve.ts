@@ -123,6 +123,22 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function validForeignBaseUrl(value: string): boolean {
+  if (!/^https:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === 'https:' &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 function credentialUrl(value: string | undefined): boolean {
   if (!value || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
   try {
@@ -137,15 +153,17 @@ function unsafePassthrough(
   name: string,
   env: Readonly<Record<string, string | undefined>>,
 ): boolean {
+  const upper = name.toUpperCase();
   return (
     !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
-    name.startsWith('CQ_') ||
-    deniedPassthrough.has(name) ||
-    name.startsWith('AWS_') ||
-    name.startsWith('AZURE_') ||
-    name.startsWith('GOOGLE_') ||
-    name.startsWith('GCP_') ||
-    isSecret(name) ||
+    // Windows environment names are case-insensitive; compare case-folded everywhere.
+    upper.startsWith('CQ_') ||
+    deniedPassthrough.has(upper) ||
+    upper.startsWith('AWS_') ||
+    upper.startsWith('AZURE_') ||
+    upper.startsWith('GOOGLE_') ||
+    upper.startsWith('GCP_') ||
+    isSecret(upper) ||
     credentialUrl(env[name])
   );
 }
@@ -194,11 +212,26 @@ function providerName(name: string, env: Readonly<Record<string, string | undefi
     const separated = `_${suffix}`;
     if (!name.endsWith(separated)) return false;
     const encodedId = name.slice('CQ_PROVIDER_'.length, -separated.length);
+    if (!/^[A-Z0-9]+(?:_[A-Z0-9]+)*$/.test(encodedId)) return false;
     const id = encodedId.toLowerCase().replaceAll('_', '-');
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) return false;
     if (PROVIDER_IDS.includes(id as (typeof PROVIDER_IDS)[number])) return true;
     return nonblank(env[`CQ_PROVIDER_${encodedId}_PROFILE`])?.startsWith('custom:') === true;
   });
+}
+
+function parseListItems(label: string, raw: unknown): string[] {
+  const parts = isStringArray(raw)
+    ? [...raw]
+    : String(raw)
+        .split(',')
+        .map((part) => part.trim());
+  if (parts.some((part) => part.length === 0)) throw new Error(`${label}: empty list item`);
+  if (parts.includes('none') && parts.length !== 1)
+    throw new Error(`${label}: 'none' must be the only item`);
+  if (parts.includes('none')) return [];
+  if (new Set(parts).size !== parts.length) throw new Error(`${label}: duplicate list item`);
+  return [...parts].sort();
 }
 
 function parse(
@@ -207,17 +240,8 @@ function parse(
 ): ConfigValue {
   if (raw === null) return null;
   if (key.type === 'list') {
-    const parts = isStringArray(raw)
-      ? [...raw]
-      : String(raw)
-          .split(',')
-          .map((part) => part.trim());
-    if (parts.some((part) => part.length === 0)) throw new Error(`${key.env}: empty list item`);
-    if (parts.includes('none') && parts.length !== 1)
-      throw new Error(`${key.env}: 'none' must be the only item`);
-    if (parts.includes('none')) return [];
-    if (new Set(parts).size !== parts.length) throw new Error(`${key.env}: duplicate list item`);
-    const unique = [...new Set(parts)].sort();
+    const unique = parseListItems(key.env, raw);
+    if (unique.length === 0) return [];
     if (key.values && unique.some((value) => !key.values?.includes(value)))
       throw new Error(`${key.env}: unsupported list value`);
     if (
@@ -371,7 +395,7 @@ function parse(
       !Array.isArray(argv) ||
       argv.length === 0 ||
       argv.some((part) => typeof part !== 'string' || part.length === 0) ||
-      (typeof argv[0] === 'string' && argv[0].includes('/') && !isAbsolute(argv[0]))
+      (typeof argv[0] === 'string' && /[\\/]/.test(argv[0]) && !isAbsolute(argv[0]))
     )
       throw new Error(`${key.env}: expected non-empty string argv`);
     return argv as string[];
@@ -441,7 +465,18 @@ function validateWindow(key: ConfigKey, value: string): void {
 }
 
 function equal(a: ConfigValue, b: ConfigValue): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([k, v]) => [k, canonical(v)]),
+    );
+  return value;
 }
 
 function isSubset(a: ConfigValue, b: ConfigValue): boolean {
@@ -547,7 +582,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
   const unknownNames: string[] = [];
   for (const name of Object.keys(env)) {
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
-    if (isSecret(name) && env[name] !== undefined && env[name] !== '') {
+    if (isSecret(name) && nonblank(env[name]) !== undefined) {
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
       else credentials[name] = 'set';
     }
@@ -580,7 +615,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     'ANTHROPIC_BASE_URL',
   ]) {
     const value = nonblank(env[name]);
-    if (value && !/^https:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value))
+    if (value && !validForeignBaseUrl(value))
       throw new Error(`${name}: expected HTTPS URL without userinfo or query`);
   }
   const profileRaw = nonblank(env.CQ_PROFILE);
@@ -698,7 +733,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         throw new Error(`${id}: expected boolean value`);
       value = raw === true || raw === 'true';
     } else if (spec.type === 'list') {
-      value = isStringArray(raw) ? [...raw] : String(raw).split(',').filter(Boolean).sort();
+      value = parseListItems(id, isStringArray(raw) ? raw : String(raw));
     } else {
       value = String(raw);
       if ('values' in spec && !spec.values.some((supported: string) => supported === value))
