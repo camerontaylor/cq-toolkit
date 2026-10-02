@@ -1066,3 +1066,85 @@ describe('a lock fault during the rollback is reported, never thrown', () => {
     expect(h.store.backing.get('src/a.ts')).toBe(before);
   });
 });
+
+// Opus review (PR #258): the APPLY's lock fault is a result too, and the
+// approval digest binds what the dispatch actually runs.
+describe('the approved apply: lock faults and the digested subject', () => {
+  function authorityOver(
+    locks: MutationLocks,
+    digests: string[] = [],
+  ): ReturnType<typeof makeApprovalAuthority> {
+    return makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (s) => {
+          digests.push(s.inputDigest);
+          return Promise.resolve({
+            nonce: `nonce-${s.inputDigest.slice(0, 12)}`,
+            state: { workspace: '/ws', headSha: 'head', treeClean: true },
+          });
+        },
+      },
+      ledger: makeInMemoryNonceLedger(),
+      locks,
+      readState: {
+        read: () => Promise.resolve({ workspace: '/ws', headSha: 'head', treeClean: true }),
+      },
+    });
+  }
+
+  function firstSectionFaults(mode: 'acquire' | 'release'): MutationLocks {
+    const real = makeProcessLocalMutationLocks();
+    return {
+      forWorkspace: (workspace: string) => ({
+        withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+          if (mode === 'acquire') throw new Error('git-mutex: waiter budget exhausted');
+          await real.forWorkspace(workspace).withLock(fn);
+          throw new Error('git-mutex: release failed');
+        },
+      }),
+    };
+  }
+
+  for (const [mode, fate] of [
+    ['acquire', 'UNSPENT'],
+    ['release', 'token is spent'],
+  ] as const) {
+    test(`a ${mode} fault on the apply returns failed (${fate}) instead of rejecting`, async () => {
+      const h = harness(FIXTURE, 0);
+      const dispatch = makePlaybookDispatchOp({
+        playbooks: h.playbooks,
+        quarantine: h.quarantine,
+        run: h.run,
+        storeFor: () => h.store,
+        approval: authorityOver(firstSectionFaults(mode)),
+      });
+      const result = await dispatch({
+        playbookId: 'fix-foo-bar',
+        dir: '/ws',
+        targets: ['src/a.ts'],
+      });
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') return;
+      expect(result.error).toContain('mutation lock faulted');
+      expect(result.error).toContain(fate);
+      expect(result.error).toContain('NO verifier or rollback ran');
+      expect(h.run.verifierCalls).toHaveLength(0);
+    });
+  }
+
+  test('the approval digest binds the resolved rule, not only the playbook id', async () => {
+    const digests: string[] = [];
+    for (const rule of [RULE, { ...RULE, id: 'a-different-rule' }]) {
+      const h = harness(FIXTURE, 0, '', { ...playbookOf(), rule });
+      await makePlaybookDispatchOp({
+        playbooks: h.playbooks,
+        quarantine: h.quarantine,
+        run: h.run,
+        storeFor: () => h.store,
+        approval: authorityOver(makeProcessLocalMutationLocks(), digests),
+      })({ playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] });
+    }
+    expect(digests).toHaveLength(2);
+    expect(digests[0]).not.toBe(digests[1]);
+  });
+});

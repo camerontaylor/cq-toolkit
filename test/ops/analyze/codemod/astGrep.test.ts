@@ -578,6 +578,44 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
   // authorized its write. These pin that the flag is now necessary but never
   // sufficient.
   describe('the mutation is authorized by an approval, not by the input flag', () => {
+    test('a lock RELEASE fault after the write is a failed result naming the write set, not a rejection', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const state: ApprovalState = { workspace: '/ws', headSha: 'codemod-head', treeClean: true };
+      const real = makeProcessLocalMutationLocks();
+      const authority = makeApprovalAuthority({
+        approvals: {
+          verifiedFor: (subject) =>
+            Promise.resolve({ nonce: `codemod-${subject.inputDigest.slice(0, 12)}`, state }),
+        },
+        ledger: makeInMemoryNonceLedger(),
+        locks: {
+          forWorkspace: (workspace) => ({
+            withLock: async <T>(fn: () => T | Promise<T>): Promise<T> => {
+              await real.forWorkspace(workspace).withLock(fn);
+              throw new Error('git-mutex: release failed');
+            },
+          }),
+        },
+        readState: { read: () => Promise.resolve(state) },
+      });
+      const result = await makeAstGrepCodemod(
+        scanRunnerFor('src/a.ts'),
+        () => store,
+        authority,
+      )({
+        dir: '/ws',
+        rule: 'r',
+        files: ['src/a.ts'],
+        dryRun: false,
+        approved: true,
+      });
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') return;
+      expect(result.error).toContain('mutation lock faulted');
+      expect(result.error).toContain('token is spent');
+      expect(result.error).toContain("'src/a.ts'");
+    });
+
     test('deny-all: approved:true alone writes nothing', async () => {
       const store = memoryStore(FIXTURE_FILES);
       const run = scanRunnerFor('src/a.ts');

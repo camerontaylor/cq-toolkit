@@ -348,8 +348,9 @@ export function makeApplyRemediation(
     // THE EMPTY PLAN IS NOT A MUTATION: with no file to rewrite there is
     // nothing to approve, so the honest empty result is returned WITHOUT
     // touching the approval seam — consuming a human's token to rewrite
-    // zero files would burn a decision for no write.
-    if (pendingTargets(plannedEdits).length === 0) {
+    // zero files would burn a decision for no write. A DRY RUN never
+    // touches the seam, so it keeps its own branch (and its `dry-run` mode).
+    if (!input.dryRun && pendingTargets(plannedEdits).length === 0) {
       return {
         status: 'ok',
         value: {

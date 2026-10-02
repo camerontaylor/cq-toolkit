@@ -1001,12 +1001,28 @@ export function makeAstGrepCodemod(
         timeoutMs: input.timeoutMs,
       }),
     };
+    // Whether the approved WRITE was entered — the callback runs only after
+    // the exercise granted, so it separates an acquire-side fault (token
+    // UNSPENT) from a release-side one (token spent, files may have landed).
+    let writeEntered = false;
     let written: ApprovedMutation<CodemodFileApplied[]>;
     try {
-      written = await withApprovedMutation(approval, subject, writePhase);
+      written = await withApprovedMutation(approval, subject, () => {
+        writeEntered = true;
+        return writePhase();
+      });
     } catch (err) {
       if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
-      throw err;
+      // A LOCK FAULT is a RESULT, not an escape (the applyRemediation rule):
+      // a release fault can follow a complete write, and rejecting would
+      // leave the caller with no evidence that the workspace changed.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT';
+      return {
+        status: 'failed',
+        error: `ast-grep codemod: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. ${tokenFate}, and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a lock fault proves neither that any of them was written nor that none was, so inspect the workspace before re-running; this is NOT an approval refusal`,
+      };
     }
     if (written.status === 'needs-human') return { status: 'needs-human', reason: written.reason };
     return {

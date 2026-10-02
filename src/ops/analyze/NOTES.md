@@ -225,8 +225,9 @@ reconciliation rows ADR-0003 §4c left open are resolved here, and both
 resolutions are decisions with a stated alternative, not defaults.
 
 - **O-5 — where the workspace mutation lock's RECORD lives: BESIDE the
-  operator approval ledger, in the P1-trusted layer, keyed on
-  `sha256(realpath(workspace))`** (`makeLedgerBesideMutationLocks`, built
+  operator approval ledger, in the P1-trusted layer, keyed on the sha256
+  of the workspace's enclosing git worktree root** (so nested containment
+  roots over one tree share one lock; `makeLedgerBesideMutationLocks`, built
   on the sweep lane's existing `makeGitMutex` — no new lock subsystem). The
   two candidates ADR-0003 rejected are excluded on evidence: an
   environment-derived location (`os.tmpdir()`, `$XDG_STATE_HOME`)

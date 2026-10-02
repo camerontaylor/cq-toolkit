@@ -59,6 +59,7 @@ import {
   makeLedgerBesideMutationLocks,
   makeProcessLocalMutationLocks,
   withApprovedMutation,
+  withMutationLock,
 } from '../../../src/ops/analyze/approval.js';
 import {
   CLEAN_STATE,
@@ -541,7 +542,7 @@ describe('O-5 — where the mutation lock record lives', () => {
         const artifacts = inTrusted.filter((entry) => entry.startsWith('mutation-'));
         expect(artifacts).toHaveLength(1);
         // Keyed on the workspace, not on the ledger file: the artifact name
-        // carries a sha256(realpath(workspace)) prefix, so two workspaces
+        // carries a sha256(worktree root) prefix, so two workspaces
         // sharing one ledger never share a lock.
         expect(artifacts[0]).toMatch(/^mutation-[0-9a-f]{32}\.lock$/);
         return artifacts[0] as string;
@@ -1195,5 +1196,46 @@ describe('the operator ledger is durable before it reports a spend (ADR-0003 §4
     expect(reason).toContain('ledger');
     expect(reason).toContain('UNSPENT');
     expect(spy.calls).toBe(0);
+  });
+});
+
+// Opus review (PR #258).
+describe('lock-only sections, provider faults and nested lock domains', () => {
+  test('withMutationLock hands its callback NO scope — a lock is not a spent approval', async () => {
+    const { authority } = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const held = await withMutationLock(authority, WORKSPACE, async (...args: unknown[]) =>
+      args.some((arg) => isExercisedScope(arg)),
+    );
+    expect(held).toEqual({ ok: true, value: false });
+  });
+
+  test('a faulting verified-approval provider is a needs-human refusal, not a rejection', async () => {
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: { verifiedFor: () => Promise.reject(new Error('token snapshot unreadable')) },
+      ledger,
+      locks: makeProcessLocalMutationLocks(),
+      readState: fixedStateReader(),
+    });
+    const spy = writeSpy();
+    const outcome = await withApprovedMutation(authority, subject(), spy.run);
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+      'token snapshot unreadable',
+    );
+    expect(spy.calls).toBe(0);
+    expect(ledger.spent()).toBe(0);
+  });
+
+  test('nested containment roots inside one worktree share ONE mutation lock', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-domain-'));
+    const repo = join(dir, 'repo');
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    const other = join(dir, 'other');
+    mkdirSync(join(other, '.git'), { recursive: true });
+    const locks = makeLedgerBesideMutationLocks(join(dir, 'state', 'approvals.ndjson'));
+    expect(locks.forWorkspace(join(repo, 'src'))).toBe(locks.forWorkspace(repo));
+    expect(locks.forWorkspace(other)).not.toBe(locks.forWorkspace(repo));
   });
 });

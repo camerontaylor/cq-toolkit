@@ -39,8 +39,8 @@
 // O-5 (WHERE THE MUTATION LOCK RECORD LIVES — open in ADR-0003 §4c; the
 // question the annex flagged and would not answer). RESOLVED HERE, by
 // construction rather than by preference: the record lives BESIDE the
-// operator approval ledger in the P1-trusted layer, keyed on
-// `sha256(realpath(workspace))` ({@link makeLedgerBesideMutationLocks}).
+// operator approval ledger in the P1-trusted layer, keyed on the sha256 of
+// the workspace's enclosing git worktree root ({@link makeLedgerBesideMutationLocks}).
 // Both rejected candidates are excluded on evidence, not taste: an
 // environment-derived location (`os.tmpdir()`, `$XDG_STATE_HOME`)
 // reintroduces ADR §2.5's split-brain (contenders computing different
@@ -379,8 +379,10 @@ export function makeFileNonceLedger(
         closeSync(handle);
       }
       if (isNew) {
-        dirSynced = true;
+        // Flagged only AFTER the fsync returns: a hard failure leaves the flag
+        // clear, so the next consume retries the directory sync.
         syncDirSync(dirname(path));
+        dirSynced = true;
       }
       known.add(nonce);
       return 'consumed';
@@ -438,9 +440,10 @@ export function makeProcessLocalMutationLocks(): MutationLocks {
 /**
  * The O-5 RESOLUTION: one cross-process mutation lock per workspace whose
  * RECORD lives beside the operator approval ledger in the P1-trusted layer
- * and never inside the workspace, keyed on
- * `sha256(realpath(workspace))` — so two paths to one tree share one lock
- * and one tree never gets two. The primitive is the sweep lane's existing
+ * and never inside the workspace, keyed on the sha256 of the workspace's
+ * enclosing git worktree root — so two paths to one tree, and two nested
+ * containment roots inside one tree, share one lock and one tree never gets
+ * two. The primitive is the sweep lane's existing
  * git mutex (the same proper-lockfile discipline the ledger store and the
  * worktree safety code use), NOT a new lock subsystem.
  */
@@ -466,9 +469,29 @@ export function makeLedgerBesideMutationLocks(ledgerPath: string): MutationLocks
   };
 }
 
-/** `sha256(realpath(workspace))`, hex-truncated to 32 — the O-5 lock key. */
+/**
+ * `sha256(lockDomain(workspace))`, hex-truncated to 32 — the O-5 lock key.
+ * The domain is the enclosing git worktree root, NOT the supplied path:
+ * containment roots nest (`/repo` with target `src/a.ts`, `/repo/src` with
+ * target `a.ts` name one file), and keying on the supplied path would give
+ * those two approvals two locks over the same bytes.
+ */
 function workspaceKey(workspace: string): string {
-  return createHash('sha256').update(realpathOrSelf(workspace)).digest('hex').slice(0, 32);
+  return createHash('sha256').update(lockDomain(workspace)).digest('hex').slice(0, 32);
+}
+
+/**
+ * The nearest ancestor-or-self of the canonical workspace holding a `.git`
+ * entry (a directory, or the file a linked worktree or submodule carries) —
+ * the same discovery git itself performs, and so the tree the state read
+ * describes. A workspace outside any repository is its own domain.
+ */
+function lockDomain(workspace: string): string {
+  const canonical = realpathOrSelf(workspace);
+  for (let dir = canonical; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    if (dirname(dir) === dir) return canonical;
+  }
 }
 
 /**
@@ -505,8 +528,9 @@ export interface ApprovalStateReader {
 
 /**
  * The real state reader: `realpath`, `git rev-parse HEAD`, and the STRICT
- * clean predicate — `git status --porcelain=v1 --untracked-files=all` empty,
- * so an UNTRACKED file counts as dirty. Ignored files are out of scope,
+ * clean predicate — `git status --porcelain=v1 --untracked-files=all
+ * --ignore-submodules=none` empty, so an UNTRACKED file counts as dirty and a
+ * submodule cannot opt itself out. Ignored files are out of scope,
  * which ADR-0003 §4c records as a stated residual (an ignored file can
  * still influence a codemod that reads it).
  *
@@ -519,7 +543,15 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
     read: async (workspace) => {
       const root = realpathSync(workspace);
       const headSha = await git(root, ['rev-parse', 'HEAD']);
-      const status = await git(root, ['status', '--porcelain=v1', '--untracked-files=all']);
+      // `--ignore-submodules=none` overrides a committed `ignore = all` in
+      // .gitmodules, which would otherwise hide changed bytes inside a
+      // submodule from the clean predicate.
+      const status = await git(root, [
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=all',
+        '--ignore-submodules=none',
+      ]);
       return { workspace: root, headSha, treeClean: status === '' };
     },
   };
@@ -752,7 +784,18 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
             'approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state',
         };
       }
-      const verified = await config.approvals.verifiedFor(subject);
+      let verified: VerifiedApproval | undefined;
+      try {
+        verified = await config.approvals.verifiedFor(subject);
+      } catch (err) {
+        return {
+          granted: false,
+          reason: denyReason(
+            subject,
+            `the verified-approval provider faulted (${messageOf(err)}) — a provider that cannot answer is treated as no approval`,
+          ),
+        };
+      }
       if (verified === undefined || verified.nonce === '') {
         return {
           granted: false,
@@ -825,7 +868,7 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       } catch (err) {
         return {
           granted: false,
-          reason: `approval refused: the approval ledger could not be read or appended — ${messageOf(err)}; the ledger is fail-closed, so nothing was written and the token is UNSPENT`,
+          reason: `approval refused: the approval ledger could not be read or appended — ${messageOf(err)}; the ledger is fail-closed, so nothing was written. The token is UNSPENT when the fault struck before the record was appended (an unreadable or torn ledger, a short write) and INDETERMINATE when it struck after (a sync or close fault, after which a later consume may read it as spent) — re-approve rather than retry`,
         };
       }
       if (outcome === 'spent') {
@@ -978,8 +1021,8 @@ export async function withApprovedMutation<T>(
         'approval refused: the authority exposes no mutation lock, so the state re-check could not be atomic with the write; nothing was written and the token is UNSPENT',
     };
   }
-  const held = await withMutationLock(
-    authority,
+  return lockedSection(
+    locks,
     subject.workspace,
     async (scope): Promise<ApprovedMutation<T>> => {
       const exercised = await authority.exercise(admitted.grant, subject);
@@ -988,8 +1031,6 @@ export async function withApprovedMutation<T>(
     },
     { op: subject.op, targets: subject.targets },
   );
-  if (!held.ok) return { status: 'needs-human', reason: held.reason };
-  return held.value;
 }
 
 /**
@@ -1003,15 +1044,16 @@ export async function withApprovedMutation<T>(
  *
  * Unlike {@link withApprovedMutation} this does NOT admit, exercise or
  * consume: it is the same mutual exclusion, with no approval semantics of
- * its own. An authority with no bound locks refuses rather than running
- * unlocked.
+ * its own — and so `fn` receives NO {@link ExercisedScope}. A scope asserts
+ * that an approval was consumed; minting one here would let any caller
+ * holding a bound authority hand it to a nested codemod and write without
+ * spending a token. An authority with no bound locks refuses rather than
+ * running unlocked.
  */
 export async function withMutationLock<T>(
   authority: ApprovalAuthority,
   workspace: string,
-  fn: (scope: ExercisedScope) => Promise<T>,
-  /** What the scope reports and bounds: op name (wording) and the approved targets. */
-  meta: { readonly op?: string; readonly targets?: readonly string[] } = {},
+  fn: () => Promise<T>,
 ): Promise<
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string }
 > {
@@ -1023,21 +1065,31 @@ export async function withMutationLock<T>(
         "approval refused: the authority exposes no mutation lock, so this workspace's mutations are not serialized; nothing was written",
     };
   }
-  // The scope is minted INSIDE the critical section and retired in a `finally`
-  // when that section settles — so it cannot exist outside the lock, and a
-  // recipient that retains it past the section holds a scope that no longer
-  // passes {@link isExercisedScope}.
-  return {
-    ok: true,
-    value: await locks.forWorkspace(workspace).withLock(async () => {
-      const scope = mintScope(meta.op ?? '', workspace, meta.targets ?? []);
-      try {
-        return await fn(scope);
-      } finally {
-        retireScope(scope);
-      }
-    }),
-  };
+  return { ok: true, value: await locks.forWorkspace(workspace).withLock(fn) };
+}
+
+/**
+ * The approved critical section: the lock, plus a scope minted INSIDE it and
+ * retired in a `finally` when it settles — so a scope cannot exist outside
+ * the lock, and a recipient that retains it past the section holds one that
+ * no longer passes {@link isExercisedScope}. Module-private: only
+ * {@link withApprovedMutation}, which exercises before calling `fn`'s write,
+ * may mint a scope.
+ */
+async function lockedSection<T>(
+  locks: MutationLocks,
+  workspace: string,
+  fn: (scope: ExercisedScope) => Promise<T>,
+  meta: { readonly op: string; readonly targets: readonly string[] },
+): Promise<T> {
+  return locks.forWorkspace(workspace).withLock(async () => {
+    const scope = mintScope(meta.op, workspace, meta.targets);
+    try {
+      return await fn(scope);
+    } finally {
+      retireScope(scope);
+    }
+  });
 }
 
 /**

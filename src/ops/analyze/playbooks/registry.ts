@@ -521,8 +521,14 @@ export function makePlaybookDispatchOp(
       op: 'analyze.playbookDispatch',
       workspace: input.dir,
       targets,
+      // The RESOLVED playbook's rule and verifier are digested too, not only
+      // its id: the registry is process-scoped and re-registrable, so an id
+      // alone would let a token approved for one rule authorize another
+      // registered under the same name.
       inputDigest: approvalInputDigest({
         playbookId: input.playbookId,
+        rule: playbook.rule,
+        verifier: playbook.verifier,
         dir: input.dir,
         targets,
         timeoutMs: input.timeoutMs,
@@ -532,6 +538,10 @@ export function makePlaybookDispatchOp(
     // PostApplyReadFault is thrown from inside the write callback, so it
     // surfaces as a rejection of withApprovedMutation, after the lock has
     // been released.
+    // Set on entering the write callback, i.e. once the exercise granted —
+    // what separates an acquire-side lock fault (token UNSPENT, nothing
+    // written) from a release-side one (token spent, edits may be on disk).
+    let writeEntered = false;
     let approved: ApprovedMutation<{
       engine: OpResult<CodemodReport>;
       applied: Map<string, string>;
@@ -546,6 +556,7 @@ export function makePlaybookDispatchOp(
           engine: OpResult<CodemodReport>;
           applied: Map<string, string>;
         }> => {
+          writeEntered = true;
           // NESTED COMPOSITION (ADR-0003 §6): the engine primitive receives
           // the scope for the approval THIS dispatch already exercised, so the
           // inner write runs under the already-held lock and already-consumed
@@ -596,7 +607,18 @@ export function makePlaybookDispatchOp(
           error: `playbook dispatch: the remediation was applied, but re-reading '${err.file}' to fingerprint the applied bytes FAILED (${err.message}) — the rollback on a non-passing verifier verdict cannot be proven safe, so NO restore was attempted and the workspace holds the applied edits; inspect it by hand before re-dispatching`,
         };
       }
-      throw err;
+      // A LOCK FAULT is a RESULT, not an escape (the applyRemediation and
+      // restoreTargets rule): a release fault can follow a completed engine
+      // write, and rejecting would leave applied-but-unverified edits on disk
+      // with no evidence. No verifier or restore runs — the section's
+      // exclusivity is unproven, so neither could be trusted.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT';
+      return {
+        status: 'failed',
+        error: `playbook dispatch: the workspace mutation lock faulted during the approved apply of playbook '${playbook.id}' — ${messageOf(err)}. ${tokenFate}; the targets were ${targets.map((file) => `'${file}'`).join(', ')} and NO verifier or rollback ran — a lock fault proves neither that the edits landed nor that they did not, so inspect the workspace before re-dispatching; this is NOT an approval refusal`,
+      };
     }
     if (approved.status === 'needs-human') {
       return {
@@ -772,7 +794,7 @@ export function makePlaybookDispatchOp(
     return {
       status: 'indeterminate',
       detail:
-        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — ${restoreProse(restore)} The playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5), and re-running the dispatch is now safe because the workspace is back at its pre-dispatch bytes. ` +
+        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — ${restoreProse(restore)} The playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5)${restore.stranded.length === 0 ? ', and re-running the dispatch is now safe because the workspace is back at its pre-dispatch bytes' : ', but do NOT re-dispatch until the stranded files are inspected and repaired — re-applying the rule over them may not be idempotent'}. ` +
         `Dispatch evidence: ${JSON.stringify(unverified)}`,
     };
   };

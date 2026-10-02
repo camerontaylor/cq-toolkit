@@ -881,6 +881,19 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     expect(store.written.size).toBe(0);
   });
 
+  test('an EMPTY plan under dryRun stays a dry-run report, not an applied one', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store, codemodRunner({}))({ ...baseInput(), dryRun: true });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.mode).toBe('dry-run');
+    expect(result.value.plannedEdits).toBe(0);
+    expect(store.written.size).toBe(0);
+  });
+
   test('a cluster with ZERO target files short-circuits: honest empty ok, the runner is never invoked (M2)', async () => {
     // Every member failure carries file: null — nothing is addressable.
     const report = clusterErrors({
