@@ -20,8 +20,9 @@ failure; baselines only tighten (doctrine I5).
 ## Agent loop
 
 Use `npm run lint:fast -- <owned-file...>` for syntactic feedback and
-`npm run fix -- <owned-file...>` for safe lint fixes, formatting and the full
-static gate. Lists must be explicit; never format the repository per turn.
+`npm run fix -- <owned-file...>` for safe lint fixes and formatting of those
+files only (it runs no static gate and no tests; run `npm run check:static`
+explicitly for dependents). Lists must be explicit; never format the repository per turn.
 `npm run check` runs formatting checks, the static gate once, tests and Knip.
 Changed-file lint does not establish correctness of dependents.
 

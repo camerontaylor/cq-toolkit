@@ -78,11 +78,17 @@ function newestSrcMtimeMs() {
  * the trust-critical path and it never reuses. TS7 is checked-emit: a build
  * error fails loudly here, never downstream.
  */
+let distPrepared = false;
+
 export function ensureDist() {
+  // Build-once per process: every consumer in one invocation reuses the first
+  // preparation instead of re-walking src/ or re-running `npm run build`.
+  if (distPrepared) return;
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
     if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
+      distPrepared = true;
       return; // dist exists and is newer than every src file — reuse it
     }
   } catch {
@@ -101,6 +107,7 @@ export function ensureDist() {
       }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
   }
+  distPrepared = true;
 }
 
 /**
