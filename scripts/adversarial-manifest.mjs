@@ -58,12 +58,12 @@ const regression = {
   A1: 'test/adversarial/trust-rows.test.ts',
   A2: 'test/adversarial/trust-rows.test.ts',
   A3: 'test/adversarial/trust-rows.test.ts',
-  A4: 'test/adversarial/empty-commit-thread.test.ts',
+  A4: 'test/adversarial/a4-empty-commit-real-git.test.ts',
   A5: 'test/adversarial/boundary-rows.test.ts',
   A6: 'test/adversarial/boundary-rows.test.ts',
   A10: 'test/adversarial/boundary-rows.test.ts',
   A11: 'test/adversarial/boundary-rows.test.ts',
-  A14: 'test/adversarial/boundary-rows.test.ts',
+  A14: 'test/adversarial/a14-privileged-workflow.test.ts',
   A15: 'test/adversarial/trust-rows.test.ts',
   A17: 'test/adversarial/boundary-rows.test.ts',
   A20: 'test/adversarial/trust-rows.test.ts',
@@ -109,20 +109,93 @@ function safeAttack(row) {
   };
 }
 
+// The remaining report fields are informational only, but they are still
+// untrusted artifact content headed into a committed document: keep only the
+// producer's known keys and scalar/array shapes, never a verbatim copy.
+const stringList = (value) =>
+  Array.isArray(value) ? value.filter((item) => typeof item === 'string') : null;
+
+const stringValueMap = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const map = {};
+  for (const [key, item] of Object.entries(value))
+    if (typeof item === 'string' || item === null) map[key] = item;
+  return Object.keys(map).length > 0 ? map : null;
+};
+
+const observedValueMap = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const map = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === null) {
+      map[key] = null;
+      continue;
+    }
+    if (typeof item !== 'object' || Array.isArray(item)) continue;
+    const entry = {};
+    for (const field of ['value', 'createdAt', 'updatedAt'])
+      if (typeof item[field] === 'string') entry[field] = item[field];
+    map[key] = entry;
+  }
+  return Object.keys(map).length > 0 ? map : null;
+};
+
+const safeProfileSettings = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const settings = {};
+  if (typeof value.api === 'string') settings.api = value.api;
+  const expected = stringValueMap(value.expected);
+  if (expected) settings.expected = expected;
+  const absentKeys = stringList(value.absentKeys);
+  if (absentKeys) settings.absentKeys = absentKeys;
+  const before = stringValueMap(value.before);
+  if (before) settings.before = before;
+  const observed = observedValueMap(value.observed);
+  if (observed) settings.observed = observed;
+  if (Array.isArray(value.environments))
+    settings.environments = value.environments
+      .filter(
+        (environment) =>
+          environment !== null &&
+          typeof environment === 'object' &&
+          !Array.isArray(environment) &&
+          typeof environment.name === 'string' &&
+          Array.isArray(environment.cqVariables),
+      )
+      .map((environment) => ({
+        name: environment.name,
+        cqVariables: environment.cqVariables.filter((key) => typeof key === 'string'),
+      }));
+  return settings;
+};
+
+const safeOutsiderTrust = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const trust = {};
+  if (typeof value.actorAssociation === 'string') trust.actorAssociation = value.actorAssociation;
+  if (typeof value.associationEvidence === 'string')
+    trust.associationEvidence = value.associationEvidence;
+  const associations = stringList(value.trustedAssociations);
+  if (associations) trust.trustedAssociations = associations;
+  const bots = stringList(value.trustedBots);
+  if (bots) trust.trustedBots = bots;
+  return trust;
+};
+
 const rows = ids.map((id) => {
   const attempts = reports.flatMap(({ name, report }) =>
     report.rows
-      .filter((row) => row.id === id)
+      .filter((row) => row !== null && typeof row === 'object' && row.id === id)
       .map((row) => {
         const attack = safeAttack(row);
         return {
           profile: report.profile,
           artifact: `artifacts/adversarial-suite/${name}`,
           profileVerified: report.profileVerified === true,
-          profileSettings: report.profileSettings ?? null,
+          profileSettings: safeProfileSettings(report.profileSettings),
           attackExecuted: attack !== null,
           attack,
-          outsiderTrust: report.outsiderTrust ?? null,
+          outsiderTrust: safeOutsiderTrust(report.outsiderTrust),
         };
       }),
   );

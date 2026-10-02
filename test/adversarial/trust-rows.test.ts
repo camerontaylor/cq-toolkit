@@ -61,7 +61,7 @@ const profiles = [
   },
 ];
 
-describe.each(profiles)('§7 trust attacks under $name', ({ merge, review: reviewConfig }) => {
+describe.each(profiles)('§7 trust attacks under $name', ({ name, merge, review: reviewConfig }) => {
   test('A1 stranger APPROVED LGTM cannot grant acceptance', () => {
     expect(classifyPr(candidate([review('stranger', 'APPROVED')]), NOW, merge)).toMatchObject({
       verdict: 'awaiting',
@@ -104,21 +104,15 @@ describe.each(profiles)('§7 trust attacks under $name', ({ merge, review: revie
     ).toMatchObject({ verdict: 'eligible', reason: 'explicit_all_clear' });
   });
 
-  test('A15 a human skip marker remains feedback, not an automation notice', () => {
-    const body = '<!-- cq-review-loop: skipped -->\nPlease fix the authorization bug';
-    const pr = candidate([
-      {
-        ...review('human-reviewer', 'CHANGES_REQUESTED'),
-        authorAssociation: 'MEMBER',
-        body,
-      },
-    ]);
-    expect(
-      classifyPr(pr, NOW, {
-        ...merge,
-        trustedAssociations: ['MEMBER'],
-      }),
-    ).toMatchObject({ verdict: 'awaiting', reason: 'merge_objection_outstanding' });
+  test('A15 a skip-pattern body is control input only for the configured automation', () => {
+    // The body matches a configured bot skip pattern (identity at line start,
+    // skip verb within the bounded window) while carrying a real objection.
+    const body = 'CodeRabbit skipped this run.\nPlease fix the authorization bug';
+    const objection = {
+      ...review('human-reviewer', 'CHANGES_REQUESTED'),
+      authorAssociation: 'MEMBER',
+      body,
+    };
     const fetched: FetchedReviewState = {
       repo: { owner: 'octo', name: 'widget' },
       pr: 7,
@@ -132,12 +126,43 @@ describe.each(profiles)('§7 trust attacks under $name', ({ merge, review: revie
       truncated: false,
       truncatedBecause: [],
     };
+    if (name === 'conservative') {
+      // No automation identity is resolved, so every skip-pattern body is bot
+      // noise (I2): the review is not merge evidence at all — fail toward
+      // awaiting — and the review loop files it as a bot notice, never a
+      // dispatchable answer.
+      expect(
+        classifyPr(candidate([objection]), NOW, { ...merge, trustedAssociations: ['MEMBER'] }),
+      ).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
+      expect(
+        classifyThreads(fetched, NOW, {
+          ...reviewConfig,
+          trustedAuthors: ['human-reviewer'],
+        }).items,
+      ).toMatchObject([{ verdict: 'skip', reason: 'bot_skip_notice' }]);
+      return;
+    }
+    // With an automation identity resolved, its skip authority is exclusive:
+    // a human's marker-carrying objection still objects and stays actionable.
+    expect(
+      classifyPr(candidate([objection]), NOW, { ...merge, trustedAssociations: ['MEMBER'] }),
+    ).toMatchObject({ verdict: 'awaiting', reason: 'merge_objection_outstanding' });
     expect(
       classifyThreads(fetched, NOW, {
         ...reviewConfig,
         trustedAuthors: ['human-reviewer'],
       }).items,
     ).toMatchObject([{ verdict: 'actionable' }]);
+    // Positive control: the configured automation's own marker drops even a
+    // trusted-looking approval — a marker is never acceptance evidence.
+    const automationNotice = {
+      ...review('cq-automation', 'APPROVED'),
+      authorAssociation: 'MEMBER',
+      body: 'CodeRabbit skipped this run.',
+    };
+    expect(
+      classifyPr(candidate([automationNotice]), NOW, { ...merge, trustedAssociations: ['MEMBER'] }),
+    ).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
   });
 
   test('A20 outsider review thread yields no fixer batch and no acceptance credit', () => {

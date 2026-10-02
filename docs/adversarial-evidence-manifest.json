@@ -43,7 +43,7 @@
       "attackExecuted": false,
       "observedOutcome": null,
       "prerequisite": "W0.7 and W1.3; live scratch thread and acceptance check",
-      "permanentRegression": "test/adversarial/empty-commit-thread.test.ts",
+      "permanentRegression": "test/adversarial/a4-empty-commit-real-git.test.ts",
       "attempts": [],
       "blocker": "No independently observed, head-bound live policy verdict for every required profile"
     },
@@ -153,7 +153,7 @@
       "attackExecuted": false,
       "observedOutcome": null,
       "prerequisite": "W1.7, W1.9, W1.10; live Apps, IDs, rulesets and promotion gate",
-      "permanentRegression": "test/adversarial/boundary-rows.test.ts",
+      "permanentRegression": "test/adversarial/a14-privileged-workflow.test.ts",
       "attempts": [],
       "blocker": "No independently observed, head-bound live policy verdict for every required profile"
     },
