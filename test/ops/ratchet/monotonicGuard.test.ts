@@ -73,6 +73,7 @@ import {
   formatViolations,
 } from '../../../src/ops/ratchet/monotonicGuard.js';
 import { describe, expect, test } from 'vitest';
+import { scrubbedGitEnv } from '../../helpers/git-template.js';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
 const TARGET = 'typecheck';
@@ -111,15 +112,6 @@ function covBody(value: number): string {
 
 function bodyLines(b: string): string[] {
   return b.split('\n').filter((l) => l !== '');
-}
-
-/** Remove ambient repository selectors so the real fixture uses only cwd. */
-function scrubbedGitEnv(): NodeJS.ProcessEnv {
-  // Keep this fixture independent of ambient git state; a shared helper can
-  // replace this local scrub when the template seam lands.
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
-  return env;
 }
 
 /**

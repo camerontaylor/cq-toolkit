@@ -46,6 +46,17 @@ export interface ClonedGitTemplate {
 
 type SeedRepo = (repo: string) => Promise<void>;
 
+/**
+ * Process environment minus every inherited `GIT_*` variable. Run from a git
+ * hook, `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` would override `-C` and
+ * point fixture git calls at the outer repository or index.
+ */
+export function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  return env;
+}
+
 function git(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(

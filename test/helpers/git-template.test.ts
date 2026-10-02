@@ -2,13 +2,7 @@ import { execFile } from 'node:child_process';
 import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { cloneTemplate, createGitTemplate } from './git-template.js';
-
-function scrubbedGitEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
-  );
-}
+import { cloneTemplate, createGitTemplate, scrubbedGitEnv } from './git-template.js';
 
 function git(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {

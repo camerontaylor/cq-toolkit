@@ -112,10 +112,11 @@ afterEach(() => {
 });
 
 // Real compiler/Oxlint calls have a bounded 30s child deadline below; the
-// suite-level budget is explicit because most tests perform two real
-// compiler+Oxlint process spawns under host-load swings; the reused TS2307
-// plus configuration-failure case performs three bounded real gates. A loaded
-// host must not fail before the structurally bounded child process reports.
+// suite-level budget covers one bounded child under host-load swings. Cases
+// with more bounded children (the TS2307 plus configuration-failure case runs
+// three real gates; the integrated-omission case runs Oxlint then a gate)
+// carry budgets covering every child bound, so a loaded host cannot fail
+// before the structurally bounded child process reports.
 describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () => {
   it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
     expect(kernelImports(DRIVER_SRC)).toEqual([]);
@@ -185,7 +186,7 @@ describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () =>
     expect(configFailure.status).toBe(1);
     expect(configFailure.stderr).toContain('compiler configuration or project-loading failure:');
     expect(configFailure.stderr).toMatch(/TS5023|TS5083/);
-  });
+  }, 100_000);
   it('reproduces the integrated checker omission that requires the compiler fallback', () => {
     const root = fixture();
     writeFileSync(join(root, 'unvisited/extra.ts'), 'export const extra: string = 42;\n');
@@ -207,7 +208,7 @@ describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () =>
     const result = gate(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('unvisited/extra.ts');
-  });
+  }, 70_000);
   it('rejects --update before loading the engine and never rewrites the baseline', () => {
     const root = fixture();
     const original = readFileSync(join(root, BASELINE), 'utf8');
