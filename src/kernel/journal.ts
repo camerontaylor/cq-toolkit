@@ -20,16 +20,16 @@
 // line, and a line whose event.runId does not match the file's run: a hole
 // or misattribution in complete evidence is corruption, not a torn write,
 // and silently accepting it would poison the fold.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
+  lstat,
   mkdir,
   open,
   readFile,
   readdir,
   rename,
-  rmdir,
   stat,
   unlink,
 } from 'node:fs/promises';
@@ -180,33 +180,116 @@ export async function acquirePlanLock(
   assertSafeRunId(planId);
   assertSafeRunId(runId);
   await mkdir(journalDir, { recursive: true });
-  // Atomic exclusion covers eligibility THROUGH publication/listen/fence,
-  // for creators and reclaimers alike. Never reclaim this short-lived guard
-  // by timestamp/PID/read+unlink: that would recreate the stale-check race.
-  // Unresolved R1: a crash leaves this guard behind and blocks even complete
-  // dead-owner records. This does NOT satisfy the accepted recovery contract;
-  // replacing it requires process-death-released atomic publication exclusion.
-  const publication = join(journalDir, `${planId}.lock.acquiring`);
+  // Legacy publishers recorded no owner in this directory. Neither a dead
+  // record nor time proves fleet quiescence: never migrate it automatically.
+  // Fresh repaired journals use a permanent guard inode. Legacy journals need
+  // an operator-attested, separately governed migration before they can run.
+  const legacy = join(journalDir, `${planId}.lock.acquiring`);
   try {
-    await mkdir(publication, { mode: 0o700 });
+    await lstat(legacy);
+    throw acquisitionBusy(planId);
   } catch (error) {
-    if (errorCode(error) !== 'EEXIST') throw error;
-    throw new Error(`journal: plan lock acquisition in progress or interrupted for '${planId}'`);
+    if (!isEnoent(error)) throw error;
   }
-  let acquired: PlanLock;
+  const guard = await acquirePublicationGuard(join(journalDir, `${planId}.lock.guard`), planId);
+  let acquired: PlanLock | undefined;
   try {
     acquired = await acquirePlanLockRecord(journalDir, planId, runId);
   } catch (error) {
-    await rmdir(publication);
+    await guard.close();
     throw error;
   }
   try {
-    await rmdir(publication);
+    await guard.close(); // last OFD reference: no explicit unlock, unlink or truncation
   } catch (error) {
     await acquired.release();
     throw error;
   }
   return acquired;
+}
+
+function acquisitionBusy(planId: string): Error {
+  return new Error(`journal: plan lock acquisition in progress or interrupted for '${planId}'`);
+}
+
+// flock is associated with the shared open file description, unlike fcntl
+// process locks. The child exits WITHOUT unlocking; the parent's fd keeps it.
+const FLOCK_PROGRAM = 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))';
+async function acquirePublicationGuard(
+  path: string,
+  planId: string,
+  spawnHelper: typeof spawn = spawn,
+): Promise<Awaited<ReturnType<typeof open>>> {
+  // a+ is one create-or-open syscall, RDWR for flock's NFS emulation. This
+  // zero-byte inode is never read, truncated, renamed or unlinked by us.
+  const guard = await open(path, 'a+', 0o600);
+  let helper: ReturnType<typeof spawn> | undefined;
+  let closed:
+    | Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: Error }>
+    | undefined;
+  let stderr = '';
+  try {
+    const outcome = await runLadder(
+      async (context) => {
+        helper = spawnHelper('/usr/bin/perl', ['-e', FLOCK_PROGRAM], {
+          stdio: [guard.fd, 'ignore', 'pipe'],
+        });
+        const child = helper;
+        closed = new Promise((resolve) => {
+          let spawnError: Error | undefined;
+          child.once('error', (error) => {
+            spawnError = error;
+          });
+          child.once('close', (code, signal) =>
+            resolve({ code, signal, ...(spawnError !== undefined ? { error: spawnError } : {}) }),
+          );
+        });
+        child.stderr?.on('data', (bytes: Buffer) => {
+          stderr = (stderr + bytes.toString()).slice(0, 4096);
+        });
+        const kill = (): void => {
+          child.kill('SIGKILL');
+        };
+        context.setCancelPort({ hardCancel: kill, kill });
+        context.signal.addEventListener('abort', kill, { once: true });
+        try {
+          const ended = await closed;
+          if (context.signal.aborted)
+            throw new Error('journal: publication lock helper deadline exceeded');
+          return ended;
+        } finally {
+          context.signal.removeEventListener('abort', kill);
+        }
+      },
+      { wallClockMs: 2000, abortGraceMs: 0, killGraceMs: 0 },
+      { op: 'journal-publication-lock', jobKey: planId, attempt: 1 },
+    );
+    // A ladder can detach its task. Reap the helper before releasing our fd:
+    // no inherited reference may survive into eligibility or a later acquire.
+    if (outcome.outcome === 'killed') helper?.kill('SIGKILL');
+    await closed;
+    if (outcome.outcome === 'threw') throw outcome.error;
+    if (outcome.outcome === 'killed')
+      throw new Error('journal: publication lock helper deadline exceeded');
+    const ended = outcome.value;
+    if (ended.error !== undefined)
+      throw new Error('journal: publication lock helper capability failed', { cause: ended.error });
+    if (ended.signal !== null || ended.code !== 0) {
+      if (ended.signal === null && ended.code === 3) throw acquisitionBusy(planId);
+      throw new Error(
+        `journal: publication lock helper capability failed (exit=${String(ended.code)}, signal=${String(ended.signal)}, stderr=${stderr})`,
+      );
+    }
+    const held = await guard.stat();
+    const published = await stat(path);
+    if (held.dev !== published.dev || held.ino !== published.ino) {
+      throw new Error('journal: publication guard inode changed — refusing acquisition');
+    }
+    return guard;
+  } catch (error) {
+    await guard.close();
+    throw error;
+  }
 }
 
 async function acquirePlanLockRecord(

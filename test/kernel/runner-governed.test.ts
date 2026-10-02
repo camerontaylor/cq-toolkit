@@ -1565,9 +1565,10 @@ describe('governed journal v2 + resume', () => {
     // Inspecting shared history requires a lease even when the refusal
     // creates no run journal or seq claim. Release retains its lock record.
     const lockName = 'plan-gov-mark-nohistory.lock.json';
+    const guardName = 'plan-gov-mark-nohistory.lock.guard';
     const files = await readdir(dir);
     expect(files.filter((name) => name.endsWith('.ndjson') || name.includes('.seq.'))).toEqual([]);
-    expect(files).toEqual([lockName]);
+    expect(files.sort()).toEqual([guardName, lockName]);
     const released = JSON.parse(await readFile(join(dir, lockName), 'utf8')) as Record<
       string,
       unknown
@@ -1602,7 +1603,7 @@ describe('governed journal v2 + resume', () => {
       runId: 'refusal-contender',
     });
     expect(nextReleased.nonce).not.toBe(released.nonce);
-    expect(await readdir(dir)).toEqual([lockName]);
+    expect((await readdir(dir)).sort()).toEqual([guardName, lockName]);
   });
 
   test('replay-skip re-attestation copies the prior finish\u2019s costUSD, not just usage (composition M2)', async () => {
