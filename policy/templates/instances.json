@@ -126,6 +126,10 @@
       "reason": "Repo-owned CI with no template today: the manual-dispatch E5 live review-loop drill against a scratch repo (unlike live-merge.yml, it was never templated)."
     },
     {
+      "workflow": "macos-venue.yml",
+      "reason": "Repo-owned CI with no template today: the non-required macOS full-gate mirror (static-macos). Kept outside ci.yml so the promotion gate's verified-workflow wait never keys on it — see policy/templates/required-check.md."
+    },
+    {
       "workflow": "pack-audit.yml",
       "reason": "Repo-owned CI with no template today: audits this package's npm tarball (files allowlist + denylist scan) — specific to this package, not an adoptable pattern."
     }
