@@ -344,6 +344,16 @@ describe('fingerprintSet', () => {
     expect(keyFor([at205, at306], at205)).toBe(keyFor([at306, at205], at205));
   });
 
+  test('null and empty-string files never alias in duplicate ordering', () => {
+    const nullFile = failureOf({ file: null, line: null, message: 'same' });
+    const emptyFile = failureOf({ file: '', line: null, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullFile, emptyFile], nullFile)).toBe(keyFor([emptyFile, nullFile], nullFile));
+  });
+
   test('a suite-level vitest failure keys by the first message line, not the full error text', () => {
     const suite = (message: string): string =>
       fingerprintFailure(failureOf({ line: null, message, ruleId: 'vitest-suite' }), {
