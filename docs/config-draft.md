@@ -31,7 +31,7 @@ mirror.
 | `CQ_SANDBOX_BACKEND`     | `auto`       | —               | `sandbox.backend`    | unordered; change needs opt-in |
 | `CQ_SANDBOX_NETWORK`     | `model-only` | `allow`         | `sandbox.network`    | `model-only` is tighter        |
 | `CQ_RUN_TOOL`            | `on`         | —               | `run.tool`           | `off` is tighter               |
-| `CQ_RUN_ENV_PASSTHROUGH` | empty list   | —               | `run.envPassthrough` | unordered; change needs opt-in |
+| `CQ_RUN_ENV_PASSTHROUGH` | empty list   | —               | `run.envPassthrough` | subset; additions need opt-in  |
 
 Blank list values fall through. The literal `none` explicitly clears a list;
 with a selected profile, blank values fall through to the profile. The

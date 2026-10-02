@@ -367,5 +367,50 @@ describe('pure configuration resolution', () => {
       expect(() => quarantine('run-a,,run-b')).toThrow(/empty list item/);
       expect(() => quarantine('run-a,run-a')).toThrow(/duplicate list item/);
     });
+
+    it('judges per-call map values by their merged result', () => {
+      const config = resolve({ values: { 'driver.bindings': { '*/zai': 'ai-sdk' } } });
+      expect(config.entries['driver.bindings']?.layer).toBe('call');
+      expect(() => resolve({ values: { 'driver.bindings': { '*/zai': 'claude-agent' } } })).toThrow(
+        /explicit opt-in/,
+      );
+    });
+
+    it('compares opt-in values to typed records and lists after parsing', () => {
+      const bindings = resolve({
+        values: { 'driver.bindings': { 'custom/vendor': 'ai-sdk' } },
+        optIn: ['driver.bindings=custom/vendor:ai-sdk'],
+      });
+      expect(entryValue('driver.bindings', bindings)).toMatchObject({
+        'custom/vendor': 'ai-sdk',
+      });
+      expect(
+        entryValue(
+          'run.envPassthrough',
+          resolve({
+            values: { 'run.envPassthrough': ['SAFE_B', 'SAFE_A'] },
+            optIn: ['run.envPassthrough=SAFE_A,SAFE_B'],
+          }),
+        ),
+      ).toEqual(['SAFE_A', 'SAFE_B']);
+      expect(() =>
+        resolve({
+          values: { 'driver.bindings': { 'custom/vendor': 'ai-sdk' } },
+          optIn: ['driver.bindings=custom/vendor:other'],
+        }),
+      ).toThrow(/disagrees/);
+    });
+
+    it('treats blank foreign credentials as unset and ignores prototype names', () => {
+      expect(resolve({ env: { GH_TOKEN: '', ZAI_API_KEY: '  ' } }).credentials).toEqual({});
+      expect(() => resolve({ optIn: ['constructor'] })).toThrow(/unknown opt-in key/);
+      expect(() => resolve({ values: { toString: 'x' } })).toThrow(/unknown per-call/);
+      expect(
+        entryValue(
+          'provider.zai-glm-coding.windowFractions',
+          resolve({ env: { CQ_PROVIDER_ZAI_GLM_CODING_WINDOW_FRACTIONS: 'constructor:0.5' } }),
+        ),
+      ).toEqual({ constructor: '0.5' });
+    });
   });
 });

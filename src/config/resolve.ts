@@ -3,7 +3,6 @@ import {
   CALL_ONLY_CONFIG,
   FOREIGN_ENV_NAMES,
   PROVIDER_IDS,
-  PROVIDER_KEYS,
   type ConfigKey,
   providerKeysFor,
 } from './registry.js';
@@ -50,7 +49,6 @@ export interface ResolveConfigOptions {
 }
 
 const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
-const providerKeySuffixes = [...PROVIDER_KEYS].sort((a, b) => b.length - a.length);
 const secretSuffixes = [
   '_API_KEY',
   '_TOKEN',
@@ -206,20 +204,6 @@ function assertOutsideWorkspace(
   return resolvePath(evidence.realpath);
 }
 
-function providerName(name: string, env: Readonly<Record<string, string | undefined>>): boolean {
-  if (!name.startsWith('CQ_PROVIDER_')) return false;
-  return providerKeySuffixes.some((suffix) => {
-    const separated = `_${suffix}`;
-    if (!name.endsWith(separated)) return false;
-    const encodedId = name.slice('CQ_PROVIDER_'.length, -separated.length);
-    if (!/^[A-Z0-9]+(?:_[A-Z0-9]+)*$/.test(encodedId)) return false;
-    const id = encodedId.toLowerCase().replaceAll('_', '-');
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) return false;
-    if (PROVIDER_IDS.includes(id as (typeof PROVIDER_IDS)[number])) return true;
-    return nonblank(env[`CQ_PROVIDER_${encodedId}_PROFILE`])?.startsWith('custom:') === true;
-  });
-}
-
 function parseListItems(label: string, raw: unknown): string[] {
   const parts = isStringArray(raw)
     ? [...raw]
@@ -296,7 +280,7 @@ function parse(
             ? /^[a-z0-9*-]+$/.test(name) && /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)
             : /^[a-z0-9*-]+$/.test(name) && /^[a-z0-9*-]+$/.test(value);
       if (!valid) throw new Error(`${key.env}: invalid map token`);
-      if (name in result) throw new Error(`${key.env}: duplicate map entry '${name}'`);
+      if (Object.hasOwn(result, name)) throw new Error(`${key.env}: duplicate map entry '${name}'`);
       result[name] = value;
     }
     return result;
@@ -325,7 +309,7 @@ function parse(
       ) {
         throw new Error(`${key.env}: invalid served-alias entry`);
       }
-      if (name in result) throw new Error(`${key.env}: duplicate served-alias entry`);
+      if (Object.hasOwn(result, name)) throw new Error(`${key.env}: duplicate served-alias entry`);
       result[name] = served;
     }
     return result;
@@ -546,7 +530,8 @@ function parseOptIns(optIns: readonly string[]): {
   for (const entry of optIns) {
     const split = entry.indexOf('=');
     const id = split < 0 ? entry : entry.slice(0, split);
-    if (!byId.has(id) && !(id in CALL_ONLY_CONFIG)) throw new Error(`unknown opt-in key '${id}'`);
+    if (!byId.has(id) && !Object.hasOwn(CALL_ONLY_CONFIG, id))
+      throw new Error(`unknown opt-in key '${id}'`);
     ids.add(id);
     if (split >= 0) values.set(id, entry.slice(split + 1));
   }
@@ -586,12 +571,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
       else credentials[name] = 'set';
     }
-    if (
-      name.startsWith('CQ_') &&
-      name !== 'CQ_PROFILE' &&
-      !registryByEnv.has(name) &&
-      !providerName(name, env)
-    )
+    if (name.startsWith('CQ_') && name !== 'CQ_PROFILE' && !registryByEnv.has(name))
       unknownNames.push(name);
   }
   if (unknownNames.length) {
@@ -605,8 +585,10 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     );
   }
   for (const name of FOREIGN_ENV_NAMES) {
-    if (env[name] !== undefined && isSecret(name)) credentials[name] = 'set';
-    else if (env[name] !== undefined && env[name] !== '') foreign[name] = env[name];
+    const value = env[name];
+    if (nonblank(value) === undefined) continue;
+    if (isSecret(name)) credentials[name] = 'set';
+    else foreign[name] = value!;
   }
   for (const name of [
     'ZAI_BASE_URL',
@@ -638,12 +620,15 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
   }
   const { ids: optIns, values: optInValues } = parseOptIns(options.optIn ?? []);
   for (const id of Object.keys(options.values ?? {})) {
-    if (!byId.has(id) && !(id in CALL_ONLY_CONFIG))
+    if (!byId.has(id) && !Object.hasOwn(CALL_ONLY_CONFIG, id))
       throw new Error(`unknown per-call configuration key '${id}'`);
   }
   for (const [id, value] of optInValues) {
     const typed = options.values?.[id];
-    if (typed !== undefined && String(typed) !== value)
+    if (typed === undefined) continue;
+    const key = byId.get(id);
+    // Compare parsed values so typed records and reordered lists match their string form.
+    if (key ? !equal(parse(key, typed), parse(key, value)) : String(typed) !== value)
       throw new Error(`${id}: opt-in value disagrees with typed value`);
   }
 
@@ -698,9 +683,11 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         next.some((name) => unsafePassthrough(name, env))
       )
         throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
-      if (!tighter(key, next, current) && !optIns.has(key.id))
+      // Maps merge by entry, so judge the merged result rather than the partial call value.
+      const merged = overlay(key, current, next);
+      if (!tighter(key, merged, current) && !optIns.has(key.id))
         throw new Error(`${key.id}: less-conservative per-call value requires explicit opt-in`);
-      current = overlay(key, current, next);
+      current = merged;
       layer = 'call';
       sourceEnv = undefined;
     }
