@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { createGovernor, currentJobContext } from '../../src/kernel/governor.js';
 import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
-import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
+import { runPlan as kernelRunPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { JournalEvent, Op, OpRegistryEntry, OpResult, Plan } from '../../src/kernel/types.js';
 
 const hooks = vi.hoisted(() => ({
@@ -51,13 +51,70 @@ vi.mock('../../src/kernel/journal.js', async (importOriginal) => {
   };
 });
 
+// Mirrors journal.ts private PUBLICATION_STARTUP_MS; update if that bound changes.
+// First acquisition: helper 10s + boot lookup 10s + startup/I/O margin 5s.
+// Later acquisitions reuse the successful boot identity: helper 10s + margin 5s.
+const ACQUISITION_STEP_MS = 2 * 10_000 + 5_000;
+function journalEnclosure(steps: number): number {
+  return ACQUISITION_STEP_MS + (steps - 1) * 15_000 + 5_000;
+}
+const pendingRuns = new Map<Promise<unknown>, AbortController>();
+const cleanupActions = new Set<() => void>();
+function runPlan(...args: Parameters<typeof kernelRunPlan>): ReturnType<typeof kernelRunPlan> {
+  const abort = new AbortController();
+  const governance = args[3];
+  const running = kernelRunPlan(
+    args[0],
+    args[1],
+    args[2],
+    governance === undefined
+      ? undefined
+      : {
+          ...governance,
+          signal:
+            governance.signal === undefined
+              ? abort.signal
+              : AbortSignal.any([abort.signal, governance.signal]),
+        },
+  );
+  pendingRuns.set(running, abort);
+  // Observe outcomes immediately, keeping the original rejecting promise for assertions.
+  void running.then(
+    () => pendingRuns.delete(running),
+    () => pendingRuns.delete(running),
+  );
+  return running;
+}
+async function settleFixtureWork(): Promise<void> {
+  for (const abort of pendingRuns.values()) abort.abort();
+  for (const action of cleanupActions) action();
+  cleanupActions.clear();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcomes = await Promise.race([
+      Promise.allSettled([...pendingRuns.keys()]),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('fixture cleanup: work did not settle; journal retained')),
+          ACQUISITION_STEP_MS,
+        );
+      }),
+    ]);
+    const rejection = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (rejection?.status === 'rejected') throw rejection.reason;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 const directories: string[] = [];
 afterEach(async () => {
+  await settleFixtureWork();
   hooks.before = undefined;
   hooks.after = undefined;
   hooks.beforePublication = undefined;
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
+}, ACQUISITION_STEP_MS + 5_000);
 async function directory(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'cq-j-lifecycle-'));
   directories.push(dir);
@@ -68,6 +125,7 @@ function deferred() {
   const promise = new Promise<void>((done) => {
     resolve = done;
   });
+  cleanupActions.add(resolve);
   return { promise, resolve };
 }
 // Report setup/infrastructure failure directly instead of waiting forever for
@@ -178,231 +236,255 @@ test.each(['worker', 'replay-producer'] as const)(
     const next = await acquirePlanLock(dir, plan.id, 'next');
     await next.release();
   },
+  journalEnclosure(3),
 );
 
-test('failed durable reservation append stops queued work and frees reservation and held slot', async () => {
-  const dir = await directory();
-  const injected = new Error('reservation append failed');
-  const calls: string[] = [];
-  const governor = createGovernor({ maxUsd: 10 });
-  hooks.before = async (event) => {
-    if (event.type === 'reservation-opened') throw injected;
-  };
-  await expect(
-    runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      registry(async (id) => {
-        calls.push(id);
-        return { status: 'ok', value: id };
-      }),
-      { governor, allowAdvisory: true },
-    ),
-  ).rejects.toBe(injected);
-  expect(calls).toEqual([]);
-  expect(governor.outstandingCount).toBe(0);
-  expect(governor.inFlight).toBe(0);
-  expect(governor.tripped).toBe(true);
-  expect((await events(dir)).some((event) => event.type === 'run-finished')).toBe(false);
-});
-
-test('lost nonce leaves write-ahead unresolved, loss-charged and quarantined until explicit release', async () => {
-  const dir = await directory();
-  const calls: string[] = [];
-  const governor = createGovernor({ maxUsd: 10 });
-  const rivalNonce = randomUUID();
-  const lockPath = join(dir, `${plan.id}.lock.json`);
-  const dependentPlan: Plan = {
-    id: plan.id,
-    jobs: [
-      { id: 'a', op: 'work', input: { id: 'a' } },
-      { id: 'dependent', op: 'work', input: { id: 'dependent' }, dependsOn: ['a'] },
-    ],
-  };
-  const view = registry(async (id) => {
-    calls.push(id);
-    return { status: 'ok', value: id };
-  });
-  hooks.after = async (event) => {
-    if (event.type !== 'reservation-opened') return;
-    const record = JSON.parse(await readFile(lockPath, 'utf8')) as Record<string, unknown>;
-    const replacement = `${lockPath}.replacement`;
-    await writeFile(replacement, JSON.stringify({ ...record, nonce: rivalNonce, runId: 'rival' }));
-    await rename(replacement, lockPath);
-  };
-  await expect(
-    runPlan(dependentPlan, { concurrency: 2, stopOnError: false, journalDir: dir }, view, {
-      governor,
-      allowAdvisory: true,
-    }),
-  ).rejects.toThrow('lock-lost');
-  expect(calls).toEqual([]);
-  expect(governor.outstandingCount).toBe(0);
-  expect(governor.inFlight).toBe(0);
-  expect(governor.usdSpent).toBe(0); // local capacity is abandoned; durable loss charges on fold
-  expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([]);
-  expect((await events(dir)).filter((event) => event.type === 'reservation-opened')).toEqual([
-    expect.objectContaining({ jobId: 'a', usd: 5 }),
-  ]);
-  expect(JSON.parse(await readFile(lockPath, 'utf8'))).toMatchObject({ nonce: rivalNonce });
-  expect(JSON.parse(await readFile(lockPath, 'utf8'))).not.toHaveProperty('released');
-  hooks.after = undefined;
-  // Simulate the rival's explicit release, without rewriting journal facts.
-  const rival = JSON.parse(await readFile(lockPath, 'utf8')) as Record<string, unknown>;
-  await writeFile(lockPath, JSON.stringify({ ...rival, released: true }));
-  const resumed = createGovernor({ maxUsd: 10 });
-  const report = await runPlan(
-    dependentPlan,
-    { concurrency: 2, stopOnError: false, journalDir: dir, resume: true },
-    view,
-    { governor: resumed, allowAdvisory: true },
-  );
-  expect(calls).toEqual([]);
-  expect(resumed.usdSpent).toBe(5);
-  expect(report.jobs[0]?.result.status).toBe('needs-human');
-  expect(report.jobs[1]?.result).toMatchObject({ status: 'failed' });
-  expect(report.counts.blocked).toBe(2);
-  expect(
-    (await events(dir)).some((event) => event.type === 'job-quarantined' && event.jobId === 'a'),
-  ).toBe(true);
-  const released = createGovernor({ maxUsd: 10 });
-  const releasedReport = await runPlan(
-    dependentPlan,
-    { concurrency: 2, stopOnError: false, journalDir: dir, resume: true },
-    view,
-    { governor: released, allowAdvisory: true, releaseQuarantine: ['a'] },
-  );
-  expect(calls).toEqual(['a', 'dependent']);
-  expect(released.usdSpent).toBe(5);
-  expect(releasedReport.counts.done).toBe(2);
-  expect(
-    (await events(dir)).some(
-      (event) => event.type === 'quarantine-released' && event.jobId === 'a',
-    ),
-  ).toBe(true);
-});
-
-test('settlement append failure aborts and drains its admitted sibling with full settlement', async () => {
-  const dir = await directory();
-  const injected = new Error('settlement append failed');
-  const siblingStarted = deferred();
-  const governor = createGovernor({ maxUsd: 10 });
-  const calls: string[] = [];
-  let aborted = false;
-  hooks.before = async (event) => {
-    if (event.type === 'reservation-settled' && event.jobId === 'a') throw injected;
-  };
-  await expect(
-    runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false, journalDir: dir },
-      registry(async (id) => {
-        calls.push(id);
-        if (id === 'a') {
-          await siblingStarted.promise;
-          return { status: 'ok', value: id };
-        }
-        const context = currentJobContext();
-        if (context === undefined) throw new Error('missing governed job context');
-        await new Promise<void>((resolve) => {
-          context.signal.addEventListener(
-            'abort',
-            () => {
-              aborted = true;
-              resolve();
-            },
-            { once: true },
-          );
-          siblingStarted.resolve();
-        });
-        return {
-          status: 'indeterminate',
-          detail: 'journal failure cancelled the admitted sibling',
-        };
-      }),
-      { governor, allowAdvisory: true },
-    ),
-  ).rejects.toBe(injected);
-  expect(calls).toEqual(['a', 'b']);
-  expect(aborted).toBe(true);
-  expect(governor.outstandingCount).toBe(0);
-  expect(governor.inFlight).toBe(0);
-  expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([
-    expect.objectContaining({ jobId: 'b', basis: 'full', charged: 5 }),
-  ]);
-});
-
-test('fold corruption releases the lease before rejecting and distinct plans can hold separate leases', async () => {
-  const dir = await directory();
-  await writeFile(join(dir, 'journal-stop--1--a.ndjson'), '{corrupt}\n');
-  await expect(
-    runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      registry(async () => ({ status: 'ok', value: 1 })),
-    ),
-  ).rejects.toThrow();
-  const owner = await acquirePlanLock(dir, plan.id, 'next');
-  try {
-    const otherPlan = await acquirePlanLock(dir, 'other-plan', 'parallel');
-    await otherPlan.release();
-    await owner.assertHeld();
-  } finally {
-    await owner.release();
-  }
-});
-
-test('atomic publication exclusion prevents a late reclaimer while a plain owner dispatches', async () => {
-  const dir = await directory();
-  const seed = await acquirePlanLock(dir, plan.id, 'seed');
-  await seed.release();
-  const publicationPaused = deferred();
-  const publish = deferred();
-  const bodyStarted = deferred();
-  const finishBody = deferred();
-  hooks.beforePublication = async () => {
-    publicationPaused.resolve();
-    await publish.promise;
-  };
-  const oneJob: Plan = { id: plan.id, jobs: plan.jobs.slice(0, 1) };
-  const calls: string[] = [];
-  const running = runPlan(
-    oneJob,
-    { concurrency: 1, stopOnError: false, journalDir: dir },
-    registry(async (id) => {
-      calls.push(id);
-      bodyStarted.resolve();
-      await finishBody.promise;
-      return { status: 'ok', value: id };
-    }),
-  );
-  try {
-    // Eligibility has been decided and the complete replacement is ready,
-    // but the owning publisher has not renamed it yet.
-    await awaitStage(publicationPaused.promise, running, 'publication pause');
-    await expect(acquirePlanLock(dir, plan.id, 'late-reclaimer')).rejects.toThrow(
-      'acquisition in progress',
-    );
-    expect(calls).toEqual([]);
-    publish.resolve();
-    await awaitStage(bodyStarted.promise, running, 'body entry');
+test(
+  'failed durable reservation append stops queued work and frees reservation and held slot',
+  async () => {
+    const dir = await directory();
+    const injected = new Error('reservation append failed');
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 10 });
+    hooks.before = async (event) => {
+      if (event.type === 'reservation-opened') throw injected;
+    };
     await expect(
       runPlan(
-        oneJob,
+        plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         registry(async (id) => {
-          calls.push(`duplicate-${id}`);
+          calls.push(id);
           return { status: 'ok', value: id };
         }),
+        { governor, allowAdvisory: true },
       ),
-    ).rejects.toThrow('plan locked');
-    expect(calls).toEqual(['a']);
-  } finally {
-    publish.resolve();
-    finishBody.resolve();
-    await running;
-  }
-});
+    ).rejects.toBe(injected);
+    expect(calls).toEqual([]);
+    expect(governor.outstandingCount).toBe(0);
+    expect(governor.inFlight).toBe(0);
+    expect(governor.tripped).toBe(true);
+    expect((await events(dir)).some((event) => event.type === 'run-finished')).toBe(false);
+  },
+  journalEnclosure(1),
+);
+
+test(
+  'lost nonce leaves write-ahead unresolved, loss-charged and quarantined until explicit release',
+  async () => {
+    const dir = await directory();
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 10 });
+    const rivalNonce = randomUUID();
+    const lockPath = join(dir, `${plan.id}.lock.json`);
+    const dependentPlan: Plan = {
+      id: plan.id,
+      jobs: [
+        { id: 'a', op: 'work', input: { id: 'a' } },
+        { id: 'dependent', op: 'work', input: { id: 'dependent' }, dependsOn: ['a'] },
+      ],
+    };
+    const view = registry(async (id) => {
+      calls.push(id);
+      return { status: 'ok', value: id };
+    });
+    hooks.after = async (event) => {
+      if (event.type !== 'reservation-opened') return;
+      const record = JSON.parse(await readFile(lockPath, 'utf8')) as Record<string, unknown>;
+      const replacement = `${lockPath}.replacement`;
+      await writeFile(
+        replacement,
+        JSON.stringify({ ...record, nonce: rivalNonce, runId: 'rival' }),
+      );
+      await rename(replacement, lockPath);
+    };
+    await expect(
+      runPlan(dependentPlan, { concurrency: 2, stopOnError: false, journalDir: dir }, view, {
+        governor,
+        allowAdvisory: true,
+      }),
+    ).rejects.toThrow('lock-lost');
+    expect(calls).toEqual([]);
+    expect(governor.outstandingCount).toBe(0);
+    expect(governor.inFlight).toBe(0);
+    expect(governor.usdSpent).toBe(0); // local capacity is abandoned; durable loss charges on fold
+    expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([]);
+    expect((await events(dir)).filter((event) => event.type === 'reservation-opened')).toEqual([
+      expect.objectContaining({ jobId: 'a', usd: 5 }),
+    ]);
+    expect(JSON.parse(await readFile(lockPath, 'utf8'))).toMatchObject({ nonce: rivalNonce });
+    expect(JSON.parse(await readFile(lockPath, 'utf8'))).not.toHaveProperty('released');
+    hooks.after = undefined;
+    // Simulate the rival's explicit release, without rewriting journal facts.
+    const rival = JSON.parse(await readFile(lockPath, 'utf8')) as Record<string, unknown>;
+    await writeFile(lockPath, JSON.stringify({ ...rival, released: true }));
+    const resumed = createGovernor({ maxUsd: 10 });
+    const report = await runPlan(
+      dependentPlan,
+      { concurrency: 2, stopOnError: false, journalDir: dir, resume: true },
+      view,
+      { governor: resumed, allowAdvisory: true },
+    );
+    expect(calls).toEqual([]);
+    expect(resumed.usdSpent).toBe(5);
+    expect(report.jobs[0]?.result.status).toBe('needs-human');
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed' });
+    expect(report.counts.blocked).toBe(2);
+    expect(
+      (await events(dir)).some((event) => event.type === 'job-quarantined' && event.jobId === 'a'),
+    ).toBe(true);
+    const released = createGovernor({ maxUsd: 10 });
+    const releasedReport = await runPlan(
+      dependentPlan,
+      { concurrency: 2, stopOnError: false, journalDir: dir, resume: true },
+      view,
+      { governor: released, allowAdvisory: true, releaseQuarantine: ['a'] },
+    );
+    expect(calls).toEqual(['a', 'dependent']);
+    expect(released.usdSpent).toBe(5);
+    expect(releasedReport.counts.done).toBe(2);
+    expect(
+      (await events(dir)).some(
+        (event) => event.type === 'quarantine-released' && event.jobId === 'a',
+      ),
+    ).toBe(true);
+  },
+  journalEnclosure(3),
+);
+
+test(
+  'settlement append failure aborts and drains its admitted sibling with full settlement',
+  async () => {
+    const dir = await directory();
+    const injected = new Error('settlement append failed');
+    const siblingStarted = deferred();
+    const governor = createGovernor({ maxUsd: 10 });
+    const calls: string[] = [];
+    let aborted = false;
+    hooks.before = async (event) => {
+      if (event.type === 'reservation-settled' && event.jobId === 'a') throw injected;
+    };
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 2, stopOnError: false, journalDir: dir },
+        registry(async (id) => {
+          calls.push(id);
+          if (id === 'a') {
+            await siblingStarted.promise;
+            return { status: 'ok', value: id };
+          }
+          const context = currentJobContext();
+          if (context === undefined) throw new Error('missing governed job context');
+          await new Promise<void>((resolve) => {
+            context.signal.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                resolve();
+              },
+              { once: true },
+            );
+            siblingStarted.resolve();
+          });
+          return {
+            status: 'indeterminate',
+            detail: 'journal failure cancelled the admitted sibling',
+          };
+        }),
+        { governor, allowAdvisory: true },
+      ),
+    ).rejects.toBe(injected);
+    expect(calls).toEqual(['a', 'b']);
+    expect(aborted).toBe(true);
+    expect(governor.outstandingCount).toBe(0);
+    expect(governor.inFlight).toBe(0);
+    expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([
+      expect.objectContaining({ jobId: 'b', basis: 'full', charged: 5 }),
+    ]);
+  },
+  journalEnclosure(1),
+);
+
+test(
+  'fold corruption releases the lease before rejecting and distinct plans can hold separate leases',
+  async () => {
+    const dir = await directory();
+    await writeFile(join(dir, 'journal-stop--1--a.ndjson'), '{corrupt}\n');
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        registry(async () => ({ status: 'ok', value: 1 })),
+      ),
+    ).rejects.toThrow();
+    const owner = await acquirePlanLock(dir, plan.id, 'next');
+    try {
+      const otherPlan = await acquirePlanLock(dir, 'other-plan', 'parallel');
+      await otherPlan.release();
+      await owner.assertHeld();
+    } finally {
+      await owner.release();
+    }
+  },
+  journalEnclosure(3),
+);
+
+test(
+  'atomic publication exclusion prevents a late reclaimer while a plain owner dispatches',
+  async () => {
+    const dir = await directory();
+    const seed = await acquirePlanLock(dir, plan.id, 'seed');
+    await seed.release();
+    const publicationPaused = deferred();
+    const publish = deferred();
+    const bodyStarted = deferred();
+    const finishBody = deferred();
+    hooks.beforePublication = async () => {
+      publicationPaused.resolve();
+      await publish.promise;
+    };
+    const oneJob: Plan = { id: plan.id, jobs: plan.jobs.slice(0, 1) };
+    const calls: string[] = [];
+    const running = runPlan(
+      oneJob,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      registry(async (id) => {
+        calls.push(id);
+        bodyStarted.resolve();
+        await finishBody.promise;
+        return { status: 'ok', value: id };
+      }),
+    );
+    try {
+      // Eligibility has been decided and the complete replacement is ready,
+      // but the owning publisher has not renamed it yet.
+      await awaitStage(publicationPaused.promise, running, 'publication pause');
+      await expect(acquirePlanLock(dir, plan.id, 'late-reclaimer')).rejects.toThrow(
+        'acquisition in progress',
+      );
+      expect(calls).toEqual([]);
+      publish.resolve();
+      await awaitStage(bodyStarted.promise, running, 'body entry');
+      await expect(
+        runPlan(
+          oneJob,
+          { concurrency: 1, stopOnError: false, journalDir: dir },
+          registry(async (id) => {
+            calls.push(`duplicate-${id}`);
+            return { status: 'ok', value: id };
+          }),
+        ),
+      ).rejects.toThrow('plan locked');
+      expect(calls).toEqual(['a']);
+    } finally {
+      publish.resolve();
+      finishBody.resolve();
+      await running;
+    }
+  },
+  journalEnclosure(4),
+);
 
 const invocationCases = (['plain', 'capped', 'uncapped'] as const).flatMap((mode) =>
   (['import', 'validation'] as const).flatMap((pause) =>
@@ -510,6 +592,7 @@ test.each(invocationCases)(
       ).toHaveLength(0);
     }
   },
+  journalEnclosure(1),
 );
 
 test.each(['capped', 'uncapped'] as const)(
@@ -539,7 +622,7 @@ test.each(['capped', 'uncapped'] as const)(
       { get: () => entry },
       { governor, signal: abort.signal, allowAdvisory: true },
     );
-    await parked.promise;
+    await awaitStage(parked.promise, running, 'importer parked');
     abort.abort();
     resume.resolve();
     const report = await running;
@@ -556,6 +639,7 @@ test.each(['capped', 'uncapped'] as const)(
       ]);
     }
   },
+  journalEnclosure(1),
 );
 
 // Advance only ladder time; deferred imports and durable append barriers
@@ -590,74 +674,116 @@ function ladderClock() {
   };
 }
 
-test('closed ladder cannot invoke a resumed importer while a sibling holds the lease', async () => {
-  const dir = await directory();
-  const parked = deferred();
-  const resume = deferred();
-  const firstSettled = deferred();
-  const siblingStarted = deferred();
-  const finishSibling = deferred();
-  const calls: string[] = [];
-  const clock = ladderClock();
-  const governor = createGovernor(
-    { maxUsd: 10, inFlightCeiling: 2, perJobWallClockMs: 10, abortGraceMs: 1, killGraceMs: 1 },
-    clock,
-  );
-  hooks.before = async (event) => {
-    if (event.type === 'job-started' && event.jobId === 'b') await firstSettled.promise;
-  };
-  hooks.after = async (event) => {
-    if (event.type === 'reservation-settled' && event.jobId === 'a') firstSettled.resolve();
-  };
-  const entry = (id: string): OpRegistryEntry<never, never> => ({
-    name: id,
-    inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
-    importer: async () => {
-      if (id === 'a') {
-        parked.resolve();
-        await resume.promise;
-      }
-      return (async () => {
-        calls.push(id);
-        if (id === 'b') {
-          siblingStarted.resolve();
-          await finishSibling.promise;
+test(
+  'closed ladder cannot invoke a resumed importer while a sibling holds the lease',
+  async () => {
+    const dir = await directory();
+    const parked = deferred();
+    const resume = deferred();
+    const firstSettled = deferred();
+    const siblingStarted = deferred();
+    const finishSibling = deferred();
+    const calls: string[] = [];
+    const clock = ladderClock();
+    cleanupActions.add(() => clock.advance(10_000));
+    const governor = createGovernor(
+      { maxUsd: 10, inFlightCeiling: 2, perJobWallClockMs: 10, abortGraceMs: 1, killGraceMs: 1 },
+      clock,
+    );
+    hooks.before = async (event) => {
+      if (event.type === 'job-started' && event.jobId === 'b') await firstSettled.promise;
+    };
+    hooks.after = async (event) => {
+      if (event.type === 'reservation-settled' && event.jobId === 'a') firstSettled.resolve();
+    };
+    const entry = (id: string): OpRegistryEntry<never, never> => ({
+      name: id,
+      inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
+      importer: async () => {
+        if (id === 'a') {
+          parked.resolve();
+          await resume.promise;
         }
-        return { status: 'ok', value: id };
-      }) as unknown as Op<never, never>;
-    },
-  });
-  const entries = new Map(['a', 'b'].map((id) => [id, entry(id)]));
-  const running = runPlan(
-    { id: plan.id, jobs: ['a', 'b'].map((id) => ({ id, op: id, input: { id } })) },
-    { concurrency: 2, stopOnError: false, journalDir: dir },
-    { get: (name) => entries.get(name) },
-    { governor, allowAdvisory: true },
-  );
-  try {
-    await parked.promise;
-    clock.advance(12);
-    await siblingStarted.promise;
-    expect(governor.inFlight).toBe(1);
-    expect(governor.outstandingCount).toBe(1);
-    resume.resolve();
-    // Drain the detached import continuation while the sibling retains its
-    // reservation/slot and the plan lease, rather than relying on lease loss.
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(calls).toEqual(['b']);
-    await expect(acquirePlanLock(dir, plan.id, 'contender')).rejects.toThrow('plan locked');
-    expect(governor.tripped).toBe(false);
-  } finally {
-    resume.resolve();
-    finishSibling.resolve();
-  }
-  const report = await running;
-  expect(report.jobs.find((job) => job.jobId === 'a')?.result.status).toBe('budget-exhausted');
-  expect(report.jobs.find((job) => job.jobId === 'b')?.result.status).toBe('ok');
-  expect(governor.inFlight).toBe(0);
-  expect(governor.outstandingCount).toBe(0);
-  expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([
-    expect.objectContaining({ jobId: 'a', charged: 5, basis: 'full' }),
-    expect.objectContaining({ jobId: 'b', charged: 0, basis: 'observed' }),
-  ]);
-});
+        return (async () => {
+          calls.push(id);
+          if (id === 'b') {
+            siblingStarted.resolve();
+            await finishSibling.promise;
+          }
+          return { status: 'ok', value: id };
+        }) as unknown as Op<never, never>;
+      },
+    });
+    const entries = new Map(['a', 'b'].map((id) => [id, entry(id)]));
+    const running = runPlan(
+      { id: plan.id, jobs: ['a', 'b'].map((id) => ({ id, op: id, input: { id } })) },
+      { concurrency: 2, stopOnError: false, journalDir: dir },
+      { get: (name) => entries.get(name) },
+      { governor, allowAdvisory: true },
+    );
+    try {
+      await awaitStage(parked.promise, running, 'importer parked');
+      clock.advance(12);
+      await siblingStarted.promise;
+      expect(governor.inFlight).toBe(1);
+      expect(governor.outstandingCount).toBe(1);
+      resume.resolve();
+      // Drain the detached import continuation while the sibling retains its
+      // reservation/slot and the plan lease, rather than relying on lease loss.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(calls).toEqual(['b']);
+      await expect(acquirePlanLock(dir, plan.id, 'contender')).rejects.toThrow('plan locked');
+      expect(governor.tripped).toBe(false);
+    } finally {
+      resume.resolve();
+      finishSibling.resolve();
+    }
+    const report = await running;
+    expect(report.jobs.find((job) => job.jobId === 'a')?.result.status).toBe('budget-exhausted');
+    expect(report.jobs.find((job) => job.jobId === 'b')?.result.status).toBe('ok');
+    expect(governor.inFlight).toBe(0);
+    expect(governor.outstandingCount).toBe(0);
+    expect((await events(dir)).filter((event) => event.type === 'reservation-settled')).toEqual([
+      expect.objectContaining({ jobId: 'a', charged: 5, basis: 'full' }),
+      expect.objectContaining({ jobId: 'b', charged: 0, basis: 'observed' }),
+    ]);
+  },
+  journalEnclosure(2),
+);
+
+// Positive cleanup control: a writer paused in an op must finish its durable
+// tail while the directory exists. This verifies fixture ordering, not the
+// historical ENOENT's cause (the old trace did not identify that writer).
+test(
+  'fixture cleanup drains a paused writer before deleting its journal',
+  async () => {
+    const dir = await directory();
+    const entered = deferred();
+    const finish = deferred();
+    let tailWritten = false;
+    hooks.after = async (event) => {
+      if (event.type === 'run-finished') {
+        expect(await readFile(join(dir, `${event.runId}.ndjson`), 'utf8')).toContain(
+          'run-finished',
+        );
+        tailWritten = true;
+      }
+    };
+    const running = runPlan(
+      { id: plan.id, jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      registry(async () => {
+        entered.resolve();
+        await finish.promise;
+        return { status: 'ok', value: 'a' };
+      }),
+    );
+    await awaitStage(entered.promise, running, 'cleanup control body entry');
+    expect(tailWritten).toBe(false);
+    await settleFixtureWork();
+    await running;
+    expect(tailWritten).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  },
+  journalEnclosure(1),
+);

@@ -150,6 +150,9 @@ interface Worker {
   next(): Promise<Message>;
   exited: Promise<void>;
 }
+// Mirrors journal.ts private 10s helper + 10s boot bounds; the remaining
+// 5s covers measured Node/loader startup. Update on source-bound drift.
+const CHILD_STEP_MS = 2 * 10_000 + 5_000;
 const workers: Worker[] = [];
 const directories: string[] = [];
 const sockets = new Set<string>();
@@ -177,6 +180,7 @@ function start(dir: string, runId: string, extra: Record<string, string> = {}): 
   });
   const messages: Message[] = [];
   let waiter: ((message: Message) => void) | undefined;
+  let refuseWaiter: (() => void) | undefined;
   createInterface({ input: child.stdout }).on('line', (line) => {
     const message = JSON.parse(line) as Message;
     if (waiter !== undefined) {
@@ -186,7 +190,10 @@ function start(dir: string, runId: string, extra: Record<string, string> = {}): 
     } else messages.push(message);
   });
   const exited = new Promise<void>((resolve) => {
-    child.once('exit', () => resolve());
+    child.once('close', () => {
+      refuseWaiter?.();
+      resolve();
+    });
   });
   const worker: Worker = {
     child,
@@ -197,10 +204,18 @@ function start(dir: string, runId: string, extra: Record<string, string> = {}): 
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           waiter = undefined;
+          refuseWaiter = undefined;
           reject(new Error(`lock child timed out: ${stderr}`));
-        }, 10000);
+        }, CHILD_STEP_MS);
+        refuseWaiter = () => {
+          clearTimeout(timeout);
+          waiter = undefined;
+          refuseWaiter = undefined;
+          reject(new Error(`lock child closed before expected handshake: ${stderr}`));
+        };
         waiter = (message) => {
           clearTimeout(timeout);
+          refuseWaiter = undefined;
           resolve(message);
         };
       });
@@ -224,108 +239,135 @@ afterEach(async () => {
       worker.child.kill('SIGCONT');
       worker.child.kill('SIGKILL');
     }
-    await worker.exited;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        worker.exited,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('lock child not reaped; journal retained')),
+            CHILD_STEP_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
   await Promise.all([...sockets].map((path) => unlink(path).catch(() => undefined)));
   sockets.clear();
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
+}, CHILD_STEP_MS + 5_000);
 
-// Two child startups each have a 10s watchdog; the enclosing deadline must
-// cover both rather than expire at Vitest's default 5s during host load.
-test('different TMPDIR contenders use the recorded socket and cannot split one plan lock', async () => {
-  const dir = await directory();
-  const owner = start(dir, 'owner', { TMPDIR: '/tmp/owner-only' });
-  expect((await owner.next()).status).toBe('acquired');
-  await record(dir);
-  const contender = start(dir, 'contender', { TMPDIR: '/tmp/contender-only' });
-  const refusal = await contender.next();
-  expect(refusal.status).toBe('refused');
-  expect(refusal.error).toContain('plan locked');
-  owner.child.stdin.write('release\n');
-  expect((await owner.next()).status).toBe('released');
-  await owner.exited;
-  const next = await acquirePlanLock(dir, 'locked', 'next');
-  await next.release();
-}, 30000);
+// Owner child, contender child, then parent acquisition: three bounded steps.
+// Enclosure: three acquisitions, two of them fresh child processes.
+test(
+  'different TMPDIR contenders use the recorded socket and cannot split one plan lock',
+  async () => {
+    const dir = await directory();
+    const owner = start(dir, 'owner', { TMPDIR: '/tmp/owner-only' });
+    expect((await owner.next()).status).toBe('acquired');
+    await record(dir);
+    const contender = start(dir, 'contender', { TMPDIR: '/tmp/contender-only' });
+    const refusal = await contender.next();
+    expect(refusal.status).toBe('refused');
+    expect(refusal.error).toContain('plan locked');
+    owner.child.stdin.write('release\n');
+    expect((await owner.next()).status).toBe('released');
+    await owner.exited;
+    const next = await acquirePlanLock(dir, 'locked', 'next');
+    await next.release();
+  },
+  3 * CHILD_STEP_MS,
+);
 
-test('SIGSTOP with a saturated socket backlog never permits stealing a live owner', async () => {
-  const dir = await directory();
-  const owner = start(dir, 'paused');
-  expect((await owner.next()).status).toBe('acquired');
-  const lock = await record(dir);
-  owner.child.kill('SIGSTOP');
-  // The listener uses backlog 16. Connections queue while the owner is paused;
-  // both a full backlog and PID liveness must remain refusal evidence.
-  const connections: Socket[] = [];
-  await Promise.all(
-    Array.from(
-      { length: 64 },
-      () =>
-        new Promise<void>((resolve) => {
-          const socket = createConnection(String(lock.socketPath));
-          connections.push(socket);
-          const done = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-          const timeout = setTimeout(done, 100);
-          socket.once('connect', done);
-          socket.once('error', done);
-        }),
-    ),
-  );
-  try {
-    await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('plan locked');
-    expect((await record(dir)).nonce).toBe(lock.nonce);
-  } finally {
-    for (const socket of connections) socket.destroy();
-    owner.child.kill('SIGCONT');
-  }
-  owner.child.stdin.write('release\n');
-  expect((await owner.next()).status).toBe('released');
-});
+// Enclosure: owner child then contender; includes the 1s socket probe within margin.
+test(
+  'SIGSTOP with a saturated socket backlog never permits stealing a live owner',
+  async () => {
+    const dir = await directory();
+    const owner = start(dir, 'paused');
+    expect((await owner.next()).status).toBe('acquired');
+    const lock = await record(dir);
+    owner.child.kill('SIGSTOP');
+    // The listener uses backlog 16. Connections queue while the owner is paused;
+    // both a full backlog and PID liveness must remain refusal evidence.
+    const connections: Socket[] = [];
+    await Promise.all(
+      Array.from(
+        { length: 64 },
+        () =>
+          new Promise<void>((resolve) => {
+            const socket = createConnection(String(lock.socketPath));
+            connections.push(socket);
+            const done = () => {
+              clearTimeout(timeout);
+              resolve();
+            };
+            const timeout = setTimeout(done, 100);
+            socket.once('connect', done);
+            socket.once('error', done);
+          }),
+      ),
+    );
+    try {
+      await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('plan locked');
+      expect((await record(dir)).nonce).toBe(lock.nonce);
+    } finally {
+      for (const socket of connections) socket.destroy();
+      owner.child.kill('SIGCONT');
+    }
+    owner.child.stdin.write('release\n');
+    expect((await owner.next()).status).toBe('released');
+  },
+  2 * CHILD_STEP_MS,
+);
 
-test('SIGKILL recovery charges an unresolved durable reservation and quarantines its job', async () => {
-  const dir = await directory();
-  const owner = start(dir, 'locked--1--a', { J_TEST_CRASH: 'yes' });
-  expect((await owner.next()).status).toBe('acquired');
-  await record(dir);
-  owner.child.kill('SIGKILL');
-  await owner.exited;
-  const calls: string[] = [];
-  const candidate: OpRegistryEntry<never, never> = {
-    name: 'work',
-    inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
-    importer: () =>
-      Promise.resolve((async () => {
-        calls.push('a');
-        return { status: 'ok', value: 'a' };
-      }) as unknown as Op<never, never>),
-  };
-  const registry: OpRegistryView = { get: () => candidate };
-  const governor = createGovernor({ maxUsd: 10 });
-  const report = await runPlan(
-    { id: 'locked', jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
-    { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-    registry,
-    { governor, allowAdvisory: true },
-  );
-  expect(calls).toEqual([]);
-  expect(governor.usdSpent).toBe(4);
-  expect(governor.quarantinedJobs.has('a')).toBe(true);
-  expect(governor.outstandingCount).toBe(0);
-  expect(governor.inFlight).toBe(0);
-  const recoveryEvents = await openRunLog(dir).read(report.runId);
-  expect(recoveryEvents.find((event) => event.type === 'run-started')).toMatchObject({
-    journalVersion: 2,
-    seq: 2,
-  });
-  const verdict = report.jobs[0]?.result;
-  expect(verdict?.status).toBe('needs-human');
-  if (verdict?.status !== 'needs-human') throw new Error('missing quarantine verdict');
-  expect(verdict.reason).toContain('quarantined:');
-});
+// Enclosure: owner write-ahead then parent recovery.
+test(
+  'SIGKILL recovery charges an unresolved durable reservation and quarantines its job',
+  async () => {
+    const dir = await directory();
+    const owner = start(dir, 'locked--1--a', { J_TEST_CRASH: 'yes' });
+    expect((await owner.next()).status).toBe('acquired');
+    await record(dir);
+    owner.child.kill('SIGKILL');
+    await owner.exited;
+    const calls: string[] = [];
+    const candidate: OpRegistryEntry<never, never> = {
+      name: 'work',
+      inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
+      importer: () =>
+        Promise.resolve((async () => {
+          calls.push('a');
+          return { status: 'ok', value: 'a' };
+        }) as unknown as Op<never, never>),
+    };
+    const registry: OpRegistryView = { get: () => candidate };
+    const governor = createGovernor({ maxUsd: 10 });
+    const report = await runPlan(
+      { id: 'locked', jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+      { governor, allowAdvisory: true },
+    );
+    expect(calls).toEqual([]);
+    expect(governor.usdSpent).toBe(4);
+    expect(governor.quarantinedJobs.has('a')).toBe(true);
+    expect(governor.outstandingCount).toBe(0);
+    expect(governor.inFlight).toBe(0);
+    const recoveryEvents = await openRunLog(dir).read(report.runId);
+    expect(recoveryEvents.find((event) => event.type === 'run-started')).toMatchObject({
+      journalVersion: 2,
+      seq: 2,
+    });
+    const verdict = report.jobs[0]?.result;
+    expect(verdict?.status).toBe('needs-human');
+    if (verdict?.status !== 'needs-human') throw new Error('missing quarantine verdict');
+    expect(verdict.reason).toContain('quarantined:');
+  },
+  2 * CHILD_STEP_MS,
+);
 
 test.each(['', '{"nonce":', '{"nonce":"invalid"}'])(
   'half-written or corrupt lock refuses without replacing bytes: %s',
@@ -338,74 +380,89 @@ test.each(['', '{"nonce":', '{"nonce":"invalid"}'])(
   },
 );
 
-test('racing reclaimers fence by nonce and stale release cannot clobber the winner', async () => {
-  const dir = await directory();
-  const seed = await acquirePlanLock(dir, 'locked', 'seed');
-  await seed.release();
-  const contenders = [
-    start(dir, 'one', { J_TEST_RACE: 'yes' }),
-    start(dir, 'two', { J_TEST_RACE: 'yes' }),
-  ];
-  expect(await Promise.all(contenders.map((worker) => worker.next()))).toEqual([
-    { status: 'waiting' },
-    { status: 'waiting' },
-  ]);
-  for (const worker of contenders) worker.child.stdin.write('go\n');
-  const acquired = await Promise.all(contenders.map((worker) => worker.next()));
-  const seqs = acquired
-    .filter((message) => message.status === 'acquired')
-    .map((message) => message.seq);
-  expect(seqs).toHaveLength(1); // exclusion, not merely eventual nonce convergence
-  expect(new Set(seqs).size).toBe(seqs.length);
-  const winner = await record(dir);
-  const statuses = await Promise.all(
-    contenders.map(async (worker, index) => {
-      if (acquired[index]?.status !== 'acquired') return 'refused';
-      worker.child.stdin.write('check\n');
-      return (await worker.next()).status;
-    }),
-  );
-  expect(statuses.filter((status) => status === 'held')).toHaveLength(1);
-  for (const [index, worker] of contenders.entries()) {
-    if (statuses[index] !== 'lost') continue;
-    worker.child.stdin.write('release\n');
-    expect((await worker.next()).status).toBe('released');
-    expect((await record(dir)).nonce).toBe(winner.nonce);
-    expect(await record(dir)).not.toHaveProperty('released');
-  }
-  for (const [index, worker] of contenders.entries()) {
-    if (statuses[index] !== 'held') continue;
-    worker.child.stdin.write('release\n');
-    expect((await worker.next()).status).toBe('released');
-  }
-});
+// Enclosure: seed plus two independently booted reclaimers (parallel, conservatively summed).
+test(
+  'racing reclaimers fence by nonce and stale release cannot clobber the winner',
+  async () => {
+    const dir = await directory();
+    const seed = await acquirePlanLock(dir, 'locked', 'seed');
+    await seed.release();
+    const contenders = [
+      start(dir, 'one', { J_TEST_RACE: 'yes' }),
+      start(dir, 'two', { J_TEST_RACE: 'yes' }),
+    ];
+    expect(await Promise.all(contenders.map((worker) => worker.next()))).toEqual([
+      { status: 'waiting' },
+      { status: 'waiting' },
+    ]);
+    for (const worker of contenders) worker.child.stdin.write('go\n');
+    const acquired = await Promise.all(contenders.map((worker) => worker.next()));
+    const seqs = acquired
+      .filter((message) => message.status === 'acquired')
+      .map((message) => message.seq);
+    expect(seqs).toHaveLength(1); // exclusion, not merely eventual nonce convergence
+    expect(new Set(seqs).size).toBe(seqs.length);
+    const winner = await record(dir);
+    const statuses = await Promise.all(
+      contenders.map(async (worker, index) => {
+        if (acquired[index]?.status !== 'acquired') return 'refused';
+        worker.child.stdin.write('check\n');
+        return (await worker.next()).status;
+      }),
+    );
+    expect(statuses.filter((status) => status === 'held')).toHaveLength(1);
+    for (const [index, worker] of contenders.entries()) {
+      if (statuses[index] !== 'lost') continue;
+      worker.child.stdin.write('release\n');
+      expect((await worker.next()).status).toBe('released');
+      expect((await record(dir)).nonce).toBe(winner.nonce);
+      expect(await record(dir)).not.toHaveProperty('released');
+    }
+    for (const [index, worker] of contenders.entries()) {
+      if (statuses[index] !== 'held') continue;
+      worker.child.stdin.write('release\n');
+      expect((await worker.next()).status).toBe('released');
+    }
+  },
+  3 * CHILD_STEP_MS,
+);
 
-test('foreign-host record refuses even with dead-looking PID/socket evidence', async () => {
-  const dir = await directory();
-  const path = join(dir, 'locked.lock.json');
-  const bytes = JSON.stringify({
-    nonce: randomUUID(),
-    socketPath: '/tmp/no-such-cq-j.sock',
-    pid: 2147483647,
-    host: 'foreign-host',
-    bootId: 'old-boot',
-    runId: 'foreign',
-  });
-  await writeFile(path, bytes);
-  await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('foreign host');
-  expect(await readFile(path, 'utf8')).toBe(bytes);
-});
+// Enclosure: one acquisition before the foreign-host refusal.
+test(
+  'foreign-host record refuses even with dead-looking PID/socket evidence',
+  async () => {
+    const dir = await directory();
+    const path = join(dir, 'locked.lock.json');
+    const bytes = JSON.stringify({
+      nonce: randomUUID(),
+      socketPath: '/tmp/no-such-cq-j.sock',
+      pid: 2147483647,
+      host: 'foreign-host',
+      bootId: 'old-boot',
+      runId: 'foreign',
+    });
+    await writeFile(path, bytes);
+    await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow('foreign host');
+    expect(await readFile(path, 'utf8')).toBe(bytes);
+  },
+  CHILD_STEP_MS + 5_000,
+);
 
-test('independent child sequence claims use the real plan and unique positive ordinals', async () => {
-  const dir = await directory();
-  const contenders = [
-    start(dir, 'claim-one', { J_TEST_CLAIM_ONLY: 'yes' }),
-    start(dir, 'claim-two', { J_TEST_CLAIM_ONLY: 'yes' }),
-  ];
-  const claims = await Promise.all(contenders.map((worker) => worker.next()));
-  expect(claims.map((message) => message.status)).toEqual(['claimed', 'claimed']);
-  expect(claims.map((message) => message.seq).sort()).toEqual([1, 2]);
-});
+// Enclosure: parallel Node/loader startups; no helper or boot lookup.
+test(
+  'independent child sequence claims use the real plan and unique positive ordinals',
+  async () => {
+    const dir = await directory();
+    const contenders = [
+      start(dir, 'claim-one', { J_TEST_CLAIM_ONLY: 'yes' }),
+      start(dir, 'claim-two', { J_TEST_CLAIM_ONLY: 'yes' }),
+    ];
+    const claims = await Promise.all(contenders.map((worker) => worker.next()));
+    expect(claims.map((message) => message.status)).toEqual(['claimed', 'claimed']);
+    expect(claims.map((message) => message.seq).sort()).toEqual([1, 2]);
+  },
+  CHILD_STEP_MS,
+);
 
 test('an interrupted publication guard refuses without unsafe automatic reclamation', async () => {
   const dir = await directory();
@@ -511,85 +568,100 @@ test('invalid inherited descriptor fails closed without publication', async () =
   await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-test('helper-exit handshake retains exclusion through SIGSTOP; SIGKILL recovers a complete record', async () => {
-  const dir = await directory();
-  const path = join(dir, 'locked.lock.json');
-  // Complete released prior state; no legacy acquiring directory exists.
-  const seed = await acquirePlanLock(dir, 'locked', 'seed');
-  await seed.release();
-  const prior = await readFile(path, 'utf8');
-  const held = start(dir, 'interrupted', { J_TEST_PAUSE_PUBLICATION: 'yes' });
-  expect(await held.next()).toMatchObject({ status: 'publication-held' });
-  const inode = await stat(join(dir, 'locked.lock.guard'));
-  await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow(
-    'acquisition in progress',
-  );
-  expect(await readFile(path, 'utf8')).toBe(prior);
-  held.child.kill('SIGKILL');
-  await held.exited;
-  const recovered = await acquirePlanLock(dir, 'locked', 'recovered');
-  try {
-    await recovered.assertHeld();
-  } finally {
-    await recovered.release();
-  }
-  const after = await stat(join(dir, 'locked.lock.guard'));
-  expect({ dev: after.dev, ino: after.ino, size: after.size }).toEqual({
-    dev: inode.dev,
-    ino: inode.ino,
-    size: 0,
-  });
-  expect((await record(dir)).runId).toBe('recovered');
-}, 30000);
-
-test('live inherited-descriptor flock retains same-process exclusion after helper exit', async (context) => {
-  try {
-    await access('/usr/bin/perl');
-  } catch {
-    context.skip();
-    return;
-  }
-  const dir = await directory();
-  const path = join(dir, 'live.guard');
-  const first = await open(path, 'a+', 0o600);
-  const second = await open(path, 'a+', 0o600);
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-  const flock = (fd: number) =>
-    new Promise<number | null>((resolve, reject) => {
-      const helper = actual.spawn(
-        '/usr/bin/perl',
-        ['-e', 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))'],
-        { stdio: [fd, 'ignore', 'pipe'] },
-      );
-      helper.once('error', reject);
-      helper.once('close', (code) => resolve(code));
+// Enclosure: seed and paused child each 25s; cached parent contention/recovery share remaining 25s.
+test(
+  'helper-exit handshake retains exclusion through SIGSTOP; SIGKILL recovers a complete record',
+  async () => {
+    const dir = await directory();
+    const path = join(dir, 'locked.lock.json');
+    // Complete released prior state; no legacy acquiring directory exists.
+    const seed = await acquirePlanLock(dir, 'locked', 'seed');
+    await seed.release();
+    const prior = await readFile(path, 'utf8');
+    const held = start(dir, 'interrupted', { J_TEST_PAUSE_PUBLICATION: 'yes' });
+    expect(await held.next()).toMatchObject({ status: 'publication-held' });
+    const inode = await stat(join(dir, 'locked.lock.guard'));
+    await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow(
+      'acquisition in progress',
+    );
+    expect(await readFile(path, 'utf8')).toBe(prior);
+    held.child.kill('SIGKILL');
+    await held.exited;
+    const recovered = await acquirePlanLock(dir, 'locked', 'recovered');
+    try {
+      await recovered.assertHeld();
+    } finally {
+      await recovered.release();
+    }
+    const after = await stat(join(dir, 'locked.lock.guard'));
+    expect({ dev: after.dev, ino: after.ino, size: after.size }).toEqual({
+      dev: inode.dev,
+      ino: inode.ino,
+      size: 0,
     });
-  try {
-    expect(await flock(first.fd)).toBe(0); // holder handshake before contender
-    expect(await flock(second.fd)).toBe(3);
-    expect(await flock(first.fd)).toBe(0); // same OFD is a reference to one lock
-    await first.close();
-    expect(await flock(second.fd)).toBe(0);
-  } finally {
-    await first.close().catch(() => undefined);
-    await second.close();
-  }
-}, 30000);
+    expect((await record(dir)).runId).toBe('recovered');
+  },
+  3 * CHILD_STEP_MS,
+);
 
-test('boot identity timeout remains retryable; a successful lookup is reused per process', async (context) => {
-  if (process.platform !== 'darwin') {
-    context.skip();
-    return;
-  }
-  const dir = await directory();
-  const worker = start(dir, 'cache', { J_TEST_BOOT_CACHE: 'yes' });
-  expect(await worker.next()).toMatchObject({
-    status: 'refused',
-    bootCalls: 1,
-    error:
-      'journal: boot identity startup/completion deadline exceeded after 10000ms (possible slow host)',
-  });
-  expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
-  expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
-  await worker.exited;
-}, 30000);
+// Enclosure: four helper-only calls at 10s plus 10s control/I/O margin.
+test(
+  'live inherited-descriptor flock retains same-process exclusion after helper exit',
+  async (context) => {
+    try {
+      await access('/usr/bin/perl');
+    } catch {
+      context.skip();
+      return;
+    }
+    const dir = await directory();
+    const path = join(dir, 'live.guard');
+    const first = await open(path, 'a+', 0o600);
+    const second = await open(path, 'a+', 0o600);
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const flock = (fd: number) =>
+      new Promise<number | null>((resolve, reject) => {
+        const helper = actual.spawn(
+          '/usr/bin/perl',
+          ['-e', 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))'],
+          { stdio: [fd, 'ignore', 'pipe'] },
+        );
+        helper.once('error', reject);
+        helper.once('close', (code) => resolve(code));
+      });
+    try {
+      expect(await flock(first.fd)).toBe(0); // holder handshake before contender
+      expect(await flock(second.fd)).toBe(3);
+      expect(await flock(first.fd)).toBe(0); // same OFD is a reference to one lock
+      await first.close();
+      expect(await flock(second.fd)).toBe(0);
+    } finally {
+      await first.close().catch(() => undefined);
+      await second.close();
+    }
+  },
+  2 * CHILD_STEP_MS,
+);
+
+// Enclosure: three sequential child acquisitions; first failure must remain retryable.
+test(
+  'boot identity timeout remains retryable; a successful lookup is reused per process',
+  async (context) => {
+    if (process.platform !== 'darwin') {
+      context.skip();
+      return;
+    }
+    const dir = await directory();
+    const worker = start(dir, 'cache', { J_TEST_BOOT_CACHE: 'yes' });
+    expect(await worker.next()).toMatchObject({
+      status: 'refused',
+      bootCalls: 1,
+      error:
+        'journal: boot identity startup/completion deadline exceeded after 10000ms (possible slow host)',
+    });
+    expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
+    expect(await worker.next()).toMatchObject({ status: 'released', bootCalls: 2 });
+    await worker.exited;
+  },
+  3 * CHILD_STEP_MS,
+);
