@@ -130,16 +130,49 @@ jobs:
         run: npm run check:static
       - name: Check formatting
         run: npm run format:check
+      # Timing probe (baseline component A): this job alone also writes the
+      # vitest JSON report (per-file durations) for each test invocation.
+      # `--reporter=default` keeps the console output; `json` adds the file
+      # (cac dot notation: `--outputFile.json=` targets only the json
+      # reporter). The paths sit under $RUNNER_TEMP, outside the worktree, so
+      # Knip and the build below never see them. `--coverage` stays OFF —
+      # the ratchet is the instrumented Linux venue. These steps carry no
+      # `if:`, exactly as in the static job: they remain the gate.
       - name: Test unit
-        run: npm run test:unit
+        run: npm run test:unit -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-unit.json"
       - name: Test e2e/acp
-        run: npm run test:e2e
+        run: npm run test:e2e -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-e2e.json"
       - name: Check unused files and dependencies
         run: npm run knip
       - name: Build
         run: npm run build
       - name: Check generated op docs
         run: npm run gen:op-docs:check
+      # The reporter writes in onFinished, so a red test run still leaves
+      # both files. This step proves both exist and parse (it is what
+      # catches a wrong reporter flag); it is a plain step, so it is skipped
+      # after an earlier failure and never masks it.
+      - name: Verify vitest JSON reports
+        run: |
+          for f in vitest-unit vitest-e2e; do
+            node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$RUNNER_TEMP/vitest-reports/$f.json"
+          done
+      # Publishes whatever was written, even after a red run. Measurement
+      # plumbing must not become a second gate: continue-on-error and
+      # if-no-files-found: warn mean an upload problem can neither fail a
+      # green job nor mask a red one. The baseline report (lane A) downloads
+      # this artifact per run (`gh run download -n vitest-macos-<run_id>-<attempt>`)
+      # and reads `testResults[].startTime/endTime` per file; name encodes
+      # OS and run attempt so a re-run never collides.
+      - name: Upload vitest JSON reports
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (immutable commit pin; repo policy)
+        with:
+          name: vitest-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vitest-reports/
+          if-no-files-found: warn
+          retention-days: 30
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
