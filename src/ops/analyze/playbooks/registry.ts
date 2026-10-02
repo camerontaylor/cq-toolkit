@@ -50,23 +50,32 @@
 //          quarantine) any more than it may PASS it (I5). The edits are
 //          restored too, and the prose says plainly that the verdict was
 //          unobservable.
-//   5. ROLLBACK ON A NON-PASSING VERDICT (W4.3) — the only outcome that
-//      leaves the workspace alone is a pass. A `fail` or an
+//   5. ROLLBACK ON A NON-PASSING VERDICT (W4.3) — a `fail` or an
 //      `indeterminate` restores every file the apply rewrote, from the
 //      bytes captured before it ran, through the SAME store. The restore
 //      report names what was restored and — the part that must never be
 //      softened — what is STRANDED (a file the restore could not put
 //      back), so the exact on-disk state is always knowable.
 //      THE RESTORE IS A MUTATION, so it runs under the SAME workspace
-//      mutation lock as the apply (O-6, closed for real this time) AND it
-//      is CONDITIONAL: it writes the pre-apply bytes back only if the file
-//      still holds the exact bytes THIS dispatch wrote. A concurrent
-//      approved dispatch of another playbook may legitimately have written
-//      the same workspace while this verifier was running, and a blind
-//      restore would silently discard that work — a lost update between
-//      the ops' own writers, which no amount of "the workspace is under
-//      approval" excuses. A file that no longer matches is reported
+//      mutation lock as the apply (O-6) AND it is CONDITIONAL: it writes the
+//      pre-apply bytes back only if the file still holds the exact bytes THIS
+//      dispatch wrote. A concurrent approved dispatch of another playbook may
+//      legitimately have written the same workspace while this verifier was
+//      running, and a blind restore would silently discard that work — a lost
+//      update between the ops' own writers, which no amount of "the workspace
+//      is under approval" excuses. A file that no longer matches is reported
 //      STRANDED, untouched, with the digests on both sides.
+//      RESIDUAL, stated rather than hidden: "a pass is the only outcome that
+//      leaves the workspace alone" is true of THIS dispatch's own edits, NOT
+//      of the workspace under concurrent approved dispatches. Two approved
+//      dispatches over overlapping targets can interleave such that B
+//      restores A's verifier-failed bytes as its own pre-apply baseline —
+//      A's stranded evidence makes the state detectable, and nothing is
+//      CLOBBERED (both reports are truthful from their own frame), but a
+//      failed remediation can survive on disk. Recorded as a residual in the
+//      family NOTES; the fix would fingerprint the pre-apply capture inside
+//      the mutation critical section rather than trusting the pre-capture
+//      bytes as the restore baseline.
 //
 // THE TRACE CUT (journal-record shape): every dispatch is supposed to leave
 // a journal record, but the kernel journal seam (src/kernel/journal.ts) is
@@ -507,7 +516,6 @@ export function makePlaybookDispatchOp(
         timeoutMs: input.timeoutMs,
       }),
     };
-    const codemod = makeAstGrepCodemod(deps.run, () => store);
     // The try wraps the AWAIT itself, not the destructuring below: a
     // PostApplyReadFault is thrown from inside the write callback, so it
     // surfaces as a rejection of withApprovedMutation, after the lock has
@@ -520,8 +528,21 @@ export function makePlaybookDispatchOp(
       approved = await withApprovedMutation(
         deps.approval ?? DENY_ALL_APPROVALS,
         subject,
-        async (): Promise<{ engine: OpResult<CodemodReport>; applied: Map<string, string> }> => {
-          const engine = await codemod({
+        async (
+          scope,
+        ): Promise<{ engine: OpResult<CodemodReport>; applied: Map<string, string> }> => {
+          // NESTED COMPOSITION (ADR-0003 §6): the engine primitive receives
+          // the scope for the approval THIS dispatch already exercised, so the
+          // inner write runs under the already-held lock and already-consumed
+          // nonce WITHOUT exercising a second approval — which would throw on
+          // at-most-once. A scope is not a bypass: it is minted only inside
+          // this critical section, is not serializable, and carries no nonce.
+          const engine = await makeAstGrepCodemod(
+            deps.run,
+            () => store,
+            undefined,
+            scope,
+          )({
             dir: input.dir,
             rule: JSON.stringify(playbook.rule),
             files: targets,

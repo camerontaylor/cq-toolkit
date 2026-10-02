@@ -383,14 +383,41 @@ and unreplayable), while the dispatch's rollback still marks every applied
 file STRANDED, because a section whose exclusivity cannot be proven proves
 no restore either way.
 
+### Residual: rollback resurrection under overlapping approved dispatches
+
+Two approved dispatches over OVERLAPPING targets can interleave so that a
+failed remediation survives on disk. Dispatch A applies file F and its
+verifier then fails; A's lock is released while the verifier runs (deliberate
+— a verifier may run to 600s); approved dispatch B applies to the same file,
+capturing A's post-A bytes as ITS pre-apply baseline, and also fails. B's
+conditional restore finds its own fingerprint still matching and writes F
+back to A's verifier-failed edits. A's restore correctly STRANDS (fingerprint
+mismatch) and says so.
+
+What still holds: nothing is clobbered, no lost update, and both reports are
+truthful from their own frame — A names the conflict with both digests, B
+reports a genuine restore of what it captured. What does NOT hold is the
+absolute phrasing "a pass is the only outcome that leaves the workspace
+alone": under this interleaving a failed remediation can be on disk
+afterwards. It requires two human-approved dispatches with overlapping targets
+and specific timing, and it is detectable from A's stranded evidence.
+
+NOT fixed here: the honest fix is to fingerprint the pre-apply capture INSIDE
+the mutation critical section rather than trusting bytes captured before the
+lock, which changes when the capture happens and is a behavioral change to
+step 3a. Recorded as a residual rather than absorbed silently.
+
 ### Open integration lease (for the #238 / kernel owner, NOT done here)
 
-1. `src/ops/analyze/registry.ts` is #238's file and was deliberately not
-   edited. Both call sites still compose the ops with no authority, so the
-   shipped, registry-composed `analyze.applyRemediation` and
-   `analyze.playbookDispatch` REFUSE every write until the kernel's verified
-   approvals are bound. That is fail-closed by design, but it is a real
-   functional change to the registry path and needs the adapter to land.
+1. `src/ops/analyze/registry.ts` is now **edited** (the lease was extended
+   for approval-authority integration only) and all THREE mutating call
+   sites — `analyze.applyRemediation`, `analyze.playbookDispatch` and
+   `analyze.astGrepCodemod` — bind the shared authority via
+   `setAnalyzeApprovalAuthority`. The DEFAULT is still deny-all, so the
+   registry-composed ops REFUSE every write until the kernel's verified
+   approvals are bound; what changed is that the binding point now exists and
+   is uniform across the family. Bind once per process, before op resolution
+   (see the tenancy note on the setter).
 2. The generated op docs describe the pre-W4.3 approval semantics
    ("approved: true" as sufficient). `gen:op-docs` is generated from the
    registry description, so the text moves with (1).

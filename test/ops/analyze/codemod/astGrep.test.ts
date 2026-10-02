@@ -10,6 +10,17 @@
 import { describe, expect, test } from 'vitest';
 import type { RawCheckOutput, RunCheck } from '../../../../src/ops/gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../../../../src/ops/analyze/analysisStore.js';
+import type {
+  ApprovalAuthority,
+  ApprovalState,
+  ExercisedScope,
+} from '../../../../src/ops/analyze/approval.js';
+import {
+  makeApprovalAuthority,
+  makeInMemoryNonceLedger,
+  makeProcessLocalMutationLocks,
+  withApprovedMutation,
+} from '../../../../src/ops/analyze/approval.js';
 import { AnalysisStoreError } from '../../../../src/ops/analyze/analysisStore.js';
 import {
   applyEditsToBytes,
@@ -516,9 +527,136 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     });
   }
 
-  function makeOp(store: AnalyzeFileStore, run: RunCheck = scanRunner()) {
-    return makeAstGrepCodemod(run, () => store);
+  /**
+   * A REAL approval authority for the op's own write (ADR-0003), over a real
+   * in-memory nonce ledger and the real mutation lock. Only the kernel's
+   * verified-approval seam and the workspace state reader are substituted.
+   *
+   * The default in `makeAstGrepCodemod` is the DENY-ALL authority, so this
+   * helper binds one explicitly — otherwise every apply-path test below would
+   * be refused at the mutation, which is a separate test below.
+   */
+  function trustedAuthority(workspace = '/ws'): ApprovalAuthority {
+    const state: ApprovalState = { workspace, headSha: 'codemod-head', treeClean: true };
+    return makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (subject) =>
+          Promise.resolve({ nonce: `codemod-${subject.inputDigest.slice(0, 12)}`, state }),
+      },
+      ledger: makeInMemoryNonceLedger(),
+      locks: makeProcessLocalMutationLocks(),
+      readState: { read: () => Promise.resolve(state) },
+    });
   }
+
+  function makeOp(store: AnalyzeFileStore, run: RunCheck = scanRunner()) {
+    return makeAstGrepCodemod(run, () => store, trustedAuthority());
+  }
+
+  // W4.3 / A16: the standalone op is a REGISTRY ENTRY, so untrusted plan JSON
+  // can name it. Before the authority existed, `approved: true` alone
+  // authorized its write. These pin that the flag is now necessary but never
+  // sufficient.
+  describe('the mutation is authorized by an approval, not by the input flag', () => {
+    test('deny-all: approved:true alone writes nothing', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      // NO authority bound — the shipped default for an unbound caller.
+      const op = makeAstGrepCodemod(run, () => store);
+      const result = await op({
+        dir: '/ws',
+        rule: 'r',
+        files: ['src/a.ts'],
+        dryRun: false,
+        approved: true,
+      });
+      expect(result.status).toBe('needs-human');
+      // The refusal happens AT THE MUTATION, after the plan is computed — so
+      // the scan HAS run by then. Pinned so nobody later "optimises" this
+      // into a pre-scan gate and believes the test proves otherwise.
+      expect(run.commands.length).toBeGreaterThan(0);
+      expect(store.written.size).toBe(0);
+    });
+
+    test('a forged inherited scope is REFUSED, not ignored', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      // A forgery is exactly this: a well-shaped object that is NOT branded,
+      // so the cast is what a bypass attempt would have to do.
+      const forged = {
+        op: 'analyze.playbookDispatch',
+        workspace: '/ws',
+      } as unknown as ExercisedScope;
+      const op = makeAstGrepCodemod(run, () => store, trustedAuthority(), forged);
+      const result = await op({
+        dir: '/ws',
+        rule: 'r',
+        files: ['src/a.ts'],
+        dryRun: false,
+        approved: true,
+      });
+      // Ignored-and-fallthrough would be the hole: it would authorize the
+      // write on the input flag alone.
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') return;
+      expect(result.error).toContain('did not mint');
+      expect(store.written.size).toBe(0);
+    });
+
+    test('NESTED (ADR-0003 §6): an inherited scope writes under the OUTER approval, with no second exercise', async () => {
+      const store = memoryStore(FIXTURE_FILES);
+      const run = scanRunner();
+      const authority = trustedAuthority();
+      const subject = {
+        op: 'analyze.playbookDispatch',
+        workspace: '/ws',
+        targets: ['src/a.ts'],
+        inputDigest: 'sha256:nested',
+      };
+      // The dispatch shape: one approved mutation whose write is the engine
+      // primitive. The primitive receives the scope instead of demanding a
+      // second token, which would throw on at-most-once.
+      const nested = await withApprovedMutation(authority, subject, async (scope) => {
+        const engine = makeAstGrepCodemod(run, () => store, undefined, scope);
+        return engine({
+          dir: '/ws',
+          rule: 'r',
+          files: ['src/a.ts'],
+          dryRun: false,
+          approved: true,
+        });
+      });
+      expect(nested.status).toBe('ok');
+      // The bytes landed, and the nested op consumed no approval of its own:
+      // the outer subject's nonce is the only one spent.
+      expect(store.written.size).toBe(1);
+      // The outer mutation's VALUE is the inner op's result (the dispatch
+      // passes the engine's report straight through).
+      if (nested.status === 'ok' && nested.value.status === 'ok') {
+        expect(nested.value.value.mode).toBe('applied');
+      } else {
+        throw new Error('the nested engine did not report ok through the outer approval');
+      }
+    });
+
+    test('the direct path spends exactly one nonce for the same write the nested path performs', async () => {
+      const direct = trustedAuthority();
+      const store = memoryStore(FIXTURE_FILES);
+      const result = await makeAstGrepCodemod(
+        scanRunner(),
+        () => store,
+        direct,
+      )({
+        dir: '/ws',
+        rule: 'r',
+        files: ['src/a.ts'],
+        dryRun: false,
+        approved: true,
+      });
+      expect(result.status).toBe('ok');
+      expect(store.written.size).toBe(1);
+    });
+  });
 
   test('an apply without explicit approval is refused BEFORE any I/O', async () => {
     const store = memoryStore(FIXTURE_FILES);

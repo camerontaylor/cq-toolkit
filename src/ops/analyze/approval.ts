@@ -849,10 +849,57 @@ export type ApprovedMutation<T> =
  * from a plan JSON `approved: true` to a byte on disk that does not pass a
  * check-and-spend under the lock first.
  */
+/**
+ * The capability ADR-0003 §6 defines for NESTED mutations: an approval
+ * already exercised, under a workspace mutation lock already held, valid only
+ * until the write that received it settles.
+ *
+ * WHY IT EXISTS. When one approved mutation drives another — the playbook
+ * dispatch applying a rule THROUGH the `analyze.astGrepCodemod` engine
+ * primitive — the inner write must not exercise a SECOND approval. ADR-0003
+ * §6 names this exact case and this exact answer: the inner op "writes under
+ * the already-held lock and already-consumed nonce, without
+ * re-exercising", and a grant exercised twice THROWS (§4c's at-most-once).
+ * Without a scope there are only two wrong options: the inner op demands a
+ * second token for a write one approval already covers, or it is given a
+ * bypass flag that any future caller could set.
+ *
+ * THE PROPERTIES THAT MAKE IT SAFE, and the reason it is not a token:
+ *  - branded: only this module can mint one, so plan JSON cannot carry it
+ *    (it is not serializable, and a forged value fails {@link isExercisedScope});
+ *  - it does NOT authorize anything by itself — it asserts only that some
+ *    approval for THIS workspace was already consumed under the lock that is
+ *    still held, which is why it exists only as an argument to the write
+ *    callback of {@link withApprovedMutation};
+ *  - it carries no nonce and no subject, so it cannot be replayed into a
+ *    second write: the only code that accepts one is the callback that is
+ *    already inside the critical section, and the lock is released when that
+ *    callback settles.
+ */
+declare const scopeBrand: unique symbol;
+
+/** See {@link ExercisedScope}. Minted only inside an approved mutation's critical section. */
+export interface ExercisedScope {
+  readonly [scopeBrand]: true;
+  /** The op whose approval was exercised — for refusal wording, never for authorization. */
+  readonly op: string;
+  /** The workspace whose mutation lock is currently held. */
+  readonly workspace: string;
+}
+
+/** True only for a scope this module minted inside a live critical section. */
+export function isExercisedScope(value: unknown): value is ExercisedScope {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { [scopeBrand]?: unknown })[scopeBrand] === true
+  );
+}
+
 export async function withApprovedMutation<T>(
   authority: ApprovalAuthority,
   subject: ApprovalSubject,
-  write: () => Promise<T>,
+  write: (scope: ExercisedScope) => Promise<T>,
 ): Promise<ApprovedMutation<T>> {
   const admitted = await authority.admit(subject);
   if (!admitted.granted) return { status: 'needs-human', reason: admitted.reason };
@@ -867,11 +914,12 @@ export async function withApprovedMutation<T>(
   const held = await withMutationLock(
     authority,
     subject.workspace,
-    async (): Promise<ApprovedMutation<T>> => {
+    async (scope): Promise<ApprovedMutation<T>> => {
       const exercised = await authority.exercise(admitted.grant, subject);
       if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
-      return { status: 'ok', value: await write() };
+      return { status: 'ok', value: await write(scope) };
     },
+    subject.op,
   );
   if (!held.ok) return { status: 'needs-human', reason: held.reason };
   return held.value;
@@ -894,7 +942,9 @@ export async function withApprovedMutation<T>(
 export async function withMutationLock<T>(
   authority: ApprovalAuthority,
   workspace: string,
-  fn: () => Promise<T>,
+  fn: (scope: ExercisedScope) => Promise<T>,
+  /** The op the scope will report — wording only, never authorization. */
+  op = '',
 ): Promise<
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string }
 > {
@@ -906,7 +956,14 @@ export async function withMutationLock<T>(
         "approval refused: the authority exposes no mutation lock, so this workspace's mutations are not serialized; nothing was written",
     };
   }
-  return { ok: true, value: await locks.forWorkspace(workspace).withLock(fn) };
+  // The scope is minted INSIDE the critical section, so it cannot exist —
+  // and therefore cannot be passed anywhere — except while this lock is held.
+  return {
+    ok: true,
+    value: await locks
+      .forWorkspace(workspace)
+      .withLock(async () => fn({ [scopeBrand]: true, op, workspace })),
+  };
 }
 
 /**

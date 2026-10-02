@@ -401,14 +401,22 @@ let sharedApproval: ApprovalAuthority = DENY_ALL_APPROVALS;
  * lets the ops ask. Every mutation still has to present a grant this
  * authority recognises, be exercised at the mutation, and consume its nonce
  * in one critical section of the workspace mutation lock.
+ *
+ * TENANCY AND LIFETIME (what the kernel owner must know). The binding is
+ * process-wide and captured when an importer RESOLVES an op, which is what
+ * makes two dispatch paths unable to disagree about what is approved. The
+ * kernel runner resolves an importer per dispatch, so a bind performed BEFORE
+ * a run reaches every dispatch of that run. Two consequences, both
+ * fail-closed: there is no per-RUN scoping, so two concurrent plan runs in one
+ * process would share one authority where ADR §4a's snapshot is per-run (the
+ * damage is bounded by the subject binding — op, workspace, input digest and
+ * a single-use nonce — so the worst case is "the write the token already
+ * covered"); and an SDK consumer that holds a composed op reference keeps the
+ * authority captured at composition time across a later reset. So: bind ONCE
+ * per process, BEFORE any op is resolved.
  */
 export function setAnalyzeApprovalAuthority(authority: ApprovalAuthority | undefined): void {
   sharedApproval = authority ?? DENY_ALL_APPROVALS;
-}
-
-/** The approval authority the mutating ops currently resolve (deny-all unless bound). */
-export function analyzeApprovalAuthority(): ApprovalAuthority {
-  return sharedApproval;
 }
 
 /** Analyze-lane op registry (G1: failure-set aggregation; signature clustering). */
@@ -457,8 +465,15 @@ export const registry: OpRegistryEntry[] = [
         import('../gates/checkRunner.js'),
       ]).then(
         ([m, s, runner]) =>
-          m.makeAstGrepCodemod(runner.subprocessRunCheck, (input) =>
-            s.pathAnalysisFileStore(input.dir),
+          m.makeAstGrepCodemod(
+            runner.subprocessRunCheck,
+            (input) => s.pathAnalysisFileStore(input.dir),
+            // The same authority binding as the two remediation ops below.
+            // This entry is reachable by untrusted plan JSON, so binding it is
+            // what closes the third A16 path: with deny-all (the default)
+            // an `approved: true` plan input writes nothing, and no authority
+            // is ever derived from the input.
+            sharedApproval,
           ) as Op<unknown, unknown>,
       ),
   },

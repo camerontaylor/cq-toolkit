@@ -35,7 +35,7 @@ import {
 } from '../../../src/ops/gates/checkRunner.js';
 import { tscLinesAdapter } from '../../../src/ops/gates/adapters/tsc.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
-import type { ApprovalAuthority } from '../../../src/ops/analyze/approval.js';
+import type { ApprovalAuthority, ApprovalState } from '../../../src/ops/analyze/approval.js';
 import {
   makeApprovalAuthority,
   makeInMemoryNonceLedger,
@@ -76,19 +76,24 @@ const AST_GREP_AVAILABLE = spawnSync('ast-grep', ['--version'], { stdio: 'ignore
  * repository live in test/ops/analyze/approval.test.ts.
  */
 function e2eApprovalAuthority(): ApprovalAuthority {
+  // The SIGNED state and the state READER must agree, or admission's drift
+  // check refuses and the e2e cannot pass: the reader answers the SAME
+  // workspace the verified seam signed. (The `''` placeholder this replaced
+  // was harmless only while the seam carried a bare nonce; from the
+  // signed-state contract onward it made every leg fail closed.)
+  const stateFor = (workspace: string): ApprovalState => ({
+    workspace,
+    headSha: 'e2e-head',
+    treeClean: true,
+  });
   return makeApprovalAuthority({
     approvals: {
       verifiedFor: (subject) =>
-        Promise.resolve({
-          nonce: `e2e-${subject.op}`,
-          state: { workspace: subject.workspace, headSha: 'e2e-head', treeClean: true },
-        }),
+        Promise.resolve({ nonce: `e2e-${subject.op}`, state: stateFor(subject.workspace) }),
     },
     ledger: makeInMemoryNonceLedger(),
     locks: makeProcessLocalMutationLocks(),
-    readState: {
-      read: () => Promise.resolve({ workspace: '', headSha: 'e2e-head', treeClean: true }),
-    },
+    readState: { read: (workspace: string) => Promise.resolve(stateFor(workspace)) },
   });
 }
 

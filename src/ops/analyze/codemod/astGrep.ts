@@ -59,6 +59,18 @@ import { resolve } from 'node:path';
 import type { Op } from '../../../kernel/types.js';
 import type { RawCheckOutput, RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
+import type {
+  ApprovalAuthority,
+  ApprovalSubject,
+  ApprovedMutation,
+  ExercisedScope,
+} from '../approval.js';
+import {
+  approvalInputDigest,
+  DENY_ALL_APPROVALS,
+  isExercisedScope,
+  withApprovedMutation,
+} from '../approval.js';
 import { contentDigest } from '../renderAnalysisReport.js';
 
 /**
@@ -670,6 +682,31 @@ export type CodemodReport =
 export function makeAstGrepCodemod(
   run: RunCheck,
   storeFor: (input: AstGrepCodemodInput) => AnalyzeFileStore,
+  /**
+   * The ADR-0003 authority this op's WRITE is authorized by. Defaults to the
+   * DENY-ALL authority: with nothing bound, an apply is refused
+   * `needs-human` at the mutation and `approved: true` writes nothing. That
+   * default is the whole point of the third parameter — this op is a
+   * REGISTRY ENTRY, so untrusted plan JSON can name it, and before the
+   * authority existed its `approved` boolean was sufficient on its own. The
+   * flag is now necessary-but-not-sufficient, exactly as it is in
+   * `applyRemediation`; nothing derives an authority from the input.
+   */
+  approval: ApprovalAuthority = DENY_ALL_APPROVALS,
+  /**
+   * NESTED composition only (ADR-0003 §6): a scope from an OUTER approved
+   * mutation — the playbook dispatch, which drives this primitive to apply a
+   * playbook's rule. Passing it means "an approval for this workspace is
+   * already consumed and its lock is already held", so this write proceeds
+   * under that lock WITHOUT exercising a second approval. Omit it when
+   * driving the op directly; then this op must exercise its own approval,
+   * which a default-deny authority refuses.
+   *
+   * A forged value cannot pass {@link isExercisedScope} — the brand is only
+   * minted inside a live critical section — and a scope is not
+   * serializable, so plan JSON cannot carry one.
+   */
+  inherited?: ExercisedScope,
 ): Op<AstGrepCodemodInput, CodemodReport> {
   return async (input) => {
     // The approval gate is FIRST — before the store resolves, before any
@@ -678,7 +715,7 @@ export function makeAstGrepCodemod(
       return {
         status: 'needs-human',
         reason:
-          'codemod apply requires an explicit approval flag — remediation is never auto-applied; pass { approved: true } (or dryRun: true to preview the diffs)',
+          'codemod apply requires an explicit approval flag — remediation is never auto-applied; pass { approved: true } (or dryRun: true to preview the diffs). That flag is necessary but NOT sufficient: the write is additionally authorized by an approval token exercised at the mutation (ADR-0003)',
       };
     }
     // The 'at least one file' rule is enforced HERE too, not only at the
@@ -810,76 +847,139 @@ export function makeAstGrepCodemod(
       }
     }
     const appliedFiles: CodemodFileApplied[] = [];
-    for (const item of pending) {
-      const file = item.file;
-      try {
-        await store.writeBytes(file, item.after);
-      } catch (err) {
-        // BEST-EFFORT ROLLBACK, and ONLY for write-phase faults (a splice
-        // fault can never land here — the preflight above caught it with
-        // nothing written). The faulted file itself may hold a PARTIAL
-        // write (writeFileSync is not atomic) and every already-written
-        // file's ORIGINAL bytes are still in `current` (freshness-verified
-        // pre-scan), so both are restored newest-first through the same
-        // store before faulting. When a rollback restore faults, the
-        // already-written wording survives, the restore failure is named,
-        // and STRANDED is the exact disjoint complement — applied minus
-        // restored (a restored file is listed ONLY under restored; Y1) —
-        // so the caller always knows the exact on-disk state.
-        const rolledBack: string[] = [];
-        const rollbackFaults: string[] = [];
-        let faultedFileRestoreFailed = '';
+    // THE WRITE, as ONE unit, factored so the same body serves both callers:
+    // an outer approved mutation (which hands us an inherited scope and is
+    // already inside the workspace lock) and a direct apply (which must
+    // exercise this op's own approval first).
+    const writePhase = async (): Promise<CodemodFileApplied[]> => {
+      for (const item of pending) {
+        const file = item.file;
         try {
-          await store.writeBytes(file, current.get(file) as Uint8Array);
-        } catch (restoreErr) {
-          faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
-        }
-        for (const applied of [...appliedFiles].reverse()) {
+          await store.writeBytes(file, item.after);
+        } catch (err) {
+          // BEST-EFFORT ROLLBACK, and ONLY for write-phase faults (a splice
+          // fault can never land here — the preflight above caught it with
+          // nothing written). The faulted file itself may hold a PARTIAL
+          // write (writeFileSync is not atomic) and every already-written
+          // file's ORIGINAL bytes are still in `current` (freshness-verified
+          // pre-scan), so both are restored newest-first through the same
+          // store before faulting. When a rollback restore faults, the
+          // already-written wording survives, the restore failure is named,
+          // and STRANDED is the exact disjoint complement — applied minus
+          // restored (a restored file is listed ONLY under restored; Y1) —
+          // so the caller always knows the exact on-disk state.
+          const rolledBack: string[] = [];
+          const rollbackFaults: string[] = [];
+          let faultedFileRestoreFailed = '';
           try {
-            await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
-            rolledBack.push(applied.file);
-          } catch (rollbackErr) {
-            rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+            await store.writeBytes(file, current.get(file) as Uint8Array);
+          } catch (restoreErr) {
+            faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
           }
+          for (const applied of [...appliedFiles].reverse()) {
+            try {
+              await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
+              rolledBack.push(applied.file);
+            } catch (rollbackErr) {
+              rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+            }
+          }
+          if (rollbackFaults.length === 0) {
+            const rolledBackNote =
+              rolledBack.length === 0
+                ? 'no earlier files to roll back'
+                : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
+            throw new CodemodWriteFault(
+              `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
+            );
+          }
+          const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
+          const stranded = appliedFiles
+            .map((applied) => applied.file)
+            .filter((written) => !rolledBack.includes(written));
+          throw new CodemodWriteFault(
+            `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+          );
         }
-        if (rollbackFaults.length === 0) {
-          const rolledBackNote =
-            rolledBack.length === 0
-              ? 'no earlier files to roll back'
-              : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
-          return {
-            status: 'failed',
-            error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
-          };
-        }
-        const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
-        const stranded = appliedFiles
-          .map((applied) => applied.file)
-          .filter((file) => !rolledBack.includes(file));
+        appliedFiles.push({
+          file,
+          edits: item.edits,
+          diff: item.diff,
+          digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
+        });
+      }
+      return appliedFiles;
+    };
+    // NESTED (ADR-0003 §6): an outer approval is already consumed and already
+    // holds this workspace's lock, so the write proceeds under it WITHOUT a
+    // second exercise — re-exercising would throw on at-most-once.
+    if (inherited !== undefined) {
+      if (!isExercisedScope(inherited)) {
+        // A value this module did not mint is a caller bug or a forgery. It
+        // is REFUSED, never ignored: ignoring it would fall through to
+        // authorizing the write on the input flag alone, which is the exact
+        // hole this whole change closes.
         return {
           status: 'failed',
-          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+          error:
+            'ast-grep codemod: an inherited approval scope was supplied that this module did not mint — refused rather than ignored, because ignoring it would fall through to authorizing the write on the input flag alone',
         };
       }
-      appliedFiles.push({
-        file,
-        edits: item.edits,
-        diff: item.diff,
-        digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
-      });
+      try {
+        await writePhase();
+      } catch (err) {
+        if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
+        throw err;
+      }
+      return {
+        status: 'ok',
+        value: {
+          mode: 'applied',
+          plannedEdits: plannedEdits.length,
+          unfixedMatches: scan.outcome.unfixedMatches,
+          files: appliedFiles,
+          ...(note === undefined ? {} : { note }),
+        },
+      };
     }
+    // DIRECT: exercise this op's OWN approval at the mutation. With the
+    // default deny-all authority this is where a plan-JSON `approved: true`
+    // stops — the flag is necessary but never sufficient.
+    const subject: ApprovalSubject = {
+      op: 'analyze.astGrepCodemod',
+      workspace: input.dir,
+      targets: pending.map((item) => item.file),
+      inputDigest: approvalInputDigest({
+        dir: input.dir,
+        rule: input.rule,
+        files: input.files,
+        dryRun: input.dryRun,
+        timeoutMs: input.timeoutMs,
+      }),
+    };
+    let written: ApprovedMutation<CodemodFileApplied[]>;
+    try {
+      written = await withApprovedMutation(approval, subject, writePhase);
+    } catch (err) {
+      if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
+      throw err;
+    }
+    if (written.status === 'needs-human') return { status: 'needs-human', reason: written.reason };
     return {
       status: 'ok',
       value: {
         mode: 'applied',
         plannedEdits: plannedEdits.length,
         unfixedMatches: scan.outcome.unfixedMatches,
-        files: appliedFiles,
+        files: written.value,
         ...(note === undefined ? {} : { note }),
       },
     };
   };
 }
+
+/** A write-phase fault (carrying its rollback evidence) thrown out of the write unit. */
+class CodemodWriteFault extends Error {}
 
 // No default export here, deliberately: like the ledger family's make*
 // ops, the registry importer COMPOSES this op from the named factory plus
