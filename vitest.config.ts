@@ -41,10 +41,15 @@ const filesOf = (cls: SuiteClass): string[] =>
     .filter(([, c]) => c === cls)
     .map(([file]) => file);
 
-for (const file of Object.keys(manifest)) {
-  // Drift is loud: a stale manifest entry would silently shrink a project.
+const suiteClasses: readonly string[] = ['pure', 'process', 'integration', 'live'];
+for (const [file, cls] of Object.entries(manifest)) {
+  // Drift is loud: a stale manifest entry would silently shrink a project,
+  // and a misspelled class would silently demote the file to `process`.
   if (!existsSync(new URL(`./${file}`, import.meta.url))) {
     throw new Error(`test/suite-classes.json lists a missing file: ${file}`);
+  }
+  if (!suiteClasses.includes(cls)) {
+    throw new Error(`test/suite-classes.json gives ${file} an unknown class: ${String(cls)}`);
   }
 }
 
