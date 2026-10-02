@@ -254,7 +254,7 @@ function fakeManagedScript(
       return;
     }
     peer.send({ type: 'system', subtype: 'init', session_id: sessionId, model });
-    if (directive?.kind === 'tool-then-reply' && allowed.has(directive.tool)) {
+    if (directive?.kind === 'tool-then-reply') {
       peer.send({
         type: 'assistant',
         message: {
@@ -263,7 +263,16 @@ function fakeManagedScript(
           ],
         },
       });
-      void runFakeTool(opts.cwd, directive.tool, directive.input)
+      // Like the real fixture under --permission-prompts none: an
+      // out-of-policy tool_use is still emitted, then DENIED without
+      // executing, so the driver's governed-surface fold is exercised.
+      const toolOutcome = allowed.has(directive.tool)
+        ? runFakeTool(opts.cwd, directive.tool, directive.input)
+        : Promise.resolve({
+            ok: false,
+            text: `permission denied: ${directive.tool} is not allowed`,
+          });
+      void toolOutcome
         .then((outcome) => {
           peer.send({
             type: 'user',
