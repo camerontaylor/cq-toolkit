@@ -218,3 +218,22 @@ test('rejects export targets and declarations that resolve through symlinks outs
     await rm(outside, { recursive: true, force: true });
   }
 });
+
+test('follows bare triple-slash reference paths as file-relative', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      '/// <reference path="extra.d.ts" />\nexport {};\n',
+    );
+    await writeFile(path.join(root, 'dist/extra.d.ts'), 'declare const extra: number;\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path: declaration }) => declaration),
+      ['./dist/extra.d.ts', './dist/index.d.ts'],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

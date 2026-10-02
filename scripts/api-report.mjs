@@ -93,14 +93,14 @@ function declarationReferences(rawSource) {
   const importTypePattern = /\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
   const requirePattern = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
   const referencePathPattern = /\/\/\/\s*<reference\s+path\s*=\s*(['"])([^'"]+)\1/g;
-  for (const pattern of [
-    fromPattern,
-    sideEffectImportPattern,
-    importTypePattern,
-    requirePattern,
-    referencePathPattern,
-  ]) {
+  for (const pattern of [fromPattern, sideEffectImportPattern, importTypePattern, requirePattern]) {
     for (const match of source.matchAll(pattern)) references.add(match[2]);
+  }
+  // `/// <reference path>` is file-relative even when written bare (`foo.d.ts`),
+  // unlike module specifiers, so normalize it to a relative form to keep it in the graph.
+  for (const match of source.matchAll(referencePathPattern)) {
+    const target = match[2];
+    references.add(target.startsWith('.') || path.isAbsolute(target) ? target : `./${target}`);
   }
   return [...references].sort(compareStrings);
 }
