@@ -333,6 +333,27 @@ describe('fingerprintSet', () => {
     expect(keyOf(renamed)).not.toBe(keyOf(original));
   });
 
+  test('which duplicate occurrence receives the ordinal is independent of input order', () => {
+    const at205 = failureOf({ line: 205, message: 'suite > test' });
+    const at306 = failureOf({ line: 306, message: 'suite > test' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([at205, at306], at306)).toBe(keyFor([at306, at205], at306));
+    expect(keyFor([at205, at306], at205)).toBe(keyFor([at306, at205], at205));
+  });
+
+  test('a suite-level vitest failure keys by the first message line, not the full error text', () => {
+    const suite = (message: string): string =>
+      fingerprintFailure(failureOf({ line: null, message, ruleId: 'vitest-suite' }), {
+        tool: 'vitest',
+      });
+    expect(suite('Error: cannot load\n  at /tmp/a.ts:10:5')).toBe(
+      suite('Error: cannot load\n  at /tmp/a.ts:99:1'),
+    );
+  });
+
   test('empty failure set yields an empty fingerprint set', () => {
     expect(fingerprintSet({ tool: 'eslint', failures: [], exitCode: 0 }).size).toBe(0);
   });

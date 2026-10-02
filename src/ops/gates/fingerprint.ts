@@ -6,8 +6,10 @@
 // while a genuinely new failure still keys differently. LOCATION-LESS
 // failures (line null — vitest's suite/assertion shape) have no position to
 // bucket, so they match by CONTENT instead: the normalized message — for
-// vitest the FULL test name, since `adapters/vitest.ts` carries the test's
-// `fullName` (or `ancestorTitles`+`title`) in `message`. Duplicate canonical
+// vitest assertions the FULL test name, since `adapters/vitest.ts` carries the
+// test's `fullName` (or `ancestorTitles`+`title`) in `message`. Suite-level
+// vitest failures (ruleId `vitest-suite`, free-form error text) use the
+// first-line content regime instead. Duplicate canonical
 // identities receive occurrence ordinals, preserving counts without
 // depending on input order. Pure decision code: zero I/O.
 //
@@ -20,7 +22,7 @@
 //     spot is a regression; cross-tool failures never collide); position is
 //     bucketed, never exact (line/column buckets default 20, offset bucket
 //     default 500 — documented coarseness, asserted in tests).
-//   - Matching regimes: Vitest failures match by full test name regardless
+//   - Matching regimes: Vitest test failures match by full test name regardless
 //     of reported location; other positioned failures match by drift-tolerant
 //     position (message ignored); other location-less failures match by the
 //     FIRST LINE of the normalized message plus the offset bucket, so
@@ -32,6 +34,7 @@
 //     cannot collide across splits. The 32-bit FNV form is a compact
 //     display/ledger encoding of the key, NEVER the comparison unit, making
 //     novel/fixed detection deterministic rather than probabilistic.
+import { VITEST_SUITE_RULE_ID } from './adapters/vitest.js';
 import type { CheckFailure, FailureSet } from './checkRunner.js';
 
 /**
@@ -115,8 +118,9 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
  * Every failure of a {@link FailureSet} paired with its OCCURRENCE key — the
  * exact canonical {@link fingerprintKey} with a `#<ordinal>` suffix — the
  * FailureSet's `tool` folded in. The ordinal preserves duplicate counts while
- * keeping comparison independent of failure order (occurrences of one
- * identity are interchangeable, so shuffling them cannot change the set).
+ * keeping comparison independent of failure order (ordinals are assigned in a
+ * deterministic order of the equivalent failures, not array position, so the
+ * pairing of failure to key is stable under shuffling too).
  *
  * The composite is collision-free: the canonical key is JSON array text that
  * always ends in `]` (components may themselves contain `#`), and the
@@ -128,13 +132,43 @@ export function fingerprintPairs(
   cfg?: FingerprintConfig,
 ): Array<{ failure: CheckFailure; key: string }> {
   const effective = { ...cfg, tool: s.tool };
+  const identities = s.failures.map((failure) => fingerprintKey(failure, effective));
+  // Ordinals follow a deterministic order of equivalent failures (by their
+  // excluded fields), never array position, so reports are order-invariant.
+  const order = s.failures
+    .map((_, index) => index)
+    .sort(
+      (a, b) =>
+        compareText(identities[a] ?? '', identities[b] ?? '') ||
+        compareFailures(s.failures[a], s.failures[b]) ||
+        a - b,
+    );
+  const keys: string[] = new Array<string>(s.failures.length);
   const occurrences = new Map<string, number>();
-  return s.failures.map((failure) => {
-    const identity = fingerprintKey(failure, effective);
+  for (const index of order) {
+    const identity = identities[index] ?? '';
     const occurrence = occurrences.get(identity) ?? 0;
     occurrences.set(identity, occurrence + 1);
-    return { failure, key: `${identity}#${occurrence}` };
-  });
+    keys[index] = `${identity}#${occurrence}`;
+  }
+  return s.failures.map((failure, index) => ({ failure, key: keys[index] ?? '' }));
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Total order over every failure field, used only to break ties among equivalent failures. */
+function compareFailures(a: CheckFailure | undefined, b: CheckFailure | undefined): number {
+  if (a === undefined || b === undefined) {
+    return 0;
+  }
+  return (
+    (a.line ?? -1) - (b.line ?? -1) ||
+    (a.column ?? -1) - (b.column ?? -1) ||
+    compareText(a.message, b.message) ||
+    compareText(a.file ?? '', b.file ?? '')
+  );
 }
 
 /**
@@ -151,7 +185,7 @@ export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<stri
 function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
   const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
   const ruleId = f.ruleId ?? '';
-  if (cfg.tool === 'vitest') {
+  if (cfg.tool === 'vitest' && f.ruleId !== VITEST_SUITE_RULE_ID) {
     return [cfg.tool, file, ruleId, f.severity, 'test-name', normalizeTestName(f.message)];
   }
   if (typeof f.line === 'number') {
@@ -175,9 +209,8 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
  * Vitest identity: the FULL message with whitespace runs collapsed and
  * trimmed. `adapters/vitest.ts` already funnels the test's `fullName` (or
  * `ancestorTitles`+`title`) into `message`, so for a named test this is the
- * whole test name; a suite-level failure has no test name, and its message
- * is the whole error text, which is exactly what distinguishes it from a
- * sibling suite failure. Case is PRESERVED — distinct names differing only
+ * whole test name; suite-level failures (ruleId `vitest-suite`) never reach
+ * this function — their free-form error text takes the first-line regime. Case is PRESERVED — distinct names differing only
  * in case stay distinct. NO length cap: hashing is O(n) anyway, and a cap
  * would only mint a prefix-collision class (two long distinct names sharing
  * a prefix would key identically).

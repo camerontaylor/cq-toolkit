@@ -15,6 +15,9 @@ import type {
 } from '../checkRunner.js';
 
 /** Adapter for vitest's `--reporter=json` output. */
+/** `ruleId` marking a suite-level (no failing assertion) Vitest failure. */
+export const VITEST_SUITE_RULE_ID = 'vitest-suite';
+
 export const vitestJsonAdapter: CheckAdapter = {
   name: 'vitest-json',
   parse: parseVitestJson,
@@ -102,7 +105,8 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
         file,
         line: null,
         column: null,
-        ruleId: null,
+        // Discriminator: the message is free-form suite error text, not a test name.
+        ruleId: VITEST_SUITE_RULE_ID,
         message: suiteMessage,
         severity: 'error',
       });
