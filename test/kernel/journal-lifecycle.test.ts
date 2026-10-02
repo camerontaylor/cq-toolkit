@@ -70,6 +70,22 @@ function deferred() {
   });
   return { promise, resolve };
 }
+// Report setup/infrastructure failure directly instead of waiting forever for
+// a stage that the failed run can never reach. A stage still must win before
+// the fixture proceeds; an unexpectedly successful early run is also a failure.
+async function awaitStage(
+  stage: Promise<void>,
+  running: Promise<unknown>,
+  name: string,
+): Promise<void> {
+  await Promise.race([
+    stage,
+    running.then((result) => {
+      if (result instanceof Error) throw result;
+      throw new Error(`fixture: run settled before ${name}`);
+    }),
+  ]);
+}
 const plan: Plan = {
   id: 'journal-stop',
   jobs: ['a', 'b', 'c'].map((id) => ({ id, op: 'work', input: { id } })),
@@ -150,7 +166,7 @@ test.each(['worker', 'replay-producer'] as const)(
       },
     );
     try {
-      await failureSeen.promise;
+      await awaitStage(failureSeen.promise, running, 'append failure');
       await expect(acquirePlanLock(dir, plan.id, 'contender')).rejects.toThrow('plan locked');
       expect(settled).toBe(false);
     } finally {
@@ -363,13 +379,13 @@ test('atomic publication exclusion prevents a late reclaimer while a plain owner
   try {
     // Eligibility has been decided and the complete replacement is ready,
     // but the owning publisher has not renamed it yet.
-    await publicationPaused.promise;
+    await awaitStage(publicationPaused.promise, running, 'publication pause');
     await expect(acquirePlanLock(dir, plan.id, 'late-reclaimer')).rejects.toThrow(
       'acquisition in progress',
     );
     expect(calls).toEqual([]);
     publish.resolve();
-    await bodyStarted.promise;
+    await awaitStage(bodyStarted.promise, running, 'body entry');
     await expect(
       runPlan(
         oneJob,
@@ -463,7 +479,7 @@ test.each(invocationCases)(
       (error: unknown) => error,
     );
     try {
-      await stopSeen.promise;
+      await awaitStage(stopSeen.promise, running, 'sibling stop');
       await new Promise<void>((resolve) => setImmediate(resolve));
     } finally {
       resume.resolve();
