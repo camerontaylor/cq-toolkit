@@ -47,11 +47,14 @@ suite; they do not revisit this contract.
   queue route — the sanctioned one (doctrine I3: `main` advances only by the
   promotion gate's pure fast-forward) — the candidate is the `merge-queue`
   commit the gate resolves. The protocol still permits a direct-to-`main` PR
-  when that is a task's actual target; there the candidate is the commit `main`
-  ends up at, which under I3 is the merge commit (never a squash or a rewrite),
-  and the same rule applies: read that SHA's check-runs against the gate's own
-  check list, failing
-  closed on a skipped or missing result. Either way the PR head is not the
+  when that is a task's actual target; there the candidate is the merge commit
+  (never a squash or a rewrite, per I3) that the merge would produce, and it
+  must be created and checked **before** `main` advances — for example a
+  throwaway merge branch carrying that merge commit. Required CI is read on
+  that exact SHA against the gate's own check list, failing closed on a skipped
+  or missing result. No gate workflow resolves such a commit today, so a
+  direct-to-`main` PR cannot claim readiness until that evidence exists; this
+  contract states the rule and does not add the mechanism. Either way the PR head is not the
   candidate.
 - **A green PR head is not candidate evidence.**
   `strict_required_status_checks_policy` is `false`
@@ -70,9 +73,10 @@ owner.
 1. Start from the files the diff actually touches.
 2. Add the test files that statically import, or are imported by, the changed
    source, via Vitest's static-import graph. Any command with execution intent
-   carries `--run` (`npx vitest run related <changed source files>`); a bare
-   `npx vitest related …` can enter watch behaviour, so it is not the documented
-   form. List-only selection — printing the affected test files without running
+   carries `--run` and keeps `related` as the subcommand
+   (`npx vitest related --run <changed source files>`); `vitest run related …`
+   treats `related` as a filename filter and a bare `vitest related …` can enter
+   watch behaviour, so neither is the documented form. List-only selection — printing the affected test files without running
    them — is the job of `scripts/affected-tests.mjs`, which a later slice of the
    execution-policy run delivers; until it lands, the selection is made by hand
    and recorded in the handoff record.
