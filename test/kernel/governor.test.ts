@@ -2297,7 +2297,12 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
         ),
         clock,
       );
+      let markHangEntered: () => void = () => {};
+      const hangEntered = new Promise<void>((resolve) => {
+        markHangEntered = resolve;
+      });
       const hangOp = async (): Promise<OpResult<unknown>> => {
+        markHangEntered();
         const ctx = currentJobContext();
         if (ctx !== undefined) ctx.signal.addEventListener('abort', () => {}); // ignored
         return new Promise<never>(() => {}); // hangs forever — only the ladder may end it
@@ -2305,15 +2310,17 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
       const plan = independentPlan('plan-evidence', 2);
       plan.jobs[0] = { id: 'j1', op: 'hang', input: { jobId: 'j1' } };
       plan.jobs[1] = { id: 'j2', op: 'ok', input: { jobId: 'j2' } };
-      const report = await pumped(
-        runPlan(
-          plan,
-          { concurrency: 1, stopOnError: false, journalDir: dir },
-          viewWith(entry('hang', hangOp), entry('ok', okOp)),
-          { governor, allowAdvisory: true },
-        ),
-        clock,
+      const running = runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('hang', hangOp), entry('ok', okOp)),
+        { governor, allowAdvisory: true },
       );
+      // The pre-invocation fence does real I/O: hold the virtual clock until
+      // the body is entered, or a slow host burns the 100ms job budget first
+      // and the job ends as a never-ran cancel instead of a kill verdict.
+      await hangEntered;
+      const report = await pumped(running, clock);
 
       const events = await openRunLog(dir).read(report.runId);
       expect(events[0]).toMatchObject({ type: 'run-started', planId: 'plan-evidence' });
