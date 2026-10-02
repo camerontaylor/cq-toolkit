@@ -122,6 +122,7 @@ test('preserves conditional export keys and targets instead of deduplicating bra
   }
 });
 
+// Spawns the CLI per assertion; allow headroom on loaded hosts.
 test('CLI baseline comparison detects re-export leaf and side-effect augmentation edits', async () => {
   const root = await fixture({ '.': './dist/index.js' });
   try {
@@ -170,7 +171,7 @@ test('CLI baseline comparison detects re-export leaf and side-effect augmentatio
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 test('fails closed when a declared export target or declaration is absent', async () => {
   const missingTarget = await fixture({ './missing': './dist/missing.js' });
@@ -237,3 +238,70 @@ test('follows bare triple-slash reference paths as file-relative', async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('ignores import-like text inside string literal types', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(
+      path.join(root, 'dist/index.d.ts'),
+      'export type Label = \'import("./missing.js")\';\nexport * from "./leaf.js";\n',
+    );
+    await writeFile(path.join(root, 'dist/leaf.d.ts'), 'export declare function run(): void;\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries[0].targets[0].declarationGraph.map(({ path: declaration }) => declaration),
+      ['./dist/index.d.ts', './dist/leaf.d.ts'],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('treats an all-condition exports object as the root entry', async () => {
+  const root = await fixture({ import: './dist/index.js', default: './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export {};\n');
+    const report = await makeReport(root);
+    assert.deepEqual(
+      report.entries.map(({ specifier }) => specifier),
+      ['.'],
+    );
+    assert.deepEqual(
+      report.entries[0].targets.map(({ conditions }) => conditions),
+      [['import'], ['default']],
+    );
+
+    await writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'fixture', exports: { '.': './dist/index.js', import: './x.js' } }),
+    );
+    await assert.rejects(makeReport(root), /mixes subpath and condition keys/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Spawns the CLI per assertion; allow headroom on loaded hosts.
+test('CLI draft mode marks the report and default mode fails without a baseline', async () => {
+  const root = await fixture({ '.': './dist/index.js' });
+  try {
+    await writeFile(path.join(root, 'dist/index.js'), 'export {};\n');
+    await writeFile(path.join(root, 'dist/index.d.ts'), 'export {};\n');
+    const draft = spawnSync(process.execPath, [scriptPath, '--draft'], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(draft.status, 0, draft.stderr);
+    const report = JSON.parse(draft.stdout);
+    assert.equal(report.draft, true);
+    assert.equal(report.baselineStatus, 'not-established');
+
+    const missing = spawnSync(process.execPath, [scriptPath], { cwd: root, encoding: 'utf8' });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /baseline is missing/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);

@@ -8,7 +8,9 @@ declaration graph and a SHA-256 digest for each file. The export map scopes
 the report to public package entrypoints, while the graph includes their
 re-exported declaration leaves. It fails if a target or relative declaration
 is missing, a target resolves through a symlink outside the package, or an
-export shape cannot be interpreted safely.
+export shape cannot be interpreted safely. An exports object whose keys are
+all conditions (no leading `.`) is reported as the conditional map of the `.`
+entry, matching Node's resolution.
 
 The current output is a draft, not a proposed stable API contract. Do not add
 it as `baselines/api-report.json` or treat its hashes as approved. The final
@@ -29,7 +31,7 @@ against the packed tarball.
 Direct tooling tests can be run without the repository's full test suite:
 
 ```sh
-node --test test/api-report.test.mjs
+npx vitest run test/api-report.test.mjs
 ```
 
 The report is intentionally byte-sensitive: harmless declaration formatting

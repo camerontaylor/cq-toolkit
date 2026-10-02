@@ -53,9 +53,11 @@ function declarationPath(target) {
   throw new Error(`export target has no supported declaration mapping: ${target}`);
 }
 
-// Blank out comments (keeping `/// <reference path>` directives and string literals)
-// so imports quoted in JSDoc examples are not counted as declaration dependencies.
-function stripComments(source) {
+// Blank out comments (keeping `/// <reference path>` directives) and replace each
+// string literal with an indexed placeholder, so imports quoted in JSDoc examples or
+// inside string literal types are not counted as declaration dependencies.
+function maskSource(source) {
+  const strings = [];
   let out = '';
   let i = 0;
   while (i < source.length) {
@@ -64,7 +66,8 @@ function stripComments(source) {
     if (ch === '"' || ch === "'" || ch === '`') {
       let j = i + 1;
       while (j < source.length && source[j] !== ch) j += source[j] === '\\' ? 2 : 1;
-      out += source.slice(i, j + 1);
+      strings.push(source.slice(i + 1, j));
+      out += `${ch}\0${strings.length - 1}\0${ch}`;
       i = j + 1;
     } else if (ch === '/' && next === '*') {
       const end = source.indexOf('*/', i + 2);
@@ -82,23 +85,24 @@ function stripComments(source) {
       i += 1;
     }
   }
-  return out;
+  return { masked: out, strings };
 }
 
 function declarationReferences(rawSource) {
-  const source = stripComments(rawSource);
+  const { masked, strings } = maskSource(rawSource);
   const references = new Set();
-  const fromPattern = /\bfrom\s*(['"])([^'"]+)\1/g;
-  const sideEffectImportPattern = /\bimport\s*(['"])([^'"]+)\1/g;
-  const importTypePattern = /\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
-  const requirePattern = /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g;
+  const literal = String.raw`(['"])\0(\d+)\0\1`;
+  const fromPattern = new RegExp(String.raw`\bfrom\s*${literal}`, 'g');
+  const sideEffectImportPattern = new RegExp(String.raw`\bimport\s*${literal}`, 'g');
+  const importTypePattern = new RegExp(String.raw`\bimport\s*\(\s*${literal}\s*\)`, 'g');
+  const requirePattern = new RegExp(String.raw`\brequire\s*\(\s*${literal}\s*\)`, 'g');
   const referencePathPattern = /\/\/\/\s*<reference\s+path\s*=\s*(['"])([^'"]+)\1/g;
   for (const pattern of [fromPattern, sideEffectImportPattern, importTypePattern, requirePattern]) {
-    for (const match of source.matchAll(pattern)) references.add(match[2]);
+    for (const match of masked.matchAll(pattern)) references.add(strings[Number(match[2])]);
   }
   // `/// <reference path>` is file-relative even when written bare (`foo.d.ts`),
   // unlike module specifiers, so normalize it to a relative form to keep it in the graph.
-  for (const match of source.matchAll(referencePathPattern)) {
+  for (const match of masked.matchAll(referencePathPattern)) {
     const target = match[2];
     references.add(target.startsWith('.') || path.isAbsolute(target) ? target : `./${target}`);
   }
@@ -187,8 +191,17 @@ async function makeReport(root = ROOT) {
     throw new Error('package.json must declare an exports object');
   }
 
+  // Node treats an exports object whose keys are all conditions (no leading `.`)
+  // as the root entry's conditional map; mixing both key kinds is invalid.
+  const keys = Object.keys(pkg.exports);
+  const subpathKeys = keys.filter((key) => key.startsWith('.'));
+  if (subpathKeys.length > 0 && subpathKeys.length !== keys.length) {
+    throw new Error('package.json exports mixes subpath and condition keys');
+  }
+  const exportsMap = subpathKeys.length === 0 ? { '.': pkg.exports } : pkg.exports;
+
   const entries = [];
-  for (const [specifier, exportValue] of Object.entries(pkg.exports).sort(([a], [b]) =>
+  for (const [specifier, exportValue] of Object.entries(exportsMap).sort(([a], [b]) =>
     compareStrings(a, b),
   )) {
     const targets = collectTargets(exportValue);
@@ -263,6 +276,8 @@ async function main() {
   }
 }
 
-if (import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  await main();
+}
 
 export { makeReport, parseArgs };
