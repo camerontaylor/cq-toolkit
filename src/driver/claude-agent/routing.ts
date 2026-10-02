@@ -30,6 +30,7 @@
 // only, never secrets — a table is safe to log, journal, or ship in an
 // error message.
 import { z } from 'zod';
+import { DispatchError } from '../errors.js';
 import type { ModelSpec } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -162,7 +163,10 @@ export function resolveEndpoint(
     ? parsed.endpoints[endpointName]
     : undefined;
   if (entry === undefined) {
-    throw new Error(
+    // Pre-dispatch misconfiguration carries its class as structured data
+    // (ADR-0002 §2.2): errorClassOf → 'config'.
+    throw new DispatchError(
+      'config',
       `claude-agent driver: unknown provider '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,
     );
   }

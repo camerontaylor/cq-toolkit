@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { createDriverFactory } from '../../../src/driver/factory.js';
 import {
   ALPHA_FAILURE_MESSAGE,
   ALPHA_FIX,
@@ -176,22 +177,35 @@ function optsFor(
     journalDir: scene.journalDir,
     gh: scene.gh.effects,
     driver: {
-      binary: AGENT_CLI,
       provider: 'cq-d4-e2e',
       model: 'sweep-fake',
-      sessionsDir: scene.sessionsDir,
-      routingTable: {
-        endpoints: {
-          'cq-d4-e2e': {
-            baseUrlEnv: 'CQ_D4_E2E_URL',
-            baseUrlDefault: 'http://127.0.0.1:9',
-            keyEnv: 'CQ_D4_E2E_KEY',
-            models: ['sweep-fake'],
-            notes: 'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
+      budget: { maxUsd: 1 },
+    } satisfies SweepUnitDriverConfig,
+    // The scenario's DEPLOYMENT factory config (ADR-0002 §2.5): role
+    // 'fixer' + the fake provider → the subprocess lane over the fake agent
+    // CLI; the lane knobs (binary/routing table/sessions dir) live HERE,
+    // never in plan JSON. The factory owns the served-model assertion.
+    drivers: createDriverFactory({
+      bindings: { fixer: { 'cq-d4-e2e': 'subprocess' } },
+      lanes: {
+        subprocess: {
+          binary: AGENT_CLI,
+          sessionsDir: scene.sessionsDir,
+          routingTable: {
+            endpoints: {
+              'cq-d4-e2e': {
+                baseUrlEnv: 'CQ_D4_E2E_URL',
+                baseUrlDefault: 'http://127.0.0.1:9',
+                keyEnv: KEY_ENV,
+                models: ['sweep-fake'],
+                notes:
+                  'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
+              },
+            },
           },
         },
       },
-    } satisfies SweepUnitDriverConfig,
+    }),
     check: {
       adapter: 'tsc-lines',
       command: process.execPath,

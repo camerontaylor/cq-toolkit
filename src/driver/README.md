@@ -77,12 +77,16 @@ Constructor options:
   (`https://api.z.ai/api/coding/paas/v4` — the plan-funded wire;
   `ZAI_BASE_URL` overrides, e.g. for the pay-as-you-go
   `https://api.z.ai/api/paas/v4`). The conformance suite injects mocks here.
-- `outputSchema?` — a zod schema; when set, the SDK structured-output path
-  (`Output.object`) runs and the parsed value lands in
-  `WorkerResult.structuredOutput`. Data-driven; per-op schema registries
-  are a later-lane concern.
 - `harnessConfig?` — harness tool surface + prompt budget
   (default: `defaultHarnessConfig`).
+
+Structured output (seam v2, ADR-0002 section 2.3): there is NO
+construction-time schema — the request rides `OpInvocation.outputSchema`
+(built with `toOutputSchema(name, zodSchema)` from
+`../common/structured.js`); when set, the SDK structured-output path
+(`Output.object`) runs and the parsed value lands in
+`WorkerResult.structuredOutput`.
+
 - `sessionsDir?` — backing `SessionStore` directory.
 - `pricing?` — price-lookup override for the derived-only `costUSD` rule
   (default: `priceOf` over the vendored models.dev table). Tests and
@@ -108,7 +112,8 @@ symlink planted after the check is a documented TOCTOU window; the mitigation
 is keeping run command allowlists tight (never allowlist `ln`).
 
 Budget mapping (I8): the driver owns NO wall clock — it forwards the
-governor's `currentJobContext()?.signal` as the SDK `abortSignal` and
+run's `RunOptions.signal` (seam v2 — the caller passes the governed rung-1
+signal explicitly) as the SDK `abortSignal` and
 ignores `Budget.wallClockMs` (the governor's ladder decides when to abort);
 `Budget.maxTokens` becomes a timer-free `stopWhen` condition over
 accumulated step usage; `maxAttempts` is the runner/governor's retry
@@ -133,23 +138,24 @@ Stop reasons: governed abort or abort-shaped failure → `aborted`; token
 budget tripped or SDK `length` → `budget`; SDK `error`/`content-filter` or
 a mid-run throw → `error`; otherwise `complete`.
 
-Failure classes (#210): every `error` verdict's `WorkerResult.error` starts
-with `ai-sdk driver: [<token>]` — the class token is the second component,
-after the lane prefix — so the fixtures runner can tell an honest
-structured-output miss from a loud endpoint absence without the frozen seam
-carrying a new field. `[structured-output-miss]` — the required structured
-object was not produced / did not parse (the `result.output` getter threw
-`NoOutputGeneratedError` / `NoObjectGeneratedError`); the verdict stays
-`error` and `structuredOutput` is never fabricated. A token cap or a
+Failure classes (seam v2, RS-14): every `error` verdict carries the
+STRUCTURED `WorkerResult.errorClass` — classified from SDK status codes and
+error names per the ADR section-2.2 cut rules (`output-invalid` for a
+structured-output miss: the required object was not produced / did not
+validate; `auth`/`quota`/`rate-limit`/`transient`/`provider-error`/`harness`
+from the provider signals; `unknown` at worst) — so consumers read the
+class, never narration-text tokens. The verdict stays `error` and
+`structuredOutput` is never fabricated on a miss. A token cap or a
 governed abort that leaves the final step on tool-calls is the honest
 `budget`/`aborted` verdict instead — the missing object is its consequence,
 not a driver failure — and `structuredOutput` is likewise never fabricated
-on those paths. `[endpoint-timeout]` —
-the SDK-retryable transient class (endpoint header timeout, network error,
-rate limit / 429, 5xx), plus the non-retryable step-timeout abort (classified
-via its `TimeoutError` name). `[provider-error]` —
-anything else. The classification lives in
-the exported pure `classifyRunFailure(err)`.
+on those paths. The remaining `errorClass` values come from the structured
+cuts: `'transient'` for the SDK-retryable class (endpoint header timeout,
+network error) AND the non-retryable step-timeout abort (its `TimeoutError`
+name), `'rate-limit'`/`'quota'`/`'auth'`/`'provider-error'` per the limit
+rules, and `'unknown'` for anything message-only (a bare message regex is
+never a class). The classification lives in the exported pure
+`classifyRunFailure(err)`.
 
 Pricing attribution: `costUSD` is derived via
 `src/driver/pricing/index.ts` (`computeCostUSD`) over the vendored
@@ -168,8 +174,8 @@ worker, the toolkit's value is not "you can run Claude headless".
 Files:
 
 - `index.ts` — `SubprocessDriver implements Driver` (constructor options:
-  `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
-  `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
+  `binary?` default `'claude'`, `routingTable?`,
+  `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
   `harnessConfig?`, `pricing?`, `envAllowlist?`, `toolSurface?` (default
   `'harness'`; `'stock'` is the D6 null-hypothesis mode, reachable only by
   constructing the class directly), and a `spawn?` override hook for
@@ -192,7 +198,7 @@ Files:
   data) and `terminateGracefully` — the SIGTERM→SIGKILL grace ladder
   that EXECUTES an already-decided kill (rungs observable via `onRung`
   markers; grace delays injectable for tests). The governor decides
-  WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
+  WHEN (the governed `RunOptions.signal`); this file only obeys.
 
 Child environment is DEFAULT-DENY (issue #183) for the subprocess CLI,
 the claude-agent SDK child, the ACP vendor process, and every harness `run`
@@ -231,7 +237,8 @@ closed-form git commands and shell commands receive the filtered env.
 Argv surface (headless reference, harness mode — the default): `-p` (prompt
 rides stdin), `--output-format stream-json`, `--verbose` (the real CLI
 refuses stream-json print mode without it — found live, CLI 2.1.270, T1.6
-slice 4), `--json-schema <schema>` when `outputSchema` is set, then the
+slice 4), `--json-schema <schema>` when the invocation carries
+`outputSchema`, then the
 CLOSED SURFACE (W1.4): `--tools ""` (builtins absent, not denied),
 `--setting-sources ""` (no ambient settings), `--strict-mcp-config` (no
 ambient MCP servers), `--mcp-config <sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json`
@@ -273,8 +280,8 @@ Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A):
   harness results three ways (harness denial by prefix / CLI permission
   denial / anything else = transport failure), and settles every harness
   failure as stopReason `error` with a `HARNESS_ERROR_PREFIX` cause and an
-  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field
-  lands with the W3.3 types bump).
+  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field —
+  shipped with seam v2).
 - Named limitations: a same-uid `run` command can still read an
   ancestor's environment (OS confinement, T1.8); a server killed without
   SIGTERM orphans an in-flight command group until it exits on its own.
@@ -368,9 +375,10 @@ pooling, no retries.
 Files:
 
 - `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
-  `sdkLoader?`, `endpointTable?`, `outputSchema?` → the SDK's native
-  `outputFormat: { type: 'json_schema' }`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`, `envAllowlist?`). The env option contains
+  `sdkLoader?`, `endpointTable?`, `harnessConfig?`,
+  `sessionsDir?`, `pricing?`, `envAllowlist?`. The structured-output
+  schema rides the INVOCATION (`OpInvocation.outputSchema`, seam v2) and
+  activates the SDK's native `outputFormat: { type: 'json_schema' }`.) The env option contains
   additional host variable names exposed to the SDK child and harness
   `run` children through the manifest; invalid names are rejected at
   construction. Before the CLI receives the schema, the
@@ -443,7 +451,8 @@ reasons); a platform without sandbox support degrades to that documented
 enforcement instead of failing the run on a capability we do not rely on.
 
 Budget mapping (I8): the driver owns NO wall clock — the governed
-`currentJobContext()?.signal` is forwarded to the SDK query's
+`RunOptions.signal` (the caller passes the rung-1 signal explicitly,
+seam v2) is forwarded to the SDK query's
 cancellation root and `Budget.wallClockMs` is ignored (the governor's
 ladder decides when). The DD-1 spike MEASURED this lane's cooperative
 abort settle live: ≈2.0 s after the signal, with no post-abort transcript
@@ -475,10 +484,10 @@ handle is exactly as precise and out of its reach; a sidecar-less
 session resumes the workspace only, an honest partial continuation);
 unknown sessionRef throws. Session turns persist in our
 `SessionMessage` vocabulary only. Structured output rides the SDK's
-NATIVE `outputFormat: { type: 'json_schema' }` path; the result's
-`structured_output` is validated against the configured zod schema
-post-settle — a payload that fails is dropped to narration, never
-trusted. Usage maps the result vocabulary (`input_tokens` /
+NATIVE `outputFormat: { type: 'json_schema' }` path (the schema rides the
+INVOCATION); the result's `structured_output` is validated post-settle by
+the shared validator — a payload that fails settles the uniform
+error/`output-invalid` verdict, never trusted. Usage maps the result vocabulary (`input_tokens` /
 `output_tokens` / `cache_read_input_tokens` /
 `cache_creation_input_tokens`); `reasoning` is deliberately OMITTED —
 the SDK's `thinkingTokens` are already counted inside `output_tokens`,
@@ -506,9 +515,11 @@ Files:
 
 - `index.ts` — `AcpDriver implements Driver` (constructor options:
   `command?`/`endpoint?`/`endpointTable?` (binary discovery, §3 posture),
-  `envNames?`/`modelEnv?` (env var NAMES — never values), `outputSchema?`
-  (prompt-directed JSON), `workspaceRoot?`, `sessionsDir?`, `pricing?`,
-  `termGraceMs?`/`killGraceMs?`, `spawn?` test seam).
+  `envNames?`/`modelEnv?` (env var NAMES — never values),
+  `workspaceRoot?`, `sessionsDir?`, `pricing?`,
+  `termGraceMs?`/`killGraceMs?`, `spawn?` test seam. The structured-output
+  schema rides the INVOCATION (`OpInvocation.outputSchema`, seam v2) and
+  drives prompt-directed JSON.)
 - `protocol.ts` — OUR wire vocabulary: zero vendor imports (I10); the
   shapes were transcribed from live probes (nested `session/update`
   payloads, `configOptions` model reporting, kind-based permission

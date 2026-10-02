@@ -57,22 +57,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "driver": {
       "additionalProperties": false,
       "properties": {
-        "binary": {
-          "anyOf": [
-            {
-              "minLength": 1,
-              "type": "string"
-            },
-            {
-              "items": {
-                "minLength": 1,
-                "type": "string"
-              },
-              "minItems": 1,
-              "type": "array"
-            }
-          ]
-        },
         "budget": {
           "additionalProperties": false,
           "properties": {
@@ -97,62 +81,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "type": "string"
         },
         "provider": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "routingTable": {
-          "additionalProperties": false,
-          "properties": {
-            "endpoints": {
-              "additionalProperties": {
-                "additionalProperties": false,
-                "properties": {
-                  "baseUrlDefault": {
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "baseUrlEnv": {
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "keyEnv": {
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "models": {
-                    "items": {
-                      "minLength": 1,
-                      "type": "string"
-                    },
-                    "minItems": 1,
-                    "type": "array"
-                  },
-                  "notes": {
-                    "minLength": 1,
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "baseUrlEnv",
-                  "baseUrlDefault",
-                  "keyEnv",
-                  "models",
-                  "notes"
-                ],
-                "type": "object"
-              },
-              "propertyNames": {
-                "type": "string"
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "endpoints"
-          ],
-          "type": "object"
-        },
-        "sessionsDir": {
           "minLength": 1,
           "type": "string"
         },
@@ -181,7 +109,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         }
       },
       "required": [
-        "binary",
         "provider",
         "model"
       ],

@@ -4,11 +4,14 @@
 //      registers exactly five ops — planSweep, worktreeFor, unit, salvage,
 //      cleanup — with 'sweep.unit' dispatchable by name.
 //   2. SCHEMA ACCEPT/REJECT: a fully-wired dispatch input parses; unknown
-//      keys, an empty binary template, and a model-less driver section are
-//      rejected at the boundary.
+//      keys, a model-less driver section, AND the removed S4b-B2 plan-JSON
+//      driver keys (binary/routingTable/sessionsDir — plan data never names
+//      an executable, ADR-0002 §2.5/§2.3) are rejected at the boundary.
 //   3. THE IMPORTER RESOLVES and the binding refuses the two honest
 //      misconfigurations (no driver / no check config) with `failed` naming
-//      the field — never a silent no-op.
+//      the field — never a silent no-op. bindingsFromDispatch binds a
+//      FACTORY (ADR-0002 §2.5): it resolves role 'fixer' once and the
+//      bindings carry resolved.driver + the RESOLVED modelSpec.
 //   4. THE PUSH LEG (jSKJL): the shipped makePushBranch publishes a local
 //      branch to a real LOCAL BARE origin (offline), with the args-array
 //      `push -u origin <branch>` argv.
@@ -17,6 +20,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
+import type { DriverFactory, ResolvedDriver } from '../../../src/driver/factory.js';
+import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import {
   registry as sweepRegistry,
   SweepUnitDispatchInputSchema,
@@ -38,6 +43,24 @@ afterAll(() => {
   for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * A FAKE factory (ADR-0002 §2.5): bindingsFromDispatch resolves role 'fixer'
+ * through it ONCE — the fake records nothing (the dispatch-shape assertions
+ * live in test/plans/sweep.test.ts's capturing driver) but hands back a
+ * distinguished driver + RESOLVED spec, so the tests can pin that the
+ * bindings carry the RESOLVED form (never the input's raw spec).
+ */
+const FAKE_RESOLVED: ResolvedDriver = {
+  driver: {
+    run: async (_invocation: OpInvocation): Promise<WorkerResult> => {
+      throw new Error('fake factory driver: not dispatched in this suite');
+    },
+  } satisfies Driver,
+  lane: 'ai-sdk',
+  modelSpec: { provider: 'resolved-zai', model: 'resolved-model' },
+};
+const fakeFactory: DriverFactory = { resolve: () => FAKE_RESOLVED };
+
 /** A fully-wired dispatch input (the shape an enriched plan job carries). */
 const VALID: SweepUnitDispatchInput = {
   repoRoot: '/repo',
@@ -48,11 +71,9 @@ const VALID: SweepUnitDispatchInput = {
   fixer: 'fix',
   files: ['packages/alpha/test/suite.test.js'],
   driver: {
-    binary: ['node', '/opt/agent.mjs'],
     provider: 'cq-e2e',
     model: 'sweep-fake',
     budget: { maxUsd: 1 },
-    sessionsDir: '/tmp/sweep-sessions',
   },
   check: {
     adapter: 'tsc-lines',
@@ -82,8 +103,10 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       }).success,
     ).toBe(false);
     expect(
-      SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver: { ...VALID.driver!, budget: {} } })
-        .success,
+      SweepUnitDispatchInputSchema.safeParse({
+        ...VALID,
+        driver: { ...VALID.driver!, budget: {} },
+      }).success,
     ).toBe(false);
     // A context-only input (the builder's enrichment before knobs are layered) parses.
     expect(
@@ -99,18 +122,33 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     ).toBe(true);
     // Unknown keys are refused (strict).
     expect(SweepUnitDispatchInputSchema.safeParse({ ...VALID, evil: true }).success).toBe(false);
-    // An empty driver binary template is refused.
-    expect(
-      SweepUnitDispatchInputSchema.safeParse({
-        ...VALID,
-        driver: { ...VALID.driver, binary: [] },
-      }).success,
-    ).toBe(false);
+    // The S4b-B2 keys are GONE from the plan-JSON driver config (ADR-0002
+    // §2.3/§2.5 — plan data never names an executable or a lane): the strict
+    // schema REJECTS each of binary/routingTable/sessionsDir; those knobs
+    // moved into DriverFactoryConfig.lanes.subprocess.
+    const baseDriver = { provider: 'cq-e2e', model: 'sweep-fake' };
+    const bannedDrivers: Record<string, unknown>[] = [
+      { ...baseDriver, binary: ['node', '/opt/agent.mjs'] },
+      {
+        ...baseDriver,
+        routingTable: {
+          endpoints: { 'cq-e2e': { baseUrlEnv: 'X', models: ['sweep-fake'] } },
+        },
+      },
+      { ...baseDriver, sessionsDir: '/tmp/sweep-sessions' },
+    ];
+    for (const driver of bannedDrivers) {
+      const key = Object.keys(driver).filter((candidate) => !(candidate in baseDriver));
+      expect(
+        SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver }).success,
+        `driver.${key.join(',')} must be rejected`,
+      ).toBe(false);
+    }
     // A driver section without a model is refused.
     expect(
       SweepUnitDispatchInputSchema.safeParse({
         ...VALID,
-        driver: { binary: 'agent', provider: 'cq-e2e' },
+        driver: { provider: 'cq-e2e' },
       } as unknown).success,
     ).toBe(false);
   });
@@ -149,17 +187,39 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(checkless?.status === 'failed' && checkless.error).toMatch(/no check config/);
     // bindingsFromDispatch itself throws (the op wraps the throw).
     const { driver: _omitted, ...driverlessInput } = VALID;
-    expect(() => bindingsFromDispatch(driverlessInput)).toThrow(/no driver config/);
+    expect(() => bindingsFromDispatch(driverlessInput, fakeFactory)).toThrow(/no driver config/);
+  });
+
+  test('bindingsFromDispatch resolves through the factory ONCE and carries the RESOLVED form', () => {
+    let resolves = 0;
+    const countingFactory: DriverFactory = {
+      resolve: () => {
+        resolves += 1;
+        return FAKE_RESOLVED;
+      },
+    };
+    const bindings = bindingsFromDispatch(VALID, countingFactory);
+    // ONE resolve per dispatch (the binder's preferred shape, ADR-0002
+    // checklist §2.3), role 'fixer'.
+    expect(resolves).toBe(1);
+    // The RESOLVED form: the factory's driver and the factory's NORMALISED
+    // spec — never the input's raw spec.
+    expect(bindings.driver).toBe(FAKE_RESOLVED.driver);
+    expect(bindings.modelSpec).toEqual(FAKE_RESOLVED.modelSpec);
+    expect(bindings.modelSpec).not.toEqual(VALID.driver);
+    // No sessionsDir binding survived the migration: the workspace-bound run
+    // creates its fresh record inside the worktree (factory retention).
+    expect('sessionsDir' in bindings).toBe(false);
   });
 
   test('bindingsFromDispatch defaults the push leg ON (push:false opts out)', () => {
-    expect(bindingsFromDispatch(VALID).pushBranch).toBeDefined();
-    expect(bindingsFromDispatch({ ...VALID, push: false }).pushBranch).toBeUndefined();
+    expect(bindingsFromDispatch(VALID, fakeFactory).pushBranch).toBeDefined();
+    expect(bindingsFromDispatch({ ...VALID, push: false }, fakeFactory).pushBranch).toBeUndefined();
     // The prompt template: the shipped default, placeholders substituted.
-    const bindings = bindingsFromDispatch(VALID);
+    const bindings = bindingsFromDispatch(VALID, fakeFactory);
     expect(bindings.sandboxPolicy).toEqual({ level: 'workspace-write' });
     expect(() =>
-      bindingsFromDispatch({ ...VALID, driver: { ...VALID.driver!, budget: {} } }),
+      bindingsFromDispatch({ ...VALID, driver: { ...VALID.driver!, budget: {} } }, fakeFactory),
     ).toThrow(/driver.budget is required/);
     const expected = DEFAULT_UNIT_PROMPT_TEMPLATE.replaceAll('{package}', 'alpha')
       .replaceAll('{fixer}', 'fix')
@@ -178,14 +238,17 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       const dir = mkdtempSync(join(tmpdir(), 'sweep-install-'));
       CLEANUP.push(dir);
       const { worktreesDir: _ignored, ...withoutDir } = VALID;
-      const bindings = bindingsFromDispatch({
-        ...withoutDir,
-        repoRoot: join(dir, 'repo'),
-        install: {
-          command: process.execPath,
-          args: ['-e', "require('node:fs').writeFileSync('installed', 'yes')"],
+      const bindings = bindingsFromDispatch(
+        {
+          ...withoutDir,
+          repoRoot: join(dir, 'repo'),
+          install: {
+            command: process.execPath,
+            args: ['-e', "require('node:fs').writeFileSync('installed', 'yes')"],
+          },
         },
-      });
+        fakeFactory,
+      );
       expect(bindings.worktreesDir).toBe(join(dir, 'worktrees', 'cq'));
       expect(SweepUnitDispatchInputSchema.safeParse(withoutDir).success).toBe(true);
       await bindings.installDeps?.(dir);
@@ -200,23 +263,34 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       const root = mkdtempSync(join(tmpdir(), 'sweep-hook-order-'));
       CLEANUP.push(root);
       const repoRoot = join(root, 'repo');
-      execFileSync('git', ['init', '-q', '-b', 'main', repoRoot], { timeout: 10_000 });
+      execFileSync('git', ['init', '-q', '-b', 'main', repoRoot], {
+        timeout: 10_000,
+      });
       execFileSync('git', ['-C', repoRoot, 'config', 'user.email', 't@example.invalid'], {
         timeout: 10_000,
       });
-      execFileSync('git', ['-C', repoRoot, 'config', 'user.name', 'T'], { timeout: 10_000 });
-      writeFileSync(join(repoRoot, 'seed.txt'), 'seed\n');
-      execFileSync('git', ['-C', repoRoot, 'add', 'seed.txt'], { timeout: 10_000 });
-      execFileSync('git', ['-C', repoRoot, 'commit', '-q', '-m', 'seed'], { timeout: 10_000 });
-      const timeline: string[] = [];
-      const bindings = bindingsFromDispatch({
-        ...VALID,
-        repoRoot,
-        worktreesDir: join(root, 'trees'),
-        runPrefix: 'cq/hook-order',
-        mode: 'prep',
-        push: false,
+      execFileSync('git', ['-C', repoRoot, 'config', 'user.name', 'T'], {
+        timeout: 10_000,
       });
+      writeFileSync(join(repoRoot, 'seed.txt'), 'seed\n');
+      execFileSync('git', ['-C', repoRoot, 'add', 'seed.txt'], {
+        timeout: 10_000,
+      });
+      execFileSync('git', ['-C', repoRoot, 'commit', '-q', '-m', 'seed'], {
+        timeout: 10_000,
+      });
+      const timeline: string[] = [];
+      const bindings = bindingsFromDispatch(
+        {
+          ...VALID,
+          repoRoot,
+          worktreesDir: join(root, 'trees'),
+          runPrefix: 'cq/hook-order',
+          mode: 'prep',
+          push: false,
+        },
+        fakeFactory,
+      );
       const op = makeSweepUnitOp({
         ...bindings,
         installDeps: async () => {
@@ -227,13 +301,20 @@ describe('sweep.unit registry entry (jSKJF)', () => {
           return { stdout: '', stderr: '', exitCode: 0 };
         },
       });
-      const unit = { package: VALID.package, fixer: VALID.fixer, files: VALID.files };
+      const unit = {
+        package: VALID.package,
+        fixer: VALID.fixer,
+        files: VALID.files,
+      };
       const first = await op(unit);
       expect(first.status).toBe('ok');
       if (first.status !== 'ok') return;
       expect(first.value.worktree.reused).toBe(false);
       expect(timeline).toEqual(['install', 'probe']);
-      const linked = bindingsFromDispatch({ ...VALID, repoRoot: first.value.worktree.path });
+      const linked = bindingsFromDispatch(
+        { ...VALID, repoRoot: first.value.worktree.path },
+        fakeFactory,
+      );
       expect(linked.mutex?.lockPath).toBe(bindings.mutex?.lockPath);
 
       timeline.length = 0;
@@ -246,10 +327,13 @@ describe('sweep.unit registry entry (jSKJF)', () => {
   );
 
   test('placeholder substitution is literal — `$&`/`` $` `` never become replacement tokens (#175 item 7)', () => {
-    const bindings = bindingsFromDispatch({
-      ...VALID,
-      promptTemplate: 'pkg={package} fixer={fixer} wt={worktree}',
-    });
+    const bindings = bindingsFromDispatch(
+      {
+        ...VALID,
+        promptTemplate: 'pkg={package} fixer={fixer} wt={worktree}',
+      },
+      fakeFactory,
+    );
     const unit = { package: 'a$&b', fixer: 'f$`g', files: [] };
     // The OLD string-replacer form would turn `$&` into the matched
     // placeholder and `` $` `` into the pre-match text — corrupting the prompt.
@@ -392,20 +476,26 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {
-    const bindings = bindingsFromDispatch(VALID);
+    const bindings = bindingsFromDispatch(VALID, fakeFactory);
     expect(bindings.mutex).toEqual({
       lockPath: '/repo/.git/cq-git-mutex',
       retries: 13,
     });
-    const overridden = bindingsFromDispatch({
-      ...VALID,
-      mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
+    const overridden = bindingsFromDispatch(
+      {
+        ...VALID,
+        mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
+      },
+      fakeFactory,
+    );
+    expect(overridden.mutex).toEqual({
+      lockPath: '/locks/custom.lock',
+      staleMs: 5000,
     });
-    expect(overridden.mutex).toEqual({ lockPath: '/locks/custom.lock', staleMs: 5000 });
     expect(mutexWaiterRetries(600_000)).toBe(13);
     expect(100 * (2 ** mutexWaiterRetries(600_000) - 1)).toBeGreaterThan(600_000);
     // The resolved segments override rides the bindings (jTPa1).
-    const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' });
+    const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' }, fakeFactory);
     expect(renamed.segments).toEqual({
       kind: 'fix',
       slug: 'a-b-2',

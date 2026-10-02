@@ -4,7 +4,7 @@
 // primitives — the driver-hygiene scan exempts exactly this path,
 // src/driver/subprocess/process.ts): the SIGTERM→SIGKILL grace ladder lives
 // here because here the kernel has ALREADY DECIDED to kill (the governed
-// signal from currentJobContext() fired — I8: the governor decides WHEN to
+// RunOptions.signal fired — I8: the governor decides WHEN to
 // abort, the driver only obeys) and this helper only EXECUTES that decision
 // against a real OS process. It never decides to start a termination on its
 // own: `terminateGracefully` is called by the driver purely as a reaction
@@ -40,7 +40,7 @@
 import {
   processSignalCleanupStarted,
   registerProcessSignalCleanup,
-} from '../../kernel/process-signals.js';
+} from '../../shared/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
