@@ -91,23 +91,23 @@
 // string — nothing was applied, nothing was quarantined, and the taxonomy
 // has no payload slot. The full `trace` query op and a durable dispatch
 // journal are post-v1 (recorded in the family NOTES.md).
-import type { Op, OpResult } from "../../../kernel/types.js";
-import type { RunCheck } from "../../gates/checkRunner.js";
-import type { ApprovalAuthority, ApprovedMutation } from "../approval.js";
+import type { Op, OpResult } from '../../../kernel/types.js';
+import type { RunCheck } from '../../gates/checkRunner.js';
+import type { ApprovalAuthority, ApprovedMutation } from '../approval.js';
 import {
   approvalInputDigest,
   contentFingerprint,
   DENY_ALL_APPROVALS,
   withApprovedMutation,
   withMutationLock,
-} from "../approval.js";
-import type { AnalyzeFileStore } from "../analysisStore.js";
-import type { CodemodFileApplied, CodemodReport } from "../codemod/astGrep.js";
-import { makeAstGrepCodemod } from "../codemod/astGrep.js";
-import type { Playbook, VerifierCommand } from "./format.js";
-import type { QuarantineLedger, QuarantineRecord } from "./quarantine.js";
-import type { PlaybookVerifierOutcome } from "./verifier.js";
-import { makePlaybookVerifier } from "./verifier.js";
+} from '../approval.js';
+import type { AnalyzeFileStore } from '../analysisStore.js';
+import type { CodemodFileApplied, CodemodReport } from '../codemod/astGrep.js';
+import { makeAstGrepCodemod } from '../codemod/astGrep.js';
+import type { Playbook, VerifierCommand } from './format.js';
+import type { QuarantineLedger, QuarantineRecord } from './quarantine.js';
+import type { PlaybookVerifierOutcome } from './verifier.js';
+import { makePlaybookVerifier } from './verifier.js';
 
 /**
  * The op-boundary cap for a JSON-dispatched verifier whose authored command
@@ -174,15 +174,13 @@ export class DispatchInFlightError extends Error {
     super(
       `a dispatch of playbook '${playbookId}' is already in flight; wait for it to settle — a queued duplicate would re-apply the rule`,
     );
-    this.name = "DispatchInFlightError";
+    this.name = 'DispatchInFlightError';
     this.playbookId = playbookId;
   }
 }
 
 /** Build a playbook registry. Seeds are registered in order (duplicates throw). */
-export function makePlaybookRegistry(
-  initial?: readonly Playbook[],
-): PlaybookRegistry {
+export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookRegistry {
   const byId = new Map<string, Playbook>();
   // The per-id dispatch slots: an entry exists exactly while that
   // playbook's dispatch is UNSETTLED, and is removed on settlement so the
@@ -196,9 +194,7 @@ export function makePlaybookRegistry(
   };
   for (const playbook of initial ?? []) {
     if (byId.has(playbook.id)) {
-      throw new RangeError(
-        `playbook registry: duplicate id '${playbook.id}' in seed`,
-      );
+      throw new RangeError(`playbook registry: duplicate id '${playbook.id}' in seed`);
     }
     stored(playbook);
   }
@@ -292,12 +288,12 @@ export function makePlaybookRegisterOp(
       playbooks.register(input.playbook);
     } catch (err) {
       return {
-        status: "failed",
+        status: 'failed',
         error: err instanceof Error ? err.message : String(err),
       };
     }
     return {
-      status: "ok",
+      status: 'ok',
       value: { id: input.playbook.id, total: playbooks.list().length },
     };
   };
@@ -321,7 +317,7 @@ export function makePlaybookQuarantineListOp(
   quarantine: QuarantineLedger,
 ): Op<PlaybookQuarantineListInput, PlaybookQuarantineListReport> {
   return async () => ({
-    status: "ok",
+    status: 'ok',
     value: { records: quarantine.records() },
   });
 }
@@ -365,14 +361,14 @@ export interface PlaybookDispatchDeps {
  * (value.record; the detail string on the indeterminate outcome).
  */
 export interface PlaybookDispatchRecord {
-  kind: "playbook-dispatch";
+  kind: 'playbook-dispatch';
   playbookId: string;
   targets: string[];
   plannedEdits: number;
   unfixedMatches: number;
   files: Array<{ file: string; edits: number; digestAfter: string }>;
   verifier: PlaybookVerifierOutcome;
-  outcome: "verified" | "verifier-failed" | "verifier-indeterminate";
+  outcome: 'verified' | 'verifier-failed' | 'verifier-indeterminate';
   quarantined: boolean;
   /**
    * The step-5 rollback evidence. Present ONLY on the non-passing
@@ -399,7 +395,7 @@ export interface PlaybookRestoreReport {
 
 /** The dispatch report for the ONE `ok` outcome: the verifier passed. */
 export interface PlaybookDispatchOutcome {
-  outcome: "verified";
+  outcome: 'verified';
   playbookId: string;
   targets: string[];
   plannedEdits: number;
@@ -418,7 +414,7 @@ export interface PlaybookDispatchOutcome {
  * a consumer can parse the JSON it finds there.
  */
 export interface PlaybookDispatchUnverified {
-  outcome: "verifier-failed" | "verifier-indeterminate";
+  outcome: 'verifier-failed' | 'verifier-indeterminate';
   playbookId: string;
   targets: string[];
   plannedEdits: number;
@@ -463,24 +459,22 @@ type PlaybookDispatchResult = OpResult<PlaybookDispatchOutcome>;
 export function makePlaybookDispatchOp(
   deps: PlaybookDispatchDeps,
 ): Op<PlaybookDispatchInput, PlaybookDispatchOutcome> {
-  const dispatchOnce = async (
-    input: PlaybookDispatchInput,
-  ): Promise<PlaybookDispatchResult> => {
+  const dispatchOnce = async (input: PlaybookDispatchInput): Promise<PlaybookDispatchResult> => {
     // ---- 1. Registry lookup (before anything runs).
     const playbook = deps.playbooks.get(input.playbookId);
     if (playbook === undefined) {
       const registered = deps.playbooks.list().map((entry) => entry.id);
       return {
-        status: "failed",
-        error: `unknown playbook id '${input.playbookId}' — registered: ${registered.join(", ") || "(none)"}`,
+        status: 'failed',
+        error: `unknown playbook id '${input.playbookId}' — registered: ${registered.join(', ') || '(none)'}`,
       };
     }
     // ---- 2. Quarantine consult — fail closed BEFORE any scan or write.
     if (deps.quarantine.isQuarantined(playbook.id)) {
       const reason = deps.quarantine.reasonOf(playbook.id);
       return {
-        status: "needs-human",
-        reason: `playbook '${playbook.id}' is quarantined and is never re-dispatched automatically${reason === undefined ? "" : ` — quarantine reason: ${reason}`}; lifting the quarantine is an explicit consumer action (QuarantineLedger.unquarantine), never an automatic one`,
+        status: 'needs-human',
+        reason: `playbook '${playbook.id}' is quarantined and is never re-dispatched automatically${reason === undefined ? '' : ` — quarantine reason: ${reason}`}; lifting the quarantine is an explicit consumer action (QuarantineLedger.unquarantine), never an automatic one`,
       };
     }
     // ---- 3. The codemod engine (scan → collision → freshness → apply),
@@ -492,7 +486,7 @@ export function makePlaybookDispatchOp(
       store = deps.storeFor(input);
     } catch (err) {
       return {
-        status: "failed",
+        status: 'failed',
         error: `playbook dispatch: ${messageOf(err)}`,
       };
     }
@@ -510,7 +504,7 @@ export function makePlaybookDispatchOp(
         preApply.set(file, await store.readBytes(file));
       } catch (err) {
         return {
-          status: "failed",
+          status: 'failed',
           error: `playbook dispatch: could not capture the pre-apply bytes of '${file}', which the rollback on a non-passing verifier verdict depends on — nothing was written (${messageOf(err)})`,
         };
       }
@@ -524,7 +518,7 @@ export function makePlaybookDispatchOp(
     // authorization — the plan-JSON-shaped boolean cannot reach a byte on
     // disk through this path (A16).
     const subject = {
-      op: "analyze.playbookDispatch",
+      op: 'analyze.playbookDispatch',
       workspace: input.dir,
       targets,
       inputDigest: approvalInputDigest({
@@ -572,9 +566,7 @@ export function makePlaybookDispatchOp(
             // anchor, which ADR-0003 §2/§6 keeps. The authorization is the
             // grant consumed above.
             approved: true,
-            ...(input.timeoutMs === undefined
-              ? {}
-              : { timeoutMs: input.timeoutMs }),
+            ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
           });
           // THE POST-APPLY FINGERPRINTS, read back INSIDE the same critical
           // section that wrote them. They are what step 5's conditional
@@ -582,13 +574,10 @@ export function makePlaybookDispatchOp(
           // wrote" is answered from bytes this dispatch itself produced,
           // not from a digest the engine reported and never re-read.
           const written = new Map<string, string>();
-          if (engine.status === "ok" && engine.value.mode === "applied") {
+          if (engine.status === 'ok' && engine.value.mode === 'applied') {
             for (const file of engine.value.files) {
               try {
-                written.set(
-                  file.file,
-                  contentFingerprint(await store.readBytes(file.file)),
-                );
+                written.set(file.file, contentFingerprint(await store.readBytes(file.file)));
               } catch (err) {
                 throw new PostApplyReadFault(file.file, messageOf(err));
               }
@@ -603,21 +592,21 @@ export function makePlaybookDispatchOp(
       // rollback is attempted. Saying so beats restoring blind.
       if (err instanceof PostApplyReadFault) {
         return {
-          status: "failed",
+          status: 'failed',
           error: `playbook dispatch: the remediation was applied, but re-reading '${err.file}' to fingerprint the applied bytes FAILED (${err.message}) — the rollback on a non-passing verifier verdict cannot be proven safe, so NO restore was attempted and the workspace holds the applied edits; inspect it by hand before re-dispatching`,
         };
       }
       throw err;
     }
-    if (approved.status === "needs-human") {
+    if (approved.status === 'needs-human') {
       return {
-        status: "needs-human",
+        status: 'needs-human',
         reason: `${approved.reason}; playbook '${playbook.id}' was not dispatched and no target of '${targets.length}' was read for modification — re-approve against the current workspace state to dispatch it`,
       };
     }
     const engineResult: OpResult<CodemodReport> = approved.value.engine;
     const postApply: Map<string, string> = approved.value.applied;
-    if (engineResult.status !== "ok") {
+    if (engineResult.status !== 'ok') {
       // Unreachable by construction (approved: true, dryRun: false — and the
       // engine never returns budget-exhausted/indeterminate), but the frozen
       // taxonomy allows them, so they pass through honestly rather than
@@ -627,11 +616,11 @@ export function makePlaybookDispatchOp(
       return engineResult;
     }
     const applied = engineResult.value;
-    if (applied.mode !== "applied") {
+    if (applied.mode !== 'applied') {
       // Unreachable: dispatch always runs the apply mode (dryRun: false).
       return {
-        status: "failed",
-        error: "playbook dispatch: the engine returned a dry-run report",
+        status: 'failed',
+        error: 'playbook dispatch: the engine returned a dry-run report',
       };
     }
     const files = applied.files;
@@ -663,22 +652,22 @@ export function makePlaybookDispatchOp(
       edits: file.edits,
       digestAfter: file.digestAfter,
     }));
-    if (verifier.verdict === "pass") {
+    if (verifier.verdict === 'pass') {
       const record: PlaybookDispatchRecord = {
-        kind: "playbook-dispatch",
+        kind: 'playbook-dispatch',
         playbookId: playbook.id,
         targets,
         plannedEdits: applied.plannedEdits,
         unfixedMatches: applied.unfixedMatches,
         files: recordFiles,
         verifier,
-        outcome: "verified",
+        outcome: 'verified',
         quarantined: false,
       };
       return {
-        status: "ok",
+        status: 'ok',
         value: {
-          outcome: "verified",
+          outcome: 'verified',
           playbookId: playbook.id,
           targets,
           plannedEdits: applied.plannedEdits,
@@ -689,7 +678,7 @@ export function makePlaybookDispatchOp(
         },
       };
     }
-    if (verifier.verdict === "fail") {
+    if (verifier.verdict === 'fail') {
       // The one quarantine entry path: an OBSERVED verifier failure. The
       // ledger record carries the verifier's reason verbatim — the evidence.
       deps.quarantine.quarantine(playbook.id, verifier.reason);
@@ -709,19 +698,19 @@ export function makePlaybookDispatchOp(
         postApply,
       );
       const record: PlaybookDispatchRecord = {
-        kind: "playbook-dispatch",
+        kind: 'playbook-dispatch',
         playbookId: playbook.id,
         targets,
         plannedEdits: applied.plannedEdits,
         unfixedMatches: applied.unfixedMatches,
         files: recordFiles,
         verifier,
-        outcome: "verifier-failed",
+        outcome: 'verifier-failed',
         quarantined: true,
         restore,
       };
       const unverified: PlaybookDispatchUnverified = {
-        outcome: "verifier-failed",
+        outcome: 'verifier-failed',
         playbookId: playbook.id,
         targets,
         plannedEdits: applied.plannedEdits,
@@ -734,7 +723,7 @@ export function makePlaybookDispatchOp(
         record,
       };
       return {
-        status: "failed",
+        status: 'failed',
         error:
           `playbook '${playbook.id}': the verifier FAILED (${verifier.reason}) — the applied remediation did not hold. ${restoreProse(restore)} The playbook is QUARANTINED (quarantined: true); lifting the quarantine is an explicit human action. ` +
           `Dispatch evidence: ${JSON.stringify(unverified)}`,
@@ -756,19 +745,19 @@ export function makePlaybookDispatchOp(
       postApply,
     );
     const record: PlaybookDispatchRecord = {
-      kind: "playbook-dispatch",
+      kind: 'playbook-dispatch',
       playbookId: playbook.id,
       targets,
       plannedEdits: applied.plannedEdits,
       unfixedMatches: applied.unfixedMatches,
       files: recordFiles,
       verifier,
-      outcome: "verifier-indeterminate",
+      outcome: 'verifier-indeterminate',
       quarantined: false,
       restore,
     };
     const unverified: PlaybookDispatchUnverified = {
-      outcome: "verifier-indeterminate",
+      outcome: 'verifier-indeterminate',
       playbookId: playbook.id,
       targets,
       plannedEdits: applied.plannedEdits,
@@ -781,7 +770,7 @@ export function makePlaybookDispatchOp(
       record,
     };
     return {
-      status: "indeterminate",
+      status: 'indeterminate',
       detail:
         `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — ${restoreProse(restore)} The playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5), and re-running the dispatch is now safe because the workspace is back at its pre-dispatch bytes. ` +
         `Dispatch evidence: ${JSON.stringify(unverified)}`,
@@ -798,7 +787,7 @@ export function makePlaybookDispatchOp(
       .catch((err) => {
         if (err instanceof DispatchInFlightError) {
           return {
-            status: "needs-human",
+            status: 'needs-human',
             reason: `${err.message}; re-dispatch deliberately once the in-flight dispatch settles (a deliberate re-dispatch of a passed playbook is an explicit action, the same trust level as the first)`,
           } satisfies PlaybookDispatchResult;
         }
@@ -860,7 +849,7 @@ async function restoreTargets(
       if (before === undefined) {
         // A file the apply reported but the capture did not hold: nothing to
         // restore from, and saying so is the honest report.
-        stranded.push({ file, error: "no pre-apply capture for this file" });
+        stranded.push({ file, error: 'no pre-apply capture for this file' });
         continue;
       }
       // COMPARE BEFORE WRITE: the guard that keeps this restore from
@@ -877,10 +866,7 @@ async function restoreTargets(
       }
       const currentFingerprint = contentFingerprint(current);
       const appliedFingerprint = expected.get(file);
-      if (
-        appliedFingerprint !== undefined &&
-        currentFingerprint !== appliedFingerprint
-      ) {
+      if (appliedFingerprint !== undefined && currentFingerprint !== appliedFingerprint) {
         stranded.push({
           file,
           error: `another writer changed this file while the verifier ran (this dispatch wrote ${String(appliedFingerprint)}, the file now holds ${currentFingerprint}) — NOT restored, because overwriting it would discard that writer's work`,
@@ -890,8 +876,7 @@ async function restoreTargets(
       if (appliedFingerprint === undefined) {
         stranded.push({
           file,
-          error:
-            "no post-apply fingerprint for this file, so a conditional restore is impossible",
+          error: 'no post-apply fingerprint for this file, so a conditional restore is impossible',
         });
         continue;
       }
@@ -944,7 +929,7 @@ class PostApplyReadFault extends Error {
     detail: string,
   ) {
     super(detail);
-    this.name = "PostApplyReadFault";
+    this.name = 'PostApplyReadFault';
   }
 }
 
@@ -957,7 +942,7 @@ function restoreProse(restore: PlaybookRestoreReport): string {
   if (restore.stranded.length === 0) {
     return `the applied edits were ROLLED BACK to their pre-dispatch bytes (${restore.restored.length} file(s) restored) and the workspace is back at its pre-dispatch state.`;
   }
-  return `the applied edits were ROLLED BACK where possible, but the restore FAILED for ${restore.stranded.map((entry) => `${entry.file} (${entry.error})`).join(", ")} — those files are STRANDED and the workspace is NOT at its pre-dispatch state; restored: ${restore.restored.length === 0 ? "none" : restore.restored.join(", ")}.`;
+  return `the applied edits were ROLLED BACK where possible, but the restore FAILED for ${restore.stranded.map((entry) => `${entry.file} (${entry.error})`).join(', ')} — those files are STRANDED and the workspace is NOT at its pre-dispatch state; restored: ${restore.restored.length === 0 ? 'none' : restore.restored.join(', ')}.`;
 }
 
 /** Error message of an unknown throwable, for `failed` results. */
