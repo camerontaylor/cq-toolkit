@@ -125,8 +125,10 @@ for tool pins, architecture conformance and the integrated-checker fallback.
 ### Mechanical checks
 
 `npm run check` is a composite of the whole-tree obligations (format check,
-static gate, the full suite, Knip); with the full suite now CI's, prefer the
-focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
+static gate, the full suite, Knip). **It is not a local verification route** —
+its full-suite leg is CI's obligation — and it runs only inside the
+coordinator-owned diagnostic and rollback exceptions. For ordinary local work use
+the focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
 `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `npm run lint:fast -- <file...>`

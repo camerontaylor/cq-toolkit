@@ -5,9 +5,11 @@ repository. This document **supersedes the previous "three full local gates"
 (3×) rule** everywhere it was stated. It is normative: no protocol step,
 handoff record or review cycle may require a local full-suite run.
 
-Slice 1 of `specs/optimise-test-suite-execution-policy-spec.md` (component **B —
+Slice 1 of the execution-policy spec — `specs/optimise-test-suite-execution-policy-spec.md`
+in the **toolkit-research** repo (this repository does not contain it; the path is
+relative to that repo's root) — component **B —
 Operating policy**, plus the **C — Gate venue** rule that makes required CI the
-full-gate authority). The later slices measure, retime and parallelise the
+full-gate authority. The later slices measure, retime and parallelise the
 suite; they do not revisit this contract.
 
 ## 1. The rule
@@ -17,8 +19,9 @@ suite; they do not revisit this contract.
   tests **affected by the diff** (`npx vitest run <affected test files>`).
   `npm run lint` and `npm run typecheck` are aliases of `npm run check:static` —
   run one, never several.
-- **Knip's condition (canonical; other documents link here, none restates
-  it).** `npm run knip` is whole-project, not file-scoped: run it when the diff
+- **Knip's condition (canonical here; another document may restate it only
+  alongside a link to this section).** `npm run knip` is whole-project, not
+  file-scoped: run it when the diff
   touches entrypoints, exports, dependencies or configuration — where dead code
   can actually appear — and skip it otherwise.
 - **Zero local full gates per PR.** No protocol step requires a local full
@@ -40,10 +43,16 @@ suite; they do not revisit this contract.
   they disagree about `ratchet`, `from-source` and `pack-audit`, and that
   disagreement is the reconciliation subject of the later CI-consolidation
   slice, not a claim this contract makes.
-- **Candidate evidence is green required CI on the exact candidate SHA.** The
-  candidate is the `merge-queue` commit the promotion gate resolves; its verdict
-  is read from that SHA's check-runs against the gate's own check list, failing
-  closed on a skipped or missing result.
+- **Candidate evidence is green required CI on the exact candidate SHA.** On the
+  queue route — the sanctioned one (doctrine I3: `main` advances only by the
+  promotion gate's pure fast-forward) — the candidate is the `merge-queue`
+  commit the gate resolves. The protocol still permits a direct-to-`main` PR
+  when that is a task's actual target; there the candidate is the commit `main`
+  ends up at, which under I3 is the merge commit (never a squash or a rewrite),
+  and the same rule applies: read that SHA's check-runs against the gate's own
+  check list, failing
+  closed on a skipped or missing result. Either way the PR head is not the
+  candidate.
 - **A green PR head is not candidate evidence.**
   `strict_required_status_checks_policy` is `false`
   (`policy/templates/github-settings.json`), so a PR head can be green while
@@ -60,8 +69,13 @@ owner.
 
 1. Start from the files the diff actually touches.
 2. Add the test files that statically import, or are imported by, the changed
-   source — `npx vitest related <changed source files>` uses Vitest's
-   static-import graph.
+   source, via Vitest's static-import graph. Any command with execution intent
+   carries `--run` (`npx vitest run related <changed source files>`); a bare
+   `npx vitest related …` can enter watch behaviour, so it is not the documented
+   form. List-only selection — printing the affected test files without running
+   them — is the job of `scripts/affected-tests.mjs`, which a later slice of the
+   execution-policy run delivers; until it lands, the selection is made by hand
+   and recorded in the handoff record.
 3. Add non-import dependents that do not appear in the import graph: fixtures,
    prompts, policy and workflow templates, generated docs, scripts.
 4. **Escalate anything you cannot classify.** Shared interfaces,
@@ -91,23 +105,47 @@ first; it rejects a path outside the repository, a `.git`/`node_modules`/
 before any tool runs:
 
 ```bash
-# 1. validate the list through the same containment check (non-mutating, fails closed)
-node --input-type=module -e 'import { ownedFiles } from "./scripts/lib/owned-files.mjs"; console.log(`owned-files OK: ${ownedFiles(process.argv.slice(1)).length} file(s)`);' -- <files>
-# 2. safe lint fixes for that list (safe fixes only; suggestions and dangerous fixes are excluded)
-node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix <files>
-# 3. formatting for exactly the same list
-node node_modules/oxfmt/bin/oxfmt <files>
+# 1. validate AND filter → /tmp/owned-files.txt: the surviving regular files, one path per
+#    line, and an EMPTY file when nothing survives (no trailing newline, so an empty
+#    result stays empty)
+node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync("/tmp/owned-files.txt", ownedFiles(process.argv.slice(1)).join("\n"));' -- <files>
+# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded)
+if [ -s /tmp/owned-files.txt ]; then
+  xargs node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < /tmp/owned-files.txt
+else
+  echo "owned-files: nothing to rewrite (empty or deleted-only list)"
+fi
+# 3. formatting for exactly the same paths
+if [ -s /tmp/owned-files.txt ]; then
+  xargs node node_modules/oxfmt/bin/oxfmt < /tmp/owned-files.txt
+else
+  echo "owned-files: nothing to format (empty or deleted-only list)"
+fi
 ```
+
+**Validate-then-substitute: steps 2 and 3 consume step 1's output, never the
+original `<files>` list.** `ownedFiles()` deliberately accepts a deleted path and
+then omits it from its return value, and it also de-duplicates; passing the raw
+list on would hand deleted or repeated paths to a mutating tool. A deleted-only
+diff yields an empty `/tmp/owned-files.txt`, both `if` branches take the
+`else` path, and the sequence ends as a no-op — the same outcome
+`scripts/fix.mjs` reports for deleted-only inputs. A mixed diff formats and fixes
+only the files that still exist. The guard must test emptiness rather than
+pipe a blank line into the tools: `xargs` ignores blank input, so an unguarded
+command would run with **no file arguments** — the repository-wide invocation
+the next paragraph forbids.
 
 This is the canonical spelling of the leaf commands; `AGENTS.md` repeats it
 verbatim rather than varying it. Invoke the pinned binaries through `node`
 rather than `npx`, which can resolve a newer oxlint/oxfmt than the pinned
-devDependency.
+devDependency. On a docs-only list `oxlint` reports "No files found to lint" and
+exits 1 — the level `scripts/fix.mjs` tolerates (it throws only above 1) — while
+the formatting step still applies.
 
 Validation is a separate process from the mutation, so this is check-then-act,
 not a lock: re-run step 1 whenever the list changes. Batch supported files into
-one invocation per tool, skip rewriting deleted files, never omit the file list,
-and never substitute a repository-wide glob. `npm run format:check` remains the
+one invocation per tool, never omit the file list, and never substitute a
+repository-wide glob. `npm run format:check` remains the
 read-only whole-tree formatting check — a candidate-level check, not per-turn
 feedback.
 

@@ -46,21 +46,34 @@ Use `npm run lint:fast -- <owned-file...>` for syntactic feedback. Lists must
 be explicit; never format the repository per turn. Changed-file lint does not
 establish correctness of dependents.
 
-`npm run fix -- <owned-file...>` is **not** file-scoped: it always ends with
-the full-project static gate (`scripts/fix.mjs`), even for a deleted-only
+`npm run fix -- <owned-file...>` is **not** file-scoped: it **always ends by
+running the full-project static gate** (`scripts/fix.mjs` runs
+`scripts/ratchet-typecheck.mjs` with no file list), even for a deleted-only
 list. Invoking the leaf tools directly bypasses that script's containment
-checks, so validate the same list through `scripts/lib/owned-files.mjs` first
-and then run the leaves — the canonical spelling, repeated verbatim from
-contract §3:
+checks, so validate and filter the list through `scripts/lib/owned-files.mjs`
+first and pass its **output** to the leaves — the canonical spelling, repeated
+verbatim from contract §3:
 
 ```bash
-node --input-type=module -e 'import { ownedFiles } from "./scripts/lib/owned-files.mjs"; console.log(`owned-files OK: ${ownedFiles(process.argv.slice(1)).length} file(s)`);' -- <files>
-node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix <files>
-node node_modules/oxfmt/bin/oxfmt <files>
+# 1. validate AND filter → /tmp/owned-files.txt (empty file when nothing survives)
+node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync("/tmp/owned-files.txt", ownedFiles(process.argv.slice(1)).join("\n"));' -- <files>
+# 2. safe lint fixes for THAT list (never the original list)
+if [ -s /tmp/owned-files.txt ]; then
+  xargs node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < /tmp/owned-files.txt
+else
+  echo "owned-files: nothing to rewrite (empty or deleted-only list)"
+fi
+# 3. formatting for exactly the same paths
+if [ -s /tmp/owned-files.txt ]; then
+  xargs node node_modules/oxfmt/bin/oxfmt < /tmp/owned-files.txt
+else
+  echo "owned-files: nothing to format (empty or deleted-only list)"
+fi
 ```
 
-`npm run check` is a composite — formatting, static gate, the full suite and
-Knip — and its full-suite leg belongs to CI.
+`npm run check` is a composite whose legs include the full suite; it is **not a
+local verification route** and runs only inside the coordinator-owned diagnostic
+and rollback exceptions (contract §1).
 
 Any local timing cited as evidence carries a load stamp (host uptime + load
 average at measurement time), and no protocol or record cites `--maxWorkers`
