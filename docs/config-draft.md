@@ -37,7 +37,11 @@ Blank list values fall through. The literal `none` explicitly clears a list;
 with a selected profile, blank values fall through to the profile. The
 `conservative` profile seeds only the built-in values. `solo-maintainer`
 currently seeds merge acceptance, protected-path posture, sandbox, network,
-and driver binding values shown in `policy/profiles/solo-maintainer.env`.
+and driver binding values shown in `policy/profiles/solo-maintainer.profile`.
+The bundled seeds use a `.profile` extension rather than `.env` because
+`policy/denylist/patterns.yml` (`class:key-material-env`) forbids any
+`*.env*` path in this repository; the seeds carry configuration values only,
+never credentials.
 
 The resolver remains pure: the integrating caller passes the environment
 snapshot, canonical `workspaceRootRealpath`, and `verifiedRealpaths` entries
