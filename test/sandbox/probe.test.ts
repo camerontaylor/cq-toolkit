@@ -681,4 +681,31 @@ describe('review hardening of the certification entry points', () => {
     });
     expect(grantAll).not.toHaveBeenCalled();
   });
+
+  test('the receipt binds the launch the canaries exercised, not a certify-time re-read', async () => {
+    const adapter = fakeAdapter('fs-only');
+    const exercised = adapter.launch;
+    const grantAll = vi.fn(() => Promise.resolve(result({ ok: true, exitCode: 0 })));
+    // First read (certifyBackends) and every read after the probe yields the
+    // grant-all; only the probe's own read yields the function the canaries
+    // ran.  Binding the grant-all would authorize a launch nobody probed.
+    let reads = 0;
+    Object.defineProperty(adapter, 'launch', {
+      get: () => (++reads === 2 ? exercised : grantAll),
+    });
+    const certification = await certifyBackends({
+      ...seams(),
+      network: 'allow',
+      adapters: [adapter],
+    });
+    expect(certification.certified).toEqual(['bwrap']);
+    await expect(
+      launchCertified(adapter, certification, {
+        workspace: '/tmp',
+        argv: ['/usr/bin/true'],
+        network: 'allow',
+      }),
+    ).rejects.toThrow(/launch method changed after certification/);
+    expect(grantAll).not.toHaveBeenCalled();
+  });
 });

@@ -89,6 +89,9 @@ export interface SandboxBackendAdapter {
   launch(request: SandboxLaunchRequest): Promise<SandboxLaunchResult>;
 }
 
+/** Post-exit pipe-drain grace when the direct child exits at its deadline. */
+const DRAIN_GRACE_MS = 1_000;
+
 /**
  * Run a launcher child to settlement and classify what happened.  The child
  * gets its OWN PROCESS GROUP (final-head review): on timeout the group is
@@ -158,6 +161,8 @@ function runChild(
       }
     };
     let settled = false;
+    const deadline = Date.now() + options.timeoutMs;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = (): void => {
       // Sweep the group the moment the DIRECT child is gone (delta review):
       // descendants holding the stdio pipes would otherwise delay settlement
@@ -168,6 +173,21 @@ function runChild(
       settled = true;
       clearTimeout(timer);
       if (!spawnErrored) killGroup('SIGKILL');
+      // A descendant that LEFT the group (setsid) survives the sweep and can
+      // hold the stdio pipes open indefinitely, so 'close' never fires and
+      // the launch would never settle (Opus review).  Bound the drain by the
+      // launch deadline (with a short grace for a legitimate tail): then the
+      // pipes are destroyed and the launch is not ok — its output is
+      // incomplete and a process outlived the sweep.
+      drainTimer = setTimeout(
+        () => {
+          if (finished) return;
+          result.timedOut = true;
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+        },
+        Math.max(deadline - Date.now(), DRAIN_GRACE_MS),
+      );
     };
     const timer = setTimeout(() => {
       if (settled) return;
@@ -179,6 +199,7 @@ function runChild(
       finished = true;
       clearTimeout(timer);
       settle();
+      clearTimeout(drainTimer);
       if (overflowed) result.timedOut = true;
       if (spawnErrorMessage !== undefined) result.spawnError = spawnErrorMessage;
       result.stdout = out.slice(0, options.maxOutputChars);

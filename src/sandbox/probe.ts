@@ -963,10 +963,14 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
     { blocker: string; launch: SandboxBackendAdapter['launch'] }
   >();
   for (const adapter of adapters) {
-    const launchRef = adapter.launch;
+    // Bind the reference the canaries EXERCISED, as returned by the probe —
+    // a second read of `adapter.launch` here could see a different function
+    // from an accessor (Opus review).  A thrown probe certifies nothing, so
+    // the fallback read only labels the blocker entry.
+    let launchRef = adapter.launch;
     let record: BackendProbeRecord;
     try {
-      ({ record } = await probeBackendWithLaunch(adapter, {
+      ({ record, launchRef } = await probeBackendWithLaunch(adapter, {
         ...options,
         platform,
         network,

@@ -627,6 +627,48 @@ describe('launcher hardening (PR review)', () => {
     }
   });
 
+  test('a descendant that escapes the group cannot hold the launch past its deadline', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-out-'));
+    const pidFile = join(outsideDir, 'escaped.pid');
+    try {
+      const helper = join(outsideDir, 'helper');
+      await writeFile(
+        helper,
+        '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
+        {
+          mode: 0o755,
+        },
+      );
+      // The direct child exits 0 at once; its grandchild calls setsid() —
+      // leaving the swept process group — and keeps the stdio pipes open.
+      const started = Date.now();
+      const result = await landlockAdapter({ helperPath: helper }).launch({
+        workspace: dir,
+        argv: [
+          '/usr/bin/perl',
+          '-e',
+          `use POSIX; if (fork) { exit 0 } setsid(); open my $f, '>', '${pidFile}'; print $f $$; close $f; sleep 120`,
+        ],
+        network: 'model-only',
+        timeoutMs: 3_000,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.timedOut).toBe(true);
+      expect(Date.now() - started).toBeLessThan(60_000);
+    } finally {
+      const pid = Number(await readFile(pidFile, 'utf8').catch(() => ''));
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+    // Scheduling margin only, as for the snapshot tests above.
+  }, 90_000);
+
   test('landlock refuses a proxyPort it cannot compose', async () => {
     const outsideDir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-out-'));
     try {
