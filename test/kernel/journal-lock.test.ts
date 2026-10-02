@@ -152,6 +152,8 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
+// Two child startups each have a 10s watchdog; the enclosing deadline must
+// cover both rather than expire at Vitest's default 5s during host load.
 test('different TMPDIR contenders use the recorded socket and cannot split one plan lock', async () => {
   const dir = await directory();
   const owner = start(dir, 'owner', { TMPDIR: '/tmp/owner-only' });
@@ -166,7 +168,7 @@ test('different TMPDIR contenders use the recorded socket and cannot split one p
   await owner.exited;
   const next = await acquirePlanLock(dir, 'locked', 'next');
   await next.release();
-});
+}, 30000);
 
 test('SIGSTOP with a saturated socket backlog never permits stealing a live owner', async () => {
   const dir = await directory();

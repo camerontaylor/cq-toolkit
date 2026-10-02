@@ -38,6 +38,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
+import { runLadder } from './governor.js';
 import { JournalEventSchema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
 
@@ -101,27 +102,37 @@ async function readLockRecord(path: string): Promise<PlanLockRecord> {
 }
 
 /** A full or paused socket backlog is alive; all unknown errors fail closed. */
-function socketIsAlive(path: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(path);
-    const timer = setTimeout(() => finish(true), 1000);
-    const finish = (alive: boolean): void => {
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(alive);
-    };
-    socket.once('connect', () => finish(true));
-    socket.once('error', (error) => {
-      const code = errorCode(error);
-      if (code === 'ENOENT' || code === 'ECONNREFUSED') finish(false);
-      else if (code === 'EAGAIN') finish(true);
-      else {
-        clearTimeout(timer);
-        socket.destroy();
-        reject(error);
-      }
-    });
-  });
+async function socketIsAlive(path: string): Promise<boolean> {
+  // The governor owns the probe deadline as well as invocation deadlines.
+  // Aborting a probe is positive refusal evidence, never permission to steal.
+  const outcome = await runLadder(
+    ({ signal }) =>
+      new Promise<boolean>((resolve, reject) => {
+        const socket = createConnection(path);
+        const finish = (alive: boolean): void => {
+          signal.removeEventListener('abort', refuse);
+          socket.destroy();
+          resolve(alive);
+        };
+        const refuse = (): void => finish(true);
+        signal.addEventListener('abort', refuse, { once: true });
+        socket.once('connect', () => finish(true));
+        socket.once('error', (error) => {
+          const code = errorCode(error);
+          if (code === 'ENOENT' || code === 'ECONNREFUSED') finish(false);
+          else if (code === 'EAGAIN') finish(true);
+          else {
+            signal.removeEventListener('abort', refuse);
+            socket.destroy();
+            reject(error);
+          }
+        });
+      }),
+    { wallClockMs: 1000, abortGraceMs: 0, killGraceMs: 0 },
+    { op: 'journal-lock-probe', jobKey: path, attempt: 1 },
+  );
+  if (outcome.outcome === 'threw') throw outcome.error;
+  return outcome.outcome === 'killed' || outcome.value;
 }
 
 function pidIsAlive(pid: number): boolean {
