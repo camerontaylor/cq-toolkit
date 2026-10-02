@@ -89,6 +89,27 @@ export interface PricedModel {
  *   seam wrapper's; this module only prices what was asked for);
  * - observed id outside the declared set → `undeclared-remap`, NO price.
  */
+/**
+ * The ids that must be priced for one invocation: the requested id first, then
+ * every DECLARED served alias, with the requested id filtered out of its own
+ * alias list and exact duplicates removed.
+ *
+ * Both `resolvePricedModel` and `worstCaseRates` derive their candidate set from
+ * here. They used to filter independently and drifted apart, which double-counted
+ * a candidate whenever a policy declared the requested id inside its own alias
+ * list — harmless for the maximum, but it reported the same id twice in
+ * `unpricedCandidates` and made the two functions disagree about what they cover.
+ */
+function pricedCandidates(
+  modelSpec: ModelSpec,
+  aliases: ServedAliasTable | undefined,
+  lane: string,
+): readonly string[] {
+  const requested = modelSpec.model;
+  const declared = servedAliasIds(aliases, lane, modelSpec.provider, requested);
+  return Object.freeze([requested, ...declared.filter((id) => id !== requested)]);
+}
+
 export function resolvePricedModel(args: {
   readonly lane: string;
   readonly modelSpec: ModelSpec;
@@ -97,7 +118,7 @@ export function resolvePricedModel(args: {
 }): PricedModel {
   const requested = args.modelSpec.model;
   const aliases = servedAliasIds(args.aliases, args.lane, args.modelSpec.provider, requested);
-  const candidates = Object.freeze([requested, ...aliases.filter((id) => id !== requested)]);
+  const candidates = pricedCandidates(args.modelSpec, args.aliases, args.lane);
   const served = args.servedModel;
   if (served !== undefined && served !== requested && !aliases.includes(served)) {
     return { servedModel: served, via: 'undeclared-remap', candidates };
@@ -142,11 +163,7 @@ export function worstCaseRates(
   readonly missingDirections: readonly RateDirection[];
   readonly candidates: readonly string[];
 } {
-  const requested = modelSpec.model;
-  const candidates = Object.freeze([
-    requested,
-    ...servedAliasIds(aliases, lane, modelSpec.provider, requested),
-  ]);
+  const candidates = pricedCandidates(modelSpec, aliases, lane);
   const unpricedCandidates: string[] = [];
   const perCandidate: PerMillionRates[] = [];
   for (const candidate of candidates) {
@@ -233,12 +250,24 @@ export function worstCaseReservationUsd(args: {
 }
 
 /**
- * Whether the alias-set maximum bounds what the wire may serve. True only when
- * the lane's served-model check is on with `requireObserved: true` (an observed
- * id must then be the requested id or a declared alias). A lane configured
- * `requireObserved: false` may serve ANY model unobserved, so its USD
- * classification is ADVISORY (ADR-0002 §2.6; ADR-0003 critic r2 m-d).
+ * Whether the alias-set maximum bounds what the wire may serve.
+ *
+ * Both halves are required, and this predicate ENFORCES the conjunction rather
+ * than leaving it to the caller:
+ *   - `requireObserved: true`, so an observed id must be the requested id or a
+ *     declared alias. A lane configured `requireObserved: false` may serve ANY
+ *     model unobserved, so its USD classification is ADVISORY (ADR-0002 §2.6;
+ *     ADR-0003 critic r2 m-d);
+ *   - the priced resolution must not be an `undeclared-remap`, i.e. the observed
+ *     id really was inside the declared set.
+ *
+ * This previously took only the boolean and returned it unchanged, which let a
+ * caller obtain `true` and claim a USD bound without ever checking the remap —
+ * a footgun aimed at the W3.3/J integration step.
  */
-export function servedModelBoundedByObservation(requireObserved: boolean): boolean {
-  return requireObserved;
+export function servedModelIsBounded(args: {
+  readonly requireObserved: boolean;
+  readonly priced: Pick<PricedModel, 'via'>;
+}): boolean {
+  return args.requireObserved && args.priced.via !== 'undeclared-remap';
 }

@@ -101,6 +101,19 @@ own never-zero rule.
 
 ## 5. Open items this audit hands to owners (no lane edits)
 
+0. **MCP credit term is unmodelled (declared gap, owner: seam owner).** The Z.AI
+   formula bills "MCP tool credit usage = Number of calls x Output multiplier",
+   but the FROZEN seam `Usage` (`src/driver/types.ts`) has no field able to carry a
+   call count, and widening a frozen type is not this lane's to do. Posture taken:
+   `creditsForUsage` takes `mcpCalls` as a caller-supplied parameter rather than
+   inventing a seam field, and `creditsAreLowerBound(profile, model, mcpCalls)`
+   reports `true` whenever the model has an MCP term the caller did not supply — a
+   caller sizing a reservation must consult it. Safety mechanism: no quota lane
+   can reach a HARD USD classification today (`admissionVerdict` returns ADVISORY
+   with `no-observed-balance` / `unobservable-allowance` for every quota profile),
+   so an under-count cannot gate a HARD reservation. Closing this properly needs a
+   seam-lease decision on `Usage` (owner: J/seam owner), not a pricing edit.
+
 1. **Lane owners (S/J/INV):** replace the raw-served-id price key at the four
    `costField` call sites with the W3.5 canonical resolution, under lease. Until
    then every remap is an unpriced invocation.

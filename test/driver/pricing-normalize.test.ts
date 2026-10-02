@@ -12,7 +12,7 @@ import { priceOf } from '../../src/driver/pricing/index.js';
 import {
   resolvePricedModel,
   servedAliasIds,
-  servedModelBoundedByObservation,
+  servedModelIsBounded,
   worstCaseRates,
   worstCaseReservationUsd,
 } from '../../src/driver/pricing/normalize.js';
@@ -223,9 +223,79 @@ describe('worstCaseReservationUsd', () => {
   });
 });
 
-describe('servedModelBoundedByObservation', () => {
-  test('only requireObserved:true bounds the served model by the alias set', () => {
-    expect(servedModelBoundedByObservation(true)).toBe(true);
-    expect(servedModelBoundedByObservation(false)).toBe(false);
+describe('servedModelIsBounded', () => {
+  // The predicate ENFORCES the conjunction; it is not a pass-through of the flag.
+  const exact = resolvePricedModel({
+    lane: 'subprocess',
+    modelSpec: HAIKU,
+    servedModel: HAIKU.model,
+  });
+  const aliased = resolvePricedModel({
+    lane: 'subprocess',
+    modelSpec: HAIKU,
+    servedModel: 'claude-haiku-4-5-20251001',
+    aliases: ALIASES,
+  });
+  const remapped = resolvePricedModel({
+    lane: 'subprocess',
+    modelSpec: HAIKU,
+    servedModel: 'claude-opus-4-1',
+    aliases: ALIASES,
+  });
+
+  test('bounded only when observed AND the observed id was in the declared set', () => {
+    expect(servedModelIsBounded({ requireObserved: true, priced: exact })).toBe(true);
+    expect(servedModelIsBounded({ requireObserved: true, priced: aliased })).toBe(true);
+    // An observed id OUTSIDE the declared set breaks the bound even with the
+    // check switched on — the half of the conjunction a caller used to skip.
+    expect(servedModelIsBounded({ requireObserved: true, priced: remapped })).toBe(false);
+  });
+
+  test('requireObserved:false never bounds, whatever was observed', () => {
+    expect(servedModelIsBounded({ requireObserved: false, priced: exact })).toBe(false);
+    expect(servedModelIsBounded({ requireObserved: false, priced: aliased })).toBe(false);
+  });
+
+  test('an unobserved resolution is in-bounds under requireObserved:true, by construction', () => {
+    // `via: 'unobserved'` is unreachable on a lane with requireObserved:true —
+    // the seam wrapper rejects an unobserved id before a result is priced — so
+    // this case cannot arise in a governed run. The predicate follows the stated
+    // contract (requireObserved AND not an undeclared remap) rather than adding
+    // a third condition the ADR does not have.
+    const unobserved = resolvePricedModel({ lane: 'acp', modelSpec: HAIKU });
+    expect(unobserved.via).toBe('unobserved');
+    expect(servedModelIsBounded({ requireObserved: true, priced: unobserved })).toBe(true);
+    // ...but the same resolution on a lane that does NOT require observation is
+    // unbounded, which is the case that actually reaches admission.
+    expect(servedModelIsBounded({ requireObserved: false, priced: unobserved })).toBe(false);
+  });
+});
+
+describe('pricedCandidates consistency (F5)', () => {
+  test('a policy declaring the requested id in its own alias list is deduped ONCE', () => {
+    // The two functions used to filter independently and drifted apart, so the
+    // requested id appeared twice in worstCaseRates' unpricedCandidates.
+    const selfReferential: ServedAliasTable = {
+      'ai-sdk': { deepseek: { 'deepseek-chat': ['deepseek-chat', 'deepseek-flash'] } },
+    };
+    const resolved = resolvePricedModel({
+      lane: 'ai-sdk',
+      modelSpec: DEEPSEEK_CHAT,
+      aliases: selfReferential,
+    });
+    const worst = worstCaseRates(DEEPSEEK_CHAT, selfReferential, 'ai-sdk');
+    expect(resolved.candidates).toEqual(['deepseek-chat', 'deepseek-flash']);
+    expect(worst.candidates).toEqual(resolved.candidates);
+    expect(worst.unpricedCandidates).toEqual([]);
+  });
+
+  test('the requested id appearing twice in the alias list still yields one candidate', () => {
+    const repeated: ServedAliasTable = {
+      'ai-sdk': { deepseek: { 'deepseek-chat': ['deepseek-flash', 'deepseek-flash'] } },
+    };
+    expect(worstCaseRates(DEEPSEEK_CHAT, repeated, 'ai-sdk').candidates).toEqual([
+      'deepseek-chat',
+      'deepseek-flash',
+    ]);
   });
 });

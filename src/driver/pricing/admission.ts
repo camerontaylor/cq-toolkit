@@ -241,18 +241,47 @@ export function classifyProviderSignal(
     };
   }
   const resetsAt = isoResetMs(observedQuota?.resetsAt);
-  if (signal.retryAfterMs !== undefined) {
+  // A `Retry-After` is evidence of a transient throttle only on a lane that
+  // documents throttling: a profile with no rate-limit headers and no throttle
+  // rule (codex-chatgpt — RS-14 captured no rate-limit headers at all in
+  // `codex exec --json`) must not have a stray retry-after manufacture a
+  // retryable verdict. This is the second half of the codex fix; that lane's real
+  // failure default comes from the seam's `classifyFailure`, not from here.
+  const documentsThrottle =
+    profile.rateLimitHeaders.length > 0 ||
+    profile.errorSignals.some((fact) => fact.errorClass === 'rate-limit');
+
+  // On a lane whose remaining-allowance channel IS an endpoint (deepseek's
+  // /user/balance; opencode-go's /zen/go/v1/usage, whose capture records
+  // `resetsAt`), an endpoint-supplied wall-clock reset is strictly MORE
+  // informative than a generic retry hint: it is when the allowance actually
+  // returns, not "come back shortly". Preferring `retry-after` there would
+  // busy-retry an exhausted allowance and throw the reset away — the same hazard
+  // the Claude unified-header ordering prevents, on the two lanes whose channel is
+  // an endpoint.
+  //
+  // Header-channel profiles (claude-subscription, anthropic-api, openai-api) are
+  // deliberately UNAFFECTED: for them `retry-after` keeps precedence, because the
+  // vendor documents it as the throttle discriminator and the Claude rules are
+  // built around it. With no `resetsAt` this branch does not fire, so a throttle
+  // on an endpoint lane still classifies as rate-limit exactly as before.
+  //
+  // Caller contract: the observation must come from THIS profile's documented
+  // `observability.usageEndpoint` — the same identity discipline that
+  // `ProviderSignal.endpoint` enforces for endpoint-scoped rules.
+  if (resetsAt !== undefined && profile.observability.channel === 'endpoint') {
+    return {
+      errorClass: 'quota',
+      deferUntilMs: resetsAt,
+      rule: 'quota-resets-at',
+    };
+  }
+  if (signal.retryAfterMs !== undefined && documentsThrottle) {
     return {
       errorClass: 'rate-limit',
       rule: 'retry-after',
     };
   }
-  // NO status-only fallback here. Status-declared rules are already resolved by
-  // firstMatchingRule, which applies ruleMatches; a second lookup keyed on the
-  // status alone would bypass that AND and resurrect the two defects this
-  // replaced - an ordinary Anthropic 400 would match the spend-limit rule
-  // without its documented message, and a Zen-wire (or endpoint-less) 402 would
-  // match the Go-wire rule without the identity that scopes it.
   if (resetsAt !== undefined) {
     return {
       errorClass: 'quota',
@@ -366,6 +395,16 @@ export function creditsForUsage(
   model: string,
   usage: Usage,
   instantMs: number,
+  /**
+   * MCP tool calls billed on this invocation, when the caller knows the count.
+   *
+   * The vendor formula carries a fourth term — "MCP tool credit usage = Number of
+   * calls x Output multiplier" — and the frozen seam `Usage` has NO field able to
+   * carry it. Rather than widen a frozen type from this lane, the count is a
+   * parameter: a caller that knows it passes it, and a caller that does not gets a
+   * figure that is explicitly a LOWER BOUND (see `creditsAreLowerBound`).
+   */
+  mcpCalls?: number,
 ): number | undefined {
   const burn = profile.quota?.burnModels?.[model];
   if (burn === undefined) return undefined;
@@ -373,8 +412,32 @@ export function creditsForUsage(
   const tokens =
     usage.input * tokenMultiplier.input +
     usage.cacheRead * tokenMultiplier.cachedInput +
-    usage.output * tokenMultiplier.output;
+    usage.output * tokenMultiplier.output +
+    (mcpCalls ?? 0) * (tokenMultiplier.mcpCall ?? 0);
   return (tokens / divisor) * peakMultiplier(profile, instantMs);
+}
+
+/**
+ * Whether a burn figure from `creditsForUsage` is a LOWER BOUND rather than the
+ * whole charge.
+ *
+ * True exactly when the model HAS an MCP term in its published formula and the
+ * caller did not pass `mcpCalls` — the one way this figure can be short. A caller
+ * sizing a reservation MUST consult this and must not treat a lower bound as a
+ * complete charge. The safety mechanism is that no quota lane can reach a HARD USD
+ * classification on this path today (`admissionVerdict` returns ADVISORY with
+ * `no-observed-balance` / `unobservable-allowance` for every quota profile), so an
+ * under-count can never gate a HARD reservation; this predicate exists so that
+ * stays true by construction rather than by accident.
+ */
+export function creditsAreLowerBound(
+  profile: ProviderProfile,
+  model: string,
+  mcpCalls?: number,
+): boolean {
+  const burn = profile.quota?.burnModels?.[model];
+  if (burn?.tokenMultiplier.mcpCall === undefined) return false;
+  return mcpCalls === undefined;
 }
 
 /** The USD classification ceiling an admission decision may claim for a lane. */

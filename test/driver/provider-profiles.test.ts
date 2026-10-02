@@ -19,6 +19,7 @@ import type { ProviderSignal } from '../../src/driver/pricing/admission.js';
 import {
   admissionVerdict,
   classifyProviderSignal,
+  creditsAreLowerBound,
   creditsForUsage,
   peakMultiplier,
 } from '../../src/driver/pricing/admission.js';
@@ -775,6 +776,21 @@ describe('creditsForUsage', () => {
     expect(creditsForUsage(CLAUDE_SUB!, 'claude-haiku-4-5', usage, PEAK)).toBeUndefined();
   });
 
+  test('the published MCP term is applied when the caller supplies the count', () => {
+    const withoutMcp = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
+    const withMcp = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK, 10)!;
+    // 10 calls x the GLM-5.3-Flash output multiplier (8) / 10,000, at peak.
+    expect(withMcp - withoutMcp).toBeCloseTo((10 * 8) / 10_000, 12);
+  });
+
+  test('a figure is a LOWER BOUND exactly when the MCP term was not supplied', () => {
+    expect(creditsAreLowerBound(ZAI!, 'glm-5.3-flash')).toBe(true);
+    expect(creditsAreLowerBound(ZAI!, 'glm-5.3-flash', 0)).toBe(false);
+    // A model with no published MCP term is never a lower bound.
+    expect(creditsAreLowerBound(ZAI!, 'glm-4.7')).toBe(false);
+    expect(creditsAreLowerBound(CLAUDE_SUB!, 'claude-haiku-4-5')).toBe(false);
+  });
+
   test('off-peak credits are half the peak burn', () => {
     const peak = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
     const offPeak = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, OFF_PEAK)!;
@@ -842,6 +858,68 @@ describe('admissionVerdict', () => {
     const verdict = admissionVerdict('codex-chatgpt', { model: 'gpt-6-sol' });
     expect(verdict.verdict).toBe('advisory');
     expect(verdict.reasons).toContain('unobservable-allowance');
+  });
+
+  // F1: the codex lane's documented default is produced by the seam's
+  // classifyFailure, not here. Its profile declares no throttle signal, so a
+  // stray Retry-After must not manufacture a retryable verdict.
+  test('codex: a stray Retry-After does not become a transient throttle', () => {
+    const verdict = classifyProviderSignal('codex-chatgpt', {
+      httpStatus: 429,
+      retryAfterMs: 30_000,
+    });
+    expect(verdict.errorClass).not.toBe('rate-limit');
+    expect(verdict.errorClass).toBe('provider-error');
+  });
+
+  test('codex: a bare failure with no signal is still the unattributed default', () => {
+    expect(classifyProviderSignal('codex-chatgpt', { message: 'exit 1' }).errorClass).toBe(
+      'provider-error',
+    );
+  });
+
+  test('codex: the profile declares no throttle headers and no rule', () => {
+    const codex = providerProfile('codex-chatgpt');
+    expect(codex?.rateLimitHeaders).toEqual([]);
+    expect(codex?.errorSignals).toEqual([]);
+  });
+
+  // F2: an endpoint-channel lane's own wall-clock reset outranks a generic retry
+  // hint; header-channel lanes keep `retry-after` precedence.
+  test('deepseek: an endpoint resetsAt outranks Retry-After on the balance lane', () => {
+    const verdict = classifyProviderSignal(
+      'deepseek',
+      { httpStatus: 500, retryAfterMs: 1_000 },
+      { resetsAt: '2026-09-28T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
+  });
+
+  test('opencode-go: same precedence on the usage-endpoint lane', () => {
+    const verdict = classifyProviderSignal(
+      'opencode-go',
+      { httpStatus: 500, retryAfterMs: 1_000 },
+      { resetsAt: '2026-09-28T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBe(Date.parse('2026-09-28T00:00:00Z'));
+  });
+
+  test('an endpoint lane with no resetsAt still classifies a throttle as rate-limit', () => {
+    const verdict = classifyProviderSignal('deepseek', { httpStatus: 500, retryAfterMs: 1_000 });
+    expect(verdict.errorClass).toBe('rate-limit');
+    expect(verdict.rule).toBe('retry-after');
+  });
+
+  test('a HEADER-channel lane keeps retry-after precedence (Claude rules untouched)', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      { httpStatus: 429, retryAfterMs: 3_741_000 },
+      { resetsAt: '2026-09-28T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('rate-limit');
+    expect(verdict.deferUntilMs).toBeUndefined();
   });
 
   test('an unknown provider is ADVISORY, never treated as unmetered', () => {

@@ -673,17 +673,20 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
       },
     },
     rateLimitHeaders: [],
-    errorSignals: [
-      {
-        errorClass: 'provider-error',
-        provenance: {
-          kind: 'rs14-capture',
-          source: `${CAPTURES}cx_json.jsonl`,
-          asOf: '2026-09-24',
-          note: 'The exec stream carries no quota marker. Until the seam carries a codex-specific signal, a non-zero exit with usage but no result is classified provider-error, never silently as zero spend.',
-        },
-      },
-    ],
+    errorSignals: [],
+    // NO provider errorSignals rule, deliberately — the empty array IS the
+    // statement. The lane's documented failure default is REAL and already
+    // implemented upstream: the seam's `classifyFailure`
+    // (src/driver/subprocess/index.ts, header-cut order case 5) classifies "a
+    // codex CLI that folded real usage and exited non-zero with no result event"
+    // as `provider-error`. Recording it here was wrong twice over — a rule with no
+    // discriminator is unreachable (every `firstMatchingRule` tier is gated on
+    // one, so the documented intent could never apply), and it would duplicate a
+    // signal this module cannot observe: the exec JSON stream carries no quota
+    // marker. `rateLimitHeaders` is empty for the same reason — RS-14 captured no
+    // rate-limit headers at all in `codex exec --json` — which also stops a stray
+    // `Retry-After` from manufacturing a transient-throttle verdict on a lane
+    // that documents no throttle at all.
   },
 
   'opencode-go': {
