@@ -22,7 +22,9 @@ suite; they do not revisit this contract.
 - **Knip's condition (canonical here; another document may restate it only
   alongside a link to this section).** `npm run knip` is whole-project, not
   file-scoped: run it when the diff
-  touches entrypoints, exports, dependencies or configuration — where dead code
+  touches entrypoints, exports, dependencies or configuration, or removes or
+  rewires the last import of a file or package (`knip.json` enables `files` and
+  `dependencies`, so a source-only edit can orphan either) — where dead code
   can actually appear — and skip it otherwise.
 - **Zero local full gates per PR.** No protocol step requires a local full
   `npm run test` or full `npm run test:unit`. A clean review adds **zero runs
@@ -109,13 +111,17 @@ first; it rejects a path outside the repository, a `.git`/`node_modules`/
 before any tool runs:
 
 ```bash
+( # subshell: `set -e` fail-fast without killing the caller's shell
+set -e
+OWNED=$(mktemp)
+trap 'rm -f "$OWNED"' EXIT
 # 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
 #    (paths containing spaces survive), and an EMPTY file when nothing survives
-OWNED=$(mktemp)
 OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
-# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded)
+# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
+#    xargs maps oxlint's tolerated exit 1 to 123, so only 123 is accepted here
 if [ -s "$OWNED" ]; then
-  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED"
+  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED" || [ $? -eq 123 ]
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
@@ -125,7 +131,7 @@ if [ -s "$OWNED" ]; then
 else
   echo "owned-files: nothing to format (empty or deleted-only list)"
 fi
-rm -f "$OWNED"
+)
 ```
 
 **Validate-then-substitute: steps 2 and 3 consume step 1's output, never the

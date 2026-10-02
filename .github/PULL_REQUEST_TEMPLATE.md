@@ -50,7 +50,7 @@ affected tests, Knip under its condition, and the three diff checks:
 - [ ] `npm run check:static` — exit 0 (once; `lint`/`typecheck` are aliases)
 - [ ] `npm run format:check` — exit 0
 - [ ] `npx vitest run <affected test files>` — exit 0, or not applicable (zero affected tests: record the determination and why the diff cannot affect any)
-- [ ] `npm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration)
+- [ ] `npm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration, and removes or rewires no last import)
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
 - [ ] `git diff --check` — clean (unstaged tracked)

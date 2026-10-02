@@ -18,7 +18,8 @@ Your local duty, on a coherent change:
 - `npx vitest run <affected test files>` — the tests your diff affects, not
   the suite
 - `npm run knip` — whole-project, not file-scoped: run it when the diff
-  touches entrypoints, exports, dependencies or configuration, and skip it
+  touches entrypoints, exports, dependencies or configuration, or removes
+  or rewires the last import of a file or package, and skip it
   otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** No protocol step requires of a worker a local full
@@ -55,13 +56,17 @@ first and pass its **output** to the leaves — the canonical spelling, repeated
 verbatim from contract §3:
 
 ```bash
+( # subshell: `set -e` fail-fast without killing the caller's shell
+set -e
+OWNED=$(mktemp)
+trap 'rm -f "$OWNED"' EXIT
 # 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
 #    (paths containing spaces survive), and an EMPTY file when nothing survives
-OWNED=$(mktemp)
 OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
-# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded)
+# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
+#    xargs maps oxlint's tolerated exit 1 to 123, so only 123 is accepted here
 if [ -s "$OWNED" ]; then
-  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED"
+  xargs -0 node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix < "$OWNED" || [ $? -eq 123 ]
 else
   echo "owned-files: nothing to rewrite (empty or deleted-only list)"
 fi
@@ -71,7 +76,7 @@ if [ -s "$OWNED" ]; then
 else
   echo "owned-files: nothing to format (empty or deleted-only list)"
 fi
-rm -f "$OWNED"
+)
 ```
 
 `npm run check` is a composite whose legs include the full suite; it is **not a
