@@ -35,7 +35,8 @@ it('rejects a production target before writing evidence or making an API request
     GH_TOKEN: firstToken,
     CQ_ADVERSARIAL_SECOND_TOKEN: secondToken,
   });
-  expect(result.status).not.toBe(0);
+  expect(result.status).toBe(2);
+  expect(result.stdout).toBe('');
   expect(result.stderr).toContain('Refusing target other than');
   expect(() => readFileSync(artifact)).toThrow();
 });
@@ -45,12 +46,15 @@ it('records missing credentials and dependency rows as BLOCKED without leaking t
     'camerontaylor/cq-scratch-v11-adversarial',
     'A1,A12,A13,A18,A19',
   );
-  expect(result.status).toBe(2);
+  expect(result.status).toBe(3);
   const raw = readFileSync(artifact, 'utf8');
   const evidence = JSON.parse(raw) as {
     rows: { id: string; status: string; attackExecuted: boolean; reason: string }[];
   };
   expect(evidence.rows).toHaveLength(5);
+  const summary = JSON.parse(result.stdout) as { evidence: string; rows: unknown[] };
+  expect(summary.evidence).toMatch(/evidence-blank\.json$/);
+  expect(summary.rows).toEqual(evidence.rows.map(({ id }) => ({ id, status: 'BLOCKED' })));
   expect(evidence.rows.every((row) => row.status === 'BLOCKED' && !row.attackExecuted)).toBe(true);
   expect(evidence.rows.find((row) => row.id === 'A1')?.reason).toContain('Missing GH_TOKEN');
   for (const id of ['A12', 'A13', 'A18', 'A19']) {
@@ -65,7 +69,7 @@ it('rejects one token reused for both identities without writing the token to ev
     GH_TOKEN: firstToken,
     CQ_ADVERSARIAL_SECOND_TOKEN: firstToken,
   });
-  expect(result.status).toBe(2);
+  expect(result.status).toBe(3);
   const raw = readFileSync(artifact, 'utf8');
   expect(raw).toContain('tokens are identical');
   expect(raw).not.toContain(firstToken);

@@ -85,8 +85,16 @@ The dispatch environment `adversarial-scratch` needs a primary credential in
 credential in `CQ_ADVERSARIAL_SECOND_TOKEN` with permission to review its PRs.
 It also needs `CQ_ADVERSARIAL_PROFILE_TOKEN`, an owner or installed App token
 with scratch repository Variables read/write and access to list environments
-and their variables. GitHub's repository Actions variable API expresses the
+and their variables; the outsider trust check reads `CQ_MERGE_TRUSTED_*` with
+it as well. GitHub's repository Actions variable API expresses the
 §3.1 keys; environment overrides are inspected and block the profile if found.
 The available owner credential created the private repository and PR,
 but it is a broad owner credential and is not provisioned to the dispatch
 environment. None of these environment secrets is currently confirmed.
+
+The preflight rejects a second identity that is a scratch collaborator, because
+a collaborator is a trusted association by default. On a private personal
+repository only collaborators can read a PR, so the A1 and A15 drivers cannot
+run while the scratch repository stays private. Running them requires an owner
+decision, for example making the scratch repository public. Until then those
+rows stay BLOCKED at preflight or at review submission.

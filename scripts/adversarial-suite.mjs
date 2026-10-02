@@ -47,19 +47,24 @@ const SOLO_PROFILE = {
   CQ_BUDGET_ALLOW_ADVISORY: 'false',
   CQ_BUDGET_REQUIRE_CAP: 'true',
 };
+// I1: argument errors exit 2; BLOCKED rows await a human-observed verdict (3).
+function argError(message) {
+  process.stderr.write(`adversarial-suite: ${message}\n`);
+  process.exit(2);
+}
 const args = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
     const match = /^--([a-z]+)=(.*)$/.exec(arg);
-    if (!match) throw new Error(`Unsupported argument: ${arg}`);
+    if (!match) argError(`Unsupported argument: ${arg}`);
     return [match[1], match[2]];
   }),
 );
 const profile = args.profile;
 if (profile !== 'blank' && profile !== 'solo-maintainer') {
-  throw new Error('--profile must be blank or solo-maintainer');
+  argError('--profile must be blank or solo-maintainer');
 }
 if (args.repo !== SCRATCH_REPO) {
-  throw new Error(`Refusing target other than ${SCRATCH_REPO}`);
+  argError(`Refusing target other than ${SCRATCH_REPO}`);
 }
 const rows = args.rows
   ? args.rows
@@ -68,7 +73,7 @@ const rows = args.rows
       .filter(Boolean)
   : READY;
 if (rows.length === 0 || rows.some((row) => !READY.includes(row) && !(row in DEPENDENT))) {
-  throw new Error('Unknown or unsupported adversarial row');
+  argError('Unknown or unsupported adversarial row');
 }
 
 const output = resolve(`artifacts/adversarial-suite/evidence-${profile}.json`);
@@ -239,7 +244,7 @@ async function identity(token) {
   return { id: user.id, login: user.login, type: user.type };
 }
 
-async function verifyOutsider(primaryToken, primary, outsider, repo) {
+async function verifyOutsider(primaryToken, variablesToken, primary, outsider, repo) {
   // The repository owner must perform this check: a 404 from a token without
   // administration rights could conceal a collaborator from the caller.
   if (repo.owner?.id !== primary.id || repo.owner?.type !== 'User' || !repo.permissions?.admin) {
@@ -256,9 +261,14 @@ async function verifyOutsider(primaryToken, primary, outsider, repo) {
   if (collaborator !== null) {
     throw new Error('Second identity is a scratch repository collaborator');
   }
+  // Trust variables are read with the Variables-scoped credential: a token
+  // without that permission could get a concealed 404 that reads as "absent".
+  if (!variablesToken) {
+    throw new Error('CQ_ADVERSARIAL_PROFILE_TOKEN with scratch Variables read is required');
+  }
   const trustedBotsVariable = await github(
     `/repos/${SCRATCH_REPO}/actions/variables/CQ_MERGE_TRUSTED_BOTS`,
-    primaryToken,
+    variablesToken,
     { allow404: true },
   );
   const trustedBots = (trustedBotsVariable?.value ?? '')
@@ -270,7 +280,7 @@ async function verifyOutsider(primaryToken, primary, outsider, repo) {
   }
   const associationsVariable = await github(
     `/repos/${SCRATCH_REPO}/actions/variables/CQ_MERGE_TRUSTED_ASSOCIATIONS`,
-    primaryToken,
+    variablesToken,
     { allow404: true },
   );
   const configuredAssociations = (associationsVariable?.value ?? '')
@@ -305,6 +315,7 @@ async function preflight() {
         'Missing GH_TOKEN (CQ_ADVERSARIAL_TOKEN) or CQ_ADVERSARIAL_SECOND_TOKEN in adversarial-scratch environment',
     };
   }
+  const profileToken = process.env.CQ_ADVERSARIAL_PROFILE_TOKEN;
   if (first === second) return { reason: 'First and second test identity tokens are identical' };
   let primary;
   let outsider;
@@ -329,13 +340,13 @@ async function preflight() {
     }
     evidence.repositoryId = repo.id;
     evidence.defaultBranch = repo.default_branch;
-    evidence.outsiderTrust = await verifyOutsider(first, primary, outsider, repo);
+    evidence.outsiderTrust = await verifyOutsider(first, profileToken, primary, outsider, repo);
   } catch (error) {
     return { reason: `Scratch repository or outsider trust preflight failed: ${String(error)}` };
   }
   try {
-    await configureProfile(process.env.CQ_ADVERSARIAL_PROFILE_TOKEN);
-    evidence.outsiderTrust = await verifyOutsider(first, primary, outsider, repo);
+    await configureProfile(profileToken);
+    evidence.outsiderTrust = await verifyOutsider(first, profileToken, primary, outsider, repo);
   } catch (error) {
     return { reason: `Scratch ${profile} profile setup/readback failed: ${String(error)}` };
   }
@@ -444,5 +455,10 @@ for (const id of rows) {
   evidence.rows.push(result);
   await save();
 }
-process.stdout.write(`${output}\n`);
-if (evidence.rows.some((row) => row.status !== 'PASS')) process.exitCode = 2;
+process.stdout.write(
+  `${JSON.stringify({
+    evidence: output,
+    rows: evidence.rows.map(({ id, status }) => ({ id, status })),
+  })}\n`,
+);
+if (evidence.rows.some((row) => row.status !== 'PASS')) process.exitCode = 3;

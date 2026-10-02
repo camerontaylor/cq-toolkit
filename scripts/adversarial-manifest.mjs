@@ -75,15 +75,20 @@ for (const name of await readdir(artifactDir).catch(() => [])) {
   let report;
   try {
     report = JSON.parse(await readFile(resolve(artifactDir, name), 'utf8'));
-  } catch {
+  } catch (error) {
+    process.stderr.write(`adversarial-manifest: skipping unreadable ${name}: ${String(error)}\n`);
     continue;
   }
   if (
+    report === null ||
+    typeof report !== 'object' ||
     report.target !== 'camerontaylor/cq-scratch-v11-adversarial' ||
     !['blank', 'solo-maintainer'].includes(report.profile) ||
     !Array.isArray(report.rows)
-  )
+  ) {
+    process.stderr.write(`adversarial-manifest: skipping ${name}: wrong target, profile or rows\n`);
     continue;
+  }
   reports.push({ name, report });
 }
 
@@ -169,6 +174,20 @@ const safeProfileSettings = (value) => {
   return settings;
 };
 
+const safeWorkflowRun = (value) => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const run = {};
+  if (typeof value.runId === 'string' && /^\d+$/.test(value.runId)) run.runId = value.runId;
+  if (typeof value.runAttempt === 'string' && /^\d+$/.test(value.runAttempt))
+    run.runAttempt = value.runAttempt;
+  if (
+    typeof value.url === 'string' &&
+    /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+$/.test(value.url)
+  )
+    run.url = value.url;
+  return Object.keys(run).length > 0 ? run : null;
+};
+
 const safeOutsiderTrust = (value) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const trust = {};
@@ -191,6 +210,7 @@ const rows = ids.map((id) => {
         return {
           profile: report.profile,
           artifact: `artifacts/adversarial-suite/${name}`,
+          workflowRun: safeWorkflowRun(report.workflowRun),
           profileVerified: report.profileVerified === true,
           profileSettings: safeProfileSettings(report.profileSettings),
           attackExecuted: attack !== null,

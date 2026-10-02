@@ -62,8 +62,22 @@ const SLOW = { timeout: 60_000 };
 const HOOK_MS = 60_000;
 const ROOT = resolve(import.meta.dirname, '../..');
 
+// A parent git (e.g. a hook running vitest) can export variables that override
+// `cwd` and point every call below at the caller's repository instead.
+const INHERITED_ENV: NodeJS.ProcessEnv = { ...process.env };
+for (const key of [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+])
+  delete INHERITED_ENV[key];
+
 const GIT_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
+  ...INHERITED_ENV,
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_TERMINAL_PROMPT: '0',

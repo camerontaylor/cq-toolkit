@@ -32,7 +32,6 @@ concurrency:
 
 jobs:
   probe:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: adversarial-scratch
@@ -46,10 +45,17 @@ jobs:
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}
           SOURCE_REPOSITORY: ${{ github.repository }}
+          DISPATCH_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
           CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
         run: |
           set -euo pipefail
+          # Fail, not skip: a skipped matrix would look like a clean run.
+          if [[ "$DISPATCH_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo 'refusing: dispatch only from the default branch'
+            exit 1
+          fi
           if [[ "$SCRATCH_REPOSITORY" != "camerontaylor/cq-scratch-v11-adversarial" ]] || \
              [[ "$SCRATCH_REPOSITORY" == "$SOURCE_REPOSITORY" ]]; then
             echo 'refusing: target must be the dedicated cq-scratch-v11-adversarial repository'
