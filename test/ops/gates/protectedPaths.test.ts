@@ -113,8 +113,10 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
     ],
   '\\.(?:test|spec)\\.[cm]?[jt]sx?$': ['src/a.test.ts', 'src/b.spec.mts'],
   '\\.config\\.[^/]+$': ['vitest.config.ts', 'packages/a/vite.config.js'],
-  '(?:^|\\/)(?:setupTests|global[-.]setup|conftest)\\.(?:[cm]?[jt]sx?|py)$': [
+  '(?:^|\\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\\.(?:[cm]?[jt]sx?|py)$': [
     'src/setupTests.ts',
+    'globalSetup.ts',
+    'test/globalSetup.mts',
     'global-setup.ts',
     'global.setup.mjs',
     'conftest.py',

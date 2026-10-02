@@ -48,7 +48,9 @@ export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
 export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /\.config\.[^/]+$/i,
   // Runner entry points and environment files can alter or suppress test evidence.
-  /(?:^|\/)(?:setupTests|global[-.]setup|conftest)\.(?:[cm]?[jt]sx?|py)$/i,
+  // globalSetup is spelled separately because Vitest's canonical camelCase
+  // key has no [-.] separator for the alternation below to match.
+  /(?:^|\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\.(?:[cm]?[jt]sx?|py)$/i,
   /(?:^|\/)\.env\.test(?:\.[^/]+)?$/i,
   /(?:^|\/)(?:oxlint\.json|karma\.conf\.[cm]?js)$/i,
   // Ratchet evidence: the definitions (ratchets.json) and every baseline a
