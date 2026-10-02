@@ -24,10 +24,13 @@ async function stub(
   create = "printf '%064d\\n' 1",
   state = 'false 0',
 ) {
-  const dir = await mkdtemp(join(tmpdir(), 'cq-container-stub-'));
-  scratch.push(dir);
-  const command = join(dir, 'docker');
-  const log = join(dir, 'calls');
+  // The launcher lives OUTSIDE the workspace: a launcher inside the
+  // model-writable workspace is refused by the adapter.
+  const bin = await mkdtemp(join(tmpdir(), 'cq-container-stub-'));
+  const dir = await mkdtemp(join(tmpdir(), 'cq-container-ws-'));
+  scratch.push(bin, dir);
+  const command = join(bin, 'docker');
+  const log = join(bin, 'calls');
   await writeFile(
     command,
     `#!/bin/sh

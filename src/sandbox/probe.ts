@@ -38,7 +38,7 @@
 // that handoff so no caller can name a backend the probe never ran.
 import { execFile as execFileCb } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, open, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -122,6 +122,18 @@ export interface ProbeOptions {
    */
   modelProxy?: boolean;
   timeoutMs?: number;
+  /**
+   * Test seam: the "external" egress target the bare-host control and the
+   * in-boundary connect both use.  Defaults to 8.8.8.8:53; a deterministic
+   * test points it at a loopback listener so verdicts do not depend on the
+   * host's outbound connectivity.
+   */
+  externalTarget?: { host: string; port: number };
+  /**
+   * Test seam: the host-present executable the local-prefix canary attacks.
+   * Defaults to the first entry under /usr/local/bin (or /usr/local/share).
+   */
+  localPrefixTarget?: string;
 }
 
 /**
@@ -388,6 +400,10 @@ async function withScratch<T>(
     allocated.push(root);
     const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-ws-'));
     allocated.push(workspace);
+    // mkdtemp is owner-only; a non-root container UID (65532) could not
+    // traverse or write the bind mount, so the workspace control would fail
+    // for a usable container.  The scratch dir is empty and ephemeral.
+    await chmod(workspace, 0o777);
     const sibling = await mkdtemp(join(dirname(workspace), 'cq-sbx-sib-'));
     allocated.push(sibling);
     return await run({ root, workspace, sibling });
@@ -607,7 +623,7 @@ async function probeBackendWithLaunch(
       // cannot demonstrate the denial and stays inconclusive (a synthetic
       // pass would certify an unproven boundary), and a launch that timed
       // out, failed to spawn, or crashed is never read as a refusal.
-      const localBin = await firstLocalPrefixTarget();
+      const localBin = options.localPrefixTarget ?? (await firstLocalPrefixTarget());
       if (localBin === undefined) {
         canaries.push({
           id: 'local-prefix-exec',
@@ -627,7 +643,16 @@ async function probeBackendWithLaunch(
               }
             : sandboxed.ok
               ? { id: 'local-prefix-exec', verdict: 'fail', detail: `executed ${localBin}` }
-              : !executed(sandboxed)
+              : !executed(sandboxed) &&
+                  !(
+                    // An OCI runtime reports a hidden/denied exec as 126/127;
+                    // that is a refusal only when the launcher's own
+                    // exec-machinery line names this exact target.
+                    sandboxed.spawnError === undefined &&
+                    !sandboxed.timedOut &&
+                    (sandboxed.exitCode === 126 || sandboxed.exitCode === 127) &&
+                    execRefusalAttributable(adapter.backend, localBin, sandboxed)
+                  )
                 ? {
                     id: 'local-prefix-exec',
                     verdict: 'inconclusive',
@@ -696,7 +721,7 @@ async function probeBackendWithLaunch(
       // 9-11 — network, posture-aware.  The bare-host controls arm each
       // canary; a control that cannot fire leaves the canary inconclusive and
       // the posture uncertifiable.
-      const external = { host: '8.8.8.8', port: 53 };
+      const external = options.externalTarget ?? { host: '8.8.8.8', port: 53 };
       const externalArm = await externalControl(external.host, external.port);
       if (modelProxy) {
         const proxy = await loopbackPort();
@@ -931,7 +956,6 @@ async function probeBackendWithLaunch(
 export async function certifyBackends(options: ProbeOptions = {}): Promise<SandboxCertification> {
   const platform = options.platform ?? process.platform;
   const network = options.network ?? 'model-only';
-  const modelProxy = options.modelProxy === true && network === 'model-only';
   const adapters = options.adapters ?? adaptersForPlatform(platform);
   const records: BackendProbeRecord[] = [];
   const probedAdapters = new Map<
@@ -939,22 +963,43 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
     { blocker: string; launch: SandboxBackendAdapter['launch'] }
   >();
   for (const adapter of adapters) {
-    const { record, launchRef } = await probeBackendWithLaunch(adapter, {
-      ...options,
-      platform,
-      network,
-    });
+    const launchRef = adapter.launch;
+    let record: BackendProbeRecord;
+    try {
+      ({ record } = await probeBackendWithLaunch(adapter, {
+        ...options,
+        platform,
+        network,
+      }));
+    } catch (error) {
+      // One candidate's probe failure must not hide the others: record it
+      // as an uncertified blocker and keep probing the platform order.
+      record = {
+        backend: adapter.backend,
+        platform,
+        network,
+        networkDemonstrated: 'none',
+        runnable: false,
+        certified: false,
+        blocker: `probe failed: ${error instanceof Error ? error.message : String(error)}`,
+        canaries: [],
+      };
+    }
     records.push(record);
     probedAdapters.set(adapter, {
       blocker: record.certified ? '' : (record.blocker ?? 'probe did not certify this launcher'),
       launch: launchRef,
     });
   }
+  // Derive the aggregate egress claim from records that actually
+  // demonstrated the posture; no successful observation means 'none'.
+  const aggregateDemonstrated: NetworkDemonstrated =
+    records.find((r) => r.networkDemonstrated !== 'none')?.networkDemonstrated ?? 'none';
   const certification: SandboxCertification = {
     platform,
     probedAt: new Date().toISOString(),
     network,
-    networkDemonstrated: network === 'allow' ? 'allow' : modelProxy ? 'proxy-loopback' : 'none',
+    networkDemonstrated: aggregateDemonstrated,
     records,
     certified: Object.freeze(records.filter((r) => r.certified).map((r) => r.backend)),
   };
@@ -1086,5 +1131,7 @@ export async function launchCertified(
         ' — the launch profile must be the profile the canaries proved; CQ_SANDBOX=required is fail-closed',
     );
   }
-  return adapter.launch(snapshot);
+  // Invoke the receipt-bound reference, never a second read of
+  // `adapter.launch` (an accessor could return a different function).
+  return probed.launch.call(adapter, snapshot);
 }

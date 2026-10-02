@@ -235,6 +235,7 @@ describe('linux and container boundary construction', () => {
 
 describe('adapter options are snapshotted at construction (Sol final-head review)', () => {
   let stubDir: string;
+  let wsDir: string;
   const stubScript = async (name: string, marker: string): Promise<string> => {
     const path = join(stubDir, name);
     await writeFile(path, `#!/bin/sh\necho "${marker} $@"\n`, { mode: 0o755 });
@@ -243,9 +244,12 @@ describe('adapter options are snapshotted at construction (Sol final-head review
 
   beforeEach(async () => {
     stubDir = await mkdtemp(join(tmpdir(), 'cq-sbx-stub-'));
+    // Launchers must live OUTSIDE the workspace the adapter confines.
+    wsDir = await mkdtemp(join(tmpdir(), 'cq-sbx-ws-'));
   });
   afterEach(async () => {
     if (stubDir !== undefined) await rm(stubDir, { recursive: true, force: true });
+    if (wsDir !== undefined) await rm(wsDir, { recursive: true, force: true });
   });
 
   test('mutating container options after construction cannot change the boundary', async () => {
@@ -275,7 +279,7 @@ esac
     options.image = 'evil:latest';
     options.user = '0:0';
     const result = await adapter.launch({
-      workspace: stubDir,
+      workspace: wsDir,
       argv: ['/usr/bin/true'],
       network: 'model-only',
     });
@@ -300,7 +304,7 @@ esac
     const adapter = landlockAdapter(options);
     options.helperPath = stubB;
     const result = await adapter.launch({
-      workspace: stubDir,
+      workspace: wsDir,
       argv: ['/usr/bin/true'],
       network: 'model-only',
     });
@@ -581,5 +585,63 @@ describe('a bubblewrap adapter can at least name its own availability', () => {
     const availability = await bwrapAdapter().available();
     expect(typeof availability.available).toBe('boolean');
     if (!availability.available) expect(availability.blocker).toMatch(/bubblewrap/);
+  });
+});
+
+describe('launcher hardening (PR review)', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test('a launcher inside the workspace is refused, and loader hooks never reach it', async () => {
+    const helper = join(dir, 'helper');
+    await writeFile(helper, '#!/bin/sh\nenv\n', { mode: 0o755 });
+    const inside = await landlockAdapter({ helperPath: helper }).launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+    });
+    expect(inside.ok).toBe(false);
+    expect(inside.spawnError).toMatch(/inside the model-writable workspace/);
+
+    const outsideDir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-out-'));
+    try {
+      const outside = join(outsideDir, 'helper');
+      await writeFile(outside, '#!/bin/sh\nenv\n', { mode: 0o755 });
+      const ran = await landlockAdapter({ helperPath: outside }).launch({
+        workspace: dir,
+        argv: ['/usr/bin/true'],
+        network: 'model-only',
+        parentEnv: { PATH: '/usr/bin:/bin', LD_PRELOAD: '/evil.so', KEEP: 'yes' },
+        envPassthrough: ['LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'KEEP'],
+      });
+      expect(ran.ok).toBe(true);
+      expect(ran.stdout).toContain('KEEP=yes');
+      expect(ran.stdout).not.toMatch(/LD_PRELOAD|DYLD_/);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test('landlock refuses a proxyPort it cannot compose', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-out-'));
+    try {
+      const helper = join(outsideDir, 'helper');
+      await writeFile(helper, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      const result = await landlockAdapter({ helperPath: helper }).launch({
+        workspace: dir,
+        argv: ['/usr/bin/true'],
+        network: 'model-only',
+        proxyPort: 8080,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.spawnError).toMatch(/proxyPort is unsupported/);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });

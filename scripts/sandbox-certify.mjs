@@ -48,10 +48,16 @@ if (network !== undefined && network !== 'model-only' && network !== 'allow') {
 }
 const modelProxy = process.argv.includes('--model-proxy');
 
-const certification = await probe.certifyBackends({
-  ...(network === undefined ? {} : { network }),
-  ...(modelProxy ? { modelProxy: true } : {}),
-});
+let certification;
+try {
+  certification = await probe.certifyBackends({
+    ...(network === undefined ? {} : { network }),
+    ...(modelProxy ? { modelProxy: true } : {}),
+  });
+} catch (error) {
+  stderr.write(`sandbox-certify: probe failed: ${error?.stack ?? error}\n`);
+  exit(2);
+}
 
 if (process.argv.includes('--json')) {
   stdout.write(`${JSON.stringify(certification, null, 2)}\n`);
@@ -75,4 +81,5 @@ if (process.argv.includes('--json')) {
   );
 }
 
-exit(certification.certified.length === 0 ? 1 : 0);
+// exitCode (not exit()) lets piped stdout drain before the process ends.
+process.exitCode = certification.certified.length === 0 ? 1 : 0;

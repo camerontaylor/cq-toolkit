@@ -27,10 +27,10 @@
 //               provisioned (the D7 pattern), it is never silently "auto".
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join, relative, resolve } from 'node:path';
+import { delimiter, isAbsolute, join, relative, resolve } from 'node:path';
 import { buildSandboxLauncherEnv } from './index.js';
 import type { SandboxBackend, SandboxNetwork } from './config.js';
 
@@ -266,14 +266,60 @@ function resolveLauncher(name: string): string | undefined {
   return undefined;
 }
 
-/** Build the launcher child env from the parent env through the shared scrub. */
+/** Dynamic-loader hook names: run code inside a launcher before any boundary exists. */
+const LOADER_HOOK_NAME = /^(?:LD_|DYLD_)/;
+
+/**
+ * Build the launcher child env from the parent env through the shared scrub.
+ * The launcher (bwrap, sandbox-exec, a container CLI, the Landlock helper) runs
+ * on the HOST before the boundary is installed, so an operator passthrough
+ * naming a loader hook (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, ...) would run
+ * a model-writable library unconfined.  Loader hooks are categorically
+ * excluded from this env, passthrough or not.
+ */
 function launcherEnv(request: {
   parentEnv?: Readonly<Record<string, string | undefined>>;
   envPassthrough?: readonly string[];
 }): Record<string, string> {
-  return buildSandboxLauncherEnv(request.parentEnv ?? process.env, {
+  const scrubbed = buildSandboxLauncherEnv(request.parentEnv ?? process.env, {
     envPassthrough: request.envPassthrough ?? [],
   });
+  for (const name of Object.keys(scrubbed)) {
+    if (LOADER_HOOK_NAME.test(name)) delete scrubbed[name];
+  }
+  return scrubbed;
+}
+
+/**
+ * Refuse a launcher whose canonical path sits inside the requested workspace:
+ * a confined command could replace that file, and the next launch would
+ * execute the replacement on the host before any boundary exists.
+ */
+function launcherInsideWorkspace(
+  launcher: string,
+  workspace: string,
+): SandboxLaunchResult | undefined {
+  let real: string;
+  let realWorkspace: string;
+  try {
+    real = realpathSync(launcher);
+    realWorkspace = realpathSync(workspace);
+  } catch {
+    return undefined; // an unresolvable path fails at spawn / workspace validation
+  }
+  const rel = relative(realWorkspace, real);
+  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
+    return {
+      ok: false,
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      timedOut: false,
+      spawnError: `launcher '${launcher}' is inside the model-writable workspace; refusing to execute a replaceable launcher`,
+    };
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +664,8 @@ export function bwrapAdapter(): SandboxBackendAdapter {
           spawnError: 'bwrap launcher was not resolved at construction; refusing a PATH fallback',
         };
       }
+      const bwrapInside = launcherInsideWorkspace(launcher, request.workspace);
+      if (bwrapInside !== undefined) return bwrapInside;
       if (request.proxyPort !== undefined) {
         // --unshare-net denies loopback with the rest of the network; there is
         // no proxy composition.  Refuse rather than silently downgrade.
@@ -784,6 +832,8 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
           spawnError: `${resolved.command} launcher was not resolved at construction; refusing a PATH fallback`,
         };
       }
+      const containerInside = launcherInsideWorkspace(launcher, request.workspace);
+      if (containerInside !== undefined) return containerInside;
       if (request.proxyPort !== undefined) {
         // --network none denies loopback with the rest; no proxy composition.
         return {
@@ -947,6 +997,22 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
             options.helperPath === undefined
               ? 'landlock is not provisioned: no helper binary'
               : `landlock helper '${options.helperPath}' was not resolved at construction; refusing a PATH fallback`,
+        };
+      }
+      const helperInside = launcherInsideWorkspace(helperPath, request.workspace);
+      if (helperInside !== undefined) return helperInside;
+      if (request.proxyPort !== undefined) {
+        // The helper has no proxy-port argument; refuse rather than run a
+        // different egress posture than the one requested.
+        return {
+          ok: false,
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          timedOut: false,
+          spawnError:
+            'landlock cannot compose a loopback proxy under model-only; proxyPort is unsupported',
         };
       }
       return runChild(

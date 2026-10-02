@@ -16,8 +16,11 @@
 // else the same probe records the platform blocker instead.  LIVE STATUS: the
 // narrow-allow profile has not yet executed on any host — live evidence at
 // final head is a gate of the fresh protocol sequence, not this suite.
-import { realpath } from 'node:fs/promises';
-import { describe, expect, test, vi } from 'vitest';
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 
 // Measured scheduling margin (final head, concurrent authorized testing):
 // each probe runs its controls as REAL bare-host processes, and process
@@ -41,6 +44,39 @@ import {
   type BackendProbeRecord,
   type SandboxCertification,
 } from '../../src/sandbox/probe.js';
+
+// Deterministic host seams: the probe's "external" egress target is a
+// loopback listener the bare host can always reach, and the local-prefix
+// target is a stub executable — so certification verdicts never depend on
+// outbound DNS or on what /usr/local happens to contain.
+let seamServer: Server;
+let seamDir: string;
+let seamOptions: {
+  externalTarget: { host: string; port: number };
+  localPrefixTarget: string;
+};
+const seams = () => seamOptions;
+beforeAll(async () => {
+  seamServer = createServer((socket) => socket.destroy());
+  const port = await new Promise<number>((resolve) => {
+    seamServer.listen(0, '127.0.0.1', () => {
+      const address = seamServer.address();
+      resolve(typeof address === 'object' && address !== null ? address.port : 0);
+    });
+  });
+  seamDir = await mkdtemp(join(tmpdir(), 'cq-probe-seams-'));
+  const stub = join(seamDir, 'local-stub');
+  await writeFile(stub, '#!/bin/sh\nexit 0\n');
+  await chmod(stub, 0o755);
+  seamOptions = {
+    externalTarget: { host: '127.0.0.1', port },
+    localPrefixTarget: stub,
+  };
+});
+afterAll(async () => {
+  await new Promise<void>((done) => seamServer.close(() => done()));
+  await rm(seamDir, { recursive: true, force: true });
+});
 
 const result = (over: Partial<SandboxLaunchResult>): SandboxLaunchResult => ({
   ok: false,
@@ -185,7 +221,7 @@ const ALL_IDS = [
 
 describe('a probe can be forged by neither a broken nor a promiscuous launcher', () => {
   test('a launcher that blocks everything fails its control and stays uncertified', async () => {
-    const record = await probeBackend(fakeAdapter('block-all'));
+    const record = await probeBackend(fakeAdapter('block-all'), seams());
     expect(record.runnable).toBe(false); // it claims availability but ran no child
     expect(verdictOf(record, 'workspace-control')).toBe('fail');
     expect(record.certified).toBe(false);
@@ -193,16 +229,8 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
   });
 
   test('a launcher that grants everything fails every denial canary', async () => {
-    const record = await probeBackend(fakeAdapter('grant-all'));
+    const record = await probeBackend(fakeAdapter('grant-all'), seams());
     for (const id of ALL_IDS) {
-      if (id === 'local-prefix-exec') {
-        // Host-dependent: a 'fail' wherever the launcher grants the exec and
-        // /usr/local has content to attack; 'inconclusive' on a host with an
-        // empty local prefix (no synthetic pass — the denial was not
-        // demonstrable there).
-        expect(['fail', 'inconclusive']).toContain(verdictOf(record, id));
-        continue;
-      }
       expect(verdictOf(record, id)).toBe('fail');
     }
     if (process.platform === 'linux') expect(verdictOf(record, 'proc-link-escape')).toBe('fail');
@@ -221,7 +249,10 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
         request.argv[1]?.startsWith('/proc/')
           ? Promise.resolve(result({ ok: true, exitCode: 0 }))
           : confined(request);
-      const record = await probeBackend(adapter, { network: 'allow' });
+      const record = await probeBackend(adapter, {
+        ...seams(),
+        network: 'allow',
+      });
       expect(verdictOf(record, 'workspace-control')).toBe('pass');
       expect(verdictOf(record, 'read-escape')).toBe('pass');
       expect(verdictOf(record, 'read-escape-sibling')).toBe('pass');
@@ -232,7 +263,7 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
   );
 
   test('an inconclusive canary refuses certification — doubt fails closed', async () => {
-    const record = await probeBackend(fakeAdapter('env-fails'));
+    const record = await probeBackend(fakeAdapter('env-fails'), seams());
     expect(verdictOf(record, 'credential-env')).toBe('inconclusive');
     expect(record.certified).toBe(false);
     expect(record.blocker).toMatch(/inconclusive/);
@@ -242,7 +273,10 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     const record = await probeBackend({
       backend: 'container',
       workspaceParent: () => '/tmp',
-      available: async () => ({ available: false, blocker: 'docker daemon unreachable' }),
+      available: async () => ({
+        available: false,
+        blocker: 'docker daemon unreachable',
+      }),
       launch: async () => result({}),
     });
     expect(record.runnable).toBe(false);
@@ -253,6 +287,7 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
 
   test('a proxy-composed posture is uncertifiable for a backend without composition', async () => {
     const record = await probeBackend(fakeAdapter('fs-only'), {
+      ...seams(),
       network: 'model-only',
       modelProxy: true,
     });
@@ -267,7 +302,7 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     // a naive probe could read every bash -c refusal as a boundary.  With the
     // in-boundary shell control failed, the shell-dependent canaries must be
     // inconclusive and nothing certifies.
-    const record = await probeBackend(fakeAdapter('broken-bash'));
+    const record = await probeBackend(fakeAdapter('broken-bash'), seams());
     expect(verdictOf(record, 'workspace-control')).toBe('pass');
     expect(verdictOf(record, 'nested-child-escape')).toBe('inconclusive');
     expect(verdictOf(record, 'network-loopback')).toBe('inconclusive');
@@ -279,20 +314,27 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
 
 describe('posture-aware network certification', () => {
   test('an allow-posture boundary certifies for allow, never for model-only', async () => {
-    const allow = await probeBackend(fakeAdapter('fs-only'), { network: 'allow' });
+    const allow = await probeBackend(fakeAdapter('fs-only'), {
+      ...seams(),
+      network: 'allow',
+    });
     expect(verdictOf(allow, 'network-loopback')).toBe('pass');
     expect(verdictOf(allow, 'read-escape-sibling')).toBe('pass');
     expect(verdictOf(allow, 'symlink-escape')).toBe('pass');
     expect(verdictOf(allow, 'nested-child-escape')).toBe('pass');
     expect(allow.certified).toBe(true);
     expect(allow.networkDemonstrated).toBe('allow');
-    const modelOnly = await probeBackend(fakeAdapter('fs-only'), { network: 'model-only' });
+    const modelOnly = await probeBackend(fakeAdapter('fs-only'), {
+      ...seams(),
+      network: 'model-only',
+    });
     expect(verdictOf(modelOnly, 'network-loopback')).toBe('fail');
     expect(modelOnly.certified).toBe(false);
   });
 
   test('a passing proxy stand-in remains diagnostic and cannot certify a production endpoint', async () => {
     const record = await probeBackend(fakeAdapter('proxy-fs-only'), {
+      ...seams(),
       network: 'model-only',
       modelProxy: true,
     });
@@ -305,7 +347,10 @@ describe('posture-aware network certification', () => {
     // classifies an honest, executed denial as a pass — so this stricter
     // boundary EARNS certification under plain model-only, exactly as a real
     // boundary of this shape would.
-    const strict = await probeBackend(fakeAdapter('proxy-fs-only'), { network: 'model-only' });
+    const strict = await probeBackend(fakeAdapter('proxy-fs-only'), {
+      ...seams(),
+      network: 'model-only',
+    });
     expect(verdictOf(strict, 'network-loopback')).toBe('pass');
     expect(strict.certified).toBe(true);
   });
@@ -334,7 +379,10 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
 
   test('launchCertified refuses a backend the probe did not certify', async () => {
     const adapter = fakeAdapter('block-all');
-    const certification = await certifyBackends({ adapters: [adapter] });
+    const certification = await certifyBackends({
+      ...seams(),
+      adapters: [adapter],
+    });
     expect(certification.certified).toEqual([]);
     await expect(
       launchCertified(adapter, certification, {
@@ -348,6 +396,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('a different launcher instance sharing the backend name inherits nothing', async () => {
     const certified = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [certified],
       network: 'allow',
     });
@@ -365,6 +414,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('mutating the caller-visible fields cannot widen a launch or the handoff', async () => {
     const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'allow',
     });
@@ -397,6 +447,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('a launch method swapped in after certification is refused', async () => {
     const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'allow',
     });
@@ -428,6 +479,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('launchCertified executes inside a genuinely probe-certified backend', async () => {
     const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'allow',
     });
@@ -443,6 +495,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('certification does not transfer across postures', async () => {
     const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'allow',
     });
@@ -458,6 +511,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('a proxy stand-in authorizes neither an arbitrary port nor a launch without a port', async () => {
     const adapter = fakeAdapter('proxy-fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'model-only',
       modelProxy: true,
@@ -480,6 +534,7 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   test('a non-proxy certification refuses a launch that carries a proxy port', async () => {
     const adapter = fakeAdapter('fs-only');
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'allow',
     });
@@ -494,14 +549,19 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
   });
 
   test('the certified list is exactly what the probe earned', async () => {
-    const certification = await certifyBackends({ adapters: [fakeAdapter('grant-all')] });
+    const certification = await certifyBackends({
+      ...seams(),
+      adapters: [fakeAdapter('grant-all')],
+    });
     expect(certifiedBackendsOf(certification)).toEqual([]);
   });
 });
 
 describe.runIf(process.platform === 'darwin')('the real seatbelt certification', () => {
   test('the live canaries certify seatbelt under model-only posture', async () => {
-    const certification = await certifyBackends({ adapters: [seatbeltAdapter()] });
+    const certification = await certifyBackends({
+      adapters: [seatbeltAdapter()],
+    });
     const record = certification.records.find((r) => r.backend === 'seatbelt');
     expect(record?.certified).toBe(true);
     expect(record?.blocker).toBeUndefined();
@@ -522,6 +582,7 @@ describe.runIf(process.platform === 'darwin')('the real seatbelt certification',
   test('live proxy stand-in observations do not certify a production proxy', async () => {
     const adapter = seatbeltAdapter();
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [adapter],
       network: 'model-only',
       modelProxy: true,
@@ -573,5 +634,51 @@ describe('the certified list feeds the resolver without inventing backends', () 
     });
     expect(config.selectedBackend).toBeUndefined();
     expect(config.runTool).toBe('withheld');
+  });
+});
+
+describe('review hardening of the certification entry points', () => {
+  test('one candidate throwing does not hide the others, and the aggregate claims nothing', async () => {
+    const throwing: SandboxBackendAdapter = {
+      ...fakeAdapter('fs-only'),
+      available: () => Promise.reject(new Error('available exploded')),
+    };
+    const certification = await certifyBackends({
+      ...seams(),
+      network: 'allow',
+      adapters: [throwing, fakeAdapter('fs-only')],
+    });
+    expect(certification.records).toHaveLength(2);
+    expect(certification.records[0]?.certified).toBe(false);
+    expect(certification.records[0]?.blocker).toMatch(/probe failed: available exploded/);
+    expect(certification.certified).toEqual(['bwrap']);
+
+    const none = await certifyBackends({
+      ...seams(),
+      network: 'allow',
+      adapters: [throwing],
+    });
+    expect(none.networkDemonstrated).toBe('none');
+  });
+
+  test('launchCertified invokes the receipt-bound function, not a re-read accessor', async () => {
+    const adapter = fakeAdapter('fs-only');
+    const certification = await certifyBackends({
+      ...seams(),
+      network: 'allow',
+      adapters: [adapter],
+    });
+    const bound = adapter.launch;
+    const grantAll = vi.fn(() => Promise.resolve(result({ ok: true, exitCode: 0 })));
+    let reads = 0;
+    Object.defineProperty(adapter, 'launch', {
+      get: () => (++reads === 1 ? bound : grantAll),
+    });
+    await launchCertified(adapter, certification, {
+      workspace: '/tmp',
+      argv: ['/usr/bin/true'],
+      network: 'allow',
+    });
+    expect(grantAll).not.toHaveBeenCalled();
   });
 });

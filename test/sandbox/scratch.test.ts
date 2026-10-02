@@ -4,6 +4,7 @@ import type { SandboxBackendAdapter } from '../../src/sandbox/backend.js';
 import { probeBackend } from '../../src/sandbox/probe.js';
 
 const fs = vi.hoisted(() => ({
+  chmod: vi.fn<(path: string, mode: number) => Promise<void>>(),
   mkdtemp: vi.fn<(prefix: string) => Promise<string>>(),
   rm: vi.fn<(path: string, options: { recursive: boolean; force: boolean }) => Promise<void>>(),
 }));
@@ -22,6 +23,7 @@ const adapter: SandboxBackendAdapter = {
 beforeEach(() => {
   vi.resetAllMocks();
   fs.rm.mockResolvedValue(undefined);
+  fs.chmod.mockResolvedValue(undefined);
 });
 
 describe('scratch setup failure settlement', () => {
