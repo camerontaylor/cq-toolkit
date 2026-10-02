@@ -17,7 +17,12 @@
 // is classified in test/suite-classes.json as pure | process | integration |
 // live. The projects below derive their file lists from that manifest, so
 // the classification is auditable and a file absent from the manifest falls
-// into `process` (conservative: real-process budgets, serial). Selection:
+// into `process` (conservative: real-process budgets, serial; this includes
+// the lint/rules RuleTester suites). The process-backed projects carry
+// distinct `sequence.groupOrder`s (process 1, live 2, integration 3) so a
+// bare run keeps the old root-level global serialization: same-order
+// projects run concurrently, different orders run one after another.
+// Selection:
 //   npm run test:unit == --project pure --project process --project live
 //   npm run test:e2e  == --project integration
 // Coverage and reporters stay ROOT-level (they are absent from the
@@ -75,7 +80,8 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'process',
-          include: ['test/**/*.test.ts'],
+          sequence: { groupOrder: 1 },
+          include: ['test/**/*.test.ts', 'lint/**/*.test.ts'],
           exclude: [...configDefaults.exclude, '**/dist/**', ...classified],
           testTimeout: 30_000,
           hookTimeout: 60_000,
@@ -88,6 +94,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'live',
+          sequence: { groupOrder: 2 },
           include: filesOf('live'),
           testTimeout: 30_000,
           hookTimeout: 60_000,
@@ -102,6 +109,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'integration',
+          sequence: { groupOrder: 3 },
           include: filesOf('integration'),
           testTimeout: 5_000,
           hookTimeout: 10_000,
