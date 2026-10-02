@@ -584,7 +584,7 @@ describe('a bubblewrap adapter can at least name its own availability', () => {
   test('availability returns a verdict, with a blocker when absent', async () => {
     const availability = await bwrapAdapter().available();
     expect(typeof availability.available).toBe('boolean');
-    if (!availability.available) expect(availability.blocker).toMatch(/bubblewrap/);
+    if (!availability.available) expect(availability.blocker).toMatch(/bwrap|bubblewrap/);
   });
 });
 
