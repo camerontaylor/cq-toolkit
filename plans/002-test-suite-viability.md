@@ -1,6 +1,6 @@
 # Test suite viability: shim what is ours, keep one real contract per tool
 
-Status: consensus draft after gpt-6-sol review, 2026-09-24. Implementation delegated to the GLM-5.3-Flash orchestrator on user instruction.
+Status: consensus draft after gpt-6-sol review, 2026-09-24; in implementation. PR-1 (#217) and PR-2 (#218) are open; PR-3 and PR-4 are not started. Acceptance criteria are not yet met: `sweep.e2e` measures 189–353s against the U2 ≤120s target and the 60s per-file goal.
 
 ## Objective
 
