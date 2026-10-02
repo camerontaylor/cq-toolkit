@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { test } from 'vitest';
 
 import { makeReport, parseArgs } from '../scripts/api-report.mjs';
 
