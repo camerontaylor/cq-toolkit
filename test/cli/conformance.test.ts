@@ -17,16 +17,53 @@
 // fixture ops (test/fixtures/cli-ops) through the governed kernel, so no
 // network, model, or real filesystem target is touched. Deterministic: tmp
 // dirs only, cleaned up.
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { runCli } from '../../src/cli/main.js';
 import type { CliIo } from '../../src/cli/output.js';
 import { RunReportSchema } from '../../src/kernel/schema.js';
+import { stripComments } from '../helpers/strip-comments.js';
 
 const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
+const OPS_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/ops');
+
+/**
+ * The factory rule's static half (ADR-0002 §2.5), checked on the live tree:
+ * NO file under src/ops may import a lane module — statically or via an
+ * import() expression. Ops resolve drivers through the DriverFactory; a
+ * direct lane import would bypass the served-model wrapper and the
+ * plan-data-never-names-an-executable bound.
+ */
+async function laneImports(directory: string, root = directory): Promise<string[]> {
+  const hits: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      hits.push(...(await laneImports(path, root)));
+    } else if (entry.name.endsWith('.ts')) {
+      // Tokenize before matching (a JSDoc mention of a lane module is
+      // prose, not an import edge). The single-pass scanner keeps literal
+      // contents VERBATIM — erasing them would erase the quoted specifiers
+      // this scan matches on — while dropping both comment forms. The
+      // specifier class covers single/double quotes AND constant
+      // template literals (a backtick import is still an import edge).
+      const source = stripComments(await readFile(path, 'utf8'));
+      if (
+        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
+          source,
+        )
+      ) {
+        // Relative to the scan root (kept through the recursion), so a
+        // fixture scan names its files exactly like the live tree names.
+        hits.push(path.slice(root.length + 1));
+      }
+    }
+  }
+  return hits.sort();
+}
 
 interface CapturedRun {
   code: number;
@@ -142,6 +179,42 @@ describe('sample: pure op through the real registry', () => {
 });
 
 describe('sample: agentic-class op through the real registry', () => {
+  test('no src/ops module imports a lane module — static or dynamic (the factory rule)', async () => {
+    expect(await laneImports(OPS_SRC)).toEqual([]);
+  });
+
+  test('the scan also catches a constant template-literal specifier (PR #238 review round 2)', async () => {
+    // A backtick import is still an import edge: the matcher accepts
+    // single-quoted, double-quoted AND constant template-literal
+    // specifiers, so ``await import(`…driver/acp/…`)`` cannot bypass the
+    // ops-to-lane guard.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-lane-import-tick-'));
+    try {
+      await writeFile(
+        join(scratch, 'backtick.ts'),
+        'const mod = await import(`../../driver/acp/index.js`);\nexport default mod;\n',
+      );
+      await writeFile(
+        join(scratch, 'quoted.ts'),
+        "import x from '../../driver/subprocess/index.js';\nexport default x;\n",
+      );
+      // A nested hit is named relative to the SCAN ROOT (the root threads
+      // through the recursion), matching the live tree's naming.
+      await mkdir(join(scratch, 'nested'), { recursive: true });
+      await writeFile(
+        join(scratch, 'nested', 'deep.ts'),
+        'const mod = await import(`../../driver/ai-sdk/index.js`);\nexport default mod;\n',
+      );
+      expect(await laneImports(scratch)).toEqual([
+        'backtick.ts',
+        join('nested', 'deep.ts'),
+        'quoted.ts',
+      ]);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test('sweep.unit without a driver config fails honestly before any spawn', async () => {
     const { code, out, err } = await capture([
       'sweep.unit',

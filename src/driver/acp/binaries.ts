@@ -23,9 +23,15 @@
 // SECRETS: entries carry env var guidance in `notes` as NAMES only —
 // never values. The driver injects the child env at run() time (see
 // index.ts); nothing here reads a key.
+//
+// ERROR CLASSES (seam v2, ADR-0002 §2.2): every resolution failure here is
+// a PRE-DISPATCH CONFIG error and throws `DispatchError('config', …)` from
+// ../errors.js — the class rides as structured data (errorClassOf →
+// 'config'), the same posture as the workspace/session throws in index.ts.
 import { access, constants } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
+import { DispatchError } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // The endpoint table — plain data, schema-validated (invalid tables throw loudly)
@@ -147,7 +153,8 @@ export async function resolveAcpCommand(
   let installHint: string;
   if (explicitCommand !== undefined) {
     if (explicitCommand.length === 0) {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         'acp driver: the command option must carry at least the binary (non-empty argv)',
       );
     }
@@ -162,7 +169,8 @@ export async function resolveAcpCommand(
       ? parsed.endpoints[endpointName]
       : undefined;
     if (entry === undefined) {
-      throw new Error(
+      throw new DispatchError(
+        'config',
         `acp driver: unknown endpoint '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,
       );
     }
@@ -182,7 +190,8 @@ export async function resolveAcpCommand(
     };
   }
   const pathValue = env['PATH'] ?? '';
-  throw new Error(
+  throw new DispatchError(
+    'config',
     `acp driver: the harness binary '${binary}' was not found (not absolute/resolvable and not on PATH) — ` +
       `install it first (${installHint}) or pass an explicit command via the driver's \`command\` option; ` +
       `refusing pre-dispatch, before any session exists. PATH searched: ${pathValue === '' ? '(empty)' : pathValue}`,

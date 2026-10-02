@@ -26,12 +26,20 @@
 //      coupling — `error` is present only on a `stopReason: 'error'`
 //      verdict, and it is non-empty and bounded to the producer's
 //      500-chars-plus-marker shape.
+//   9. Seam v2 (ADR-0002): `errorClass` follows the same one-directional
+//      wire rule as `error` (present ⇒ stopReason 'error'; an 'error'
+//      verdict without one still parses), `providerSignals` are allowed on
+//      ANY verdict, `outputSchema`/`workspace` ride the invocation,
+//      SEAM_VERSION pins 2, and `errorClassOf` extracts a dispatch class
+//      from tagged throws only — never guessing.
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
 // names. No Date.now(), no Math.random(), no new dependencies — vitest only.
 import { describe, expect, test } from 'vitest';
 import type { z } from 'zod';
 import * as kernelSchema from '../../src/kernel/schema.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
+import { SEAM_VERSION } from '../../src/driver/types.js';
 import type {
   Job,
   JobFinishedJournalEvent,
@@ -55,11 +63,15 @@ import type {
   DriverStopReason,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   SandboxPolicy,
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
+  WorkspaceBinding,
 } from '../../src/driver/types.js';
 
 // ---------------------------------------------------------------------------
@@ -203,6 +215,51 @@ function genToolDenial(r: Rng): ToolDenial {
   return { tool: id(r, 'tool-'), reason: id(r, 'why-') };
 }
 
+const WORKER_ERROR_CLASSES: readonly WorkerErrorClass[] = [
+  'output-invalid',
+  'served-model-mismatch',
+  'transient',
+  'rate-limit',
+  'quota',
+  'auth',
+  'provider-error',
+  'harness',
+  'unknown',
+];
+
+/** One provider-reported limit window; every field but the id is optional. */
+function genProviderWindow(r: Rng): NonNullable<ProviderSignals['windows']>[number] {
+  const window: NonNullable<ProviderSignals['windows']>[number] = {
+    id: pick(r, ['5h', '7d', 'rolling', 'requests']),
+  };
+  const utilization = sometimes(r, () => intBetween(r, 0, 100) / 100);
+  if (utilization !== undefined) window.utilization = utilization;
+  const remaining = sometimes(r, () => {
+    const counts: NonNullable<NonNullable<ProviderSignals['windows']>[number]['remaining']> = {};
+    const requests = sometimes(r, () => intBetween(r, 0, 1_000));
+    if (requests !== undefined) counts.requests = requests;
+    const tokens = sometimes(r, () => intBetween(r, 0, 1_000_000));
+    if (tokens !== undefined) counts.tokens = tokens;
+    return counts;
+  });
+  if (remaining !== undefined) window.remaining = remaining;
+  const resetAt = sometimes(r, () => isoTimestamp(r));
+  if (resetAt !== undefined) window.resetAt = resetAt;
+  return window;
+}
+
+function genProviderSignals(r: Rng): ProviderSignals {
+  const signals: ProviderSignals = {};
+  const retryAfterMs = sometimes(r, () => intBetween(r, 0, 3_600_000));
+  if (retryAfterMs !== undefined) signals.retryAfterMs = retryAfterMs;
+  const windows = sometimes(
+    r,
+    () => Array.from({ length: intBetween(r, 1, 2) }, () => genProviderWindow(r)), // several windows may be live at once
+  );
+  if (windows !== undefined) signals.windows = windows;
+  return signals;
+}
+
 function genWorkerResult(r: Rng): WorkerResult {
   const denials: ToolDenial[] = Array.from({ length: intBetween(r, 0, 3) }, () => genToolDenial(r));
   const result: WorkerResult = {
@@ -228,8 +285,24 @@ function genWorkerResult(r: Rng): WorkerResult {
   if (result.stopReason === 'error') {
     const error = sometimes(r, () => id(r, 'err-'));
     if (error !== undefined) result.error = error;
+    // Seam v2 one-directional wire rule (ADR-0002 §2.2): errorClass rides
+    // ONLY an 'error' verdict — an 'error' verdict without one still
+    // generates, so pre-S3 producer shapes stay covered.
+    const errorClass = sometimes(r, () => pick(r, WORKER_ERROR_CLASSES));
+    if (errorClass !== undefined) result.errorClass = errorClass;
   }
+  // Seam v2: providerSignals are allowed on ANY verdict.
+  const providerSignals = sometimes(r, () => genProviderSignals(r));
+  if (providerSignals !== undefined) result.providerSignals = providerSignals;
   return result;
+}
+
+function genOutputSchema(r: Rng): OutputSchema {
+  return { name: id(r, 'contract-'), schema: { type: 'object', additionalProperties: bool(r) } };
+}
+
+function genWorkspaceBinding(r: Rng): WorkspaceBinding {
+  return { path: `/tmp/workspaces/${id(r, 'ws-')}` };
 }
 
 function genOpInvocation(r: Rng): OpInvocation {
@@ -242,6 +315,12 @@ function genOpInvocation(r: Rng): OpInvocation {
   };
   const sessionRef = sometimes(r, () => id(r, 'sess-'));
   if (sessionRef !== undefined) invocation.sessionRef = sessionRef;
+  // Seam v2: the structured-output request and the workspace binding ride
+  // the invocation as plain data.
+  const outputSchema = sometimes(r, () => genOutputSchema(r));
+  if (outputSchema !== undefined) invocation.outputSchema = outputSchema;
+  const workspace = sometimes(r, () => genWorkspaceBinding(r));
+  if (workspace !== undefined) invocation.workspace = workspace;
   return invocation;
 }
 
@@ -985,6 +1064,222 @@ describe('WorkerResult.error — post-freeze seam migration wire contract', () =
     expect(tooLong.success).toBe(false);
     if (tooLong.success) return; // narrow for TS
     expect(tooLong.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
+  });
+});
+
+describe('WorkerResult.errorClass — seam v2 one-directional wire rule (ADR-0002 §2.2)', () => {
+  const base = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+  };
+
+  test('an error verdict WITH errorClass parses and round-trips', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      stopReason: 'error',
+      error: 'ai-sdk driver: run failed — Error: 429 with retry-after',
+      errorClass: 'rate-limit',
+    });
+  });
+
+  test.each(['complete', 'aborted', 'budget'] as const)(
+    'errorClass on a %s stopReason FAILS the mirror, naming the errorClass path',
+    (stopReason) => {
+      const parsed = kernelSchema.WorkerResultSchema.safeParse({
+        ...base,
+        stopReason,
+        errorClass: 'transient',
+      });
+      expect(parsed.success).toBe(false);
+      if (parsed.success) return; // narrow for TS
+      expect(parsed.error.issues.some((issue) => issue.path[0] === 'errorClass')).toBe(true);
+    },
+  );
+
+  test('a value outside the nine frozen classes is rejected by the enum', () => {
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      { ...base, stopReason: 'error', errorClass: 'fatal' },
+      "bogus errorClass 'fatal'",
+    );
+  });
+});
+
+describe('WorkerResult.providerSignals — seam v2, allowed on ANY verdict', () => {
+  const base = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+  };
+
+  test('providerSignals parse on a complete verdict and round-trip', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      stopReason: 'complete',
+      providerSignals: {
+        retryAfterMs: 1200,
+        windows: [
+          {
+            id: '5h',
+            utilization: 0.42,
+            remaining: { requests: 3, tokens: 1200 },
+            resetAt: '2026-09-28T00:00:00.000Z',
+          },
+          { id: '7d' },
+        ],
+      },
+    });
+  });
+
+  test('window values carry the conformance bounds (PR #238 review round 2)', () => {
+    // The mirror enforces the same rows the shipped conformance suite
+    // asserts per result (src/driver/conformance.ts): nonempty ids,
+    // utilization 0–1, parseable reset instants — plus integral nonnegative
+    // remaining counts (the doc calls them counts). Malformed quota
+    // evidence must not parse as validated data.
+    const schema = kernelSchema.WorkerResultSchema;
+    const window = (over: Record<string, unknown>): unknown => ({
+      ...base,
+      stopReason: 'complete',
+      providerSignals: { windows: [{ id: '5h', utilization: 0.5, ...over }] },
+    });
+    failsParse(schema, window({ id: '' }), 'an empty window id');
+    failsParse(schema, window({ utilization: 1.5 }), 'utilization over 1');
+    failsParse(schema, window({ utilization: -0.1 }), 'negative utilization');
+    failsParse(
+      schema,
+      {
+        ...base,
+        stopReason: 'complete',
+        providerSignals: { windows: [{ id: 'requests', remaining: { requests: 2.5 } }] },
+      },
+      'a fractional remaining count',
+    );
+    failsParse(
+      schema,
+      {
+        ...base,
+        stopReason: 'complete',
+        providerSignals: { windows: [{ id: 'tokens', remaining: { tokens: -1 } }] },
+      },
+      'a negative remaining count',
+    );
+    failsParse(schema, window({ resetAt: 'next tuesday' }), 'an unparseable resetAt');
+    // The boundary values stay legal: the closed utilization range, a zero
+    // count, and any parseable instant.
+    schema.parse(window({ utilization: 0, resetAt: '2026-09-28T00:00:00.000Z' }));
+    schema.parse({
+      ...base,
+      stopReason: 'complete',
+      providerSignals: {
+        windows: [{ id: 'requests', remaining: { requests: 0, tokens: 0 }, utilization: 1 }],
+      },
+    });
+  });
+
+  test('an empty providerSignals object parses — every field is optional', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      stopReason: 'aborted',
+      providerSignals: {},
+    });
+  });
+
+  test('an unknown key inside providerSignals is rejected (strict mirror)', () => {
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      { ...base, stopReason: 'complete', providerSignals: { vendor: 'claude' } },
+      'vendor key inside providerSignals',
+    );
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      {
+        ...base,
+        stopReason: 'complete',
+        providerSignals: { windows: [{ id: '5h', share: 0.5 }] },
+      },
+      'unknown key inside a provider window',
+    );
+  });
+});
+
+describe('OpInvocation.outputSchema/workspace — seam v2 invocation fields', () => {
+  const base: OpInvocation = {
+    prompt: 'resolve the conflict',
+    modelSpec: { model: 'glm-4.7', provider: 'zai' },
+    toolPolicy: { allow: ['read'] },
+    sandboxPolicy: { level: 'workspace-write' },
+    budget: {},
+  };
+
+  test('outputSchema parses and round-trips', () => {
+    roundTripsThrough(kernelSchema.OpInvocationSchema, {
+      ...base,
+      outputSchema: { name: 'review.fixItem/v1', schema: { type: 'object' } },
+    });
+  });
+
+  test('workspace parses and round-trips', () => {
+    roundTripsThrough(kernelSchema.OpInvocationSchema, {
+      ...base,
+      workspace: { path: '/tmp/workspaces/ws-a' },
+    });
+  });
+
+  test('an invocation with NEITHER new field still parses (v1 shape)', () => {
+    roundTripsThrough(kernelSchema.OpInvocationSchema, { ...base });
+  });
+
+  test('extra keys inside outputSchema/workspace are rejected (strict mirror)', () => {
+    failsParse(
+      kernelSchema.OpInvocationSchema,
+      {
+        ...base,
+        outputSchema: { name: 'x/v1', schema: {}, journalled: true },
+      },
+      'unknown key inside outputSchema',
+    );
+    failsParse(
+      kernelSchema.OpInvocationSchema,
+      { ...base, workspace: { path: '/tmp/ws', realpath: '/private/tmp/ws' } },
+      'unknown key inside workspace',
+    );
+  });
+});
+
+describe('seam v2 compatibility + version pin (ADR-0002 §2.8)', () => {
+  test('a v1-shaped WorkerResult WITHOUT the new fields still parses', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete',
+    });
+  });
+
+  test('SEAM_VERSION is 2', () => {
+    expect(SEAM_VERSION).toBe(2);
+  });
+});
+
+describe('dispatch error classes (ADR-0002 §2.2 pre-dispatch throws)', () => {
+  test('errorClassOf extracts the class from a DispatchError', () => {
+    expect(errorClassOf(new DispatchError('config', 'workspace realpath mismatch'))).toBe('config');
+    expect(errorClassOf(new DispatchError('auth', 'credentials rejected pre-dispatch'))).toBe(
+      'auth',
+    );
+  });
+
+  test('errorClassOf accepts a plain object tagged with the same field', () => {
+    expect(errorClassOf({ dispatchClass: 'config' })).toBe('config');
+    expect(errorClassOf({ dispatchClass: 'auth' })).toBe('auth');
+  });
+
+  test('errorClassOf returns undefined for untagged or unrecognized throws — never guesses', () => {
+    expect(errorClassOf(new Error('plain, untagged'))).toBeUndefined();
+    expect(errorClassOf({ dispatchClass: 'fatal' })).toBeUndefined();
+    expect(errorClassOf({ class: 'auth' })).toBeUndefined();
+    expect(errorClassOf('config')).toBeUndefined();
+    expect(errorClassOf(null)).toBeUndefined();
+    expect(errorClassOf(undefined)).toBeUndefined();
   });
 });
 
