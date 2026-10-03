@@ -16,6 +16,10 @@ import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Build once before collection so every test can rely on the same dist.
+    // Vitest runs this global setup once per invocation; watch-mode reruns do
+    // not rebuild after source edits.
+    globalSetup: ['./test/global-setup.ts'],
     // Process-backed suites have real startup and termination deadlines.
     // Run files serially so competing fixtures do not consume those budgets.
     fileParallelism: false,
