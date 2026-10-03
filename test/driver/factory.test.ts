@@ -470,7 +470,15 @@ describe('driver factory — knobs reach the constructed lane', () => {
       .driver.run(invocation());
     expect(verdict.stopReason).toBe('complete');
     const record = await new SessionStore(join(dir, 'sessions')).load(verdict.sessionId as string);
-    expect(record?.workspace.startsWith(realpathSync(workspaceRoot))).toBe(true);
+    // The record's workspace carries tempWorkspace's mkdtemp prefix — the
+    // CALLER's workspaceRoot spelling (/var/... on macOS, whose /var aliases
+    // /private/var). Containment is a realpath fact, not a spelling fact:
+    // normalize BOTH sides (the resumedRecordOrThrow discipline), never the
+    // stored spelling alone.
+    expect(
+      record !== undefined &&
+        realpathSync(record.workspace).startsWith(realpathSync(workspaceRoot)),
+    ).toBe(true);
   });
 
   test('the lane-specific sessionsDir overrides the factory-level one', async () => {
