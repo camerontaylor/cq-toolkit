@@ -6,6 +6,7 @@
     "src/registry/types.ts",
     "src/ops/*/registry.ts",
     "scripts/*.mjs",
+    "scripts/lib/affected-tests.d.mts",
     "scripts/lib/eval-axes-select.d.mts",
     "scripts/lib/render-templates.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
