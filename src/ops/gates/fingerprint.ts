@@ -115,6 +115,20 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
 }
 
 /**
+ * The compact fingerprint under the PRE-W4.4 scheme (ledger signature
+ * scheme 1), kept ONLY so persisted ledger escalations survive the scheme
+ * change: Vitest failures key by position (located) or first message line
+ * (location-less) like every other tool, and suite-level failures carry the
+ * null ruleId they had before {@link VITEST_SUITE_RULE_ID} existed. Equal to
+ * {@link fingerprintFailure} for every non-Vitest tool. Never a gate input.
+ */
+export function legacyFingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
+  const resolved = resolveConfig(cfg);
+  const ruleId = resolved.tool === 'vitest' && f.ruleId === VITEST_SUITE_RULE_ID ? null : f.ruleId;
+  return fnv1a32Hex(JSON.stringify(locationComponents({ ...f, ruleId }, resolved)));
+}
+
+/**
  * Every failure of a {@link FailureSet} paired with its OCCURRENCE key — the
  * exact canonical {@link fingerprintKey} with a `#<ordinal>` suffix — the
  * FailureSet's `tool` folded in. The ordinal preserves duplicate counts while
@@ -208,11 +222,17 @@ export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<stri
 
 /** The component tuple of the pre-hash key: tool, normalized file, ruleId, severity, and the position regime. */
 function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
+  if (cfg.tool === 'vitest' && f.ruleId !== VITEST_SUITE_RULE_ID) {
+    const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
+    return [cfg.tool, file, f.ruleId ?? '', f.severity, 'test-name', normalizeTestName(f.message)];
+  }
+  return locationComponents(f, cfg);
+}
+
+/** The position (located) or first-line content (location-less) component tuple. */
+function locationComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
   const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
   const ruleId = f.ruleId ?? '';
-  if (cfg.tool === 'vitest' && f.ruleId !== VITEST_SUITE_RULE_ID) {
-    return [cfg.tool, file, ruleId, f.severity, 'test-name', normalizeTestName(f.message)];
-  }
   if (typeof f.line === 'number') {
     const lineBucket = Math.floor(f.line / cfg.lineBucketSize);
     const colBucket = Math.floor((f.column ?? 0) / cfg.columnBucketSize);
