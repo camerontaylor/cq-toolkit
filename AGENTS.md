@@ -5,7 +5,12 @@ SDK of atomic code-quality operations, a deterministic plan runner, and
 adoptable merge-queue and doctrine policy templates. It is self-hosting —
 the toolkit's own quality gates run on the toolkit itself.
 
-## Gates (green before claiming done)
+## Gates (focused locally, full-gate authority in CI)
+
+**Canonical contract: [docs/focused-checks-contract.md](docs/focused-checks-contract.md).**
+It supersedes the old 3× full-gate rule everywhere that rule was stated.
+
+Your local duty, on a coherent change:
 
 pnpm is the package manager (`packageManager` in package.json); install
 with `pnpm install`. `pnpm-workspace.yaml` enables the global virtual store,
@@ -14,20 +19,79 @@ so a warm install in a fresh worktree is a symlink pass.
 - `pnpm run check:static` — TS7 compiler ratchet plus typed Oxlint;
   `pnpm run lint` and `pnpm run typecheck` are aliases (run only one)
 - `pnpm run format:check`
-- `pnpm run test`
-- `pnpm run knip`
+- `pnpm exec vitest run <affected test files>` — the tests your diff affects, not
+  the suite
+- `pnpm run knip` — whole-project, not file-scoped: run it when the diff
+  touches entrypoints, exports, dependencies or configuration, adds a file,
+  adds or changes an import (a new package or unresolvable specifier), or
+  removes or rewires the last import of a file or package, and skip it
+  otherwise (canonical condition: the contract's §1)
 
-CI additionally runs the build, the from-source smoke plan, and the
-denylist scan + self-test. Never alter source or baselines to hide a
+**Zero local full gates per PR.** No protocol step requires of a worker a local full
+`pnpm run test` / `test:unit`, and a clean review adds no run beyond the review
+protocol's own three fixed checkpoints (which are the cheap deterministic
+gates plus the affected tests, never the suite).
+The full suite — plus the build, the from-source smoke plan, the coverage
+ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
+**green required CI on the exact candidate SHA** (the `merge-queue` commit the
+promotion gate resolves) is the sole full-gate authority. A green PR head is
+not candidate evidence, because required status checks are not strict here
+(mechanism, the four required-set declarations and the one sanctioned CI skip:
+contract §1). Local full runs remain legal as coordinator-owned diagnostics or
+rollback evidence, recorded as such.
+
+Escalate a shared interface, dependency/tooling or config change — and any
+impact you cannot classify — to the coordinator with the reason, rather than
+launching a broad run yourself; broad selection is the coordinator's decision,
+made after escalation (contract §2). Never alter source or baselines to hide a
 failure; baselines only tighten (doctrine I5).
 
 ## Agent loop
 
-Use `pnpm lint:fast <owned-file...>` for syntactic feedback and
-`pnpm fix <owned-file...>` for safe lint fixes, formatting and the full
-static gate. Lists must be explicit; never format the repository per turn.
-`pnpm run check` runs formatting checks, the static gate once, tests and Knip.
-Changed-file lint does not establish correctness of dependents.
+Use `pnpm lint:fast <owned-file...>` for syntactic feedback. Lists must
+be explicit; never format the repository per turn. Changed-file lint does not
+establish correctness of dependents.
+
+`pnpm fix <owned-file...>` is **not** file-scoped: it **always ends by
+running the full-project static gate** (`scripts/fix.mjs` runs
+`scripts/ratchet-typecheck.mjs` with no file list), even for a deleted-only
+list. Invoking the leaf tools directly bypasses that script's containment
+checks, so validate and filter the list through `scripts/lib/owned-files.mjs`
+first and pass its **output** to the leaves — the canonical spelling, repeated
+verbatim from contract §3:
+
+```bash
+( # subshell: `set -e` fail-fast without killing the caller's shell
+set -e
+OWNED=$(mktemp)
+trap 'rm -f "$OWNED"' EXIT
+# 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
+#    (paths containing spaces survive), and an EMPTY file when nothing survives
+OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
+# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
+#    oxlint's exit 1 (findings left, nothing lintable, or a config error) is tolerated INSIDE
+#    the per-batch wrapper; any higher exit fails xargs (123 GNU, 1 BSD) and `set -e` stops
+if [ -s "$OWNED" ]; then
+  xargs -0 sh -c 'node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix "$@" || [ $? -eq 1 ]' sh < "$OWNED"
+else
+  echo "owned-files: nothing to rewrite (empty or deleted-only list)"
+fi
+# 3. formatting for exactly the same paths
+if [ -s "$OWNED" ]; then
+  xargs -0 node node_modules/oxfmt/bin/oxfmt < "$OWNED"
+else
+  echo "owned-files: nothing to format (empty or deleted-only list)"
+fi
+)
+```
+
+`pnpm run check` is a composite whose legs include the full suite; it is **not a
+local verification route** and runs only inside the coordinator-owned diagnostic
+and rollback exceptions (contract §1).
+
+Any local timing cited as evidence carries a load stamp (host uptime + load
+average at measurement time), and no protocol or record cites `--maxWorkers`
+(mechanism, and the caveat that a later slice may change it: contract §5).
 
 ## GLM peak-hour blackout
 
@@ -60,9 +124,13 @@ full intended PR diff before creating a PR. Full protocol:
   results.
 - Run the deterministic gates three times: before cycle 1, after cycle-1
   addressing (before cycle 2), and after cycle-2 addressing. Both cycles
-  include their addressing. Whitespace/conflict-marker checks cover the
-  pinned base through HEAD, staged changes, and unstaged tracked changes
-  separately (commands in the protocol §5); stage your own new files first.
+  include their addressing. Those gates are the cheap deterministic ones plus
+  the affected tests — the full suite is CI's, and Knip runs per the contract's
+  condition (see
+  [docs/focused-checks-contract.md](docs/focused-checks-contract.md)).
+  Whitespace/conflict-marker checks cover the pinned base through HEAD,
+  staged changes, and unstaged tracked changes separately (commands in the
+  protocol §5); stage your own new files first.
 - Adjudicate every critical/major finding: fix the technically valid ones,
   reject false positives with concrete reasons. Minor findings only when
   materially beneficial. Record dispositions concisely.

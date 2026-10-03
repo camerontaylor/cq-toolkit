@@ -118,16 +118,28 @@ out with `PNPM_CONFIG_VIRTUAL_STORE_TYPE=project`.
 
 Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
 `pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
-Formatting is `pnpm run format:check`, runtime tests are `pnpm run test`, and
-checked declaration emit is `pnpm run build`. See [the local static policy](lint/README.md)
+Formatting is `pnpm run format:check`, the tests you need are the ones your diff
+affects (`pnpm exec vitest run <affected test files>`), and checked declaration emit is
+`pnpm run build`. **The full suite is not a local gate**: `pnpm run test` /
+`test:unit` runs in CI, and green required CI on the exact candidate SHA is the
+sole full-gate authority — see
+[docs/focused-checks-contract.md](docs/focused-checks-contract.md). See
+[the local static policy](lint/README.md)
 for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-Use `pnpm run check` for read-only formatting, static checks, tests and Knip. `lint` and
+`pnpm run check` is a composite of the whole-tree obligations (format check,
+static gate, the full suite, Knip). **It is not a local verification route** —
+its full-suite leg is CI's obligation — and it runs only inside the
+coordinator-owned diagnostic and rollback exceptions. For ordinary local work use
+the focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
+`lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `pnpm lint:fast <file...>`
 or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting,
-then checks the whole package. Build, smoke and denylist remain separate gates.
+then runs the full-project static gate — use the contract's validated leaf
+commands when you want fixes without that gate. Build, smoke and denylist remain
+separate gates.
 See [local static policy](lint/README.md) for pins, compiler fallback evidence,
 rule decisions and compatibility changes.
