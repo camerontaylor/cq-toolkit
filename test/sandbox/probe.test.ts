@@ -313,6 +313,26 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
 });
 
 describe('posture-aware network certification', () => {
+  test('modelProxy combined with network allow is rejected, not silently dropped', async () => {
+    await expect(
+      probeBackend(fakeAdapter('fs-only'), { ...seams(), network: 'allow', modelProxy: true }),
+    ).rejects.toThrow(/modelProxy.*allow/);
+  });
+
+  test('the nested-child canary passes the sibling path as an argument, not shell source', async () => {
+    const seen: string[][] = [];
+    const adapter = fakeAdapter('fs-only');
+    const inner = adapter.launch;
+    adapter.launch = (request) => {
+      seen.push([...request.argv]);
+      return inner(request);
+    };
+    await probeBackend(adapter, { ...seams(), network: 'allow' });
+    const nested = seen.find((argv) => argv[3] === 'cq-nested');
+    expect(nested?.[2]).toBe('/bin/cat "$1"');
+    expect(nested?.[4]).toContain('cq-');
+  });
+
   test('an allow-posture boundary certifies for allow, never for model-only', async () => {
     const allow = await probeBackend(fakeAdapter('fs-only'), {
       ...seams(),

@@ -47,6 +47,10 @@ if (network !== undefined && network !== 'model-only' && network !== 'allow') {
   exit(2);
 }
 const modelProxy = process.argv.includes('--model-proxy');
+if (modelProxy && network === 'allow') {
+  stderr.write('sandbox-certify: --model-proxy contradicts --network allow\n');
+  exit(2);
+}
 
 let certification;
 try {

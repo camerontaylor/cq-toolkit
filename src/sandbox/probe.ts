@@ -38,7 +38,18 @@
 // that handoff so no caller can name a backend the probe never ran.
 import { execFile as execFileCb } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdtemp, open, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  access,
+  chmod,
+  mkdtemp,
+  open,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -347,16 +358,26 @@ async function loopbackPort(): Promise<
 }
 
 /**
- * First entry under /usr/local/bin, else /usr/local/share — the local-prefix
- * attack surface for the P7 deviation probe.  undefined when the host carries
- * no local-prefix content at all.
+ * First EXECUTABLE regular file under /usr/local/bin, else /usr/local/share —
+ * the local-prefix attack surface for the P7 deviation probe.  readdir order
+ * is no eligibility guarantee, so directories and non-executables are skipped.
+ * undefined when the host carries no such content.
  */
 async function firstLocalPrefixTarget(): Promise<string | undefined> {
   for (const dir of ['/usr/local/bin', '/usr/local/share']) {
     try {
       const entries = await readdir(dir);
-      const file = entries.find((name) => !name.startsWith('.'));
-      if (file !== undefined) return join(dir, file);
+      for (const name of entries.sort()) {
+        if (name.startsWith('.')) continue;
+        const candidate = join(dir, name);
+        try {
+          if (!(await stat(candidate)).isFile()) continue;
+          await access(candidate, constants.X_OK);
+          return candidate;
+        } catch {
+          // Unusable entry (dangling link, no exec bit) — keep scanning.
+        }
+      }
     } catch {
       // Prefix absent on this host — the caller records the n/a verdict.
     }
@@ -444,7 +465,12 @@ async function probeBackendWithLaunch(
   const platform = options.platform ?? process.platform;
   const network = options.network ?? 'model-only';
   const timeoutMs = options.timeoutMs ?? 20_000;
-  const modelProxy = options.modelProxy === true && network === 'model-only';
+  if (options.modelProxy === true && network === 'allow') {
+    throw new Error(
+      "modelProxy requires network 'model-only'; it contradicts network 'allow' (unrestricted egress)",
+    );
+  }
+  const modelProxy = options.modelProxy === true;
   const base = { backend: adapter.backend, platform, network };
   const demonstrated: NetworkDemonstrated =
     network === 'allow' ? 'allow' : modelProxy ? 'proxy-loopback' : 'none';
@@ -599,7 +625,16 @@ async function probeBackendWithLaunch(
       // 5 — the boundary must hold for DESCENDANTS: a nested child (a shell
       // spawning a grandchild) attempting the sibling escape.  Armed by the
       // in-boundary shell control, so a nonzero exit is attributable.
-      const nestedRead = await launch(['/bin/bash', '-c', `/bin/cat '${siblingSentinel}'`]);
+      // The path rides as a positional argument: interpolating it into shell
+      // source would let a quote in the temp path yield a syntax error that
+      // exits nonzero and reads as a denial.
+      const nestedRead = await launch([
+        '/bin/bash',
+        '-c',
+        '/bin/cat "$1"',
+        'cq-nested',
+        siblingSentinel,
+      ]);
       canaries.push(
         denialOutcome(
           'nested-child-escape',
