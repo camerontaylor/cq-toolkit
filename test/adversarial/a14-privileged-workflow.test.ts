@@ -415,13 +415,19 @@ beforeAll(() => {
         },
       },
       classifier: {
-        files: { [CLASSIFIER_PATH]: 'export const classify = () => "eligible";\n' },
+        files: {
+          [CLASSIFIER_PATH]: 'export const classify = () => "eligible";\n',
+        },
       },
     },
     trust,
   );
   importCommits(
-    { 'cq-state': { files: { '.cq/settle-state.json': ledgerFor(heads['exfil-gate']!) } } },
+    {
+      'cq-state': {
+        files: { '.cq/settle-state.json': ledgerFor(heads['exfil-gate']!) },
+      },
+    },
     trust,
   );
 }, HOOK_MS);
@@ -602,6 +608,39 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
       }
     }
     expect(carriers).toEqual([]);
+  });
+
+  test('every secret-reading workflow_dispatch job runs in a main-only environment', () => {
+    // A write collaborator can dispatch from any branch, and that ref's copy of
+    // the workflow controls the shell, so an in-step ref check is not a
+    // boundary: the deployment policy must withhold the environment secrets.
+    const settings = JSON.parse(
+      readFileSync(join(ROOT, 'policy/templates/github-settings.json'), 'utf8'),
+    ) as {
+      environments: Record<string, { branch_policies: { name: string; type: string }[] }>;
+    };
+    // Retires at C2 (ADR-0004 D-H.3.1): the C1 carrier gate reads a
+    // repository-level secret and is guarded by a job-level default-ref check.
+    const RETIRING_C1_CARRIERS = new Set(['.github/workflows/merge-queue-gate.yml:gate']);
+    const unprotected: string[] = [];
+    let checked = 0;
+    for (const path of files) {
+      const scan = scanWorkflow(readFileSync(join(ROOT, path), 'utf8'));
+      if (!scan.ok || !scan.triggers.includes('workflow_dispatch')) continue;
+      for (const [id, job] of scan.jobs) {
+        if (!/\bsecrets\.[A-Za-z_]/.test(job.text)) continue;
+        if (RETIRING_C1_CARRIERS.has(`${path}:${id}`)) continue;
+        checked += 1;
+        const name = /\benvironment:\s*([A-Za-z0-9_-]+)/.exec(job.text)?.[1];
+        const policies =
+          name === undefined ? undefined : settings.environments[name]?.branch_policies;
+        const mainOnly =
+          policies?.length === 1 && policies[0]?.name === 'main' && policies[0].type === 'branch';
+        if (!mainOnly) unprotected.push(`${path}:${id} (${name ?? 'no environment'})`);
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+    expect(unprotected).toEqual([]);
   });
 
   test('no promotion credential is reachable from an untrusted trigger', () => {

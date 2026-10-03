@@ -75,3 +75,16 @@ it('rejects one token reused for both identities without writing the token to ev
   expect(raw).not.toContain(firstToken);
   expect(raw).not.toContain(secondToken);
 });
+
+it('rejects an unsupported option such as --row instead of defaulting to every row', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cq-adversarial-test-'));
+  directories.push(directory);
+  const result = spawnSync(
+    process.execPath,
+    [runner, '--repo=camerontaylor/cq-scratch-v11-adversarial', '--profile=blank', '--row=A15'],
+    { cwd: directory, encoding: 'utf8', env: { ...process.env, GH_TOKEN: '' } },
+  );
+  expect(result.status).toBe(2);
+  expect(result.stderr).toContain('Unsupported option: --row');
+  expect(result.stdout).toBe('');
+});

@@ -33,6 +33,19 @@ const PROFILE_KEYS = [
   'CQ_BUDGET_ALLOW_ADVISORY',
   'CQ_BUDGET_REQUIRE_CAP',
 ];
+// Operational repository variables (App identities, drill owner) that the
+// Apps listed as live prerequisites require. They carry no trust or sandbox
+// policy, so they are preserved and never mutated; any other unmodeled CQ_*
+// variable could change policy and still blocks the run.
+const OPERATIONAL_KEYS = [
+  'CQ_VERDICT_APP_ID',
+  'CQ_VERDICT_APP_CLIENT_ID',
+  'CQ_PROMOTER_APP_ID',
+  'CQ_PROMOTER_APP_CLIENT_ID',
+  'CQ_AUTOMATION_INTERIM_FALLBACK',
+  'CQ_DRILL_OWNER',
+];
+const SUPPORTED_FLAGS = ['repo', 'profile', 'rows'];
 const SOLO_PROFILE = {
   CQ_MERGE_REQUIRE_HUMAN_APPROVAL: 'false',
   CQ_MERGE_ACCEPT_REVIEW_STATES: 'APPROVED,COMMENTED',
@@ -59,6 +72,12 @@ const args = Object.fromEntries(
     return [match[1], match[2]];
   }),
 );
+const unknownFlags = Object.keys(args).filter((flag) => !SUPPORTED_FLAGS.includes(flag));
+if (unknownFlags.length) {
+  argError(
+    `Unsupported option: --${unknownFlags.join(', --')} (supported: --repo, --profile, --rows)`,
+  );
+}
 const profile = args.profile;
 if (profile !== 'blank' && profile !== 'solo-maintainer') {
   argError('--profile must be blank or solo-maintainer');
@@ -177,7 +196,10 @@ async function verifyEnvironmentOverrides(token) {
     }
     const keys = variables.variables
       .map((item) => item.name)
-      .filter((name) => typeof name === 'string' && name.startsWith('CQ_'));
+      .filter(
+        (name) =>
+          typeof name === 'string' && name.startsWith('CQ_') && !OPERATIONAL_KEYS.includes(name),
+      );
     observed.push({ name: environment.name, cqVariables: keys });
     if (keys.length)
       throw new Error(
@@ -203,7 +225,11 @@ async function configureProfile(token) {
     PROFILE_KEYS.map((key) => [key, before.get(key)?.value ?? null]),
   );
   const unsupported = [...before.keys()].filter(
-    (key) => key.startsWith('CQ_') && !PROFILE_KEYS.includes(key),
+    (key) =>
+      key.startsWith('CQ_') && !PROFILE_KEYS.includes(key) && !OPERATIONAL_KEYS.includes(key),
+  );
+  evidence.profileSettings.preservedOperationalKeys = [...before.keys()].filter((key) =>
+    OPERATIONAL_KEYS.includes(key),
   );
   if (unsupported.length) {
     throw new Error(`Unmodeled scratch CQ variables require review: ${unsupported.join(', ')}`);
@@ -393,7 +419,10 @@ async function outsiderReview(id, context) {
   }
   const body =
     id === 'A15'
-      ? `<!-- cq-review-loop: adversarial-spoof -->\nAdversarial skip-marker probe ${new Date().toISOString()}`
+      ? // The automation-governed skip marker (the permanent A15 regression's
+        // body), carrying a real objection; the review-loop's own
+        // `<!-- cq-review-loop:` signature is skipped for every actor.
+        `CodeRabbit skipped this run.\nPlease fix the authorization bug ${new Date().toISOString()}`
       : `LGTM — adversarial untrusted approval probe ${new Date().toISOString()}`;
   try {
     const review = await github(

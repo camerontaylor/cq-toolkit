@@ -3,8 +3,9 @@
 The `adversarial-suite` workflow is a manual dispatch. It targets only
 [`camerontaylor/cq-scratch-v11-adversarial`](https://github.com/camerontaylor/cq-scratch-v11-adversarial)
 and uses a separate test identity for attacker actions. Never point an attack
-at `cq-toolkit`, its merge queue, or a release branch. The private scratch
-repository and its [open fixture PR #1](https://github.com/camerontaylor/cq-scratch-v11-adversarial/pull/1)
+at `cq-toolkit`, its merge queue, or a release branch. The public scratch
+repository (public since 2026-10-03, so a non-collaborator identity can read and
+review its PRs) and its [open fixture PR #1](https://github.com/camerontaylor/cq-scratch-v11-adversarial/pull/1)
 were created for this suite and are retained for G2 audit. Add the scratch
 repository to the owner's deletion list.
 
@@ -64,7 +65,9 @@ been applied or read back by this change; live evidence remains BLOCKED.
 
 The full §7 G2 suite also includes A7–A9 and A16. Their workstream owners
 must contribute attack evidence and permanent regressions before G2; this
-initial W1 lane does not claim them.
+initial W1 lane does not claim them. The evidence manifest lists them as
+placeholder BLOCKED rows with a null `permanentRegression`; they are not
+covered.
 
 ## Release-lane dependency
 
@@ -88,13 +91,29 @@ with scratch repository Variables read/write and access to list environments
 and their variables; the outsider trust check reads `CQ_MERGE_TRUSTED_*` with
 it as well. GitHub's repository Actions variable API expresses the
 §3.1 keys; environment overrides are inspected and block the profile if found.
-The available owner credential created the private repository and PR,
+The available owner credential created the repository and PR,
 but it is a broad owner credential and is not provisioned to the dispatch
 environment. None of these environment secrets is currently confirmed.
 
-The preflight rejects a second identity that is a scratch collaborator, because
-a collaborator is a trusted association by default. On a private personal
-repository only collaborators can read a PR, so the A1 and A15 drivers cannot
-run while the scratch repository stays private. Running them requires an owner
-decision, for example making the scratch repository public. Until then those
-rows stay BLOCKED at preflight or at review submission.
+The scratch repository is public, so the second identity needs no access grant
+to read or review the fixture PR. The preflight still rejects a second identity
+that is a scratch collaborator, because a collaborator is a trusted association
+by default; the identity must be an unrelated account. The A15 driver submits
+the automation-governed `CodeRabbit skipped this run.` marker with an
+objection, the same body as the permanent A15 regression.
+
+Repository variables outside the §3.1 profile keys are preserved: the App
+identity variables (`CQ_VERDICT_APP_ID`, `CQ_VERDICT_APP_CLIENT_ID`,
+`CQ_PROMOTER_APP_ID`, `CQ_PROMOTER_APP_CLIENT_ID`) and the other operational
+names in the runner's `OPERATIONAL_KEYS` are never mutated. Any other
+unmodeled `CQ_*` variable blocks the run for review. The runner rejects
+unsupported options, so a typo such as `--row=A15` is an argument error
+rather than the full default row set.
+
+The `adversarial-scratch` environment is declared in
+`policy/templates/github-settings.json` with a main-only deployment branch
+policy and a secret-name allowlist. A write collaborator can dispatch from any
+branch, and that ref's copy of the workflow controls the shell, so the
+in-step ref check is not the boundary: the live environment must carry this
+policy (settings drift reports it otherwise), and an A14 test fails if a
+secret-reading `workflow_dispatch` job lacks a main-only environment.

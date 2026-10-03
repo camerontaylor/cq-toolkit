@@ -112,6 +112,20 @@
       "secrets": ["CQ_AUTOMATION_APP_KEY", "Z_AI_API_KEY"],
       "interimSecrets": ["CQ_AUTOMATION_TOKEN", "GH_TOKEN"]
     },
+    "adversarial-scratch": {
+      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "can_admins_bypass": false,
+      "reviewers": [],
+      "prevent_self_review": false,
+      "wait_timer": 0,
+      "secrets": [
+        "CQ_ADVERSARIAL_TOKEN",
+        "CQ_ADVERSARIAL_SECOND_TOKEN",
+        "CQ_ADVERSARIAL_PROFILE_TOKEN"
+      ],
+      "interimSecrets": []
+    },
     "drill": {
       "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
       "branch_policies": [{ "name": "main", "type": "branch" }],
