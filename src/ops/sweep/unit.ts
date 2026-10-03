@@ -49,6 +49,7 @@ import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex } from './gitMutex.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { SweepWorkspace, WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
@@ -635,12 +636,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       worktree.path,
       'diff',
       '--cached',
-      '--text',
-      '--no-ext-diff',
-      '--no-textconv',
-      '--no-renames',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
+      ...SWEEP_DIFF_FLAGS,
       '--',
     ]);
     if (diff.code !== 0) {
@@ -1195,12 +1191,7 @@ async function enforceStagePathAllowlist(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1263,12 +1254,7 @@ async function commitStaged(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--quiet',
   ]);
   if (empty.code !== 0 && empty.code !== 1) {
@@ -1782,12 +1768,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1811,12 +1792,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--',
   ]);
   if (committedDiff.code !== 0) {
