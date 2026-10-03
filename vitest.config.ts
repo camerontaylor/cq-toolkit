@@ -48,12 +48,18 @@ for (const [file, cls] of Object.entries(manifest)) {
   if (!existsSync(new URL(`./${file}`, import.meta.url))) {
     throw new Error(`test/suite-classes.json lists a missing file: ${file}`);
   }
+  if (file.startsWith('test/e2e/') && cls !== 'integration') {
+    throw new Error(`test/suite-classes.json must classify ${file} as integration, not ${cls}`);
+  }
   if (!suiteClasses.includes(cls)) {
     throw new Error(`test/suite-classes.json gives ${file} an unknown class: ${String(cls)}`);
   }
 }
 
 const classified = [...filesOf('pure'), ...filesOf('integration'), ...filesOf('live')];
+// Everything under test/e2e is integration by location, even when a new file
+// has not been added to the manifest yet (it must not fall into `process`).
+const e2eGlob = 'test/e2e/**/*.test.ts';
 
 export default defineConfig({
   test: {
@@ -87,7 +93,7 @@ export default defineConfig({
           name: 'process',
           sequence: { groupOrder: 1 },
           include: ['test/**/*.test.ts', 'lint/**/*.test.ts'],
-          exclude: [...configDefaults.exclude, '**/dist/**', ...classified],
+          exclude: [...configDefaults.exclude, '**/dist/**', e2eGlob, ...classified],
           testTimeout: 30_000,
           hookTimeout: 60_000,
           fileParallelism: false,
@@ -115,7 +121,7 @@ export default defineConfig({
         test: {
           name: 'integration',
           sequence: { groupOrder: 3 },
-          include: filesOf('integration'),
+          include: [e2eGlob, ...filesOf('integration')],
           testTimeout: 5_000,
           hookTimeout: 10_000,
           fileParallelism: false,
