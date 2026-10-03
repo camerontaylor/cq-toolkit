@@ -44,8 +44,13 @@ Both promotion gates are `active` on GitHub today
 **alternative promoters, not an AND**: each fast-forwards `main` on its own
 prerequisites with a compare-and-swap on the queue tip
 (`policy/templates/README.md:174-176`), so the first gate whose own set is
-green promotes. During C1 the effective promotion obligation is therefore the
-**intersection** of S3 and S7, not their union. The legacy gate fired on the
+green promotes. During C1 promotion is therefore an **OR of two complete
+predicates** — `(all S3 requirements) OR (all S7 requirements)` — not a union
+of the two sets and not merely their intersection. A check required by only one
+gate is non-blocking only while the other gate's whole set is green: if the
+shared `static`/`denylist` evidence is green but an S3-only obligation
+(`ratchet`) and an S7-only obligation (`from-source`) both fail, neither
+predicate holds and nothing promotes. The legacy gate fired on the
 last candidate push (run `36952171986`,
 `push`/`merge-queue`, `2026-10-02T01:41:55Z`) while the successor's
 `workflow_run` leg has fired 4 times against 96 `schedule` sweeps in the
@@ -95,7 +100,11 @@ becomes fully promotion-blocking only at C2, when S7 is the sole promoter.
 
 ### 1.3 What actually ran on the candidate SHA (measured, not asserted)
 
-Check-runs on `70de728` (API, `filter=latest`, all pages), selected rows:
+Check-runs on `70de728` (API, `filter=latest`, all pages), selected rows. The
+sha carries **two surfaces**: "run 2" (started 01:41:57) is the `merge-queue`
+candidate push the legacy gate fired on (`01:41:55Z`, §1.1); "run 1" (started
+01:46:39–40, after run 2's `ratchet` finished at 01:46:32) is the `main` push
+that the promotion itself triggered. Candidate timing is run 2 only.
 
 | context               | app                      | started  | completed | duration |
 | --------------------- | ------------------------ | -------- | --------- | -------- |
@@ -121,9 +130,11 @@ Both absences are structural, not incidental:
   `schedule` + `workflow_dispatch`: it posts on **PR heads**, never on a push
   tip.
 
-Two timing facts the promotion decision needs: the binding leg today is
-`static` at 5m04s against a 20-minute gate deadline (`merge-queue-gate.yml:100`
-and `gate.yml:258`), i.e. **~4× headroom**, and two runs of the same job on the
+Two timing facts the promotion decision needs: the candidate's binding leg
+today is `ratchet` at 4m35s (run 2; `static` finished at 4m14s) against a
+20-minute gate deadline (`merge-queue-gate.yml:100` and `gate.yml:258`), i.e.
+**~4.4× headroom** (the slower post-promotion `main` run, `static` 5m04s, is
+still ~3.9×), and two runs of the same job on the
 same SHA differed by 16% (`static` 5m04s vs 4m14s) and 1.8% (`ratchet` 4m40s vs
 4m35s) — the same order as the spec's own two-baseline comparison (19%). That
 variance is larger than any saving consolidation could offer (§4).
@@ -144,10 +155,13 @@ The rule that makes them agree _where they must_:
 
 Two invariants fall out, and both are already the live behaviour:
 
-- Anything in the legacy gate list must be push-produced. Putting
-  `from-source` or `pack-audit` into `{{GATE_CHECKS}}` today would stall every
-  promotion for the full 20 minutes and then refuse
-  (`merge-queue-gate.yml:165-168`) — a total queue freeze, not a red PR.
+- Anything in the legacy gate list must be push-produced. Putting a
+  PR-head-only context — `pack-audit` or `cq/acceptance` — into
+  `{{GATE_CHECKS}}` today would stall every promotion for the full 20 minutes
+  and then refuse (`merge-queue-gate.yml:165-168`) — a total queue freeze, not
+  a red PR. `from-source` is not in that class: `ci.yml:12-14` triggers on an
+  unfiltered `push` and its job is defined at `:73-98`, so it is push-produced
+  and satisfiable (§2.4).
 - Anything in a verified workflow is implicitly required _for promotion_ whether
   or not a list says so.
 
@@ -247,18 +261,22 @@ direction) in the same owner-governed pass that applies R2.
 
 ### 2.6 Which declaration sites must change, to make them agree
 
-Ordered; every row is applied together or not at all.
+Ordered; every row is applied together or not at all. Rows 1b and 5b are
+additions to the original list: 1b keeps the shipped adopter instructions
+consistent with it, 5b wakes the successor gate on the new workflow.
 
-| order | site                                                                              | change                                                                                                                                                                                                                                                                                                    | outward-facing?                                                              |
-| ----- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1     | `policy/templates/required-check.md:105-113` (+ `:31-42` prose)                   | rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1)                                                                                                                                                | no (template, then regenerate)                                               |
-| 2     | `.github/workflows/ci.yml`                                                        | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                                                                                                   | no (generated instance)                                                      |
-| 3     | `scripts/denylist-scan:165-173`                                                   | add `{ ci.yml: from-source }`; at promotion add `{ ci-macos.yml: static-macos }`                                                                                                                                                                                                                          | **yes** — protected path (`protected-paths.json:13`)                         |
-| 4     | `policy/protected-paths.json:15`                                                  | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                                                                                                        | **yes** — protected path                                                     |
-| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58` | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                                                                                                             | no (repo) / **yes** (D11 judges the producer change)                         |
-| 6     | `policy/templates/github-settings.json:65-73`                                     | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are                                                                                 | **yes** — target state of live settings                                      |
-| 7a    | live classic protection (S5/S6), **pre-C2 only**                                  | add `from-source` to `main`; add `static-macos` to both branches at promotion if it precedes C2; decide the `main`/`pack-audit` asymmetry                                                                                                                                                                 | **yes** — owner-only, via the API                                            |
-| 7b    | live rulesets (S4), **at C2**                                                     | apply R0/R1/R2 as templated (item 6). The target has `classicBranchProtection: null` for both branches (`github-settings.json:80-83`), so the wizard _removes_ S5/S6 rather than updating them, and R2 targets only `merge-queue` (`:39-45`) — `main` keeps R1's `update` rule and no required-check rule | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) |
+| order | site                                                                                     | change                                                                                                                                                                                                                                                                                                                                   | outward-facing?                                                              |
+| ----- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1     | `policy/templates/required-check.md:105-113` (+ `:31-42` prose)                          | rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1)                                                                                                                                                                               | no (template, then regenerate)                                               |
+| 1b    | `policy/README.md:42-49` (adoption step 3)                                               | rewrite "register every required check in all three places": `GATE_WORKFLOWS` (successor gate) is a fourth place, a standalone workflow check is not enforced by the successor until it is added there, and C2 enforcement is R2 on `merge-queue` only, not classic protection on both branches (`github-settings.json:39-45`, `:80-83`) | no (shipped adopter docs)                                                    |
+| 2     | `.github/workflows/ci.yml`                                                               | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                                                                                                                                  | no (generated instance)                                                      |
+| 3     | `scripts/denylist-scan:165-173`                                                          | add `{ ci.yml: from-source }`; at promotion add `{ ci-macos.yml: static-macos }`                                                                                                                                                                                                                                                         | **yes** — protected path (`protected-paths.json:13`)                         |
+| 4     | `policy/protected-paths.json:15`                                                         | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                                                                                                                                       | **yes** — protected path                                                     |
+| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58`        | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                                                                                                                                            | no (repo) / **yes** (D11 judges the producer change)                         |
+| 5b    | `policy/templates/gate.yml` (`workflow_run.workflows`, `wake` path whitelist) + instance | at promotion, recommended placement only: add `ci-macos` to the trigger list and `.github/workflows/ci-macos.yml` to the whitelist (today `ci` and `cq-measure` only, `gate.yml:55-63`, `:111-113`); regenerate. `GATE_WORKFLOWS` alone makes the gate verify the run, not wake on it                                                    | no (repo) / **yes** (D11 judges the producer change)                         |
+| 6     | `policy/templates/github-settings.json:65-73`                                            | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are                                                                                                                | **yes** — target state of live settings                                      |
+| 7a    | live classic protection (S5/S6), **pre-C2 only**                                         | add `from-source` to `main`; add `static-macos` to both branches at promotion if it precedes C2; decide the `main`/`pack-audit` asymmetry                                                                                                                                                                                                | **yes** — owner-only, via the API                                            |
+| 7b    | live rulesets (S4), **at C2**                                                            | apply R0/R1/R2 as templated (item 6). The target has `classicBranchProtection: null` for both branches (`github-settings.json:80-83`), so the wizard _removes_ S5/S6 rather than updating them, and R2 targets only `merge-queue` (`:39-45`) — `main` keeps R1's `update` rule and no required-check rule                                | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) |
 
 Items 7a and 7b are the only genuinely outward-facing steps and the only ones
 this lane cannot perform. They are separate passes: 7a edits the classic
@@ -277,17 +295,18 @@ entries are the D11 trust anchors.
 
 ### 3.1 Where the context goes, per site
 
-| site                                                                                  | insertion                                                                                                       | notes                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `policy/templates/required-check.md`                                                  | a standalone `ci-macos.yml` template with its own job body, not a matrix                                        | a matrix would rename the check runs (`static (ubuntu-latest)`), breaking the S1/S2 pairing and every `name:`-identity rule the I4 leg polices (`scripts/denylist-scan:150-157`); the template's `{{RUNNER}}` slot is single-valued (`:33-39`), so a macOS job needs its own body with `macos-latest` |
-| `.github/workflows/ci.yml`                                                            | no `static-macos` job under the recommended placement; only the `from-source` comment refresh                   | a job added here is bound by S7 all-jobs aggregate from birth, before any list names it (§1.2 consequence 5, §3.2)                                                                                                                                                                                    |
-| `policy/templates/ci-macos.yml` + its instance `.github/workflows/ci-macos.yml` (new) | the `static-macos` job: `runs-on: macos-latest`, `test:unit` + `test:e2e`, unfiltered `on:`, no job-level `if:` | its own file is what makes "initially non-required" true in every venue (§3.2); the price is that macOS and Linux legs can no longer be throttled by one workflow                                                                                                                                     |
-| `scripts/denylist-scan:165-173`                                                       | `{ workflow: 'ci-macos.yml', check: 'static-macos' }`                                                           | job id must equal the check name, no `name:` override, and the I4 leg then polices it forever                                                                                                                                                                                                         |
-| `policy/protected-paths.json:15`                                                      | `"static-macos"`                                                                                                | the list must stay equal to the gate's wait list (`policyDiff.test.ts:1132-1137`)                                                                                                                                                                                                                     |
-| `policy/templates/github-settings.json:65-73`                                         | `{ "context": "static-macos", "integration_id": 15368 }`                                                        | Actions-pinned, plain name (§2.3)                                                                                                                                                                                                                                                                     |
-| legacy gate                                                                           | `GATE_CHECKS` in `policy/templates/instances.json:58`                                                           | push-produced, so satisfiable (Rule R)                                                                                                                                                                                                                                                                |
-| **successor gate**                                                                    | `GATE_WORKFLOWS` in `policy/templates/instances.json:33` gains `ci-macos.yml`                                   | required under the recommended placement; a no-op in the rejected single-file layout, where S7 already binds the job (§3.2)                                                                                                                                                                           |
-| live rulesets + both branches' protection                                             | add the context                                                                                                 | owner-governed, last, same pass                                                                                                                                                                                                                                                                       |
+| site                                                                                  | insertion                                                                                                                                                                                                                 | notes                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `policy/templates/required-check.md`                                                  | a standalone `ci-macos.yml` template with its own job body, not a matrix                                                                                                                                                  | a matrix would rename the check runs (`static (ubuntu-latest)`), breaking the S1/S2 pairing and every `name:`-identity rule the I4 leg polices (`scripts/denylist-scan:150-157`); the template's `{{RUNNER}}` slot is single-valued (`:33-39`), so a macOS job needs its own body with `macos-latest` |
+| `.github/workflows/ci.yml`                                                            | no `static-macos` job under the recommended placement; only the `from-source` comment refresh                                                                                                                             | a job added here is bound by S7 all-jobs aggregate from birth, before any list names it (§1.2 consequence 5, §3.2)                                                                                                                                                                                    |
+| `policy/templates/ci-macos.yml` + its instance `.github/workflows/ci-macos.yml` (new) | the `static-macos` job: `runs-on: macos-latest`, `test:unit` + `test:e2e`, unfiltered `on:`, no job-level `if:`                                                                                                           | its own file is what makes "initially non-required" true in every venue (§3.2); the price is that macOS and Linux legs can no longer be throttled by one workflow                                                                                                                                     |
+| `scripts/denylist-scan:165-173`                                                       | `{ workflow: 'ci-macos.yml', check: 'static-macos' }`                                                                                                                                                                     | job id must equal the check name, no `name:` override, and the I4 leg then polices it forever                                                                                                                                                                                                         |
+| `policy/protected-paths.json:15`                                                      | `"static-macos"`                                                                                                                                                                                                          | the list must stay equal to the gate's wait list (`policyDiff.test.ts:1132-1137`)                                                                                                                                                                                                                     |
+| `policy/templates/github-settings.json:65-73`                                         | `{ "context": "static-macos", "integration_id": 15368 }`                                                                                                                                                                  | Actions-pinned, plain name (§2.3)                                                                                                                                                                                                                                                                     |
+| legacy gate                                                                           | `GATE_CHECKS` in `policy/templates/instances.json:58`                                                                                                                                                                     | push-produced, so satisfiable (Rule R)                                                                                                                                                                                                                                                                |
+| **successor gate**                                                                    | `GATE_WORKFLOWS` in `policy/templates/instances.json:33` gains `ci-macos.yml`                                                                                                                                             | required under the recommended placement; a no-op in the rejected single-file layout, where S7 already binds the job (§3.2)                                                                                                                                                                           |
+| **successor gate wake path**                                                          | `policy/templates/gate.yml` `workflow_run.workflows` gains `ci-macos`, and the `wake` job's path whitelist gains `.github/workflows/ci-macos.yml` (`gate.yml:55-63`, `:111-113` in the instance); regenerate the instance | `GATE_WORKFLOWS` makes the gate _verify_ the run but not _wake_ on it. Without the trigger, a macOS run that finishes after a timeout, or is rerun green after a refusal, starts no promotion attempt until the next scheduled sweep (§3.2)                                                           |
+| live rulesets + both branches' protection                                             | add the context                                                                                                                                                                                                           | owner-governed, last, same pass                                                                                                                                                                                                                                                                       |
 
 ### 3.2 The placement decision (this is the part the spec's list omits)
 
@@ -305,8 +324,10 @@ read contexts. But `gate.yml` enforces `ci.yml` **in full**
   phase is therefore notional in this placement.
 - **`static-macos` in its own workflow file** (say `ci-macos.yml`): genuinely
   non-blocking while non-required, because nothing in S1–S7 names it. Promotion
-  then costs exactly one token — `GATE_WORKFLOWS` — plus the S1–S6 edits above.
-  Demotion is then a clean inverse.
+  then costs `GATE_WORKFLOWS` plus the successor gate's wake path (the
+  `workflow_run` trigger and the `wake` path whitelist, which today name only
+  `ci` and `cq-measure`, `gate.yml:55-63`, `:111-113`) plus the S1–S6 edits
+  above. Demotion is then a clean inverse.
 
 **Recommendation: its own workflow file**, with `ci.yml` untouched. The price is
 one more instance in `policy/templates/instances.json` and one more I4 pairing;
@@ -327,8 +348,8 @@ macOS job would convert an infrastructure skip into a queue freeze.
 
 The gate refuses after 20 minutes (`merge-queue-gate.yml:100`, `:165-168`;
 `gate.yml:258` → `promote-gate.ts:1036-1039`). Promotion therefore requires
-**max < 20 min**, not only p90 ≤ 15 min. Measured headroom today is 4×
-(5m04s binding leg). The macOS leg has no such headroom in advance: the spec
+**max < 20 min**, not only p90 ≤ 15 min. Measured headroom today is
+~4.4× (4m35s binding leg on the candidate push). The macOS leg has no such headroom in advance: the spec
 expects an unmodified suite to exceed 15 min on a macOS runner if the trace's
 per-spawn hypothesis holds, which is why the promotion clock starts only after
 E's top-10 reduction merges.
@@ -360,7 +381,8 @@ Demotion is the exact inverse of §2.6's table with the §3.2 caveat: remove
 `static-macos` from S6/S4 first (outward-facing, owner), then from S1 and S3
 together (they are machine-tied), then from S2, then from S7 — under the
 recommended layout, remove `ci-macos.yml` from `GATE_WORKFLOWS`
-(`policy/templates/instances.json:33`) and regenerate `gate.yml`, otherwise the
+(`policy/templates/instances.json:33`) and from the `gate.yml` wake path, and
+regenerate `gate.yml`, otherwise the
 successor gate keeps requiring the run and a slow or flaky macOS leg still
 freezes promotion; if the job lives in `ci.yml` instead, **remove the job
 itself**, because S7 keeps it binding until it is gone. Record the breach
@@ -436,10 +458,14 @@ redundant in the only sense that matters — what a green `ratchet` does and doe
 not say about the tests.
 
 The arithmetic that settles it: candidate time-to-verdict is
-`max(static, ratchet)`, currently 5m04s. Folding the tests into `ratchet` would
-move the binding leg to 4m40s — a **≤ 8% ceiling, below the 16% run-to-run
-variance measured on that binding leg** (§1.3). The saving is real but is
-runner-minutes, not the SLO the spec actually governs.
+`max(static, ratchet)`. On the merge-queue candidate push (§1.3 run 2) that is
+`max(4m14s, 4m35s)` = 4m35s, and `ratchet` is already the binding leg — folding
+the tests into it saves **0%** of candidate latency (it could only lengthen it).
+Only on the post-promotion `main` push (run 1: `static` 5m04s vs `ratchet`
+4m40s) would the binding leg move, by at most 24s (**≤ 8%**) — a cross-branch
+worst case, and below the 16% run-to-run variance measured on `static` (§1.3).
+The saving is real but is runner-minutes, not the candidate SLO the spec
+actually governs.
 
 **Reopen this decision only when** the successor trusted leg carries a required
 **test verdict** (today it carries none — only a typecheck-count recomputation
@@ -550,9 +576,12 @@ Rollback is the recorded inverse of §2.6 / §3.4, and it is **not** quiet:
 3. `ratchet` is app-unpinned on `merge-queue` (S6, `app_id: null`) — any App can
    report that context there.
 4. Both promotion gates are simultaneously active with different required sets,
-   and each promotes on its own; today the effective obligation is their
-   **intersection** — a check only one gate requires (e.g. `from-source`, S7
-   only) does not block promotion.
+   and each promotes on its own; today promotion is `(all S3) OR (all S7)`. A
+   check only one gate requires (e.g. `from-source`, S7 only) does not block
+   promotion while the other gate's set is fully green, but it does block it
+   once an obligation unique to the other gate is also red — rollback and
+   reconciliation analysis must evaluate both predicates, never the
+   intersection of the sets.
 5. `bypass_actors` include `actor_id: 5` with `bypass_mode: always`
    (S4 `:77`) — repository admins always bypass every required check.
 
