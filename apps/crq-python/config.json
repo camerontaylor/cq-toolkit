@@ -1,0 +1,27 @@
+{
+  "repo": "camerontaylor/cq-toolkit",
+  "clone": "/srv/operator/repos/worktrees/coderabbit-queue-repo",
+  "worktree_root": "/srv/operator/repos/worktrees",
+  "worktree_prefix": "coderabbit-queue-",
+  "max_starts_per_hour": 5,
+  "max_inflight": 2,
+  "review_timeout_min": 75,
+  "quiet_minutes": 30,
+  "rate_limit_default_backoff_min": 30,
+  "error_backoff_min": 30,
+  "max_item_failures": 3,
+  "spawn_addressing": true,
+  "address_provider": "claude/claude-sonnet-5-5",
+  "address_mode": "bypassPermissions",
+  "address_timeout_min": 180,
+  "address_severities": [
+    "critical",
+    "major"
+  ],
+  "merged_min_survival": 0.25,
+  "merged_min_surviving_lines": 15,
+  "tick_agent_title_prefix": "crq tick",
+  "keep_tick_agents": 3,
+  "schedule_id": "schedule-example",
+  "merged_min_file_focus": 0.25
+}
