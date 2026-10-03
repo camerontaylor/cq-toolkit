@@ -1025,6 +1025,8 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       await resilient(() =>
         run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/fix/core', wtPath, 'main'], dir),
       );
+      // Sweep locks active worktrees; a failed removal must restore that lock.
+      await resilient(() => run(['-C', dir, 'worktree', 'lock', wtPath], dir));
       // Dirty the tree (untracked file: porcelain non-empty).
       writeFileSync(join(wtPath, 'dirty.txt'), 'dirty');
 
@@ -1034,6 +1036,9 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       await expect(resilient(() => effects.worktreeRemove(dir, wtPath))).rejects.toThrow(
         /contains modified or untracked/,
       );
+      expect(
+        await resilient(() => run(['-C', dir, 'worktree', 'list', '--porcelain'], dir)),
+      ).toMatch(/^locked/m);
       // --force is the explicit dirty path and succeeds.
       await resilient(() => effects.worktreeRemove(dir, wtPath, { force: true }));
       // The branch age parses as an integer ms (the H age-basis half).

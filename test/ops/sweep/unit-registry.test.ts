@@ -16,7 +16,7 @@
 //      branch to a real LOCAL BARE origin (offline), with the args-array
 //      `push origin <branch>` argv (no `-u`: no shared config write).
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
@@ -253,6 +253,12 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       expect(SweepUnitDispatchInputSchema.safeParse(withoutDir).success).toBe(true);
       await bindings.installDeps?.(dir);
       expect(readFileSync(join(dir, 'installed'), 'utf8')).toBe('yes');
+      // The job's abort signal reaches the install subprocess: a pre-aborted
+      // signal kills it before it can write anything.
+      const aborted = AbortSignal.abort();
+      rmSync(join(dir, 'installed'));
+      await expect(bindings.installDeps?.(dir, aborted)).rejects.toThrow(/killed/);
+      expect(existsSync(join(dir, 'installed'))).toBe(false);
     },
   );
 

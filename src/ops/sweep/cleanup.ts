@@ -800,7 +800,14 @@ export function makeSubprocessCleanupEffects(
         opts?.force === true
           ? ['worktree', 'remove', '--force', path]
           : ['worktree', 'remove', path];
-      await runCleanupGit(args, root, timeoutMs);
+      try {
+        await runCleanupGit(args, root, timeoutMs);
+      } catch (err) {
+        // Removal failed: the checkout is still registered, so restore the
+        // prune protection the unlock above dropped.
+        await runCleanupGit(['worktree', 'lock', path], root, timeoutMs).catch(() => undefined);
+        throw err;
+      }
     },
     branchDelete: async (root, branch) => {
       await runCleanupGit(['branch', '-D', branch], root, timeoutMs);

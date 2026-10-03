@@ -201,7 +201,7 @@ export interface SweepUnitBindings {
    * Dependency install hook, run before a probe in any checkout (worker or
    * detached final-probe) that has not yet recorded a successful install.
    */
-  installDeps?: (worktreePath: string) => Promise<void>;
+  installDeps?: (worktreePath: string, signal?: AbortSignal) => Promise<void>;
   /** The run's reserved branch prefix. */
   runPrefix: string;
   /** The base the worktrees check out (and the PRs target). */
@@ -377,6 +377,18 @@ export function sweepUnitFaultClass(error: string): SweepUnitFaultClass {
   return 'unknown';
 }
 
+/** Fault prefix marking a governed cancellation (maps to `indeterminate`, never `failed`). */
+const CANCELLED_FAULT = '[CANCELLED]';
+
+/** Map a leg fault to its op result: cancellation is resumable, anything else failed. */
+function faultResult(
+  fault: string,
+): { status: 'indeterminate'; detail: string } | { status: 'failed'; error: string } {
+  return fault.startsWith(CANCELLED_FAULT)
+    ? { status: 'indeterminate', detail: fault }
+    : { status: 'failed', error: fault };
+}
+
 /** Prefix a class tag onto a unit fault message (stable, machine-readable). */
 function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): string {
   return `[${cls.toUpperCase()}] ${message}`;
@@ -475,7 +487,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // strictly clean, and the probe below is always a fresh re-probe, I7).
     const before = await probeLeg(probe, bindings, unit, worktreeFor, 'baseline');
     if (before.worktree === undefined || before.probe === undefined) {
-      return { status: 'failed', error: before.fault ?? '(no detail)' };
+      return faultResult(before.fault ?? '(no detail)');
     }
     const worktree = before.worktree;
     const baseline = before.probe;
@@ -699,7 +711,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       async (cleanWorktree) => probeLeg(probe, bindings, unit, worktreeFor, 'final', cleanWorktree),
     );
     if (finalProbe.fault !== null) {
-      return { status: 'failed', error: finalProbe.fault };
+      return faultResult(finalProbe.fault);
     }
     if (finalProbe.probe === undefined) {
       return { status: 'failed', error: '(final probe returned no evidence)' };
@@ -1019,7 +1031,7 @@ async function withBaseOwnedFinalTree(
 /** Run the install hook unless this checkout already recorded a successful install. */
 async function ensureInstalled(
   bindings: SweepUnitBindings,
-  installDeps: (worktreePath: string) => Promise<void>,
+  installDeps: (worktreePath: string, signal?: AbortSignal) => Promise<void>,
   worktreePath: string,
 ): Promise<string | null> {
   try {
@@ -1035,7 +1047,7 @@ async function ensureInstalled(
     }
     const markerPath = resolve(worktreePath, marker.stdout.trim());
     if (existsSync(markerPath)) return null;
-    await installDeps(worktreePath);
+    await installDeps(worktreePath, currentJobContext()?.signal);
     await writeFile(markerPath, '');
     return null;
   } catch (err) {
@@ -1072,6 +1084,13 @@ async function probeLeg(
   if (bindings.installDeps !== undefined) {
     const installFault = await ensureInstalled(bindings, bindings.installDeps, worktree.path);
     if (installFault !== null) {
+      // A governed cancellation killed the install: no verdict, resumable.
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          worktree,
+          fault: `${CANCELLED_FAULT} sweep.unit ${unit.package}: dependency install cancelled — ${installFault}`,
+        };
+      }
       return {
         worktree,
         fault: tagged(
@@ -1079,6 +1098,21 @@ async function probeLeg(
           `sweep.unit ${unit.package}: dependency install failed — ${installFault}`,
         ),
       };
+    }
+    if (leg === 'final') {
+      // The probed bytes must be the published bytes: the tree was fixed
+      // before install, so an install that writes a nonignored file would
+      // let the probe pass on content absent from the commit.
+      const status = await bindings.git(['-C', worktree.path, 'status', '--porcelain']);
+      if (status.code !== 0 || status.stdout.trim() !== '') {
+        return {
+          worktree,
+          fault: tagged(
+            'infra',
+            `sweep.unit ${unit.package}: the install hook changed nonignored files in the final-probe checkout — ${status.code !== 0 ? status.stderr.trim() : status.stdout.trim().split('\n').slice(0, 5).join('; ')}`,
+          ),
+        };
+      }
     }
   }
   const input: BaselineProbeInput = {
@@ -1678,7 +1712,7 @@ export function bindingsFromDispatch(
     ...(input.install === undefined
       ? {}
       : {
-          installDeps: async (worktreePath: string): Promise<void> => {
+          installDeps: async (worktreePath: string, signal?: AbortSignal): Promise<void> => {
             // Own process group: a timeout kills lifecycle-script descendants
             // too, and a relative command resolves inside the new worktree.
             const outcome = await runArgvCommand(
@@ -1689,6 +1723,7 @@ export function bindingsFromDispatch(
                 env: inheritedEnv(),
                 maxBytes: INSTALL_OUTPUT_MAX_BYTES,
                 timeoutMs: input.install?.timeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
+                ...(signal !== undefined ? { signal } : {}),
               },
             );
             if (outcome.kind === 'spawn-error') throw new Error(messageOf(outcome.error));
