@@ -22,6 +22,12 @@ on:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   # The job id stays `static-macos`: the check name the baseline report and
   # any future promotion pair on. It mirrors the static job's seven command
@@ -43,22 +49,25 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # Mirrored from the static job above, verbatim: the mirror is the
       # point, so an edit to one body's steps is an edit to both.
       - name: Static gate
-        run: npm run check:static
+        run: pnpm run check:static
       - name: Check formatting
-        run: npm run format:check
+        run: pnpm run format:check
       # Timing probe (baseline component A): this job alone also writes the
       # vitest JSON report (per-file durations) for each test invocation.
       # `--reporter=default` keeps the console output; `json` adds the file
@@ -68,20 +77,20 @@ jobs:
       # the ratchet is the instrumented Linux venue. These steps carry no
       # `if:` beyond the one noted on e2e: they remain the gate.
       - name: Test unit
-        run: npm run test:unit -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-unit.json"
+        run: pnpm run test:unit --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-unit.json"
       # `!cancelled()`, not the implicit success(): a red unit run must not
       # skip e2e, or the failing candidates lose their e2e timing. The unit
       # failure still fails the job — this only keeps later evidence
       # flowing.
       - name: Test e2e/acp
         if: ${{ !cancelled() }}
-        run: npm run test:e2e -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-e2e.json"
+        run: pnpm run test:e2e --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-e2e.json"
       - name: Check unused files and dependencies
-        run: npm run knip
+        run: pnpm run knip
       - name: Build
-        run: npm run build
+        run: pnpm run build
       - name: Check generated op docs
-        run: npm run gen:op-docs:check
+        run: pnpm run gen:op-docs:check
       # The reporter writes in onFinished, so a red test run still leaves
       # both files. This step proves both exist and parse (it is what
       # catches a wrong reporter flag); it runs after a red test step
