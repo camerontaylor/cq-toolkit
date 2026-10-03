@@ -77,6 +77,7 @@ describe('selectAffected', () => {
       'test/cli/registry.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/scripts/static-conformance.test.ts',
+      'test/cli/conformance.test.ts',
     ];
     const pool = [...allTests, ...consumers];
     const pick = (path: string) =>
@@ -86,6 +87,7 @@ describe('selectAffected', () => {
       expect.arrayContaining([consumers[2], consumers[3]]),
     );
     expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.test.ts');
+    expect(pick('src/ops/new/x.ts')).toContain('test/cli/conformance.test.ts');
   });
 
   it('falls back to every test when a changed file has no mapping', () => {

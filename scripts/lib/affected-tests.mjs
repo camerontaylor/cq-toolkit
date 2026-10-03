@@ -27,7 +27,7 @@ export const NON_IMPORT_MAP = [
     /^src\/driver\//,
     [/^test\/kernel\/driver-hygiene\.test\.ts$/, /^test\/scripts\/static-conformance\.test\.ts$/],
   ],
-  [/^src\/ops\//, [/^test\/cli\/registry\.test\.ts$/]],
+  [/^src\/ops\//, [/^test\/cli\/(registry|conformance)\.test\.ts$/]],
   [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//, /^test\/ops\/gates\//]],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
   [/^docs\/ops\//, [/^test\/scripts\//]],
