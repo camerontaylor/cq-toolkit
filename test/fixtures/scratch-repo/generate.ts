@@ -31,24 +31,6 @@ export const ALPHA_FIX = {
   newText: 'const expected = 2;',
 } as const;
 
-/**
- * The one edit that BREAKS beta's passing production module (the dirty-tree scenario):
- * it shifts beta's expectation constant, so the broken module's assertion AND
- * its thrown message move together — the failure text stays internally
- * consistent with the assertion that produced it.
- */
-export const BETA_BREAK = {
-  file: 'packages/beta/src/calculation.js',
-  oldText: 'const expected = 4;',
-  newText: 'const expected = 5;',
-} as const;
-
-/**
- * The beta failure message a breaking edit produces (novel vs its clean
- * baseline): the assertion then expects 5 while sum(2, 2) computes 4.
- */
-export const BETA_BREAK_MESSAGE = 'expected 5, got 4';
-
 /** The workspace manifest the e2e sweeps — two packages, git's own path form. */
 export const SCRATCH_PACKAGES: Array<{ name: string; path: string }> = [
   { name: 'alpha', path: 'packages/alpha' },
@@ -132,13 +114,19 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+  );
+}
+
 /** One bounded git call (the worktreeFor.test.ts real-git idiom). */
 function run(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       [...GIT_NO_AUTO_MAINTENANCE, ...args],
-      { cwd, timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
+      { cwd, env: scrubbedGitEnv(), timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(new Error(stderr.trim() || error.message));

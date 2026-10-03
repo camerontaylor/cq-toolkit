@@ -1,12 +1,10 @@
 // Slice D + F — tests for the #30 selective credential gate in the
 // demo-eval-axes workflow. Two describes:
-//   1. MODULE-LEVEL (no skipIf): direct unit tests over the extracted pure
-//      module scripts/lib/eval-axes-select.mjs — these run EVERYWHERE,
-//      including CI (no dist, no network, no keys needed).
-//   2. SPAWN E2E (skipIf dist missing): proves the real script wiring
-//      end-to-end where dist exists (e.g. after a local build); CI covers
-//      the module-level describe above and SKIPS these — the script imports
-//      ../dist/index.js at module top and CI runs tests before build.
+//   1. MODULE-LEVEL: direct unit tests over the extracted pure module
+//      scripts/lib/eval-axes-select.mjs — these run everywhere, including CI.
+//   2. SPAWN E2E: proves the real script wiring end-to-end. Vitest's
+//      globalSetup builds ../dist/index.js before collection, so these cases
+//      run everywhere too.
 //
 // Every case is spend-free: each refusal happens BEFORE any dispatch. The
 // e2e cases' dummy key (ZAI_API_KEY='x') is never used — the credential
@@ -14,8 +12,7 @@
 // ever reached.
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -44,12 +41,23 @@ function envFor(keys: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+// spawnSync blocks the event loop, so Vitest's test timeout cannot interrupt
+// a wedged child: the spawn itself must be bounded, and a timeout or spawn
+// failure surfaces as a named error instead of a hung run.
+const DEMO_SPAWN_TIMEOUT_MS = 30_000;
+
 function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
+  const res = spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
+    timeout: DEMO_SPAWN_TIMEOUT_MS,
   });
+  if (res.error !== undefined)
+    throw new Error(
+      `demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`,
+    );
+  return res;
 }
 
 // Mirror of the script's cell table (same lane/provider/model quadruple).
@@ -110,11 +118,13 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 });
 
-describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))(
+describe(
   'demo-eval-axes: the #30 selective credential gate (spawn e2e)',
+  { timeout: 60_000 },
   () => {
-    // CI covers the module-level describe above and SKIPS these: the script
-    // imports ../dist/index.js at module top and CI runs tests before build.
+    // The global setup builds ../dist/index.js before collection, making this
+    // real spawn wiring mandatory in local runs and CI alike. The describe
+    // timeout covers one bounded node spawn (DEMO_SPAWN_TIMEOUT_MS) on a loaded host.
 
     it('usage guard: --only without a value exits 1 listing the valid cells', () => {
       const res = runDemo(['--only']);
