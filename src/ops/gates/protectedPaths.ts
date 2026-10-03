@@ -82,6 +82,8 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /^\.husky(?:\/|$)/i,
   /(?:^|\/)vitest\.(?:workspace|projects)\.(?:[cm]?[jt]sx?|json)$/i,
   /(?:^|\/)(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|poetry\.lock|uv\.lock|pdm\.lock|Pipfile\.lock|Gemfile\.lock|Cargo\.lock|composer\.lock|mix\.lock|go\.sum)$/i,
+  // pnpm settings and install hooks decide what a lockfile install materializes.
+  /(?:^|\/)(?:pnpm-workspace\.yaml|\.pnpmfile\.[cm]?js)$/i,
 ]);
 
 /** Every protected worker path, in one default-deny taxonomy. */

@@ -44,8 +44,8 @@ prevents opening the PR.
 ## Final gates (actual exits, final implementation state)
 
 - [ ] `node scripts/ratchet-typecheck.mjs` — exit 0
-- [ ] `npm run lint` — exit 0
-- [ ] `npm run test` — exit 0
+- [ ] `pnpm run lint` — exit 0
+- [ ] `pnpm run test` — exit 0
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
 - [ ] `git diff --check` — clean (unstaged tracked)

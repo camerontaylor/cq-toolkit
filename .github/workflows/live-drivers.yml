@@ -43,6 +43,12 @@ concurrency:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   live-drivers:
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
@@ -61,19 +67,22 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # The demo and the spike import the BUILT barrel (dist/index.js).
       - name: Build
-        run: npm run build
+        run: pnpm run build
       # The live describe's legs are (anthropic, deepseek). The ANTHROPIC leg
       # needs a native ANTHROPIC_API_KEY — a key the operating regime
       # deliberately does not hold (owner's keys rule, 2026-09-14: Claude
@@ -86,7 +95,7 @@ jobs:
       - name: Live ai-sdk vitest leg (deepseek)
         env:
           LIVE_DRIVERS: '1'
-        run: npm test -- test/driver/ai-sdk.test.ts -t deepseek
+        run: pnpm test test/driver/ai-sdk.test.ts -t deepseek
       - name: Eval-axes demo — the ai-sdk cells (zai + deepseek)
         run: node scripts/demo-eval-axes.mjs --only ai-sdk
       - name: DD-1 abort spike — the ai-sdk lane

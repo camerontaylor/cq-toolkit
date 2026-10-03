@@ -36,7 +36,8 @@ instantiation tokens; the six command steps below are this repo's
 format check, test, Knip, build, and the generated-op-docs drift check. This repo's
 `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
-tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
+tokens (`ubuntu-latest`, `24`, `pnpm install --frozen-lockfile`) and adding
+the provenance header.
 The `from-source` companion job below mirrors ci.yml's second job exactly
 (tokens swapped) so a regeneration carries it instead of silently dropping
 it; it is deliberately not a required check — see its comment.
@@ -59,6 +60,12 @@ on:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   static:
     runs-on: {{RUNNER}}
@@ -70,37 +77,40 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node {{NODE_VERSION}}
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
       # One compiler ratchet plus typed lint; aliases must not duplicate it.
       - name: Static gate
-        run: npm run check:static
+        run: pnpm run check:static
       - name: Check formatting
-        run: npm run format:check
+        run: pnpm run format:check
       - name: Test
-        run: npm run test
+        run: pnpm run test
       - name: Check unused files and dependencies
-        run: npm run knip
+        run: pnpm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
       # emits dist/ and recompiles (checked emit, no --noCheck) — the
       # deliberate, boring-safe choice.
       - name: Build
-        run: npm run build
+        run: pnpm run build
       # Generated-artifact drift gate (ws-i scope item 5): the generator's
       # --check mode recomputes the per-op reference and fails on any drift
       # (missing, changed, or stale docs/ops/*.md) without writing. It reads
       # the BUILT registry, so this step follows the build above; its output
       # is deterministic (no timestamps, no absolute paths).
       - name: Check generated op docs
-        run: npm run gen:op-docs:check
+        run: pnpm run gen:op-docs:check
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
@@ -120,21 +130,24 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node {{NODE_VERSION}}
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
       # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
       # is the from-source point, so build runs unconditionally here (the
       # static job's build above is its own job's emit gate).
       - name: Build
-        run: npm run build
+        run: pnpm run build
       - name: From-source smoke (real governed plan through dist/)
         run: node scripts/smoke-run-plan.mjs
 ```
