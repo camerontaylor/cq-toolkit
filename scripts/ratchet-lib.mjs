@@ -36,7 +36,7 @@ export function fail(message) {
   process.exit(1);
 }
 
-// npm/npx are .cmd shims on win32; since Node's CVE-2024-27980 fix a .cmd
+// pnpm is a .cmd shim on win32; since Node's CVE-2024-27980 fix a .cmd
 // must be spawned through a shell. Package JS entrypoints run directly with
 // Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
@@ -88,7 +88,7 @@ export function ensureDist() {
   } catch {
     // no dist yet (CI cold checkout) or unreadable — fall through to build
   }
-  const res = spawnSync('npm', ['run', 'build'], {
+  const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
@@ -96,7 +96,7 @@ export function ensureDist() {
   });
   if (res.error || res.status !== 0) {
     fail(
-      `cannot build the ratchet engine (npm run build): ${
+      `cannot build the ratchet engine (pnpm run build): ${
         res.error ? res.error.message : `exit ${res.status}`
       }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
@@ -350,7 +350,7 @@ export async function upsertProposalPr({ existing, edit, create }) {
  */
 export function runCoverageRaw() {
   rmSync(COVERAGE_SUMMARY_PATH, { force: true });
-  const res = spawnSync('npx', ['vitest', 'run', '--coverage'], {
+  const res = spawnSync('pnpm', ['exec', 'vitest', 'run', '--coverage'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
