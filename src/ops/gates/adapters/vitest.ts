@@ -14,10 +14,10 @@ import type {
   RawCheckOutput,
 } from '../checkRunner.js';
 
-/** Adapter for vitest's `--reporter=json` output. */
 /** `ruleId` marking a suite-level (no failing assertion) Vitest failure. */
 export const VITEST_SUITE_RULE_ID = 'vitest-suite';
 
+/** Adapter for vitest's `--reporter=json` output. */
 export const vitestJsonAdapter: CheckAdapter = {
   name: 'vitest-json',
   parse: parseVitestJson,

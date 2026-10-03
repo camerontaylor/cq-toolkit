@@ -197,7 +197,7 @@ describe('regressionGate decision table', () => {
     expect(result.value.preExistingCount).toBe(2);
   });
 
-  test('Vitest full-name multisets tolerate location drift and reject duplicate-count drops', async () => {
+  test('Vitest full-name multisets tolerate location drift and report dropped duplicates as fixed', async () => {
     const first = failureOf({
       file: '/repo/src/a.test.ts',
       line: 5,
