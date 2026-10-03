@@ -294,6 +294,11 @@ jobs:
           ref: ${{ github.sha }}
           path: trust
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -303,8 +308,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: 'Judge (CLI: selfhost/acceptance)'
         env:
           GH_TOKEN: ${{ github.token }}

@@ -54,11 +54,14 @@ see the I4 interplay above):
           # Runs repo code, so the checkout token must not survive checkout.
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node {{NODE_VERSION}}
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
       # Context values reach scripts via env: indirection — never a textual
@@ -86,10 +89,10 @@ see the I4 interplay above):
             while IFS= read -r -d '' path || [ -n "${path}" ]; do
               changed+=("${path}")
             done < "${RUNNER_TEMP}/changed.txt"
-            npx vitest related --run "${changed[@]}"
+            pnpm exec vitest related --run "${changed[@]}"
           else
             echo "no changed files selected — falling back to the full suite"
-            npm run test
+            pnpm run test
           fi
 ```
 

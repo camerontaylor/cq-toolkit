@@ -61,8 +61,8 @@ jobs:
     environment: drill
     env:
       # Names only. GH_TOKEN is deliberately NOT here: it is scoped to the
-      # vitest step's env below, so npm ci's lifecycle scripts never see it
-      # (round-3 fix).
+      # vitest step's env below, so pnpm install's lifecycle scripts never
+      # see it (round-3 fix).
       LIVE_GH: '1'
       E5_RUN_ID: ${{ inputs.run_id }}
     steps:
@@ -75,17 +75,20 @@ jobs:
           # drill validates branches LOCALLY pre-merge; dispatch always runs
           # main's trusted code.
           ref: main
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false); gh rides
           # GH_TOKEN, not the checkout credential.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # A misconfigured dispatch would otherwise be a green-skipped run (the
       # live describe skips without LIVE_GH) — refuse loudly before any live
       # call. GH_TOKEN's presence is asserted in the vitest step — the only
@@ -96,9 +99,9 @@ jobs:
       - name: Live review-loop e2e (test/e2e/review/live.test.ts)
         env:
           # Names only — scoped to THIS step on purpose (round-3 fix): the
-          # token must not reach npm ci's lifecycle scripts. Prefer the
+          # token must not reach pnpm install's lifecycle scripts. Prefer the
           # fine-grained, scratch-repo-scoped PAT from the header note.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
-          npx vitest run test/e2e/review/live.test.ts
+          pnpm exec vitest run test/e2e/review/live.test.ts

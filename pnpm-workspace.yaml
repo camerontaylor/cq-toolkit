@@ -1,0 +1,11 @@
+# Global virtual store: node_modules holds only symlinks into one shared,
+# content-addressed virtual store under `pnpm store path`/links, so every
+# worktree of this repo (and every other project on the host) reuses the
+# same materialized dependency graph — a warm install is a symlink pass.
+# pnpm disables it automatically in CI, where there is no warm store.
+virtualStoreType: global
+
+# npm parity: never install peers implicitly. The optional
+# @anthropic-ai/claude-agent-sdk peer must stay absent from the lockfile so
+# install-matrix's without-peer leg proves the package works without it.
+autoInstallPeers: false

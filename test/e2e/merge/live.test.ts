@@ -7,7 +7,7 @@
 //
 //   LIVE_GH=1  +  GH_TOKEN in the environment
 //
-// Plain `npm run test` SKIPS the whole suite (describe.skip); the skip is
+// Plain `pnpm run test` SKIPS the whole suite (describe.skip); the skip is
 // the default gate's contract. One top-level test runs the drill as a
 // sequenced log (every step asserts and logs via console.error so the
 // output reads as a drill log), with a generous per-test timeout.
@@ -449,7 +449,7 @@ const reportSummary = (report: ExecutionReport): string =>
     let scratchDir: string | undefined;
 
     // Env vars this suite mutates, snapshotted for the afterAll restore:
-    // under LIVE_GH=1 npm run test the SAME vitest worker runs the rest of
+    // under LIVE_GH=1 pnpm run test the SAME vitest worker runs the rest of
     // the suite — a leaked GH_REPO would silently aim every later test's gh
     // spawn at the long-gone scratch repo (r2 review).
     let savedEnv: Record<string, string | undefined>;

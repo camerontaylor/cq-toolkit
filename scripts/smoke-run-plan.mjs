@@ -84,8 +84,8 @@
 // at dispatch time and the fixture never contacts anything (the URL is a
 // black hole); no real credential exists in this lane.
 //
-// Standalone by design — never imported by `npm test` (the suite's smoke
-// test only loads the src barrel). Requires `npm run build` first: spawning
+// Standalone by design — never imported by `pnpm test` (the suite's smoke
+// test only loads the src barrel). Requires `pnpm run build` first: spawning
 // dist/cli.js IS the point. Usage:
 //
 //   node scripts/smoke-run-plan.mjs            # spawn the built CLI + assert
@@ -128,7 +128,7 @@ async function runPlanParent() {
     await access(join(REPO_ROOT, 'dist', 'cli.js'));
   } catch {
     fail(
-      'dist/cli.js is missing — run `npm run build` first — from-source IS the point (the smoke spawns the BUILT CLI)',
+      'dist/cli.js is missing — run `pnpm run build` first — from-source IS the point (the smoke spawns the BUILT CLI)',
     );
   }
   const { openRunLog, RunReportSchema } = await importDist();
@@ -562,7 +562,7 @@ async function importDist() {
     return await import('../dist/index.js');
   } catch (e) {
     fail(
-      `cannot import dist/index.js — run \`npm run build\` first — from-source IS the point (the smoke spawns the BUILT CLI)\n  (${e instanceof Error ? e.message : String(e)})`,
+      `cannot import dist/index.js — run \`pnpm run build\` first — from-source IS the point (the smoke spawns the BUILT CLI)\n  (${e instanceof Error ? e.message : String(e)})`,
     );
   }
 }

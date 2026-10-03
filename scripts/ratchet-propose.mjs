@@ -8,8 +8,8 @@
 // `ratchet-propose-measure` workflow installs, runs the suite and recomputes
 // typecheck-count, then uploads a numbers-only artifact. The privileged
 // `ratchet-propose` workflow (`workflow_run`, environment `automation`)
-// builds the TRUSTED toolkit from the default branch (`npm ci
-// --ignore-scripts && npm run build`), downloads that artifact and runs
+// builds the TRUSTED toolkit from the default branch (`pnpm install --frozen-lockfile
+// --ignore-scripts && pnpm run build`), downloads that artifact and runs
 //
 //   node scripts/ratchet-propose.mjs --measurement=<path>
 //

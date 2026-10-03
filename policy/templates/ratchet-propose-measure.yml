@@ -8,7 +8,7 @@
 # `permissions: {}`, no `secrets.*`,
 # no `environment:`. The proposer (`ratchet-propose.yml`, `workflow_run`, env
 # `automation`) consumes the artifact as data and never shares a job with
-# `npm ci` or test execution.
+# `pnpm install --frozen-lockfile` or test execution.
 #
 # Worst case for a forged reading: an inflated value proposes a baseline
 # that is TOO TIGHT — a visible, reviewed PR through merge-queue, never a
@@ -78,19 +78,22 @@ jobs:
           git init .
           git fetch --no-tags "${RUNNER_TEMP}/cq-source/source.bundle" refs/cq-transfer/subject
           git checkout --detach "$SUBJECT"
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies and build the CLI
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
       - name: Run the suite with coverage
         run: |
           rm -f coverage/coverage-summary.json
-          npx vitest run --coverage
+          pnpm exec vitest run --coverage
       - name: 'Recompute typecheck-count (CLI: ratchet.recomputeTypecheck)'
         id: count
         run: |

@@ -8,7 +8,8 @@
 # judges it (RS-4 T-2/T-8). Everything that decides comes from the trust ref
 # (`github.sha` here, the default-branch tip):
 #   - the verifier code: the toolkit built from the trust checkout with
-#     `npm ci --ignore-scripts` (never the head's dist/ or node_modules);
+#     `pnpm install --frozen-lockfile --ignore-scripts` (never the head's
+#     dist/ or node_modules);
 #   - the protected-path lists, the ratchet definition set and the policy
 #     file, read by `gates.policyDiff` AT THE TRUST REF;
 #   - the posture: `vars.CQ_MERGE_PROTECTED_PATHS`, a repository variable
@@ -201,6 +202,11 @@ jobs:
           # The object fetch below scopes its own credential to that step;
           # nothing persists into the trusted build or the verifier.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -210,8 +216,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: Fetch the subject, base and cq-state objects (no checkout)
         id: objects
         env:

@@ -9,8 +9,8 @@ The v1 library is not published to npm yet: `@camerontaylor/cq-toolkit@0.0.0` on
 ```sh
 git clone https://github.com/camerontaylor/cq-toolkit
 cd cq-toolkit
-npm ci
-npm run build
+pnpm install --frozen-lockfile
+pnpm run build
 ```
 
 Once v1 ships, the install is the usual one:
@@ -111,18 +111,22 @@ Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.gi
 
 ## Local verification
 
-Run `npm run check:static` for the TS7 compiler ratchet and typed Oxlint.
-`npm run lint` and `npm run typecheck` are compatibility aliases; run only one.
-Formatting is `npm run format:check`, runtime tests are `npm run test`, and
-checked declaration emit is `npm run build`. See [the local static policy](lint/README.md)
+The repository uses pnpm (pinned by `packageManager`). Its
+`pnpm-workspace.yaml` turns on pnpm's global virtual store, so every
+worktree links one shared, already-materialized dependency graph.
+
+Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
+`pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
+Formatting is `pnpm run format:check`, runtime tests are `pnpm run test`, and
+checked declaration emit is `pnpm run build`. See [the local static policy](lint/README.md)
 for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-Use `npm run check` for read-only formatting, static checks, tests and Knip. `lint` and
+Use `pnpm run check` for read-only formatting, static checks, tests and Knip. `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
-For an inner loop, pass explicit owned files to `npm run lint:fast -- <file...>`
-or `npm run fix -- <file...>`. The latter applies safe lint fixes and formatting,
+For an inner loop, pass explicit owned files to `pnpm lint:fast <file...>`
+or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting,
 then checks the whole package. Build, smoke and denylist remain separate gates.
 See [local static policy](lint/README.md) for pins, compiler fallback evidence,
 rule decisions and compatibility changes.

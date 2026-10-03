@@ -5,14 +5,16 @@
 # lazily by dynamic import at run() time and feature-detects it — importing
 # or building this package must never require it to exist. This workflow is
 # the mechanical proof of that ADR claim, both halves, on every PR:
-#   - without-peer: a plain `npm ci` (the optional peer is NOT installed)
+#   - without-peer: a plain `pnpm install --frozen-lockfile` (the optional
+#     peer is NOT installed; pnpm-workspace.yaml sets autoInstallPeers: false)
 #     — the typecheck ratchet, lint, full suite, and build must pass with
 #     the SDK absent.
 #   - with-peer: the same gates after installing the pinned peer
-#     (`--no-save`, so the lockfile stays peer-free) — the driver lane must
-#     also be correct WITH the real package present. The suite itself never
-#     contacts the network or a real CLI in either half (every test injects
-#     a mock module through the driver's `sdkLoader` seam).
+#     (checkout-local, so the committed lockfile stays peer-free) — the
+#     driver lane must also be correct WITH the real package present. The
+#     suite itself never contacts the network or a real CLI in either half
+#     (every test injects a mock module through the driver's `sdkLoader`
+#     seam).
 #
 # Trigger note (I4 posture): this workflow is not a required check, but its
 # `on:` block is deliberately simple and UNFILTERED — pull_request +
@@ -35,26 +37,29 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       # Plain ci: the optional peer is NOT installed (never in the lockfile).
       - name: Install dependencies (optional peer absent)
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # The typecheck gate IS this ratchet step (same posture as ci.yml).
       - name: Typecheck ratchet
         run: node scripts/ratchet-typecheck.mjs
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
       - name: Test
-        run: npm run test
+        run: pnpm run test
       - name: Build
-        run: npm run build
+        run: pnpm run build
 
   with-peer:
     name: build+test with the optional agent SDK peer
@@ -63,27 +68,31 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies (optional peer absent)
-        run: npm ci
-      # The pinned peer, installed WITHOUT saving: package.json keeps the
-      # SDK as an optional peerDependency only and the lockfile stays
-      # peer-free — this half proves the with-peer posture, not a dependency
-      # change.
-      - name: Install the optional agent SDK peer (pinned, no-save)
-        run: npm install --no-save @anthropic-ai/claude-agent-sdk@0.3.270
+        run: pnpm install --frozen-lockfile
+      # The pinned peer, added only in this throwaway checkout (pnpm has no
+      # --no-save): the committed package.json keeps the SDK as an optional
+      # peerDependency only and the committed lockfile stays peer-free —
+      # this half proves the with-peer posture, not a dependency change.
+      # auto-install-peers brings the SDK's own peers, as npm would.
+      - name: Install the optional agent SDK peer (pinned, checkout-local)
+        run: pnpm add --save-optional --config.auto-install-peers=true @anthropic-ai/claude-agent-sdk@0.3.270
       - name: Typecheck ratchet
         run: node scripts/ratchet-typecheck.mjs
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
       - name: Test
-        run: npm run test
+        run: pnpm run test
       - name: Build
-        run: npm run build
+        run: pnpm run build
