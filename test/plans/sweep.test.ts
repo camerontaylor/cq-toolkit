@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';

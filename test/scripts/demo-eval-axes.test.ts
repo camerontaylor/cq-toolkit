@@ -42,7 +42,7 @@ function envFor(keys: Record<string, string>): NodeJS.ProcessEnv {
 }
 
 function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
+  const res = spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
@@ -52,6 +52,13 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
     timeout: 10_000,
     killSignal: 'SIGKILL',
   });
+  // spawnSync blocks the event loop, so Vitest's test timeout cannot interrupt a
+  // wedged child: a timeout or spawn failure surfaces as a named error.
+  if (res.error !== undefined)
+    throw new Error(
+      `demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`,
+    );
+  return res;
 }
 
 // Mirror of the script's cell table (same lane/provider/model quadruple).

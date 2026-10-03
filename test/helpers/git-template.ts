@@ -19,13 +19,6 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
-/** Git invocations must not inherit repository-selection state from the host. */
-function scrubbedGitEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
-  );
-}
-
 export interface GitTemplate {
   /** Temporary root containing the seeded repository and bare origin. */
   root: string;
