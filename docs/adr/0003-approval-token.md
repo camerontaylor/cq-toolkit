@@ -1,8 +1,8 @@
 # ADR-0003 annex — Human-approval token for `approved:true` jobs
 
-Status: **proposed, revision r1** (part of ADR-0003; implements W4.3, closes J4 M3, guards A16).
+Status: **accepted** (owner G1 sign-off, 2026-09-26; drafted as proposed, revision r1; part of ADR-0003; implements W4.3, closes J4 M3, guards A16).
 
-- Critic round 1 dispositions: `adr-0003-r1-dispositions.md` (M5, M6, m9 touch this annex).
+- Critic round 1 dispositions: `adr-0003-r1-dispositions.md` (private `toolkit-research` repository, not published here) (M5, M6, m9 touch this annex).
 
 Anchors (cq-toolkit `5e52707`):
 

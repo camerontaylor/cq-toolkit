@@ -1,8 +1,8 @@
 # ADR-0003 annex — Journal v2 schema and replay rules
 
-Status: **proposed, revision r1** (part of ADR-0003).
+Status: **accepted** (owner G1 sign-off, 2026-09-26; drafted as proposed, revision r1; part of ADR-0003).
 
-- Critic round 1 dispositions: `adr-0003-r1-dispositions.md` (M2, M3, m4, m5, m6, m8 touch this annex).
+- Critic round 1 dispositions: `adr-0003-r1-dispositions.md` (private `toolkit-research` repository, not published here) (M2, M3, m4, m5, m6, m8 touch this annex).
 - Anchors (cq-toolkit `5e52707`): `src/kernel/types.ts:167-221`, `src/kernel/schema.ts:348-420`,
   `src/kernel/journal.ts`, `src/kernel/runner.ts:412-451,557-584`.
 

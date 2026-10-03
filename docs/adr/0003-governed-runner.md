@@ -5,7 +5,8 @@
 Status: **accepted** (owner G1 sign-off, 2026-09-26; binding work-item preconditions and residuals retained)
 
 - Critic round 1 (`research/adr-0003-critic` @ `d8349c8`) returned ITERATE with 16 findings. All are
-  dispositioned in `adr-0003-r1-dispositions.md`.
+  dispositioned in `adr-0003-r1-dispositions.md`, which is not published in this repository (it lives in the private
+  `toolkit-research` repository).
 - Critic round 2 (final, `research/adr-0003-critic-r2` @ `f4ebca6`) returned ITERATE with 13 residual findings
   (3 major). Still pending: a cross-family second opinion (V11PLAN §16.8) and owner approval at G1.
 - **Reconciled (G1 prep): 2026-09-25.** Folds `adr-0003-critic-r2-verdict.md` (`f4ebca6`), the cross-ADR items of
@@ -25,7 +26,7 @@ Evidence:
   2026-09-25): design note §2.6.
 
 Annexes: `adr-0003-journal-migration.md` (journal v2 and replay), `adr-0003-approval-token.md` (token spec),
-`adr-0003-r1-dispositions.md` (critic round 1).
+`adr-0003-r1-dispositions.md` (critic round 1; private `toolkit-research` repository, unpublished).
 Slots: **C — provider-profile contents (RS-14)**; **D — configuration keys (RS-15)**.
 
 ## 1. Context

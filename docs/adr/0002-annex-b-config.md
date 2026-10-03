@@ -1,7 +1,7 @@
 # ADR-0002 Annex B — Configuration keys (RS-15)
 
-Status: **proposed** (RS-15, run=v11, tier O). Fills ADR-0002's Annex B slot and ADR-0003's Slot D without changing
-either ADR's main text (`research/g1-adr-reconciliation` @ `bf5f540`). Owner approval rides G1 with the ADRs.
+Status: **accepted** (owner G1 sign-off, 2026-09-26, as part of the reconciled ADR set; originally drafted as proposed, RS-15, run=v11, tier O). Fills ADR-0002's Annex B slot and ADR-0003's Slot D without changing
+either ADR's main text (`research/g1-adr-reconciliation` @ `bf5f540`). Owner approval rode G1 with the ADRs and was recorded on 2026-09-26.
 Date: 2026-09-25.
 Evidence: `rs15-config-inventory.md` (every tunable at cq-toolkit `5e52707`, with a disposition per row).
 Inputs: V11PLAN §2 P7/P8, §3 D3/D5/D11/D14, §3.1; ADR-0002 §2.5–§2.6 and Annex B slot; ADR-0003 §2.1–§2.7, Slot C,
