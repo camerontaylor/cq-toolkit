@@ -1682,7 +1682,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       });
       const outcome = await runLadder(
         async (ctx) =>
-          driver.run(invocation({ prompt: 'x'.repeat(WEDGED_PROMPT_CHARS) }), { signal: ctx.signal }),
+          driver.run(invocation({ prompt: 'x'.repeat(WEDGED_PROMPT_CHARS) }), {
+            signal: ctx.signal,
+          }),
         { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
         { clock },
