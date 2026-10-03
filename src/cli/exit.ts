@@ -15,9 +15,8 @@
 //       runner's re-marked rows and the honest-stop claim), or the run was
 //       CANCELLED. The run-report contract widens in v1.1 (ADR-0003 §2.9):
 //       `earlyStopReason: 'signal'` — the governed runner's cancel stop —
-//       maps like a needs-human stop → 3 today, and the shell-convention
-//       130/143 (SIGINT/SIGTERM) arrive with the CLI's OS-signal wiring
-//       (W2.5, a separate slice).
+//       maps like a needs-human stop → 3; the exit codes stay {0,1,2,3} (I1),
+//       so no shell-convention 130/143 is assigned.
 //
 // A thrown uncaught exception mapping to 1 is decided by the CALLER
 // (main.ts's catches), not by these functions — they only map the frozen
