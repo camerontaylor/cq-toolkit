@@ -323,7 +323,9 @@ const staticKeys: readonly ConfigKey[] = rows.map(
     ].includes(env)
       ? { min: 1 }
       : {}),
-    ...(env.endsWith('_MS') && !['CQ_BUDGET_MAX_DEFER_MS'].includes(env) ? { min: 1 } : {}),
+    ...(env.endsWith('_MS') && !['CQ_BUDGET_MAX_DEFER_MS', 'CQ_RUN_TIMEOUT_MS'].includes(env)
+      ? { min: 1 }
+      : {}),
     ...(env.endsWith('_USD') && !['CQ_BUDGET_MAX_USD'].includes(env)
       ? { min: Number.MIN_VALUE }
       : {}),
