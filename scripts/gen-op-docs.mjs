@@ -28,7 +28,7 @@
 //
 // BUILD DEPENDENCY: the registry is imported from the BUILT package
 // (dist/registry/index.js), the same built-engine dependency the ratchet
-// runners carry. Run `npm run build` first; the ci.yml static job builds (and
+// runners carry. Run `pnpm run build` first; the ci.yml static job builds (and
 // its ratchet step builds) before the drift step runs.
 //
 // USAGE:
@@ -119,7 +119,7 @@ function renderDoc(entry, statuses) {
     `# \`${name}\``,
     '',
     `Generated from the op registry by [\`${GENERATOR_REF}\`](../../${GENERATOR_REF}).`,
-    'Do not edit by hand — run `npm run gen:op-docs`.',
+    'Do not edit by hand — run `pnpm run gen:op-docs`.',
     '',
     `- **Family:** \`${family}\``,
     `- **CLI:** \`cq ${name} [--<schema-key>=<value> ...] [--json]\`; run \`cq ${name} --help\` for the input schema (a secondary interface over the SDK — see [\`src/cli/README.md\`](../../src/cli/README.md))`,
@@ -152,7 +152,7 @@ async function loadRegistry() {
     return await import('../dist/registry/index.js');
   } catch (err) {
     throw new Error(
-      `cannot import the built registry (dist/registry/index.js) — run \`npm run build\` first (${messageOf(err)})`,
+      `cannot import the built registry (dist/registry/index.js) — run \`pnpm run build\` first (${messageOf(err)})`,
     );
   }
 }
@@ -215,7 +215,7 @@ async function main(argv) {
     if (drift.length > 0) {
       for (const item of drift) console.error(`gen-op-docs: drift — ${item}`);
       console.error(
-        `gen-op-docs: FAIL — ${drift.length} generated doc(s) out of date; run \`npm run gen:op-docs\``,
+        `gen-op-docs: FAIL — ${drift.length} generated doc(s) out of date; run \`pnpm run gen:op-docs\``,
       );
       return 1;
     }

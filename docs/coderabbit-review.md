@@ -127,16 +127,16 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`npm run check:static` (once — `lint` and `typecheck` are its aliases),
-`npm run format:check`, `npm run knip` (whole-project: run it when the diff
+`pnpm run check:static` (once — `lint` and `typecheck` are its aliases),
+`pnpm run format:check`, `pnpm run knip` (whole-project: run it when the diff
 touches entrypoints, exports, dependencies or configuration, adds a file,
 adds or changes an import (a new package or unresolvable specifier), or
 removes or rewires the last import of a file or package, and skip it
 otherwise — canonical condition in
 [focused-checks-contract.md](focused-checks-contract.md) §1), the tests affected
-by the diff (`npx vitest run <affected test files>`), and the three
+by the diff (`pnpm exec vitest run <affected test files>`), and the three
 whitespace/conflict-marker checks below. The **full suite is not a local
-gate**: `npm run test` / `test:unit` runs in CI on every push/PR, and green
+gate**: `pnpm run test` / `test:unit` runs in CI on every push/PR, and green
 required CI on the exact candidate SHA is the sole full-gate authority. The
 three checkpoints are the cadence itself, not review-triggered work — a clean
 review adds nothing beyond them. Use the immutable `BASE` from §3 and stage
@@ -207,11 +207,11 @@ table: <https://docs.coderabbit.ai/management/plans#rate-limits>.
 The third gate run (§5, after cycle-2 addressing) is the final one; record
 its actual exits in the PR body:
 
-- `npm run check:static` (once — `lint` and `typecheck` are its aliases)
-- `npm run format:check`
-- `npx vitest run <affected test files>` (the diff's tests, not the suite — the
+- `pnpm run check:static` (once — `lint` and `typecheck` are its aliases)
+- `pnpm run format:check`
+- `pnpm exec vitest run <affected test files>` (the diff's tests, not the suite — the
   full suite is CI's; see [focused-checks-contract.md](focused-checks-contract.md))
-- `npm run knip` (when the diff touches entrypoints, exports, dependencies or
+- `pnpm run knip` (when the diff touches entrypoints, exports, dependencies or
   configuration, adds a file, adds or changes an import, or removes or rewires the last
   import — same
   condition as §5)

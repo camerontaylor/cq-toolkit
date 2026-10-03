@@ -47,15 +47,15 @@ Focused set, per [docs/focused-checks-contract.md](../docs/focused-checks-contra
 the static gate once (`lint`/`typecheck` are its aliases), the format check, the
 affected tests, Knip under its condition, and the three diff checks:
 
-- [ ] `npm run check:static` — exit 0 (once; `lint`/`typecheck` are aliases)
-- [ ] `npm run format:check` — exit 0
-- [ ] `npx vitest run <affected test files>` — exit 0, or not applicable (zero affected tests: record the determination and why the diff cannot affect any)
-- [ ] `npm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration, adds no file, and removes or rewires no last import)
+- [ ] `pnpm run check:static` — exit 0 (once; `lint`/`typecheck` are aliases)
+- [ ] `pnpm run format:check` — exit 0
+- [ ] `pnpm exec vitest run <affected test files>` — exit 0, or not applicable (zero affected tests: record the determination and why the diff cannot affect any)
+- [ ] `pnpm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration, adds no file, and removes or rewires no last import)
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
 - [ ] `git diff --check` — clean (unstaged tracked)
 
-No local full-suite gate: `npm run test` / `test:unit` is CI's obligation (green
+No local full-suite gate: `pnpm run test` / `test:unit` is CI's obligation (green
 required CI on the exact candidate SHA is the sole full-gate authority).
 
 CI on the PR: the full suite, build, from-source smoke, denylist scan + self-test.

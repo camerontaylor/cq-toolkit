@@ -1,6 +1,6 @@
 @camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable merge-queue and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress.
 
-The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). Review protocol (two CodeRabbit CLI cycles before every PR): see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `npm run gen:op-docs`).
+The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). Review protocol (two CodeRabbit CLI cycles before every PR): see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
 
 ## Install
 
@@ -9,8 +9,8 @@ The v1 library is not published to npm yet: `@camerontaylor/cq-toolkit@0.0.0` on
 ```sh
 git clone https://github.com/camerontaylor/cq-toolkit
 cd cq-toolkit
-npm ci
-npm run build
+pnpm install --frozen-lockfile
+pnpm run build
 ```
 
 Once v1 ships, the install is the usual one:
@@ -111,11 +111,16 @@ Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.gi
 
 ## Local verification
 
-Run `npm run check:static` for the TS7 compiler ratchet and typed Oxlint.
-`npm run lint` and `npm run typecheck` are compatibility aliases; run only one.
-Formatting is `npm run format:check`, the tests you need are the ones your diff
-affects (`npx vitest run <affected test files>`), and checked declaration emit is
-`npm run build`. **The full suite is not a local gate**: `npm run test` /
+The repository uses pnpm (pinned by `packageManager`). Its
+`pnpm-workspace.yaml` turns on pnpm's global virtual store, so every
+worktree links one shared, already-materialized dependency graph. CI opts
+out with `PNPM_CONFIG_VIRTUAL_STORE_TYPE=project`.
+
+Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
+`pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
+Formatting is `pnpm run format:check`, the tests you need are the ones your diff
+affects (`pnpm exec vitest run <affected test files>`), and checked declaration emit is
+`pnpm run build`. **The full suite is not a local gate**: `pnpm run test` /
 `test:unit` runs in CI, and green required CI on the exact candidate SHA is the
 sole full-gate authority — see
 [docs/focused-checks-contract.md](docs/focused-checks-contract.md). See
@@ -124,15 +129,15 @@ for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-`npm run check` is a composite of the whole-tree obligations (format check,
+`pnpm run check` is a composite of the whole-tree obligations (format check,
 static gate, the full suite, Knip). **It is not a local verification route** —
 its full-suite leg is CI's obligation — and it runs only inside the
 coordinator-owned diagnostic and rollback exceptions. For ordinary local work use
 the focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
 `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
-For an inner loop, pass explicit owned files to `npm run lint:fast -- <file...>`
-or `npm run fix -- <file...>`. The latter applies safe lint fixes and formatting,
+For an inner loop, pass explicit owned files to `pnpm lint:fast <file...>`
+or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting,
 then runs the full-project static gate — use the contract's validated leaf
 commands when you want fixes without that gate. Build, smoke and denylist remain
 separate gates.

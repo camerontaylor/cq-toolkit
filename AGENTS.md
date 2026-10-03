@@ -12,19 +12,23 @@ It supersedes the old 3× full-gate rule everywhere that rule was stated.
 
 Your local duty, on a coherent change:
 
-- `npm run check:static` — TS7 compiler ratchet plus typed Oxlint;
-  `npm run lint` and `npm run typecheck` are aliases (run only one)
-- `npm run format:check`
-- `npx vitest run <affected test files>` — the tests your diff affects, not
+pnpm is the package manager (`packageManager` in package.json); install
+with `pnpm install`. `pnpm-workspace.yaml` enables the global virtual store,
+so a warm install in a fresh worktree is a symlink pass.
+
+- `pnpm run check:static` — TS7 compiler ratchet plus typed Oxlint;
+  `pnpm run lint` and `pnpm run typecheck` are aliases (run only one)
+- `pnpm run format:check`
+- `pnpm exec vitest run <affected test files>` — the tests your diff affects, not
   the suite
-- `npm run knip` — whole-project, not file-scoped: run it when the diff
+- `pnpm run knip` — whole-project, not file-scoped: run it when the diff
   touches entrypoints, exports, dependencies or configuration, adds a file,
   adds or changes an import (a new package or unresolvable specifier), or
   removes or rewires the last import of a file or package, and skip it
   otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** No protocol step requires of a worker a local full
-`npm run test` / `test:unit`, and a clean review adds no run beyond the review
+`pnpm run test` / `test:unit`, and a clean review adds no run beyond the review
 protocol's own three fixed checkpoints (which are the cheap deterministic
 gates plus the affected tests, never the suite).
 The full suite — plus the build, the from-source smoke plan, the coverage
@@ -44,11 +48,11 @@ failure; baselines only tighten (doctrine I5).
 
 ## Agent loop
 
-Use `npm run lint:fast -- <owned-file...>` for syntactic feedback. Lists must
+Use `pnpm lint:fast <owned-file...>` for syntactic feedback. Lists must
 be explicit; never format the repository per turn. Changed-file lint does not
 establish correctness of dependents.
 
-`npm run fix -- <owned-file...>` is **not** file-scoped: it **always ends by
+`pnpm fix <owned-file...>` is **not** file-scoped: it **always ends by
 running the full-project static gate** (`scripts/fix.mjs` runs
 `scripts/ratchet-typecheck.mjs` with no file list), even for a deleted-only
 list. Invoking the leaf tools directly bypasses that script's containment
@@ -81,7 +85,7 @@ fi
 )
 ```
 
-`npm run check` is a composite whose legs include the full suite; it is **not a
+`pnpm run check` is a composite whose legs include the full suite; it is **not a
 local verification route** and runs only inside the coordinator-owned diagnostic
 and rollback exceptions (contract §1).
 

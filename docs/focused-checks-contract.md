@@ -15,12 +15,12 @@ suite; they do not revisit this contract.
 ## 1. The rule
 
 - **Focused checks only, locally.** A worker runs the static gate
-  (`npm run check:static`), the format check (`npm run format:check`) and the
-  tests **affected by the diff** (`npx vitest run <affected test files>`).
-  `npm run lint` and `npm run typecheck` are aliases of `npm run check:static` —
+  (`pnpm run check:static`), the format check (`pnpm run format:check`) and the
+  tests **affected by the diff** (`pnpm exec vitest run <affected test files>`).
+  `pnpm run lint` and `pnpm run typecheck` are aliases of `pnpm run check:static` —
   run one, never several.
 - **Knip's condition (canonical here; another document may restate it only
-  alongside a link to this section).** `npm run knip` is whole-project, not
+  alongside a link to this section).** `pnpm run knip` is whole-project, not
   file-scoped: run it when the diff
   touches entrypoints, exports, dependencies or configuration, adds a file,
   adds or changes an import, or removes or rewires the last import of a file or
@@ -31,7 +31,7 @@ suite; they do not revisit this contract.
   does not resolve is a finding the static gate can miss) — where dead code
   can actually appear — and skip it otherwise.
 - **Zero local full gates per PR.** No protocol step requires a local full
-  `npm run test` or full `npm run test:unit`. A clean review adds **zero runs
+  `pnpm run test` or full `pnpm run test:unit`. A clean review adds **zero runs
   beyond the review protocol's own three fixed checkpoints** — before cycle 1,
   after cycle-1 addressing, after cycle-2 addressing
   (`docs/coderabbit-review.md` §5). Those three cheap deterministic gate sets
@@ -80,7 +80,7 @@ owner.
 2. Add the test files that statically import, or are imported by, the changed
    source, via Vitest's static-import graph. Any command with execution intent
    carries `--run` and keeps `related` as the subcommand
-   (`npx vitest related --run <changed source files>`); `vitest run related …`
+   (`pnpm exec vitest related --run <changed source files>`); `vitest run related …`
    treats `related` as a filename filter and a bare `vitest related …` can enter
    watch behaviour, so neither is the documented form. List-only selection — printing the affected test files without running
    them — is the job of `scripts/affected-tests.mjs`, which a later slice of the
@@ -100,9 +100,9 @@ owner.
 A passing focused test does not prove its dependents; that is exactly what the
 candidate run is for.
 
-## 3. `npm run fix` is not file-scoped
+## 3. `pnpm fix` is not file-scoped
 
-`npm run fix -- <owned-file...>` rewrites only the listed files, but it **always
+`pnpm fix <owned-file...>` rewrites only the listed files, but it **always
 ends by running the full-project static gate** (`scripts/fix.mjs` runs
 `scripts/ratchet-typecheck.mjs` with no file list, including for deleted-only
 inputs). It is therefore a full-project static gate wearing a file-scoped
@@ -153,7 +153,7 @@ the next paragraph forbids.
 
 This is the canonical spelling of the leaf commands; `AGENTS.md` repeats it
 verbatim rather than varying it. Invoke the pinned binaries through `node`
-rather than `npx`, which can resolve a newer oxlint/oxfmt than the pinned
+rather than `pnpm dlx`, which can resolve a newer oxlint/oxfmt than the pinned
 devDependency. On a docs-only list `oxlint` reports "No files found to lint" and
 exits 1 — the level `scripts/fix.mjs` tolerates (it throws only above 1) — while
 the formatting step still applies. Exit 1 is also oxlint's status for remaining
@@ -163,7 +163,7 @@ verdict: read its output, and take the verdict from `lint:fast` or the static ga
 Validation is a separate process from the mutation, so this is check-then-act,
 not a lock: re-run step 1 whenever the list changes. Batch supported files into
 one invocation per tool, never omit the file list, and never substitute a
-repository-wide glob. `npm run format:check` remains the
+repository-wide glob. `pnpm run format:check` remains the
 read-only whole-tree formatting check — a candidate-level check, not per-turn
 feedback.
 
@@ -171,7 +171,7 @@ Read-only syntactic feedback on an explicit list is genuinely file-scoped and
 is the right default:
 
 ```bash
-npm run lint:fast -- <owned-file...>
+pnpm lint:fast <owned-file...>
 ```
 
 `scripts/fix.mjs` itself is tracked for a later change that gives it fix-only
