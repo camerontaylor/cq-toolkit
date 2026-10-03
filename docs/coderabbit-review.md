@@ -129,7 +129,8 @@ Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
 `npm run check:static` (once — `lint` and `typecheck` are its aliases),
 `npm run format:check`, `npm run knip` (whole-project: run it when the diff
-touches entrypoints, exports, dependencies or configuration, adds a file, or
+touches entrypoints, exports, dependencies or configuration, adds a file,
+adds or changes an import (a new package or unresolvable specifier), or
 removes or rewires the last import of a file or package, and skip it
 otherwise — canonical condition in
 [focused-checks-contract.md](focused-checks-contract.md) §1), the tests affected
@@ -211,7 +212,8 @@ its actual exits in the PR body:
 - `npx vitest run <affected test files>` (the diff's tests, not the suite — the
   full suite is CI's; see [focused-checks-contract.md](focused-checks-contract.md))
 - `npm run knip` (when the diff touches entrypoints, exports, dependencies or
-  configuration, adds a file, or removes or rewires the last import — same
+  configuration, adds a file, adds or changes an import, or removes or rewires the last
+  import — same
   condition as §5)
 - `git diff --check "$BASE" HEAD` (committed PR changes)
 - `git diff --check --cached` (staged changes)

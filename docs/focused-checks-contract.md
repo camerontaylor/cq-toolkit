@@ -22,10 +22,13 @@ suite; they do not revisit this contract.
 - **Knip's condition (canonical here; another document may restate it only
   alongside a link to this section).** `npm run knip` is whole-project, not
   file-scoped: run it when the diff
-  touches entrypoints, exports, dependencies or configuration, adds a file, or
-  removes or rewires the last import of a file or package (`knip.json` enables
-  `files` and `dependencies`, so a source-only edit can orphan either, and a new
-  file nothing imports is itself an orphan) — where dead code
+  touches entrypoints, exports, dependencies or configuration, adds a file,
+  adds or changes an import, or removes or rewires the last import of a file or
+  package (`knip.json` enables `files` and `dependencies`, so a source-only edit
+  can orphan either, and a new file nothing imports is itself an orphan; it also
+  enables `unlisted` and `unresolved`, so an import of a package missing from
+  `package.json` — even one TypeScript resolves transitively — or of a path that
+  does not resolve is a finding the static gate can miss) — where dead code
   can actually appear — and skip it otherwise.
 - **Zero local full gates per PR.** No protocol step requires a local full
   `npm run test` or full `npm run test:unit`. A clean review adds **zero runs

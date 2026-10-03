@@ -19,7 +19,8 @@ Your local duty, on a coherent change:
   the suite
 - `npm run knip` — whole-project, not file-scoped: run it when the diff
   touches entrypoints, exports, dependencies or configuration, adds a file,
-  or removes or rewires the last import of a file or package, and skip it
+  adds or changes an import (a new package or unresolvable specifier), or
+  removes or rewires the last import of a file or package, and skip it
   otherwise (canonical condition: the contract's §1)
 
 **Zero local full gates per PR.** No protocol step requires of a worker a local full
