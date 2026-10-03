@@ -47,6 +47,9 @@ see the I4 interplay above):
     # it ever becomes required, pair it with an unfiltered fallback that
     # reports on every PR.
     runs-on: {{RUNNER}}
+    env:
+      # Conventional per-project node_modules in CI (no shared-store hook).
+      PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
     steps:
       - name: Check out the repo (full history)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)

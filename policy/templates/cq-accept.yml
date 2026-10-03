@@ -76,6 +76,12 @@ permissions: {}
 # only among sweeps, so the post step also skips (best-effort) a verdict
 # whose snapshot predates the latest-snapshot same-app verdict on that head.
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   resolve:
     name: resolve
