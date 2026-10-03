@@ -88,6 +88,13 @@ mid-prompt semantics. U4 does not rewrite or remove those tests.
 
 ## Process-entry inventory
 
+Restack note: after rebasing onto the harness-over-MCP drivers, the subprocess
+conformance `tool-then-reply` legs run the REAL fixture CLI again (the harness
+MCP server executes the tool and records the session; no in-process fake can
+stand in for that boundary). Non-tool legs and every ACP leg still use the
+transport fakes. Timings and per-test counts elsewhere in this file were
+measured before the restack and are not re-measured here.
+
 The list below is the committed source of truth. `test/driver/process-inventory.test.ts`
 parses this section and checks it against the known entry-point scan. The
 current list is:
@@ -99,30 +106,47 @@ current list is:
 - `test/e2e/analyze/analyze.e2e.test.ts`
 - `test/e2e/merge/live.test.ts`
 - `test/e2e/sweep/sweep.e2e.test.ts`
+- `test/harness/git-closed-forms.test.ts`
+- `test/harness/mcp-bin.test.ts`
 - `test/helpers/git-template.test.ts`
+- `test/ops/gates/policyDiff.test.ts`
+- `test/ops/gates/tamper-corpus.test.ts`
 - `test/ops/pr/ensureTrackerBranch.test.ts`
 - `test/ops/ratchet/captureBaseline.test.ts`
+- `test/ops/ratchet/definitions.test.ts`
 - `test/ops/ratchet/effects.test.ts`
+- `test/ops/ratchet/git-graph.test.ts`
+- `test/ops/ratchet/git.test.ts`
 - `test/ops/ratchet/monotonicGuard.test.ts`
+- `test/ops/ratchet/op-registry.test.ts`
+- `test/ops/ratchet/recomputeTypecheck.test.ts`
+- `test/ops/ratchet/verifyRatchet.test.ts`
 - `test/ops/review/registry.test.ts`
 - `test/ops/sweep/cleanup.test.ts`
 - `test/ops/sweep/ledger-suppression.test.ts`
 - `test/ops/sweep/planSweep.test.ts`
 - `test/ops/sweep/unit-registry.test.ts`
 - `test/ops/sweep/worktreeFor.test.ts`
+- `test/plans/sweep.test.ts`
 - `test/scripts/demo-eval-axes.test.ts`
+- `test/scripts/github-settings.test.ts`
 - `test/scripts/knip.test.ts`
 - `test/scripts/oxlint-boundaries.test.ts`
 - `test/scripts/ratchet-baseline.test.ts`
+- `test/scripts/ratchet-propose.test.ts`
 - `test/scripts/static-conformance.test.ts`
 - `test/scripts/tooling-commands.test.ts`
+- `test/selfhost/promote-gate.test.ts`
 - `test/workflows/merge-queue-gate.test.ts`
+- `test/workflows/policy-provenance.test.ts`
+- `test/workflows/ratchet-provenance.test.ts`
+- `test/workflows/template-render.test.ts`
 
 ## Lane-partition record (proposals only; no CI changes)
 
 The current lane proposal is not a process-free split:
 
-- `test:unit` is not process-free: **21 of the 25** inventory files live in
+- `test:unit` is not process-free: **38 of the 42** inventory files live in
   that lane, so its name and membership currently overstate isolation.
 - `acp.test.ts`'s e2e-lane placement remains justified: **at most 47 of 58**
   driver-specific tests can spawn the real fixture — 7 never construct a

@@ -388,6 +388,7 @@ function fakeAcpScript(
               toolCall: {
                 toolCallId: 'fake-transport-tool',
                 title: `${directive.tool}: conformance`,
+                ...(directive.toolIdentity !== undefined ? { kind: directive.toolIdentity } : {}),
                 content: [],
                 locations: [],
                 rawInput: directive.input,

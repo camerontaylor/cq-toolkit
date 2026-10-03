@@ -51,7 +51,7 @@ import {
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import type { ManagedChild, SpawnOptions } from '../../src/driver/subprocess/process.js';
-import { fakeManagedSpawn, runFakeTool } from '../helpers/transport-fakes.js';
+import { fakeManagedSpawn } from '../helpers/transport-fakes.js';
 import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import {
@@ -226,18 +226,50 @@ function conformanceHarnessConfig(
 
 let fakeManagedSessionCounter = 0;
 
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tool-leg directive → FAKE_AGENT_* env for the REAL fixture CLI. Tool legs keep the
+ * real process: in harness mode the harness MCP server the fixture spawns
+ * executes the tool and records the session, a boundary an in-process fake
+ * cannot honestly stand in for.
+ */
+function toolLegEnv(
+  directive: Extract<ModelDirective, { kind: 'tool-then-reply' }>,
+): Record<string, string> {
+  return {
+    FAKE_AGENT_MODE: 'tool-then-reply',
+    FAKE_AGENT_TOOL: directive.tool,
+    FAKE_AGENT_INPUT: JSON.stringify(directive.input),
+    FAKE_AGENT_REPLY: directive.reply,
+  };
+}
+
+/**
+ * In-process stand-in for the stream-json CLI on the non-tool conformance
+ * legs. It reports the init surface the fail-closed assertion demands:
+ * exactly the driver's `--allowedTools` plus `StructuredOutput` under
+ * `--json-schema`, and the `cq-harness` server connected when configured.
+ */
 function fakeManagedScript(
   opts: { cwd: string; args: readonly string[] },
   directive: ModelDirective | undefined,
-  hasOutputSchema: boolean,
 ): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
   const modelIndex = opts.args.indexOf('--model');
   const model =
     modelIndex === -1 ? 'conformance-1' : (opts.args[modelIndex + 1] ?? 'conformance-1');
   const allowedIndex = opts.args.indexOf('--allowedTools');
-  const allowed = new Set(
-    allowedIndex === -1 ? [] : (opts.args[allowedIndex + 1] ?? '').split(' ').filter(Boolean),
-  );
+  const allowed = (allowedIndex === -1 ? '' : (opts.args[allowedIndex + 1] ?? ''))
+    .split(' ')
+    .filter(Boolean);
+  const harnessMode = opts.args.includes('--tools');
+  const hasSchema = opts.args.includes('--json-schema');
   const sessionId = `fake-cli-${fakeManagedSessionCounter++}`;
   const usage = {
     input_tokens: 10,
@@ -253,63 +285,59 @@ function fakeManagedScript(
       peer.finish(1);
       return;
     }
-    peer.send({ type: 'system', subtype: 'init', session_id: sessionId, model });
-    if (directive?.kind === 'tool-then-reply') {
+    peer.send({
+      type: 'system',
+      subtype: 'init',
+      session_id: sessionId,
+      model,
+      ...(harnessMode
+        ? {
+            tools: [...(hasSchema ? ['StructuredOutput'] : []), ...allowed],
+            mcp_servers: opts.args.includes('--mcp-config')
+              ? [{ name: 'cq-harness', status: 'connected', source: 'dynamic' }]
+              : [],
+          }
+        : {}),
+    });
+    const text =
+      directive?.kind === 'reply'
+        ? directive.text
+        : directive?.kind === 'reply-invalid-json'
+          ? 'this reply is prose, not the required JSON object'
+          : 'ok';
+    peer.send({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    // A schema'd run answers through the CLI's StructuredOutput tool with the
+    // scripted reply's JSON; a non-JSON reply offers none, so the driver
+    // reports output-invalid.
+    const structured = hasSchema ? parseJson(text) : undefined;
+    if (structured !== undefined) {
       peer.send({
         type: 'assistant',
         message: {
           content: [
-            { type: 'tool_use', id: 'fake-tool', name: directive.tool, input: directive.input },
+            {
+              type: 'tool_use',
+              id: 'fake-structured',
+              name: 'StructuredOutput',
+              input: structured,
+            },
           ],
         },
       });
-      // Like the real fixture under --permission-prompts none: an
-      // out-of-policy tool_use is still emitted, then DENIED without
-      // executing, so the driver's governed-surface fold is exercised.
-      const toolOutcome = allowed.has(directive.tool)
-        ? runFakeTool(opts.cwd, directive.tool, directive.input)
-        : Promise.resolve({
-            ok: false,
-            text: `permission denied: ${directive.tool} is not allowed`,
-          });
-      void toolOutcome
-        .then((outcome) => {
-          peer.send({
-            type: 'user',
-            message: {
-              content: [
-                {
-                  type: 'tool_result',
-                  tool_use_id: 'fake-tool',
-                  is_error: !outcome.ok,
-                  content: outcome.text,
-                },
-              ],
+      peer.send({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'fake-structured',
+              is_error: false,
+              content: 'Structured output provided successfully',
             },
-          });
-          peer.send({
-            type: 'assistant',
-            message: { content: [{ type: 'text', text: directive.reply }] },
-          });
-          peer.send({
-            type: 'result',
-            subtype: 'success',
-            is_error: false,
-            session_id: sessionId,
-            model,
-            usage,
-            ...(hasOutputSchema ? { structured_output: { answer: 'ok' } } : {}),
-          });
-          peer.finish();
-        })
-        .catch((error: unknown) => {
-          peer.stderr(`fake tool error: ${String(error)}`);
-          peer.finish(1);
-        });
-      return;
+          ],
+        },
+      });
     }
-    const text = directive?.kind === 'reply' ? directive.text : 'ok';
-    peer.send({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
     peer.send({
       type: 'result',
       subtype: 'success',
@@ -317,19 +345,20 @@ function fakeManagedScript(
       session_id: sessionId,
       model,
       usage,
-      ...(hasOutputSchema ? { structured_output: { answer: 'ok' } } : {}),
+      ...(harnessMode ? { permission_denials: [] } : {}),
+      ...(structured !== undefined ? { structured_output: structured } : {}),
     });
     peer.finish();
   };
 }
 
-/** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
+/** Fresh SubprocessDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
+  const directive = spec.directive;
+  const toolLeg = directive?.kind === 'tool-then-reply';
   return new SubprocessDriver({
-    ...baseOptions(spec.scratchDir, {}, []),
-    spawn: fakeManagedSpawn((opts) =>
-      fakeManagedScript(opts, spec.directive, spec.outputSchema !== undefined),
-    ),
+    ...baseOptions(spec.scratchDir, toolLeg ? toolLegEnv(directive) : {}, []),
+    ...(toolLeg ? {} : { spawn: fakeManagedSpawn((opts) => fakeManagedScript(opts, directive)) }),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
