@@ -896,6 +896,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         ...focusedUnitBindings(scene, {
           run: async () => {
             const worktree = resolve(scene.repo, 'worktrees', 'test-fix', 'beta');
+            mkdirSync(resolve(worktree, 'packages/beta/generated'), { recursive: true });
             writeFileSync(resolve(worktree, 'packages/beta/generated/calculation.js'), BETA_SOURCE);
             rmSync(resolve(worktree, 'packages/beta/src/calculation.js'), { force: true });
             return {
