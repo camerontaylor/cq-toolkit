@@ -1,5 +1,10 @@
 # Release runbook — v1.0.0
 
+**Historical, superseded on 2026-10-01.** The owner decided the first npm
+publication will be [0.2.0](0.2-release-runbook.md) after G2. Do not execute
+the 1.0.0 publication or fixtures-flip instructions below. The existing
+`v1.0.0` source tag remains an unpublished historical identifier.
+
 Operator record for the phase-5 release (T5.1 → T5.3). It states exactly what
 the autonomous run did, what it could not do, and the remaining owner steps —
 each with the evidence to check (and a command where the step is mechanical).
