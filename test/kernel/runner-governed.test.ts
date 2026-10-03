@@ -2645,7 +2645,12 @@ describe('W2.3 reserve-then-settle', () => {
     const calls: string[] = [];
     let held: ReturnType<typeof currentJobContext>;
     let runReport: RunReport | undefined;
+    let markEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
     const hangThenReport = async (raw: unknown): Promise<OpResult<unknown>> => {
+      markEntered(); // body entry = the gate for the virtual clock
       const jobId = (raw as { jobId: string }).jobId;
       calls.push(jobId);
       held = currentJobContext();
@@ -2657,16 +2662,19 @@ describe('W2.3 reserve-then-settle', () => {
       clock,
     );
     const plan: Plan = { id: 'w23-late', jobs: [{ id: 'j1', op: 'hang', input: { jobId: 'j1' } }] };
-    await pump(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: w3dir },
-        viewWith(entry('hang', hangThenReport)),
-        { governor, allowAdvisory: true },
-      ).then((report) => {
-        runReport = report;
-      }),
-    );
+    const running = runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('hang', hangThenReport)),
+      { governor, allowAdvisory: true },
+    ).then((report) => {
+      runReport = report;
+    });
+    // The journal dispatch does real fs I/O before the body can run: hold the
+    // virtual clock until the body is entered, or a slow host burns the 100ms
+    // job budget first and the kill verdict flips to a never-ran cancel.
+    await entered;
+    await pump(running);
     // The kill settled the dispatch: basis 'full', charged = the whole
     // reservation (the fair share C/concurrency = 5/1).
     const report = runReport as RunReport;
