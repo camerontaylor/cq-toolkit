@@ -156,18 +156,24 @@ export function resolvePricedModel(args: {
   }
   const via: PricingResolutionVia =
     served === undefined ? 'unobserved' : isRequested ? 'exact' : 'alias';
-  // An observed alias that is itself a priced model is billed at ITS rates (a
-  // `deepseek-chat` request served as `deepseek-flash` costs the flash row);
-  // only an alias with no table entry of its own (a dated Anthropic id) falls
-  // back to the canonical key's rates.
-  const servedRates =
+  // An observed alias is billed at ITS OWN rates (a `deepseek-chat` request served
+  // as `deepseek-flash` costs the flash row). An alias with no table entry of its
+  // own leaves the rates ABSENT — a `glm-5.3-flash` request served as `glm-5.3`
+  // must not be billed at the cheaper flash row. The one exception is a dated
+  // snapshot of the requested id (`claude-haiku-4-5-20251001`), the same model.
+  const isDatedSnapshot = (alias: string): boolean => {
+    const base = `${normalise(requested)}-`;
+    const rest = normalise(alias).slice(base.length);
+    return normalise(alias).startsWith(base) && /^\d{8}$/.test(rest);
+  };
+  const rates =
     via === 'alias' && matchedAlias !== undefined
-      ? priceOf({ ...args.modelSpec, model: matchedAlias })
-      : undefined;
-  const canonicalRates = servedRates ?? priceOf(args.modelSpec);
+      ? (priceOf({ ...args.modelSpec, model: matchedAlias }) ??
+        (isDatedSnapshot(matchedAlias) ? priceOf(args.modelSpec) : undefined))
+      : priceOf(args.modelSpec);
   return {
     canonicalModel: requested,
-    ...(canonicalRates === undefined ? {} : { rates: canonicalRates }),
+    ...(rates === undefined ? {} : { rates }),
     ...(served === undefined ? {} : { servedModel: served }),
     via,
     candidates,

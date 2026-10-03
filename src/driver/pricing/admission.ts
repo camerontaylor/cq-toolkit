@@ -513,7 +513,7 @@ export function creditsForUsage(
   const tokens =
     usage.input * tokenMultiplier.input +
     usage.cacheRead * tokenMultiplier.cachedInput +
-    usage.output * tokenMultiplier.output;
+    (usage.output + (usage.reasoning ?? 0)) * tokenMultiplier.output;
   // The MCP term is a SEPARATE charge (calls × output multiplier), not part of
   // the token expression the divisor scales.
   const mcpCredits = (mcpCalls ?? 0) * (tokenMultiplier.mcpCall ?? 0);

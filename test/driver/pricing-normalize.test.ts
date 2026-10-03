@@ -118,6 +118,17 @@ describe('resolvePricedModel', () => {
     expect(priceOf(HAIKU_DATED)).toBeUndefined();
   });
 
+  test('an alias with no table entry of its own is NOT billed at the requested rates', () => {
+    const resolved = resolvePricedModel({
+      lane: 'acp',
+      modelSpec: { provider: 'zai', model: 'glm-5.3-flash' },
+      servedModel: 'builtin:bigmodel\\GLM-5.3',
+      aliases: { acp: { zai: { 'glm-5.3-flash': ['glm-5.3'] } } },
+    });
+    expect(resolved.via).toBe('alias');
+    expect(resolved.rates).toBeUndefined();
+  });
+
   test('an UNDECLARED served id resolves to no price and never to zero', () => {
     const resolved = resolvePricedModel({
       lane: 'subprocess',

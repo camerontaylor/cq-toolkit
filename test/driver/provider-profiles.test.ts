@@ -831,6 +831,18 @@ describe('creditsForUsage', () => {
     );
   });
 
+  test('reasoning tokens are billed at the OUTPUT multiplier', () => {
+    const base = creditsForUsage(ZAI!, 'glm-5.3-flash', usage, PEAK)!;
+    const withReasoning = creditsForUsage(
+      ZAI!,
+      'glm-5.3-flash',
+      { ...usage, reasoning: 1_000_000 },
+      PEAK,
+    )!;
+    // 1e6 reasoning tokens x 8 output multiplier / 10,000 divisor.
+    expect(withReasoning - base).toBeCloseTo(8 * 100, 6);
+  });
+
   test('the scale reconciles with the vendor token-allowance table (Lite weekly)', () => {
     for (const [model, band] of Object.entries(ALLOWANCE_BAND_M_TOKENS_WEEK)) {
       const bestCasePeak = weeklyTokensAtCachedRate(model, LITE_WEEKLY_CREDITS, PEAK) / 1e6;
