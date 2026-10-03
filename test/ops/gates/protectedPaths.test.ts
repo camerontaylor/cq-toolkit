@@ -122,7 +122,12 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
     'conftest.py',
   ],
   '(?:^|\\/)\\.env\\.test(?:\\.[^/]+)?$': ['.env.test', 'packages/a/.env.test.local'],
-  '(?:^|\\/)(?:oxlint\\.json|karma\\.conf\\.[cm]?js)$': ['oxlint.json', 'karma.conf.js'],
+  '(?:^|\\/)(?:oxlint\\.json|karma\\.conf\\.[cm]?[jt]s)$': [
+    'oxlint.json',
+    'karma.conf.js',
+    'karma.conf.ts',
+    'karma.conf.mts',
+  ],
   '^baselines(?:\\/|$)': ['baselines/coverage--coverage--a8ceec8f7024.json'],
   '(?:^|\\/)\\.node-version$': ['.node-version'],
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],

@@ -52,7 +52,7 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   // key has no [-.] separator for the alternation below to match.
   /(?:^|\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\.(?:[cm]?[jt]sx?|py)$/i,
   /(?:^|\/)\.env\.test(?:\.[^/]+)?$/i,
-  /(?:^|\/)(?:oxlint\.json|karma\.conf\.[cm]?js)$/i,
+  /(?:^|\/)(?:oxlint\.json|karma\.conf\.[cm]?[jt]s)$/i,
   // Ratchet evidence: the definitions (ratchets.json) and every baseline a
   // ratchet is measured against. A worker baseline edit is a definition of
   // what the ratchet means, not ordinary content.

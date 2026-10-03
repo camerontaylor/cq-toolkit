@@ -266,15 +266,17 @@ describe('RS-10 detector and totals regressions', () => {
       expect(await git(['check-attr', 'diff', '--', 'victim.test.ts'])).toBe(
         'victim.test.ts: diff: hostile\n',
       );
-      // Negative control: without --no-textconv the hostile driver hides the
-      // removed bytes, so the shared flags below are what expose them.
-      const withTextconv = await git([
-        'diff',
-        '--cached',
-        ...SWEEP_DIFF_FLAGS.filter((flag) => flag !== '--no-textconv'),
-        '--',
-      ]).catch(() => '');
-      expect(withTextconv).not.toContain("-  it('never fails to charge the card once', () => {");
+      // Negative control: without --no-textconv Git runs the hostile driver
+      // (`false`) and refuses to render the diff at all, so the shared flags
+      // below are what expose the removed bytes.
+      await expect(
+        git([
+          'diff',
+          '--cached',
+          ...SWEEP_DIFF_FLAGS.filter((flag) => flag !== '--no-textconv'),
+          '--',
+        ]),
+      ).rejects.toThrow(/unable to read files to diff/);
 
       const diff = await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']);
       expect(diff).toContain('--- a/victim.test.ts');
