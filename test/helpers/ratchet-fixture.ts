@@ -5,7 +5,7 @@ import { join } from 'node:path';
 /** Give an isolated project the real built engine after writing its source inputs. */
 export function copyRatchetEngine(repository: string, fixture: string): void {
   if (!existsSync(join(repository, 'dist/ops/ratchet/checkRatchet.js'))) {
-    const build = spawnSync('npm', ['run', 'build'], {
+    const build = spawnSync('pnpm', ['run', 'build'], {
       cwd: repository,
       encoding: 'utf8',
       shell: process.platform === 'win32',
