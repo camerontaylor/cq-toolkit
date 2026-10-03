@@ -290,11 +290,11 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * because it is tamper-evident. An attacker who can write that layer can
  * rewrite history; that assumption is ADR §1's, not this function's.
  *
- * Concurrency, stated because it is a real precondition: the
- * read-then-append is not atomic on its own, so this ledger is correct only
- * when `consume` runs inside the mutation lock for the same workspace —
- * which is exactly where {@link ApprovalAuthority.exercise} calls it. A
- * caller who lifts the ledger out of the lock reopens a replay window.
+ * Concurrency: the read-then-append runs under a LEDGER-WIDE lock
+ * (`<path>.append.lock`), so approvals for different workspaces sharing one
+ * ledger cannot interleave their appends. `consume` is also still called
+ * inside the per-workspace mutation lock by
+ * {@link ApprovalAuthority.exercise}, which orders it against the write.
  *
  * SHORT WRITES, and why `consume` cannot simply call `writeSync` once:
  * `fs.writeSync` RETURNS the number of bytes it wrote and does not promise
@@ -351,41 +351,58 @@ export function makeFileNonceLedger(
       known.add(record);
     });
   };
+  // LEDGER-WIDE append lock. The per-workspace mutation lock does not
+  // serialize two DIFFERENT workspaces that share one operator ledger, and a
+  // short `writeSync` lets their append syscalls interleave into malformed
+  // lines. This lock is keyed on the ledger file itself, so every
+  // read-check-append sequence over one ledger is exclusive across processes.
+  const appendLock = makeGitMutex({ lockPath: `${path}.append` });
+  const consumeLocked = async (nonce: string): Promise<'consumed' | 'spent'> => {
+    absorb();
+    if (known.has(nonce)) return 'spent';
+    // TORN-TAIL GUARD, before the O_APPEND. A previous write that failed
+    // part-way can leave bytes with no terminating newline; appending now
+    // would fuse the partial record with this one and corrupt BOTH. So an
+    // unterminated tail is refused outright rather than papered over.
+    if (hasUnterminatedTail(path)) {
+      throw new Error(
+        `approval ledger: '${path}' ends with an unterminated record (a previous write appears to have been torn) — appending would fuse it with the next record and corrupt both, so the consume is refused; an operator must inspect and repair the ledger`,
+      );
+    }
+    // Synchronous on purpose: the append must be COMPLETE before this
+    // promise resolves, or the exercise would report "consumed" for a
+    // nonce that is still only a promise of a byte on disk.
+    const isNew = !dirSynced;
+    const line = Buffer.from(`${nonce}\n`, 'utf8');
+    const handle = openSync(path, 'a');
+    try {
+      // WRITE-ALL, then one fsync of the completed record: the record
+      // that reaches the platter is the whole nonce, never a prefix.
+      writeAll(handle, line, write, nonce);
+      fdatasyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+    if (isNew) {
+      // Flagged only AFTER the fsync returns: a hard failure leaves the flag
+      // clear, so the next consume retries the directory sync.
+      syncDirSync(dirname(path));
+      dirSynced = true;
+    }
+    known.add(nonce);
+    return 'consumed';
+  };
   return {
     consume: async (nonce) => {
-      absorb();
-      if (known.has(nonce)) return 'spent';
-      // TORN-TAIL GUARD, before the O_APPEND. A previous write that failed
-      // part-way can leave bytes with no terminating newline; appending now
-      // would fuse the partial record with this one and corrupt BOTH. So an
-      // unterminated tail is refused outright rather than papered over.
-      if (hasUnterminatedTail(path)) {
+      // Validate BEFORE touching the ledger: a malformed nonce appended here
+      // would report `consumed`, then make the next absorb() read the new
+      // record as corruption and wedge every later approval.
+      if (!NONCE_PATTERN.test(nonce)) {
         throw new Error(
-          `approval ledger: '${path}' ends with an unterminated record (a previous write appears to have been torn) — appending would fuse it with the next record and corrupt both, so the consume is refused; an operator must inspect and repair the ledger`,
+          `approval ledger: refusing to record a malformed nonce (${JSON.stringify(String(nonce).slice(0, 64))}, expected ${NONCE_SHAPE}) — nothing was written`,
         );
       }
-      // Synchronous on purpose: the append must be COMPLETE before this
-      // promise resolves, or the exercise would report "consumed" for a
-      // nonce that is still only a promise of a byte on disk.
-      const isNew = !dirSynced;
-      const line = Buffer.from(`${nonce}\n`, 'utf8');
-      const handle = openSync(path, 'a');
-      try {
-        // WRITE-ALL, then one fsync of the completed record: the record
-        // that reaches the platter is the whole nonce, never a prefix.
-        writeAll(handle, line, write, nonce);
-        fdatasyncSync(handle);
-      } finally {
-        closeSync(handle);
-      }
-      if (isNew) {
-        // Flagged only AFTER the fsync returns: a hard failure leaves the flag
-        // clear, so the next consume retries the directory sync.
-        syncDirSync(dirname(path));
-        dirSynced = true;
-      }
-      known.add(nonce);
-      return 'consumed';
+      return appendLock.withLock(() => consumeLocked(nonce));
     },
     spent: () => {
       absorb();
@@ -481,16 +498,20 @@ function workspaceKey(workspace: string): string {
 }
 
 /**
- * The nearest ancestor-or-self of the canonical workspace holding a `.git`
- * entry (a directory, or the file a linked worktree or submodule carries) —
- * the same discovery git itself performs, and so the tree the state read
- * describes. A workspace outside any repository is its own domain.
+ * The OUTERMOST ancestor-or-self of the canonical workspace holding a `.git`
+ * entry (a directory, or the file a linked worktree or submodule carries).
+ * Outermost, not nearest: a submodule or nested checkout is reachable both
+ * through its own root and through the parent's, so the nearest `.git` would
+ * give one physical file two lock domains. The outer root is the one domain
+ * every path to those bytes shares; over-sharing only serializes, which is the
+ * safe direction. A workspace outside any repository is its own domain.
  */
 function lockDomain(workspace: string): string {
   const canonical = realpathOrSelf(workspace);
+  let outermost = canonical;
   for (let dir = canonical; ; dir = dirname(dir)) {
-    if (existsSync(join(dir, '.git'))) return dir;
-    if (dirname(dir) === dir) return canonical;
+    if (existsSync(join(dir, '.git'))) outermost = dir;
+    if (dirname(dir) === dir) return outermost;
   }
 }
 

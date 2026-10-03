@@ -1238,4 +1238,43 @@ describe('lock-only sections, provider faults and nested lock domains', () => {
     expect(locks.forWorkspace(join(repo, 'src'))).toBe(locks.forWorkspace(repo));
     expect(locks.forWorkspace(other)).not.toBe(locks.forWorkspace(repo));
   });
+
+  test('a nested repository (submodule) shares the PARENT repository lock', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-domain-nested-'));
+    const parent = join(dir, 'parent');
+    const sub = join(parent, 'vendor', 'sub');
+    mkdirSync(join(parent, '.git'), { recursive: true });
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, '.git'), 'gitdir: ../../.git/modules/sub\n');
+    const locks = makeLedgerBesideMutationLocks(join(dir, 'state', 'approvals.ndjson'));
+    expect(locks.forWorkspace(sub)).toBe(locks.forWorkspace(parent));
+  });
+
+  test('a malformed nonce is refused BEFORE the ledger is touched and does not wedge it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-badnonce-'));
+    const path = join(dir, 'approvals.ndjson');
+    const ledger = makeFileNonceLedger(path);
+    for (const bad of ['', 'ABC', 'a'.repeat(31), 'A'.repeat(32)]) {
+      await expect(ledger.consume(bad)).rejects.toThrow(/malformed nonce/);
+    }
+    expect(existsSync(path)).toBe(false);
+    await expect(ledger.consume('d'.repeat(32))).resolves.toBe('consumed');
+  });
+
+  test('two ledger instances on one file serialize through the ledger-wide lock', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cq-appendlock-'));
+    const path = join(dir, 'approvals.ndjson');
+    const a = makeFileNonceLedger(path);
+    const b = makeFileNonceLedger(path);
+    const results = await Promise.all([
+      a.consume('1'.repeat(32)),
+      b.consume('2'.repeat(32)),
+      a.consume('2'.repeat(32)),
+    ]);
+    expect(results.filter((r) => r === 'consumed')).toHaveLength(2);
+    expect(readFileSync(path, 'utf8').trim().split('\n').sort()).toEqual([
+      '1'.repeat(32),
+      '2'.repeat(32),
+    ]);
+  });
 });
