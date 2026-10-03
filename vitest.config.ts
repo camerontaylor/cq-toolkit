@@ -1,11 +1,11 @@
 // Vitest 5's default test discovery does not exclude build output, so a
-// local `npm run build` before `npm run test` would re-run the stale
+// local `pnpm run build` before `pnpm run test` would re-run the stale
 // compiled tests under dist/ (CI orders test before build, local runs may
 // not). Extend the shipped defaults (node_modules, .git, ...) with dist
 // instead of replacing them, so built-in exclusions stay active.
 //
 // Coverage (H4 ratchet runner): provider v8 (the peer-pinned
-// @vitest/coverage-v8), with `json-summary` so `npx vitest run --coverage`
+// @vitest/coverage-v8), with `json-summary` so `pnpm exec vitest run --coverage`
 // writes coverage/coverage-summary.json — the file the ratchet's coverage
 // adapter reads `total.lines.pct` from (normalized to INTEGER percent by
 // scripts/ratchet-lib.mjs: 2-decimal float noise across runners is

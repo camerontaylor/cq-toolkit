@@ -201,17 +201,17 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(refs).toEqual(['${{ github.sha }}']);
       // Installs and builds happen only in trust/, with no lifecycle scripts.
       const judge = jobBlocks(body).get('judge') ?? '';
-      for (const step of steps(judge).filter((s) => /\bnpm\b/.test(s))) {
+      for (const step of steps(judge).filter((s) => /\bpnpm (?:install|run|exec)\b/.test(s))) {
         expect(step).toMatch(/^ {8}working-directory: trust$/m);
       }
-      for (const install of body.matchAll(/npm ci[^\n]*/g)) {
+      for (const install of body.matchAll(/pnpm install[^\n]*/g)) {
         expect(install[0]).toContain('--ignore-scripts');
       }
       // The only node invocation is the trusted CLI.
       for (const m of body.matchAll(/\bnode (\S+)/g)) {
         expect(m[1]).toBe('trust/dist/cli.js');
       }
-      expect(body).not.toMatch(/\bnpx\b|vitest|npm test|npm run test/);
+      expect(body).not.toMatch(/\bnpx\b|\bpnpm exec\b|vitest|pnpm test|pnpm run test/);
       // The head is fetched as objects, never materialised as a tree.
       expect(body).not.toMatch(/git (?:-C \S+ )?(?:checkout|switch|worktree|archive|reset)/);
       expect(body).not.toMatch(/actions\/(?:download|upload)-artifact/);
@@ -219,7 +219,7 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(judge).toContain("'+refs/heads/cq-state:refs/remotes/origin/cq-state'");
       // No cache is restored by a deciding job (D-C.7).
       expect(body).toMatch(/cache: ''/);
-      expect(body).not.toMatch(/cache: npm|actions\/cache/);
+      expect(body).not.toMatch(/cache: p?npm|actions\/cache/);
     },
   );
 

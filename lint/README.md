@@ -169,16 +169,16 @@ check because typed rules intentionally do not run there.
 
 ## Agent command contract
 
-`lint:fast -- <file...>` uses the root config without type analysis. The pinned
+`pnpm lint:fast <file...>` uses the root config without type analysis. The pinned
 CLI cannot negate `--type-aware` with `=false`, so typed mode is opt-in in the
 full wrapper, never enabled in config. Both modes disable nested configs.
 Real fixtures demonstrate compiler-only, typed-only and shared syntactic
 failures. An executable failing shim at `OXLINT_TSGOLINT_PATH` is started by full
 mode and untouched by fast mode (POSIX fixture; Windows not exercised locally).
 
-`fix -- <file...>` validates the complete list before writes, runs safe Oxlint
+`pnpm fix <file...>` validates the complete list before writes, runs safe Oxlint
 `--fix` (no suggestions/dangerous fixes), formats the same files with Oxfmt,
-and stops: it runs no static gate and no tests, so run `npm run check:static`
+and stops: it runs no static gate and no tests, so run `pnpm run check:static`
 separately for dependents. Paths are argv entries, never shell fragments;
 spaces and metacharacters remain literal. Empty lists, directories, file symlinks,
 repository escapes and tooling metadata are rejected; deleted files are skipped.

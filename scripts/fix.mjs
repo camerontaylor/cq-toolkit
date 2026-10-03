@@ -1,7 +1,7 @@
-// Leaf-scoped contract: `npm run fix -- <owned-file...>` runs safe Oxlint fixes
+// Leaf-scoped contract: `pnpm fix <owned-file...>` runs safe Oxlint fixes
 // and Oxfmt on the named files ONLY. It launches no full static gate and no
 // tests — deleted-only inputs and clean trees included. The full static gate
-// is its own explicit command (`npm run check:static`).
+// is its own explicit command (`pnpm run check:static`).
 import { lintArgs, ownedFiles, run } from './lib/owned-files.mjs';
 
 let lintStatus = 0;

@@ -17,9 +17,9 @@
 #   - `decide` resolves its own subject: the gate CLI reads the merge-queue
 #     tip and main itself (D-K.3), never from the event. Its code is the
 #     toolkit built from the trust ref (`github.sha`, the default-branch tip)
-#     with `npm ci --ignore-scripts`. The head is only git objects plus API
-#     data (check runs, PRs, reviews): nothing the queue authored runs here,
-#     and no PR artifact is read.
+#     with `pnpm install --frozen-lockfile --ignore-scripts`. The head is
+#     only git objects plus API data (check runs, PRs, reviews): nothing the
+#     queue authored runs here, and no PR artifact is read.
 #   - Every read uses this job's GITHUB_TOKEN. The promotion credential
 #     reaches only the gate step, where the CLI puts it in a step-scoped
 #     GIT_CONFIG_* extra-header for the one atomic push (Decision 13).
@@ -67,6 +67,12 @@ on:
   workflow_dispatch:
 
 permissions: {}
+
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
   wake:
@@ -182,6 +188,11 @@ jobs:
           # The object fetch and the push scope their own credentials to
           # their steps; nothing persists into the trusted build.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -191,8 +202,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: Fetch the main and merge-queue objects (no checkout)
         env:
           GH_TOKEN: ${{ github.token }}
