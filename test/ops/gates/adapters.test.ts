@@ -53,6 +53,12 @@ describe('vitest-json adapter (real captured fixture)', () => {
         },
       ],
       exitCode: 1,
+      numTotalTests: 2,
+      numPassedTests: 1,
+      numPassed: 1,
+      numSkippedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
     };
     expect(result).toEqual({ verdict: 'parsed', set: expected });
   });
@@ -192,6 +198,7 @@ describe('vitest-json adapter (real captured fixture)', () => {
           },
         ],
         exitCode: 1,
+        numTotalTests: 0,
       },
     });
   });
@@ -440,6 +447,7 @@ describe('gates registry entry', () => {
       'gates.regressionGate',
       'gates.hackDetector',
       'gates.commitGate',
+      'gates.policyDiff',
     ]);
     const valid = { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'] } };
     expect(CheckRunnerInputSchema.parse(valid)).toEqual({

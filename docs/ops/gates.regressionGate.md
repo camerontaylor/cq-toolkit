@@ -76,6 +76,36 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           },
           "type": "array"
         },
+        "numPassed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPassedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPendingTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numSkippedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTodoTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTotalTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
         "tool": {
           "type": "string"
         }
@@ -173,6 +203,36 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "type": "object"
           },
           "type": "array"
+        },
+        "numPassed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPassedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numPendingTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numSkippedTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTodoTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numTotalTests": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
         },
         "tool": {
           "type": "string"

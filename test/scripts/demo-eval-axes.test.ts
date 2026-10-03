@@ -41,12 +41,23 @@ function envFor(keys: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+// spawnSync blocks the event loop, so Vitest's test timeout cannot interrupt
+// a wedged child: the spawn itself must be bounded, and a timeout or spawn
+// failure surfaces as a named error instead of a hung run.
+const DEMO_SPAWN_TIMEOUT_MS = 30_000;
+
 function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
+  const res = spawnSync(process.execPath, ['scripts/demo-eval-axes.mjs', ...args], {
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
+    timeout: DEMO_SPAWN_TIMEOUT_MS,
   });
+  if (res.error !== undefined)
+    throw new Error(
+      `demo-eval-axes spawn failed: ${res.error.message}\n${res.stdout}${res.stderr}`,
+    );
+  return res;
 }
 
 // Mirror of the script's cell table (same lane/provider/model quadruple).
@@ -107,32 +118,37 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 });
 
-describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => {
-  // The global setup builds ../dist/index.js before collection, making this
-  // real spawn wiring mandatory in local runs and CI alike.
+describe(
+  'demo-eval-axes: the #30 selective credential gate (spawn e2e)',
+  { timeout: 60_000 },
+  () => {
+    // The global setup builds ../dist/index.js before collection, making this
+    // real spawn wiring mandatory in local runs and CI alike. The describe
+    // timeout covers one bounded node spawn (DEMO_SPAWN_TIMEOUT_MS) on a loaded host.
 
-  it('usage guard: --only without a value exits 1 listing the valid cells', () => {
-    const res = runDemo(['--only']);
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-    expect(res.stderr).toContain('valid cells:');
-  });
+    it('usage guard: --only without a value exits 1 listing the valid cells', () => {
+      const res = runDemo(['--only']);
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr).toContain('valid cells:');
+    });
 
-  it('#30 discriminator: a zai-only selection demands only ZAI_API_KEY, never DEEPSEEK_API_KEY', () => {
-    // No keys in env at all: the OLD unconditional gate listed BOTH key vars
-    // here; the selective gate must name ZAI_API_KEY only (the glm cells
-    // never contact DeepSeek).
-    const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-    expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
-    expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
-  });
+    it('#30 discriminator: a zai-only selection demands only ZAI_API_KEY, never DEEPSEEK_API_KEY', () => {
+      // No keys in env at all: the OLD unconditional gate listed BOTH key vars
+      // here; the selective gate must name ZAI_API_KEY only (the glm cells
+      // never contact DeepSeek).
+      const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
+      expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
+    });
 
-  it('a selected deepseek cell still demands DEEPSEEK_API_KEY (refusal precedes any dispatch)', () => {
-    // ZAI_API_KEY='x' is never used: the credential gate refuses before
-    // makeDriver — the selected deepseek cells are never constructed, no
-    // network is touched, no paid call is made.
-    const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-    expect(res.stderr).toContain('DEEPSEEK_API_KEY');
-  });
-});
+    it('a selected deepseek cell still demands DEEPSEEK_API_KEY (refusal precedes any dispatch)', () => {
+      // ZAI_API_KEY='x' is never used: the credential gate refuses before
+      // makeDriver — the selected deepseek cells are never constructed, no
+      // network is touched, no paid call is made.
+      const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
+      expect(res.stderr).toContain('DEEPSEEK_API_KEY');
+    });
+  },
+);

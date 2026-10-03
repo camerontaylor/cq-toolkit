@@ -4,11 +4,14 @@
 //      registers exactly five ops — planSweep, worktreeFor, unit, salvage,
 //      cleanup — with 'sweep.unit' dispatchable by name.
 //   2. SCHEMA ACCEPT/REJECT: a fully-wired dispatch input parses; unknown
-//      keys, an empty binary template, and a model-less driver section are
-//      rejected at the boundary.
+//      keys, a model-less driver section, AND the removed S4b-B2 plan-JSON
+//      driver keys (binary/routingTable/sessionsDir — plan data never names
+//      an executable, ADR-0002 §2.5/§2.3) are rejected at the boundary.
 //   3. THE IMPORTER RESOLVES and the binding refuses the two honest
 //      misconfigurations (no driver / no check config) with `failed` naming
-//      the field — never a silent no-op.
+//      the field — never a silent no-op. bindingsFromDispatch binds a
+//      FACTORY (ADR-0002 §2.5): it resolves role 'fixer' once and the
+//      bindings carry resolved.driver + the RESOLVED modelSpec.
 //   4. THE PUSH LEG (jSKJL): the shipped makePushBranch publishes a local
 //      branch to a real LOCAL BARE origin (offline), with the args-array
 //      `push -u origin <branch>` argv.
@@ -17,12 +20,15 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
+import type { DriverFactory, ResolvedDriver } from '../../../src/driver/factory.js';
+import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import {
   registry as sweepRegistry,
   SweepUnitDispatchInputSchema,
 } from '../../../src/ops/sweep/registry.js';
 import {
   bindingsFromDispatch,
+  classifyStagePaths,
   compileStagePathPatterns,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
@@ -36,6 +42,24 @@ afterAll(() => {
   for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * A FAKE factory (ADR-0002 §2.5): bindingsFromDispatch resolves role 'fixer'
+ * through it ONCE — the fake records nothing (the dispatch-shape assertions
+ * live in test/plans/sweep.test.ts's capturing driver) but hands back a
+ * distinguished driver + RESOLVED spec, so the tests can pin that the
+ * bindings carry the RESOLVED form (never the input's raw spec).
+ */
+const FAKE_RESOLVED: ResolvedDriver = {
+  driver: {
+    run: async (_invocation: OpInvocation): Promise<WorkerResult> => {
+      throw new Error('fake factory driver: not dispatched in this suite');
+    },
+  } satisfies Driver,
+  lane: 'ai-sdk',
+  modelSpec: { provider: 'resolved-zai', model: 'resolved-model' },
+};
+const fakeFactory: DriverFactory = { resolve: () => FAKE_RESOLVED };
+
 /** A fully-wired dispatch input (the shape an enriched plan job carries). */
 const VALID: SweepUnitDispatchInput = {
   repoRoot: '/repo',
@@ -46,10 +70,8 @@ const VALID: SweepUnitDispatchInput = {
   fixer: 'fix',
   files: ['packages/alpha/test/suite.test.js'],
   driver: {
-    binary: ['node', '/opt/agent.mjs'],
     provider: 'cq-e2e',
     model: 'sweep-fake',
-    sessionsDir: '/tmp/sweep-sessions',
   },
   check: {
     adapter: 'tsc-lines',
@@ -86,18 +108,33 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     ).toBe(true);
     // Unknown keys are refused (strict).
     expect(SweepUnitDispatchInputSchema.safeParse({ ...VALID, evil: true }).success).toBe(false);
-    // An empty driver binary template is refused.
-    expect(
-      SweepUnitDispatchInputSchema.safeParse({
-        ...VALID,
-        driver: { ...VALID.driver, binary: [] },
-      }).success,
-    ).toBe(false);
+    // The S4b-B2 keys are GONE from the plan-JSON driver config (ADR-0002
+    // §2.3/§2.5 — plan data never names an executable or a lane): the strict
+    // schema REJECTS each of binary/routingTable/sessionsDir; those knobs
+    // moved into DriverFactoryConfig.lanes.subprocess.
+    const baseDriver = { provider: 'cq-e2e', model: 'sweep-fake' };
+    const bannedDrivers: Record<string, unknown>[] = [
+      { ...baseDriver, binary: ['node', '/opt/agent.mjs'] },
+      {
+        ...baseDriver,
+        routingTable: {
+          endpoints: { 'cq-e2e': { baseUrlEnv: 'X', models: ['sweep-fake'] } },
+        },
+      },
+      { ...baseDriver, sessionsDir: '/tmp/sweep-sessions' },
+    ];
+    for (const driver of bannedDrivers) {
+      const key = Object.keys(driver).filter((candidate) => !(candidate in baseDriver));
+      expect(
+        SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver }).success,
+        `driver.${key.join(',')} must be rejected`,
+      ).toBe(false);
+    }
     // A driver section without a model is refused.
     expect(
       SweepUnitDispatchInputSchema.safeParse({
         ...VALID,
-        driver: { binary: 'agent', provider: 'cq-e2e' },
+        driver: { provider: 'cq-e2e' },
       } as unknown).success,
     ).toBe(false);
   });
@@ -136,14 +173,36 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(checkless?.status === 'failed' && checkless.error).toMatch(/no check config/);
     // bindingsFromDispatch itself throws (the op wraps the throw).
     const { driver: _omitted, ...driverlessInput } = VALID;
-    expect(() => bindingsFromDispatch(driverlessInput)).toThrow(/no driver config/);
+    expect(() => bindingsFromDispatch(driverlessInput, fakeFactory)).toThrow(/no driver config/);
+  });
+
+  test('bindingsFromDispatch resolves through the factory ONCE and carries the RESOLVED form', () => {
+    let resolves = 0;
+    const countingFactory: DriverFactory = {
+      resolve: () => {
+        resolves += 1;
+        return FAKE_RESOLVED;
+      },
+    };
+    const bindings = bindingsFromDispatch(VALID, countingFactory);
+    // ONE resolve per dispatch (the binder's preferred shape, ADR-0002
+    // checklist §2.3), role 'fixer'.
+    expect(resolves).toBe(1);
+    // The RESOLVED form: the factory's driver and the factory's NORMALISED
+    // spec — never the input's raw spec.
+    expect(bindings.driver).toBe(FAKE_RESOLVED.driver);
+    expect(bindings.modelSpec).toEqual(FAKE_RESOLVED.modelSpec);
+    expect(bindings.modelSpec).not.toEqual(VALID.driver);
+    // No sessionsDir binding survived the migration: the workspace-bound run
+    // creates its fresh record inside the worktree (factory retention).
+    expect('sessionsDir' in bindings).toBe(false);
   });
 
   test('bindingsFromDispatch defaults the push leg ON (push:false opts out)', () => {
-    expect(bindingsFromDispatch(VALID).pushBranch).toBeDefined();
-    expect(bindingsFromDispatch({ ...VALID, push: false }).pushBranch).toBeUndefined();
+    expect(bindingsFromDispatch(VALID, fakeFactory).pushBranch).toBeDefined();
+    expect(bindingsFromDispatch({ ...VALID, push: false }, fakeFactory).pushBranch).toBeUndefined();
     // The prompt template: the shipped default, placeholders substituted.
-    const bindings = bindingsFromDispatch(VALID);
+    const bindings = bindingsFromDispatch(VALID, fakeFactory);
     const expected = DEFAULT_UNIT_PROMPT_TEMPLATE.replaceAll('{package}', 'alpha')
       .replaceAll('{fixer}', 'fix')
       .replaceAll('{worktree}', '/worktrees/fix/alpha');
@@ -155,10 +214,13 @@ describe('sweep.unit registry entry (jSKJF)', () => {
   });
 
   test('placeholder substitution is literal — `$&`/`` $` `` never become replacement tokens (#175 item 7)', () => {
-    const bindings = bindingsFromDispatch({
-      ...VALID,
-      promptTemplate: 'pkg={package} fixer={fixer} wt={worktree}',
-    });
+    const bindings = bindingsFromDispatch(
+      {
+        ...VALID,
+        promptTemplate: 'pkg={package} fixer={fixer} wt={worktree}',
+      },
+      fakeFactory,
+    );
     const unit = { package: 'a$&b', fixer: 'f$`g', files: [] };
     // The OLD string-replacer form would turn `$&` into the matched
     // placeholder and `` $` `` into the pre-match text — corrupting the prompt.
@@ -167,6 +229,26 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     );
     // The check-command args use the same literal substitution.
     expect(bindings.checkCommand(unit, '/wt').args).toEqual(['scripts/check.js', 'a$&b']);
+  });
+
+  test('the shared default-deny taxonomy protects whole evidence/config roots', () => {
+    for (const path of [
+      'packages/a/test/helpers/setup.ts',
+      'packages/a/__mocks__/fs.ts',
+      'vitest.setup.ts',
+      '.oxlintrc.json',
+      '.mocharc.json',
+      '.gitignore',
+      'package-lock.json',
+      '.github/workflows/ci.yml',
+    ]) {
+      expect(classifyStagePaths([path]).kind, path).toBe('protected');
+    }
+  });
+
+  test('propose-only routes every non-empty staged set to human review', () => {
+    expect(classifyStagePaths(['src/production.ts'], undefined, true).kind).toBe('propose-only');
+    expect(classifyStagePaths([], undefined, true).kind).toBe('clean');
   });
 
   test('the staged-path allowlist compiles CASE-SENSITIVELY (#175 item 3)', () => {
@@ -281,14 +363,17 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {
-    const bindings = bindingsFromDispatch(VALID);
+    const bindings = bindingsFromDispatch(VALID, fakeFactory);
     expect(bindings.mutex).toEqual({
       lockPath: join(sweepRunStateDir('/repo', 'worktrees', 'cq/09-16a'), 'git-mutex.lock'),
     });
-    const overridden = bindingsFromDispatch({
-      ...VALID,
-      mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
-    });
+    const overridden = bindingsFromDispatch(
+      {
+        ...VALID,
+        mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
+      },
+      fakeFactory,
+    );
     expect(overridden.mutex).toEqual({ lockPath: '/locks/custom.lock', staleMs: 5000 });
     // jeDcl: the PUSH lock preserves the caller's FULL mutex config — only
     // the lockfile is the push's own. A shorter stale window on the push
@@ -307,7 +392,7 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
       retryBaseMs: 250,
     });
     // The resolved segments override rides the bindings (jTPa1).
-    const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' });
+    const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' }, fakeFactory);
     expect(renamed.segments).toEqual({
       kind: 'fix',
       slug: 'a-b-2',

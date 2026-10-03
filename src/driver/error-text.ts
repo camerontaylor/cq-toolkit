@@ -19,6 +19,7 @@ const SECRET_ENV_SUFFIXES = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
+  '_URL',
   'PRIVATE_KEY',
 ];
 
@@ -27,8 +28,8 @@ export function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Bound a diagnostic string and redact any environment secret value it echoes. */
-export function boundedErrorText(text: string): string {
+/** Redact environment secrets and credential-bearing URL values from text. */
+export function redactSensitiveText(text: string): string {
   let out = text;
   for (const [name, value] of Object.entries(process.env)) {
     if (
@@ -43,5 +44,11 @@ export function boundedErrorText(text: string): string {
       );
     }
   }
+  return out;
+}
+
+/** Bound a diagnostic string and redact environment secrets before persistence. */
+export function boundedErrorText(text: string): string {
+  const out = redactSensitiveText(text);
   return out.length <= MAX_ERROR_CHARS ? out : `${out.slice(0, MAX_ERROR_CHARS)}… [truncated]`;
 }

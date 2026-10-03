@@ -46,15 +46,34 @@ to the run summary) and exit 0 with honest outcomes — per-PR failures and
 needs-human rows are results, not crashes; only a whole-run throw (bad args,
 a failed listing) exits 1.
 
+I2 acceptance normally requires a non-author review. When author and reviewer
+agents must share one GitHub account, set repository variable
+`CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW=true` in the adopting repo; blank or
+false keeps author reviews ineligible. The independent reviewer must submit a
+`COMMENTED` review containing exactly one marker in this form, with distinct
+agent IDs and the exact reviewed head SHA:
+
+```html
+<!-- cq-agent-review: {"version":1,"reviewerAgentId":"reviewer-agent","authorAgentId":"author-agent","headSha":"0123456789abcdef0123456789abcdef01234567","verdict":"PASS","independent":true} -->
+```
+
+`HOLD`, `RETRACT`, malformed markers, stale heads, and later marked reviews
+supersede earlier author-agent passes. An ordinary author comment does not
+count. The marker records the independent review procedure; it does not
+cryptographically authenticate the agent IDs.
+
 ## Required secrets
 
-Names only in the templates — values live in the adopting repo's Actions
-secrets.
+Names only in the templates — values live in the adopting repo's
+`automation` environment (a main-only deployment branch policy, W1.10
+Decision 8): the jobs that read them declare `environment: automation`, so a
+dispatch from any other ref fails at job admission, before a secret is
+exposed.
 
-| token                     | secret holds                                                                                                                                                                                                                                                                                           |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                    |
+| token                     | secret holds                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                           |
 
 Both are step-scoped in the workflows: they reach only the run step, never
 `npm ci`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
@@ -112,6 +131,30 @@ adopter owns it by hand.
   cross-run memory — a slot that could run unbounded would duplicate or
   starve the slots after it.
 - Enforcement: `timeout-minutes: 20` on the job in each workflow YAML.
+
+### SHA-bound acceptance and durable settle state (W1.2)
+
+- Rule: immediately before every merge call, `self-merge-prs` re-fetches the
+  PR (head, base, reviews, force-push timeline) and merges only when a
+  trusted review's `commit.oid` equals the live head SHA and the identical
+  `(head SHA, base SHA, force-push epoch)` tuple has two durable observations
+  at least the settle window apart. Observations live in
+  `.cq/settle-state.json` on the `cq-state` branch, written through the
+  GitHub git-data API with a fast-forward-only (compare-and-swap) ref update.
+- Why: commit timestamps are author-controlled and GitHub records no push
+  time, so settle is measured from the automation's own observations. The
+  Actions cache holding `.selfhost/journal` is evictable and writable by any
+  job with the Actions token, so it never holds settle state.
+- Enforcement: `gateMergeEffects` and `recheckBeforeMerge` in
+  `src/selfhost/merge-recheck.ts` wrap the merge effect itself, so no
+  classify→merge window remains; `src/selfhost/state-branch.ts` owns the
+  store. A refusal shows as a `cq merge-time recheck refused pr N: …`
+  needs-human row, and a later run merges the PR once it qualifies.
+  `{{SELFHOST_TOKEN}}` needs Contents write to update `cq-state`.
+  Restricting that branch to the automation identity is a MANUAL ruleset
+  step today — no automation enforces it until W1.10 — so any Contents-write
+  holder can back-date an anchor. That can only shorten settle; it can never
+  forge SHA-bound acceptance.
 
 ### Honest outcomes
 

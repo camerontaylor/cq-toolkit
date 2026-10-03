@@ -12,14 +12,15 @@
 //
 // I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
 // driver-owned scheduling primitives under src/driver/**; this file (and
-// routing.ts) contain none. WHEN to abort is the governor's decision: the
-// governed context arrives via `currentJobContext()` (imported from
-// ../../kernel/governor.js — the one deliberate driver→kernel import, same
-// as the ai-sdk driver) and its `signal` is forwarded EXACTLY ONE place:
-// the SIGTERM→SIGKILL grace ladder in ./process.ts (the scan's single
-// exempt file, where the ladder executes an already-decided kill). Outside
-// a governed run no cancellation source exists and a run is simply
-// un-abortable by us. Consequences, documented:
+// routing.ts) contain none. WHEN to abort is the signal sender's decision:
+// the run's ONLY cancellation SOURCE is `RunOptions.signal` (seam v2,
+// ADR-0002 §2.1) — the caller passes the governed rung-1 signal
+// explicitly. The signal is forwarded EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder
+// in ./process.ts (the scan's single exempt file, where the ladder executes
+// an already-decided kill). An already-aborted signal never dispatches and
+// creates NO session state. Outside a governed run without a signal no
+// cancellation source exists and a run is simply un-abortable by us.
+// Consequences, documented:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
 //     clock; a driver-owned deadline would duplicate and race it.
 //   - No retries, ever: exactly ONE spawn per run (attempts are the
@@ -28,13 +29,13 @@
 // ROUTING (./routing.ts): ModelSpec → env-based route over a serializable
 // RoutingTable (default: zai / deepseek / anthropic anthropic-compat
 // endpoints, as-of 2026-09). The endpoint is injected purely through env
-// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model`. The
-// DEEPSEEK SILENT-REMAP FOOTGUN is enforced in routeFor: a model name not
-// on the endpoint allowlist THROWS before dispatch (gateways silently serve
-// their default model for unknown names — a poisoned fact we refuse to
-// create). Key VALUES are read from the environment at run() time; a
-// missing one throws pre-dispatch. Routes carry var NAMES only, never
-// secrets.
+// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model` UNCHECKED
+// — the DEEPSEEK SILENT-REMAP FOOTGUN is defended POST-DISPATCH since the
+// §2.6 allowlist retirement: the driver surfaces the model id the CLI
+// reports as served, and the shared served-model assertion (applied by the
+// factory, ADR-0002 §2.6) fails a mismatching run. Key VALUES are read from
+// the environment at run() time; a missing one throws pre-dispatch. Routes
+// carry var NAMES only, never secrets.
 //
 // ARGV (the reference headless surface, built by `buildArgs`):
 //   -p                          headless print mode; the PROMPT rides stdin
@@ -45,43 +46,89 @@
 //                               rejects stream-json without it — found live,
 //                               CLI 2.1.270, T1.6 slice 4; a no-op for CLIs
 //                               that don't know the flag)
-//   --json-schema <json>        only when the constructor's outputSchema is
-//                               set (zod→JSON Schema via z.toJSONSchema;
-//                               the OpInvocation seam cannot carry a schema,
-//                               so per-op registries stay a later lane)
-//   --allowedTools <names>      ALWAYS present: the harness tool surface
-//                               (buildTools names) ∩ the frozen ToolPolicy —
-//                               'allowlist' (default) → policy.allow ∩
-//                               harness, 'unrestricted' → all harness names,
-//                               'none' → an EMPTY value (nothing
-//                               pre-approved). Headless -p mode CANNOT
-//                               PROMPT: a tool outside --allowedTools is
-//                               DENIED by the CLI (never prompted, never
-//                               hung) — those denials are the CLI-side
-//                               source of WorkerResult.denials. NO
-//                               UNDOCUMENTED FLAGS (issue #19):
-//                               `--permission-prompts none` and `--bare`
-//                               were removed — the real CLI rejects them at
-//                               parse.
-//   --model <route.model>       the routed, allowlist-verified model id
+//   --json-schema <json>        only when the invocation carries
+//                               `outputSchema`
+//   --tools ""                  harness mode (default): every CLI builtin
+//                               is REMOVED from the surface (absent, not
+//                               denied — RS-1/RS-1b b1/b5)
+//   --setting-sources ""        harness mode: no ambient HOME/project
+//                               settings (canary allow rules stay inert)
+//   --strict-mcp-config         harness mode: no ambient MCP servers
+//   --mcp-config <file>         harness mode, non-empty selection only: the
+//                               per-run config launching `cq-harness-mcp`
+//                               (`<sessionsDir>/<sessionId>.<run-uuid>.cq-
+//                               harness-mcp.json` — unique per run; O_EXCL +
+//                               0600, an existing file is a hard error;
+//                               deleted once init reports the server
+//                               connected, again at settle)
+//   --allowedTools <names>      ALWAYS present, ONE argv element,
+//                               SPACE-joined (comma-joining silently
+//                               pre-approves only the first entry — RS-1b
+//                               b9/b10): harness mode → the QUALIFIED
+//                               spellings `mcp__cq-harness__<name>` of the
+//                               selected surface (harness ∩ ToolPolicy:
+//                               'allowlist' → allow ∩ harness,
+//                               'unrestricted' → all, 'none' → empty).
+//                               MCP tools are never auto-approved, so this
+//                               list is load-bearing (RS-1b b6); name
+//                               matching is byte-exact (b3). Headless -p
+//                               mode CANNOT PROMPT: a call outside the list
+//                               is DENIED (never prompted, never hung). NO
+//                               UNDOCUMENTED FLAGS (issue #19).
+//   --model <route.model>       the routed model id (routed verbatim — the
+//                               pre-dispatch model allowlist is retired, §2.6)
 //   --resume <cli-session-id>   only on sessionRef resume, when the record
 //                               carries a CLI session marker (below)
 //
-// TRUST STATEMENT (issue #28's subprocess half): sandboxPolicy governs the
-// tool-NAME surface only — the harness sandbox/path/output restrictions are
-// NOT enforced by this driver. The CLI is an independent process with its
-// own permission model: run/sandbox confinement is the host CLI's business
-// (--allowedTools controls WHICH tools may run, never where or how). When
-// sandboxPolicy.level is not 'none' AND a tool surface was actually
-// exposed, the run records a `sandbox-level-unenforced` narration marker so
-// the unenforced request is observable per run (a mode-'none' run exposes
-// NOTHING pre-approved — headless-denied — so there is nothing unenforced
-// to observe, and the shared conformance contract pins such records to zero
-// tool-role messages).
+// CLOSED TOOL SURFACE (W1.4 — RS-12 design, ADR-0002 Annex A.4). The
+// harness executors now run on this lane too: the CLI's only tools are the
+// harness's, served over stdio by `cq-harness-mcp` (src/harness/mcp/) —
+// the SAME shared core (src/harness/surface.ts) claude-agent serves
+// in-process. The driver authors the manifest (workspace realpath, sandbox,
+// selection, harness config, env names); the server re-validates it,
+// scrubs its env to the default child-env allowlist + envAllowlist names
+// (route credentials never reach `run` children's env), and enforces
+// containment, allowlists and the read-only mapping. Fail-closed on three
+// fronts, each settling stopReason 'error' with a `HARNESS_ERROR_PREFIX`
+// cause and an `errorClass: 'harness'` narration marker (ADR-0002 §2.2's
+// enum field lands with the W3.3 types bump):
+//   - the FIRST system/init must report exactly the expected surface —
+//     `cq-harness`/connected (or no server) and exactly the qualified
+//     selected tools, plus `StructuredOutput` under --json-schema (pinned
+//     by the live leg) — else the ladder terminates the run
+//     ('harness-surface-mismatch'); a run whose result arrives with no init
+//     at all is 'harness-surface-unverified';
+//   - an is_error result on a harness tool is a DENIAL only when its text
+//     carries a stable harness denial prefix, or the CLI reported a
+//     permission denial for it; anything else (a dead server's
+//     'Connection closed', an MCP timeout, …) is a transport failure that
+//     terminates the run ('harness-transport-failure').
+// Tool names are mapped back to harness names in records and denials.
+//
+// STOCK MODE (plan D6 — null-hypothesis evals only): `toolSurface:
+// 'stock'` keeps the legacy argv (no --tools/--setting-sources/MCP flags;
+// harness NAMES in --allowedTools, which the CLI does not know — inert,
+// RS-1 J2 C1) and none of the harness enforcement. An option of the
+// directly constructed driver only — never a factory or plan key.
+//
+// TRUST STATEMENT (issue #28's subprocess half). Harness mode: the harness
+// enforces the TOOL-level sandbox mapping (read-only denials, workspace
+// containment, allowlists); OS confinement stays unenforced, so a
+// requested level with a non-empty surface records `{cq:
+// 'sandbox-level-unenforced', level, layer: 'os'}`. `run` commands keep
+// HOST privileges (the harness trust boundary, tools.ts). Stock mode: the
+// CLI's own permission model governs; the legacy `sandbox-level-
+// unenforced` marker (no layer) records that nothing was enforced here.
 //
 // SESSIONS (I6, OUR vocabulary — src/harness/session.ts):
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
 //     scratch dir and a fresh record; the CLI runs with cwd = workspace.
+//     When the invocation carries a `workspace` binding (ADR-0002 §2.4),
+//     the fresh record is instead created IN realpath(workspace.path) and
+//     the CLI + harness manifest bind there; a workspace set alongside a
+//     sessionRef must record the SAME realpath (else a pre-dispatch config
+//     throw). Session records and sidecars stay in the lane's sessionsDir —
+//     never inside the workspace.
 //   - sessionRef → SessionStore.load (unknown → THROW pre-dispatch: a fake
 //     resume is worse than a loud one); the SAME workspace continues, and
 //     `--resume` continues the CLI-side conversation using the CLI session
@@ -102,8 +149,10 @@
 //     reachable by the model. Our vocabulary never becomes vendor
 //     vocabulary either way.
 //   - Persisted per run, post-settle: the user prompt, ONE role 'tool'
-//     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the CLI tool
-//     name; content = { input, ok, output } in plain-JSON our-vocabulary),
+//     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the harness name
+//     — `mcp__cq-harness__read` is recorded as `read`; stock mode: the CLI
+//     tool name; content = { input, ok, output } in plain-JSON
+//     our-vocabulary),
 //     the assistant transcript text (when any), and non-JSON stdout lines
 //     + stderr as narration (toolName 'cli-narration'). OUT-OF-POLICY tool
 //     activity is narration-only: the record reflects the governed tool
@@ -135,11 +184,14 @@
 //   anything else               → narration (collected, persisted)
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
-//   1. governed signal fired (the ladder terminated the child) → 'aborted'
-//   2. real usage folded ≥ Budget.maxTokens → 'budget'
-//   3. result event present: subtype 'success' (and is_error ≠ true)
+//   1. the run signal fired (already-aborted at entry, or mid-run through
+//      the ladder the signal triggers) → 'aborted'
+//   2. harness surface/transport failure → 'error'
+//   3. oversized stdout/stderr line → 'error'
+//   4. real usage folded ≥ Budget.maxTokens → 'budget'
+//   5. result event present: subtype 'success' (and is_error ≠ true)
 //      → 'complete'; any other result status → 'error'
-//   4. no result event (spawn failure, nonzero exit, silent death) → 'error'
+//   6. no result event (spawn failure, nonzero exit, silent death) → 'error'
 // Once spawned, run() NEVER throws: every failure lands in an honest
 // 'error' verdict carrying the sessionId + denials gathered so far — and a
 // SYNCHRONOUS SPAWN FAILURE is a verdict too (issue #19): a spawnImpl that
@@ -153,10 +205,33 @@
 // the retained stderr tail — so a 0-token failure is diagnosable from the
 // journal instead of an unexplained "driver reported no cause".
 // Only PRE-DISPATCH validation throws
-// (unknown model — the routing footgun; missing key env; unknown
-// sessionRef; a non-positive Budget.maxTokens; invalid grace windows or
-// binary template at construction; a schema that cannot become JSON Schema
-// — the last at construction).
+// (unknown provider — the routing config error; the model-allowlist miss is
+// RETIRED, §2.6 — and missing key
+// env, each a DispatchError('config'); unknown sessionRef; a workspace
+// binding that is not an absolute existing directory or disagrees with the
+// resumed record's realpath — a DispatchError('config'); a non-positive
+// Budget.maxTokens; invalid grace windows or binary template at
+// construction).
+//
+// ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
+// `errorClass`, classified ONLY from structured signals — the close cause
+// (spawn error / death signal / non-zero exit), the result-frame
+// subtype/errors, and the CLI's limit vocabulary where the vendor exposes
+// no structure (anchored patterns only; the unanchored numeric-status
+// style is banned). Cut order: an oversized output line is a protocol
+// break → 'harness'; the funded-allowance rows (claude session/weekly
+// limit text, gateway "spend limit reached", opencode "Insufficient
+// account funds") → 'quota', with the reset instant in
+// `providerSignals.windows[*].resetAt` when the claude limit text carries
+// an extractable one; the throttle rows ("Server is temporarily limiting
+// requests", "Request rejected (429)") → 'rate-limit'; a result-event
+// error → 'provider-error' (except a codex non-zero exit that folded real
+// usage with no result event — the provider's failure surfaced through
+// the CLI → 'provider-error'); spawn error / signal death / other
+// non-zero exit / silent death → 'harness'; anything unresolved is
+// 'unknown', NEVER a guessed 'transient'. Abort-shaped runs are excluded
+// (they are 'aborted', not errors). `providerSignals` rides ANY verdict,
+// only with structurally present data — never invented.
 //
 // BUDGET — the subprocess floor is honest about what a headless CLI cannot
 // do: there is NO mid-run token hook, so Budget.maxTokens is enforced only
@@ -179,32 +254,53 @@
 // 0 would be a fabricated fact. The derived figure is api-equivalent
 // (modeled — list price for the tokens consumed), never presented as billed
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
-import { z } from 'zod';
-import type { ZodType } from 'zod';
-import { currentJobContext } from '../../kernel/governor.js';
+import { basename, join, resolve } from 'node:path';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
+import {
+  buildManifest,
+  compareInitSurface,
+  harnessToolName,
+  isHarnessDenial,
+  isQualifiedHarnessTool,
+  qualifiedToolName,
+  selectToolNames,
+} from '../../harness/surface.js';
+import type { ExpectedInitSurface, HarnessManifest } from '../../harness/surface.js';
+import { HARNESS_MCP_SERVER_NAME } from '../../harness/surface.js';
+import { harnessServerLaunch } from '../../harness/mcp/launch.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
+import { DispatchError } from '../errors.js';
+import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
+import {
+  compileOutputSchemaFault,
+  uncompilableSchemaVerdict,
+  validateStructured,
+} from '../common/structured.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  ProviderSignals,
+  RunOptions,
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
 } from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
+import { redactSensitiveText } from '../error-text.js';
 import { spawnManaged, terminateGracefully } from './process.js';
 import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from './process.js';
 
@@ -228,6 +324,48 @@ export const CLI_SESSION_FILE = '.cq-cli-session';
 export const NARRATION_TOOL = 'cli-narration';
 
 /**
+ * The file-name SUFFIX of the per-run MCP config (W1.4, Annex A.4):
+ * `<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json` — UNIQUE PER
+ * RUN, so two concurrent runs on one session can never read, replace or
+ * delete each other's binding — created exclusively (O_EXCL) with mode
+ * 0600, never in the model-visible workspace (tamper vector #26), and
+ * deleted as soon as `system/init` reports the harness connected, with a
+ * second delete at settle as the backstop.
+ */
+export const HARNESS_MCP_CONFIG_FILE = '.cq-harness-mcp.json';
+
+/**
+ * CLI-internal tools the `claude` CLI adds to `init.tools` even under
+ * `--tools ""`, pinned by the W1.4 live leg (A.5a, CLI 2.1.280): with
+ * `--json-schema` the CLI injects exactly `StructuredOutput` (its native
+ * structured-output tool, auto-approved). Nothing is added without it.
+ */
+export const CLI_STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
+
+/**
+ * The stable leading text of every harness-classified error verdict
+ * (`WorkerResult.error`). ADR-0002 §2.2's `errorClass: 'harness'` lands with
+ * the seam-v2 types bump (W3.3); until then this prefix — and the
+ * `errorClass: 'harness'` field on the narration marker — is the
+ * machine-readable classification.
+ */
+export const HARNESS_ERROR_PREFIX = 'subprocess driver: harness failure';
+
+/**
+ * The tool surface the lane runs with:
+ *   - 'harness' (default) — the CLOSED surface (W1.4): every CLI builtin is
+ *     removed (`--tools ""`), ambient settings and MCP servers are ignored,
+ *     and the only tools are the harness's, served by `cq-harness-mcp` and
+ *     enforced by the shared core.
+ *   - 'stock' — the NULL-HYPOTHESIS EVAL mode only (plan D6): the CLI's own
+ *     builtin surface with the legacy argv, where `--allowedTools` carries
+ *     harness names the CLI does not know (inert — RS-1 J2 C1) and NOTHING
+ *     the harness enforces applies. An option of the DIRECTLY CONSTRUCTED
+ *     driver only (ADVISORY, ADR-0002 §2.5) — never a factory or plan key.
+ */
+export type SubprocessToolSurface = 'harness' | 'stock';
+
+/**
  * The spawn seam: `spawnManaged` by default; tests inject a fake (the
  * conformance suite's scripted CLI, slice 2) through the constructor's
  * `spawn` option.
@@ -241,15 +379,6 @@ export interface SubprocessDriverOptions {
    * (`['claude', '--fallback-flag']`). Default 'claude'.
    */
   binary?: string | readonly string[];
-  /**
-   * Structured-output schema (data-driven). When set, the CLI is invoked
-   * with `--json-schema <zod→JSON Schema>` and the result event's
-   * structured_output is validated against this schema before it lands in
-   * WorkerResult.structuredOutput (a payload that fails is dropped to
-   * narration, never trusted). Per-op schema registries are a later-lane
-   * concern (the frozen OpInvocation cannot carry a schema).
-   */
-  outputSchema?: ZodType;
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
   routingTable?: RoutingTable;
   /** SIGTERM→SIGKILL grace in ms (default: process.ts's DEFAULT_TERM_GRACE_MS). */
@@ -274,6 +403,12 @@ export interface SubprocessDriverOptions {
    * only, never values.
    */
   envAllowlist?: readonly string[];
+  /**
+   * The tool surface (see SubprocessToolSurface). Default 'harness' — the
+   * closed surface. 'stock' exists for null-hypothesis evals only and is
+   * reachable solely by constructing this class directly.
+   */
+  toolSurface?: SubprocessToolSurface;
   /** Spawn override hook for tests. Default: the real spawnManaged. */
   spawn?: SpawnFn;
 }
@@ -286,9 +421,6 @@ export interface SubprocessDriverOptions {
  */
 export class SubprocessDriver implements Driver {
   private readonly binary: readonly string[];
-  /** The constructor's original schema — the settle-time structured_output check parses against it. */
-  private readonly outputSchema: ZodType | undefined;
-  private readonly outputJsonSchema: string | undefined;
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;
@@ -298,6 +430,7 @@ export class SubprocessDriver implements Driver {
     | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
     | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
+  private readonly toolSurface: SubprocessToolSurface;
   private readonly spawnImpl: SpawnFn;
 
   constructor(options: SubprocessDriverOptions = {}) {
@@ -322,15 +455,6 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
-    // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise. The original
-    // zod schema is retained alongside the serialized form — the CLI's
-    // structured_output is validated against it post-settle (below).
-    this.outputSchema = options.outputSchema;
-    this.outputJsonSchema =
-      options.outputSchema === undefined
-        ? undefined
-        : JSON.stringify(stripMetaSchema(z.toJSONSchema(options.outputSchema)));
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());
@@ -355,16 +479,26 @@ export class SubprocessDriver implements Driver {
     // weaken default-deny for every later spawn on a "stateless" instance.
     this.envAllowlist =
       options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
+    if (
+      options.toolSurface !== undefined &&
+      options.toolSurface !== 'harness' &&
+      options.toolSurface !== 'stock'
+    ) {
+      throw new Error(
+        `subprocess driver: toolSurface must be 'harness' or 'stock', got ${JSON.stringify(options.toolSurface)}`,
+      );
+    }
+    this.toolSurface = options.toolSurface ?? 'harness';
     this.spawnImpl = options.spawn ?? spawnManaged;
   }
 
-  /** The frozen seam: run one invocation to completion. */
-  async run(opInvocation: OpInvocation): Promise<WorkerResult> {
+  /** The frozen seam (v2): run one invocation to completion. */
+  async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
     // spawned and (except routing/key checks) before any session exists.
-    const route = routeFor(modelSpec, this.routingTable); // unknown provider/model → the footgun throw
+    const route = routeFor(modelSpec, this.routingTable); // unknown provider → the config throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
     if (
       budget.maxTokens !== undefined &&
@@ -374,63 +508,135 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
+    // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
+    // session state exists — a bad binding is a pre-dispatch config throw.
+    const boundWorkspace =
+      opInvocation.workspace === undefined
+        ? undefined
+        : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
 
-    // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
+    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
+    // the ONLY cancellation channel (seam v2). Checked BEFORE the spawn (an
+    // already-cancelled invocation never spawns — and never creates a
+    // session record, never appends a dangling user turn), then forwarded
+    // to the ladder — the driver decides nothing about WHEN.
+    const signal = options?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+
+    // --- Structured-output preflight (PR #238 review round 2): the schema
+    // document is caller-authored plain data — compile it BEFORE the CLI is
+    // spawned. An uncompilable document is the uniform LOCAL 'output-invalid'
+    // verdict (the settle-time miss shape), never a provider/harness failure
+    // from a request-setup rejection. No record exists yet (none is created):
+    // zero usage, no denials, no sessionId.
+    if (opInvocation.outputSchema !== undefined) {
+      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
+      if (schemaFault !== undefined) {
+        return uncompilableSchemaVerdict('subprocess', schemaFault);
+      }
+    }
+
+    // --- I6 isolation / §2.4 workspace table: a fresh record — created in
+    // the bound workspace when one is set, else in a fresh temp workspace —
+    // or a real resume, which must record the SAME realpath when a workspace
+    // is bound (else a pre-dispatch config throw).
     const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
     const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
-        ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
-        : await loadSessionOrThrow(store, sessionRef);
+        ? await store.create(
+            boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
+          )
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'subprocess driver');
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
-    // --- Tool surface: harness names ∩ per-op ToolPolicy → --allowedTools.
-    const harnessNames = buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map(
-      (t) => t.name,
-    );
-    const allowed = allowedToolNames(harnessNames, toolPolicy);
+    // --- Tool surface. 'harness' (default): the SHARED CORE's one manifest
+    // constructor binds the workspace realpath, sandbox level, harness ∩
+    // ToolPolicy, harness config and env names; the manifest rides the
+    // server's argv inside a per-run MCP config (Annex A.4). 'stock': the
+    // legacy inert harness-name allowlist over the CLI's builtins (D6).
+    const stock = this.toolSurface === 'stock';
+    let manifest: HarnessManifest | undefined;
+    let allowed: string[];
+    if (stock) {
+      allowed = selectToolNames(
+        buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map((t) => t.name),
+        toolPolicy,
+      );
+    } else {
+      manifest = await buildManifest({
+        workspace,
+        sandbox: sandboxPolicy.level,
+        toolPolicy,
+        harness: this.harnessConfig,
+        envNames: this.envAllowlist,
+      });
+      allowed = manifest?.tools ?? [];
+    }
 
-    // --- Trust statement (header): sandboxPolicy names the tool surface ---
-    // only; THIS driver does not enforce a sandbox level. When a level was
-    // requested AND a tool surface was actually exposed, record that the
-    // level went unenforced here (per-run, observable).
+    // --- Sandbox narration. Harness mode: the harness now enforces the
+    // TOOL-level sandbox mapping (read-only denials, containment) on this
+    // lane, so the marker narrows to OS confinement (`layer: 'os'`). Stock
+    // mode: nothing the harness enforces applies — the legacy marker.
     const sandboxUnenforced = sandboxPolicy.level !== 'none' && allowed.length > 0;
 
     // --- CLI-level resume: the CLI session id recorded in the SESSIONS ---
     // STORE sidecar by a prior run (absent → workspace-only continuation).
     const resumeCliSessionId = await readCliSessionId(sessionsDir, record.sessionId);
 
+    // --- The per-run MCP config (harness mode, non-empty selection):
+    // created exclusively, 0600, beside the session records.
+    const mcpConfigPath =
+      manifest === undefined
+        ? undefined
+        : await writeMcpConfig(sessionsDir, record.sessionId, manifest);
+
+    // --- Per-run schema resolution (ADR-0002 §2.3): the invocation schema
+    // is the only schema source; it normalizes to the same plain-data
+    // OutputSchema the shared validator judges.
+    const outputSchema = opInvocation.outputSchema;
+
     const argv = buildArgs({
       route,
-      allowedToolNames: allowed,
-      outputJsonSchema: this.outputJsonSchema,
+      toolSurface: this.toolSurface,
+      allowedToolNames: stock ? allowed : allowed.map(qualifiedToolName),
+      mcpConfigPath,
+      outputJsonSchema:
+        outputSchema === undefined
+          ? undefined
+          : // Transport (ADR-0002 §2.3): the EXACT plain document the schema
+            // request carried, meta-URI stripped (the CLI rejects the
+            // draft-2020-12 `$schema` key, #209).
+            JSON.stringify(stripMetaSchema(outputSchema.schema)),
       resumeCliSessionId,
     });
-
-    // --- Governed cancellation (I8): checked before the spawn (an already-
-    // cancelled invocation never spawns), then forwarded to the ladder —
-    // the driver decides nothing about WHEN.
-    const governed = currentJobContext();
-    const signal = governed?.signal;
-    if (signal?.aborted === true) {
-      return {
-        usage: zeroUsage(),
-        sessionId: record.sessionId,
-        denials: [],
-        stopReason: 'aborted',
-      };
-    }
 
     // --- The one spawn. From here on, run() NEVER throws past the seam —
     // including the spawn itself: a SYNCHRONOUS spawnImpl failure (empty
     // argv → ERR_INVALID_ARG_TYPE, a hostile override) is an 'error'
     // VERDICT, not a rejection (issue #19).
     const observation = newObservation();
+    if (!stock) {
+      // Fail-closed init-surface assertion (Annex A.4): exactly the harness
+      // server (when configured) and exactly the selected tools, plus the
+      // pinned CLI-internal structured-output tool under --json-schema.
+      observation.expectedSurface = {
+        harness: manifest !== undefined,
+        tools: allowed,
+        internalTools: outputSchema === undefined ? [] : [CLI_STRUCTURED_OUTPUT_TOOL],
+      };
+    }
     if (sandboxUnenforced) {
       observation.narration.push(
-        JSON.stringify({ cq: 'sandbox-level-unenforced', level: sandboxPolicy.level }),
+        JSON.stringify(
+          stock
+            ? { cq: 'sandbox-level-unenforced', level: sandboxPolicy.level }
+            : { cq: 'sandbox-level-unenforced', level: sandboxPolicy.level, layer: 'os' },
+        ),
       );
     }
     let child: ManagedChild;
@@ -463,12 +669,16 @@ export class SubprocessDriver implements Driver {
       } catch {
         // deliberately swallowed — the verdict still reaches the caller
       }
+      await removeMcpConfig(mcpConfigPath);
       return {
         usage: zeroUsage(),
         sessionId: record.sessionId,
         denials: [],
         stopReason: 'error',
         error: boundedErrorText(`subprocess driver: spawn failed — ${describeError(err)}`),
+        // A spawn failure is a local (harness) failure — the producer rule
+        // (ADR-0002 §2.2): every error verdict carries its class.
+        errorClass: 'harness',
       };
     }
 
@@ -478,8 +688,14 @@ export class SubprocessDriver implements Driver {
     const terminationDone = new Promise<void>((resolve) => {
       finishTermination = resolve;
     });
-    const onAbort = (): void => {
+    // One ladder, two deciders: the GOVERNED signal (→ 'aborted') and the
+    // fail-closed harness checks (→ 'error'/harness). The first decider wins;
+    // the ladder runs once.
+    let terminationCause: 'governed' | 'harness' | undefined;
+    const startTermination = (cause: 'governed' | 'harness'): void => {
+      if (terminationStarted) return;
       terminationStarted = true;
+      terminationCause = cause;
       void terminateGracefully(
         child,
         {
@@ -493,21 +709,42 @@ export class SubprocessDriver implements Driver {
         },
       ).then(
         (outcome) => {
-          aborted = true;
+          aborted = terminationCause === 'governed';
           observation.narration.push(JSON.stringify({ cq: 'termination', outcome }));
           finishTermination?.();
         },
         () => {
-          aborted = true; // ladder failure must not hang the governed run
+          aborted = terminationCause === 'governed'; // ladder failure must not hang the run
           finishTermination?.();
         },
       );
     };
+    const onAbort = (): void => startTermination('governed');
     if (signal !== undefined) {
       signal.addEventListener('abort', onAbort, { once: true });
+      // ATTACH-TIME RECHECK (the acp lane's Codex P1 pattern, and
+      // claude-agent's abortRootFollowing): abort events are NOT replayed —
+      // a signal that fired while the record/manifest/MCP-config awaits were
+      // in flight (between the pre-dispatch aborted check and THIS attach)
+      // lands the listener on an ALREADY-aborted signal, never invoked, and
+      // the child would never be terminated: the run would stream past a
+      // fired cancellation. Run the abort path NOW — startTermination is
+      // once-guarded, and the settle below awaits the ladder's markers.
+      if (signal.aborted) onAbort();
     }
 
-    child.onStdoutLine((line) => handleStdoutLine(observation, line));
+    let earlyConfigDelete: Promise<void> | undefined;
+    child.onStdoutLine((line) => {
+      handleStdoutLine(observation, line);
+      if (observation.harnessConnected && earlyConfigDelete === undefined) {
+        // Shortest useful lifetime: the CLI has spawned the server and the
+        // manifest now lives in its memory (a reconnect respawns from that
+        // in-memory config, never the file — live leg A.5i) — delete the
+        // config at once; the settle-time delete below is the backstop.
+        earlyConfigDelete = removeMcpConfig(mcpConfigPath);
+      }
+      if (observation.harnessFailure !== undefined) startTermination('harness');
+    });
     child.onStderrLine((line) => observation.stderr.push(line));
 
     // Capture the settled close value WITHOUT adding an unbounded await: a
@@ -535,29 +772,59 @@ export class SubprocessDriver implements Driver {
     // always settles (its SIGKILL rung force-resolves).
     if (terminationStarted) await terminationDone;
 
-    // Structured_output is the one vendor field that becomes seam data, so
-    // when a schema was configured it must survive that schema before it can
-    // reach a verdict — the CLI is a vendor boundary, and a payload that
-    // fails is dropped and its rejection recorded as narration, never
-    // trusted (the ai-sdk lane gets the same guarantee from Output.object).
-    const rawStructured = observation.result?.['structured_output'];
+    // Backstop delete of the per-run MCP config, whatever the verdict and
+    // whatever the sessionRetention (a failure is swallowed; rm is idempotent).
+    await earlyConfigDelete;
+    await removeMcpConfig(mcpConfigPath);
+
+    // Fail closed: a harness-mode run whose CLI never reported an init
+    // surface ran unverified — whatever it reports is not a model outcome.
     if (
-      this.outputSchema !== undefined &&
-      observation.result !== undefined &&
-      rawStructured !== undefined
+      !aborted &&
+      observation.expectedSurface !== undefined &&
+      !observation.initSeen &&
+      observation.harnessFailure === undefined &&
+      observation.result !== undefined
     ) {
-      const check = this.outputSchema.safeParse(rawStructured);
-      if (check.success) {
-        observation.result['structured_output'] = check.data;
-      } else {
-        delete observation.result['structured_output'];
-        observation.narration.push(
-          JSON.stringify({
-            cq: 'structured-output-rejected',
-            issues: check.error.issues.length,
-            paths: check.error.issues.map((issue) => issue.path.map(String).join('.')),
-          }),
-        );
+      observation.harnessFailure = { cq: 'harness-surface-unverified', errorClass: 'harness' };
+    }
+    if (observation.harnessFailure !== undefined) {
+      observation.narration.push(JSON.stringify(observation.harnessFailure));
+    }
+
+    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared validator
+    // judges the payload over the SAME document that was sent. A miss after
+    // the CLI's own retry settles the uniform error/'output-invalid' verdict
+    // (usage and cost kept, rejection in the bounded error text) — the old
+    // "complete with the payload dropped to narration" behaviour is deleted.
+    // A harness failure voids the payload outright: output produced on an
+    // unverified or broken tool surface is not a model outcome.
+    let structured: unknown;
+    let structuredMiss: string | undefined;
+    if (
+      outputSchema !== undefined &&
+      !aborted &&
+      observation.harnessFailure === undefined &&
+      observation.result !== undefined
+    ) {
+      const subtype = asString(observation.result['subtype']);
+      if (subtype === 'error_max_structured_output_retries') {
+        structuredMiss =
+          `the CLI exhausted its native structured-output retries ` +
+          `(subtype '${subtype}') without producing the required object`;
+      } else if (resultStatusOf(observation.result) === 'success') {
+        const raw = observation.result['structured_output'];
+        if (raw === undefined) {
+          structuredMiss =
+            'the result event carried no structured_output (the CLI never produced the required object)';
+        } else {
+          const check = validateStructured(outputSchema, raw);
+          if (check.ok) {
+            structured = check.value;
+          } else {
+            structuredMiss = `the result does not validate against schema '${outputSchema.name}' — ${check.reason}`;
+          }
+        }
       }
     }
 
@@ -585,7 +852,16 @@ export class SubprocessDriver implements Driver {
       // deliberately swallowed — the honest verdict outranks the record
     }
 
-    return this.verdict(modelSpec, budget, observation, record.sessionId, aborted);
+    return this.verdict(
+      modelSpec,
+      budget,
+      observation,
+      record.sessionId,
+      aborted,
+      structured,
+      structuredMiss,
+      isCodexBinary(this.binary[0] ?? ''),
+    );
   }
 
   // --- Internals -------------------------------------------------------------
@@ -605,7 +881,10 @@ export class SubprocessDriver implements Driver {
     for (const [childVar, hostVar] of Object.entries(route.env)) {
       const value = process.env[hostVar];
       if (value === undefined || value === '') {
-        throw new Error(
+        // Pre-dispatch misconfiguration carries its class as structured data
+        // (ADR-0002 §2.2): errorClassOf → 'config'.
+        throw new DispatchError(
+          'config',
           `subprocess driver: route to '${route.endpoint}' requires ${hostVar} in the environment`,
         );
       }
@@ -621,6 +900,14 @@ export class SubprocessDriver implements Driver {
    * report zeros and NEVER a cost. A served/reported model mismatch with
    * the requested id is the narration marker's business (run()); the
    * PRICING here keys on the served id either way (issue #24).
+   *
+   * ERROR CLASSES (seam v2, ADR-0002 §2.2): every 'error' verdict carries
+   * `errorClass` — the producer rule — and nothing else does. Cut order:
+   * a harness failure → 'harness'; a structured-output miss →
+   * 'output-invalid'; otherwise the §2.2 classifier over the close cause,
+   * the result frame and the CLI's cause texts. Abort/budget carve-outs
+   * carry no class: the missing object is their consequence, not their
+   * cause.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -628,30 +915,67 @@ export class SubprocessDriver implements Driver {
     observation: RunObservation,
     sessionId: string,
     aborted: boolean,
+    structured: unknown,
+    structuredMiss: string | undefined,
+    codexBinary: boolean,
   ): WorkerResult {
     const measured =
       observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
-    const structured =
-      observation.result === undefined ? undefined : observation.result.structured_output;
     const stopReason = stopReasonOf({
       aborted,
+      harnessFailure: observation.harnessFailure !== undefined,
       maxTokens: budget.maxTokens,
       usage,
       resultStatus: resultStatusOf(observation.result),
+      oversizedLine: observation.close?.oversizedLine === true,
     });
+    // §2.3 verdict unification: a structured-output miss is an ERROR verdict
+    // — except when a cap or the signal stopped the run first (the missing
+    // object is its consequence, not its cause: the budget/aborted carve-out).
+    const missIsError = structuredMiss !== undefined && stopReason === 'complete';
+    const effectiveStopReason: WorkerResult['stopReason'] = missIsError ? 'error' : stopReason;
     // The error field is present ONLY on a driver-level failure verdict (the
     // frozen contract allows `error` only with stopReason 'error'): the cause
     // is derived from the result frame, else the child's exit evidence, else
     // the narration tail — a bare 'error' tells the caller nothing (issue
     // #208, mirroring the claude-agent derivation).
     let error: string | undefined;
-    if (stopReason === 'error') {
-      error = errorCauseOf(observation);
-      if (observation.stderr.length > 0) {
+    let errorClass: WorkerErrorClass | undefined;
+    let providerSignals: ProviderSignals | undefined;
+    if (effectiveStopReason === 'error') {
+      if (observation.harnessFailure !== undefined) {
+        // Fail-closed surface/transport assertions are always 'harness'.
+        errorClass = 'harness';
+      } else if (structuredMiss !== undefined) {
+        error = `subprocess driver: structured output invalid — ${structuredMiss}`;
+        errorClass = 'output-invalid';
+      } else {
+        const result = observation.result;
+        const resultFailed = result !== undefined && resultStatusOf(result) === 'error';
+        const rawResult = asString(result?.['result']);
+        const errorEntries = (asArray(result?.['errors']) ?? []).filter(
+          (entry): entry is string => typeof entry === 'string' && entry.trim() !== '',
+        );
+        const subtype = asString(result?.['subtype']);
+        const resultCause =
+          rawResult !== undefined && rawResult.trim() !== '' ? rawResult : errorEntries.join('; ');
+        const classified = classifyFailure({
+          kind: resultFailed ? 'result-frame' : 'close',
+          texts: [...(resultFailed ? [resultCause, subtype ?? ''] : []), ...observation.stderr],
+          oversizedLine: observation.close?.oversizedLine === true,
+          close: observation.close,
+          measuredUsage: measured !== undefined || observation.assistantUsage !== undefined,
+          codexBinary,
+        });
+        errorClass = classified.errorClass;
+        providerSignals = classified.providerSignals;
+      }
+      error = error ?? errorCauseOf(observation);
+      if (error !== undefined && observation.stderr.length > 0) {
         error = `${error}; stderr: ${observation.stderr.slice(-3).join(' | ')}`;
       }
-      error = boundedErrorText(error);
+      error = boundedErrorText(error ?? 'subprocess driver: the CLI failed without a cause');
     }
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/spawn-failure verdict.
@@ -671,13 +995,20 @@ export class SubprocessDriver implements Driver {
       // The observed served model: what the endpoint reports it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
       ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
-      ...(structured !== undefined ? { structuredOutput: structured } : {}),
+      // The payload rides a COMPLETE verdict only (parity with the ai-sdk
+      // lane): the served-model wrapper judges only completes, so a payload
+      // on a budget/aborted verdict would bypass the observed-model check.
+      ...(effectiveStopReason === 'complete' && structured !== undefined
+        ? { structuredOutput: structured }
+        : {}),
       usage,
       ...cost,
       sessionId,
       denials: observation.denials,
-      stopReason,
+      stopReason: effectiveStopReason,
       ...(error !== undefined ? { error } : {}),
+      ...(errorClass !== undefined ? { errorClass } : {}),
+      ...(providerSignals !== undefined ? { providerSignals } : {}),
     };
   }
 
@@ -715,17 +1046,6 @@ function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
 }
 
-/** Load a sessionRef for resume; unknown sessions throw (a fake resume is worse than a loud error). */
-async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
-  const record = await store.load(sessionRef);
-  if (record === undefined) {
-    throw new Error(
-      `subprocess driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
-    );
-  }
-  return record;
-}
-
 /**
  * Frozen ToolPolicy → the allowed tool-name subset: 'none' → nothing;
  * 'unrestricted' → the whole harness surface; 'allowlist' (the default
@@ -735,17 +1055,63 @@ export function allowedToolNames(
   harnessToolNames: readonly string[],
   policy: ToolPolicy,
 ): string[] {
-  const mode = policy.mode ?? 'allowlist';
-  if (mode === 'none') return [];
-  if (mode === 'unrestricted') return [...harnessToolNames];
-  const allowed = new Set(policy.allow);
-  return harnessToolNames.filter((name) => allowed.has(name));
+  return selectToolNames(harnessToolNames, policy); // the shared core — one implementation
+}
+
+/**
+ * Write the per-run MCP config (Annex A.4) EXCLUSIVELY (flag 'wx' =
+ * O_CREAT|O_EXCL — never follows or reuses a pre-planted file) with mode
+ * 0600, beside the session records, under a per-run random name. An
+ * existing file at that name is never adopted or replaced: EEXIST throws
+ * (pre-dispatch). The server is launched as `process.execPath` + the
+ * module-relative bin (never PATH/npx/plan data); the manifest is its one
+ * argv element.
+ */
+async function writeMcpConfig(
+  sessionsDir: string,
+  sessionId: string,
+  manifest: HarnessManifest,
+): Promise<string> {
+  // ABSOLUTE: the CLI runs with cwd = the workspace, so a relative
+  // sessionsDir would resolve --mcp-config beneath the workspace.
+  const path = resolve(sessionsDir, `${sessionId}.${randomUUID()}${HARNESS_MCP_CONFIG_FILE}`);
+  const launch = harnessServerLaunch();
+  const config = {
+    mcpServers: {
+      [HARNESS_MCP_SERVER_NAME]: {
+        command: launch.command,
+        args: [...launch.args, JSON.stringify(manifest)],
+        env: {},
+      },
+    },
+  };
+  const body = `${JSON.stringify(config)}\n`;
+  await writeFile(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  return path;
+}
+
+/** Delete the per-run MCP config; absent path or failure is swallowed (persistence posture). */
+async function removeMcpConfig(path: string | undefined): Promise<void> {
+  if (path === undefined) return;
+  try {
+    await rm(path, { force: true });
+  } catch {
+    // deliberately swallowed — the verdict outranks the cleanup
+  }
 }
 
 /** Inputs to the argv builder — plain data. */
 export interface ArgBuildInputs {
   route: Route;
+  /** The tool surface. Default 'harness' (the closed surface). */
+  toolSurface?: SubprocessToolSurface;
+  /**
+   * The --allowedTools names, verbatim: harness mode passes the QUALIFIED
+   * spellings (`mcp__cq-harness__<name>`); stock mode the legacy harness names.
+   */
   allowedToolNames: readonly string[];
+  /** The per-run MCP config path (harness mode, non-empty selection only). */
+  mcpConfigPath?: string | undefined;
   /** Serialized JSON Schema for --json-schema, when the schema option is set. */
   outputJsonSchema: string | undefined;
   /** CLI session id for --resume, when the record carries a marker. */
@@ -774,6 +1140,14 @@ export function buildArgs(inputs: ArgBuildInputs): string[] {
   if (inputs.outputJsonSchema !== undefined) {
     args.push('--json-schema', inputs.outputJsonSchema);
   }
+  if ((inputs.toolSurface ?? 'harness') === 'harness') {
+    // The CLOSED surface (RS-1 recipe + RS-1b MCP form, Annex A.4): no
+    // builtins (absent, not denied), no ambient settings, no ambient MCP.
+    args.push('--tools', '', '--setting-sources', '', '--strict-mcp-config');
+    if (inputs.mcpConfigPath !== undefined) args.push('--mcp-config', inputs.mcpConfigPath);
+  }
+  // ONE argv element, SPACE-joined: a comma-joined list silently
+  // pre-approves only its first entry (RS-1b b9/b10).
   args.push('--allowedTools', inputs.allowedToolNames.join(' '));
   args.push('--model', inputs.route.model);
   if (inputs.resumeCliSessionId !== undefined) {
@@ -817,7 +1191,31 @@ interface RunObservation {
   deniedToolUseIds: Set<string>;
   /** The frozen denials, in denial order. */
   denials: ToolDenial[];
+  /** Harness mode only: the init surface the CLI must report (fail-closed assertion). */
+  expectedSurface: ExpectedInitSurface | undefined;
+  /** True once the first system/init event was folded. */
+  initSeen: boolean;
+  /** True once init reported the harness server connected (the config file may go). */
+  harnessConnected: boolean;
+  /** tool_use ids the CLI reported as permission-denied (system/permission_denied). */
+  permissionDeniedIds: Set<string>;
+  /** The first harness failure (surface mismatch / transport failure) — terminates the run. */
+  harnessFailure: HarnessFailure | undefined;
 }
+
+/** A harness-classified failure marker (narration + error cause), `errorClass: 'harness'`. */
+type HarnessFailure =
+  | {
+      cq: 'harness-surface-mismatch';
+      errorClass: 'harness';
+      expected: unknown;
+      observed: unknown;
+    }
+  | { cq: 'harness-transport-failure'; errorClass: 'harness'; tool: string; text: string }
+  | { cq: 'harness-surface-unverified'; errorClass: 'harness' };
+
+/** The CLI's own permission-denial text (RS-1b b3/b6), the fallback when no frame was seen. */
+const CLI_PERMISSION_TEXT = /^Claude requested permissions to use /;
 
 function newObservation(): RunObservation {
   return {
@@ -834,6 +1232,11 @@ function newObservation(): RunObservation {
     toolResults: [],
     deniedToolUseIds: new Set(),
     denials: [],
+    expectedSurface: undefined,
+    initSeen: false,
+    harnessConnected: false,
+    permissionDeniedIds: new Set(),
+    harnessFailure: undefined,
   };
 }
 
@@ -926,7 +1329,17 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
       if (event['subtype'] === 'init') {
         observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
+        if (!observation.initSeen) {
+          observation.initSeen = true;
+          assertInitSurface(observation, event);
+        }
         return;
+      }
+      if (event['subtype'] === 'permission_denied') {
+        // The CLI's permission gate refused a call outside --allowedTools;
+        // the errored tool_result that follows is a permission denial.
+        const id = asString(event['tool_use_id']);
+        if (id !== undefined) observation.permissionDeniedIds.add(id);
       }
       observation.narration.push(line); // known type, unhandled subtype — evidence
       return;
@@ -975,7 +1388,29 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.toolResults.push({ toolUseId: id, ok: rec['is_error'] !== true, text });
         if (rec['is_error'] !== true || observation.deniedToolUseIds.has(id)) continue;
         observation.deniedToolUseIds.add(id);
-        const tool = observation.toolUseNameById.get(id) ?? 'unknown';
+        const rawName = observation.toolUseNameById.get(id) ?? 'unknown';
+        // Harness names in OUR vocabulary (the claude-agent lane's too).
+        const tool = harnessToolName(rawName);
+        if (
+          observation.expectedSurface !== undefined &&
+          isQualifiedHarnessTool(rawName) &&
+          !observation.permissionDeniedIds.has(id) &&
+          !CLI_PERMISSION_TEXT.test(text) &&
+          !isHarnessDenial(text)
+        ) {
+          // THREE-WAY is_error CLASSIFICATION (Annex A.4) — neither a harness
+          // denial (stable prefix) nor a CLI permission denial: a server
+          // crash, an MCP timeout, a -32602 … arriving as CLI-authored text.
+          // Never a denial: the run would otherwise finish as a model
+          // outcome with no working tools. Terminate → error/harness.
+          observation.harnessFailure ??= {
+            cq: 'harness-transport-failure',
+            errorClass: 'harness',
+            tool,
+            text: text.slice(0, 2_000),
+          };
+          continue;
+        }
         observation.denials.push({
           tool,
           reason: text === '' ? `tool use denied by the CLI (${tool})` : text,
@@ -992,6 +1427,34 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     default:
       observation.narration.push(line);
   }
+}
+
+/**
+ * The fail-closed init-surface assertion (Annex A.4), on the FIRST
+ * system/init event of a harness-mode run: the `{name, status}` projection
+ * of `mcp_servers` and the `tools` set must match the expected surface
+ * exactly. A mismatch (a missing/failed harness, a leaked connector or
+ * stray `.mcp.json`, a builtin `--tools ""` no longer strips) records the
+ * harness failure that terminates the run; a match with a configured
+ * server marks it connected.
+ */
+function assertInitSurface(observation: RunObservation, event: Record<string, unknown>): void {
+  const expected = observation.expectedSurface;
+  if (expected === undefined) return; // stock mode — nothing asserted
+  const verdict = compareInitSurface(expected, {
+    mcp_servers: event['mcp_servers'],
+    tools: event['tools'],
+  });
+  if (verdict.ok) {
+    observation.harnessConnected = expected.harness;
+    return;
+  }
+  observation.harnessFailure ??= {
+    cq: 'harness-surface-mismatch',
+    errorClass: 'harness',
+    expected: verdict.expected,
+    observed: verdict.observed,
+  };
 }
 
 /**
@@ -1028,7 +1491,18 @@ async function persistObservation(
     }
   }
   for (const outcome of observation.toolResults) {
-    const name = observation.toolUseNameById.get(outcome.toolUseId);
+    const rawName = observation.toolUseNameById.get(outcome.toolUseId);
+    // Harness mode: only the QUALIFIED harness spellings are the governed
+    // surface, recorded under their harness names; stock mode: the legacy
+    // raw-name match.
+    const name =
+      rawName === undefined
+        ? undefined
+        : observation.expectedSurface === undefined
+          ? rawName
+          : isQualifiedHarnessTool(rawName)
+            ? harnessToolName(rawName)
+            : undefined;
     if (name === undefined || !allowedNames.has(name)) continue; // governed surface only
     const use = observation.toolUses.find((candidate) => candidate.id === outcome.toolUseId);
     const message: SessionMessage = {
@@ -1043,7 +1517,10 @@ async function persistObservation(
   if (text !== '') {
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
-  const diagnostics = [...observation.narration, ...observation.stderr.map((l) => `[stderr] ${l}`)];
+  const diagnostics = [
+    ...observation.narration.map(redactSensitiveText),
+    ...observation.stderr.map((l) => `[stderr] ${redactSensitiveText(l)}`),
+  ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {
       role: 'tool',
@@ -1087,13 +1564,25 @@ export function resultStatusOf(result: ResultEvent | undefined): ResultStatus {
 
 /**
  * The error CAUSE for an 'error' verdict (issue #208): what actually went
- * wrong, in precedence order — a failed result frame's own `result` string,
- * then its joined `errors` entries, then its subtype; else the child's spawn
- * error, else its exit code or terminating signal, else the narration tail.
+ * wrong, in precedence order — a harness failure; a failed result frame's
+ * own `result` string, joined `errors` entries, or subtype; the child's
+ * oversized-line failure, spawn error, exit code or terminating signal;
+ * finally the narration tail.
  * The caller appends the retained stderr tail and redacts/bounds the result
  * (`boundedErrorText`), so a 0-token failure is diagnosable from the journal.
  */
 function errorCauseOf(observation: RunObservation): string {
+  const failure = observation.harnessFailure;
+  if (failure !== undefined) {
+    switch (failure.cq) {
+      case 'harness-surface-mismatch':
+        return `${HARNESS_ERROR_PREFIX} — init surface mismatch: expected ${JSON.stringify(failure.expected)}, observed ${JSON.stringify(failure.observed)}`;
+      case 'harness-transport-failure':
+        return `${HARNESS_ERROR_PREFIX} — transport failure on '${failure.tool}': ${failure.text}`;
+      case 'harness-surface-unverified':
+        return `${HARNESS_ERROR_PREFIX} — the CLI never reported its init surface`;
+    }
+  }
   const result = observation.result;
   if (result !== undefined && resultStatusOf(result) === 'error') {
     const rawResult = asString(result['result']);
@@ -1110,6 +1599,9 @@ function errorCauseOf(observation: RunObservation): string {
     return `subprocess driver: result event error — ${cause}`;
   }
   const close = observation.close;
+  if (close?.oversizedLine === true) {
+    return 'subprocess driver: child emitted an oversized stdout/stderr line';
+  }
   if (close?.spawnError !== undefined) {
     return `subprocess driver: spawn failed — ${describeError(close.spawnError)}`;
   }
@@ -1128,6 +1620,246 @@ function errorCauseOf(observation: RunObservation): string {
 /** Σ of the frozen Usage fields — the fold Budget.maxTokens is checked against. */
 function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Error-class classifier (seam v2, ADR-0002 §2.2; RS-14 §4 CLI rows)
+// ---------------------------------------------------------------------------
+
+/** Inputs to the subprocess failure classifier — structured signals only. */
+export interface FailureClassInputs {
+  /** Which channel reported the failure (the classifier's kind signal). */
+  kind: 'result-frame' | 'close';
+  /**
+   * The CLI's cause texts: a failed result frame's result string / subtype,
+   * plus the retained stderr tail. The stream-json surface exposes no HTTP
+   * headers or status codes, so the vendor rows below match ONLY through
+   * these anchored patterns.
+   */
+  texts: readonly string[];
+  /** The child flushed an oversized stdout/stderr line (a protocol break). */
+  oversizedLine: boolean;
+  /** The child's settled close (spawn error / exit code / signal), when known. */
+  close: ProcessClose | undefined;
+  /** A real usage measurement was folded (the codex row's evidence). */
+  measuredUsage: boolean;
+  /** The spawned binary is a codex CLI (the codex row's structured signal). */
+  codexBinary: boolean;
+}
+
+/** The classifier's verdict: the frozen class plus any limit observations. */
+export interface FailureClassification {
+  errorClass: WorkerErrorClass;
+  providerSignals?: ProviderSignals;
+}
+
+/**
+ * The vendor limit texts, ANCHORED — never a bare numeric-status scan:
+ *   - the claude CLI's session/weekly usage-limit result ("You've hit your
+ *     … limit · resets …") — quota, reset when extractable;
+ *   - gateway funded-allowance prose ("spend limit reached") and the
+ *     opencode funded-balance row ("Insufficient account funds") — quota;
+ *   - the throttle rows ("Server is temporarily limiting requests",
+ *     "Request rejected (429)") — rate-limit.
+ */
+const CLI_LIMIT_TEXT = /you(?:'ve| have) hit your [a-z ]{1,32}limit · resets /i;
+const RATE_LIMIT_TEXTS: ReadonlyArray<RegExp> = [
+  /server is temporarily limiting requests/i,
+  /request rejected \(429\)/i,
+];
+const QUOTA_TEXTS: ReadonlyArray<RegExp> = [
+  /\bspend limit reached\b/i,
+  /\bInsufficient account funds\b/,
+];
+
+/**
+ * The class of a subprocess failure (header cut order):
+ *   1. an oversized output line is a protocol break → 'harness';
+ *   2. the funded-allowance rows → 'quota' (+ the claude reset window);
+ *   3. the throttle rows → 'rate-limit';
+ *   4. a result-event error → 'provider-error';
+ *   5. a codex CLI that folded real usage and exited non-zero with no
+ *      result event surfaced the PROVIDER's failure → 'provider-error';
+ *   6. a spawn error, a signal death, any other non-zero exit, or a
+ *      silent death → 'harness'.
+ * Abort-shaped runs never reach this function (they are 'aborted').
+ */
+export function classifyFailure(inputs: FailureClassInputs): FailureClassification {
+  if (inputs.oversizedLine) {
+    return { errorClass: 'harness' };
+  }
+  const joined = inputs.texts.join('\n');
+  if (CLI_LIMIT_TEXT.test(joined)) {
+    return quotaWithResetSignal(joined);
+  }
+  if (QUOTA_TEXTS.some((pattern) => pattern.test(joined))) {
+    return { errorClass: 'quota' };
+  }
+  if (RATE_LIMIT_TEXTS.some((pattern) => pattern.test(joined))) {
+    return { errorClass: 'rate-limit' };
+  }
+  if (inputs.kind === 'result-frame') {
+    return { errorClass: 'provider-error' };
+  }
+  const close = inputs.close;
+  const exitFailure =
+    close !== undefined &&
+    close.spawnError === undefined &&
+    close.signal === null &&
+    close.code !== 0;
+  if (inputs.codexBinary && exitFailure && inputs.measuredUsage) {
+    // RS-14 §4 codex row: the CLI reported usage, then died before the
+    // result event — the provider's failure, surfaced through the CLI.
+    return { errorClass: 'provider-error' };
+  }
+  return { errorClass: 'harness' };
+}
+
+/** Quota + the claude unified-window reset observation, when extractable. */
+function quotaWithResetSignal(text: string): FailureClassification {
+  const resetAt = resetAtFromLimitText(text);
+  return {
+    errorClass: 'quota',
+    ...(resetAt !== undefined
+      ? { providerSignals: { windows: [{ id: unifiedWindowIdOf(text), resetAt }] } }
+      : {}),
+  };
+}
+
+/**
+ * The unified-limit window id for a claude limit text: the vendor names the
+ * window ('use limit'/'session limit' = the 5h unified window, 'weekly
+ * limit' = the 7d one); anything else is honestly bucketed 'unified' rather
+ * than guessed.
+ */
+function unifiedWindowIdOf(text: string): string {
+  if (/\b(?:weekly|7d)\b/i.test(text)) return '7d';
+  if (/\b(?:use|session|5h)\b/i.test(text)) return '5h';
+  return 'unified';
+}
+
+/**
+ * The reset instant from a claude limit text's "· resets <when>" tail, when
+ * the vendor's form is parseable: an absolute date, a relative duration
+ * ('1h30m'), or the CLI's wall-clock form ("3pm (Asia/Singapore)" — resolved
+ * against the named IANA zone). Anything ambiguous (bare digits, a zoneless
+ * wall clock) is left OUT — never invent a reset.
+ */
+export function resetAtFromLimitText(text: string): string | undefined {
+  // The capture stops at the line end: the classifier may join several
+  // cause texts (result frame + subtype + stderr) into one string.
+  const tail = /· resets ([^\n]+)/i.exec(text)?.[1]?.trim();
+  if (tail === undefined || tail === '' || /^\d+$/.test(tail)) return undefined;
+  const parsed = Date.parse(tail);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  const duration =
+    /^((?<days>\d+)d)?((?<hours>\d+)h)?((?<minutes>\d+)m)?((?<seconds>\d+)s)?$/i.exec(tail);
+  if (duration?.groups !== undefined) {
+    const { days, hours, minutes, seconds } = duration.groups;
+    const totalMs =
+      Number(days ?? 0) * 86_400_000 +
+      Number(hours ?? 0) * 3_600_000 +
+      Number(minutes ?? 0) * 60_000 +
+      Number(seconds ?? 0) * 1000;
+    return totalMs > 0 ? new Date(Date.now() + totalMs).toISOString() : undefined;
+  }
+  const wall =
+    /^(?:(?<date>\d{4}-\d{2}-\d{2})\s+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?\s*(?<meridiem>am|pm)?\s*\((?<zone>[^)]+)\)$/i.exec(
+      tail,
+    );
+  if (wall?.groups === undefined) return undefined;
+  const { date, hour, minute, meridiem, zone } = wall.groups;
+  if (zone === undefined) return undefined; // a zoneless wall clock is no instant
+  let hours = Number(hour);
+  const minutes = Number(minute ?? '0');
+  if (!Number.isInteger(hours) || hours <= 0 || hours > 23) return undefined;
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) return undefined;
+  if (meridiem !== undefined) {
+    if (hours > 12) return undefined;
+    hours = (hours % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0);
+  }
+  return instantOfWallClock(hours, minutes, zone.trim(), date);
+}
+
+/**
+ * The UTC instant of the NEXT occurrence of `hour:minute` wall-clock time in
+ * `zone` (or of the named calendar date in that zone), best effort: the
+ * zone's offset is read through Intl and corrected twice for DST edges. An
+ * unknown zone yields undefined — a reset is never invented.
+ */
+function instantOfWallClock(
+  hour: number,
+  minute: number,
+  zone: string,
+  date: string | undefined,
+): string | undefined {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const offsetAt = (at: number): number => {
+      const parts: Record<string, number> = {};
+      for (const part of formatter.formatToParts(new Date(at))) {
+        if (part.type !== 'literal') parts[part.type] = Number(part.value);
+      }
+      return (
+        Date.UTC(
+          parts['year'] ?? 1970,
+          (parts['month'] ?? 1) - 1,
+          parts['day'] ?? 1,
+          parts['hour'] ?? 0,
+          parts['minute'] ?? 0,
+          parts['second'] ?? 0,
+        ) -
+        Math.floor(at / 1000) * 1000
+      );
+    };
+    const DAY_MS = 86_400_000;
+    const timeOfDay = hour * 3_600_000 + minute * 60_000;
+    // The wall-clock midnight of the target date as-if-UTC, then the target
+    // instant: solve midnightInstant + offset(midnightInstant) === U twice.
+    const midnightAsUtc =
+      date === undefined
+        ? Math.floor((Date.now() + offsetAt(Date.now())) / DAY_MS) * DAY_MS
+        : (() => {
+            const parsed = Date.parse(`${date}T00:00:00Z`);
+            return Number.isFinite(parsed) ? parsed : Number.NaN;
+          })();
+    if (!Number.isFinite(midnightAsUtc)) return undefined;
+    let midnight = midnightAsUtc;
+    midnight -= offsetAt(midnight);
+    midnight = midnightAsUtc - offsetAt(midnight);
+    let target = midnight + timeOfDay;
+    if (date === undefined && target <= Date.now() - 60_000) {
+      // Already past today: the reset means tomorrow (best effort — across a
+      // DST edge the roll may be off by the shift; it is an observation, not
+      // a contract).
+      const tomorrow = midnightAsUtc + DAY_MS;
+      let next = tomorrow;
+      next -= offsetAt(next);
+      next = tomorrow - offsetAt(next);
+      target = next + timeOfDay;
+    }
+    return new Date(target).toISOString();
+  } catch {
+    return undefined; // unknown zone — no reset invented
+  }
+}
+
+/**
+ * Whether the spawned binary is a codex CLI: the basename of the binary
+ * template's first element (a CONFIG field, not free text). The codex row
+ * needs it — a codex exit carries no result event to classify from.
+ */
+function isCodexBinary(binary: string): boolean {
+  return /^codex/i.test(basename(binary));
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
@@ -1153,14 +1885,19 @@ function costField(
 /** Inputs to the frozen stop-reason mapping (header table). */
 export interface StopReasonInputs {
   aborted: boolean;
+  /** A harness failure terminated or invalidated the run (always an 'error'). */
+  harnessFailure?: boolean;
   maxTokens: number | undefined;
   usage: Usage;
   resultStatus: ResultStatus;
+  oversizedLine?: boolean;
 }
 
-/** THE mapping (checked in order): aborted → budget → error → complete. */
+/** THE mapping: aborted → harness failure → oversized line → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.harnessFailure === true) return 'error';
+  if (inputs.oversizedLine === true) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
   if (inputs.resultStatus !== 'success') return 'error';

@@ -36,6 +36,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import type { DriverFactory, DriverRequest, ResolvedDriver } from '../../../src/driver/factory.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type { OpResult } from '../../../src/kernel/types.js';
@@ -48,6 +49,7 @@ import {
   MODEL_SPEC_REQUIRED_REASON,
   runMergePrs,
 } from '../../../src/ops/merge/runPrs.js';
+import { RunMergePrsInputSchema } from '../../../src/ops/merge/registry.js';
 import type { MergePrsCandidate, RunMergePrsInput } from '../../../src/ops/merge/runPrs.js';
 import type {
   ConflictResolutionValue,
@@ -135,6 +137,10 @@ class FakeMergeEffects implements MergeEffects {
   /** Prs whose FIRST mergePr fails and later ones succeed — the pass-2
    * retry scripting hook (a pass-1 failure that pass 2 can recover). */
   readonly mergeFailOnce = new Set<number>();
+  /** retarget-self prs whose retargetBase fails — the failed-retarget
+   * scripting hook (a failed retarget withholds the pr, and the executor
+   * then blocks its plan-ordered descendants). */
+  readonly retargetFailures = new Set<number>();
   /** Refs whose head MOVES between the baseline validate (call 1) and any
    * later validate — the plan→run drift-stale scripting hook. */
   readonly driftRefs = new Set<string>();
@@ -184,6 +190,9 @@ class FakeMergeEffects implements MergeEffects {
 
   async retargetBase(pr: number, newBase: string): Promise<GhResult> {
     this.calls.push(`retarget:${String(pr)}:base=${newBase}`);
+    if (this.retargetFailures.has(pr)) {
+      return { code: 1, stdout: '', stderr: 'refused by the forge' };
+    }
     return OK;
   }
 
@@ -254,6 +263,27 @@ const fakeRefetch = (
   return { refetch, callCount: () => calls };
 };
 
+/**
+ * THE FAKE DRIVER FACTORY — records every DriverRequest and resolves to
+ * the given driver verbatim (the served-model wrapper is the real
+ * factory's concern; factory tests own it).
+ */
+const fakeDrivers = (
+  driver: Driver,
+): DriverFactory & {
+  requests: DriverRequest[];
+  resolve(request: DriverRequest): ResolvedDriver;
+} => {
+  const requests: DriverRequest[] = [];
+  return {
+    requests,
+    resolve: (request: DriverRequest): ResolvedDriver => {
+      requests.push(request);
+      return { driver, lane: 'ai-sdk', modelSpec: request.modelSpec };
+    },
+  };
+};
+
 // ---------------------------------------------------------------------------
 // The pipeline, stage by stage
 // ---------------------------------------------------------------------------
@@ -276,6 +306,55 @@ describe('runMergePrs', () => {
     expect(outcome.diagnosis.causes).toEqual([]);
     // The agent is never dispatched when nothing conflicts.
     expect(calls).toEqual([]);
+  });
+
+  test('dispatch config applies trust policy: coderabbit approval yields no acceptable review', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(999));
+    const outcome = await runMergePrs(
+      {
+        ...baseInput([
+          eligible(44, {
+            reviews: [
+              {
+                ...approved(44),
+                authorLogin: 'coderabbitai[bot]',
+                authorAssociation: 'NONE',
+              },
+            ],
+          }),
+        ]),
+        config: { trustedBots: [], trustedAssociations: [], automationLogin: 'cq-automation[bot]' },
+      },
+      { effects, resolve },
+    );
+    expect(outcome).not.toBeNull();
+    // The composition surface reports the planner's stable not_eligible row;
+    // the underlying F1 classification is the no_acceptable_review reason.
+    expect(outcome.needsHuman).toEqual([{ pr: 44, reason: 'not_eligible' }]);
+  });
+
+  test('the dispatch boundary refuses DISMISSED in acceptReviewStates (review r3, PR #222)', () => {
+    // A dismissed review is a retracted one — the doctrine holds DISMISSED
+    // void, and the fold pre-filter already drops it under an active
+    // policy, so admitting it at the boundary could only ever fire on the
+    // legacy surface and diverge from the governed one (the selfhost
+    // recheck's trust mapping refuses it the same way).
+    const base = {
+      baseBranch: 'main',
+      repoRoot: '/tmp/whatever',
+      prs: [],
+    };
+    const rejected = RunMergePrsInputSchema.safeParse({
+      ...base,
+      config: { acceptReviewStates: ['APPROVED', 'DISMISSED'] },
+    });
+    expect(rejected.success).toBe(false);
+    // The verdict-carrying set parses clean.
+    expect(
+      RunMergePrsInputSchema.parse({ ...base, config: { acceptReviewStates: ['APPROVED'] } })
+        .config,
+    ).toEqual({ acceptReviewStates: ['APPROVED'] });
   });
 
   test('no acted resolution: the pass-2 refresh seam is never invoked even when wired', async () => {
@@ -770,7 +849,7 @@ describe('runMergePrs', () => {
     expect(callsSecond).toHaveLength(1);
   });
 
-  test('resolve passthroughs (protectedBranch/wallClockMs/sessionsDir) ride the resolve input', async () => {
+  test('resolve passthroughs (protectedBranch/wallClockMs) ride the resolve input', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(45));
     const outcome = await runMergePrs(
@@ -778,7 +857,6 @@ describe('runMergePrs', () => {
         ...baseInput([conflicting(45)], MODEL_SPEC),
         protectedBranch: 'trunk',
         wallClockMs: 1234,
-        sessionsDir: '/sessions',
       },
       { effects, resolve },
     );
@@ -792,7 +870,6 @@ describe('runMergePrs', () => {
       modelSpec: MODEL_SPEC,
       protectedBranch: 'trunk',
       wallClockMs: 1234,
-      sessionsDir: '/sessions',
     });
   });
 
@@ -963,6 +1040,17 @@ describe('runMergePrs', () => {
     const effects = new FakeMergeEffects();
     effects.mergeFailures.add(44); // the eligible root's merge is refused
     effects.driftRefs.add(headRefFor(48)); // 48's head moves after the baseline → stale
+    // The GENERALIZED #153 shape (PR #234 r1): a failed merge can only
+    // orphan a child when the failing entry is itself a stacked merge —
+    // and the generalized planner no longer orders such a child at all.
+    // So the executor's blocked leg is driven by a failed RETARGET here:
+    // 50 is a retarget-self root (its rung 49 closed), its retarget is
+    // refused, 51 (its plan-ordered depth-1 child) blocks on the failed
+    // ancestor, and 52 — which the pre-generalization planner ORDERED
+    // into 51's would-be-orphaned branch — is withheld at plan time
+    // (stack_base_merging_this_pass): 51 merges earlier in the pass, so
+    // merging 52 into 51's branch would strand it off the trunk.
+    effects.retargetFailures.add(50);
     const { resolve, calls } = fakeResolve(escalated('a human must reconcile the semantics'));
 
     const outcome = await runMergePrs(
@@ -970,9 +1058,16 @@ describe('runMergePrs', () => {
         [
           draft(41),
           eligible(44),
-          eligible(47, { baseRefName: 'feat/44' }), // 44's child — blocked when 44 fails
+          // 44's child: 44 is a same-pass merge root, so the planner
+          // defers 47 (stack_base_merging_this_pass) instead of ordering
+          // it into 44's soon-to-be-orphaned branch (review-debt #153).
+          eligible(47, { baseRefName: 'feat/44' }),
           conflicting(45),
           eligible(48),
+          { ...eligible(49), state: 'closed' as const, headRefName: 'gone-49' },
+          eligible(50, { baseRefName: 'gone-49' }),
+          eligible(51, { baseRefName: 'feat/50' }),
+          eligible(52, { baseRefName: 'feat/51' }),
         ],
         MODEL_SPEC,
       ),
@@ -985,15 +1080,18 @@ describe('runMergePrs', () => {
     // No second pass: nothing acted.
     expect(outcome.secondPass).toBeNull();
     expect(outcome.firstPass.merged).toEqual([]);
-    // The execution buckets: 44 failed, 48 stale (drift), 47 blocked by
-    // its failed ancestor.
-    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44]);
+    // The execution buckets: 44 failed, 48 stale (drift), 50's retarget
+    // failed, and 51 blocked by its failed ancestor. 47 AND 52 never
+    // reached execution — the generalized planner withheld both
+    // (#153: 47's base is a same-pass merge root; 52's base 51 merges
+    // earlier in the pass under retarget-self root 50).
+    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44, 50]);
     expect(outcome.firstPass.stale.map((entry) => entry.pr)).toEqual([48]);
-    expect(outcome.firstPass.blocked.map((entry) => entry.pr)).toEqual([47]);
+    expect(outcome.firstPass.blocked.map((entry) => entry.pr)).toEqual([51]);
     // Dedupe + priority pinned on pr 45: it is BOTH an escalation AND a
     // planner withhold ('not_eligible' — it is conflicting) — the decided
     // escalation's summary wins, the planner's gate reason does not.
-    expect(outcome.needsHuman.map((row) => row.pr)).toEqual([41, 44, 45, 47, 48]);
+    expect(outcome.needsHuman.map((row) => row.pr)).toEqual([41, 44, 45, 47, 48, 50, 51, 52]);
     const reasonOf = (pr: number): string => {
       const row = outcome.needsHuman.find((candidate) => candidate.pr === pr);
       if (row === undefined) throw new Error(`no needsHuman row for pr ${String(pr)}`);
@@ -1002,12 +1100,15 @@ describe('runMergePrs', () => {
     expect(reasonOf(41)).toBe('not_eligible');
     expect(reasonOf(44)).toBe('gh pr merge 44 --merge failed (exit 1): refused by the forge');
     expect(reasonOf(45)).toBe('a human must reconcile the semantics');
-    expect(reasonOf(47)).toBe('blocked_by_ancestor');
+    expect(reasonOf(47)).toBe('stack_base_merging_this_pass');
     // The stale row carries the drift detail (baseline sha vs moved sha).
     expect(reasonOf(48)).toContain('head moved between plan and run');
-    // The final report is pass 1, so its post-mortem names all three
+    expect(reasonOf(50)).toBe('gh pr edit 50 --base main failed (exit 1): refused by the forge');
+    expect(reasonOf(51)).toBe('blocked_by_ancestor');
+    expect(reasonOf(52)).toBe('stack_base_merging_this_pass');
+    // The final report is pass 1, so its post-mortem names all four
     // execution outcomes.
-    expect(outcome.diagnosis.needsHuman).toEqual([44, 47, 48]);
+    expect(outcome.diagnosis.needsHuman).toEqual([44, 48, 50, 51]);
     expect(calls).toHaveLength(1);
   });
 
@@ -1045,7 +1146,7 @@ describe('runMergePrs', () => {
           return { usage: ZERO_USAGE, denials: [], stopReason: 'complete' };
         },
       };
-      const op = makeRunMergePrsOp({ driver });
+      const op = makeRunMergePrsOp({ drivers: fakeDrivers(driver) });
 
       const result = await op({ baseBranch: 'main', repoRoot: dir, prs: [], nowMs: NOW_MS });
 
@@ -1072,17 +1173,16 @@ describe('runMergePrs', () => {
     }
   });
 
-  test('makeRunMergePrsOp accepts harnessConfig and dispatches identically (type-level threading; behavioral pin is dispatch parity)', async () => {
-    // Mirror of resolveConflict.test.ts's harnessConfig test. HONESTY NOTE
-    // (PR162 r1): with driver SUPPLIED the config is inert — this test pins
-    // dispatch parity + binding, not the forwarding spread itself (a silent
-    // drop of the spread would stay green here; the spread is type-checked
-    // and the LIVE proof of a config's effect is F5's scripted-agent path,
-    // which supplies deps.driver). Behaviorally: a dispatch with a
-    // harnessConfig present behaves identically — the conflicting pr is
-    // dispatched, the acted self-report is verified against a MOVING head,
-    // and the resolution lands; and the op binds with the config alone (an
-    // empty run dispatches nothing).
+  test('makeRunMergePrsOp threads drivers + harnessConfig and dispatches identically (the harness rides the DriverRequest)', async () => {
+    // Mirror of resolveConflict.test.ts's factory-resolution test. With a
+    // FAKE factory injected the harnessConfig is observable only as data
+    // on the captured DriverRequest (the live proof of a config's effect
+    // is F5's scripted-agent path through a factory bound to the fixture
+    // lane). Behaviorally: a dispatch with a harnessConfig present behaves
+    // identically — the conflicting pr is dispatched, the acted
+    // self-report is verified against a MOVING head, and the resolution
+    // lands; and the op binds with the config alone (an empty run
+    // dispatches nothing).
     const dir = await mkdtemp(join(tmpdir(), 'runprs-harness-'));
     try {
       const effects = new FakeMergeEffects();
@@ -1092,6 +1192,7 @@ describe('runMergePrs', () => {
         run: async (invocation: OpInvocation): Promise<WorkerResult> => {
           runs.push(invocation);
           return {
+            model: invocation.modelSpec.model,
             structuredOutput: { decision: 'acted', summary: 'config rode along' },
             usage: ZERO_USAGE,
             denials: [],
@@ -1099,12 +1200,15 @@ describe('runMergePrs', () => {
           };
         },
       };
-      const op = makeRunMergePrsOp({ effects, driver, harnessConfig: defaultHarnessConfig });
-      const sessionsDir = join(dir, 'sessions');
+      const factory = fakeDrivers(driver);
+      const op = makeRunMergePrsOp({
+        effects,
+        drivers: factory,
+        harnessConfig: defaultHarnessConfig,
+      });
       const result = await op({
         ...baseInput([conflicting(45)], MODEL_SPEC),
         repoRoot: dir,
-        sessionsDir,
       });
       expect(result.status).toBe('ok');
       if (result.status !== 'ok') throw new Error('expected an ok result');
@@ -1112,6 +1216,11 @@ describe('runMergePrs', () => {
         { pr: 45, decision: 'acted', summary: 'config rode along' },
       ]);
       expect(runs).toHaveLength(1);
+      // The resolve op resolved ONE request through the factory, carrying
+      // the conflict-resolver role and the harness dep.
+      expect(factory.requests).toHaveLength(1);
+      expect(factory.requests[0]?.role).toBe('conflict-resolver');
+      expect(factory.requests[0]?.harness).toBe(defaultHarnessConfig);
 
       // Build-only: the config alone binds fine (an empty run dispatches
       // nothing).

@@ -37,6 +37,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       },
       "type": "object"
     },
+    "claimedPaths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "owner": {
       "minLength": 1,
       "type": "string"

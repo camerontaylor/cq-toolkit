@@ -1,0 +1,7 @@
+diff --git a/test/attack.test.ts.snap b/test/attack.test.ts.snap
+index 1111111..2222222 100644
+--- a/test/attack.test.ts.snap
++++ b/test/attack.test.ts.snap
+@@ -1,1 +1,1 @@
+-exports[`x 1`] = `old`;
++exports[`x 1`] = `rewritten`;

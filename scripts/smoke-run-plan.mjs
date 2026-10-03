@@ -3,7 +3,7 @@
 // (dist/cli.js) drives a real governed plan. This script spawns
 //
 //   node dist/cli.js run-plan --plan=<file> --journal-dir=<dir> \
-//        --concurrency=2 --max-usd=2 --ops-root=test/fixtures/cli-smoke-ops
+//        --concurrency=2 --max-tokens=10000 --ops-root=test/fixtures/cli-smoke-ops
 //
 // as a child, consumer-style (stdio piped, streams inspected), and asserts
 // the contracts the CLI + kernel + governor + subprocess driver are supposed
@@ -18,14 +18,15 @@
 // default 'ok' completion, fixed usage). The governed composition itself is
 // the CLI's (src/cli/run-plan.ts):
 //
-//   runPlan(plan, opts, governRegistry(view, governor))
-//     → withBudgetStop(report, plan, governor)
+//   runPlan(plan, opts, view, { governor }) — the governed runner performs
+//     admission, spend observation, the honest stop, and the v2 journal
+//     itself (the CLI governs exactly when the operator sets a cap)
 //
-// exactly as src/kernel/README.md's "Budget governor" section documents —
-// the old smoke wired this composition BY HAND in a self re-invoked child;
-// a generic CLI child cannot carry that hand wiring, so the usage-fold
-// evidence moved into the fixture op's guards PLUS the governor-trip child
-// (leg 4 below — two-part evidence; leg 5 is the trip).
+// exactly as ADR-0003 §2 documents — the old smoke wired this composition BY
+// HAND in a self re-invoked child; a generic CLI child cannot carry that hand
+// wiring, so the usage-fold evidence moved into the fixture op's guards PLUS
+// the governor-trip child (leg 4 below — two-part evidence; leg 5 is the
+// trip).
 //
 // ASSERTED HERE (the legs):
 //   0. Child exit code 0 — the CLI's own verdict over the whole run.
@@ -33,12 +34,12 @@
 //      valid against the shipped RunReportSchema (parseable whole, nothing
 //      else); two jobs, both done (value 'smoke-1'), stoppedEarly false,
 //      counts honest.
-//   1b. Frozen-contract pin — on a FRESH run, report.usage and every
-//      row.usage are undefined: RunReport usage is replay-only (the frozen
-//      JobOutcome contract — runner.ts sources per-job usage from replayed
-//      journal events alone), and the derived-only costUSD stays undefined
-//      too (cost is priced by the price-map layer from usage; runPlan never
-//      fabricates it).
+//   1b. Governed-evidence pin — on a FRESH governed run, the runner's
+//       evidence fold puts the fixture's fixed usage on EVERY row and rolls
+//       it up on the report (the v1.1 contract; the pre-v1.1 replay-only
+//       pin is gone), while the derived-only costUSD stays ABSENT: the
+//       fixture's model is unpriced (no costUSD evidence), the ledger's
+//       rollup is 0, and a fabricated 0 would claim "spent nothing".
 //   2. Journal evidence — the temp journal dir carries exactly one run whose
 //      NDJSON events are run-started, job-started ×2 (attempt 1 each),
 //      job-finished ×2, run-finished (first/last in order).
@@ -58,20 +59,20 @@
 //      inspect):
 //        (a) THE FIXTURE GUARDS (test/fixtures/cli-smoke-ops/smoke/
 //            agent-run.js): the op REFUSES an ungoverned job context — a
-//            dropped governRegistry wiring fails both jobs and the child
+//            dropped governed dispatch fails both jobs and the child
 //            exits 1, failing leg 0 — and it REFUSES a driver result
 //            without usage (the old regression guard, message unchanged).
 //            Leg 0's exit 0 + leg 1's two ok rows prove both guards passed
-//            — i.e. ctx.reportUsage WAS called with the fixture's fixed
+//            — i.e. ctx.reportResult WAS called with the fixture's fixed
 //            usage, once per job, twice here. But guards alone prove
-//            reportUsage was CALLED, not that it is CONNECTED to the
-//            governor — a no-op reportUsage callback would pass all of it.
+//            reportResult was CALLED, not that it is CONNECTED to the
+//            governor — a no-op callback would pass all of it.
 //        (b) THE GOVERNOR-TRIP LEG (leg 5 below): a second CLI child runs
 //            the same ops root under --max-tokens=1 — a token-rollup cap
 //            (DD-9: price-independent) that the fixture's FIRST usage
 //            observation must blow ({10,5,2,3} totals 20 tokens > 1). That
 //            trip happens THROUGH the real CLI fold path, so a disconnected
-//            reportUsage never trips it and the capped child exits 0,
+//            reportResult never trips it and the capped child exits 0,
 //            failing the smoke — evidence the guards cannot produce.
 //   5. THE GOVERNOR-TRIP LEG — the end-to-end fold proof (4b): the capped
 //      child exits 3 with stdout exactly one RunReport claiming the honest
@@ -178,8 +179,24 @@ async function runPlanParent() {
         `--plan=${planPath}`,
         `--journal-dir=${journalDir}`,
         '--concurrency=2',
-        '--max-usd=2',
+        // A generous TOKEN cap (not --max-usd): the fixture's model is
+        // unpriced, and real usage with no costUSD under a USD cap trips the
+        // DD-9 unpriced rule — so a USD cap could never arm this happy run.
+        // The token cap both governs the run (the CLI governs exactly when
+        // the operator sets a cap) and leaves 40 rolled-up tokens (2 jobs ×
+        // 20) far under it.
+        '--max-tokens=10000',
         `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+        // The A12c ADVISORY escape (W2.3): the lane table ships EMPTY at
+        // v1.1, so EVERY dispatch classifies ADVISORY, and this child is an
+        // unattended CLI run — the gate would refuse both jobs with
+        // reservation-refused {reason:'advisory-lane'} (exit 3, two
+        // budget-exhausted rows) before any usage fold could be observed,
+        // failing leg 0 for a reason that has nothing to do with what the
+        // smoke pins. This IS the recorded posture for a product path: an
+        // unattended-by-design caller passes the escape explicitly (the CLI
+        // flag stamps allowAdvisoryProvenance 'operator').
+        '--allow-advisory-budget',
       ],
       childEnv,
     );
@@ -246,28 +263,44 @@ async function runPlanParent() {
       }
     }
 
-    // Leg 1b — the frozen-contract pin on a FRESH run: RunReport usage is
-    // replay-only (runner.ts sources per-job usage from replayed journal
-    // events alone — executed rows never carry it), so the report and every
-    // row leave usage undefined here; the derived-only costUSD stays
-    // undefined too (the price-map layer owns cost; runPlan never
-    // fabricates it — see the runner's rollup note).
-    if (report.usage !== undefined) {
+    // Leg 1b — the governed-evidence pin on a FRESH run (the v1.1
+    // contract): the governed runner folds the op's streamed usage into
+    // per-job rows and the run-level rollup — the fixture's fixed
+    // {input:10, output:5, cacheRead:2, cacheWrite:3} on each row, doubled
+    // on the report. The derived-only costUSD stays ABSENT: the fixture's
+    // model is unpriced (no costUSD evidence ever folded), the ledger's
+    // rollup is 0, and a fabricated 0 would claim "spent nothing".
+    const FIXTURE_USAGE = { input: 10, output: 5, cacheRead: 2, cacheWrite: 3 };
+    if (report.usage === undefined) {
       fail(
-        `fresh-run report.usage is ${JSON.stringify(report.usage)} — RunReport usage must be replay-only on a fresh run (frozen JobOutcome contract)`,
+        'fresh-run report.usage is absent — the governed evidence fold must roll the fixture usage up (v1.1)',
       );
     }
-    for (const row of report.jobs) {
-      if (row.usage !== undefined) {
+    for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      if (report.usage[key] !== FIXTURE_USAGE[key] * 2) {
         fail(
-          `fresh-run row '${row.jobId}'.usage is ${JSON.stringify(row.usage)} — per-job usage must be replay-only on a fresh run (frozen JobOutcome contract)`,
+          `fresh-run report.usage.${key} is ${report.usage[key]}, expected ${FIXTURE_USAGE[key] * 2} (the fixture's fixed usage ×2 jobs)`,
         );
+      }
+    }
+    for (const row of report.jobs) {
+      for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+        if (row.usage?.[key] !== FIXTURE_USAGE[key]) {
+          fail(
+            `fresh-run row '${row.jobId}'.usage.${key} is ${row.usage?.[key]}, expected ${FIXTURE_USAGE[key]} — the governed evidence fold must stamp the row (v1.1)`,
+          );
+        }
       }
       if (row.costUSD !== undefined) {
         fail(
-          `fresh-run row '${row.jobId}'.costUSD is ${row.costUSD} — costUSD is derived-only and runPlan never fabricates it`,
+          `fresh-run row '${row.jobId}'.costUSD is ${row.costUSD} — costUSD is derived-only; an unpriced fold folds no cost`,
         );
       }
+    }
+    if (report.costUSD !== undefined) {
+      fail(
+        `fresh-run report.costUSD is ${report.costUSD} — the ledger's rollup is 0 for an unpriced model and runPlan never fabricates it`,
+      );
     }
 
     // Leg 2 — the journal evidence in the temp dir.
@@ -324,18 +357,19 @@ async function runPlanParent() {
     // Leg 4 — the usage fold's FIRST half (see the header): legs 0 + 1
     // already proved child exit 0 with both rows ok, which is exactly the
     // fixture guards (a) ∧ (b) — the ungoverned guard and the no-usage guard
-    // both passed, so ctx.reportUsage WAS called with the fixture's fixed
-    // usage ×2. That proves reportUsage was CALLED, not that it is CONNECTED
-    // to the governor — leg 5 below proves the connection end-to-end.
+    // both passed, so ctx.reportResult WAS called with the fixture's fixed
+    // usage ×2. That proves reportResult was CALLED, not that it is
+    // CONNECTED to the governor — leg 5 below proves the connection
+    // end-to-end.
 
     // Leg 5 — THE GOVERNOR-TRIP LEG: the fold's second half, proven
     // END-TO-END through the real CLI path (header leg 4b). The fixture op
-    // reports the fake CLI's fixed usage via ctx.reportUsage; the governor's
+    // reports the fake CLI's fixed usage via ctx.reportResult; the governor's
     // token cap (DD-9: price-independent) trips when the rollup EXCEEDS the
     // cap (governor.observeUsage → totalTokensOf), and the fixture's FIRST
     // observation is already {input:10, output:5, cacheRead:2, cacheWrite:3}
     // = 20 tokens — so --max-tokens=1 is the smallest guaranteed-tripping
-    // value. A DISCONNECTED reportUsage (the exact regression this leg
+    // value. A DISCONNECTED reportResult (the exact regression this leg
     // exists to catch — leg 4's guards cannot see it) never folds usage into
     // the governor, the cap never trips, and this child exits 0: every
     // assertion below fails.
@@ -343,16 +377,15 @@ async function runPlanParent() {
     // WHY A SECOND PLAN FILE (the one deliberate deviation from the happy
     // run): the happy plan's two jobs both dispatch into the concurrency-2
     // pool at once, so both are ADMITTED before the first usage observation
-    // — a mid-flight trip gates nothing, and withBudgetStop's honesty rule 2
-    // (governor.ts: an honest stop must GATE undispatched work) returns the
-    // report UNANNOTATED (probed live: exit 0, stoppedEarly false,
-    // budget-exhausted 0). The capped plan keeps the two parallel roots
-    // (still --concurrency=2) and hangs a dependency chain behind them
-    // (j3 ← j1, j4 ← j3), so the trip — guaranteed to have fired by the
-    // runner's wave barrier before wave 2 dispatches — deterministically
-    // gates j3 (admission rejection → a real 'budget-exhausted' row) and j4
-    // (never dispatched → the runner's 'blocked: …' marker → transitively
-    // budget-caused → withBudgetStop re-marks it → the stoppedEarly claim).
+    // — a mid-flight trip gates nothing, and the runner's honest-stop rule
+    // (I9: an honest stop must GATE undispatched work) returns the report
+    // UNANNOTATED. The capped plan keeps the two parallel roots (still
+    // --concurrency=2) and hangs a dependency chain behind them (j3 ← j1,
+    // j4 ← j3), so the trip — guaranteed to have fired by the runner's wave
+    // barrier before wave 2 dispatches — deterministically gates j3 (never
+    // admitted after the trip → the runner's honest-stop re-mark) and j4
+    // (never dispatched, transitively budget-caused behind j3 → re-marked
+    // too → the stoppedEarly claim).
     // Everything else is the happy run's discipline: same ops root, its own
     // temp journal dir, same child environment.
     const cappedPlanPath = join(planDir, 'plan-capped.json');
@@ -382,11 +415,16 @@ async function runPlanParent() {
         `--journal-dir=${cappedJournalDir}`,
         '--concurrency=2',
         // max-usd deliberately ABSENT: the capped leg isolates the TOKEN cap
-        // (DD-9's price-independent backstop). The happy run's --max-usd=2
-        // not tripping on this price-unknown model is already pinned by its
-        // exit 0 + leg 1's stoppedEarly-false assertion.
+        // (DD-9's price-independent backstop) — and on this unpriced fixture
+        // a USD cap would trip the DD-9 unpriced rule instead, never
+        // isolating the token path. The happy run arms governance with a
+        // generous token cap for the same reason.
         '--max-tokens=1', // smallest guaranteed trip: the first usage observation totals 20 tokens (> 1)
         `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+        // Same A12c escape as the happy run: without it this child would
+        // refuse both ROOT dispatches as advisory and the cap would never
+        // be reached, so the trip leg would stop measuring the token fold.
+        '--allow-advisory-budget',
       ],
       childEnv,
     );
@@ -396,7 +434,7 @@ async function runPlanParent() {
     // the earlyStopReason annotation to 3).
     if (capped.code !== 3) {
       fail(
-        `the capped child (--max-tokens=1) exited ${capped.code}, expected 3 — the governor's token cap did not honestly stop the run (a disconnected ctx.reportUsage would exit 0 exactly like this)\n--- child stdout ---\n${capped.stdout}--- child stderr ---\n${capped.stderr}`,
+        `the capped child (--max-tokens=1) exited ${capped.code}, expected 3 — the governor's token cap did not honestly stop the run (a disconnected ctx.reportResult would exit 0 exactly like this)\n--- child stdout ---\n${capped.stdout}--- child stderr ---\n${capped.stderr}`,
       );
     }
     // Leg 5b — the capped run's stdout is exactly one JSON RunReport

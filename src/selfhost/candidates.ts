@@ -346,6 +346,7 @@ export async function fetchMergeCandidates(
         // chains by fetchReviewState itself.
         issueComments: reviewState.restIssueComments,
         lastCommitAt,
+        headRefOid: reviewState.headRefOid,
         headRefName: asString(wireHead['ref']),
         baseRefName: asString(asRecord(pullWire['base'])['ref']),
         // The observed head SHA (review-debt #186): carried through the

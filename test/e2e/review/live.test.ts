@@ -16,9 +16,10 @@
 //      and ZERO gh mutations fly (the recorded argv holds none).
 //
 // THE FAKE FIXER AGENT: the loop's driver registry view binds
-// `review.fixItem` through worktreeFixDriver's makeInner seam to a
-// SubprocessDriver whose binary is `node <generated script>` — a real
-// subprocess (cwd = the PR worktree, prompt on stdin, one stream-json
+// `review.fixItem` through a DriverFactory (ADR-0002 §2.5) whose fixer
+// binding routes the fixture provider to the SUBPROCESS lane over
+// `node <generated script>` — a real subprocess (cwd = the PR worktree via
+// the invocation's workspace binding, prompt on stdin, one stream-json
 // result line out). This is the market-gap scenario: the loop CLOSES with
 // a non-privileged arbitrary reviewer's thread.
 //
@@ -38,12 +39,8 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { OpRegistryView } from '../../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
-import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
-import {
-  FixReviewItemOutputSchema,
-  makeFixReviewItem,
-  worktreeFixDriver,
-} from '../../../src/ops/review/fixReviewItem.js';
+import { createDriverFactory } from '../../../src/driver/factory.js';
+import { makeFixReviewItem } from '../../../src/ops/review/fixReviewItem.js';
 import { ghJson, makeGhRunner } from '../../../src/ops/review/gh.js';
 import type { GhFn } from '../../../src/ops/review/gh.js';
 import { FixReviewItemInputSchema } from '../../../src/ops/review/registry.js';
@@ -145,36 +142,30 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     const f = requireFixture();
     // The fix op dispatches through the governed runPlan seam exactly like
     // the CLI does (an OpRegistryEntry with the shipped input schema), but
-    // the DRIVER seam is injected: worktreeFixDriver's makeInner binds a
-    // SubprocessDriver over the fake agent (module doc).
+    // the DRIVER seam is injected: a DriverFactory (ADR-0002 §2.5) whose
+    // fixer binding routes the fixture provider to the subprocess lane over
+    // the fake agent (module doc). The invocation schema, the workspace
+    // binding and the served-model assertion are the op's/factory's
+    // business — the lane config carries only its transport knobs. The
+    // caller's harness reaches the lane through the DriverRequest (the loop
+    // passes reviewFixHarness, so the live default is unchanged).
+    const drivers = createDriverFactory({
+      bindings: { fixer: { [FIXTURE_ENDPOINT]: 'subprocess' } },
+      lanes: {
+        subprocess: {
+          binary: ['node', agentPath],
+          routingTable: fixtureRoutingTable(),
+          sessionsDir: join(f.root, 'fixer-sessions'),
+        },
+      },
+    });
     const driverRegistryView: OpRegistryView = {
       get: (name) =>
         name === 'review.fixItem'
           ? ({
               name: 'review.fixItem',
               inputSchema: FixReviewItemInputSchema,
-              importer: async () =>
-                makeFixReviewItem({
-                  driver: {
-                    perHarness: (harness, worktree) =>
-                      worktreeFixDriver({
-                        harnessConfig: harness,
-                        worktreePath: worktree.path,
-                        makeInner: (sessionsDir) =>
-                          new SubprocessDriver({
-                            binary: ['node', agentPath],
-                            // The caller's harness reaches the INNER driver
-                            // too — the perHarness argument is threaded, not
-                            // hardcoded (the loop passes reviewFixHarness,
-                            // so the live default is unchanged).
-                            harnessConfig: harness,
-                            outputSchema: FixReviewItemOutputSchema,
-                            routingTable: fixtureRoutingTable(),
-                            sessionsDir,
-                          }),
-                      }),
-                  },
-                }),
+              importer: async () => makeFixReviewItem({ drivers }),
             } as unknown as OpRegistryEntry<never, never>)
           : undefined,
     };
@@ -196,6 +187,9 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
       // is planned (the recorded deviation, module doc).
       classifyConfig: { ...defaultLoopClassifyConfig, skipResponderAuthoredThreads: false },
       driverRegistryView,
+      // The A12c escape is EXPLICIT and defaults OFF (r1 M4): the live drill
+      // dispatches fixers unattended, so it opts in like the shipped sweep.
+      allowAdvisoryBudget: true,
       nowMs: overrides.nowMs ?? Date.now(),
       dispatchLogPath,
       worktreeRoot: `${f.root}/worktrees`,

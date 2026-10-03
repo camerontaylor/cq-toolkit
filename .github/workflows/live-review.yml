@@ -10,15 +10,20 @@
 # workflows; this repo's other CI workflows — ci.yml, denylist.yml,
 # pack-audit.yml, install-matrix.yml — are likewise repo-owned).
 #
-# SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
-# secret with repo scope on the dispatching user's account (it creates
-# cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
+# SECRETS: this file carries NAMES only. GH_TOKEN must be a `drill`
+# environment secret with repo scope on the dispatching user's account (it
+# creates cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
 # scoped to the scratch repo(s) only — not the full account token: the drill
 # needs create/push/comment on one scratch repo and nothing else (the
 # names-only rule is unchanged; this line is about the secret's SCOPE).
 # The scratch repo is LEFT
 # BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
 # run_id per drill so the seeded fixtures are unambiguous.
+#
+# ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
+# `drill` (main-only branch policy, owner review allowed), which holds
+# GH_TOKEN, the drill PAT (RS-11 matrix row 6). A dispatch from any other
+# ref fails at job admission, before the secret is exposed.
 #
 # The vitest leg runs from source (no build): the live describe skips
 # cleanly unless LIVE_GH=1, and the precondition step below asserts the gate
@@ -46,8 +51,14 @@ permissions:
 
 jobs:
   live-review:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: drill
     env:
       # Names only. GH_TOKEN is deliberately NOT here: it is scoped to the
       # vitest step's env below, so npm ci's lifecycle scripts never see it

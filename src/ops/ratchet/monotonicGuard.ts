@@ -13,13 +13,34 @@
 //     a/X b/Y` header, e.g. when the new side is /dev/null). Only sections
 //     whose new path matches /^baselines\/.+\.json$/ are judged
 //     (filesChecked counts those); src/, ci/, and every other file is
-//     ignored — the guard judges baseline files only.
+//     ignored — the guard judges baseline files only. EXACTLY
+//     `baselines/ratchets.json` is excluded too (W1.7): it matches the path
+//     regex but is the ratchet DEFINITION manifest, not baseline evidence —
+//     the trusted verifier's definition check judges it.
 //   - LIFECYCLE comes from diff METADATA, never from content-line counts
 //     (Codex P1): a section is ADDED only when it carries `new file mode`
-//     or `--- /dev/null` — capture committing data, not a loosening of
-//     existing evidence — and DELETED only when it carries `deleted file
-//     mode` or `+++ /dev/null` — a removed target's prune, a legitimate
-//     file lifecycle. An EXISTING-file modification CAN produce one-sided
+//     or `--- /dev/null`, and DELETED only when it carries `deleted file
+//     mode` or `+++ /dev/null`. Lifecycle sections are PAIRED across the
+//     whole diff (W1.7, ADR-0004 attack A5 — callers diff with
+//     `--no-renames`, so a rename is always delete+add): each side's
+//     identity (`target`, `metric`, `value`, plus direction/unit) is
+//     reconstructed from its ONE-SIDED content lines, and a delete is
+//     REPLACED iff exactly one add in the same diff carries the same
+//     (target, metric). A replaced pair is judged exactly like a
+//     modification of that baseline (deleted `-` lines as the old side,
+//     added `+` lines as the new). An UNREPLACED delete fails
+//     why:'deleted without replacement' — removing a ratchet is a
+//     definition change (ADR-0004 D-C), never a data PR; so is renaming its
+//     target (`cov` deleted, `cov2` added looser: the `cov` delete is
+//     unreplaced). An UNPAIRED add stays allowed — new baseline data, and
+//     the trusted verifier reads only targets the trust ref's
+//     `baselines/ratchets.json` lists (adding a ratchet is a definition
+//     change judged there). A lifecycle section whose identity cannot be
+//     reconstructed (target/metric missing or duplicated, malformed string
+//     field, value missing/duplicated/non-finite, content on the wrong
+//     side) or whose (target, metric) is claimed ambiguously (two adds, or
+//     two deletes against one add) fails closed as 'unparsable baseline
+//     diff'. An EXISTING-file modification CAN produce one-sided
 //     content (inserting a second `"value": 100` line after the first:
 //     JSON.parse honors the later duplicate and the effective threshold is
 //     silently raised), so a section with content lines on only one side
@@ -89,7 +110,12 @@ export interface BaselineViolation {
   /** Present only on 'unit changed' violations; an absent side is undefined (rendered 'undefined'). */
   oldUnit?: string;
   newUnit?: string;
-  why: 'loosened' | 'direction changed' | 'unit changed' | 'unparsable baseline diff';
+  why:
+    | 'loosened'
+    | 'direction changed'
+    | 'unit changed'
+    | 'deleted without replacement'
+    | 'unparsable baseline diff';
 }
 
 export type DiffVerdict =
@@ -98,6 +124,14 @@ export type DiffVerdict =
 
 /** A section is a baseline iff its new path is a baselines/*.json file. */
 const BASELINE_PATH = /^baselines\/.+\.json$/;
+/**
+ * The ratchet DEFINITION manifest: it matches BASELINE_PATH but is not
+ * baseline evidence (no target/metric/value body to reconstruct). Its edits
+ * are definition changes, judged by the trusted verifier's definition check
+ * against the trust ref — never by this data guard, so it is neither judged
+ * nor counted in filesChecked.
+ */
+const RATCHET_MANIFEST_PATH = 'baselines/ratchets.json';
 
 // Quote-anchored keys: `"value"` cannot match `"oldValue"` (capital V) nor
 // `"myvalue"` (no quote before the v), so the extraction sees exactly the
@@ -538,10 +572,128 @@ function hasMarker(lines: string[], marker: string): boolean {
   return lines.some((l) => l.startsWith(marker));
 }
 
+/**
+ * An ADDED or DELETED baseline section, reconstructed from its ONE-SIDED
+ * content (a delete's `-` lines, an add's `+` lines) — the whole committed
+ * file body, so no context is needed or consulted.
+ */
+interface LifecycleBaseline {
+  path: string;
+  /** The one-sided content lines: the file body the diff removes or adds. */
+  lines: string[];
+  target: string;
+  metric: string;
+  value: number;
+}
+
+/** Decode the single occurrence of a string identity field; undefined when absent, duplicated, or malformed. */
+function singleStringField(lines: string[], re: RegExp): string | undefined {
+  const scan = scanSide(lines, re);
+  if (scan.count !== 1 || scan.last === undefined) return undefined;
+  return decodeJsonString(scan.last);
+}
+
+/**
+ * Reconstruct a lifecycle section's identity, or undefined — fail closed —
+ * when it cannot be trusted: content on the WRONG side (a delete that adds
+ * lines is not a delete), a malformed direction/unit string, a target or
+ * metric missing / duplicated (a duplicate key is ambiguous evidence: the
+ * pairing keys on identity and refuses to guess) / undecodable, or a value
+ * that is not EXACTLY one finite strict JSON number (the same VALUE_RE
+ * tokenizer and non-finite gate the modification path uses).
+ */
+function reconstructLifecycle(
+  path: string,
+  lines: string[],
+  wrongSide: string[],
+): LifecycleBaseline | undefined {
+  if (wrongSide.length > 0) return undefined;
+  if (carriesMalformedStringField(lines, [], [])) return undefined;
+  const target = singleStringField(lines, TARGET_RE);
+  const metric = singleStringField(lines, METRIC_RE);
+  const valueScan = scanSide(lines, VALUE_RE);
+  if (target === undefined || metric === undefined) return undefined;
+  if (valueScan.count !== 1 || valueScan.last === undefined) return undefined;
+  const value = Number(valueScan.last);
+  if (Number.isFinite(value) === false) return undefined;
+  return { path, lines, target, metric, value };
+}
+
+/** Pairing key: the (target, metric) identity, collision-free across any string content. */
+function identityKey(b: LifecycleBaseline): string {
+  return JSON.stringify([b.target, b.metric]);
+}
+
+/**
+ * Pair deleted baselines with added ones across the whole diff (W1.7,
+ * ADR-0004 attack A5). Per (target, metric):
+ *   - ≥2 adds, or ≥2 deletes contending for an add → every involved path
+ *     is 'unparsable baseline diff' (ambiguous: which one replaces?);
+ *   - 1 delete + 1 add → REPLACED: judged exactly like a modification of
+ *     that baseline — the deleted body is the old side, the added body the
+ *     new side, no context (each body is complete) — through the SAME
+ *     reformat skip and judgeModified the modification path uses, so a
+ *     direction flip, unit change, or loosening is named identically. The
+ *     violation path is the ADDED file (where the moved evidence lands);
+ *   - delete(s) with no add → each is 'deleted without replacement';
+ *   - a single add with no delete → allowed (new baseline data; see the
+ *     header — adding a ratchet is a definition change the verifier judges).
+ */
+function judgeLifecycle(
+  deleted: LifecycleBaseline[],
+  added: LifecycleBaseline[],
+): BaselineViolation[] {
+  const group = (bs: LifecycleBaseline[]): Map<string, LifecycleBaseline[]> => {
+    const byKey = new Map<string, LifecycleBaseline[]>();
+    for (const b of bs) {
+      const key = identityKey(b);
+      const list = byKey.get(key);
+      if (list === undefined) byKey.set(key, [b]);
+      else list.push(b);
+    }
+    return byKey;
+  };
+  const deletesByKey = group(deleted);
+  const addsByKey = group(added);
+  const violations: BaselineViolation[] = [];
+  const ambiguousKeys = new Set<string>();
+  for (const [key, adds] of addsByKey) {
+    const dels = deletesByKey.get(key) ?? [];
+    if (adds.length > 1 || dels.length > 1) {
+      ambiguousKeys.add(key);
+      for (const b of [...dels, ...adds]) {
+        violations.push({ path: b.path, why: 'unparsable baseline diff' });
+      }
+    }
+  }
+  for (const d of deleted) {
+    const key = identityKey(d);
+    if (ambiguousKeys.has(key)) continue; // already failed closed above
+    const replacement = addsByKey.get(key)?.[0];
+    if (replacement === undefined) {
+      violations.push({
+        path: d.path,
+        target: d.target,
+        metric: d.metric,
+        oldValue: d.value,
+        why: 'deleted without replacement',
+      });
+      continue;
+    }
+    if (whitespaceOnly(d.lines, replacement.lines)) continue; // a pure move: nothing moved
+    violations.push(...judgeModified(replacement.path, d.lines, replacement.lines, []));
+  }
+  return violations;
+}
+
 /** Judge a unified diff: do its baseline movements only tighten? Pure — no fs, no sources, no clock. */
 export function checkDiffMonotonicity(diff: string): DiffVerdict {
   const violations: BaselineViolation[] = [];
   let filesChecked = 0;
+  // Lifecycle sections are collected in this first pass and PAIRED after
+  // it (judgeLifecycle): a replacement can appear anywhere in the diff.
+  const deleted: LifecycleBaseline[] = [];
+  const added: LifecycleBaseline[] = [];
   for (const section of splitSections(diff)) {
     const path = sectionPath(section);
     if (path === null) {
@@ -558,7 +710,23 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       }
       continue;
     }
+    // Rename/copy detection (W1.7): the pairing below needs BOTH sides of
+    // a moved baseline as a delete and an add, i.e. a `--no-renames` diff.
+    // A rename-detected section carries only the NEW path — a baseline
+    // renamed OUT of baselines/ would otherwise vanish unjudged, and a pure
+    // rename would ride the index-only skip. Any rename/copy header that
+    // names a baseline on either side fails closed.
+    const moved = headerRegion(section).find(
+      (line) =>
+        /^(?:rename|copy) (?:from|to) /.test(line) &&
+        BASELINE_PATH.test(line.replace(/^(?:rename|copy) (?:from|to) /, '')),
+    );
+    if (moved !== undefined) {
+      violations.push({ path, why: 'unparsable baseline diff' });
+      continue;
+    }
     if (BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
+    if (path === RATCHET_MANIFEST_PATH) continue; // definition manifest: the verifier's, not ours
     filesChecked += 1;
     // Binary baselines (post-cap Codex wave): a `Binary files ... differ`
     // line or a `GIT binary patch` payload has no ± lines to reconstruct —
@@ -577,19 +745,25 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     // removed line whose own content was `-- /dev/null`) is evidence
     // movement, not file lifecycle.
     const header = headerRegion(section);
-    // BELT-AND-BRACES COMPOSITION (review-debt #120 item 2, pinned here):
-    // these lifecycle skips are per-DIFF by design — the two-PR
-    // delete-then-re-add-LOOSER composition (PR 1 deletes the baseline, PR
-    // 2 re-adds it looser) crosses TWO diffs and is invisible to any
-    // single-diff guard. The LIVE checkRatchet leg catches it: PR 2's run
-    // finds the baseline MISSING (PR 1 deleted it) and fails closed (I5 —
-    // missing evidence is never passing evidence). Both legs are
-    // load-bearing; neither alone is the whole defense.
+    // BELT-AND-BRACES COMPOSITION (review-debt #120 item 2; W1.7 update):
+    // the two-PR delete-then-re-add-LOOSER composition (PR 1 deletes the
+    // baseline, PR 2 re-adds it looser) is now caught at PR 1 — its delete
+    // has no replacement in the same diff and fails 'deleted without
+    // replacement'. A same-PR delete+re-add (a rename, a hash-scheme move)
+    // is paired and judged as a modification. The LIVE checkRatchet leg
+    // stays load-bearing: a baseline that goes missing by any other route
+    // fails closed there (I5 — missing evidence is never passing evidence).
     if (hasMarker(header, 'new file mode') || hasMarker(header, '--- /dev/null')) {
-      continue; // added baseline: capture committing data, not a loosening
+      const b = reconstructLifecycle(path, plus, minus);
+      if (b === undefined) violations.push({ path, why: 'unparsable baseline diff' });
+      else added.push(b);
+      continue;
     }
     if (hasMarker(header, 'deleted file mode') || hasMarker(header, '+++ /dev/null')) {
-      continue; // deleted baseline: prune lifecycle, not a loosening
+      const b = reconstructLifecycle(path, minus, plus);
+      if (b === undefined) violations.push({ path, why: 'unparsable baseline diff' });
+      else deleted.push(b);
+      continue;
     }
     if (minus.length === 0 && plus.length === 0) continue; // index/mode churn only
     if (minus.length === 0 || plus.length === 0) {
@@ -607,6 +781,7 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     if (whitespaceOnly(minus, plus)) continue; // reformat: nothing moved
     violations.push(...judgeModified(path, minus, plus, context));
   }
+  violations.push(...judgeLifecycle(deleted, added));
   return violations.length === 0
     ? { ok: true, violations: [], filesChecked }
     : { ok: false, violations, filesChecked };
@@ -628,6 +803,13 @@ export function formatViolations(violations: BaselineViolation[]): string[] {
       // An absent side is rendered 'undefined' — a unit that appears or
       // vanishing re-scales the evidence exactly like a rename.
       return `${v.path}: unit changed ${v.oldUnit ?? 'undefined'} → ${v.newUnit ?? 'undefined'} — incomparable scale`;
+    }
+    if (v.why === 'deleted without replacement') {
+      return (
+        `${v.path}: baseline deleted without a replacement for ` +
+        `${v.target ?? '(unknown)'}/${v.metric ?? '(unknown)'} — ` +
+        'a removed ratchet needs a definition change (ADR-0004 D-C)'
+      );
     }
     return `${v.path}: unparsable baseline diff — non-passing evidence (I5)`;
   });

@@ -457,25 +457,15 @@ export function selectPermissionAnswer(
 }
 
 /**
- * The permission request's matched tool IDENTITY (strategy §2.1's matching
- * gap, narrowed by the probe): the vendor's title leads with the tool name
- * as `<toolName>: <summary>` (capped at 80 chars on the reference vendor),
- * and `kind` is ABSENT from the request's toolCall. v1 matches the
- * leading token of the title; an empty title falls back to `kind`; both
- * absent → 'unknown' (which an allowlist never contains — fail-closed).
+ * Map authoritative ACP kinds to toolkit tool identities (`execute` → `run`).
+ * Missing kinds stay unknown: neither free-text titles nor opaque call IDs
+ * establish an allowlist identity. The permission gate rejects missing kinds
+ * explicitly; call IDs remain available separately for correlation.
  */
-export function permissionToolIdentity(
-  title: string | undefined,
-  kind: string | undefined,
-): string {
-  const trimmed = title?.trim() ?? '';
-  if (trimmed !== '') {
-    const separator = trimmed.indexOf(': ');
-    const lead = separator === -1 ? trimmed : trimmed.slice(0, separator);
-    return lead.trim() !== '' ? lead.trim() : 'unknown';
-  }
-  const trimmedKind = kind?.trim() ?? '';
-  return trimmedKind !== '' ? trimmedKind : 'unknown';
+export function permissionToolIdentity(kind: string | undefined): string {
+  const normalizedKind = kind?.trim().toLowerCase();
+  if (normalizedKind === undefined || normalizedKind === '') return 'unknown';
+  return normalizedKind === 'execute' ? 'run' : normalizedKind;
 }
 
 // ---------------------------------------------------------------------------

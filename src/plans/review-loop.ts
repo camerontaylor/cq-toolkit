@@ -73,14 +73,10 @@
 import type { Budget, ModelSpec } from '../driver/types.js';
 import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
-import {
-  BudgetGovernor,
-  governRegistry,
-  governorConfig,
-  withBudgetStop,
-} from '../kernel/governor.js';
+import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type {
+  GovernanceOptIn,
   Job,
   OpRegistryEntry,
   Plan,
@@ -255,6 +251,26 @@ export interface ReviewLoopOpts {
    * no resume in v1 wiring (journalDir is an audit trail, not a resume key).
    */
   runOptions?: { journalDir?: string; maxUsd?: number; maxTokens?: number };
+  /**
+   * Governance opt-ins for the fix run (ADR-0003 §2.5), by explicit key —
+   * the resolution surface for the ledger refusals an ALWAYS-governed fix
+   * run can hit over an existing journal dir (e.g. `budget.legacyJournal=reset`
+   * upgrades a dir holding this plan's v1 history; `budget.raiseCap` raises
+   * the last governed cap). Absent → no opt-ins (refusals stand).
+   */
+  governanceOptIn?: readonly GovernanceOptIn[];
+  /**
+   * The ADVISORY escape for the fix run (W2.3, A12c), EXPLICIT and
+   * defaulting OFF (review r1 M4): absent/false refuses every fixer
+   * dispatch on an unattended run (every lane is ADVISORY at v1.1). The
+   * shipped sweep (self-review-loop) sets it true — unattended by design —
+   * and the journal records `allowAdvisoryProvenance: 'product'`, so the
+   * escape is attributable and an embedder can withhold it. A future HARD
+   * row puts allowAdvisory admissions OUTSIDE the C_max bound (ADR-0003
+   * §2.3) — that attribution is why this is an option, never a hardcoded
+   * `true`.
+   */
+  allowAdvisoryBudget?: boolean;
   /**
    * The governor's LIMITS half for the fix run — the second
    * `governorConfig(runOptions, limits)` argument (`runOptions` above stays
@@ -828,8 +844,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   };
   // The LIMITS half rides opts.limits (review-debt #137): the review path's
   // arming surface for the wall-clock ladder — absent opts.limits keeps the
-  // historical no-ladder behavior ({}, the empty Limits half).
-  const governor = new BudgetGovernor(governorConfig(runOptions, opts.limits ?? {}));
+  // historical no-ladder behavior ({}, the empty Limits half). The ladder
+  // arms through the governor config: runPlan's governed dispatch reads
+  // governor.ladderSpec.
+  const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
@@ -838,11 +856,24 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // observed USD rollup OUT of the loop even when the fix run throws, so a
     // sweep can carry spend forward without a dispatch-log proxy.
     try {
-      return withBudgetStop(
-        await runPlan(plan, runOptions, governRegistry(view, governor)),
-        plan,
+      // ALWAYS governed: runPlan's governed dispatch owns admission, the
+      // ladder, the evidence folds, and the honest stop — its return IS the
+      // fix report. The operator's opt-ins ride the handle by explicit key
+      // (P7) — absent opts.governanceOptIn, refusals stand. The ADVISORY
+      // escape (A12c) rides opts.allowAdvisoryBudget — EXPLICIT and
+      // defaulting OFF (r1 M4): the shipped sweep passes true (unattended
+      // by design, every lane ADVISORY at v1.1), the journal records the
+      // 'product' provenance, and a caller that withholds the option
+      // refuses every fixer dispatch while its budgets stay enforced
+      // through the evidence folds and (W2.3) reservation capacity.
+      return await runPlan(plan, runOptions, view, {
         governor,
-      );
+        allowAdvisory: opts.allowAdvisoryBudget === true,
+        ...(opts.allowAdvisoryBudget === true
+          ? { allowAdvisoryProvenance: 'product' as const }
+          : {}),
+        ...(opts.governanceOptIn !== undefined ? { optIn: opts.governanceOptIn } : {}),
+      });
     } finally {
       // A throwing observer must never mask the fix run's own outcome.
       try {

@@ -1,7 +1,8 @@
 // T4.2 — the ratchet family OP registry (src/ops/ratchet/registry.ts).
 //
 // Pinned here:
-//   1. The family carries exactly the four H1–H3 ops (the metric adapters are
+//   1. The family carries exactly the four H1–H3 ops plus W1.7's trusted
+//      verifier pair (verifyRatchet, recomputeTypecheck) (the metric adapters are
 //      NOT ops and stay in metricRegistry.ts), each named `<family>.<module
 //      base>` so the central completeness heuristic covers the module and the
 //      CLI exposes one subcommand per op.
@@ -11,18 +12,24 @@
 //      touching the network, or reading the filesystem at bind time: the
 //      CheckRunner/gh/git seams are bound per dispatch and are closure-only
 //      at construction (the inertness proof).
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { promisify } from 'node:util';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import { registry } from '../../../src/ops/ratchet/registry.js';
+
+const execFileAsync = promisify(execFile);
 
 const ENTRY_NAMES = [
   'ratchet.captureBaseline',
   'ratchet.checkRatchet',
   'ratchet.monotonicGuard',
   'ratchet.proposeBaselineUpdate',
+  'ratchet.recomputeTypecheck',
+  'ratchet.verifyRatchet',
 ];
 
 const entryByName = (name: string) => {
@@ -52,6 +59,15 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     source: commandSource(),
   }),
   'ratchet.monotonicGuard': () => ({ diff: '' }),
+  'ratchet.verifyRatchet': () => ({
+    repo: '/repo',
+    trustRef: 'main',
+    subject: 'HEAD',
+    subjectKind: 'pr',
+    base: 'origin/merge-queue',
+    measureConclusion: 'success',
+  }),
+  'ratchet.recomputeTypecheck': () => ({ repo: '/repo', subject: 'HEAD', scratch: '/tmp/x' }),
   'ratchet.proposeBaselineUpdate': () => ({
     ws: '/repo',
     base: 'main',
@@ -66,7 +82,7 @@ const minimalInput = (name: string): Record<string, unknown> => {
 };
 
 describe('ratchet family op registry entries', () => {
-  test('the family carries exactly the four ops, each `<family>.<module base>`', () => {
+  test('the family carries exactly its six ops, each `<family>.<module base>`', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });
 
@@ -82,11 +98,14 @@ describe('ratchet family op registry entries', () => {
     expect(result.success).toBe(false);
   });
 
-  test('monotonicGuard requires exactly one of diff/diffPath', () => {
+  test('monotonicGuard requires exactly one of diff/diffPath/repo+base+head', () => {
     const schema = entryByName('ratchet.monotonicGuard').inputSchema;
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ diff: '', diffPath: '/tmp/x.diff' }).success).toBe(false);
     expect(schema.safeParse({ diffPath: '/tmp/x.diff' }).success).toBe(true);
+    expect(schema.safeParse({ repo: '.', base: 'origin/main', head: 'HEAD' }).success).toBe(true);
+    expect(schema.safeParse({ repo: '.', base: 'origin/main' }).success).toBe(false);
+    expect(schema.safeParse({ diff: '', repo: '.', base: 'a', head: 'b' }).success).toBe(false);
   });
 
   test.each(ENTRY_NAMES)(
@@ -98,11 +117,11 @@ describe('ratchet family op registry entries', () => {
   );
 
   test('ratchet.monotonicGuard normalizes the coverage re-basis before judging (review finding 1)', async () => {
-    // A hand-committed fractional coverage baseline re-based to the integer
-    // the live `coverage-json` reading uses must read as an equal no-op, not
+    // A hand-committed fractional coverage baseline re-based to the one
+    // decimal the live `coverage-json` reading uses must read as an equal no-op, not
     // a loosening — the op normalizes before the pure guard judges.
     const op = await entryByName('ratchet.monotonicGuard').importer();
-    const reBasis = await op({ diff: coverageDiff(93.46, 93) });
+    const reBasis = await op({ diff: coverageDiff(93.54, 93.5) });
     expect(reBasis).toMatchObject({
       status: 'ok',
       value: { ok: true, violations: [], filesChecked: 1 },
@@ -116,7 +135,7 @@ describe('ratchet family op registry entries', () => {
 
   test('ratchet.monotonicGuard normalizes any (target, coverage) pair, not one literal pair (finding N)', async () => {
     const op = await entryByName('ratchet.monotonicGuard').importer();
-    const verdict = await op({ diff: coverageDiff(93.46, 93, 'web') });
+    const verdict = await op({ diff: coverageDiff(93.54, 93.5, 'web') });
     expect(verdict).toMatchObject({
       status: 'ok',
       value: { ok: true, violations: [], filesChecked: 1 },
@@ -134,7 +153,7 @@ describe('ratchet family op registry entries', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-op-registry-diff-'));
     try {
       const diffPath = join(dir, 'ratchet.diff');
-      await writeFile(diffPath, coverageDiff(93.46, 93), 'utf8');
+      await writeFile(diffPath, coverageDiff(93.54, 93.5), 'utf8');
       const ok = await op({ diffPath });
       expect(ok).toMatchObject({ status: 'ok', value: { ok: true, filesChecked: 1 } });
 
@@ -145,6 +164,98 @@ describe('ratchet family op registry entries', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('ref-mode Git fixture', () => {
+    let repo: string;
+    let base: string;
+    const git = async (...args: string[]): Promise<string> =>
+      (
+        await execFileAsync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: '/dev/null',
+            GIT_CONFIG_SYSTEM: '/dev/null',
+            GIT_CONFIG_NOSYSTEM: '1',
+          },
+        })
+      ).stdout.trim();
+    // Construct the real two-commit repository outside the assertion deadline.
+    // Inline commit identity and signing settings avoid three setup subprocesses.
+    beforeAll(async () => {
+      repo = await mkdtemp(join(tmpdir(), 'cq-op-registry-ref-'));
+      await git('init', '-q', '-b', 'main');
+      await mkdir(join(repo, 'baselines'));
+      const rel = baselineRelPath('coverage', 'coverage');
+      const baseline = (value: number): string =>
+        renderBaseline({
+          schemaVersion: 1,
+          target: 'coverage',
+          metric: 'coverage',
+          direction: 'higher-is-better',
+          value,
+          unit: 'pct',
+          capturedAt: '2026-09-15T19:20:25.084Z',
+        });
+      await writeFile(join(repo, rel), baseline(93), 'utf8');
+      await git('add', rel);
+      const commitConfig = [
+        '-c',
+        'user.email=test@example.test',
+        '-c',
+        'user.name=test',
+        '-c',
+        'commit.gpgsign=false',
+      ];
+      await git(...commitConfig, 'commit', '-q', '-m', 'baseline');
+      base = await git('rev-parse', 'HEAD');
+      await writeFile(join(repo, rel), baseline(94), 'utf8');
+      await git(...commitConfig, 'commit', '-q', '-am', 'tighten');
+    }, 30_000);
+
+    afterAll(async () => {
+      if (repo !== undefined) await rm(repo, { recursive: true, force: true });
+    });
+
+    test('ratchet.monotonicGuard ref mode diffs the merge base with hardened Git reads', async () => {
+      const op = await entryByName('ratchet.monotonicGuard').importer();
+      expect(await op({ repo, base, head: 'HEAD' })).toMatchObject({
+        status: 'ok',
+        value: { ok: true, violations: [], filesChecked: 1 },
+      });
+      expect(await op({ repo, base })).toMatchObject({
+        status: 'failed',
+        error: 'ratchet: ref mode needs repo, base and head',
+      });
+      expect(await op({ repo, base: '--output=bad', head: 'HEAD' })).toMatchObject({
+        status: 'failed',
+      });
+    }, 15_000);
+  });
+
+  test('trusted verifier importers preserve failed op results', async () => {
+    const verify = await entryByName('ratchet.verifyRatchet').importer();
+    expect(
+      await verify({
+        repo: '/not-a-git-repository',
+        trustRef: 'main',
+        subject: 'HEAD',
+        subjectKind: 'pr',
+        base: 'main',
+        measureConclusion: 'success',
+      }),
+    ).toMatchObject({ status: 'failed' });
+
+    const recompute = await entryByName('ratchet.recomputeTypecheck').importer();
+    expect(
+      await recompute({
+        repo: '/not-a-git-repository',
+        subject: '--unsafe',
+        scratch: '/not-created',
+      }),
+    ).toMatchObject({ status: 'failed' });
   });
 });
 

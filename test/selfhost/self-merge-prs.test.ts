@@ -29,6 +29,9 @@
 //   7. The real run's RunOptions carry a durable journalDir (`merge-<stamp>`
 //      under the journal root) — asserted on the DIRECTORY the runner
 //      actually creates, the honest end-to-end observable.
+//   8. The W1.2 run-start settle observation rides the real-run result; a
+//      forge without a state branch fails its write without breaking the
+//      run (the recheck wiring itself: self-merge-prs-recheck.test.ts).
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +48,7 @@ import {
   SELFHOST_DISABLES_CONFLICT_RESOLUTION,
 } from '../../src/selfhost/self-merge-prs.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
+import { defaultClassifyPrConfig } from '../../src/ops/merge/classify.config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -182,7 +186,7 @@ describe('buildRunInput (the pure input builder)', () => {
       prs: [],
       protectedBranch: 'main', // SelfhostDefaults.protectedBranch
       wallClockMs: 300_000, // SelfhostDefaults.perJobWallClockMs (the #137 ladder)
-      modelSpec: { provider: 'ai-sdk', model: 'glm-5.3-flash' }, // SelfhostDefaults.driver
+      modelSpec: { provider: 'zai', model: 'glm-5.3-flash' }, // SelfhostDefaults.driver
       sessionsDir: '/j/sessions',
       nowMs: 1234,
     });
@@ -190,6 +194,28 @@ describe('buildRunInput (the pure input builder)', () => {
     expect(buildRunInput([], { repoRoot: '/checkout' }, 0).sessionsDir).toBe(
       '/checkout/.selfhost/journal/sessions',
     );
+  });
+
+  test('the resolved trust policy rides the strict JSON twin, not RegExp config', () => {
+    const input = buildRunInput(
+      [],
+      {
+        repoRoot: '/checkout',
+        journalRoot: '/j',
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+      1234,
+    );
+    expect(input.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+    });
+    expect(RunMergePrsInputSchema.parse(input).config).toEqual(input.config);
   });
 
   test('disableConflictResolution omits modelSpec and marks the policy', () => {
@@ -209,6 +235,30 @@ describe('buildRunInput (the pure input builder)', () => {
 describe('runSelfMergePrs — real run', () => {
   test('pins the production conflict-disable policy constant', () => {
     expect(SELFHOST_DISABLES_CONFLICT_RESOLUTION).toBe(true);
+  });
+
+  test('the governed sweep preserves the trust policy and returns an outcome', async () => {
+    const seen: RunMergePrsInput[] = [];
+    const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    const result = await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      {
+        ...baseCfg,
+        journalRoot: tmpJournalRoot(),
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+    );
+    expect(result).toMatchObject({ outcome: cannedOutcome });
+    expect(seen[0]?.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+      allowSameAccountAgentReview: false,
+    });
   });
 
   test('forwards the shipped conflict-disable policy into the parsed merge input', async () => {
@@ -256,6 +306,18 @@ describe('runSelfMergePrs — real run', () => {
     // `merge-<stamp>` dir the composition put in its RunOptions (stamp =
     // the once-read clock) under the journal root.
     expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true);
+    // The W1.2 run-start observation pass rides the result: this fake serves
+    // no snapshot shape (the PR is skipped) and no state branch (the write
+    // fails) — honest facts, never a broken run.
+    expect(result.settleObservation.observed).toEqual([]);
+    expect(result.settleObservation.skipped.map((row) => row.pr)).toEqual([7]);
+    expect(result.settleObservation.write?.ok).toBe(false);
+    // This fake does not route `gh api user`: the identity is unresolved
+    // (fail closed — every recheck would refuse), recorded, never thrown.
+    expect(result.automationIdentity).toMatchObject({
+      resolved: false,
+      reason: expect.stringContaining('unrouted gh invocation: api user') as unknown,
+    });
   });
 
   test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {
@@ -299,7 +361,7 @@ describe('runSelfMergePrs — real run', () => {
     // 1 USD cap trips the governor mid-job — and returns the frozen
     // taxonomy's honest worker verdict for a budget bound hit.
     const trippedOp = async (): Promise<OpResult<unknown>> => {
-      currentJobContext()?.reportCost(2);
+      currentJobContext()?.reportResult({ costUSD: 2 });
       return { status: 'budget-exhausted' };
     };
     const view: OpRegistryView = {
@@ -327,10 +389,10 @@ describe('runSelfMergePrs — real run', () => {
     expect(result.report.counts['budget-exhausted']).toBe(1);
     // And the stop stays HONEST about its scope: the merge plan is ONE job
     // and it executed, so nothing was undispatched for the trip to gate —
-    // withBudgetStop refuses to fabricate a stoppedEarly claim over it
+    // the governed runner refuses to fabricate a stoppedEarly claim over it
     // (I9 both directions; the kernel's 'a trip that gated NOTHING stays
     // silent' rule). The annotated early-stop form is pinned where gated
-    // rows exist: test/kernel/governor.test.ts.
+    // rows exist: test/kernel/runner-governed.test.ts.
     expect(result.report.stoppedEarly).toBe(false);
     expect(result.report.earlyStopReason).toBeUndefined();
   });

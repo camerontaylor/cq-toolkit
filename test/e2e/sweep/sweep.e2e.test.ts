@@ -39,17 +39,17 @@ import {
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { createDriverFactory } from '../../../src/driver/factory.js';
 import type { Driver } from '../../../src/driver/types.js';
 import { cloneTemplate, createGitTemplate, type GitTemplate } from '../../helpers/git-template.js';
 import {
   ALPHA_FAILURE_MESSAGE,
   ALPHA_FIX,
-  BETA_PACKAGE_JSON,
+  BETA_SOURCE,
   generateScratchRepo,
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
-import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
@@ -176,6 +176,7 @@ function optsFor(
   extra?: {
     push?: boolean;
     stagePathAllowlist?: { patterns: string[] };
+    proposeOnly?: boolean;
     runStateDir?: string | null;
     concurrency?: number;
   },
@@ -185,22 +186,34 @@ function optsFor(
     journalDir: scene.journalDir,
     gh: scene.gh.effects,
     driver: {
-      binary: AGENT_CLI,
       provider: 'cq-d4-e2e',
       model: 'sweep-fake',
-      sessionsDir: scene.sessionsDir,
-      routingTable: {
-        endpoints: {
-          'cq-d4-e2e': {
-            baseUrlEnv: 'CQ_D4_E2E_URL',
-            baseUrlDefault: 'http://127.0.0.1:9',
-            keyEnv: 'CQ_D4_E2E_KEY',
-            models: ['sweep-fake'],
-            notes: 'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
+    } satisfies SweepUnitDriverConfig,
+    // The scenario's DEPLOYMENT factory config (ADR-0002 §2.5): role
+    // 'fixer' + the fake provider → the subprocess lane over the fake agent
+    // CLI; the lane knobs (binary/routing table/sessions dir) live HERE,
+    // never in plan JSON. The factory owns the served-model assertion.
+    drivers: createDriverFactory({
+      bindings: { fixer: { 'cq-d4-e2e': 'subprocess' } },
+      lanes: {
+        subprocess: {
+          binary: AGENT_CLI,
+          sessionsDir: scene.sessionsDir,
+          routingTable: {
+            endpoints: {
+              'cq-d4-e2e': {
+                baseUrlEnv: 'CQ_D4_E2E_URL',
+                baseUrlDefault: 'http://127.0.0.1:9',
+                keyEnv: KEY_ENV,
+                models: ['sweep-fake'],
+                notes:
+                  'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
+              },
+            },
           },
         },
       },
-    } satisfies SweepUnitDriverConfig,
+    }),
     check: {
       adapter: 'tsc-lines',
       command: process.execPath,
@@ -229,7 +242,6 @@ function focusedUnitBindings(scene: Scenario, driver: Driver) {
     }),
     driver,
     modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-    sessionsDir: scene.sessionsDir,
     prompt: () => 'focused real-git contract',
     git: makeGhRunner({ bin: 'git', timeoutMs: 30_000 }),
   };
@@ -254,7 +266,7 @@ function unitRow(
   run: RunReport,
   pkg: string,
   fixer: string = 'fix',
-): { status: string; report?: SweepUnitReport; error?: string } {
+): { status: string; report?: SweepUnitReport; error?: string; reason?: string } {
   // The planner's own job-id fold (sanitizedIdPart): runs of characters
   // outside [A-Za-z0-9._-] become ONE '-' — '@scope/gamma' lands as
   // '-scope-gamma', so the id carries a double dash.
@@ -268,6 +280,7 @@ function unitRow(
   return {
     status: row.result.status,
     ...(row.result.status === 'failed' ? { error: row.result.error } : {}),
+    ...(row.result.status === 'needs-human' ? { reason: row.result.reason } : {}),
   };
 }
 
@@ -424,9 +437,9 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       expect(alphaReport?.committed).toBe(true);
       expect(alphaReport?.prBranch).toBe('cq/e2e-happy/fix/alpha');
 
-      // Alpha's fix landed in the worktree AND in a commit; beta's suite is
-      // untouched and its branch carries no commit.
-      expect(readInWorktree(scene.repo, 'alpha', 'packages/alpha/test/suite.test.js')).toContain(
+      // Alpha's production fix landed in the worktree AND in a commit; beta's
+      // module is untouched and its branch carries no commit.
+      expect(readInWorktree(scene.repo, 'alpha', 'packages/alpha/src/calculation.js')).toContain(
         ALPHA_FIX.newText,
       );
       const alphaCommits = await gitOut(
@@ -700,13 +713,13 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
 
 describe('sweep e2e: tamper guard on new files', () => {
   test(
-    'a fixer that ADDS a file with an it.skip hack: the staged scan flags it, the unit fails uncommitted',
+    'a fixer that ADDS a file with a suppression hack: the staged scan flags it, the unit fails uncommitted',
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-tamper');
       const HACKED = {
-        file: 'packages/beta/test/added.test.js',
-        text: "it.skip('gaming the run', () => {});\n",
+        file: 'packages/beta/src/added.js',
+        text: '// eslint-disable-next-line no-undef\nglobalThis.hacked = true;\n',
       };
       const result = await makeSweepUnitOp(
         focusedUnitBindings(scene, {
@@ -726,8 +739,9 @@ describe('sweep e2e: tamper guard on new files', () => {
       expect(result.status).toBe('failed');
       if (result.status === 'failed') {
         expect(result.error).toMatch(/tamper findings/);
-        expect(result.error).toMatch(/new-skip-only/);
-        expect(result.error).toMatch(/added\.test\.js/);
+        expect(result.error).toMatch(/suppression/);
+        expect(result.error).toMatch(/eslint-disable/);
+        expect(result.error).toMatch(/added\.js/);
       }
       const betaPath = resolve(scene.repo, 'worktrees', 'fix', 'beta');
       expect(await makeSubprocessWorktreeEffects(scene.repo).isStrictClean(betaPath)).toBe(false);
@@ -737,7 +751,7 @@ describe('sweep e2e: tamper guard on new files', () => {
       );
       expect(betaCommits.trim()).toBe('0');
       const staged = await gitOut(['-C', betaPath, 'diff', '--cached', '--name-only'], scene.repo);
-      expect(staged).toContain('packages/beta/test/added.test.js');
+      expect(staged).toContain('packages/beta/src/added.js');
       const salvage = await makeSalvage(makeSubprocessSalvageEffects())({
         repoRoot: scene.repo,
         entries: [
@@ -806,20 +820,21 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-scoped');
-      // Seed ONE scoped package with alpha's failing-suite shape.
+      // Seed ONE scoped package with alpha's failing production-module shape.
       const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
-      mkdirSync(join(pkgDir, 'test'), { recursive: true });
+      mkdirSync(join(pkgDir, 'src'), { recursive: true });
       writeFileSync(
         join(pkgDir, 'package.json'),
         `${JSON.stringify({ name: '@scope/gamma', version: '1.0.0', private: true }, null, 2)}\n`,
       );
       writeFileSync(
-        join(pkgDir, 'test', 'suite.test.js'),
+        join(pkgDir, 'src', 'calculation.js'),
         [
           "'use strict';",
           'const sum = (a, b) => a + b;',
-          'if (sum(1, 1) !== 3) {',
-          "  throw new Error('expected 3, got ' + sum(1, 1));",
+          'const expected = 3;',
+          'if (sum(1, 1) !== expected) {',
+          "  throw new Error('expected ' + expected + ', got ' + sum(1, 1));",
           '}',
           '',
         ].join('\n'),
@@ -828,14 +843,14 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
       await gitOut(['-C', scene.repo, 'commit', '-q', '-m', 'seed: @scope/gamma'], scene.repo);
 
       const GAMMA_FIX = {
-        file: 'packages/@scope/gamma/test/suite.test.js',
-        oldText: 'if (sum(1, 1) !== 3) {',
-        newText: 'if (sum(1, 1) !== 2) {',
+        file: 'packages/@scope/gamma/src/calculation.js',
+        oldText: 'const expected = 3;',
+        newText: 'const expected = 2;',
       };
       const config: SweepPlanConfig = {
         ...scene.config,
         packages: [{ name: '@scope/gamma', path: 'packages/@scope/gamma' }],
-        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/test/suite.test.js'] },
+        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/src/calculation.js'] },
       };
       const outcome = await runSweepPlan(
         optsFor({ ...scene, config }, (unit) =>
@@ -873,7 +888,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
   );
 
   test(
-    'a working-tree RENAME production → test shape: the allowlist flags the SOURCE path',
+    'a working-tree RENAME across an allowlist: the SOURCE path is flagged too',
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-rename');
@@ -881,11 +896,8 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         ...focusedUnitBindings(scene, {
           run: async () => {
             const worktree = resolve(scene.repo, 'worktrees', 'test-fix', 'beta');
-            writeFileSync(
-              resolve(worktree, 'packages/beta/test/manifest.test.js'),
-              BETA_PACKAGE_JSON,
-            );
-            rmSync(resolve(worktree, 'packages/beta/package.json'), { force: true });
+            writeFileSync(resolve(worktree, 'packages/beta/generated/calculation.js'), BETA_SOURCE);
+            rmSync(resolve(worktree, 'packages/beta/src/calculation.js'), { force: true });
             return {
               usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
               denials: [],
@@ -893,8 +905,8 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
             };
           },
         }),
-        stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] },
-      })({ package: 'beta', fixer: 'test-fix', files: ['packages/beta/package.json'] });
+        stagePathAllowlist: { patterns: ['^packages/beta/generated/'] },
+      })({ package: 'beta', fixer: 'test-fix', files: ['packages/beta/src/calculation.js'] });
 
       const betaPath = resolve(scene.repo, 'worktrees', 'test-fix', 'beta');
       const nameStatus = (
@@ -906,8 +918,8 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
       expect(renameIndex).toBeGreaterThanOrEqual(0);
       expect(nameStatus.slice(renameIndex, renameIndex + 3)).toEqual([
         expect.stringMatching(/^R/),
-        'packages/beta/package.json',
-        'packages/beta/test/manifest.test.js',
+        'packages/beta/src/calculation.js',
+        'packages/beta/generated/calculation.js',
       ]);
 
       expect(result.status).toBe('failed');
@@ -915,7 +927,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         // The destination alone matches; the real git rename framing must
         // expose the production SOURCE to the allowlist.
         expect(result.error).toMatch(/outside the allowlist/);
-        expect(result.error).toContain('packages/beta/package.json');
+        expect(result.error).toContain('packages/beta/src/calculation.js');
       }
       expect(scene.gh.created).toHaveLength(0);
     },
@@ -1107,8 +1119,8 @@ describe('sweep e2e: rescue lane and prep mode', () => {
             { edit: ALPHA_FIX },
             {
               write: {
-                file: 'packages/beta/test/added.test.js',
-                text: "it.skip('gaming the run', () => {});\n",
+                file: 'packages/beta/src/added.js',
+                text: '// eslint-disable-next-line no-undef\nglobalThis.hacked = true;\n',
               },
             },
           ),

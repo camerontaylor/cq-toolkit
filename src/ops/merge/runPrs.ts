@@ -81,11 +81,15 @@
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
 // outcome, always.
 import pLimit from 'p-limit';
-import type { Driver, ModelSpec } from '../../driver/types.js';
+import { createDriverFactory } from '../../driver/factory.js';
+import type { DriverFactory } from '../../driver/factory.js';
+import type { ModelSpec } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { classifyPr } from './classifyPrs.js';
+import { defaultClassifyPrConfig } from './classify.config.js';
 import type { PrCandidate } from './classifyPrs.js';
+import type { ClassifyPrConfig } from './classify.config.js';
 import { executeMerges } from './executeMerges.js';
 import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from './effects.js';
@@ -137,6 +141,19 @@ export interface MergePrsCandidate extends PrCandidate {
   state: 'open' | 'closed';
 }
 
+export type RunMergePrsConfig = {
+  settleWindowMs?: number | undefined;
+  trustedBots?: readonly string[] | undefined;
+  trustedAssociations?: readonly string[] | undefined;
+  automationLogin?: string | null | undefined;
+  excludedLogins?: readonly string[] | undefined;
+  // Twin of ClassifyPrConfig.acceptReviewStates: DISMISSED is not
+  // admissible (a dismissed review is retracted; the dispatch schema
+  // rejects it — review r3, PR #222).
+  acceptReviewStates?: readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[] | undefined;
+  allowSameAccountAgentReview?: boolean | undefined;
+};
+
 /** The composition's input: the fetched candidates plus the run's
  * configuration. Everything optional has a documented default. */
 export interface RunMergePrsInput {
@@ -170,12 +187,22 @@ export interface RunMergePrsInput {
   modelSpec?: ModelSpec;
   /** Self-host policy: withhold conflict resolution for a human. */
   conflictResolutionDisabled?: boolean;
-  /** resolveConflict passthrough — the SessionStore dir. */
+  /**
+   * The sessions dir for the DEFAULT driver factory (the session records
+   * the conflict agent's workspace-bound run creates). Reachable only
+   * through makeRunMergePrsOp's default factory binding — the resolve op
+   * input carries no sessionsDir (ADR-0002 §2.5: the binding is factory
+   * config, not plan data). Inert when `deps.drivers` is supplied.
+   */
   sessionsDir?: string;
   /** The classify clock; default Date.now() read once at call time (the
    * composition is the one place the ambient clock is allowed; tests
    * inject). */
   nowMs?: number;
+  /** Resolved reviewer trust policy passed to classifyPr. */
+  classifyConfig?: ClassifyPrConfig;
+  /** JSON-dispatch twin of the resolved reviewer trust policy. */
+  config?: RunMergePrsConfig;
 }
 
 /** The composition's output: both execution reports, every resolution the
@@ -204,8 +231,8 @@ export interface MergePrsOutcome {
 }
 
 /** The injected seams. `resolve` is the conflict agent op (slice 1's
- * makeResolveConflictOp bound to the effects/driver/sessionsDir by the
- * caller or by makeRunMergePrsOp); tests inject a recording fake — the
+ * makeResolveConflictOp bound to the effects/driver-factory by the caller
+ * or by makeRunMergePrsOp); tests inject a recording fake — the
  * whole pipeline then runs with zero real I/O. */
 export interface RunMergePrsDeps {
   /** Every git/gh mutation — the SAME seam instance both passes execute
@@ -234,7 +261,11 @@ export interface RunMergePrsDeps {
 /** Stage 1: classify every OPEN candidate through F1's table (the default
  * config — R3 tunes via classify.config, not here); closed candidates
  * carry `classification: null` (stack structure only, per F2). */
-const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedPr[] =>
+const classifyStage = (
+  candidates: MergePrsCandidate[],
+  nowMs: number,
+  classifyConfig?: ClassifyPrConfig,
+): PlannedPr[] =>
   candidates.map((candidate) => ({
     pr: candidate.pr,
     headRefName: candidate.headRefName,
@@ -244,7 +275,8 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
       : {}),
     state: candidate.state,
     authorLogin: candidate.authorLogin,
-    classification: candidate.state === 'open' ? classifyPr(candidate, nowMs) : null,
+    classification:
+      candidate.state === 'open' ? classifyPr(candidate, nowMs, classifyConfig) : null,
     truncated: candidate.truncated,
   }));
 
@@ -280,7 +312,11 @@ export async function runMergePrs(
   // Stages 1–3: classify → plan → execute (pass 1). The planner's seven
   // fail-closed rules stand untouched; conflicting prs are withheld
   // 'not_eligible' by the planner — carried, never re-graded.
-  const planned1 = classifyStage(input.prs, nowMs);
+  const classifyConfig =
+    input.config === undefined
+      ? input.classifyConfig
+      : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
+  const planned1 = classifyStage(input.prs, nowMs, classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);
 
@@ -402,7 +438,6 @@ export async function runMergePrs(
                   ? { protectedBranch: input.protectedBranch }
                   : {}),
                 ...(input.wallClockMs !== undefined ? { wallClockMs: input.wallClockMs } : {}),
-                ...(input.sessionsDir !== undefined ? { sessionsDir: input.sessionsDir } : {}),
               });
               return { candidate, result };
             },
@@ -496,7 +531,7 @@ export async function runMergePrs(
         .filter((candidate) => mergedInPass1.has(candidate.pr))
         .map((candidate) => ({ ...candidate, state: 'closed' as const }));
       const pass2Set = [...keptOpen, ...anchorRows];
-      const planned2 = classifyStage(pass2Set, nowMs);
+      const planned2 = classifyStage(pass2Set, nowMs, classifyConfig);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
       secondPass = second;
@@ -571,16 +606,33 @@ export interface MakeRunMergePrsOpDeps {
   /** Default: realMergeEffects built lazily per call from
    * input.repoRoot (+ input.protectedBranch). */
   effects?: MergeEffects;
-  /** Default: the resolve op builds its own default SubprocessDriver. */
-  driver?: Driver;
   /**
-   * resolveConflict passthrough — threads into the resolve binding and
-   * reaches the resolve op's DEFAULT SubprocessDriver construction (inert
-   * when `driver` is supplied: an explicit driver IS the harness surface).
-   * Default: the resolve op's own `defaultHarnessConfig`.
+   * The conflict agent's worker seam (ADR-0002 §2.5): the factory the
+   * resolve op resolves its 'conflict-resolver' request through. Default:
+   * createDriverFactory() over the sessionsDir below (the resolve op
+   * constructs no lane itself).
+   */
+  drivers?: DriverFactory;
+  /**
+   * The deprecated-alias notice sink carried onto the DEFAULT factory's
+   * DriverFactoryConfig (PR #238 review P2) and forwarded to the composed
+   * resolve op's own default factory. Inert when `drivers` is supplied (an
+   * explicit factory IS the notice surface). Default: none — the library
+   * default, one stderr line.
+   */
+  onDeprecatedAlias?: (message: string) => void;
+  /**
+   * resolveConflict passthrough — carried on the DriverRequest the resolve
+   * op resolves (the harness surface). Default: the resolve op's own
+   * shipped default (`defaultHarnessConfig`).
    */
   harnessConfig?: HarnessConfig;
-  /** Default: input.sessionsDir, else the resolve op's own default. */
+  /**
+   * The sessions dir for the DEFAULT factory binding — the session
+   * records the conflict agent's workspace-bound run creates. Inert when
+   * `drivers` is supplied (an explicit factory IS the sessions surface).
+   * Default: input.sessionsDir, else the factory's own default.
+   */
   sessionsDir?: string;
 }
 
@@ -590,13 +642,15 @@ export interface MakeRunMergePrsOpDeps {
  * conflict-agent op are built LAZILY PER CALL — the effects target THIS
  * run's repoRoot, and the resolve op binds the SAME effects instance (the
  * executor's mutations and the agent's worktree lifecycle share one seam),
- * plus the caller's driver/sessionsDir seams. Absent optionals are OMITTED
- * (exactOptionalPropertyTypes); an absent driver means the resolve op's
- * own default SubprocessDriver. The wrapper passes NO refetch seam — the
- * frozen MergeEffects has no candidate re-fetch capability — so the
- * default op's pass 2 classifies the in-memory candidates (guarded by the
- * pass-1 exclusion; see the module doc); SDK callers wanting a live second
- * pass call runMergePrs with a refetch of their own.
+ * plus the caller's driver-factory/harness/sessionsDir seams. Absent
+ * optionals are OMITTED (exactOptionalPropertyTypes); an absent factory
+ * means createDriverFactory() over `sessionsDir` (deps first, then the
+ * input's) — the sessions binding is factory config, never plan data
+ * (ADR-0002 §2.5). The wrapper passes NO refetch seam — the frozen
+ * MergeEffects has no candidate re-fetch capability — so the default op's
+ * pass 2 classifies the in-memory candidates (guarded by the pass-1
+ * exclusion; see the module doc); SDK callers wanting a live second pass
+ * call runMergePrs with a refetch of their own.
  *
  * DEFERRED (review-debt #137 —
  * https://github.com/camerontaylor/cq-toolkit/issues/137, owned by T4.2
@@ -618,9 +672,20 @@ export function makeRunMergePrsOp(
     const sessionsDir = deps?.sessionsDir ?? input.sessionsDir;
     const resolve = makeResolveConflictOp({
       effects,
-      ...(deps?.driver !== undefined ? { driver: deps.driver } : {}),
+      ...(deps?.drivers !== undefined
+        ? { drivers: deps.drivers }
+        : {
+            drivers: createDriverFactory({
+              ...(sessionsDir !== undefined ? { sessionsDir } : {}),
+              // The dispatch wiring's alias-notice sink (PR #238 review P2)
+              // rides the DEFAULT factory's config; absent, the library
+              // default — one stderr line — is unchanged.
+              ...(deps?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: deps.onDeprecatedAlias }
+                : {}),
+            }),
+          }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
-      ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     });
     const outcome = await runMergePrs(input, {
       effects,

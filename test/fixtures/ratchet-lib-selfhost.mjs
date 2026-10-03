@@ -51,6 +51,7 @@ await check('loadEngine returns the registry + format + guard surface', () => {
   // implementation, shared with the ratchet.monotonicGuard CLI op (review
   // finding 1).
   ok(typeof engine.normalizeBaselineDiffValues === 'function');
+  ok(typeof engine.roundCoveragePct === 'function');
 });
 await check('the driver-side adapters are the engine-authored ones', () => {
   equal(engine.adapters.typecheckCount.id, 'typecheck-count');
@@ -124,19 +125,59 @@ await check(
     }
   },
 );
-await check('normalizeCoverageSummary rounds total.lines.pct to integer percent', () => {
+await check('normalizeCoverageSummary rounds total.lines.pct to one decimal', () => {
   const rounded = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.46 } } });
-  equal(rounded.total.lines.pct, 93); // 93.46 and CI's 93.38 are the same ratchet reading
-  const half = lib.normalizeCoverageSummary({ total: { lines: { pct: 92.5 } } });
-  equal(half.total.lines.pct, 93); // Math.round: half-up
+  equal(rounded.total.lines.pct, 93.5); // the hundredths digit is cross-runner noise
+  const half = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.45 } } });
+  equal(half.total.lines.pct, 93.5); // half-up at one decimal
+  const below = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.44 } } });
+  equal(below.total.lines.pct, 93.4);
   const hostile = lib.normalizeCoverageSummary({ total: {} });
   equal(hostile.total.lines?.pct, undefined); // untouched shape -> adapter rules it unusable (I5)
+  for (const pct of [-0.04, 100.04]) {
+    const outOfRange = lib.normalizeCoverageSummary({ total: { lines: { pct } } });
+    equal(outOfRange.total.lines.pct, pct);
+    equal(engine.adapters.coverage.extract(outOfRange), null);
+  }
   equal(lib.normalizeCoverageSummary(null), null);
 });
+await check(
+  "normalizeCoverageSummary's local rounding mirror agrees with the engine's roundCoveragePct",
+  () => {
+    // The driver mirrors src/ops/ratchet/format.ts roundCoveragePct (it is
+    // sync, run before/independent of loadEngine); this table pins the two
+    // to the same granularity law so they can never drift.
+    for (const pct of [
+      93.45,
+      93.44,
+      93.46,
+      93.38,
+      1.05,
+      0.7 + 0.35,
+      99.95,
+      99.94,
+      0,
+      0.04,
+      0.05,
+      100,
+      94,
+      33.35,
+      50.25,
+      12.345,
+      87.65,
+    ]) {
+      const driver = lib.normalizeCoverageSummary({ total: { lines: { pct } } }).total.lines.pct;
+      equal(driver, engine.roundCoveragePct(pct), `pct ${pct}`);
+    }
+    equal(engine.roundCoveragePct(1.05), 1.1);
+    equal(engine.roundCoveragePct(99.95), 100);
+  },
+);
 
-// The diff-guard's uniform comparison basis: fractional baseline values on
-// BOTH diff sides normalize to the readings' integer pct before the guard
-// judges — a re-basis no-op reads as equal, a true loosening still fails.
+// The diff-guard's uniform comparison basis: coverage baseline values on
+// BOTH diff sides normalize to the readings' one-decimal pct before the
+// guard judges — a re-basis no-op reads as equal, a true loosening still
+// fails.
 const BASELINE_FILE = 'baselines/coverage--coverage--a8ceec8f7024.json';
 function baselineValueDiff(oldValue, newValue) {
   return [
@@ -164,14 +205,14 @@ await check(
       `+++ b/${BASELINE_FILE}`,
       '@@ -1,3 +1,3 @@',
       '-  "value": 93.46,',
-      '+  "value": 93.4,',
-      '   "value": 91.6,',
+      '+  "value": 93.54,',
+      '   "value": 91.64,',
       ' }',
     ].join('\n');
     const normalized = engine.normalizeBaselineDiffValues(diff);
-    ok(normalized.includes('-  "value": 93,'));
-    ok(normalized.includes('+  "value": 93,'));
-    ok(normalized.includes('   "value": 92,'));
+    ok(normalized.includes('-  "value": 93.5,'));
+    ok(normalized.includes('+  "value": 93.5,'));
+    ok(normalized.includes('   "value": 91.6,'));
     ok(normalized.includes('93.46') === false);
   },
 );
@@ -186,28 +227,28 @@ await check('normalizeBaselineDiffValues leaves non-baseline files byte-identica
   ].join('\n');
   equal(engine.normalizeBaselineDiffValues(diff), diff);
 });
-await check('guard verdict (a): re-basis 93.46 -> 93 is an equal no-op — pass', () => {
+await check('guard verdict (a): re-basis 93.54 -> 93.5 is an equal no-op — pass', () => {
   const verdict = engine.checkDiffMonotonicity(
-    engine.normalizeBaselineDiffValues(baselineValueDiff('93.46', '93')),
+    engine.normalizeBaselineDiffValues(baselineValueDiff('93.54', '93.5')),
   );
   deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
 });
-await check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
+await check('guard verdict (b): true loosening 93.4 -> 93.3 still fails', () => {
   const verdict = engine.checkDiffMonotonicity(
-    engine.normalizeBaselineDiffValues(baselineValueDiff('93', '92')),
+    engine.normalizeBaselineDiffValues(baselineValueDiff('93.4', '93.3')),
   );
   equal(verdict.ok, false);
   equal(verdict.violations.length, 1);
   equal(verdict.violations[0].why, 'loosened');
   deepEqual(engine.formatViolations(verdict.violations), [
-    `${BASELINE_FILE}: metric coverage loosened 93 → 92 — only tightening diffs pass`,
+    `${BASELINE_FILE}: metric coverage loosened 93.4 → 93.3 — only tightening diffs pass`,
   ]);
 });
 await check(
-  'guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)',
+  'guard verdict (c): 2-decimal tighten 92.44 -> 92.5 passes as a tighten (92.44 -> 92.4)',
   () => {
     const verdict = engine.checkDiffMonotonicity(
-      engine.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
+      engine.normalizeBaselineDiffValues(baselineValueDiff('92.44', '92.5')),
     );
     deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
   },
@@ -245,11 +286,11 @@ await check(
     // coverage section must not inherit its normalization (the flag is
     // re-assigned per header — and per `diff --git` section boundary).
     const realistic = [
-      baselineValueDiff('93.46', '93'),
+      baselineValueDiff('93.46', '93.5'),
       baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
     ].join('\n');
     const normalizedRealistic = engine.normalizeBaselineDiffValues(realistic);
-    ok(normalizedRealistic.includes('-  "value": 93,')); // coverage side: normalized
+    ok(normalizedRealistic.includes('-  "value": 93.5,')); // coverage side: normalized
     ok(normalizedRealistic.includes('-  "value": 2.40,')); // complexity side: untouched
     ok(normalizedRealistic.includes('+  "value": 2.49,')); // complexity side: untouched
     // Added-file header reset: `--- /dev/null` assigns the flag FALSE (no

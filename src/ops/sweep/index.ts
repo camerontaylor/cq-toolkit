@@ -73,6 +73,7 @@ export {
   RETRYABLE_FAULT_CLASSES,
   bindingsFromDispatch,
   compileStagePathPatterns,
+  DEFAULT_PROTECTED_STAGE_PATTERNS,
   DEFAULT_UNIT_GIT_TIMEOUT_MS,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,

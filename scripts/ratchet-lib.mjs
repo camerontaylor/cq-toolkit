@@ -150,7 +150,8 @@ export async function withGitAskpass(token, fn) {
 /**
  * Build (ensureDist) then import the BUILT engine. Returns the op factories,
  * the adapter registry, the format helpers (including the shared diff-side
- * coverage re-basis normalizer `normalizeBaselineDiffValues`), the diff
+ * coverage re-basis normalizer `normalizeBaselineDiffValues` and the
+ * coverage granularity law `roundCoveragePct` this file mirrors), the diff
  * monotonic guard, the baseline-proposal factory, and the first-party
  * adapters this lane's runners register (registration is the caller's job —
  * registerAdapter throws on a duplicate id, and the registry is per-process
@@ -159,7 +160,7 @@ export async function withGitAskpass(token, fn) {
 export async function loadEngine() {
   ensureDist();
   const imp = (rel) => import(pathToFileURL(join(ROOT, 'dist', 'ops', 'ratchet', rel)).href);
-  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter] =
+  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter, git] =
     await Promise.all([
       imp('checkRatchet.js'),
       imp('captureBaseline.js'),
@@ -169,6 +170,7 @@ export async function loadEngine() {
       imp('proposeBaselineUpdate.js'),
       imp('adapters/typecheckCount.js'),
       imp('adapters/coverage.js'),
+      imp('git.js'),
     ]);
   return {
     createCheckRatchet: check.createCheckRatchet,
@@ -181,9 +183,17 @@ export async function loadEngine() {
     renderBaseline: format.renderBaseline,
     tightens: format.tightens,
     normalizeBaselineDiffValues: format.normalizeBaselineDiffValues,
+    roundCoveragePct: format.roundCoveragePct,
     checkDiffMonotonicity: guard.checkDiffMonotonicity,
     formatViolations: guard.formatViolations,
     createProposeBaselineUpdate: propose.createProposeBaselineUpdate,
+    // The verifier's hardened git argv, reused (NOT re-spelled) by the
+    // runner scripts so a local guard diff can never drift from the trusted
+    // one — composition F7: an inline copy that omitted `--no-color` /
+    // `--no-relative` made `checkDiffMonotonicity` pass vacuously under
+    // `color.diff=always`.
+    GIT_HARDEN: git.GIT_HARDEN,
+    HARDENED_DIFF_FLAGS: git.HARDENED_DIFF_FLAGS,
     adapters: { typecheckCount: tcAdapter.typecheckCount, coverage: covAdapter.coverage },
   };
 }
@@ -250,27 +260,45 @@ export function typecheckEvidence(typecheckCountAdapter, run) {
 }
 
 /**
- * Integer-percent normalization of a coverage summary — THE one shared
- * rounding point (ratchet-check, ratchet-propose, and the baseline capture
- * all read through runCoverageRaw, so all three apply it identically).
+ * LOCAL MIRROR of the engine's `roundCoveragePct`
+ * (src/ops/ratchet/format.ts — the source of truth): half-up to ONE decimal
+ * with a fixed absolute 1e-9 epsilon on the ×10 scale, so a decimal half
+ * that lands a hair below itself in binary still rounds up (1.05 → 1.1).
+ * Mirrored rather than imported because normalizeCoverageSummary is SYNC
+ * and runs inside runCoverageRaw, independent of the async loadEngine build;
+ * test/fixtures/ratchet-lib-selfhost.mjs asserts the two agree on a table
+ * of values, so they can never drift silently.
+ */
+function roundCoveragePct(pct) {
+  if (!Number.isFinite(pct)) return pct;
+  return Math.floor(pct * 10 + 0.5 + 1e-9) / 10;
+}
+
+/**
+ * One-decimal normalization of a coverage summary — the driver-side
+ * application of the shared granularity law (ratchet-check,
+ * ratchet-propose, and the baseline capture all read through
+ * runCoverageRaw, so all three apply it identically, and the engine's
+ * `coverage-json` source applies the same rounding).
  *
  * Rationale: the ratcheted quantity is total.lines.pct, and v8's 2-decimal
  * figure is NOT stable across environments — the same tree measured 93.46
  * locally and 93.38 in CI (provider/instrumentation noise), which failed a
  * 93.46 baseline as a spurious 0.08 "loosening". Granularity is the fix: the
- * reading is rounded to INTEGER percent (Math.round), in place, before any
- * adapter sees it. A ratchet step smaller than 1% is noise anyway — real
- * coverage work moves whole percentages — so 93.46 and 93.38 are both simply
- * 93, and cross-runner float noise can never turn into a ratchet verdict.
- * A hostile/missing shape is left untouched: the adapter rules it unusable
- * (I5), never a fabricated reading.
+ * reading is rounded half-up to ONE DECIMAL (roundCoveragePct above), in
+ * place, before any adapter sees it — the hundredths digit is noise, while
+ * the tenths digit keeps a small real coverage gain ratchetable (93.46 →
+ * 93.5, 93.44 → 93.4). A hostile/missing shape is left untouched: the
+ * adapter rules it unusable (I5), never a fabricated reading.
  */
 export function normalizeCoverageSummary(summary) {
   if (typeof summary !== 'object' || summary === null) return summary;
   try {
     const pct = summary?.total?.lines?.pct;
-    if (typeof pct === 'number' && Number.isFinite(pct)) {
-      summary.total.lines.pct = Math.round(pct);
+    // Preserve out-of-range evidence for the adapter to reject (I5):
+    // 100.04 → 100.0 or -0.04 → 0.0 would fabricate a valid reading.
+    if (typeof pct === 'number' && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+      summary.total.lines.pct = roundCoveragePct(pct);
     }
   } catch {
     // Getter/hostile shape: leave as-is — the adapter's containment rules
@@ -314,7 +342,7 @@ export async function upsertProposalPr({ existing, edit, create }) {
  * Run the suite under the v8 coverage provider, then read the emitted
  * coverage/coverage-summary.json. Returns {status, stdout, stderr, error,
  * summary} where summary is the PARSED summary object, normalized to
- * INTEGER percent by normalizeCoverageSummary (the coverage adapter reads
+ * ONE-DECIMAL percent by normalizeCoverageSummary (the coverage adapter reads
  * total.lines.pct from it), or null when the file is absent or unparsable —
  * the engine rules a null reading non-passing evidence (I5). A stale summary
  * is removed BEFORE the run so a failed or crashed vitest can never leave
@@ -342,4 +370,70 @@ export function runCoverageRaw() {
     error: res.error,
     summary,
   };
+}
+
+/** Byte cap on the ratchet-propose measurement artifact (numbers only — tiny). */
+export const PROPOSE_MEASUREMENT_MAX_BYTES = 64 * 1024;
+
+/** The metric keys a propose measurement may carry, each with its value law. */
+const PROPOSE_METRIC_CHECKS = {
+  coverage: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100,
+  'typecheck-count': (v) => Number.isSafeInteger(v) && v >= 0,
+};
+
+/**
+ * Validate the ratchet-propose measurement artifact as UNTRUSTED DATA (W1.7).
+ * The artifact is produced by the credential-free measure leg, which ran the
+ * suite; the privileged proposer consumes it only through this function.
+ * `size` is the byte length the caller observed (fstat/read); over
+ * PROPOSE_MEASUREMENT_MAX_BYTES is refused before parsing. The shape is
+ * strict — exactly `{schemaVersion: 1, metrics: {...}}`, metric keys limited
+ * to `coverage` (finite, [0,100]) and `typecheck-count` (non-negative safe
+ * integer). An UNKNOWN metric key is refused, never ignored: the proposer
+ * must not act on a shape it does not know. Returns a null-prototype
+ * `{ coverage?, 'typecheck-count'? }`; an absent metric is simply absent (the
+ * caller notes it and proposes nothing from it — I5). Throws an Error with a
+ * clear message on any violation.
+ */
+export function parseProposeMeasurement(text, size) {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`measurement size is not a byte count: ${String(size)}`);
+  }
+  if (size > PROPOSE_MEASUREMENT_MAX_BYTES) {
+    throw new Error(
+      `measurement is ${size} bytes — over the ${PROPOSE_MEASUREMENT_MAX_BYTES}-byte cap`,
+    );
+  }
+  if (typeof text !== 'string') throw new Error('measurement text is not a string');
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`measurement is not valid JSON — ${err?.message ?? err}`);
+  }
+  const isPlainObject = (v) => typeof v === 'object' && v !== null && Array.isArray(v) === false;
+  if (!isPlainObject(doc)) throw new Error('measurement must be a JSON object');
+  const topKeys = Object.keys(doc).sort();
+  if (topKeys.length !== 2 || topKeys[0] !== 'metrics' || topKeys[1] !== 'schemaVersion') {
+    throw new Error(
+      `measurement must have exactly the keys schemaVersion and metrics (got: ${JSON.stringify(topKeys)})`,
+    );
+  }
+  if (doc.schemaVersion !== 1) {
+    throw new Error(`unsupported measurement schemaVersion ${JSON.stringify(doc.schemaVersion)}`);
+  }
+  if (!isPlainObject(doc.metrics)) throw new Error('measurement.metrics must be a JSON object');
+  const out = Object.create(null);
+  for (const key of Object.keys(doc.metrics)) {
+    const check = Object.hasOwn(PROPOSE_METRIC_CHECKS, key) ? PROPOSE_METRIC_CHECKS[key] : null;
+    if (check === null) {
+      throw new Error(`measurement carries unknown metric ${JSON.stringify(key)} — refusing`);
+    }
+    const value = doc.metrics[key];
+    if (!check(value)) {
+      throw new Error(`measurement metric '${key}' has an invalid value ${JSON.stringify(value)}`);
+    }
+    out[key] = value;
+  }
+  return out;
 }

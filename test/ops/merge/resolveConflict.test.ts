@@ -4,35 +4,49 @@
 //
 // Pinned here, group by group:
 //   1. THE SEAM (the repo's FIRST driver-consuming op): the whole flow runs
-//      through fakes — a recording MergeEffects, a recording Driver, a fake
-//      session creator, a fake prompt loader — ZERO real processes,
-//      networks, or filesystems. The exact effect-call sequence is pinned:
-//      fetch → prepare → session (inside fn) → remove-in-finally.
-//   2. THE DECISION CONTRACT (parseMergeConflictDecision): the object form;
+//      through fakes — a recording MergeEffects, a recording Driver behind
+//      a recording DriverFactory, a fake prompt loader — ZERO real
+//      processes, networks, or filesystems. The exact effect-call sequence
+//      is pinned: fetch → prepare → remove-in-finally (no pre-created
+//      session — the worktree rides the invocation as its workspace
+//      binding).
+//   2. FACTORY RESOLUTION (ADR-0002 §2.5): the op resolves ONE request —
+//      role 'conflict-resolver', the input's modelSpec, the harness dep —
+//      through deps.drivers (default: createDriverFactory), dispatches
+//      through the RESOLVED driver, and puts the factory's NORMALISED
+//      modelSpec on the invocation (never the input's). The served-model
+//      wrapper is NOT tested here: the fake factory's driver is what the
+//      op dispatches, and the wrapper is the real factory's concern
+//      (test/driver/factory.test.ts owns it).
+//   3. THE DECISION CONTRACT (parseMergeConflictDecision): the object form;
 //      the 'escalated' alias normalized; unknown extra keys tolerated; a
 //      JSON line embedded in narration; last-valid-line-wins; and the
 //      fail-closed rejections — pure prose, an unknown decision word, a
 //      non-string summary, empty string, number/null/array — each a
 //      MergeConflictContractError whose message states the contract and
 //      bounds the quoted prefix at 200 chars.
-//   3. renderConflictPrompt: every placeholder replaced globally; unknown
+//   4. renderConflictPrompt: every placeholder replaced globally; unknown
 //      placeholders left alone; unused vars ignored.
-//   4. THE OP FLOW (module doc a–h): ok/needs-human/failed/
+//   5. THE OP FLOW (module doc a–h): ok/needs-human/failed/
 //      budget-exhausted/indeterminate mapping with stopReason FIRST, the
-//      fail-closed contract violation (never ok, never needs-human), the
-//      modelSpec runtime requirement, the invocation shape (allowlist
-//      tools read/edit/run; sandbox level 'none' — the network-for-push
-//      trap; wall-clock default and override), and the failure surfaces:
-//      nonzero fetch, throwing worktreePrepare, a driver pre-dispatch
-//      throw.
-//   5. THE ACTED VERIFICATION: 'acted' is a self-report — the op captures
+//      §2.9 throw rows (a factory-resolve or driver-run throw under an
+//      aborted governed signal → indeterminate; config/auth/unclassified →
+//      needs-human), an `error` verdict → failed with errorClass=<x> named
+//      in the text, the fail-closed contract violation (never ok, never
+//      needs-human), the modelSpec runtime requirement, the invocation
+//      shape (allowlist tools read/edit/run; sandbox level 'none' — the
+//      network-for-push trap; the workspace binding; the decision-schema
+//      outputSchema; NO sessionRef; wall-clock default and override), and
+//      the failure surfaces: nonzero fetch, throwing worktreePrepare, a
+//      driver pre-dispatch throw.
+//   6. THE ACTED VERIFICATION: 'acted' is a self-report — the op captures
 //      a PRE-dispatch baseline sha (step b) and, only after an acted
 //      parse, re-fetches and re-validates: a moved sha → ok; an unchanged
 //      sha or an unresolvable-after head → indeterminate; a fetch/validate
 //      THROW in the verification → failed; an unresolvable BASELINE skips
 //      the check (unverifiable is not unproven); an escalation
 //      short-circuits BEFORE the verification (no extra validate call).
-//   6. THE SHIPPED PROMPT (the real asset): the actual
+//   7. THE SHIPPED PROMPT (the real asset): the actual
 //      prompts/conflict.default.md renders with no placeholder left, the
 //      fetch-before-merge instruction, the push-then-propagation-wait
 //      instruction (bounded refs/pull/<pr>/head poll before acting — the
@@ -40,11 +54,11 @@
 //      the op's DEFAULT loader reads that same file (the source-side half
 //      of the dist-shipping regression guard).
 import { readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
+import { DispatchError } from '../../../src/driver/errors.js';
+import type { DriverFactory, DriverRequest, ResolvedDriver } from '../../../src/driver/factory.js';
 import type {
   Driver,
   DriverStopReason,
@@ -57,7 +71,6 @@ import type { GhResult } from '../../../src/ops/review/gh.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import { headRefFor } from '../../../src/ops/merge/effects.js';
 import {
-  DEFAULT_RESOLVE_SESSIONS_DIR,
   DEFAULT_RESOLVE_WALL_CLOCK_MS,
   MergeConflictContractError,
   MergeConflictInputSchema,
@@ -84,6 +97,7 @@ const MODEL_SPEC = { model: 'resolver-model', provider: 'zai' };
 /** A WorkerResult for a 'complete' run carrying `structuredOutput` (and,
  * when scripted, the driver-reported session handle). */
 const completed = (structuredOutput: unknown, sessionId?: string): WorkerResult => ({
+  model: MODEL_SPEC.model,
   ...(sessionId !== undefined ? { sessionId } : {}),
   structuredOutput,
   usage: ZERO_USAGE,
@@ -224,6 +238,33 @@ class FakeDriver implements Driver {
   }
 }
 
+/**
+ * THE FAKE FACTORY — a recording DriverFactory seam: every DriverRequest
+ * is kept for the resolution assertions; resolve hands back the scripted
+ * driver on the 'ai-sdk' lane with the request's modelSpec VERBATIM (the
+ * real factory's normalisation is its own concern — factory tests own it).
+ */
+class FakeDriverFactory implements DriverFactory {
+  readonly requests: DriverRequest[] = [];
+
+  constructor(private readonly driver: Driver) {}
+
+  resolve(request: DriverRequest): ResolvedDriver {
+    this.requests.push(request);
+    return { driver: this.driver, lane: 'ai-sdk', modelSpec: request.modelSpec };
+  }
+}
+
+/** The factory for `driver`, or a loud test failure if it never resolved. */
+const factoryOf = (driver: Driver): FakeDriverFactory => new FakeDriverFactory(driver);
+
+/** The first recorded factory request, or a loud test failure. */
+const firstRequest = (factory: FakeDriverFactory): DriverRequest => {
+  const request = factory.requests[0];
+  if (request === undefined) throw new Error('the factory was never asked to resolve');
+  return request;
+};
+
 /** The first recorded invocation, or a loud test failure. */
 const firstInvocation = (driver: FakeDriver): OpInvocation => {
   const invocation = driver.invocations[0];
@@ -239,29 +280,6 @@ const failedError = (result: OpResult<ConflictResolutionValue>): string => {
   return result.error;
 };
 
-/**
- * THE FAKE SESSION STORE — records the workspace each session is created
- * in, hands out countable ids, and (optionally) mirrors each creation into
- * a shared log so the session's position in the effect sequence is
- * assertable.
- */
-const fakeCreateSession = (
-  log: string[] = [],
-): {
-  createSession: (workspace: string) => Promise<string>;
-  workspaces: string[];
-} => {
-  const workspaces: string[] = [];
-  let count = 0;
-  const createSession = async (workspace: string): Promise<string> => {
-    workspaces.push(workspace);
-    count += 1;
-    log.push(`session:${workspace}`);
-    return `ses-${String(count)}`;
-  };
-  return { createSession, workspaces };
-};
-
 /** A minimal template carrying every placeholder the op renders (the real
  * file's contract, small), plus one placeholder the op never renders. */
 const TEMPLATE = [
@@ -274,6 +292,97 @@ const TEMPLATE = [
 ].join('\n');
 
 const fakeLoadPrompt = async (): Promise<string> => TEMPLATE;
+
+// ---------------------------------------------------------------------------
+// Factory resolution (ADR-0002 §2.5)
+// ---------------------------------------------------------------------------
+
+describe('resolveConflict resolves its worker through the DriverFactory', () => {
+  test('the request carries role conflict-resolver and the input modelSpec; the harness dep rides the request', async () => {
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
+    const withHarness = factoryOf(driver);
+    const opWith = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      drivers: withHarness,
+      loadPrompt: fakeLoadPrompt,
+      harnessConfig: defaultHarnessConfig,
+    });
+    await opWith(baseInput());
+    expect(firstRequest(withHarness)).toEqual({
+      role: 'conflict-resolver',
+      modelSpec: MODEL_SPEC,
+      harness: defaultHarnessConfig,
+    });
+
+    // Without the dep the request carries NO harness key (the factory's
+    // own default applies).
+    const withoutHarness = factoryOf(
+      new FakeDriver(completed({ decision: 'acted', summary: 'ok' })),
+    );
+    const opWithout = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      drivers: withoutHarness,
+      loadPrompt: fakeLoadPrompt,
+    });
+    await opWithout(baseInput());
+    const request = firstRequest(withoutHarness);
+    expect(request.role).toBe('conflict-resolver');
+    expect(request.modelSpec).toEqual(MODEL_SPEC);
+    expect('harness' in request).toBe(false);
+  });
+
+  test('the invocation carries the factory-NORMALISED modelSpec, never the input spec', async () => {
+    // The deprecated 'ai-sdk' provider handle is the case normalisation
+    // exists for: the fake factory models the real one's behaviour
+    // (provider 'ai-sdk' → 'zai') and the invocation must carry the
+    // NORMALISED spec.
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
+    const normalised: DriverFactory = {
+      resolve: (request: DriverRequest): ResolvedDriver => ({
+        driver,
+        lane: 'ai-sdk',
+        modelSpec: { ...request.modelSpec, provider: 'zai' },
+      }),
+    };
+    const op = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      drivers: normalised,
+      loadPrompt: fakeLoadPrompt,
+    });
+    await op({ ...baseInput(), modelSpec: { model: 'resolver-model', provider: 'ai-sdk' } });
+    const invocation = firstInvocation(driver);
+    expect(invocation.modelSpec).toEqual({ model: 'resolver-model', provider: 'zai' });
+  });
+
+  test('a resolve throw with the config class is needs-human — before ANY effect runs', async () => {
+    // The real factory throws DispatchError('config') for an unbound
+    // provider; the fake hands the op the same surface (§2.9: a
+    // 'config'/'auth' pre-dispatch throw is the human's to arrange).
+    const broken: DriverFactory = {
+      resolve: () => {
+        throw new DispatchError('config', "no lane binding for role 'conflict-resolver'");
+      },
+    };
+    const effects = new FakeMergeEffects();
+    const op = makeResolveConflictOp({ effects, drivers: broken, loadPrompt: fakeLoadPrompt });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('could not dispatch');
+      expect(result.reason).toContain('no lane binding');
+    }
+    // Fail-closed ordering: the refusal precedes the truth fetch — no
+    // worktree, no dispatch.
+    expect(effects.calls).toEqual([]);
+  });
+
+  test('the default op builds — deps default lazily, nothing runs at construction', () => {
+    expect(() => makeResolveConflictOp()).not.toThrow();
+    expect(typeof makeResolveConflictOp()).toBe('function');
+    expect(typeof resolveConflictOp).toBe('function');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // parseMergeConflictDecision
@@ -479,16 +588,15 @@ describe('the conservative git-refname gate', () => {
 // ---------------------------------------------------------------------------
 
 describe('resolveConflict op', () => {
-  test('acted path: ok value, one prepare/remove pair around the fn, session + driver wired', async () => {
+  test('acted path: ok value, one prepare/remove pair around the fn, workspace-bound dispatch', async () => {
     const effects = new FakeMergeEffects();
     const driver = new FakeDriver(
       completed({ decision: 'acted', summary: 'merged origin/main and pushed feat/topic' }),
     );
-    const session = fakeCreateSession(effects.calls);
+    const factory = factoryOf(driver);
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: session.createSession,
+      drivers: factory,
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -504,25 +612,29 @@ describe('resolveConflict op', () => {
       },
     });
     // The exact sequence: fetch + baseline validate (truth first), prepare,
-    // the fn (session created INSIDE the worktree; after the acted parse
-    // the verification re-fetches and re-validates), then
-    // remove-in-finally — prepare and remove each exactly once, remove
-    // after fn.
+    // the fn (dispatch +, after the acted parse, the verification
+    // re-fetch and re-validate), then remove-in-finally — prepare and
+    // remove each exactly once, remove after fn. NO session creation: the
+    // worktree rides the invocation as its workspace binding.
     expect(effects.calls).toEqual([
       `fetch:${headRefFor(44)}`,
       `validate:${headRefFor(44)}`,
       `prepare:44@${headRefFor(44)}`,
-      'session:/wt/pr-44',
       `fetch:${headRefFor(44)}`,
       `validate:${headRefFor(44)}`,
       'remove:/wt/pr-44',
     ]);
-    // The session was created with the worktree path as its workspace.
-    expect(session.workspaces).toEqual(['/wt/pr-44']);
     expect(driver.invocations).toHaveLength(1);
     const invocation = firstInvocation(driver);
-    // The driver received the created session id as its sessionRef.
-    expect(invocation.sessionRef).toBe('ses-1');
+    // The prepared worktree IS the workspace binding; there is NO
+    // pre-created session (no sessionRef on the invocation).
+    expect(invocation.workspace).toEqual({ path: '/wt/pr-44' });
+    expect('sessionRef' in invocation).toBe(false);
+    // The decision schema rides the invocation (ADR-0002 §2.3) under its
+    // stable contract name.
+    expect(invocation.outputSchema).toBeDefined();
+    expect(invocation.outputSchema?.name).toBe('merge.resolveConflict/v1');
+    expect(typeof invocation.outputSchema?.schema).toBe('object');
     // The prompt carried the rendered vars and the acted contract.
     expect(invocation.prompt).toContain('feat/topic');
     expect(invocation.prompt).toContain('origin/main');
@@ -534,13 +646,14 @@ describe('resolveConflict op', () => {
     // request — a workspace-write sandbox would block the network the
     // push needs, and the frozen SandboxPolicy has no network field to
     // request it with. There is no OS-level confinement on this seam: the
-    // worktree cwd is a prompt-enforced convention, and the bounds that
-    // remain are the allowlist above, the prompt's constraints, and the
-    // wall-clock budget.
+    // workspace binding is driver-owned cwd/confinement data, and the
+    // bounds that remain are the allowlist above, the prompt's
+    // constraints, and the wall-clock budget.
     expect(invocation.sandboxPolicy).toEqual({ level: 'none' });
     // Default wall clock (UC row 44's 20 minutes).
     expect(DEFAULT_RESOLVE_WALL_CLOCK_MS).toBe(1_200_000);
     expect(invocation.budget).toEqual({ wallClockMs: DEFAULT_RESOLVE_WALL_CLOCK_MS });
+    // The factory echoed the request spec, so the invocation carries it.
     expect(invocation.modelSpec).toEqual(MODEL_SPEC);
   });
 
@@ -548,8 +661,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -562,8 +674,7 @@ describe('resolveConflict op', () => {
     const withFiles = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
     const opWith = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver: withFiles,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(withFiles),
       loadPrompt: fakeLoadPrompt,
     });
     await opWith({ ...baseInput(), conflictFiles: ['src/a.ts', 'src/b.ts'] });
@@ -572,8 +683,7 @@ describe('resolveConflict op', () => {
     const without = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
     const opWithout = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver: without,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(without),
       loadPrompt: fakeLoadPrompt,
     });
     await opWithout(baseInput());
@@ -587,8 +697,7 @@ describe('resolveConflict op', () => {
     );
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -606,8 +715,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'escalate' }));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -621,8 +729,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed('I resolved everything fine'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -632,11 +739,10 @@ describe('resolveConflict op', () => {
   });
 
   test('silent output (no structuredOutput) fails closed too', async () => {
-    const driver = new FakeDriver(stopped('complete'));
+    const driver = new FakeDriver({ ...stopped('complete'), model: MODEL_SPEC.model });
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -649,8 +755,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(stopped('aborted'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -664,20 +769,25 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(stopped('budget'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
     await expect(op(baseInput())).resolves.toEqual({ status: 'budget-exhausted' });
   });
 
-  test('stopReason error → failed, with the denials length as the hint', async () => {
-    const driver = new FakeDriver(stopped('error', [{ tool: 'run', reason: 'denied by policy' }]));
+  test('stopReason error → failed, with the denials hint and errorClass=<x> named in the text', async () => {
+    // §2.9: EVERY error verdict → 'failed'; the structured class is named
+    // in the text for humans (a served-model mismatch arrives exactly this
+    // way from the factory's wrapper — the one intended status change).
+    const driver = new FakeDriver({
+      ...stopped('error', [{ tool: 'run', reason: 'denied by policy' }]),
+      error: 'requested glm-5.3, served glm-4-7',
+      errorClass: 'served-model-mismatch',
+    });
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -685,6 +795,19 @@ describe('resolveConflict op', () => {
     expect(result.status).toBe('failed');
     expect(failedError(result)).toContain('conflict agent failed');
     expect(failedError(result)).toContain('1 tool use(s) denied by policy');
+    expect(failedError(result)).toContain('errorClass=served-model-mismatch');
+    expect(failedError(result)).toContain('requested glm-5.3, served glm-4-7');
+
+    // A classless error verdict (a v1 record) maps the same way, minus the
+    // class text.
+    const classlessOp = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      drivers: factoryOf(new FakeDriver(stopped('error'))),
+      loadPrompt: fakeLoadPrompt,
+    });
+    const classless = await classlessOp(baseInput());
+    expect(classless.status).toBe('failed');
+    expect(failedError(classless)).not.toContain('errorClass=');
   });
 
   test('a nonzero fetchRef fails closed before any worktree exists', async () => {
@@ -694,8 +817,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -713,8 +835,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -729,8 +850,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -751,19 +871,20 @@ describe('resolveConflict op', () => {
   test('modelSpec missing at dispatch → failed naming modelSpec; nothing runs', async () => {
     const effects = new FakeMergeEffects();
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const factory = factoryOf(driver);
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factory,
       loadPrompt: fakeLoadPrompt,
     });
 
     const result = await op(lateBoundInput());
     expect(result.status).toBe('failed');
     expect(failedError(result)).toContain('modelSpec');
-    // Refused BEFORE any effect or dispatch — no truth fetch, no tree, no
-    // driver call, no fabricated vendor default.
+    // Refused BEFORE any effect, resolution, or dispatch — no truth fetch,
+    // no tree, no factory request, no fabricated vendor default.
     expect(effects.calls).toEqual([]);
+    expect(factory.requests).toHaveLength(0);
     expect(driver.invocations).toHaveLength(0);
   });
 
@@ -772,8 +893,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -807,8 +927,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(new Error('unknown model for provider'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -823,6 +942,7 @@ describe('resolveConflict op', () => {
   test('the driver usage + cost are reported to the job context in ONE fold (#185)', async () => {
     const usage = { input: 12, output: 6, cacheRead: 0, cacheWrite: 0 };
     const driver = new FakeDriver({
+      model: MODEL_SPEC.model,
       structuredOutput: { decision: 'acted', summary: 'pushed' },
       usage,
       costUSD: 0.11,
@@ -831,8 +951,7 @@ describe('resolveConflict op', () => {
     });
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
     const reported: Array<{ usage?: unknown; costUSD?: number }> = [];
@@ -853,8 +972,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(new Error('cancelled mid-run'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
     const outcome = await runLadder(
@@ -884,8 +1002,7 @@ describe('resolveConflict op', () => {
     const driver = new FakeDriver(completed('raw text the real parser would refuse'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
       parse: () => ({ decision: 'acted', summary: 'read by the injected parser' }),
     });
@@ -900,36 +1017,6 @@ describe('resolveConflict op', () => {
       },
     });
   });
-
-  test('the harnessConfig dep threads to the default driver construction (seam-agnostic dispatch)', async () => {
-    // The load-bearing half is the TYPE-level threading into the
-    // SubprocessDriver constructor (exactOptional conditional spread) —
-    // deliberately unobservable through a fake driver. Behaviorally: a
-    // dispatch with a harnessConfig present behaves identically; the LIVE
-    // proof of a config's effect is F5's scripted-agent path (deps.driver).
-    const effects = new FakeMergeEffects();
-    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
-    const op = makeResolveConflictOp({
-      effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
-      loadPrompt: fakeLoadPrompt,
-      harnessConfig: defaultHarnessConfig,
-    });
-
-    await expect(op(baseInput())).resolves.toEqual({
-      status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'ok', usage: ZERO_USAGE },
-    });
-    // And the default op builds with the config alone (nothing runs).
-    expect(() => makeResolveConflictOp({ harnessConfig: defaultHarnessConfig })).not.toThrow();
-  });
-
-  test('the default op builds — deps default lazily, nothing runs at construction', () => {
-    expect(() => makeResolveConflictOp()).not.toThrow();
-    expect(typeof makeResolveConflictOp()).toBe('function');
-    expect(typeof resolveConflictOp).toBe('function');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -942,8 +1029,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -959,8 +1045,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -979,8 +1064,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -997,8 +1081,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1015,8 +1098,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1031,8 +1113,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1047,8 +1128,7 @@ describe('the acted verification', () => {
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1071,8 +1151,7 @@ describe('the acted verification', () => {
     );
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1087,30 +1166,12 @@ describe('the acted verification', () => {
     const failing = new FakeDriver(completed('I resolved everything fine', 'ses-driver-2'));
     const failedOp = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
-      driver: failing,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(failing),
       loadPrompt: fakeLoadPrompt,
     });
     const failedResult = await failedOp(baseInput());
     expect(failedResult.status).toBe('failed');
     expect(failedError(failedResult)).toContain('(session ses-driver-2)');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// The sessions-dir alignment contract (module doc coupling, pinned)
-// ---------------------------------------------------------------------------
-
-describe('the sessions-dir alignment contract', () => {
-  test('DEFAULT_RESOLVE_SESSIONS_DIR mirrors the subprocess driver default', () => {
-    // THE ALIGNMENT CONTRACT (resolveConflict module doc): the default
-    // createSession writes records to DEFAULT_RESOLVE_SESSIONS_DIR and the
-    // default SubprocessDriver reads them from ITS OWN PRIVATE
-    // defaultSessionsDir() in src/driver/subprocess/index.ts — the two
-    // stay equal by contract, not by import. If the driver ever changes
-    // its default, this test breaks loudly instead of the sessions going
-    // missing at runtime.
-    expect(DEFAULT_RESOLVE_SESSIONS_DIR).toBe(join(tmpdir(), 'cq-harness', 'sessions'));
   });
 });
 
@@ -1131,8 +1192,7 @@ describe('I11 forge fact: a push to the head branch IS refs/pull/<pr>/head', () 
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
       loadPrompt: fakeLoadPrompt,
     });
 
@@ -1216,8 +1276,7 @@ describe('the shipped conflict prompt', () => {
     // beside the module and renders it with exactly these vars.
     const op = makeResolveConflictOp({
       effects,
-      driver,
-      createSession: fakeCreateSession().createSession,
+      drivers: factoryOf(driver),
     });
 
     const result = await op({ ...baseInput(), conflictFiles: ['src/a.ts'] });

@@ -19,8 +19,26 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "config": {
       "additionalProperties": false,
       "properties": {
+        "automationLogin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "blockOnOutdatedThreads": {
           "type": "boolean"
+        },
+        "claimedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "excludedLogins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "responderIs": {
           "const": "pr-author",
@@ -60,6 +78,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "epochMs"
           ],
           "type": "string"
+        },
+        "trustedAuthors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -86,6 +110,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "string",
             "null"
           ]
+        },
+        "claimedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "headRefName": {
           "type": [
@@ -127,6 +157,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "additionalProperties": false,
             "properties": {
               "authorLogin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorType": {
                 "type": [
                   "string",
                   "null"
@@ -187,6 +223,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "null"
                 ]
               },
+              "authorType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "body": {
                 "type": "string"
               },
@@ -236,7 +278,19 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "items": {
             "additionalProperties": false,
             "properties": {
+              "authorAssociation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "authorLogin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorType": {
                 "type": [
                   "string",
                   "null"
@@ -244,6 +298,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
               },
               "body": {
                 "type": "string"
+              },
+              "commitOid": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "id": {
                 "minLength": 1,
@@ -293,6 +353,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "null"
                 ]
               },
+              "authorType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "body": {
                 "type": "string"
               },
@@ -335,6 +401,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "additionalProperties": false,
                   "properties": {
                     "authorLogin": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "authorType": {
                       "type": [
                         "string",
                         "null"

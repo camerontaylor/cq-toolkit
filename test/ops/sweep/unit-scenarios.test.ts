@@ -90,16 +90,42 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     rmDir: async () => undefined,
   });
 
+  // Deterministic object ids: the unit op pins the pre-driver HEAD, writes the
+  // staged tree, parents a base-owned probe commit on that HEAD, and after the
+  // commit verifies the tip, its parent and the committed tree.
+  const BASE_HEAD = 'a'.repeat(40);
+  const TREE = 'b'.repeat(40);
+  const PROBE_COMMIT = 'c'.repeat(40);
+  let head = BASE_HEAD;
+  let parent = BASE_HEAD;
+  let commits = 0;
+  const ok = (stdout = ''): { code: number; stdout: string; stderr: string } => ({
+    code: 0,
+    stdout,
+    stderr: '',
+  });
+
   const gitFactory = (): GhFn => async (args) => {
     gitCalls.push(args);
-    if (args.includes('rev-list')) return { code: 0, stdout: '0\n', stderr: '' };
+    if (args.includes('rev-list')) return ok('0\n');
+    if (args.includes('rev-parse')) {
+      if (args.includes('HEAD^{tree}')) return ok(`${TREE}\n`);
+      if (args.includes('HEAD^')) return ok(`${parent}\n`);
+      return ok(`${head}\n`);
+    }
+    if (args.includes('write-tree')) return ok(`${TREE}\n`);
+    if (args.includes('commit-tree')) return ok(`${PROBE_COMMIT}\n`);
+    if (args.includes('commit')) {
+      commits += 1;
+      parent = head;
+      head = String(commits).repeat(40).slice(0, 40);
+      return ok();
+    }
     // The worker always leaves a staged change: `diff --cached --quiet` exits 1.
     if (args.includes('--quiet')) return { code: 1, stdout: '', stderr: '' };
-    if (args.includes('--name-status')) return { code: 0, stdout: staged.nameStatus, stderr: '' };
-    if (args.includes('diff') && args.includes('--cached')) {
-      return { code: 0, stdout: 'diff --git a/src/a.js b/src/a.js\n', stderr: '' };
-    }
-    return { code: 0, stdout: '', stderr: '' };
+    if (args.includes('--name-status')) return ok(staged.nameStatus);
+    if (args.includes('diff')) return ok('diff --git a/src/a.js b/src/a.js\n');
+    return ok();
   };
 
   const runCheckFactory = (): RunCheck => {
@@ -158,7 +184,6 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
     checkCommand: (unit, cwd) => ({ command: 'vitest', args: [unit.package], cwd }),
     driver: world.driverFactory(),
     modelSpec: { model: 'fake', provider: 'test' },
-    sessionsDir: join(world.root, 'sessions'),
     prompt: () => 'fix it',
     git: world.gitFactory(),
     pushBranch: async (repoRoot, branch) => {
@@ -262,12 +287,27 @@ describe('sweep unit in-process scenarios', () => {
     }
   });
 
-  test('a valid in-scope test-file edit is accepted, committed, and pushed', async () => {
+  test('a protected test-file edit routes to human review before any probe, commit, or push', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
       world.staged.nameStatus = 'M\0packages/alpha/test/suite.test.js';
       const result = await runUnit(world, {
         stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] },
+      });
+      expect(result.status).toBe('needs-human');
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a valid in-scope production edit is accepted, committed, and pushed', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    try {
+      world.staged.nameStatus = 'M\0packages/alpha/src/calculation.js';
+      const result = await runUnit(world, {
+        stagePathAllowlist: { patterns: ['^packages/alpha/'] },
       });
       expect(result.status).toBe('ok');
       if (result.status === 'ok') {
@@ -284,7 +324,7 @@ describe('sweep unit in-process scenarios', () => {
   test('the default package scope names the exact cross-package path', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
-      world.staged.nameStatus = 'M\0packages/beta/test/suite.test.js';
+      world.staged.nameStatus = 'M\0packages/beta/src/calculation.js';
       // The production default (jZ59w), derived exactly as buildSweepPlan does.
       const scope = unitStagePathAllowlist(
         {
@@ -304,7 +344,7 @@ describe('sweep unit in-process scenarios', () => {
       expect(result.status).toBe('failed');
       if (result.status === 'failed') {
         expect(result.error).toMatch(/outside the allowlist/);
-        expect(result.error).toContain('packages/beta/test/suite.test.js');
+        expect(result.error).toContain('packages/beta/src/calculation.js');
       }
     } finally {
       await rm(world.root, { recursive: true, force: true });

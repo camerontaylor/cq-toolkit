@@ -97,7 +97,7 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
       value: {
         verdict: 'clean',
         attempts: 1,
-        failureSet: { tool: 'vitest', failures: [], exitCode: 0 },
+        failureSet: { tool: 'vitest', failures: [], exitCode: 0, numTotalTests: 2 },
       },
     });
     expect(fake.callCount()).toBe(1);
@@ -165,7 +165,7 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
       value: {
         verdict: 'clean',
         attempts: 2,
-        failureSet: { tool: 'vitest', failures: [], exitCode: 0 },
+        failureSet: { tool: 'vitest', failures: [], exitCode: 0, numTotalTests: 2 },
       },
     });
   });

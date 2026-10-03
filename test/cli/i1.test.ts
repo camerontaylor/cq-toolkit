@@ -14,7 +14,9 @@
 //      against RunReportSchema; ALL INPUT defects are usage errors (→2) —
 //      a --plan path that is missing or not a regular file, corrupted plan
 //      FILE CONTENT, and the kernel's own input-validation class ('runPlan: '
-//      — duplicate job ids, resume without a journal dir; 'journal: ' — the
+//      — duplicate job ids, resume without a journal dir, caps without
+//      governance, and the ledger refusals: governed history without
+//      governance, unaccounted v1 dispatches, a cap raise; 'journal: runId must match ' — the
 //      runId filename-safety assert on a schema-valid but journal-unsafe plan
 //      id, e.g. 'bad/id', under --journal-dir) — while genuine RUNTIME throws
 //      (a journal-dir pointing at a regular file) narrate 'run-plan threw:'
@@ -32,10 +34,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { exitCodeForOpResult, exitCodeForRunReport } from '../../src/cli/exit.js';
 import { parseFlags, runCli, type RunCliOptions } from '../../src/cli/main.js';
 import { narrate, type CliIo } from '../../src/cli/output.js';
+import { openRunLog } from '../../src/kernel/journal.js';
 import { JournalEventSchema, PlanSchema, RunReportSchema } from '../../src/kernel/schema.js';
 import type { OpResult, RunReport } from '../../src/kernel/types.js';
 import { get, list } from '../../src/registry/index.js';
@@ -663,16 +666,21 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
   );
 });
 
-// b2602ca successor pins (PR 64 wave-4): resume SEEDS the governor from the
-// journal (a cumulative --max-tokens cap must bind the resumed run to its
-// prior runs' usage — I9 honesty), and run-plan's kebab→camel normalizer
-// keeps the null-prototype flags record so --__proto__ reaches the strict
-// schema as the unknown key it is (exit 2), instead of vanishing through the
-// inherited accessor.
+// b2602ca successor pins (PR 64 wave-4), re-baselined for the v1.1 governed
+// kernel: a CAPPED CLI run governs, and the governed fold continues the
+// dir's ledger WITH OR WITHOUT --resume (a cumulative --max-tokens cap binds
+// the run to its prior runs' usage — I9 honesty; the v1 pin that a fresh run
+// starts at zero survives only for a dir with NO governed history), and
+// run-plan's kebab→camel normalizer keeps the null-prototype flags record so
+// --__proto__ reaches the strict schema as the unknown key it is (exit 2),
+// instead of vanishing through the inherited accessor.
 describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => {
   /**
    * Hand-written prior-run journal, field-for-field against the frozen
-   * JournalEventSchema: run-started (runId/at/planId), job-started
+   * JournalEventSchema: run-started (runId/at/planId + journalVersion 2,
+   * seq 1, governance — the v2 record a GOVERNED run writes and folds; a v1
+   * run-started here would hit the unaccounted-v1-dispatches refusal, since
+   * v1 journals carry no spend the cap could bind), job-started
    * (runId/at/jobId/op/attempt — REQUIRED: the seed's usage fold counts only
    * a finish that CLOSES an open start), job-finished (runId/at/jobId/opId/
    * inputsHash/result/usage). The file name is `<planId>--<seg>--<hex>` —
@@ -685,7 +693,15 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
     const runId = `${planId}--0001--abcd`;
     const at = '2026-01-01T00:00:00.000Z';
     const events = [
-      { type: 'run-started', runId, at, planId },
+      {
+        type: 'run-started',
+        runId,
+        at,
+        planId,
+        journalVersion: 2,
+        seq: 1,
+        governance: { attended: false },
+      },
       { type: 'job-started', runId, at, jobId: 'a', op: 'echo', attempt: 1 },
       {
         type: 'job-finished',
@@ -740,7 +756,37 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
     ]);
   });
 
-  test('the same journal + cap WITHOUT --resume starts at zero: exit 0 (the pin has teeth)', async () => {
+  test('a fresh capped run over a GOVERNED journal continues the ledger: seeded spend trips WITHOUT --resume too (the v1.1 contract)', async () => {
+    // The old v1 pin — "the same journal + cap WITHOUT --resume starts at
+    // zero" — is obsolete: a governed run folds the dir's history for LEDGER
+    // continuity whether or not resume is set (only the replay-skip map is
+    // resume-gated). This is the replacement pin, both halves:
+    //   (a) with NO prior governed history, a fresh capped run starts at
+    //       zero and exits 0;
+    //   (b) over a governed journal, the SAME capped run seeds the prior
+    //       usage and trips — the ledger continues.
+    const fresh = await writePlanFile({
+      id: 'i1-fresh-cap',
+      jobs: [
+        { id: 'a', op: 'echo', input: { msg: 'hi' } },
+        { id: 'b', op: 'echo', input: { msg: 'again' }, dependsOn: ['a'] },
+      ],
+    });
+    // The journal dir does NOT pre-exist: the governed seq claim
+    // (journal.claimSeq) carries the append path's lazy-create contract, so
+    // a first governed run over a fresh --journal-dir works (and this pin
+    // proves it).
+    const freshRun = await capture([
+      'run-plan',
+      `--plan=${fresh.planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${fresh.journalDir}`,
+      '--max-tokens=10',
+      '--allow-advisory-budget', // W2.3 A12c: a token cap is ADVISORY — unattended dispatch needs the escape
+    ]);
+    expect(freshRun.code).toBe(0); // empty dir → nothing seeded → caps start at zero
+    expect(RunReportSchema.parse(JSON.parse(freshRun.out)).counts.done).toBe(2);
+
     const { planPath, journalDir } = await writePlanFile({
       id: 'i1-resume',
       jobs: [
@@ -755,10 +801,68 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
       `--ops-root=${opsRoot}`,
       `--journal-dir=${journalDir}`,
       '--max-tokens=10',
+      '--allow-advisory-budget', // W2.3 A12c escape — the seeded trip under test is the budget family
     ]);
-    expect(code).toBe(0); // fresh governor — the prior run's usage is not loaded
+    // The seeded 100-token rollup trips the 10-token cap: job a is refused
+    // at admission, b is re-marked by the honest-stop pass → exit 3.
+    expect(code).toBe(3);
     const report = RunReportSchema.parse(JSON.parse(out));
-    expect(report.counts.done).toBe(2);
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts['budget-exhausted']).toBe(2);
+  });
+
+  test('uncapped over GOVERNED history refuses naming --opt-in; the opt-in resolves it (the refusal is actionable)', async () => {
+    // The refusal's message names `--opt-in budget.ungovernedOverGoverned` —
+    // the CLI must actually ACCEPT that flag (review cycle 1: a resolution
+    // the surface cannot express is a dead end). An opt-in alone constructs
+    // a governance handle (uncapped): the ungoverned opt-in marks the run
+    // and it proceeds outside the ledger.
+    const { planPath, journalDir } = await writePlanFile({
+      id: 'i1-optin',
+      jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+    });
+    await writePriorJournal(journalDir, 'i1-optin');
+
+    const refused = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+    ]);
+    expect(refused.code).toBe(2);
+    expect(refused.out).toBe('');
+    expect(refused.err).toMatch(
+      /runPlan: plan i1-optin has governed history; run governed or pass --opt-in budget\.ungovernedOverGoverned/,
+    );
+
+    const opted = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--opt-in=budget.ungovernedOverGoverned',
+    ]);
+    expect(opted.code).toBe(0);
+    const report = RunReportSchema.parse(JSON.parse(opted.out));
+    expect(report.counts.done).toBe(1); // the op ran, ungoverned-marked
+  });
+
+  test('--opt-in validates keys and splits on commas: an unknown key is exit 2', async () => {
+    const { planPath } = await writePlanFile({
+      id: 'i1-optin-bad',
+      jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+    });
+    const bad = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      '--opt-in=budget.raiseCap,budget.nonsense',
+    ]);
+    expect(bad.code).toBe(2);
+    expect(bad.out).toBe('');
+    expect(bad.err).toMatch(/invalid input for 'run-plan'/);
+    expect(bad.err).toMatch(/optIn/);
   });
 
   test('run-plan null-proto normalizer: --__proto__ is an OWN key → the strict schema rejects it (exit 2)', async () => {
@@ -943,26 +1047,108 @@ describe('run-plan through the governed kernel', () => {
     expect(RunReportSchema.parse(JSON.parse(out)).counts.done).toBe(1);
   });
 
-  test('--max-usd=0 is accepted: a zero-budget hard-zero cap does not reject the run (exit 0)', async () => {
+  test('--max-usd=0 is accepted: a hard-zero ceiling now REFUSES dispatch loudly (W2.3 reserve-then-settle, exit 3)', async () => {
     // RunPlanInputSchema used z.number().positive(), rejecting --max-usd=0 as
     // a usage error — but the governor explicitly accepts maxUsd >= 0 (a
-    // valid hard-zero spend ceiling, src/kernel/governor.ts). The cap binds
-    // only on PRICED spend: the echo fixture reports no usage, so nothing
-    // trips and the trivial plan still passes (no journal: fresh governor
-    // starts at zero — the seeded-DD-9 path never engages).
-    const { planPath } = await writePlanFile(singleJobPlan('echo'));
+    // valid hard-zero spend ceiling, src/kernel/governor.ts). Under W2.2 the
+    // cap bound only on PRICED spend, so a no-usage plan ran to completion
+    // (exit 0) — the fail-open corner. Under W2.3 reserve-then-settle the
+    // admission invariant S + O + r <= C admits NOTHING at C = 0: the first
+    // reserve trips `exhausted` before any dispatch, the row is
+    // budget-exhausted, and the run exits 3 — a zero budget that dispatches
+    // anyway is exactly the lie the cap exists to prevent.
+    // --allow-advisory-budget is REQUIRED for this to be the ZERO-CAP test:
+    // without the A12c escape the advisory gate (v1.1: every dispatch
+    // advisory, unattended) refuses first with `reservation-refused
+    // {reason:'advisory-lane'}`, the same observable verdict — exit 3, one
+    // budget-exhausted row — so the report assertions alone cannot tell the
+    // two paths apart. The journal assertions below do.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
     const { code, out, err } = await capture([
       'run-plan',
       `--plan=${planPath}`,
       `--ops-root=${opsRoot}`,
       '--max-usd=0',
+      `--journal-dir=${journalDir}`,
+      '--allow-advisory-budget',
+    ]);
+    expect(code).toBe(3);
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.counts.done).toBe(0);
+    expect(report.counts['budget-exhausted']).toBe(1);
+    expect(report.stoppedEarly).toBe(false); // the refusal row IS the verdict; nothing was gated
+    expect(err).not.toContain('cq: done 1');
+    // The zero-cap TRIP is what refused: a durable budget-tripped fact, and
+    // no reservation ever opened (the seed at C=0 does not trip — `0 > 0` is
+    // false — so the first `reserve` is the trip).
+    const events = await openRunLog(journalDir).read(report.runId);
+    expect(events.some((event) => event.type === 'reservation-refused')).toBe(false);
+    expect(events.some((event) => event.type === 'reservation-opened')).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'budget-tripped', tripKind: 'exhausted' }),
+    );
+  });
+
+  test('annex §3 rule-7 notice: the governed run after an ungoverned-marked run narrates the excluded runs', async () => {
+    // Run 1: governed (capped) — creates the governed history. Run 2: the
+    // ungoverned-marked opt-in — sits outside the bound. Run 3: governed
+    // again — its ledger seed excludes run 2, and the CLI must say so
+    // (human mode). A --json governed run narrates nothing.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    const base = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--concurrency=1',
+    ];
+    const first = await capture([...base, '--max-usd=5', '--allow-advisory-budget']);
+    expect(first.code).toBe(0);
+    expect(first.err).not.toContain('bound excludes'); // nothing to exclude yet
+
+    const marked = await capture([...base, '--opt-in=budget.ungovernedOverGoverned']);
+    expect(marked.code).toBe(0);
+
+    const log = openRunLog(journalDir);
+    const markedRunIds: string[] = [];
+    for (const runId of await log.runs()) {
+      const started = (await log.read(runId))[0] as { type: string; ungoverned?: unknown };
+      if (started.type === 'run-started' && 'ungoverned' in started) markedRunIds.push(runId);
+    }
+    expect(markedRunIds).toHaveLength(1);
+
+    const third = await capture([...base, '--max-usd=5', '--allow-advisory-budget']);
+    expect(third.code).toBe(0);
+    expect(third.err).toContain(`cq: bound excludes ungoverned runs ${markedRunIds[0] as string}`);
+
+    const jsonMode = await capture([...base, '--max-usd=5', '--allow-advisory-budget', '--json']);
+    expect(jsonMode.code).toBe(0);
+    expect(jsonMode.err).toBe(''); // machine mode stays silent
+  });
+
+  test('an UNCAPPED run with --journal-dir stays v1-identical: the run-started record carries NO journalVersion', async () => {
+    // The CLI's recorded policy: governance rides exactly the operator's
+    // cap — an uncapped run gets no governor, no ledger, and no v2 journal.
+    // The journal then holds a plain v1 record (no journalVersion, no seq,
+    // no governance block), pinned here from the file the run wrote.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    const { code, out } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--concurrency=1',
     ]);
     expect(code).toBe(0);
-    const report = RunReportSchema.parse(JSON.parse(out));
-    expect(report.counts.done).toBe(1);
-    expect(report.counts['budget-exhausted']).toBe(0);
-    expect(report.stoppedEarly).toBe(false);
-    expect(err).toContain('cq: done 1');
+    expect(RunReportSchema.parse(JSON.parse(out)).counts.done).toBe(1);
+    const log = openRunLog(journalDir);
+    const runs = await log.runs();
+    expect(runs).toHaveLength(1);
+    const events = await log.read(runs[0] as string);
+    const started = events[0] as { type: string; journalVersion?: unknown; seq?: unknown };
+    expect(started.type).toBe('run-started');
+    expect('journalVersion' in started).toBe(false);
+    expect('seq' in started).toBe(false);
   });
 
   test('failing job: exit 1 with a failed row, narrated', async () => {
@@ -988,9 +1174,9 @@ describe('run-plan through the governed kernel', () => {
     expect(human.code).toBe(3);
     expect(RunReportSchema.parse(JSON.parse(human.out)).jobs[0]?.result.status).toBe('needs-human');
     // The budget fixture RETURNS budget-exhausted as its op verdict — an
-    // op-returned row, NOT a governor trip (no caps configured, so
-    // withBudgetStop annotates nothing); exitCodeForRunReport still maps the
-    // row to 3.
+    // op-returned row, NOT a governor trip (no caps configured, so the run
+    // is ungoverned and no governor exists to trip); exitCodeForRunReport
+    // still maps the row to 3.
     const budget = await capture([
       'run-plan',
       `--plan=${(await writePlanFile(singleJobPlan('budget'))).planPath}`,
@@ -1055,7 +1241,7 @@ describe('run-plan through the governed kernel', () => {
     // name (`<runId>.ndjson`), so makeRunId → assertSafeRunId throws
     // `journal: …` from inside runPlan for a schema-valid plan like
     // id 'bad/id'. The plan id is still the defective INPUT, so the
-    // 'journal: ' classifier maps it to the usage path: exit 2, stdout empty,
+    // filename-safety classifier maps it to the usage path: exit 2, stdout empty,
     // stderr naming the journal assert — never the thrown-class exit 1.
     const { planPath, journalDir } = await writePlanFile({
       id: 'bad/id',
@@ -1071,6 +1257,27 @@ describe('run-plan through the governed kernel', () => {
     expect(out).toBe('');
     expect(err).toMatch(/invalid input for 'run-plan': journal: /);
     expect(err).toMatch(/runId must match/);
+  });
+
+  test('claimed sequence without a run journal is runtime corruption (1), not usage (2)', async () => {
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    await mkdir(journalDir);
+    await writeFile(join(journalDir, 'i1-plan.seq.1'), '');
+    const argv = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--max-tokens=100',
+    ];
+    const human = await capture(argv);
+    expect(human.code).toBe(1);
+    expect(human.out).toBe('');
+    expect(human.err).toMatch(/run-plan threw: journal: corrupt.*seq gap/);
+    expect(human.err).not.toContain('invalid input');
+
+    const machine = await capture([...argv, '--json']);
+    expect(machine).toEqual({ code: 1, out: '', err: '' });
   });
 
   test('duplicate job ids: PlanSchema-valid file, kernel input-class throw → exit 2', async () => {
@@ -1233,5 +1440,100 @@ describe('plan file schema', () => {
     const plan = PlanSchema.parse(singleJobPlan('echo'));
     expect(plan.id).toBe('i1-plan');
     expect(plan.jobs).toHaveLength(1);
+  });
+});
+
+// The driver factory's deprecated-alias notice (PR #238 review P2) is a
+// `cq:` stderr line, so it obeys the SAME narration matrix as every CLI
+// line: SUPPRESSED in --json machine mode (stderr stays EMPTY — the silent
+// onDeprecatedAlias sink rides the importer wiring into the ops registries'
+// DriverFactoryConfig), kept in human mode by the library default (one
+// stderr line, byte-for-byte today). Both CLI surfaces are pinned
+// end-to-end over a fixture family whose importer consumes the wiring
+// EXACTLY like the shipped registries (src/ops/*/registry.ts): the REAL
+// driver factory resolves an aliased spec (provider 'ai-sdk') and the
+// notice's channel is asserted — the captured CliIo AND process.stderr.
+describe('driver alias notice rides the importer wiring (PR #238 review P2)', () => {
+  const factoryTs = fileURLToPath(new URL('../../src/driver/factory.ts', import.meta.url));
+
+  /**
+   * Fixture family with the SHIPPED importer idiom over the REAL factory.
+   * The tmp root carries its own `{"type":"module"}` (an OS tmpdir is
+   * outside the repo's package scope) and the importer imports the factory
+   * by absolute path — no bare imports, so no node_modules anchoring is
+   * needed; the input schema is the hand-rolled pass-through the registry
+   * scanner admits (a `.parse`-bearing object with no schema `def`/`shape`
+   * is unjudged by the strictness probe).
+   */
+  async function writeAliasFixture(): Promise<string> {
+    const tmp = await makeTmpDir('cq-i1-alias-');
+    await writeFile(join(tmp, 'package.json'), '{"type":"module"}\n');
+    await mkdir(join(tmp, 'aliasfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'aliasfam', 'registry.js'),
+      [
+        'const { createDriverFactory } = await import(' + JSON.stringify(factoryTs) + ');',
+        'const schema = {',
+        '  parse: (value) => value,',
+        '  safeParseAsync: async (value) => ({ success: true, data: value }),',
+        '  parseAsync: async (value) => value,',
+        '};',
+        'export const registry = [',
+        '  {',
+        "    name: 'aliasprobe',",
+        '    inputSchema: schema,',
+        '    importer: async (wiring) => {',
+        '      const factory = createDriverFactory(',
+        '        wiring?.onDeprecatedAlias !== undefined',
+        '          ? { onDeprecatedAlias: wiring.onDeprecatedAlias }',
+        '          : {},',
+        '      );',
+        '      return async () => {',
+        "        factory.resolve({ role: 'fixer', modelSpec: { provider: 'ai-sdk', model: 'glm-4.6' } });",
+        "        return { status: 'ok', value: 'alias-resolved' };",
+        '      };',
+        '    },',
+        '  },',
+        '];',
+        '',
+      ].join('\n'),
+    );
+    return tmp;
+  }
+
+  test('direct op subcommand: --json keeps stderr EMPTY; human mode keeps the stderr notice', async () => {
+    const tmp = await writeAliasFixture();
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const machine = await capture(['aliasprobe', '--json'], { opsRoot: tmp });
+    expect(machine.code).toBe(0);
+    expect(JSON.parse(machine.out)).toEqual({ status: 'ok', value: 'alias-resolved' });
+    expect(machine.err).toBe(''); // machine mode: stderr stays EMPTY
+    expect(write).not.toHaveBeenCalled(); // the alias notice was suppressed with all narration
+    write.mockRestore();
+    const humanWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const human = await capture(['aliasprobe'], { opsRoot: tmp });
+    expect(human.code).toBe(0);
+    expect(human.err).toBe(''); // ok result: failures-only narration is silent
+    expect(humanWrite.mock.calls.some((call) => String(call[0]).includes('deprecated'))).toBe(true); // no wiring: the library default keeps today's stderr notice
+    humanWrite.mockRestore();
+  });
+
+  test('run-plan over a plan job: --json keeps stderr EMPTY; human mode keeps the stderr notice', async () => {
+    const tmp = await writeAliasFixture();
+    const { planPath } = await writePlanFile({
+      id: 'i1-alias-plan',
+      jobs: [{ id: 'a', op: 'aliasprobe', input: {} }],
+    });
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const machine = await capture(['run-plan', `--plan=${planPath}`, '--json'], { opsRoot: tmp });
+    expect(machine.code).toBe(0);
+    expect(machine.err).toBe(''); // machine mode: stderr stays EMPTY
+    expect(write).not.toHaveBeenCalled(); // the view wrap suppressed the alias notice too
+    write.mockRestore();
+    const humanWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const human = await capture(['run-plan', `--plan=${planPath}`], { opsRoot: tmp });
+    expect(human.code).toBe(0);
+    expect(humanWrite.mock.calls.some((call) => String(call[0]).includes('deprecated'))).toBe(true); // no wiring: the library default keeps today's stderr notice
+    humanWrite.mockRestore();
   });
 });

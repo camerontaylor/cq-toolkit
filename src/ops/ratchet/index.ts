@@ -28,6 +28,7 @@ export {
   normalizeBaselineDiffValues,
   parseBaseline,
   renderBaseline,
+  roundCoveragePct,
   tightens,
 } from './format.js';
 export type { BaselineFile, Direction } from './format.js';

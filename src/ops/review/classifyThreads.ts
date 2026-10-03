@@ -208,6 +208,31 @@ const parseRealMs = (iso: string | null): number | null => {
 const isResponder = (authorLogin: string | null, responder: string | null): boolean =>
   authorLogin !== null && authorLogin === responder;
 
+/** Trust is opt-in at the SDK boundary: legacy callers without a policy retain
+ * the historical behaviour, while resolved v1.1 config fails closed. */
+const isTrusted = (
+  authorLogin: string | null,
+  authorType: string | null,
+  config: ClassifyConfig,
+): boolean => {
+  if (
+    config.trustedAuthors === undefined &&
+    config.automationLogin === undefined &&
+    config.excludedLogins === undefined
+  )
+    return true;
+  if (authorLogin === null) return false;
+  if (authorLogin === config.automationLogin || config.excludedLogins?.includes(authorLogin))
+    return false;
+  return (config.trustedAuthors ?? []).some(
+    (entry) => entry === authorLogin || entry === `${authorLogin}:${authorType ?? ''}`,
+  );
+};
+
+/** Skip notices are privileged automation data, never generic author text. */
+const isAutomation = (authorLogin: string | null, config: ClassifyConfig): boolean =>
+  config.automationLogin === undefined || authorLogin === config.automationLogin;
+
 /** True when the body matches any configured bot skip/failure pattern (I2).
  * Each pattern is evaluated via a FRESH expression with any `g`/`y` flag
  * stripped: config patterns are data, and a stateful pattern's `lastIndex`
@@ -304,9 +329,24 @@ const responderAuthoredThreadRow: RowFn<ReviewThread> = (thread, ctx) =>
 
 /** Row 3 — a bot skip/failure notice is not a review (I2). */
 const botSkipThreadRow: RowFn<ReviewThread> = (thread, ctx) =>
-  matchesSkipPattern(thread.body, ctx.config)
+  isAutomation(thread.authorLogin, ctx.config) && matchesSkipPattern(thread.body, ctx.config)
     ? threadItem(thread, 'skip', 'bot_skip_notice')
     : null;
+
+/** Untrusted or path-anchored input must never reach a fixer. */
+const trustThreadRow: RowFn<ReviewThread> = (thread, ctx) => {
+  if (!isTrusted(thread.authorLogin, thread.authorType ?? null, ctx.config))
+    return threadItem(thread, 'blocked', 'untrusted_reviewer');
+  if (ctx.config.claimedPaths !== undefined) {
+    if (thread.path === null || thread.line === null) {
+      return threadItem(thread, 'blocked', 'path_anchor_missing');
+    }
+    if (!ctx.config.claimedPaths.includes(thread.path)) {
+      return threadItem(thread, 'blocked', 'path_anchor_mismatch');
+    }
+  }
+  return null;
+};
 
 /** Row 4 — an outdated unresolved thread cannot be fixed by a
  * head-of-branch commit: human/awaiting, so `blocked`. */
@@ -337,6 +377,7 @@ const THREAD_ROWS: readonly RowFn<ReviewThread>[] = [
   threadResolvedRow,
   responderAuthoredThreadRow,
   botSkipThreadRow,
+  trustThreadRow,
   outdatedThreadRow,
   responderLastWordRow,
 ];
@@ -356,9 +397,14 @@ const responderAuthoredReviewRow: RowFn<ReviewSummary> = (review, ctx) =>
 
 /** Row 8 — a bot skip/failure notice is not a review (I2). */
 const botSkipReviewRow: RowFn<ReviewSummary> = (review, ctx) =>
-  matchesSkipPattern(review.body, ctx.config)
+  isAutomation(review.authorLogin, ctx.config) && matchesSkipPattern(review.body, ctx.config)
     ? reviewItem(review, 'skip', 'bot_skip_notice')
     : null;
+
+const trustReviewRow: RowFn<ReviewSummary> = (review, ctx) =>
+  isTrusted(review.authorLogin, review.authorType ?? null, ctx.config)
+    ? null
+    : reviewItem(review, 'blocked', 'untrusted_reviewer');
 
 /** Row 9 — a DISMISSED verdict was voided downstream; re-surfacing it
  * would plan batches for noise (config.skipDismissedReviews). */
@@ -425,6 +471,7 @@ const reviewNeedsResponseRow: TotalRowFn<ReviewSummary> = (review) =>
 const REVIEW_ROWS: readonly RowFn<ReviewSummary>[] = [
   responderAuthoredReviewRow,
   botSkipReviewRow,
+  trustReviewRow,
   reviewDismissedRow,
   reviewAlreadyAnsweredRow,
   approvalNoBodyRow,
@@ -441,8 +488,13 @@ const responderAuthoredCommentRow: RowFn<RestComment> = (comment, ctx) =>
     : null;
 
 /** Row 14 — a bot skip/failure notice is not a review (I2). */
+const trustCommentRow: RowFn<RestComment> = (comment, ctx) =>
+  isTrusted(comment.authorLogin, comment.authorType ?? null, ctx.config)
+    ? null
+    : commentItem(comment, 'blocked', 'untrusted_reviewer');
+
 const botSkipCommentRow: RowFn<RestComment> = (comment, ctx) =>
-  matchesSkipPattern(comment.body, ctx.config)
+  isAutomation(comment.authorLogin, ctx.config) && matchesSkipPattern(comment.body, ctx.config)
     ? commentItem(comment, 'skip', 'bot_skip_notice')
     : null;
 
@@ -455,6 +507,7 @@ const topLevelSummaryRow: TotalRowFn<RestComment> = (comment) =>
 const COMMENT_ROWS: readonly RowFn<RestComment>[] = [
   responderAuthoredCommentRow,
   botSkipCommentRow,
+  trustCommentRow,
 ];
 
 // ---------------------------------------------------------------------------
@@ -492,10 +545,12 @@ export function classifyThreads(
   nowMs: number,
   config: ClassifyConfig = defaultClassifyConfig,
 ): Classification {
+  const effectiveConfig =
+    state.claimedPaths === undefined ? config : { ...config, claimedPaths: state.claimedPaths };
   const ctx: RowContext = {
-    responder: responderOf(state, config),
+    responder: responderOf(state, effectiveConfig),
     nowMs,
-    config,
+    config: effectiveConfig,
     restIssueComments: state.restIssueComments,
   };
   return {

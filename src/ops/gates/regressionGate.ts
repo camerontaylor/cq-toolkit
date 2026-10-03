@@ -30,6 +30,8 @@ export interface RegressionReport {
   fixedFailures: CheckFailure[];
   /** Baseline failures still present in `final` (the tolerated ones). */
   preExistingCount: number;
+  /** A test-count/skip-count regression, when runner totals expose one. */
+  totalsRegression?: string;
 }
 
 /** JSON-serializable input of the `gates.regressionGate` op. */
@@ -70,16 +72,53 @@ export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (
     .filter((pair) => !finalKeys.has(pair.key))
     .map((pair) => pair.failure);
   const preExistingCount = basePairs.length - fixedFailures.length;
+  const totalsRegression = testTotalsRegression(input.base, input.final);
   return {
     status: 'ok',
     value: {
-      verdict: novelFailures.length > 0 ? 'regression' : 'no-regression',
+      verdict:
+        novelFailures.length > 0 || totalsRegression !== null ? 'regression' : 'no-regression',
       novelFailures,
       fixedFailures,
       preExistingCount,
+      ...(totalsRegression !== null ? { totalsRegression } : {}),
     },
   };
 };
+
+function testTotalsRegression(base: FailureSet, final: FailureSet): string | null {
+  const observedFields = [
+    'numTotalTests',
+    'numPassedTests',
+    'numPassed',
+    'numSkippedTests',
+    'numPendingTests',
+    'numTodoTests',
+  ] as const;
+  const uncomputed = observedFields.find(
+    (field) => base[field] !== undefined && final[field] === undefined,
+  );
+  if (uncomputed !== undefined) {
+    return `${uncomputed} was observed in the baseline but is uncomputed in the final run — missing totals evidence cannot certify no regression`;
+  }
+  if (
+    base.numTotalTests !== undefined &&
+    final.numTotalTests !== undefined &&
+    final.numTotalTests < base.numTotalTests
+  ) {
+    return `test count dropped from ${base.numTotalTests} to ${final.numTotalTests} — a worker may not remove tests to make a run pass`;
+  }
+  const skipped = (set: FailureSet): number => {
+    const pending = set.numSkippedTests ?? set.numPendingTests ?? 0;
+    return pending + (set.numTodoTests ?? 0);
+  };
+  const baseSkipped = skipped(base);
+  const finalSkipped = skipped(final);
+  if (finalSkipped > baseSkipped) {
+    return `test skip/todo count rose from ${baseSkipped} to ${finalSkipped} — a worker may not make failing tests disappear`;
+  }
+  return null;
+}
 
 /**
  * Central I5 guard at the GATE level (mirrors and extends parseCheckOutput's

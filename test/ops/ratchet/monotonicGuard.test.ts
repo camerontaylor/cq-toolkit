@@ -15,9 +15,10 @@
 //      — no loosening is possible without a value change.
 //   2b. A section can carry BOTH violations at once (loosened under the new
 //       direction AND the flip itself), loosened first.
-//   3. File lifecycle is not a loosening, and comes from METADATA markers
-//      (`new file mode` / `--- /dev/null` for added; `deleted file mode` /
-//      `+++ /dev/null` for deleted), never from content-line counts —
+//   3. File lifecycle comes from METADATA markers (`new file mode` /
+//      `--- /dev/null` for added; `deleted file mode` / `+++ /dev/null` for
+//      deleted), never from content-line counts — an unpaired add passes, an
+//      UNREPLACED delete fails (W1.7; the pairing block below pins the rest) —
 //      counted in filesChecked via the `+++ b/` path, falling back to the
 //      `diff --git` b-side for /dev/null new-sides. One-sided content
 //      WITHOUT a lifecycle marker fails closed (Codex P1: a plus-only
@@ -520,7 +521,7 @@ describe('checkDiffMonotonicity', () => {
     expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
-  test('a deleted baseline file is skipped (prune lifecycle); path falls back to the diff --git b-side', () => {
+  test('an UNREPLACED deleted baseline fails "deleted without replacement" (W1.7); path falls back to the diff --git b-side', () => {
     const diff = [
       `diff --git a/${REL} b/${REL}`,
       'deleted file mode 100644',
@@ -530,7 +531,19 @@ describe('checkDiffMonotonicity', () => {
       '@@ -1,7 +0,0 @@',
       ...bodyLines(body('lower-is-better', 3)).map((l) => `-${l}`),
     ].join('\n');
-    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          why: 'deleted without replacement',
+        },
+      ],
+      filesChecked: 1,
+    });
   });
 
   test('non-baseline file changes are ignored entirely (filesChecked 0)', () => {
@@ -1029,6 +1042,338 @@ describe('checkDiffMonotonicity', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// W1.7 (ADR-0004 attack A5): delete/add PAIRING. The guard's diffs are
+// `git diff --no-renames --src-prefix=a/ --dst-prefix=b/`, so a rename is
+// always a delete section plus an add section; a delete is replaced iff
+// exactly one add carries the same (target, metric), and the pair is judged
+// like a modification.
+// ---------------------------------------------------------------------------
+
+/** A `--no-renames` deleted-file section: the whole old body as `-` lines. */
+function deletedSection(rel: string, oldBody: string): string {
+  const lines = bodyLines(oldBody);
+  return (
+    [
+      `diff --git a/${rel} b/${rel}`,
+      'deleted file mode 100644',
+      'index 1111111..0000000',
+      `--- a/${rel}`,
+      '+++ /dev/null',
+      `@@ -1,${lines.length} +0,0 @@`,
+      ...lines.map((l) => `-${l}`),
+    ].join('\n') + '\n'
+  );
+}
+
+/** A `--no-renames` added-file section: the whole new body as `+` lines. */
+function addedSection(rel: string, newBody: string): string {
+  const lines = bodyLines(newBody);
+  return (
+    [
+      `diff --git a/${rel} b/${rel}`,
+      'new file mode 100644',
+      'index 0000000..2222222',
+      '--- /dev/null',
+      `+++ b/${rel}`,
+      `@@ -0,0 +1,${lines.length} @@`,
+      ...lines.map((l) => `+${l}`),
+    ].join('\n') + '\n'
+  );
+}
+
+/** Same (target, metric) at NEW paths — e.g. a path-hash scheme change. */
+const REL_MOVED = 'baselines/typecheck--typecheck-count--0123456789ab.json';
+const REL_MOVED_2 = 'baselines/typecheck--typecheck-count--ba9876543210.json';
+const REL_MOVED_3 = 'baselines/typecheck--typecheck-count--fedcba987654.json';
+
+describe('delete/add pairing (W1.7, ADR-0004 attack A5)', () => {
+  test('coverage normalization keeps the deleted side across +++ /dev/null', () => {
+    const moved = 'baselines/coverage--coverage--0123456789ab.json';
+    const diff = deletedSection(REL_COV, covBody(93.44)) + addedSection(moved, covBody(93.4));
+    expect(checkDiffMonotonicity(diff).ok).toBe(false);
+    const normalized = normalizeBaselineDiffValues(
+      diff,
+      /^baselines\/[^/]*--coverage--[^/]*\.json$/,
+    );
+    expect(normalized).toContain('-  "value": 93.4,');
+    expect(normalized).toContain('+  "value": 93.4,');
+    expect(normalized).not.toContain('93.44');
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 2,
+    });
+  });
+
+  test('an unreplaced delete renders the definition-change one-liner', () => {
+    const verdict = checkDiffMonotonicity(deletedSection(REL, body('lower-is-better', 3)));
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(formatViolations(verdict.violations)).toEqual([
+      `${REL}: baseline deleted without a replacement for typecheck/typecheck-count — a removed ratchet needs a definition change (ADR-0004 D-C)`,
+    ]);
+  });
+
+  test('A5: renaming the ratchet target (cov deleted, cov2 added looser) fails on the unreplaced delete', () => {
+    const renamedTarget = 'coverage2';
+    const relCov2 = baselineRelPath(renamedTarget, COV_METRIC);
+    const diff =
+      deletedSection(REL_COV, covBody(85)) +
+      addedSection(
+        relCov2,
+        body('higher-is-better', 50, { target: renamedTarget, metric: COV_METRIC, unit: 'pct' }),
+      );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_COV,
+          target: COV_TARGET,
+          metric: COV_METRIC,
+          oldValue: 85,
+          why: 'deleted without replacement',
+        },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test.each([
+    ['an equal value', 3, 3],
+    ['a tighter value', 3, 2],
+  ])(
+    'same (target, metric) moved to a new path with %s passes (judged as a modification)',
+    (_label, oldValue, newValue) => {
+      const diff =
+        deletedSection(REL, body('lower-is-better', oldValue)) +
+        addedSection(REL_MOVED, body('lower-is-better', newValue));
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 2 });
+    },
+  );
+
+  test('a moved baseline with an equal value and a new capturedAt passes (same-value re-capture)', () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 3)) +
+      addedSection(
+        REL_MOVED,
+        body('lower-is-better', 3, { capturedAt: '2026-09-16T00:00:00.000Z' }),
+      );
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 2 });
+  });
+
+  test('a moved baseline with a LOOSER value fails "loosened", naming the added path', () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 2)) +
+      addedSection(REL_MOVED, body('lower-is-better', 3));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_MOVED,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 2,
+          newValue: 3,
+          why: 'loosened',
+        },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test('pairing is order-independent: an add listed BEFORE its delete still replaces it', () => {
+    const diff =
+      addedSection(REL_MOVED, body('lower-is-better', 3)) +
+      deletedSection(REL, body('lower-is-better', 2));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_MOVED,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 2,
+          newValue: 3,
+          why: 'loosened',
+        },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test('a paired move that flips direction fails "direction changed"', () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 3)) +
+      addedSection(REL_MOVED, body('higher-is-better', 3));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_MOVED,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 3,
+          why: 'direction changed',
+          oldDirection: 'lower-is-better',
+          newDirection: 'higher-is-better',
+        },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test('a paired move that changes the unit fails "unit changed" (terminal — no tighten reading)', () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 3)) +
+      addedSection(REL_MOVED, body('lower-is-better', 2, { unit: 'failures' }));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_MOVED,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 2,
+          why: 'unit changed',
+          oldUnit: 'errors',
+          newUnit: 'failures',
+        },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test("two adds carrying one delete's (target, metric) are ambiguous → unparsable on every involved path", () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 3)) +
+      addedSection(REL_MOVED, body('lower-is-better', 2)) +
+      addedSection(REL_MOVED_2, body('lower-is-better', 9));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, why: 'unparsable baseline diff' },
+        { path: REL_MOVED, why: 'unparsable baseline diff' },
+        { path: REL_MOVED_2, why: 'unparsable baseline diff' },
+      ],
+      filesChecked: 3,
+    });
+  });
+
+  test('two adds with the same identity and NO delete are ambiguous too', () => {
+    const diff =
+      addedSection(REL, body('lower-is-better', 3)) +
+      addedSection(REL_MOVED, body('lower-is-better', 3));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, why: 'unparsable baseline diff' },
+        { path: REL_MOVED, why: 'unparsable baseline diff' },
+      ],
+      filesChecked: 2,
+    });
+  });
+
+  test('two deletes claiming the same add are ambiguous → unparsable on all three paths', () => {
+    const diff =
+      deletedSection(REL, body('lower-is-better', 3)) +
+      deletedSection(REL_MOVED, body('lower-is-better', 3)) +
+      addedSection(REL_MOVED_3, body('lower-is-better', 3));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, why: 'unparsable baseline diff' },
+        { path: REL_MOVED, why: 'unparsable baseline diff' },
+        { path: REL_MOVED_3, why: 'unparsable baseline diff' },
+      ],
+      filesChecked: 3,
+    });
+  });
+
+  test('an unpaired add of a NEW identity passes (new baseline data; the verifier owns definitions)', () => {
+    const diff =
+      fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 2)) +
+      addedSection(REL_COV, covBody(80));
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 2 });
+  });
+
+  test.each([
+    [
+      'a deleted section with no reconstructable metric',
+      deletedSection(
+        REL,
+        body('lower-is-better', 3).replace('"metric": "typecheck-count"', '"metrik": "x"'),
+      ),
+    ],
+    [
+      'a deleted section with a DUPLICATE value line',
+      deletedSection(
+        REL,
+        body('lower-is-better', 3).replace('"value": 3,', '"value": 3,\n  "value": 1,'),
+      ),
+    ],
+    [
+      'a deleted section whose value is non-finite (1e999)',
+      deletedSection(REL, body('lower-is-better', 3).replace('"value": 3,', '"value": 1e999,')),
+    ],
+    [
+      'a deleted section with a malformed unit escape',
+      deletedSection(REL, body('lower-is-better', 3).replace('"unit": "errors"', '"unit": "e\\x"')),
+    ],
+    [
+      'an added section with no reconstructable target',
+      addedSection(
+        REL,
+        body('lower-is-better', 3).replace('"target": "typecheck"', '"targ": "typecheck"'),
+      ),
+    ],
+    [
+      'a deleted section that also ADDS content (wrong side)',
+      deletedSection(REL, body('lower-is-better', 3)) + '+  "value": 1,\n',
+    ],
+  ])('%s fails closed as unparsable — never a skipped or unreplaced delete', (_label, diff) => {
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('baselines/ratchets.json edits are ignored by the guard (definition manifest, not counted)', () => {
+    const manifest = 'baselines/ratchets.json';
+    const modified = modifiedSection(
+      manifest,
+      ['{ "ratchets": ["typecheck"] }'],
+      ['{ "ratchets": [] }'],
+    );
+    const deleted = [
+      `diff --git a/${manifest} b/${manifest}`,
+      'deleted file mode 100644',
+      'index 1111111..0000000',
+      `--- a/${manifest}`,
+      '+++ /dev/null',
+      '@@ -1,1 +0,0 @@',
+      '-{ "ratchets": ["typecheck"] }',
+    ].join('\n');
+    expect(checkDiffMonotonicity(modified)).toEqual({ ok: true, violations: [], filesChecked: 0 });
+    expect(checkDiffMonotonicity(deleted)).toEqual({ ok: true, violations: [], filesChecked: 0 });
+    // Only the EXACT manifest path is excluded: a nested lookalike is still
+    // judged (and fails closed — it carries no baseline body).
+    const nested = modifiedSection(
+      'baselines/sub/ratchets.json',
+      ['{ "ratchets": ["typecheck"] }'],
+      ['{ "ratchets": [] }'],
+    );
+    expect(checkDiffMonotonicity(nested)).toEqual({
+      ok: false,
+      violations: [{ path: 'baselines/sub/ratchets.json', why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+});
+
 const gitDescribe = gitAvailable() ? describe : describe.skip;
 gitDescribe('real git diff fixtures (literal git output from a temp repo)', () => {
   test('a real tighten diff passes', { timeout: 20_000 }, async () => {
@@ -1047,12 +1392,13 @@ gitDescribe('real git diff fixtures (literal git output from a temp repo)', () =
     });
   });
 
-  test('a noprefix DELETED baseline is attributed via the header fallback (floor-halved pair) and skipped', () => {
+  test('a noprefix DELETED baseline is attributed via the header fallback (floor-halved pair) and judged as a lifecycle delete', () => {
     // RED before the round-3 fix: the identical `X X` header pair is always
     // ODD-length, so the old %2===0 gate was dead code and the b-side path
     // was never recovered — the section fail-closed on its minus lines.
     // Now the path is recovered and the header-only `deleted file mode`
-    // lifecycle metadata skips the section.
+    // lifecycle metadata routes it to the delete/add pairing — unreplaced
+    // here, so it names the attributed path (W1.7).
     const diff = [
       `diff --git ${REL} ${REL}`,
       'deleted file mode 100644',
@@ -1062,7 +1408,19 @@ gitDescribe('real git diff fixtures (literal git output from a temp repo)', () =
       '@@ -1,7 +0,0 @@',
       ...bodyLines(body('lower-is-better', 3)).map((l) => `-${l}`),
     ].join('\n');
-    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          why: 'deleted without replacement',
+        },
+      ],
+      filesChecked: 1,
+    });
   });
 
   test(
@@ -1075,11 +1433,23 @@ gitDescribe('real git diff fixtures (literal git output from a temp repo)', () =
   );
 
   test(
-    'a real deleted-baseline diff is skipped via its metadata markers',
+    'a real deleted-baseline diff fails as deleted without replacement (W1.7)',
     { timeout: 20_000 },
     async () => {
       const diff = await realGitDiff(body('lower-is-better', 3), null);
-      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [
+          {
+            path: REL,
+            target: TARGET,
+            metric: METRIC,
+            oldValue: 3,
+            why: 'deleted without replacement',
+          },
+        ],
+        filesChecked: 1,
+      });
     },
   );
 
@@ -1356,9 +1726,9 @@ function cxBody(value: number): string {
   });
 }
 
-describe('normalizeBaselineDiffValues (coverage integer-percent comparison basis)', () => {
-  test('a fractional re-basis 93.46 → 93 reads as the equal no-op it is', () => {
-    const raw = fullRewrite(REL_COV, covBody(93.46), covBody(93));
+describe('normalizeBaselineDiffValues (coverage one-decimal comparison basis)', () => {
+  test('a fractional re-basis 93.54 → 93.5 reads as the equal no-op it is', () => {
+    const raw = fullRewrite(REL_COV, covBody(93.54), covBody(93.5));
     // Without a uniform basis the fractional old side reads as a loosening.
     expect(checkDiffMonotonicity(raw).ok).toBe(false);
     const normalized = normalizeBaselineDiffValues(raw, REL_COV);
@@ -1402,5 +1772,48 @@ describe('normalizeBaselineDiffValues (coverage integer-percent comparison basis
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(verdict.violations[0]?.why).toBe('loosened');
+  });
+});
+
+describe('rename/copy-detected sections fail closed (W1.7: the guard needs --no-renames)', () => {
+  const renamed = (from: string, to: string, kind: 'rename' | 'copy' = 'rename'): string =>
+    [
+      `diff --git a/${from} b/${to}`,
+      'similarity index 100%',
+      `${kind} from ${from}`,
+      `${kind} to ${to}`,
+      '',
+    ].join('\n');
+
+  test('a pure rename inside baselines/ is not skipped as index churn', () => {
+    const verdict = checkDiffMonotonicity(
+      renamed(
+        'baselines/coverage--coverage--a8ceec8f7024.json',
+        'baselines/cov2--coverage--x.json',
+      ),
+    );
+    expect(verdict).toMatchObject({ ok: false, violations: [{ why: 'unparsable baseline diff' }] });
+  });
+
+  test('a baseline renamed OUT of baselines/ cannot vanish unjudged', () => {
+    const verdict = checkDiffMonotonicity(
+      renamed('baselines/coverage--coverage--a8ceec8f7024.json', 'attic/coverage.json'),
+    );
+    expect(verdict.ok).toBe(false);
+  });
+
+  test('a copy onto a baseline path fails closed too', () => {
+    const verdict = checkDiffMonotonicity(
+      renamed('attic/loose.json', 'baselines/coverage--coverage--a8ceec8f7024.json', 'copy'),
+    );
+    expect(verdict.ok).toBe(false);
+  });
+
+  test('renames outside baselines/ stay ignored', () => {
+    expect(checkDiffMonotonicity(renamed('src/a.ts', 'src/b.ts'))).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 0,
+    });
   });
 });

@@ -14,6 +14,8 @@
 export interface ThreadComment {
   /** GitHub login, or null when the account is unavailable/anonymized. */
   authorLogin: string | null;
+  /** GitHub actor type when supplied. */
+  authorType?: string | null | undefined;
   /** Markdown body. */
   body: string;
   /** ISO 8601 timestamp, or null when not resolvable. */
@@ -45,6 +47,8 @@ export interface ReviewThread {
   isOutdated: boolean;
   /** The ROOT comment's author login, or null when unavailable. */
   authorLogin: string | null;
+  /** The ROOT comment's actor type, when supplied. */
+  authorType?: string | null | undefined;
   /** The ROOT comment's ISO 8601 timestamp, or null when not resolvable. */
   createdAt: string | null;
   /** The ROOT comment's markdown body. */
@@ -67,6 +71,12 @@ export interface ReviewSummary {
   state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | null;
   /** The review's markdown body (may be empty for bare verdicts). */
   body: string;
+  /** The head commit the review was submitted against, when GitHub supplied it. */
+  commitOid?: string | null | undefined;
+  /** The actor type returned by GitHub (User, Bot, Organization, …). */
+  authorType?: string | null | undefined;
+  /** The reviewer's association with the repository, when supplied. */
+  authorAssociation?: string | null | undefined;
   /** ISO 8601 submission timestamp, or null when not resolvable. */
   submittedAt: string | null;
 }
@@ -79,6 +89,8 @@ export interface RestComment {
   nodeId: string | null;
   /** Author's GitHub login, or null when unavailable. */
   authorLogin: string | null;
+  /** Author's GitHub actor type, when supplied. */
+  authorType?: string | null | undefined;
   /** Markdown body. */
   body: string;
   /** ISO 8601 timestamp, or null when not resolvable. */

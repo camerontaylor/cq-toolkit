@@ -2,7 +2,7 @@
 // CheckRunner contract + pure parse core + op factory, the three named
 // wire-format adapters, the C2 baseline tooling — fingerprints, the
 // regression gate, and the baseline probe — and the C3 tamper guard: the
-// hack detector and the commit gate.
+// hack detector and the commit gate; W1.9 adds the D11 policy check.
 export type {
   AdapterName,
   CheckAdapter,
@@ -65,3 +65,38 @@ export {
   hackDetector,
 } from './hackDetector.js';
 export { CommitGateInputSchema, HackDetectorInputSchema } from './registry.js';
+// W1.9 (D11) — the protected-path policy check: the op factory and its
+// posture resolver, the override-label record, and the workflow scanner.
+export type {
+  PolicyDiffInput,
+  PolicyDiffOutcome,
+  PolicyFinding,
+  PolicyFindingKind,
+} from './policyDiff.js';
+export { LABEL_EVENTS_MAX_BYTES, POLICY_LIST_PATH, createPolicyDiff } from './policyDiff.js';
+export type {
+  ProtectedPathsConfig,
+  ProtectedPathsOptIn,
+  ProtectedPathsPosture,
+} from './policyConfig.js';
+export {
+  PROTECTED_PATHS_ENV,
+  PROTECTED_PATHS_OPT_IN,
+  resolveProtectedPathsConfig,
+} from './policyConfig.js';
+export type { OverrideEvaluation, OverrideEvent } from './overrideRecord.js';
+export {
+  C3_ATTESTATION_PATH,
+  OVERRIDE_LABEL,
+  evaluateOverrideLabel,
+  formatOverride,
+  headObservationEpoch,
+} from './overrideRecord.js';
+export type {
+  WorkflowFinding,
+  WorkflowFindingKind,
+  WorkflowJob,
+  WorkflowScan,
+} from './workflowScan.js';
+export { diffWorkflow, isWorkflowPath, lintWorkflow, scanWorkflow } from './workflowScan.js';
+export { PolicyDiffInputSchema } from './registry.js';

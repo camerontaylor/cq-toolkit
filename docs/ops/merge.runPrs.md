@@ -20,6 +20,55 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
+    "config": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptReviewStates": {
+          "items": {
+            "enum": [
+              "APPROVED",
+              "CHANGES_REQUESTED",
+              "COMMENTED"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowSameAccountAgentReview": {
+          "type": "boolean"
+        },
+        "automationLogin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "excludedLogins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settleWindowMs": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trustedAssociations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trustedBots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "conflictResolutionDisabled": {
       "type": "boolean"
     },
@@ -88,6 +137,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "maxLength": 250,
             "type": "string"
           },
+          "headRefOid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "headSha": {
             "pattern": "^[0-9a-f]{40}$",
             "type": "string"
@@ -97,6 +152,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
               "additionalProperties": false,
               "properties": {
                 "authorLogin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "authorType": {
                   "type": [
                     "string",
                     "null"
@@ -173,7 +234,19 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "items": {
               "additionalProperties": false,
               "properties": {
+                "authorAssociation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "authorLogin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "authorType": {
                   "type": [
                     "string",
                     "null"
@@ -181,6 +254,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                 },
                 "body": {
                   "type": "string"
+                },
+                "commitOid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "id": {
                   "type": "string"
@@ -236,6 +315,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                     "null"
                   ]
                 },
+                "authorType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "body": {
                   "type": "string"
                 },
@@ -277,6 +362,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                     "additionalProperties": false,
                     "properties": {
                       "authorLogin": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "authorType": {
                         "type": [
                           "string",
                           "null"

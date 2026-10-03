@@ -33,7 +33,14 @@
 //
 // Fixed usage everywhere: {input_tokens:10, output_tokens:5,
 // cache_read_input_tokens:2, cache_creation_input_tokens:3}.
-import { existsSync } from 'node:fs';
+//
+// CLOSED-SURFACE INIT (W1.4): the driver's default argv carries `--tools ""`
+// plus the per-run `--mcp-config`, and asserts the first init event
+// fail-closed. This fixture edits the checkout directly (it makes no tool
+// calls), so it only REPORTS the surface the real CLI reports under those
+// flags: the qualified `--allowedTools` names (+ `StructuredOutput` under
+// `--json-schema`) and each configured MCP server as connected.
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import process from 'node:process';
@@ -49,6 +56,29 @@ const model = process.argv.includes('--model')
   ? process.argv[process.argv.indexOf('--model') + 1]
   : 'sweep-fake';
 const sessionId = `sweep-agent-${process.pid}-${Date.now().toString(36)}`;
+
+/** The value following `flag` in argv, or undefined when absent. */
+function argOf(flag) {
+  const i = process.argv.indexOf(flag);
+  return i === -1 ? undefined : process.argv[i + 1];
+}
+
+/** The init surface the real CLI reports for this argv (closed-surface flags only). */
+function initSurface() {
+  if (argOf('--tools') !== '') return {};
+  const allowed = (argOf('--allowedTools') ?? '').split(' ').filter((name) => name !== '');
+  const tools = [...(argOf('--json-schema') !== undefined ? ['StructuredOutput'] : []), ...allowed];
+  const configPath = argOf('--mcp-config');
+  const servers =
+    configPath === undefined
+      ? []
+      : Object.keys(JSON.parse(readFileSync(configPath, 'utf8')).mcpServers ?? {}).map((name) => ({
+          name,
+          status: 'connected',
+          source: 'dynamic',
+        }));
+  return { tools, mcp_servers: servers };
+}
 
 const out = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
@@ -114,7 +144,7 @@ async function performDelete(file) {
 }
 
 const instruction = await instructionOf();
-out({ type: 'system', subtype: 'init', session_id: sessionId, model });
+out({ type: 'system', subtype: 'init', session_id: sessionId, model, ...initSurface() });
 
 // The TRANSIENT fault ({faultOnce:{marker,why}}): faults ONLY the first
 // invocation (the marker file is created outside the checkout); a re-dispatch

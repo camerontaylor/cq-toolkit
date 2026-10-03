@@ -1,0 +1,305 @@
+# instantiated from policy/templates/gate.yml — edit the template, not this file
+# cq-gate — the P1 promotion job (ADR-0004 D-K; W1.10): promotes the
+# merge-queue tip to main when every commit in main..tip is admitted by the
+# closure rule and every admitted PR's verdicts and acceptance hold.
+#
+# Carrier (P1): `workflow_run` on `ci` and `cq-measure` for merge-queue push
+# runs, a `schedule` sweep (every 15 minutes — it bounds promotion latency
+# when a wake-up is missed, ADR-0004 O-7) and `workflow_dispatch` (honoured
+# only on the default ref, D-A.1). GitHub runs the DEFAULT BRANCH's copy of
+# this file for all three, so nothing a PR authored can edit what promotes it.
+#
+# Trust:
+#   - `wake` only decides whether to run. For `workflow_run` it re-reads the
+#     triggering run by id and requires its workflow path, event `push`,
+#     branch `merge-queue` and repository id. It carries NO data forward: a
+#     junk trigger fails `wake` and never enters the `promote` group.
+#   - `decide` resolves its own subject: the gate CLI reads the merge-queue
+#     tip and main itself (D-K.3), never from the event. Its code is the
+#     toolkit built from the trust ref (`github.sha`, the default-branch tip)
+#     with `npm ci --ignore-scripts`. The head is only git objects plus API
+#     data (check runs, PRs, reviews): nothing the queue authored runs here,
+#     and no PR artifact is read.
+#   - Every read uses this job's GITHUB_TOKEN. The promotion credential
+#     reaches only the gate step, where the CLI puts it in a step-scoped
+#     GIT_CONFIG_* extra-header for the one atomic push (Decision 13).
+#   - `decide` is the SOLE member of concurrency group `promote`, and runs in
+#     environment `promote` (main-only branch policy).
+#
+# C1 (ADR-0004 D-H.3.1): this gate runs ALONGSIDE merge-queue-gate.yml. Both
+# promote with an atomic compare-and-swap push, so running both is race-safe
+# (RS-4 T-20). merge-queue-gate.yml retires at C2.
+#
+# Credential (Decision 7): a promoter-App installation token when
+# `vars.CQ_PROMOTER_APP_CLIENT_ID` is set; otherwise the interim
+# `PROMOTE_TOKEN` (fine-grained PAT: Contents read/write, Workflows write,
+# Metadata read). With neither, the gate fails closed before any read.
+#
+# Instantiate (each token below is written in double braces in the body):
+#   GATE_WORKFLOWS   -> comma list of workflow FILE names whose merge-queue
+#                       push runs must have succeeded on the tip (the gate
+#                       reads them by workflow path, never by check name),
+#                       e.g. ci.yml,denylist.yml
+#   GATE_TIMEOUT_MIN -> minutes the gate waits for verdicts and those runs
+#                       before refusing (default 20). CEILING: the wait
+#                       plus checkout, install and build must stay under
+#                       `decide`'s fixed `timeout-minutes: 40`, so keep it
+#                       <= 25 (test/workflows/template-render.test.ts
+#                       enforces this for the instance). Above that the
+#                       runner may kill `decide` mid-wait: still no
+#                       promotion (fails closed), but the report is lost.
+# No ${{ }} expression is ever interpolated into a run: script in this
+# workflow — values reach scripts through env: indirection only. Drop the
+# result into .github/workflows/. Edit the template, not the instantiation.
+name: cq-gate
+
+on:
+  workflow_run:
+    workflows:
+      - ci
+      - cq-measure
+    types:
+      - completed
+    branches:
+      - merge-queue
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  wake:
+    name: wake
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.event_name == 'workflow_run' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Verify the triggering run (workflow_run only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != 'workflow_run' ]; then
+            echo "${EVENT}: sweep — the gate resolves its own subject"
+            exit 0
+          fi
+          case "$RUN_ID" in
+            ''|*[!0-9]*)
+              echo "refusing: run id '$RUN_ID' is not numeric"
+              exit 1;;
+          esac
+          # Re-read the run from the API by id: the fields below are the
+          # server's, not a payload a dispatcher could shape.
+          run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+          path="$(jq -r '.path' <<<"$run")"
+          event="$(jq -r '.event' <<<"$run")"
+          branch="$(jq -r '.head_branch' <<<"$run")"
+          head_repo="$(jq -r '.head_repository.id' <<<"$run")"
+          case "$path" in
+            .github/workflows/ci.yml|.github/workflows/cq-measure.yml) ;;
+            *) echo "refusing: run path '$path'"; exit 1;;
+          esac
+          [ "$event" = 'push' ] || {
+            echo "refusing: event '$event'"; exit 1; }
+          [ "$branch" = 'merge-queue' ] || {
+            echo "refusing: branch '$branch'"; exit 1; }
+          [ "$head_repo" = "$REPO_ID" ] || {
+            echo "refusing: fork or foreign run (repo id $head_repo)"
+            exit 1; }
+          echo "woken by ${path} run ${RUN_ID} on merge-queue"
+
+  decide:
+    name: decide
+    needs: wake
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: promote
+    # The SOLE member of this group: promotions serialize, and a running
+    # promotion is never cancelled mid-push.
+    concurrency:
+      group: promote
+      cancel-in-progress: false
+    # Reads only, with this job's GITHUB_TOKEN. `actions: write` is here
+    # ONLY because the gate dispatches cq-verify on the default ref when the
+    # tip's cq/ratchet verdict is missing; it writes nothing else.
+    permissions:
+      contents: read
+      checks: read
+      actions: write
+      pull-requests: read
+      issues: read
+    env:
+      # The trust set and posture (P7 keys, Annex B §B.6.3). Blank or unset
+      # is the conservative default.
+      CQ_MERGE_TRUSTED_BOTS: ${{ vars.CQ_MERGE_TRUSTED_BOTS }}
+      CQ_MERGE_ACCEPT_REVIEW_STATES: ${{ vars.CQ_MERGE_ACCEPT_REVIEW_STATES }}
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: ${{ vars.CQ_MERGE_TRUSTED_ASSOCIATIONS }}
+      CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW: ${{ vars.CQ_MERGE_ALLOW_SAME_ACCOUNT_AGENT_REVIEW }}
+      CQ_MERGE_PROTECTED_PATHS: ${{ vars.CQ_MERGE_PROTECTED_PATHS }}
+    steps:
+      - name: Refuse a half-registered App (paired vars)
+        # Each App is named by a PAIR: the client id mints its token, the
+        # numeric id selects its verdicts / pins its bypass. Exactly one of
+        # a pair set would make those disagree (Decisions 6, 7).
+        env:
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          VERDICT_CLIENT_ID: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          PROMOTER_APP_ID: ${{ vars.CQ_PROMOTER_APP_ID }}
+          PROMOTER_CLIENT_ID: ${{ vars.CQ_PROMOTER_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ "${VERDICT_APP_ID:+set}" != "${VERDICT_CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_VERDICT_APP_ID and'
+            echo 'vars.CQ_VERDICT_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
+          if [ "${PROMOTER_APP_ID:+set}" != "${PROMOTER_CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_PROMOTER_APP_ID and'
+            echo 'vars.CQ_PROMOTER_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
+      - name: Check out the trust ref (the default branch)
+        # v5.1.0, immutable commit pin (repo policy)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: trust
+          fetch-depth: 0
+          # The object fetch and the push scope their own credentials to
+          # their steps; nothing persists into the trusted build.
+          persist-credentials: false
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        working-directory: trust
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Fetch the main and merge-queue objects (no checkout)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A step-scoped read-only credential, passed through git's
+          # environment config (never argv, never .git/config), so it ends
+          # with this step.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+          git -C trust fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/merge-queue:refs/remotes/origin/merge-queue'
+      - name: Mint the promoter App token (when the App is registered)
+        id: promoter-app
+        if: vars.CQ_PROMOTER_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.CQ_PROMOTER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_PROMOTER_APP_KEY }}
+          permission-contents: write
+          permission-workflows: write
+      - name: 'Gate (CLI: selfhost/promote-gate)'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Interim fallback (Decision 7): the re-scoped PROMOTE_TOKEN PAT.
+          CQ_PROMOTE_TOKEN: ${{ steps.promoter-app.outputs.token || secrets.PROMOTE_TOKEN }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          TRUST: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+        run: |
+          set -euo pipefail
+          [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
+            echo "refusing: repository id '$REPO_ID'"; exit 1; }
+          [[ "$TRUST" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusing: trust ref '$TRUST'"; exit 1; }
+          [ -z "$VERDICT_APP_ID" ] || [[ "$VERDICT_APP_ID" =~ ^[0-9]+$ ]] || {
+            echo "refusing: CQ_VERDICT_APP_ID '$VERDICT_APP_ID'"; exit 1; }
+          if [ -z "$CQ_PROMOTE_TOKEN" ]; then
+            echo 'no promotion credential: set the promoter App vars or the interim PROMOTE_TOKEN'
+            exit 1
+          fi
+          # A schedule payload may omit the repository object; the API is
+          # then the source of the default branch name.
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            DEFAULT_BRANCH="$(gh api "repos/${REPO}" --jq '.default_branch')"
+          fi
+          [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+            echo "refusing: default branch '$DEFAULT_BRANCH'"; exit 1; }
+          args=(
+            --repo=trust
+            --repository="$REPO"
+            --repositoryId="$REPO_ID"
+            --trustRef="$TRUST"
+            --defaultBranch="$DEFAULT_BRANCH"
+            --verifiedWorkflows=ci.yml,denylist.yml
+            --timeoutMin=20
+            --push
+          )
+          if [ -n "$VERDICT_APP_ID" ]; then
+            args+=(--verdictAppId="$VERDICT_APP_ID")
+          fi
+          node trust/dist/selfhost/promote-gate.js "${args[@]}" \
+            > "${RUNNER_TEMP}/gate.json" || true
+          if ! jq -e -s \
+            'length == 1 and (.[0] | type) == "object"
+             and (.[0].status | type) == "string"
+             and (.[0].value == null or (.[0].value | type) == "object")
+             and (.[0].error == null or (.[0].error | type) == "string")
+             and (.[0].detail == null or (.[0].detail | type) == "string")
+             and (.[0].status != "ok" or
+               ((.[0].value | type) == "object"
+                and (.[0].value.verdict
+                  | IN("promoted", "would-promote", "noop", "refused"))
+                and (.[0].value.report | type) == "array"
+                and all(.[0].value.report[]; type == "string")))' \
+            "${RUNNER_TEMP}/gate.json" >/dev/null 2>&1; then
+            msg='gate emitted no valid JSON result'
+            printf '%s\n' "{\"status\":\"failed\",\"error\":\"$msg\"}" \
+              > "${RUNNER_TEMP}/gate.json"
+          fi
+          cat "${RUNNER_TEMP}/gate.json"
+          # The run report (each promoted PR's cq-override record included)
+          # is the step summary: fenced so SHAs and paths render verbatim,
+          # and capped.
+          jq -r '
+            . as $r
+            | (if $r.status == "ok" then ($r.value.report | join("\n"))
+               else (($r.error // $r.detail
+                 // "gate returned no error detail") | tostring)
+               end) as $report
+            | (if ($report | length) > 60000
+               then $report[0:60000] + "\n(report truncated)"
+               else $report end) as $report
+            | "## cq-gate: "
+              + (if $r.status == "ok" then $r.value.verdict
+                 else "gate " + $r.status end)
+              + "\n\n```text\n"
+              + ($report | gsub("`{3,}"; "` ` `"))
+              + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
+          # Green only when the tip was promoted or there was nothing to do.
+          jq -e '.status == "ok"
+            and (.value.verdict | IN("promoted", "noop"))' \
+            "${RUNNER_TEMP}/gate.json" >/dev/null

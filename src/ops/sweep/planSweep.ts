@@ -658,7 +658,19 @@ const SWEEP_GIT_TIMEOUT_MS = 600_000;
  * dash-leading value is parsed as an OPTION before any terminator applies).
  */
 export function changedFilesArgs(base: string): string[] {
-  return ['diff', '--name-status', '-z', base, '--'];
+  return [
+    'diff',
+    '--text',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--no-renames',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
+    '--name-status',
+    '-z',
+    base,
+    '--',
+  ];
 }
 
 /**
