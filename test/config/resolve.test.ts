@@ -413,4 +413,40 @@ describe('pure configuration resolution', () => {
       ).toEqual({ constructor: '0.5' });
     });
   });
+
+  describe('address review: strictness gaps', () => {
+    it('case-folds ACP env names and rejects unsafe ms integers', () => {
+      expect(() => resolve({ env: { CQ_DRIVER_ACP_ENV_NAMES: 'cq_sandbox' } })).toThrow(
+        /CQ_\* policy/,
+      );
+      expect(() => resolve({ env: { CQ_GH_TIMEOUT_MS: '9007199254740993' } })).toThrow(
+        /out of range/,
+      );
+    });
+
+    it('restricts bundled provider profile values', () => {
+      expect(() => resolve({ env: { CQ_PROVIDER_DEEPSEEK_PROFILE: 'bundle' } })).toThrow(/bundled/);
+    });
+
+    it('accepts typed served-alias records and order-insensitive call-only opt-ins', () => {
+      const config = resolve({
+        optIn: ['driver.servedAliases'],
+        values: { 'driver.servedAliases': { 'lane/provider/requested': 'served' } },
+      });
+      expect(entryValue('driver.servedAliases', config)).toEqual({
+        'lane/provider/requested': 'served',
+      });
+      expect(() =>
+        resolve({
+          optIn: ['budget.releaseQuarantine=run-a,run-b'],
+          values: { 'budget.releaseQuarantine': ['run-b', 'run-a'] },
+        }),
+      ).not.toThrow();
+    });
+
+    it('treats reap-on-settle as a tightening of session retention', () => {
+      const config = resolve({ values: { 'driver.sessionRetention': 'reap-on-settle' } });
+      expect(entryValue('driver.sessionRetention', config)).toBe('reap-on-settle');
+    });
+  });
 });

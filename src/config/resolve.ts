@@ -249,7 +249,9 @@ function parse(
       throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
     if (
       key.id === 'driver.acp.envNames' &&
-      unique.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.startsWith('CQ_'))
+      unique.some(
+        (name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.toUpperCase().startsWith('CQ_'),
+      )
     )
       throw new Error(`${key.env}: CQ_* policy variables cannot be passed to ACP`);
     return unique;
@@ -286,11 +288,17 @@ function parse(
     return result;
   }
   if (key.type === 'aliases') {
+    const objectEntries =
+      typeof raw === 'object' && !Array.isArray(raw) ? Object.entries(raw) : undefined;
+    if (objectEntries?.some(([, value]) => typeof value !== 'string'))
+      throw new Error(`${key.env}: alias values must be strings`);
     const entries = isStringArray(raw)
       ? raw
-      : String(raw)
-          .split(',')
-          .filter((part) => part.trim() !== '');
+      : objectEntries
+        ? objectEntries.map(([k, v]) => `${k}=${v}`)
+        : String(raw)
+            .split(',')
+            .filter((part) => part.trim() !== '');
     const result: Record<string, string> = {};
     for (const rawEntry of entries) {
       const entry = String(rawEntry).trim();
@@ -326,7 +334,7 @@ function parse(
     const value = Number(source);
     if (
       !Number.isFinite(value) ||
-      (key.type === 'int' && !Number.isSafeInteger(value)) ||
+      (key.type !== 'usd' && !Number.isSafeInteger(value)) ||
       (key.min !== undefined && value < key.min) ||
       (key.max !== undefined && value > key.max)
     ) {
@@ -337,6 +345,12 @@ function parse(
   const value = String(raw);
   if (key.values && !key.values.includes(value))
     throw new Error(`${key.env}: unsupported value '${value}'`);
+  if (
+    /^CQ_PROVIDER_[A-Z0-9_]+_PROFILE$/.test(key.env) &&
+    value !== 'bundled' &&
+    !value.startsWith('custom:')
+  )
+    throw new Error(`${key.env}: expected 'bundled' or 'custom:<absolute-path>'`);
   if (key.type === 'model' && !/^[a-z0-9-]+\/.+$/.test(value))
     throw new Error(`${key.env}: expected provider/model`);
   if (key.type === 'url') {
@@ -491,6 +505,7 @@ function tighter(key: ConfigKey, value: ConfigValue, baseline: ConfigValue): boo
   if (key.id === 'sandbox') return value === 'required';
   if (key.id === 'sandbox.network') return value === 'model-only';
   if (key.id === 'run.tool') return value === 'off';
+  if (key.id === 'driver.sessionRetention') return value === 'reap-on-settle';
   if (key.id === 'merge.protectedPaths') return value === 'human';
   switch (key.order) {
     case 'true':
@@ -519,6 +534,20 @@ function tighter(key: ConfigKey, value: ConfigValue, baseline: ConfigValue): boo
     case 'none':
       return false;
   }
+}
+
+function callOnlyEqual(id: string, typed: unknown, value: string): boolean {
+  if (CALL_ONLY_CONFIG[id as keyof typeof CALL_ONLY_CONFIG]?.type === 'list') {
+    try {
+      return equal(
+        parseListItems(id, isStringArray(typed) ? typed : String(typed)),
+        parseListItems(id, value),
+      );
+    } catch {
+      return false;
+    }
+  }
+  return String(typed) === value;
 }
 
 function parseOptIns(optIns: readonly string[]): {
@@ -628,7 +657,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     if (typed === undefined) continue;
     const key = byId.get(id);
     // Compare parsed values so typed records and reordered lists match their string form.
-    if (key ? !equal(parse(key, typed), parse(key, value)) : String(typed) !== value)
+    if (key ? !equal(parse(key, typed), parse(key, value)) : !callOnlyEqual(id, typed, value))
       throw new Error(`${id}: opt-in value disagrees with typed value`);
   }
 
