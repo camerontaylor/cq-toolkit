@@ -197,6 +197,51 @@ describe('regressionGate decision table', () => {
     expect(result.value.preExistingCount).toBe(2);
   });
 
+  test('Vitest full-name multisets tolerate location drift and report dropped duplicates as fixed', async () => {
+    const first = failureOf({
+      file: '/repo/src/a.test.ts',
+      line: 5,
+      column: 1,
+      ruleId: null,
+      message: 'suite > repeated test',
+    });
+    const second = { ...first, line: 6, column: 5 };
+    const base: FailureSet = { tool: 'vitest', failures: [first, second], exitCode: 1 };
+    const moved = await regressionGate({
+      base,
+      final: {
+        tool: 'vitest',
+        failures: [
+          { ...first, line: 205 },
+          { ...second, line: 306 },
+        ],
+        exitCode: 1,
+      },
+    });
+    expect(moved.status).toBe('ok');
+    if (moved.status !== 'ok') {
+      return;
+    }
+    expect(moved.value.verdict).toBe('no-regression');
+    expect(moved.value.preExistingCount).toBe(2);
+
+    const reduced = await regressionGate({
+      base,
+      final: { tool: 'vitest', failures: [{ ...first, line: 205 }], exitCode: 1 },
+    });
+    expect(reduced.status).toBe('ok');
+    if (reduced.status !== 'ok') {
+      return;
+    }
+    // A dropped duplicate occurrence is one FIXED failure, not a regression:
+    // nothing novel appeared and no test total moved, so the verdict is
+    // no-regression while fixedFailures still reports the dropped copy.
+    expect(reduced.value.verdict).toBe('no-regression');
+    expect(reduced.value.novelFailures).toEqual([]);
+    expect(reduced.value.fixedFailures).toEqual([second]);
+    expect(reduced.value.preExistingCount).toBe(1);
+  });
+
   test('a warning baseline escalating to error at the same spot is a regression', async () => {
     const result = await regressionGate({
       base: setOf([failureOf({ line: 30, severity: 'warning' })]),

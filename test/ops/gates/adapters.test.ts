@@ -192,7 +192,7 @@ describe('vitest-json adapter (real captured fixture)', () => {
             file: '/tmp/suite.test.ts',
             line: null,
             column: null,
-            ruleId: null,
+            ruleId: 'vitest-suite',
             message: 'RuntimeError: cannot load module',
             severity: 'error',
           },
