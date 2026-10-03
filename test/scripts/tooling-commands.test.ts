@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { installFakeBin, readFakeBinLog } from '../helpers/fake-bin.js';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -80,27 +81,55 @@ afterEach(() => {
 });
 
 describe('full static gate versus explicit-file fast lint', { timeout: 60_000 }, () => {
-  it.each([
-    ['compiler', 'export const value: string = 42;', 'error TS2322', 0],
-    ['floating', 'Promise.resolve(42);', 'no-floating-promises', 0],
-    ['unsafe', 'export const value: string = JSON.parse("42");', 'no-unsafe-assignment', 0],
-    [
-      'exhaustive',
-      "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
-      'switch-exhaustiveness-check',
-      0,
-    ],
-    ['syntactic', 'debugger;', 'no-debugger', 1],
-  ])('%s failure is enforced in the appropriate mode', (_name, code, diagnostic, fastStatus) => {
-    const root = fixture();
-    writeFileSync(join(root, 'src/sample.ts'), code);
-    const fast = command(root, 'lint-fast', ['src/sample.ts']);
-    expect(fast.error).toBeUndefined();
-    expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
-    const full = command(root, 'ratchet-typecheck');
-    expect(full.error).toBeUndefined();
-    expect(full.status).toBe(1);
-    expect(full.stdout + full.stderr).toContain(diagnostic);
+  it('asserts the compiler diagnostic and all four Oxlint diagnostics in two full gates', () => {
+    // Fixture A isolates the compiler leg. Its real tsc failure short-circuits
+    // the gate before Oxlint, exactly as the production ratchet does.
+    const compilerRoot = fixture();
+    const compilerFile = 'src/compiler.ts';
+    writeFileSync(join(compilerRoot, compilerFile), 'export const value: string = 42;');
+    const compilerFast = command(compilerRoot, 'lint-fast', [compilerFile]);
+    expect(compilerFast.error).toBeUndefined();
+    expect(compilerFast.status, compilerFast.stdout + compilerFast.stderr).toBe(0);
+    const compilerFull = command(compilerRoot, 'ratchet-typecheck');
+    expect(compilerFull.error).toBeUndefined();
+    expect(compilerFull.status).toBe(1);
+    expect(compilerFull.stdout + compilerFull.stderr).toContain('error TS2322');
+
+    // Fixture B is tsc-clean, so one real full gate reaches Oxlint and emits
+    // every type-aware and syntactic diagnostic across the four files.
+    const oxlintRoot = fixture();
+    const oxlintCases = [
+      ['floating', 'src/floating.ts', 'Promise.resolve(42);', 'no-floating-promises', 0],
+      [
+        'unsafe',
+        'src/unsafe.ts',
+        'export const value: string = JSON.parse("42");',
+        'no-unsafe-assignment',
+        0,
+      ],
+      [
+        'exhaustive',
+        'src/exhaustive.ts',
+        "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
+        'switch-exhaustiveness-check',
+        0,
+      ],
+      ['syntactic', 'src/syntactic.ts', 'debugger;', 'no-debugger', 1],
+    ] as const;
+    for (const [, file, code] of oxlintCases) writeFileSync(join(oxlintRoot, file), code);
+
+    for (const [, file, , , fastStatus] of oxlintCases) {
+      const fast = command(oxlintRoot, 'lint-fast', [file]);
+      expect(fast.error).toBeUndefined();
+      expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
+      if (file === 'src/syntactic.ts') expect(fast.stdout).toContain('no-debugger');
+    }
+    const oxlintFull = command(oxlintRoot, 'ratchet-typecheck');
+    expect(oxlintFull.error).toBeUndefined();
+    expect(oxlintFull.status).toBe(1);
+    for (const [name, , , diagnostic] of oxlintCases) {
+      expect(oxlintFull.stdout, name).toContain(diagnostic);
+    }
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -169,14 +198,14 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     const file = join(root, 'src/owned space.ts');
     writeFileSync(file, 'export {};');
     const log = join(root, 'calls.jsonl');
-    for (const tool of ['oxlint', 'oxfmt']) {
-      const bin = join(root, 'node_modules', tool, 'bin', tool);
-      mkdirSync(dirname(bin), { recursive: true });
-      writeFileSync(
-        bin,
-        `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, JSON.stringify([${JSON.stringify(tool)}, ...process.argv.slice(2)])+'\\n'); process.exit(Number(process.env.${tool.toUpperCase()}_EXIT ?? 0));`,
-      );
-    }
+    const oxlint = installFakeBin(root, 'oxlint', {
+      logFile: log,
+      exitCodeEnv: 'OXLINT_EXIT',
+    });
+    const oxfmt = installFakeBin(root, 'oxfmt', {
+      logFile: log,
+      exitCodeEnv: 'OXFMT_EXIT',
+    });
     writeFileSync(
       join(root, 'scripts/ratchet-typecheck.mjs'),
       `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, '["static"]\\n'); process.exit(17);`,
@@ -186,11 +215,9 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
       OXLINT_EXIT: '1',
     });
     expect(result.status).toBe(17);
-    const calls: unknown = readFileSync(log, 'utf8')
-      .trim()
-      .split('\n')
-      .map((line): unknown => JSON.parse(line));
-    expect(calls).toEqual([
+    expect(oxlint.calls()).toHaveLength(1);
+    expect(oxfmt.calls()).toHaveLength(1);
+    expect(readFakeBinLog(log)).toEqual([
       [
         'oxlint',
         '--config',
@@ -206,7 +233,7 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXFMT_EXIT: '8' }).status,
     ).toBe(1);
-    expect(readFileSync(log, 'utf8')).not.toContain('static');
+    expect(readFakeBinLog(log).map((call) => call[0])).toEqual(['oxlint', 'oxfmt']);
     writeFileSync(join(root, 'scripts/ratchet-typecheck.mjs'), 'process.exit(0);');
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXLINT_EXIT: '1' }).status,

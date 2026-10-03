@@ -1,17 +1,13 @@
-import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Give an isolated project the real built engine after writing its source inputs. */
 export function copyRatchetEngine(repository: string, fixture: string): void {
-  if (!existsSync(join(repository, 'dist/ops/ratchet/checkRatchet.js'))) {
-    const build = spawnSync('npm', ['run', 'build'], {
-      cwd: repository,
-      encoding: 'utf8',
-      shell: process.platform === 'win32',
-    });
-    if (build.error || build.status !== 0)
-      throw new Error(`Cannot build fixture engine: ${build.error?.message ?? build.stderr}`);
+  const engine = join(repository, 'dist/ops/ratchet/checkRatchet.js');
+  if (!existsSync(engine)) {
+    throw new Error(
+      `Cannot copy ratchet fixture engine: ${engine} is missing. Run tests through Vitest so test/global-setup.ts can build dist before collection.`,
+    );
   }
   cpSync(join(repository, 'dist'), join(fixture, 'dist'), { recursive: true });
   // A fix can edit source after this copy. Its freshness-triggered build must

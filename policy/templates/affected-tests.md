@@ -1,8 +1,12 @@
 # The affected-tests pattern
 
-Pattern: available for instantiation from phase 1; this repo currently runs
-the full suite everywhere (the suite is seconds-sized, so selection buys
-nothing yet).
+Pattern: available for instantiation from phase 1. In this repo, the
+unfiltered push/pull_request CI workflow's static job is the current test
+enforcer and runs the `test:unit` and `test:e2e` lanes; the
+`merge-queue-gate` workflow runs no tests. The lane split and affected-test
+selection remain proposals for a later policy decision. The measured suite
+is minutes-sized on the recorded host, so affected-test selection is useful
+as an advisory developer optimization.
 
 ## The idea
 
@@ -93,5 +97,7 @@ see the I4 interplay above):
           fi
 ```
 
-On merge-queue pushes, the same repo runs the full suite unconditionally —
-that job (not this one) is the safety net the blind spot section requires.
+On merge-queue pushes, the unfiltered push/pull_request CI static job remains
+the test enforcer; the `merge-queue-gate` workflow itself runs no tests. Any
+future full-suite fallback must be added there deliberately, not assumed from
+this template.
