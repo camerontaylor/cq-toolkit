@@ -738,6 +738,12 @@ def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any
 # ----------------------------------------------------------- addressing agents
 
 
+def top_level_env() -> Dict[str, str]:
+    """Without these, `paseo run` from a tick agent creates the tick agent's
+    SUBAGENT — and archiving old tick agents could interrupt it mid-fix."""
+    return {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")}
+
+
 def spawn_addressing(item: Dict[str, Any], meta: Dict[str, Any], rdir: Path) -> None:
     cycle = meta["cycle"]
     wt, wbranch = make_worktree(f"addr-{item['id']}-c{cycle}", meta["head"])
@@ -754,7 +760,7 @@ def spawn_addressing(item: Dict[str, Any], meta: Dict[str, Any], rdir: Path) -> 
     p = run(["paseo", "run", "--background", "--json", "--new-workspace", "local",
              "--provider", CONFIG["address_provider"], "--mode", CONFIG["address_mode"], "--cwd", str(wt),
              "--title", f"crq address PR #{item['pr']} cycle {cycle}", "--label", "crq=address", prompt],
-            check=False, timeout=180)
+            check=False, timeout=180, env=top_level_env())
     agent_id = cwd_ok = None
     ws = re.search(r"Created workspace (wks_[0-9a-f]+)", p.stdout + p.stderr)
     try:
