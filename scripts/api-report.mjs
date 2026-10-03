@@ -30,22 +30,33 @@ function parseArgs(args) {
   return options;
 }
 
-// A string `types` sibling supplies the declaration for every runtime branch of the
-// same conditional object, so those branches need no colocated `.d.ts` of their own.
-function collectTargets(value, conditions = [], targets = [], typesTarget = undefined) {
+// A `types` sibling (string or condition map) supplies the declaration for every runtime
+// branch of the same conditional object, so those branches need no colocated `.d.ts`.
+// `null` targets are Node's explicit "blocked" marker and contribute no targets.
+const IMPORT_CONDITIONS = new Set(['types', 'import', 'require', 'node', 'default']);
+
+function collectTargets(value, conditions = [], targets = [], typesContext = undefined) {
+  if (value === null) return targets;
   if (typeof value === 'string') {
-    targets.push({ conditions, target: value, typesTarget });
+    targets.push({
+      conditions,
+      target: value,
+      typesTarget: resolveTypesTarget(typesContext, conditions),
+    });
     return targets;
   }
   if (Array.isArray(value)) throw new Error('array export targets are unsupported');
   if (value && typeof value === 'object') {
-    const sibling = typeof value.types === 'string' ? value.types : typesTarget;
+    const own =
+      typeof value.types === 'string' || (value.types && typeof value.types === 'object')
+        ? { map: value.types, depth: conditions.length }
+        : typesContext;
     for (const [condition, child] of Object.entries(value)) {
       collectTargets(
         child,
         [...conditions, condition],
         targets,
-        condition === 'types' ? undefined : sibling,
+        condition === 'types' ? undefined : own,
       );
     }
     return targets;
@@ -53,11 +64,38 @@ function collectTargets(value, conditions = [], targets = [], typesTarget = unde
   throw new Error('package export contains an unsupported target value');
 }
 
+// Pick the declaration a runtime branch gets from a `types` condition map: follow the
+// first key that the branch's remaining conditions (or `default`) satisfy, like Node does.
+function resolveTypesTarget(context, conditions) {
+  if (!context) return undefined;
+  const remaining = new Set(conditions.slice(context.depth));
+  let node = context.map;
+  while (node && typeof node === 'object' && !Array.isArray(node)) {
+    const key = Object.keys(node).find(
+      (candidate) => remaining.has(candidate) || candidate === 'default',
+    );
+    node = key === undefined ? undefined : node[key];
+  }
+  return typeof node === 'string' ? node : undefined;
+}
+
+function isBlockedExport(value) {
+  if (value === null) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const children = Object.values(value);
+  return children.length > 0 && children.every(isBlockedExport);
+}
+
+// Reject only real parent-directory segments; `foo..js` is a legal filename.
+function hasParentSegment(relativePath) {
+  return relativePath.split(/[\\/]/).includes('..');
+}
+
 function declarationPath(target) {
   if (/\.d\.(?:ts|mts|cts)$/.test(target)) return target;
   if (target.endsWith('.mjs')) return target.replace(/\.mjs$/, '.d.mts');
   if (target.endsWith('.cjs')) return target.replace(/\.cjs$/, '.d.cts');
-  if (target.endsWith('.js')) return target.replace(/\.js$/, '.d.ts');
+  if (/\.jsx?$/.test(target)) return target.replace(/\.jsx?$/, '.d.ts');
   throw new Error(`export target has no supported declaration mapping: ${target}`);
 }
 
@@ -176,7 +214,7 @@ function declarationCandidates(target) {
   if (/\.d\.(?:ts|mts|cts)$/.test(target)) return [target];
   if (target.endsWith('.mjs')) return [target.replace(/\.mjs$/, '.d.mts')];
   if (target.endsWith('.cjs')) return [target.replace(/\.cjs$/, '.d.cts')];
-  if (target.endsWith('.js')) return [target.replace(/\.js$/, '.d.ts')];
+  if (/\.jsx?$/.test(target)) return [target.replace(/\.jsx?$/, '.d.ts')];
   return [
     `${target}.d.ts`,
     `${target}.d.mts`,
@@ -201,8 +239,54 @@ async function resolveInside(root, candidate, label) {
   return actual;
 }
 
-async function resolveDeclaration(root, containingFile, specifier) {
-  const unresolved = path.resolve(path.dirname(containingFile), specifier);
+// Resolve a package-local `#` specifier through package.json#imports (exact keys and
+// single-`*` patterns). Returns a package-relative path, or undefined when the alias
+// maps outside the package (an external dependency) and so is not part of the graph.
+function resolveImportAlias(imports, specifier) {
+  if (!imports || typeof imports !== 'object') return undefined;
+  const select = (value) => {
+    let node = value;
+    while (node && typeof node === 'object' && !Array.isArray(node)) {
+      const key = Object.keys(node).find((candidate) => IMPORT_CONDITIONS.has(candidate));
+      node = key === undefined ? undefined : node[key];
+    }
+    return typeof node === 'string' ? node : undefined;
+  };
+  let mapped;
+  if (Object.hasOwn(imports, specifier)) mapped = select(imports[specifier]);
+  else {
+    for (const [key, value] of Object.entries(imports)) {
+      const star = key.indexOf('*');
+      if (star === -1) continue;
+      const prefix = key.slice(0, star);
+      const suffix = key.slice(star + 1);
+      if (
+        specifier.length >= key.length - 1 &&
+        specifier.startsWith(prefix) &&
+        specifier.endsWith(suffix)
+      ) {
+        const target = select(value);
+        mapped = target?.replaceAll(
+          '*',
+          specifier.slice(prefix.length, specifier.length - suffix.length),
+        );
+        break;
+      }
+    }
+  }
+  if (mapped === undefined) throw new Error(`cannot resolve package import ${specifier}`);
+  return mapped.startsWith('./') ? mapped : undefined;
+}
+
+async function resolveDeclaration(root, containingFile, specifier, imports) {
+  let unresolved;
+  if (specifier.startsWith('#')) {
+    const mapped = resolveImportAlias(imports, specifier);
+    if (mapped === undefined) return undefined;
+    if (hasParentSegment(mapped))
+      throw new Error(`package import escapes package root: ${specifier}`);
+    unresolved = path.resolve(root, mapped);
+  } else unresolved = path.resolve(path.dirname(containingFile), specifier);
   if (!isInside(root, unresolved))
     throw new Error(`declaration import escapes package root: ${specifier}`);
   for (const candidate of declarationCandidates(unresolved)) {
@@ -215,7 +299,7 @@ async function resolveDeclaration(root, containingFile, specifier) {
   throw new Error(`cannot resolve package declaration import ${specifier}`);
 }
 
-async function declarationGraph(root, entry) {
+async function declarationGraph(root, entry, imports) {
   const pending = [entry];
   const seen = new Set();
   const graph = [];
@@ -232,8 +316,9 @@ async function declarationGraph(root, entry) {
     if (actual.endsWith('.json')) continue;
     const source = bytes.toString('utf8');
     for (const reference of declarationReferences(source)) {
-      if (reference.startsWith('.'))
-        pending.push(await resolveDeclaration(root, actual, reference));
+      if (!reference.startsWith('.') && !reference.startsWith('#')) continue;
+      const resolved = await resolveDeclaration(root, actual, reference, imports);
+      if (resolved) pending.push(resolved);
     }
   }
   graph.sort((a, b) => compareStrings(a.path, b.path));
@@ -241,7 +326,7 @@ async function declarationGraph(root, entry) {
 }
 
 function canonicalExportMap(value) {
-  if (typeof value === 'string') return value;
+  if (value === null || typeof value === 'string') return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [key, canonicalExportMap(child)]),
   );
@@ -278,7 +363,7 @@ async function makeReport(root = ROOT) {
       if (target.includes('*')) {
         throw new Error(`${specifier} uses an unsupported wildcard target: ${target}`);
       }
-      if (!target.startsWith('./') || target.includes('..')) {
+      if (!target.startsWith('./') || hasParentSegment(target)) {
         throw new Error(`${specifier} has an unsafe or non-relative target: ${target}`);
       }
       const jsPath = path.resolve(root, target);
@@ -288,7 +373,7 @@ async function makeReport(root = ROOT) {
         conditions.at(-1) === 'types' || !typesTarget ? declarationPath(target) : typesTarget;
       if (
         !declaration.startsWith('./') ||
-        declaration.includes('..') ||
+        hasParentSegment(declaration) ||
         declaration.includes('*')
       ) {
         throw new Error(`${specifier} has an unsafe or non-relative types target: ${declaration}`);
@@ -300,10 +385,11 @@ async function makeReport(root = ROOT) {
         conditions,
         target,
         declaration,
-        declarationGraph: await declarationGraph(root, declarationFile),
+        declarationGraph: await declarationGraph(root, declarationFile, pkg.imports),
       });
     }
-    if (targets.length === 0) throw new Error(`${specifier} has no targets`);
+    if (targets.length === 0 && !isBlockedExport(exportValue))
+      throw new Error(`${specifier} has no targets`);
     entries.push({
       specifier,
       exportMap: canonicalExportMap(exportValue),

@@ -35,13 +35,14 @@ npx vitest run test/api-report.test.mjs
 ```
 
 Wildcard (`*`) export targets and array targets are rejected explicitly rather
-than expanded. A string `types` condition supplies the declaration for its
-sibling runtime conditions.
+than expanded. A `types` condition (a string, or a condition map matched against each runtime
+branch) supplies the declaration for its sibling runtime conditions. `null`
+export targets are recorded but contribute no targets.
 
 The report is intentionally byte-sensitive: harmless declaration formatting
 changes also change a digest. It does not normalize TypeScript types or
-enumerate symbol signatures. It follows relative declaration imports and
-re-exports; declarations imported from external packages are outside this
+enumerate symbol signatures. It follows relative and package-local `#` declaration
+imports and re-exports; declarations imported from external packages are outside this
 package-local report. Review the final declaration files directly when
 establishing the baseline.
 
