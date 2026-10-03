@@ -715,6 +715,15 @@ describe('classifyProviderSignal', () => {
     expect(verdict.advisoryReason).toBeDefined();
   });
 
+  test('an explicit exhausted flag with no reset is quota/needs-human, not provider-error', () => {
+    for (const profile of ['deepseek', 'opencode-go']) {
+      const verdict = classifyProviderSignal(profile, { httpStatus: 500 }, { exhausted: true });
+      expect(verdict.errorClass).toBe('quota');
+      expect(verdict.deferUntilMs).toBeUndefined();
+      expect(verdict.advisoryReason).toBeDefined();
+    }
+  });
+
   test('a NON-exhausted observation does not defer a matched quota rule either', () => {
     const verdict = classifyProviderSignal(
       'opencode-go',

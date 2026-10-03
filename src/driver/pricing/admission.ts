@@ -346,6 +346,23 @@ export function classifyProviderSignal(
       rule: 'quota-resets-at',
     };
   }
+  // An endpoint that EXPLICITLY reports exhaustion but no readable reset (an empty
+  // DeepSeek balance only a top-up restores) is still quota evidence — only its
+  // release time is unknown, so the verdict carries no timer and reads needs-human.
+  const explicitlyExhausted = observations.some((observation) => observation.exhausted === true);
+  const exhaustedWithoutReset = {
+    errorClass: 'quota',
+    rule: 'quota-exhausted',
+    advisoryReason:
+      'endpoint reports the allowance exhausted with no usable reset time — needs-human, do not retry on a timer',
+  } as const;
+  if (
+    resetsAt === undefined &&
+    explicitlyExhausted &&
+    profile.observability.channel === 'endpoint'
+  ) {
+    return exhaustedWithoutReset;
+  }
   if (signal.retryAfterMs !== undefined && documentsThrottle) {
     return {
       errorClass: 'rate-limit',
@@ -359,6 +376,7 @@ export function classifyProviderSignal(
       rule: 'quota-resets-at',
     };
   }
+  if (explicitlyExhausted) return exhaustedWithoutReset;
   return { errorClass: 'provider-error', rule: 'unclassified' };
 }
 

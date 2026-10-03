@@ -51,6 +51,33 @@ describe('servedAliasIds', () => {
     expect(servedAliasIds(undefined, 'subprocess', 'anthropic', 'claude-haiku-4-5')).toEqual([]);
   });
 
+  test('acp ids are compared under the lane normalisation, raw id kept for reporting', () => {
+    const priced = resolvePricedModel({
+      lane: 'acp',
+      modelSpec: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+      servedModel: 'builtin:anthropic\\Claude-Haiku-4-5',
+    });
+    expect(priced.via).toBe('exact');
+    expect(priced.servedModel).toBe('builtin:anthropic\\Claude-Haiku-4-5');
+    expect(priced.rates).toBeDefined();
+    const aliased = resolvePricedModel({
+      lane: 'acp',
+      modelSpec: { provider: 'zai', model: 'glm-5.3-flash' },
+      servedModel: 'builtin:bigmodel\\GLM-5.3',
+      aliases: { acp: { zai: { 'glm-5.3-flash': ['glm-5.3'] } } },
+    });
+    expect(aliased.via).toBe('alias');
+  });
+
+  test('a prototype member is not a priced model', () => {
+    expect(priceOf({ provider: 'anthropic', model: 'constructor' })).toBeUndefined();
+    expect(priceOf({ provider: 'toString', model: 'x' })).toBeUndefined();
+    expect(
+      worstCaseRates({ provider: 'anthropic', model: 'toString' }, undefined, 'subprocess')
+        .complete,
+    ).toBe(false);
+  });
+
   test('an Object.prototype member name is not a declared alias at any level', () => {
     // A plain index answers `constructor` with a function; spreading that as
     // the alias list threw instead of reporting nothing declared.

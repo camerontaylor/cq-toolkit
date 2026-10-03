@@ -117,6 +117,17 @@ export const CANDIDATE_ZAI_ROUTING_ALIASES: ServedAliasTable = {
       'glm-5.2': ['glm-5.3'],
     },
   },
+  // The ACP wire (vendor harness `zcode-acp-server`) is asked for `glm-5.3-flash`
+  // and reports `builtin:bigmodel\GLM-5.3`, which the acp lane normalises to
+  // `glm-5.3` (probe-recorded 2026-09-15; docs/eval-axes-demo.md, and declared as
+  // a lane-scoped alias in scripts/demo-eval-axes.mjs). OBSERVED + DOCS-SILENT. The
+  // `builtin:` prefix is normalisation; THIS entry is the remaining model-id remap.
+  // `glm-5.3` is not in ./data.ts, so the cell is narrated, not priced.
+  acp: {
+    zai: {
+      'glm-5.3-flash': ['glm-5.3'],
+    },
+  },
 };
 
 /**
@@ -161,7 +172,7 @@ export const CANDIDATE_SERVED_ALIASES: ServedAliasTable = Object.freeze(
  *   model the provider served, and the same capture shows the CLI routing paid
  *   models onto a different wire entirely. Not a served-id alias; recording it as
  *   one would price the wrong model.
- * - ACP's `builtin:<provider>\<model>` form. ADR-0002 §2.6 already defines lane
+ * - ACP's `builtin:<provider>\<model>` PREFIX. ADR-0002 §2.6 already defines lane
  *   normalisation for that namespace (strip one prefix, case-fold); it is a
  *   normalisation rule, not a wire remap, and ADR-0002 §2.6 records a normalised
  *   acp mismatch as a finding rather than something to alias away.

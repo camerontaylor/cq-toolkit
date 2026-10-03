@@ -30,6 +30,8 @@
 //   - The alias-set maximum only bounds the served model while the lane's
 //     served-model check is on with `requireObserved: true`; `requireObserved:
 //     false` makes the lane ADVISORY for USD (ADR-0002 §2.6, ADR-0003 m-d).
+import { normaliseModelId } from '../served-model.js';
+import type { LaneId } from '../served-model.js';
 import { priceOf } from './index.js';
 import { ownEntry } from './provider-profiles.js';
 import type { PerMillionRates } from './data.js';
@@ -138,18 +140,29 @@ export function resolvePricedModel(args: {
   const aliases = servedAliasIds(args.aliases, args.lane, args.modelSpec.provider, requested);
   const candidates = pricedCandidates(args.modelSpec, args.aliases, args.lane);
   const served = args.servedModel;
-  if (served !== undefined && served !== requested && !aliases.includes(served)) {
+  // Compare under the LANE's normalisation (acp strips `builtin:<provider>\` and
+  // case-folds), exactly as the served-model seam did, so an observation it
+  // accepted as exact/alias is not reclassified here as a remap. The raw id is
+  // kept for reporting.
+  const normalise = (id: string): string => normaliseModelId(args.lane as LaneId, id);
+  const normalisedServed = served === undefined ? undefined : normalise(served);
+  const matchedAlias =
+    normalisedServed === undefined
+      ? undefined
+      : aliases.find((alias) => normalise(alias) === normalisedServed);
+  const isRequested = normalisedServed !== undefined && normalisedServed === normalise(requested);
+  if (served !== undefined && !isRequested && matchedAlias === undefined) {
     return { servedModel: served, via: 'undeclared-remap', candidates };
   }
   const via: PricingResolutionVia =
-    served === undefined ? 'unobserved' : served === requested ? 'exact' : 'alias';
+    served === undefined ? 'unobserved' : isRequested ? 'exact' : 'alias';
   // An observed alias that is itself a priced model is billed at ITS rates (a
   // `deepseek-chat` request served as `deepseek-flash` costs the flash row);
   // only an alias with no table entry of its own (a dated Anthropic id) falls
   // back to the canonical key's rates.
   const servedRates =
-    via === 'alias' && served !== undefined
-      ? priceOf({ ...args.modelSpec, model: served })
+    via === 'alias' && matchedAlias !== undefined
+      ? priceOf({ ...args.modelSpec, model: matchedAlias })
       : undefined;
   const canonicalRates = servedRates ?? priceOf(args.modelSpec);
   return {

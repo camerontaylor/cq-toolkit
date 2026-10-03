@@ -55,6 +55,12 @@ describe('candidate served aliases — shape and contents', () => {
     });
   });
 
+  test('the zai group records the observed acp glm-5.3-flash → glm-5.3 remap', () => {
+    expect(servedAliasIds(CANDIDATE_SERVED_ALIASES, 'acp', 'zai', 'glm-5.3-flash')).toEqual([
+      'glm-5.3',
+    ]);
+  });
+
   test('the merged candidate table keeps EVERY group (no shallow-spread clobber)', () => {
     // A shallow `{...a, ...b, ...c}` keeps only the LAST group's `ai-sdk` map and
     // silently loses the anthropic and deepseek entries: a table that looks
