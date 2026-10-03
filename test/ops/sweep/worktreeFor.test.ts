@@ -969,10 +969,15 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       await resilient(() => effects.rmDir(wtPath));
       expect(await resilient(() => effects.pathExists(wtPath))).toBe(false);
 
-      // The stale registration survives the rm until prune removes it.
+      // A locked worktree survives prune even after its directory vanishes.
       expect(
         (await resilient(() => effects.listWorktrees())).some((w) => w.branch === 'cq/x/fix/core'),
       ).toBe(true);
+      await resilient(() => effects.worktreePrune(dir));
+      expect(
+        (await resilient(() => effects.listWorktrees())).some((w) => w.branch === 'cq/x/fix/core'),
+      ).toBe(true);
+      await resilient(() => run(['-C', dir, 'worktree', 'unlock', wtPath], dir));
       await resilient(() => effects.worktreePrune(dir));
       expect(
         (await resilient(() => effects.listWorktrees())).some((w) => w.branch === 'cq/x/fix/core'),

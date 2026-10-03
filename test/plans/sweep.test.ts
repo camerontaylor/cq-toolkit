@@ -17,11 +17,11 @@
 //      sweep registry entry is a harmless pass (empty manifest plans nothing,
 //      zero effect calls).
 //   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
-//      binding (default `none`, caller-overridable for production) lands
+//      binding (default `workspace-write`, caller-overridable) lands
 //      verbatim in the Driver's OpInvocation.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
@@ -43,6 +43,7 @@ import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
 import { makeSweepUnitOp, sweepUnitSegments } from '../../src/ops/sweep/unit.js';
 import {
   buildSweepPlan,
+  defaultSweepWorktreesDir,
   SWEEP_PLAN_ID,
   SweepUnitJobOverlay,
   type SweepPlanConfig,
@@ -107,6 +108,13 @@ describe('plans barrel surface (jZ59o)', () => {
   });
 });
 
+describe('sweep worktree default', () => {
+  test('floor default resolves to a sibling worktrees directory', () => {
+    expect(defaultSweepWorktreesDir('/repo')).toBe(resolve('/repo', '..', 'worktrees', 'cq'));
+    expect(defaultSweepWorktreesDir('.')).toBe(resolve('.', '..', 'worktrees', 'cq'));
+  });
+});
+
 describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   test('both plans are discovered by file and their importers resolve', async () => {
     for (const name of [SWEEP_PLAN_ID, TEST_FIX_PLAN_ID]) {
@@ -131,7 +139,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     }
     // The test-fix floor pins the one test-only fixer label.
     const testFix = (await (await getPlan(TEST_FIX_PLAN_ID))?.importer()) as Plan;
-    const testFixPlannerJob = PlanSchema.parse(testFix).jobs[0] as { input: unknown };
+    const testFixPlannerJob = PlanSchema.parse(testFix).jobs[0] as {
+      input: unknown;
+    };
     expect(PlanSweepInputSchema.parse(testFixPlannerJob.input).fixers).toEqual([TEST_FIX_FIXER]);
   });
 
@@ -281,7 +291,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     };
     void overridden;
     // RUNTIME pin: the enrichment ships the RESOLVED segments regardless.
-    const plan = buildSweepPlan(CONFIG, twoUnitReport(), SWEEP_PLAN_ID, { push: false });
+    const plan = buildSweepPlan(CONFIG, twoUnitReport(), SWEEP_PLAN_ID, {
+      push: false,
+    });
     const inputs = plan.jobs
       .slice(1, 3)
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
@@ -299,6 +311,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     const driver = {
       provider: 'cq-e2e',
       model: 'sweep-fake',
+      budget: { maxUsd: 1 },
     };
     const check = {
       adapter: 'tsc-lines' as const,
@@ -307,7 +320,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       timeoutMs: 30_000,
     };
     const wired = buildSweepPlan(
-      { ...CONFIG, unitDispatch: { driver, check, promptTemplate: 'fix {package} at {worktree}' } },
+      {
+        ...CONFIG,
+        unitDispatch: {
+          driver,
+          check,
+          promptTemplate: 'fix {package} at {worktree}',
+        },
+      },
       twoUnitReport(),
     );
     const wiredInputs = wired.jobs
@@ -357,7 +377,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       { package: 'beta', fixer: 'fix', files: [] },
     ];
     const misaligned: PlanSweepReport = {
-      jobs: [{ id: 'sweep-alpha-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      jobs: [
+        {
+          id: 'sweep-alpha-fix',
+          op: SWEEP_UNIT_OP,
+          input: units[0],
+          dependsOn: [],
+        },
+      ],
       units,
       suppressed: [],
       needsHuman: [],
@@ -375,8 +402,18 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     // job and mis-slug the unit.
     const swapped: PlanSweepReport = {
       jobs: [
-        { id: 'sweep-beta-fix', op: SWEEP_UNIT_OP, input: units[1], dependsOn: [] },
-        { id: 'sweep-alpha-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] },
+        {
+          id: 'sweep-beta-fix',
+          op: SWEEP_UNIT_OP,
+          input: units[1],
+          dependsOn: [],
+        },
+        {
+          id: 'sweep-alpha-fix',
+          op: SWEEP_UNIT_OP,
+          input: units[0],
+          dependsOn: [],
+        },
       ],
       units,
       suppressed: [],
@@ -388,7 +425,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   test('a deletion-only root package keeps a scope pin from selection evidence (r1 major)', () => {
     const units: Array<WorkUnit> = [{ package: 'monorepo', fixer: 'fix', files: [] }];
     const report: PlanSweepReport = {
-      jobs: [{ id: 'sweep-monorepo-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      jobs: [
+        {
+          id: 'sweep-monorepo-fix',
+          op: SWEEP_UNIT_OP,
+          input: units[0],
+          dependsOn: [],
+        },
+      ],
       units,
       suppressed: [],
       needsHuman: [],
@@ -405,7 +449,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   test("a 'toString'-named package never reads an inherited selection-evidence member (r2 major)", () => {
     const units: Array<WorkUnit> = [{ package: 'toString', fixer: 'fix', files: [] }];
     const report: PlanSweepReport = {
-      jobs: [{ id: 'sweep-toString-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      jobs: [
+        {
+          id: 'sweep-toString-fix',
+          op: SWEEP_UNIT_OP,
+          input: units[0],
+          dependsOn: [],
+        },
+      ],
       units,
       suppressed: [],
       needsHuman: [],
@@ -476,7 +527,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   });
 
   test(
-    'the unit composition binds sandboxPolicy: default none, the override rides the invocation',
+    'the unit composition binds a required budget and defaults sandboxPolicy to workspace-write',
     { timeout: 120_000 },
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
@@ -510,14 +561,23 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           }),
           driver,
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          budget: { maxUsd: 1 },
           prompt: () => 'capture me',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };
         const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
-        // DEFAULT: none (the shipped behavior, unchanged).
+        // The SDK requires a cap before the unit can run.
+        expect(() => makeSweepUnitOp({ ...base, budget: {} })).toThrow(/nonempty budget/);
+        expect(() => makeSweepUnitOp({ ...base, budget: undefined } as never)).toThrow(
+          /nonempty budget/,
+        );
+        // DEFAULT: workspace-write.
         const refused = await makeSweepUnitOp(base)(unit);
         expect(refused.status).toBe('needs-human'); // the capture's deliberate stop
-        expect(captured[0]?.sandboxPolicy).toEqual({ level: 'none' });
+        expect(captured[0]?.sandboxPolicy).toEqual({
+          level: 'workspace-write',
+        });
+        expect(captured[0]?.budget).toEqual({ maxUsd: 1 });
         // WORKSPACE BINDING (ADR-0002 §2.4): the worktree rides the
         // invocation as its workspace — no pre-created session record, no
         // sessionRef — and the invocation carries the bindings' (resolved)
@@ -525,11 +585,23 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
         expect(captured[0]?.workspace).toBeDefined();
         expect(captured[0]?.workspace?.path).toContain(join(repo, 'worktrees'));
         expect(captured[0]?.sessionRef).toBeUndefined();
-        expect(captured[0]?.modelSpec).toEqual({ model: 'sweep-fake', provider: 'cq-d4-e2e' });
+        expect(captured[0]?.modelSpec).toEqual({
+          model: 'sweep-fake',
+          provider: 'cq-d4-e2e',
+        });
         // OVERRIDE: the binding rides verbatim into the OpInvocation.
-        const hardened: WorkUnit = { package: 'alpha', fixer: 'hardened', files: [] };
-        await makeSweepUnitOp({ ...base, sandboxPolicy: { level: 'workspace-write' } })(hardened);
-        expect(captured[1]?.sandboxPolicy).toEqual({ level: 'workspace-write' });
+        const hardened: WorkUnit = {
+          package: 'alpha',
+          fixer: 'hardened',
+          files: [],
+        };
+        await makeSweepUnitOp({
+          ...base,
+          sandboxPolicy: { level: 'workspace-write' },
+        })(hardened);
+        expect(captured[1]?.sandboxPolicy).toEqual({
+          level: 'workspace-write',
+        });
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -569,6 +641,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
             }),
           },
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          budget: { maxUsd: 1 },
           prompt: () => 'cancelled mid-run',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };

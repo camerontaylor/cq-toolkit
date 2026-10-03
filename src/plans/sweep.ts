@@ -78,6 +78,7 @@
 // (`-2`, `-3`, … in unit order) over every FINAL slug, so a suffix can never
 // collide with a NATURAL package slug (jcqEj) — and every surface (branch,
 // worktree, committed marker, assembler) agrees.
+import { resolve } from 'node:path';
 import type { AssemblePrsInput } from '../ops/pr/assemblePrs.js';
 import type { EnsureTrackerBranchInput } from '../ops/pr/ensureTrackerBranch.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
@@ -468,15 +469,16 @@ export function buildSweepPlan(
 // The floor — the discovered registry entry
 // ---------------------------------------------------------------------------
 
-/**
- * The shipped floor's config: an EMPTY manifest over the repo the caller is
- * in — the planner selects nothing, no unit jobs exist, and the assembler
- * assembles nothing (a harmless empty pass, the merge-prs precedent).
- */
+/** Default worktree root beside the repository, matching sweep.unit dispatch. */
+export function defaultSweepWorktreesDir(repoRoot: string): string {
+  return resolve(repoRoot, '..', 'worktrees', 'cq');
+}
+
+/** The shipped floor is an empty, harmless fleet over the current repository. */
 function floorConfig(): SweepPlanConfig {
   return {
     repoRoot: '.',
-    worktreesDir: 'worktrees/cq',
+    worktreesDir: defaultSweepWorktreesDir('.'),
     runPrefix: 'cq/sweep',
     base: 'main',
     packages: [],

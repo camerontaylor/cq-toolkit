@@ -117,7 +117,7 @@ async function scenario(runPrefix: string): Promise<Scenario> {
   CLEANUP.push(root);
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
-  // The push recorder: a LOCAL BARE origin — the real `git push -u origin`
+  // The push recorder: a LOCAL BARE origin — the real `git push origin`
   // binding works offline against it, and the tests read its refs back as
   // evidence of what was pushed (and what correctly was not).
   const origin = join(root, 'origin.git');
@@ -179,6 +179,7 @@ function optsFor(
     driver: {
       provider: 'cq-d4-e2e',
       model: 'sweep-fake',
+      budget: { maxUsd: 1 },
     } satisfies SweepUnitDriverConfig,
     // The scenario's DEPLOYMENT factory config (ADR-0002 §2.5): role
     // 'fixer' + the fake provider → the subprocess lane over the fake agent

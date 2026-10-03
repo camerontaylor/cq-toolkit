@@ -1025,6 +1025,8 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       await resilient(() =>
         run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/fix/core', wtPath, 'main'], dir),
       );
+      // Sweep locks active worktrees; a failed removal must restore that lock.
+      await resilient(() => run(['-C', dir, 'worktree', 'lock', wtPath], dir));
       // Dirty the tree (untracked file: porcelain non-empty).
       writeFileSync(join(wtPath, 'dirty.txt'), 'dirty');
 
@@ -1034,6 +1036,9 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       await expect(resilient(() => effects.worktreeRemove(dir, wtPath))).rejects.toThrow(
         /contains modified or untracked/,
       );
+      expect(
+        await resilient(() => run(['-C', dir, 'worktree', 'list', '--porcelain'], dir)),
+      ).toMatch(/^locked/m);
       // --force is the explicit dirty path and succeeds.
       await resilient(() => effects.worktreeRemove(dir, wtPath, { force: true }));
       // The branch age parses as an integer ms (the H age-basis half).
@@ -1052,6 +1057,37 @@ describe('subprocess cleanup effects (real git smoke)', () => {
       )) as (Error & { code?: string }) | null;
       expect(goneErr).toBeInstanceOf(Error);
       expect(goneErr?.code).toBe('ENOENT');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test('a LOCKED registration whose dir vanished is unlocked and pruned, so branch -D succeeds', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cleanup-locked-'));
+    try {
+      await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
+      writeFileSync(join(dir, 'seed.txt'), 'seed');
+      await resilient(() => run(['-C', dir, 'add', '.'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '-q', '-m', 'seed'], dir));
+      const wtPath = join(dir, 'wt', 'fix', 'core');
+      await resilient(() =>
+        run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/fix/core', wtPath, 'main'], dir),
+      );
+      await resilient(() => run(['-C', dir, 'worktree', 'lock', wtPath], dir));
+      rmSync(wtPath, { recursive: true, force: true });
+
+      const effects = makeSubprocessCleanupEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
+      const registered = (await resilient(() => effects.listWorktrees())).find(
+        (w) => w.branch === 'cq/x/fix/core',
+      );
+      expect(registered).toBeDefined();
+      await resilient(() => effects.worktreePrune(dir, registered?.path));
+      expect(
+        (await resilient(() => effects.listWorktrees())).some((w) => w.branch === 'cq/x/fix/core'),
+      ).toBe(false);
+      await resilient(() => effects.branchDelete(dir, 'cq/x/fix/core'));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

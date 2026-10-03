@@ -232,7 +232,15 @@ export const CleanupInputSchema: z.ZodType<CleanupInput> = z
 export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
   .object({
     repoRoot: z.string().min(1),
-    worktreesDir: z.string().min(1),
+    worktreesDir: z.string().min(1).exactOptional(),
+    install: z
+      .object({
+        command: z.string().min(1),
+        args: z.array(z.string()),
+        timeoutMs: z.number().int().min(1).exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
     runPrefix: z.string().min(1),
     base: z.string().min(1),
     package: z.string().min(1),
@@ -264,7 +272,9 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
         provider: z.string().min(1),
         model: z.string().min(1),
         toolPolicy: ToolPolicySchema.exactOptional(),
-        budget: BudgetSchema.exactOptional(),
+        budget: BudgetSchema.refine((budget) => Object.keys(budget).length > 0, {
+          message: 'driver.budget must set at least one cap',
+        }),
       })
       .strict()
       .exactOptional(),
