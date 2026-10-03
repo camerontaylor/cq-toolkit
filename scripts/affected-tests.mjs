@@ -5,9 +5,10 @@
 //
 // Usage:
 //   node scripts/affected-tests.mjs [--base <ref>] [--json] [<changed-file>...]
-//   files=$(node scripts/affected-tests.mjs --base origin/merge-queue)
-//   [ -z "$files" ] || npx vitest run $files   # empty = nothing to run; a bare
-//                                              # `vitest run` would be the FULL suite
+//   mapfile -t files < <(node scripts/affected-tests.mjs --base origin/merge-queue)
+//   [ "${#files[@]}" -eq 0 ] || npx vitest run "${files[@]}"
+//   # array-safe (spaces/globs survive); empty = nothing to run — a bare
+//   # `vitest run` would be the FULL suite
 //
 // With no explicit files, the changed set is `git diff --name-only <base>...HEAD`
 // (default base origin/merge-queue). Output: one test file per line, or with
@@ -39,7 +40,7 @@ const run = (cmd, args) =>
 const changed =
   explicit.length > 0
     ? explicit
-    : run('git', ['diff', '--name-only', '-z', `${base}...HEAD`])
+    : run('git', ['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`])
         .split('\0')
         .filter(Boolean);
 

@@ -62,6 +62,32 @@ describe('selectAffected', () => {
     }
   });
 
+  it('includes lint suites in suite-wide mappings', () => {
+    const withLint = [...allTests, 'lint/rules/r.test.ts'];
+    for (const path of ['package.json', 'vitest.config.ts', 'test/helpers/h.ts']) {
+      expect(selectAffected({ changed: [path], allTests: withLint, related: [] }).files).toEqual(
+        [...withLint].sort(),
+      );
+    }
+  });
+
+  it('maps filesystem-read consumers that have no import-graph edge', () => {
+    const consumers = [
+      'test/cli/plans.smoke.test.ts',
+      'test/cli/registry.test.ts',
+      'test/kernel/driver-hygiene.test.ts',
+      'test/scripts/static-conformance.test.ts',
+    ];
+    const pool = [...allTests, ...consumers];
+    const pick = (path: string) =>
+      selectAffected({ changed: [path], allTests: pool, related: [] }).files;
+    expect(pick('scripts/copy-prompt-assets.mjs')).toContain('test/cli/plans.smoke.test.ts');
+    expect(pick('src/driver/new/x.ts')).toEqual(
+      expect.arrayContaining([consumers[2], consumers[3]]),
+    );
+    expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.test.ts');
+  });
+
   it('falls back to every test when a changed file has no mapping', () => {
     const result = selectAffected({ changed: ['mystery/file.bin'], allTests, related: [] });
     expect(result.fallback).toBe(true);
