@@ -366,6 +366,21 @@ describe('fingerprintSet', () => {
     );
   });
 
+  test('NaN locations order deterministically in duplicate ordering', () => {
+    const finite = failureOf({ line: 5, column: 1, message: 'same' });
+    const nanLine = failureOf({ line: Number.NaN, column: 1, message: 'same' });
+    const nanColumn = failureOf({ line: 5, column: Number.NaN, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    for (const target of [finite, nanLine, nanColumn]) {
+      expect(keyFor([finite, nanLine, nanColumn], target)).toBe(
+        keyFor([nanColumn, nanLine, finite], target),
+      );
+    }
+  });
+
   test('null and empty-string rule ids never alias in duplicate ordering', () => {
     const nullRule = failureOf({ ruleId: null, line: null, message: 'same' });
     const emptyRule = failureOf({ ruleId: '', line: null, message: 'same' });

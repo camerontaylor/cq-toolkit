@@ -154,12 +154,19 @@ export function fingerprintPairs(
   return s.failures.map((failure, index) => ({ failure, key: keys[index] ?? '' }));
 }
 
-/** Orders null before any number, so null and a negative position never alias. */
+/**
+ * Total order: null, then numbers ascending, then NaN — so null and a
+ * negative position never alias, and a NaN (reachable from SDK callers;
+ * `a - b` would make the comparator inconsistent) sorts deterministically.
+ */
 function compareNullableNumber(a: number | null, b: number | null): number {
   if (a === null || b === null) {
     return a === b ? 0 : a === null ? -1 : 1;
   }
-  return a - b;
+  if (Number.isNaN(a) || Number.isNaN(b)) {
+    return Number.isNaN(a) === Number.isNaN(b) ? 0 : Number.isNaN(a) ? 1 : -1;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** Orders null before any string, so null and '' never alias. */
