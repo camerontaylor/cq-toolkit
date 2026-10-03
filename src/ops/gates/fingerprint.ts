@@ -154,6 +154,14 @@ export function fingerprintPairs(
   return s.failures.map((failure, index) => ({ failure, key: keys[index] ?? '' }));
 }
 
+/** Orders null before any number, so null and a negative position never alias. */
+function compareNullableNumber(a: number | null, b: number | null): number {
+  if (a === null || b === null) {
+    return a === b ? 0 : a === null ? -1 : 1;
+  }
+  return a - b;
+}
+
 /** Orders null before any string, so null and '' never alias. */
 function compareNullableText(a: string | null, b: string | null): number {
   if (a === null || b === null) {
@@ -172,8 +180,8 @@ function compareFailures(a: CheckFailure | undefined, b: CheckFailure | undefine
     return 0;
   }
   return (
-    (a.line ?? -1) - (b.line ?? -1) ||
-    (a.column ?? -1) - (b.column ?? -1) ||
+    compareNullableNumber(a.line, b.line) ||
+    compareNullableNumber(a.column, b.column) ||
     compareText(a.message, b.message) ||
     compareNullableText(a.file, b.file) ||
     compareNullableText(a.ruleId, b.ruleId) ||

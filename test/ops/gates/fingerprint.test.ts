@@ -354,6 +354,18 @@ describe('fingerprintSet', () => {
     expect(keyFor([nullFile, emptyFile], nullFile)).toBe(keyFor([emptyFile, nullFile], nullFile));
   });
 
+  test('null and negative locations never alias in duplicate ordering', () => {
+    const nullLine = failureOf({ line: null, column: null, message: 'same' });
+    const negativeLine = failureOf({ line: -1, column: -1, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullLine, negativeLine], nullLine)).toBe(
+      keyFor([negativeLine, nullLine], nullLine),
+    );
+  });
+
   test('null and empty-string rule ids never alias in duplicate ordering', () => {
     const nullRule = failureOf({ ruleId: null, line: null, message: 'same' });
     const emptyRule = failureOf({ ruleId: '', line: null, message: 'same' });
