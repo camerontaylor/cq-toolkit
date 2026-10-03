@@ -418,6 +418,10 @@ async function acquirePlanLockRecord(
     await syncDir(journalDir);
     await listen(server, record.socketPath);
     listening = true;
+    // The probe socket must never keep the process alive: a detached lease
+    // would otherwise hang the CLI. Liveness is still proven while the
+    // process runs; release/rollback close the server explicitly.
+    server.unref();
     await assertHeld();
   } catch (error) {
     try {
