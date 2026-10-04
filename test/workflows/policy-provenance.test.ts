@@ -291,12 +291,26 @@ describe('cq-policy programs behave as documented (bash + jq, gh stubbed)', () =
     '%s: resolve accepts PR/review/push runs, skips an unjudgeable head, refuses fork, path, event, ambiguity',
     { timeout: 120_000 },
     (_label, text) => {
+      // The commit→PR list is answered only when paginated, as two pages
+      // (PULLS_PAGE2 defaults to an empty page). Once PULLS_LATE is set,
+      // every query after the first answers with it: an association that
+      // lags the push. PULLS_FAIL makes the list call an API error.
       const shell = `gh() {
   [ "$1" = api ] || return 9
-  local data
-  case "$2" in
-    "repos/owner/repo/actions/runs/$RUN_ID") data="$RUN_DATA";;
-    "repos/owner/repo/commits/${SHA}/pulls") data="$PULLS_DATA";;
+  local pg='' data
+  if [ "$2" = --paginate ]; then pg=1; shift; fi
+  case "$pg:$2" in
+    ":repos/owner/repo/actions/runs/$RUN_ID") data="$RUN_DATA";;
+    "1:repos/owner/repo/commits/${SHA}/pulls?per_page=100")
+      [ -z "\${PULLS_FAIL:-}" ] || return 22
+      if [ -n "\${PULLS_LATE:-}" ] && [ -e "$QUERIED" ]; then
+        data="$PULLS_LATE"
+      else
+        : > "$QUERIED"
+        data="$PULLS_DATA"
+      fi
+      printf '%s\\n' "$data" "\${PULLS_PAGE2:-[]}"
+      return 0;;
     *) return 9;;
   esac
   if [ "\${3:-}" = --jq ]; then jq "$4" <<<"$data"; else printf '%s\\n' "$data"; fi
@@ -318,8 +332,14 @@ ${resolveScript(text)}`;
       });
       const dir = mkdtempSync(join(tmpdir(), 'cq-policy-resolve-'));
       const outputPath = join(dir, 'github-output');
-      const check = (run: Record<string, unknown>, pulls: unknown[] = [pull('merge-queue')]) => {
+      const queried = join(dir, 'queried');
+      const check = (
+        run: Record<string, unknown>,
+        pulls: unknown[] = [pull('merge-queue')],
+        extra: Record<string, string> = {},
+      ) => {
         rmSync(outputPath, { force: true });
+        rmSync(queried, { force: true });
         const result = spawnSync('bash', ['-c', shell], {
           encoding: 'utf8',
           env: {
@@ -327,6 +347,9 @@ ${resolveScript(text)}`;
             RUN_ID: '123',
             RUN_DATA: JSON.stringify(run),
             PULLS_DATA: JSON.stringify(pulls),
+            QUERIED: queried,
+            CQ_ASSOC_RETRY_SECONDS: '0',
+            ...extra,
             SHA,
             REPO: 'owner/repo',
             REPO_ID: '42',
@@ -352,6 +375,16 @@ ${resolveScript(text)}`;
           expect(ok.status, ok.stderr + ok.stdout).toBe(0);
           expect(ok.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=merge-queue\npr=7\n`);
         }
+        // The match on a later page counts: every page is read.
+        const paged = check(valid, [pull('other')], {
+          PULLS_PAGE2: JSON.stringify([pull('main')]),
+        });
+        expect(paged.status, paged.stderr + paged.stdout).toBe(0);
+        expect(paged.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=main\npr=7\n`);
+        // A lagging association is looked up once more before any skip.
+        const late = check(valid, [], { PULLS_LATE: JSON.stringify([pull('merge-queue')]) });
+        expect(late.status, late.stderr + late.stdout).toBe(0);
+        expect(late.outputs).toBe(`subject=${SHA}\nkind=pr\nbase=merge-queue\npr=7\n`);
         const push = check({ ...valid, event: 'push', head_branch: 'merge-queue' }, []);
         expect(push.status, push.stderr + push.stdout).toBe(0);
         expect(push.outputs).toBe(`subject=${SHA}\nkind=push\nbase=main\npr=\n`);
@@ -380,7 +413,15 @@ ${resolveScript(text)}`;
           expect(skipped.status, `${label}: ${skipped.stdout}`).toBe(0);
           expect(skipped.outputs, label).toBe('');
           expect(skipped.stdout, label).toContain('nothing to judge');
+          // An empty same-repo association is unconfirmed, not superseded.
+          expect(skipped.stdout.includes('association unconfirmed'), label).toBe(
+            label === 'no PR' || label === 'fork PR',
+          );
         }
+        // An API error fails closed: no skip, no subject.
+        const failed = check(valid, [], { PULLS_FAIL: '1' });
+        expect(failed.status, failed.stdout).not.toBe(0);
+        expect(failed.outputs).toBe('');
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
