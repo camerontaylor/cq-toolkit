@@ -16,9 +16,10 @@
 //      can spin zero times and promote; a populated list passes the guard
 //      (positive control, exit 0) in both files.
 //   3. The promotion text: the on-queue guard, the promotion-review
-//      requirement (status context, User creators, reviewed base, no push
-//      trigger), the skipped case branch, the awaiting exit (green, no
-//      promotion), and a checkout pinned to exactly 40 lowercase hex chars.
+//      requirement (status context, the pinned reviewer bot, reviewed base,
+//      no push trigger), the skipped case branch, the awaiting exit (green,
+//      no promotion), and a checkout pinned to exactly 40 lowercase hex
+//      chars.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -222,7 +223,9 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
         expect(text, `${label}: the review status context`).toContain(
           "github.event.context == 'crq/promotion-review'",
         );
-        expect(text, `${label}: bots never count as reviewers`).toContain('.type == "User"');
+        expect(text, `${label}: the pinned reviewer bot filter`).toContain(
+          '.type == "Bot" and .login == $bot_login and .cid == $bot_id',
+        );
         expect(text, `${label}: the reviewed-base binding`).toContain('REVIEW_BASE');
         expect(text, `${label}: no push trigger`).not.toMatch(/^ {2}push:/m);
         expect(text, `${label}: the skipped case branch`).toContain('concluded skipped');
@@ -288,10 +291,14 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
     text: readFileSync(path, 'utf8'),
   }));
 
-  const BOT_ID = 202921479;
+  // Fixture identity for the jq matrix, deliberately NOT any real App: the
+  // matrix exercises the filter's LOGIC, and identity values live only in
+  // instances.json — filled from the owner's registration record.
+  const BOT_LOGIN = 'promo-review-fixture[bot]';
+  const BOT_ID = 4242424242;
   const BASE = 'a'.repeat(40);
   const creator = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    login: 'cq-reviewer[bot]',
+    login: BOT_LOGIN,
     type: 'Bot',
     id: BOT_ID,
     ...over,
@@ -313,7 +320,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
           '-s',
           '--arg',
           'bot_login',
-          'cq-reviewer[bot]',
+          BOT_LOGIN,
           '--argjson',
           'bot_id',
           String(botId),
@@ -346,14 +353,85 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       // The old allow-list plumbing is gone from both files.
       expect(text, label).not.toContain('CQ_PROMOTION_REVIEWERS');
       expect(text, label).not.toContain('REVIEWERS_VAR');
+      // The fail-closed unpinned guard sits in BOTH steps of BOTH files:
+      // while the tokens are UNSET placeholders, every run refuses before it
+      // can trust anything.
+      expect(
+        text.match(/refusing: reviewer identity not pinned/g)?.length,
+        `${label}: the unpinned guard in both steps`,
+      ).toBe(2);
+      expect(text.match(/@@UNSET\*\)/g)?.length, `${label}: the sentinel branch`).toBe(2);
+      // Provenance regression: a STRANGER's public App ("cq-reviewer", owner
+      // `cqrect`, App id 1175046) once sat in these literals. Neither file
+      // may ever carry that name or id again — real values land only from
+      // the owner's registration record.
+      expect(text, `${label}: no stranger login`).not.toContain('cq-reviewer[bot]');
+      expect(text, `${label}: no stranger id`).not.toContain('202921479');
     }
-    // The rendered instance carries both literals (crq's signer-mode
-    // activation greps main's copy for them); the template carries the
-    // tokens.
-    expect(generated.text).toContain("'cq-reviewer[bot]'");
-    expect(generated.text).toContain('--argjson bot_id 202921479');
-    expect(template.text).toContain("'{{REVIEWER_BOT_LOGIN}}'");
-    expect(template.text).toContain('--argjson bot_id {{REVIEWER_BOT_ID}}');
+    // The rendered instance carries the UNSET literals (crq's signer-mode
+    // activation greps main's copy for them — so the signer side stays
+    // unpinned too until the record exists); the template carries the
+    // tokens. The sentinel appears twice in the jq args and twice in the
+    // guard case subjects.
+    expect(generated.text.match(/@@UNSET-REVIEWER-BOT-LOGIN@@/g)?.length).toBe(4);
+    expect(generated.text.match(/--argjson bot_id -1 /g)?.length).toBe(2);
+    expect(template.text.match(/case "\{\{REVIEWER_BOT_LOGIN\}\}" in/g)?.length).toBe(2);
+    expect(generated.text.match(/case "@@UNSET-REVIEWER-BOT-LOGIN@@" in/g)?.length).toBe(2);
+    expect(template.text.match(/'\{\{REVIEWER_BOT_LOGIN\}\}'/g)?.length).toBe(2);
+    expect(template.text.match(/--argjson bot_id \{\{REVIEWER_BOT_ID\}\}/g)?.length).toBe(2);
+    // instances.json is the render's single identity source: while unpinned
+    // it holds exactly the fail-closed sentinels.
+    const instances = JSON.parse(
+      readFileSync(join(ROOT, 'policy/templates/instances.json'), 'utf8'),
+    ) as Array<{ workflow: string; tokens: Record<string, string> }>;
+    const gate = instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
+    expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBe('@@UNSET-REVIEWER-BOT-LOGIN@@');
+    expect(gate?.tokens['REVIEWER_BOT_ID']).toBe('-1');
+  });
+
+  // The guard must actually FIRE, not merely be present: each file's case
+  // block runs under bash — the shipped UNSET sentinel exits 1 with the
+  // refusing message; a real-shaped login passes through (positive control).
+  describe('fail-closed unpinned-identity guard (behavioral)', () => {
+    const guardTmp = mkdtempSync(join(tmpdir(), 'gate-identity-'));
+    afterAll(() => rmSync(guardTmp, { recursive: true, force: true }));
+
+    for (const { label, text } of sources) {
+      const lines = text.split(/\r?\n/);
+      const guardBlock = (): string => {
+        const start = lines.findIndex(
+          (line) =>
+            line.includes('case "') &&
+            (line.includes('{{REVIEWER_BOT_LOGIN}}') ||
+              line.includes('@@UNSET-REVIEWER-BOT-LOGIN@@')),
+        );
+        if (start === -1) throw new Error('no unpinned-identity guard found');
+        const block: string[] = [];
+        for (let i = start; i < lines.length; i++) {
+          const line = lines[i] ?? '';
+          block.push(line);
+          if (line.trim().endsWith(';;')) break;
+        }
+        block.push('esac');
+        return block.join('\n');
+      };
+      const runGuard = (subject: string): { status: number | null; output: string } => {
+        const script = join(guardTmp, `identity-${label}-${subject.slice(0, 6)}.sh`);
+        const body = guardBlock().replace(/case ".*" in/, `case "${subject}" in`);
+        writeFileSync(script, `set -euo pipefail\n${body}\n`);
+        const res = spawnSync('bash', [script], { encoding: 'utf8' });
+        return { status: res.status, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
+      };
+      it(`refuses the UNSET sentinel with exit 1 (${label})`, () => {
+        const res = runGuard('@@UNSET-REVIEWER-BOT-LOGIN@@');
+        expect(res.status, res.output).toBe(1);
+        expect(res.output).toContain('refusing: reviewer identity not pinned');
+      });
+      it(`positive control: a real-shaped login passes the guard (${label})`, () => {
+        const res = runGuard('promo-review-fixture[bot]');
+        expect(res.status, res.output).toBe(0);
+      });
+    }
   });
 
   it('trusts only creator type Bot + pinned login + numeric id, newest wins', () => {
