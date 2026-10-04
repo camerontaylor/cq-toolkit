@@ -2387,7 +2387,12 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
             event.status === 'budget-exhausted',
         ),
       );
-      await okEntered;
+      // The entry gate alone can strand here: if the run settles in this
+      // window (say j2's invocation fence fails), `okEntered` never resolves.
+      // Race it against the run so the runner's own rejection surfaces — or
+      // an early resolve falls through to the assertions below — instead of
+      // the framework timeout eating the failure and the finally cleanup.
+      await Promise.race([okEntered, running]);
       const report = await pumped(running, clock);
 
       const events = await openRunLog(dir).read(report.runId);
