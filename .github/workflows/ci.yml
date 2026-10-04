@@ -46,32 +46,13 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      # One compiler ratchet plus typed lint; aliases must not duplicate it.
-      - name: Static gate
-        run: pnpm run check:static
-      - name: Check formatting
-        run: pnpm run format:check
-      # The split mirrors the two package scripts (`test:unit` excludes the e2e
-      # tree, `test:e2e` selects it), so a red unit run and a red e2e run
-      # are two separate reports instead of one `pnpm run test` line.
-      - name: Test unit
-        run: pnpm run test:unit
-      - name: Test e2e/acp
-        run: pnpm run test:e2e
-      - name: Check unused files and dependencies
-        run: pnpm run knip
-      # Emit gate: the ratchet step above is the typecheck gate; this step
-      # emits dist/ and recompiles (checked emit, no --noCheck) — the
-      # deliberate, boring-safe choice.
-      - name: Build
-        run: pnpm run build
-      # Generated-artifact drift gate (ws-i scope item 5): the generator's
-      # --check mode recomputes the per-op reference and fails on any drift
-      # (missing, changed, or stale docs/ops/*.md) without writing. It reads
-      # the BUILT registry, so this step follows the build above; its output
-      # is deterministic (no timestamps, no absolute paths).
-      - name: Check generated op docs
-        run: pnpm run gen:op-docs:check
+      # The hand-replaced COMMANDS slot: the static gate's seven command
+      # steps live in ONE repo-owned composite action, shared with the
+      # macOS venue's static-macos mirror (macos-venue.yml), so the two run
+      # one step list. Checkout, toolchain and install stay above: a local
+      # action is read from the checked-out workspace.
+      - name: Static gate steps (.github/actions/static-gate)
+        uses: ./.github/actions/static-gate
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
