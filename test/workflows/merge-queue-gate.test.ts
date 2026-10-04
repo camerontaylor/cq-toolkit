@@ -262,3 +262,180 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     });
   });
 });
+
+describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files in lockstep)', () => {
+  // REVIEW_JQ verbatim from each file. The jq program is token-free ($bot_login
+  // and $bot_id arrive as jq variables from the step that runs it), so the
+  // extraction is byte-identical across the generated file and the template;
+  // what DIFFERS between the files is only how the step passes the variables,
+  // pinned textually below (template tokens there, literals in the render).
+  const extractReviewJq = (text: string): string => {
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.trim().startsWith('REVIEW_JQ:'));
+    if (start === -1) throw new Error('no REVIEW_JQ found');
+    const body: string[] = [];
+    for (let i = start + 1; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      if (line.startsWith('        ')) body.push(line.slice(8));
+      else break;
+    }
+    if (body.length === 0) throw new Error('empty REVIEW_JQ program');
+    return body.join('\n');
+  };
+
+  const sources = GATE_FILES.map(({ label, path }) => ({
+    label,
+    text: readFileSync(path, 'utf8'),
+  }));
+
+  const BOT_ID = 202921479;
+  const BASE = 'a'.repeat(40);
+  const creator = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    login: 'cq-reviewer[bot]',
+    type: 'Bot',
+    id: BOT_ID,
+    ...over,
+  });
+  const status = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    context: 'crq/promotion-review',
+    id: 1,
+    state: 'success',
+    description: `reviewed main=${BASE} crq#promo-0000000000`,
+    created_at: '2026-10-04T00:00:00Z',
+    creator: creator(),
+    ...over,
+  });
+  const run = (pages: unknown, botId: number | string = BOT_ID): Record<string, unknown> =>
+    JSON.parse(
+      execFileSync(
+        'jq',
+        [
+          '-s',
+          '--arg',
+          'bot_login',
+          'cq-reviewer[bot]',
+          '--argjson',
+          'bot_id',
+          String(botId),
+          extractReviewJq(sources[0]!.text),
+        ],
+        // gh api --paginate prints ONE JSON ARRAY PER PAGE, back to back;
+        // `jq -s` slurps that stream into an array of pages. Feed the same
+        // stream shape (one document per page), never a pre-slurped nesting.
+        {
+          input: (pages as readonly unknown[]).map((page) => JSON.stringify(page)).join('\n'),
+          encoding: 'utf8',
+        },
+      ),
+    ) as Record<string, unknown>;
+
+  it('REVIEW_JQ is byte-identical across the files, and each step passes the pinned reviewer', () => {
+    const [generated, template] = sources;
+    if (generated === undefined || template === undefined)
+      throw new Error('both workflow sources are required');
+    expect(
+      extractReviewJq(generated.text),
+      'the trust filter drifted between template and instantiation',
+    ).toBe(extractReviewJq(template.text));
+    for (const { text, label } of sources) {
+      // The id rides --argjson (a JSON number): an --arg string compare
+      // against the numeric cid would fail closed on every status.
+      expect(text.match(/--argjson bot_id /g)?.length, label).toBe(2);
+      expect(text.match(/--arg bot_login /g)?.length, label).toBe(2);
+      expect(text, label).not.toMatch(/--arg bot_id\b/);
+      // The old allow-list plumbing is gone from both files.
+      expect(text, label).not.toContain('CQ_PROMOTION_REVIEWERS');
+      expect(text, label).not.toContain('REVIEWERS_VAR');
+    }
+    // The rendered instance carries both literals (crq's signer-mode
+    // activation greps main's copy for them); the template carries the
+    // tokens.
+    expect(generated.text).toContain("'cq-reviewer[bot]'");
+    expect(generated.text).toContain('--argjson bot_id 202921479');
+    expect(template.text).toContain("'{{REVIEWER_BOT_LOGIN}}'");
+    expect(template.text).toContain('--argjson bot_id {{REVIEWER_BOT_ID}}');
+  });
+
+  it('trusts only creator type Bot + pinned login + numeric id, newest wins', () => {
+    // The pinned bot's success is the review; cid is projected as a number.
+    const only = run([[status()]]);
+    expect(only['review']).toMatchObject({ id: 1, state: 'success', cid: BOT_ID });
+    expect(only['others']).toBe(0);
+
+    // Same login, wrong numeric id: untrusted — and with no trusted review
+    // plus others > 0 this is exactly the red-refusal input shape.
+    const wrongId = run([[status({ id: 2, creator: creator({ id: BOT_ID + 1 }) })]]);
+    expect(wrongId['review']).toBeNull();
+    expect(wrongId['others']).toBe(1);
+
+    // A string-typed id does not satisfy the numeric pin.
+    const stringId = run([[status({ id: 3, creator: creator({ id: String(BOT_ID) }) })]]);
+    expect(stringId['review']).toBeNull();
+    expect(stringId['others']).toBe(1);
+
+    // The repository owner's own User login is untrusted (PR-B's point).
+    const owner = run([
+      [status({ id: 4, creator: { login: 'camerontaylor', type: 'User', id: 1 } })],
+    ]);
+    expect(owner['review']).toBeNull();
+    expect(owner['others']).toBe(1);
+
+    // GITHUB_TOKEN's github-actions bot is untrusted too.
+    const actions = run([
+      [status({ id: 5, creator: { login: 'github-actions[bot]', type: 'Bot', id: 15368 } })],
+    ]);
+    expect(actions['review']).toBeNull();
+    expect(actions['others']).toBe(1);
+
+    // Newest by (created_at, id): a later failure overrides an earlier
+    // success (a blocking finding), an earlier failure yields to a later
+    // success, and an id tiebreak breaks an identical timestamp.
+    const laterFailure = run([
+      [status(), status({ id: 6, state: 'failure', created_at: '2026-10-04T00:01:00Z' })],
+    ]);
+    expect(laterFailure['review']).toMatchObject({ id: 6, state: 'failure' });
+    const laterSuccess = run([
+      [status({ state: 'failure' }), status({ id: 7, created_at: '2026-10-04T00:01:00Z' })],
+    ]);
+    expect(laterSuccess['review']).toMatchObject({ id: 7, state: 'success' });
+    const idTiebreak = run([
+      [
+        status({ id: 9, created_at: '2026-10-04T00:00:00Z' }),
+        status({ id: 8, created_at: '2026-10-04T00:00:00Z' }),
+      ],
+    ]);
+    expect(idTiebreak['review']).toMatchObject({ id: 9 });
+
+    // A trusted review coexisting with untrusted statuses selects the review
+    // and counts the others (noted, not red). A foreign-context status is
+    // filtered out before the trust split and never counts at all.
+    const mixed = run([
+      [
+        status({ id: 10 }),
+        status({ id: 11, creator: { login: 'camerontaylor', type: 'User', id: 1 } }),
+        status({
+          id: 12,
+          context: 'other-context',
+          creator: { login: 'someone', type: 'User', id: 2 },
+        }),
+      ],
+    ]);
+    expect(mixed['review']).toMatchObject({ id: 10 });
+    expect(mixed['others']).toBe(1);
+
+    // Two pages: the trusted success arrives on page 2, an untrusted status
+    // on page 1 — the filter's `add` must concatenate across pages, which is
+    // the whole point of slurping the paginated stream.
+    const twoPages = run([
+      [status({ id: 13, creator: { login: 'camerontaylor', type: 'User', id: 1 } })],
+      [status({ id: 14, created_at: '2026-10-04T00:01:00Z' })],
+    ]);
+    expect(twoPages['review']).toMatchObject({ id: 14, cid: BOT_ID });
+    expect(twoPages['others']).toBe(1);
+
+    // No statuses at all: the await shape (green wait, not red).
+    const none = run([]);
+    expect(none['review']).toBeNull();
+    expect(none['others']).toBe(0);
+  });
+});
