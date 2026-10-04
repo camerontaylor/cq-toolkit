@@ -16,6 +16,8 @@ const PROCESS_ENTRY_POINTS = [
   /\bmakeSubprocessWorktreeEffects\s*\(/,
   /\bgenerateScratchRepo\s*\(/,
   /\bcreateGitTemplate\s*\(/,
+  /\bcloneTemplate\s*\(/,
+  /\bcopyRatchetEngine\s*\(/,
   /\brunSweepPlan\s*\(/,
 ] as const;
 
