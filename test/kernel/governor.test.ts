@@ -156,11 +156,14 @@ async function pumped<T>(
 }
 
 /**
- * Advance the clock in pump steps until `gated` fires or `promise` settles —
- * the gate-mid-run analogue of `pumped`. Freezing BETWEEN dispatches is what
- * keeps a later job's pre-entry I/O from burning its own wall-clock budget: a
- * ladder that arms while the pump is stopped cannot fire its abort rung before
- * the op body is entered.
+ * Advance the clock in pump steps until `gated` fires — the gate-mid-run
+ * analogue of `pumped`. Freezing BETWEEN dispatches is what keeps a later
+ * job's pre-entry I/O from burning its own wall-clock budget: a ladder that
+ * arms while the pump is stopped cannot fire its abort rung before the op
+ * body is entered. A run that settles before the gate fired throws here: the
+ * caller's next gated await could never resolve, and failing loudly on the
+ * settlement (instead of at the framework timeout) keeps the run's own
+ * failure mode visible.
  */
 async function pumpUntil<T>(
   promise: Promise<T>,
@@ -187,6 +190,11 @@ async function pumpUntil<T>(
       );
     }
     await tick();
+  }
+  if (!gated()) {
+    throw new Error(
+      'pumpUntil: run settled before the gate fired — the gated await could never resolve',
+    );
   }
 }
 
