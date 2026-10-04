@@ -358,9 +358,13 @@ export async function upsertProposalPr({ existing, edit, create }) {
  */
 export function runCoverageRaw() {
   rmSync(COVERAGE_SUMMARY_PATH, { force: true });
+  // dist is made fresh here (a no-op once loadEngine has run), so Vitest's
+  // build-once global setup is told to skip its own rebuild.
+  ensureDist();
   const res = spawnSync('pnpm', ['exec', 'vitest', 'run', '--coverage'], {
     cwd: ROOT,
     encoding: 'utf8',
+    env: { ...process.env, CQ_DIST_PREPARED: '1' },
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
   });
