@@ -933,10 +933,14 @@ OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "blocked")
 MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
 
 
+def policy_at(rev: str) -> bool:
+    return run(["git", "cat-file", "-e", f"{rev}:docs/promotion-policy.md"], cwd=CLONE, check=False).returncode == 0
+
+
 def promotion_gate_live() -> bool:
     """The gate only exists once #269's policy is on main; before that a
     promotion review would spend quota on nothing."""
-    return run(["git", "cat-file", "-e", "origin/main:docs/promotion-policy.md"], cwd=CLONE, check=False).returncode == 0
+    return policy_at("origin/main")
 
 
 def main_sha() -> str:
@@ -979,9 +983,11 @@ def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str,
     who = run(["gh", "api", "user", "--jq", '.login + " " + .type'], timeout=60).stdout.strip()
     if who != f"{PROMO['poster']} User":
         raise RuntimeError(f"refusing to post {PROMO['status_context']}: gh auth is {who!r}, not {PROMO['poster']} (User)")
-    run(["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
-         "-f", f"state={state}", "-f", f"description={desc}"], timeout=60)
-    item.setdefault("statuses", []).append({"at": iso(), "sha": sha, "state": state, "description": desc})
+    out = run(["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
+               "-f", f"state={state}", "-f", f"description={desc}"], timeout=60).stdout
+    # the GitHub status id is what the promotion audit matches against
+    item.setdefault("statuses", []).append({"at": iso(), "sha": sha, "state": state, "description": desc,
+                                            "id": json.loads(out).get("id")})
     event("promotion_status", item=item["id"], sha=sha, state=state, description=desc)
     log.append(f"promotion: posted {state} on {sha[:10]}: {desc}")
 
@@ -1079,6 +1085,104 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
         return log + [f"promotion: trigger fired ({why}) but no merge-queue tip beyond main has all gate checks green"]
     cut_promotion(q, log, dry, main, tip, why)
     return log
+
+
+# ----------------------------------------------------------- promotion audit (read-only toward GitHub)
+#
+# Compensating control (owner ruling, #269 P1): any fleet agent with the
+# owner's gh auth can post crq/promotion-review. So on every tick, when main
+# has advanced, find the status that authorized the new main sha and require
+# that crq itself posted it, for a promotion item with a completed review.
+
+
+def promotion_statuses(sha: str) -> List[Dict[str, Any]]:
+    rows = run(["gh", "api", f"repos/{REPO}/commits/{sha}/statuses?per_page=100", "--paginate", "--jq",
+                f'.[] | select(.context == "{PROMO.get("status_context", "crq/promotion-review")}") | '
+                '{id, state, description, created_at, login: .creator.login, type: .creator.type}'],
+               timeout=120).stdout.splitlines()
+    return [json.loads(r) for r in rows if r.strip()]
+
+
+def notify_owner(text: str) -> Dict[str, Any]:
+    """Paseo message to the chancellor (the owner's desk; works from the
+    Background launchd session ticks run in) plus a best-effort macOS
+    notification (osascript exits 0 there but may not display)."""
+    res: Dict[str, Any] = {}
+    aid = PROMO.get("alert_agent_id")
+    if aid:
+        p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90, env=top_level_env())
+        res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
+    o = run(["osascript", "-e", f"display notification {json.dumps(text[:220])} with title "
+             f"\"crq: PROMOTION UNVERIFIED\" sound name \"Basso\""], check=False, timeout=30)
+    res["osascript"] = o.returncode
+    return res
+
+
+def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
+    a = q.setdefault("promotion_audit", {"records": [], "alerts": []})
+    main = main_sha()
+    last = a.get("last_main")
+    if not last:
+        if not dry:
+            a["last_main"] = main
+        return [f"promotion audit: baseline main={main[:10]}"]
+    if main == last:
+        return []
+    if run(["git", "cat-file", "-e", f"{main}^{{commit}}"], cwd=CLONE, check=False).returncode != 0:
+        git("fetch", "--quiet", "origin", "main", check=False)
+    rec: Dict[str, Any] = {"at": iso(), "from": last, "to": main}
+    reasons: List[str] = []
+    if not policy_at(last):
+        rec["verdict"] = "pre-policy"  # advanced under the old gate (policy not yet on main)
+    else:
+        if not is_ancestor(last, main):
+            reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
+        sts = promotion_statuses(main)
+        allowed = {PROMO.get("poster", "camerontaylor")} | set(PROMO.get("allowed_reviewers", []))
+        ok_creator = [x for x in sts if x["type"] == "User" and x["login"] in allowed]
+        others = [f"{x['login']}({x['type']}) {x['state']}" for x in sts if x not in ok_creator]
+        if others:
+            rec["other_creators"] = others
+        auth = max(ok_creator, key=lambda x: (x["created_at"], x["id"])) if ok_creator else None
+        if auth:
+            rec["status"] = auth
+        if not auth or auth["state"] != "success":
+            reasons.append("no qualifying crq/promotion-review success on the new main sha"
+                           + (f" (newest allowed is {auth['state']})" if auth else ""))
+        else:
+            if (auth.get("description") or "").startswith("override"):
+                reasons.append(f"owner-style override status by {auth['login']}: {auth['description'][:100]}")
+            item = next((i for i in q["items"] if i["kind"] == "promotion" and i.get("batch_sha") == main), None)
+            if not item:
+                reasons.append("crq has no promotion item for this batch sha")
+            else:
+                rec["item"] = item["id"]
+                if not item.get("cycles"):
+                    reasons.append(f"{item['id']} has no completed review")
+                if not any(x.get("id") == auth["id"] and x["state"] == "success" for x in item.get("statuses", [])):
+                    reasons.append(f"authorizing status {auth['id']} by {auth['login']} was not posted by crq "
+                                   f"(crq posted ids {[x.get('id') for x in item.get('statuses', [])]})")
+        rec["verdict"] = "UNVERIFIED" if reasons else "verified"
+        rec["reasons"] = reasons
+    line = f"promotion audit: main {last[:10]} → {main[:10]}: {rec['verdict']}" + (f" — {'; '.join(reasons)}" if reasons else "")
+    if dry:
+        return [line]
+    a["last_main"] = main
+    a["records"] = (a["records"] + [rec])[-300:]
+    LEDGER.mkdir(parents=True, exist_ok=True)
+    with (LEDGER / "promotion-audit.md").open("a") as f:
+        f.write(f"- {rec['at']} main {last[:12]} → {main[:12]}: **{rec['verdict']}**"
+                f"{' (' + rec['item'] + ', status ' + str(rec['status']['id']) + ')' if rec.get('item') else ''}"
+                f"{' — ' + '; '.join(reasons) if reasons else ''}\n")
+    if rec["verdict"] == "UNVERIFIED":
+        rec["notified"] = notify_owner(f"crq PROMOTION UNVERIFIED: main advanced {last[:10]} → {main[:10]} without a "
+                                       f"crq-verified promotion review. {'; '.join(reasons)[:600]} — see "
+                                       f"{STATE / 'status.md'}; ack with `crq.py promotion-ack {main[:10]} \"<reason>\"`.")
+        a["alerts"].append({"to": main, "at": rec["at"], "reasons": reasons, "acked": None})
+        event("promotion_unverified", **{k: v for k, v in rec.items() if k != "at"})
+    else:
+        event("promotion_verified" if rec["verdict"] == "verified" else "promotion_audit", **{k: v for k, v in rec.items() if k != "at"})
+    return [line]
 
 
 def blocking_findings(ndjson: Path) -> List[Dict[str, Any]]:
@@ -1268,6 +1372,12 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     q["last_tick"] = iso()
     log += enroll(q, dry)
     try:
+        log += promotion_audit(q, dry)
+    except Exception as exc:  # retried next tick: last_main only advances after a completed audit
+        log.append(f"promotion audit: error {exc}"[:300])
+        if not dry:
+            event("promotion_audit_error", error=str(exc)[:300])
+    try:
         log += promotion_tick(q, dry)
     except Exception as exc:  # never let promotion bookkeeping stop the queue
         log.append(f"promotion: error {exc}"[:300])
@@ -1418,7 +1528,10 @@ def write_status(q: Dict[str, Any]) -> None:
         except Exception as exc:
             next_run = f"(schedule inspect failed: {exc})"[:200]
     recent = EVENTS.read_text().splitlines()[-15:] if EVENTS.exists() else []
-    md = [f"# CodeRabbit review queue — status ({iso()})", "",
+    alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
+    banner = [f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: {'; '.join(x['reasons'])[:300]}. "
+              f"Ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`" for x in alerts]
+    md = [f"# CodeRabbit review queue — status ({iso()})", "", *banner, *([""] if banner else []),
           f"- queue: {'**PAUSED** — ' + str(q.get('pause_reason')) if q.get('paused') else 'active'}",
           f"- schedule: `{sched}` {next_run}",
           f"- rate-limit cooldown until: {q.get('cooldown_until') or '—'}",
@@ -1528,6 +1641,14 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
     if action in ("pause", "resume"):
         q["paused"] = action == "pause"
         q["pause_reason"] = reason if action == "pause" else None
+    elif action == "promotion-ack":
+        sha, _, why = (reason or "").partition(" ")
+        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
+               if not x.get("acked") and (sha == "all" or x["to"].startswith(sha))]
+        if not hit or not why.strip():
+            sys.exit('usage: crq.py promotion-ack <main-sha-prefix|all> "<reason>" (no matching open alert?)')
+        for x in hit:
+            x["acked"] = f"{iso()} {why.strip()}"
     elif action == "promote":
         q.setdefault("promotion", {})["requested"] = True  # cut on the next tick (on demand)
     elif action == "promotion-resolve":
@@ -1577,6 +1698,9 @@ def main() -> int:
     for a in ("pause", "resume", "promote"):
         p = sub.add_parser(a)
         p.add_argument("reason", nargs="?")
+    p = sub.add_parser("promotion-ack", help="acknowledge an unverified-promotion alert")
+    p.add_argument("sha")
+    p.add_argument("reason")
     p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
     p.add_argument("finding", help="finding number, or all")
     p.add_argument("disposition")
@@ -1612,6 +1736,8 @@ def main() -> int:
         base, head, n = build_synthetic(item)
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
+    elif args.cmd == "promotion-ack":
+        with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}")
     elif args.cmd == "promotion-resolve":
         with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     else:

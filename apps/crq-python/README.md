@@ -138,6 +138,30 @@ status, and crq posts that status.
   `gh api user` is `camerontaylor` (User) and refuses otherwise, because a non-allowed creator
   turns the gate red. Config: `config.json` `promotion`.
 
+### Promotion audit (compensating control for #269's accepted P1)
+
+Any fleet agent that holds the owner's `gh` auth can post `crq/promotion-review`. So every
+tick, whatever `promotion.enabled` says, crq polls `main` with GET requests only. When `main`
+has moved since the last tick, crq finds the newest allowed-User `crq/promotion-review` on the
+new sha and classifies the advance:
+
+- **verified**: the authorizing status is `success`, crq has a `promotion` item for that batch
+  sha with a completed review, and crq itself posted that exact status. crq records each
+  status id it posts, and the audit matches on that id.
+- **UNVERIFIED**: anything else. Examples: no qualifying status, a status crq did not post,
+  no crq item or no completed review, `main` not fast-forwarded, or an `override` status.
+  crq then raises an alert:
+  - a banner at the top of `state/status.md`, until `crq.py promotion-ack <sha|all> "<reason>"`;
+  - a `promotion_unverified` event;
+  - a `paseo send --no-wait` to the chancellor (`promotion.alert_agent_id`). This path was
+    verified to deliver from the Background launchd session that ticks run in;
+  - a best-effort `osascript` notification. It exits 0 in that session but may not display.
+- **pre-policy**: the previous `main` did not yet contain `docs/promotion-policy.md`, so the
+  advance happened under the old gate.
+
+Every advance is appended to `state/ledger/promotion-audit.md`. If two promotions land within
+one tick, only the newest `main` is audited.
+
 ## Merged PRs: supersession and the synthetic diff
 
 - **Survival.** Take the lines the PR added (`git diff --numstat merge^1
