@@ -4,8 +4,11 @@ Status: **proposal.** Nothing in this document is applied. Every change it
 describes touches an outward-facing, owner-governed declaration site
 (`policy/protected-paths.json`, `scripts/denylist-scan`,
 `policy/templates/github-settings.json`, a workflow template or instance, or
-the live rulesets / branch protection). Application happens at promotion time,
-by the owner, as one atomic change set — never piecemeal.
+the live rulesets / branch protection). Application is by the owner, in two
+phases that are each one atomic change set — never piecemeal within a phase
+(§2.6: phase A reconciles `from-source` and lands the non-required macOS pilot
+producer; phase B promotes `static-macos` after the pilot) — preceded by one
+scanner prerequisite that lands in its own PR (§2.4).
 
 Evidence base: `origin/main` = `origin/merge-queue` = `70de728` (read on
 2026-10-02, the date the spec's review pass was taken), the live GitHub API
@@ -238,11 +241,28 @@ Consequences of the recommendation, all owner-governed:
   rewritten in the same change — their current text ("deliberately not a
   required check") becomes false the moment it lands, and a template that
   contradicts its own ruleset is exactly the drift this document exists to end.
-- `REQUIRED_WORKFLOW_CHECKS` gains `{ workflow: 'ci.yml', check: 'from-source' }`.
-  The I4 leg will then police it: the job exists, its id is `from-source`, it
-  carries no `name:` override, and `ci.yml`'s `on:` block stays unfiltered. It
-  already satisfies all four (`:82-86`), so the leg passes without a workflow
-  edit beyond the comment.
+- **Prerequisite — the pairing model must admit several checks per workflow
+  file.** Today it cannot: `requiredWorkflowChecksProblems()`
+  (`scripts/denylist-scan:1080-1110`) rejects a second pair for the same file
+  (`:1100-1102`), and `workflowI4Checks()` looks up one pair per file with
+  `.find()` (`:1042`), so even without that rejection it would police only the
+  first of `ci.yml`'s two pairs. The scanner change: keep the duplicate-**check**
+  -name rejection (`:1103-1105`); drop the duplicate-**workflow** rejection;
+  make the I4 leg validate every pair for a file (`.filter()`, the job-id and
+  `name:` checks once per pair) while the trigger checks still run once per
+  file; and add a self-test fixture with two pairs in one workflow (both jobs
+  present → pass; either renamed away → FAIL naming it) — the leg reads only
+  the live `.github/workflows/` tree today (`:116`, `:1112-1165`), so nothing
+  exercises a multi-pair file. `scripts/denylist-scan` is a protected path
+  (`protected-paths.json:13`), so this lands in its **own PR**, before the
+  change set below, and is not part of this docs-only plan.
+- With the prerequisite merged, `REQUIRED_WORKFLOW_CHECKS` (`:165-173`) gains
+  `{ workflow: 'ci.yml', check: 'from-source' }`. The I4 leg will then police
+  it: the job exists, its id is `from-source`, it carries no `name:` override,
+  and `ci.yml`'s `on:` block stays unfiltered. It already satisfies all four
+  (`:82-86`), so beyond the scanner prerequisite no workflow edit other than
+  the comment is needed. Registered before the prerequisite, the pair fails
+  the denylist self-test outright.
 - The legacy gate list becomes `static,from-source,denylist,ratchet`
   (S1 ≡ S3 by Rule R), and `from-source` is push-produced, so the gate's wait
   is satisfiable.
@@ -277,28 +297,60 @@ direction) in the same owner-governed pass that applies R2.
 
 ### 2.6 Which declaration sites must change, to make them agree
 
-Ordered; every row is applied together or not at all. Rows 1b and 5b are
-additions to the original list: 1b keeps the shipped adopter instructions
-consistent with it, 5b wakes the successor gate on the new workflow.
+Ordered. Row 0 is a prerequisite that merges first, in its own PR. The rest
+splits into two phases; within a phase every row is applied together or not
+at all:
 
-| order | site                                                                                     | change                                                                                                                                                                                                                                                                                                                                   | outward-facing?                                                              |
-| ----- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1     | `policy/templates/required-check.md:115-124` (+ `:31-43` prose)                          | rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1)                                                                                                                                                                               | no (template, then regenerate)                                               |
-| 1b    | `policy/README.md:42-49` (adoption step 3)                                               | rewrite "register every required check in all three places": `GATE_WORKFLOWS` (successor gate) is a fourth place, a standalone workflow check is not enforced by the successor until it is added there, and C2 enforcement is R2 on `merge-queue` only, not classic protection on both branches (`github-settings.json:39-45`, `:80-83`) | no (shipped adopter docs)                                                    |
-| 2     | `.github/workflows/ci.yml`                                                               | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                                                                                                                                  | no (generated instance)                                                      |
-| 3     | `scripts/denylist-scan:165-173`                                                          | add `{ ci.yml: from-source }`; at promotion add `{ ci-macos.yml: static-macos }`                                                                                                                                                                                                                                                         | **yes** — protected path (`protected-paths.json:13`)                         |
-| 4     | `policy/protected-paths.json:15`                                                         | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                                                                                                                                       | **yes** — protected path                                                     |
-| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58`        | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                                                                                                                                            | no (repo) / **yes** (D11 judges the producer change)                         |
-| 5b    | `policy/templates/gate.yml` (`workflow_run.workflows`, `wake` path whitelist) + instance | at promotion, recommended placement only: add `ci-macos` to the trigger list and `.github/workflows/ci-macos.yml` to the whitelist (today `ci` and `cq-measure` only, `gate.yml:56-64`, `:118-121`); regenerate. `GATE_WORKFLOWS` alone makes the gate verify the run, not wake on it                                                    | no (repo) / **yes** (D11 judges the producer change)                         |
-| 6     | `policy/templates/github-settings.json:65-73`                                            | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are                                                                                                                | **yes** — target state of live settings                                      |
-| 7a    | live classic protection (S5/S6), **pre-C2 only**                                         | add `from-source` to `main`; add `static-macos` to both branches at promotion if it precedes C2; decide the `main`/`pack-audit` asymmetry                                                                                                                                                                                                | **yes** — owner-only, via the API                                            |
-| 7b    | live rulesets (S4), **at C2**                                                            | apply R0/R1/R2 as templated (item 6). The target has `classicBranchProtection: null` for both branches (`github-settings.json:80-83`), so the wizard _removes_ S5/S6 rather than updating them, and R2 targets only `merge-queue` (`:39-45`) — `main` keeps R1's `update` rule and no required-check rule                                | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) |
+- **Phase A — reconciliation + macOS pilot.** The `from-source` parts of
+  every row, plus the standalone `ci-macos.yml` template, instance and
+  checkout safeguard (rows 1, 1c), landed **non-required**: nothing in S1–S7
+  names it, so the §3.3 10-candidate pilot runs in a window where a red or
+  slow macOS leg blocks nothing.
+- **Phase B — macOS promotion,** after the pilot: every "at promotion" part
+  below. It is a separate change set and a separate owner decision.
+
+Rows 1b, 1c and 5b are additions to the original list: 1b keeps the shipped
+adopter instructions consistent with it, 1c keeps the checkout-token
+assertion covering the new head-executing workflow, 5b wakes the successor
+gate on the new workflow.
+
+| order | site                                                                                                                                                                                                                   | change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | outward-facing?                                                              |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 0     | `scripts/denylist-scan:1042`, `:1080-1110` (own PR, before phase A)                                                                                                                                                    | prerequisite for row 3's `from-source` pair: allow several pairs per workflow file, keep the duplicate-check-name rejection, validate every pair for a file in the I4 leg (filter, not find; triggers once per file), add a two-pairs-in-one-workflow self-test fixture (§2.4)                                                                                                                                                                                                                                                                                         | **yes** — protected path (`protected-paths.json:13`)                         |
+| 1     | `policy/templates/required-check.md:115-124` (+ `:31-43` prose)                                                                                                                                                        | phase A: rewrite the "companion job, not a required check" narrative for `from-source`; add a standalone `ci-macos.yml` template carrying the macOS job body (§3.1), instantiated non-required                                                                                                                                                                                                                                                                                                                                                                         | no (template, then regenerate)                                               |
+| 1b    | `policy/README.md:42-49` (adoption step 3) and `:94-95` (`ratchet` "three places above"); `policy/templates/README.md:88-111` (instantiation step 4), `:11-32` (Files table) and `:126-136` (bootstrap-rule inventory) | rewrite every "register in all three places" instruction: `GATE_WORKFLOWS` (successor gate) is a fourth place, a standalone workflow check is not enforced by the successor until it is added there, and C2 enforcement is R2 on `merge-queue` only, not classic protection on both branches (`github-settings.json:39-45`, `:80-83`). `policy/README.md:10-12` makes the template guide the source of truth, so its step 4 must change with the adoption path, not after it. Phase A also lists `ci-macos.yml` in the template guide's file and bootstrap inventories | no (shipped adopter docs)                                                    |
+| 1c    | `test/workflows/action-pins.test.ts:109-125`                                                                                                                                                                           | phase A: add `ci-macos.yml` to the hard-coded list of workflows whose every checkout must set `persist-credentials: false`; the template's checkouts carry it (§3.1)                                                                                                                                                                                                                                                                                                                                                                                                   | no                                                                           |
+| 2     | `.github/workflows/ci.yml`                                                                                                                                                                                             | refresh the `from-source` comment only — under the recommended placement (§3.2) no `static-macos` job lands in `ci.yml`                                                                                                                                                                                                                                                                                                                                                                                                                                                | no (generated instance)                                                      |
+| 3     | `scripts/denylist-scan:165-173`                                                                                                                                                                                        | phase A: add `{ ci.yml: from-source }` — only after row 0 has merged, since a second `ci.yml` pair fails the self-test until then; at promotion add `{ ci-macos.yml: static-macos }` (its own file, so row 0 is not needed for it)                                                                                                                                                                                                                                                                                                                                     | **yes** — protected path (`protected-paths.json:13`)                         |
+| 4     | `policy/protected-paths.json:15`                                                                                                                                                                                       | `["static","from-source","denylist","ratchet"]`; at promotion add `"static-macos"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | **yes** — protected path                                                     |
+| 5     | `policy/templates/merge-queue-gate.yml:92` + `policy/templates/instances.json:58`                                                                                                                                      | `GATE_CHECKS` gains `from-source`; at promotion gains `static-macos`; regenerate the instance                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | no (repo) / **yes** (D11 judges the producer change)                         |
+| 5b    | `policy/templates/gate.yml` (`workflow_run.workflows`, `wake` path whitelist) + instance                                                                                                                               | at promotion, recommended placement only: add `ci-macos` to the trigger list and `.github/workflows/ci-macos.yml` to the whitelist (today `ci` and `cq-measure` only, `gate.yml:56-64`, `:118-121`); regenerate. `GATE_WORKFLOWS` alone makes the gate verify the run, not wake on it                                                                                                                                                                                                                                                                                  | no (repo) / **yes** (D11 judges the producer change)                         |
+| 6     | `policy/templates/github-settings.json:65-73`                                                                                                                                                                          | already lists `from-source` and `pack-audit`; at promotion add `{ "context": "static-macos", "integration_id": 15368 }`. No other R2 edit is proposed: the `cq/*` pinning and the `ratchet` supersession stay as they are                                                                                                                                                                                                                                                                                                                                              | **yes** — target state of live settings                                      |
+| 7a    | live classic protection (S5/S6), **pre-C2 only**                                                                                                                                                                       | add `from-source` to `main`; add `static-macos` to both branches at promotion if it precedes C2; decide the `main`/`pack-audit` asymmetry                                                                                                                                                                                                                                                                                                                                                                                                                              | **yes** — owner-only, via the API                                            |
+| 7b    | live rulesets (S4), **at C2**                                                                                                                                                                                          | apply R0/R1/R2 as templated (item 6). The target has `classicBranchProtection: null` for both branches (`github-settings.json:80-83`), so the wizard _removes_ S5/S6 rather than updating them, and R2 targets only `merge-queue` (`:39-45`) — `main` keeps R1's `update` rule and no required-check rule                                                                                                                                                                                                                                                              | **yes** — owner-only, via the W7.3a wizard (`policy/templates/README.md:27`) |
 
 Items 7a and 7b are the only genuinely outward-facing steps and the only ones
 this lane cannot perform. They are separate passes: 7a edits the classic
 protection that exists today, 7b replaces it at C2; applying 7a's `main` edits
 after 7b would recreate exactly what the target reports as drift. Everything
 above them is reviewable in a normal PR.
+
+Phase B orders the live step **first** on `merge-queue`: add `static-macos` to
+S6 (pre-C2) or apply R2 with it (at C2) **before** the phase-B repo change
+merges. That is safe because phase A's producer already runs on every PR head,
+so the requirement is satisfiable. It is needed because `cq-gate` runs the
+default branch's copy of `gate.yml` (`gate.yml:8-10`): the new
+`GATE_WORKFLOWS` value is not live for the promotion commit's own tip until
+that commit reaches `main`. The legacy gate, which runs the pushed copy, would
+wait for `static-macos` on that tip, but it is an alternative promoter, not
+an AND (§1.1). So without the live requirement, the old successor could promote
+the promotion commit with macOS red. Recorded residual: protection reads the PR
+head, not the tip. The promotion commit's own tip is therefore the one candidate
+whose `ci-macos.yml` push run no promoter is guaranteed to verify. During C1
+the owner may close it by disabling `cq-gate` for that single promotion, so the
+legacy gate decides it, and re-enabling it afterwards; after C2 it is an
+accepted, recorded residual. Demotion inverts the order: the live requirement
+is removed first (§3.4, §5.2).
 
 **What must NOT change:** the legacy gate's 20-minute deadline unless §3.3's
 evidence demands it; `strict_required_status_checks_policy` (`:63`) is
@@ -311,18 +363,18 @@ entries are the D11 trust anchors.
 
 ### 3.1 Where the context goes, per site
 
-| site                                                                                  | insertion                                                                                                                                                                                                                 | notes                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `policy/templates/required-check.md`                                                  | a standalone `ci-macos.yml` template with its own job body, not a matrix                                                                                                                                                  | a matrix would rename the check runs (`static (ubuntu-latest)`), breaking the S1/S2 pairing and every `name:`-identity rule the I4 leg polices (`scripts/denylist-scan:150-157`); the template's `{{RUNNER}}` slot is single-valued (`:33-40`), so a macOS job needs its own body with `macos-latest` |
-| `.github/workflows/ci.yml`                                                            | no `static-macos` job under the recommended placement; only the `from-source` comment refresh                                                                                                                             | a job added here is bound by S7 all-jobs aggregate from birth, before any list names it (§1.2 consequence 5, §3.2)                                                                                                                                                                                    |
-| `policy/templates/ci-macos.yml` + its instance `.github/workflows/ci-macos.yml` (new) | the `static-macos` job: `runs-on: macos-latest`, `test:unit` + `test:e2e`, unfiltered `on:`, no job-level `if:`                                                                                                           | its own file is what makes "initially non-required" true in every venue (§3.2); the price is that macOS and Linux legs can no longer be throttled by one workflow                                                                                                                                     |
-| `scripts/denylist-scan:165-173`                                                       | `{ workflow: 'ci-macos.yml', check: 'static-macos' }`                                                                                                                                                                     | job id must equal the check name, no `name:` override, and the I4 leg then polices it forever                                                                                                                                                                                                         |
-| `policy/protected-paths.json:15`                                                      | `"static-macos"`                                                                                                                                                                                                          | the list must stay equal to the gate's wait list (`policyDiff.test.ts:1132-1137`)                                                                                                                                                                                                                     |
-| `policy/templates/github-settings.json:65-73`                                         | `{ "context": "static-macos", "integration_id": 15368 }`                                                                                                                                                                  | Actions-pinned, plain name (§2.3)                                                                                                                                                                                                                                                                     |
-| legacy gate                                                                           | `GATE_CHECKS` in `policy/templates/instances.json:58`                                                                                                                                                                     | push-produced, so satisfiable (Rule R)                                                                                                                                                                                                                                                                |
-| **successor gate**                                                                    | `GATE_WORKFLOWS` in `policy/templates/instances.json:33` gains `ci-macos.yml`                                                                                                                                             | required under the recommended placement; a no-op in the rejected single-file layout, where S7 already binds the job (§3.2)                                                                                                                                                                           |
-| **successor gate wake path**                                                          | `policy/templates/gate.yml` `workflow_run.workflows` gains `ci-macos`, and the `wake` job's path whitelist gains `.github/workflows/ci-macos.yml` (`gate.yml:56-64`, `:118-121` in the instance); regenerate the instance | `GATE_WORKFLOWS` makes the gate _verify_ the run but not _wake_ on it. Without the trigger, a macOS run that finishes after a timeout, or is rerun green after a refusal, starts no promotion attempt until the next scheduled sweep (§3.2)                                                           |
-| live rulesets + both branches' protection                                             | add the context                                                                                                                                                                                                           | owner-governed, last, same pass                                                                                                                                                                                                                                                                       |
+| site                                                                                  | insertion                                                                                                                                                                                                                 | notes                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `policy/templates/required-check.md`                                                  | a standalone `ci-macos.yml` template with its own job body, not a matrix                                                                                                                                                  | a matrix would rename the check runs (`static (ubuntu-latest)`), breaking the S1/S2 pairing and every `name:`-identity rule the I4 leg polices (`scripts/denylist-scan:150-157`); the template's `{{RUNNER}}` slot is single-valued (`:33-40`), so a macOS job needs its own body with `macos-latest`                                                                                           |
+| `.github/workflows/ci.yml`                                                            | no `static-macos` job under the recommended placement; only the `from-source` comment refresh                                                                                                                             | a job added here is bound by S7 all-jobs aggregate from birth, before any list names it (§1.2 consequence 5, §3.2)                                                                                                                                                                                                                                                                              |
+| `policy/templates/ci-macos.yml` + its instance `.github/workflows/ci-macos.yml` (new) | the `static-macos` job: `runs-on: macos-latest`, `test:unit` + `test:e2e`, unfiltered `on:`, no job-level `if:`, `persist-credentials: false` on every checkout; lands in phase A, non-required                           | its own file is what makes "initially non-required" true in every venue (§3.2); the price is that macOS and Linux legs can no longer be throttled by one workflow. It runs head-authored install and test code from birth, so `test/workflows/action-pins.test.ts:109-125` must gain it in the same change (§2.6 row 1c) — that list is hard-coded, so a new workflow is not covered by default |
+| `scripts/denylist-scan:165-173`                                                       | `{ workflow: 'ci-macos.yml', check: 'static-macos' }`                                                                                                                                                                     | job id must equal the check name, no `name:` override, and the I4 leg then polices it forever                                                                                                                                                                                                                                                                                                   |
+| `policy/protected-paths.json:15`                                                      | `"static-macos"`                                                                                                                                                                                                          | the list must stay equal to the gate's wait list (`policyDiff.test.ts:1132-1137`)                                                                                                                                                                                                                                                                                                               |
+| `policy/templates/github-settings.json:65-73`                                         | `{ "context": "static-macos", "integration_id": 15368 }`                                                                                                                                                                  | Actions-pinned, plain name (§2.3)                                                                                                                                                                                                                                                                                                                                                               |
+| legacy gate                                                                           | `GATE_CHECKS` in `policy/templates/instances.json:58`                                                                                                                                                                     | push-produced, so satisfiable (Rule R)                                                                                                                                                                                                                                                                                                                                                          |
+| **successor gate**                                                                    | `GATE_WORKFLOWS` in `policy/templates/instances.json:33` gains `ci-macos.yml`                                                                                                                                             | required under the recommended placement; a no-op in the rejected single-file layout, where S7 already binds the job (§3.2)                                                                                                                                                                                                                                                                     |
+| **successor gate wake path**                                                          | `policy/templates/gate.yml` `workflow_run.workflows` gains `ci-macos`, and the `wake` job's path whitelist gains `.github/workflows/ci-macos.yml` (`gate.yml:56-64`, `:118-121` in the instance); regenerate the instance | `GATE_WORKFLOWS` makes the gate _verify_ the run but not _wake_ on it. Without the trigger, a macOS run that finishes after a timeout, or is rerun green after a refusal, starts no promotion attempt until the next scheduled sweep (§3.2)                                                                                                                                                     |
+| live rulesets + both branches' protection                                             | add the context                                                                                                                                                                                                           | owner-governed, phase B; on `merge-queue`, before the phase-B repo change merges (§2.6)                                                                                                                                                                                                                                                                                                         |
 
 ### 3.2 The placement decision (this is the part the spec's list omits)
 
@@ -362,18 +414,33 @@ macOS job would convert an infrastructure skip into a queue freeze.
 
 ### 3.3 The 20-minute interaction
 
-The gate refuses after 20 minutes (`merge-queue-gate.yml:100`, `:165-168`;
-`gate.yml:269` → `promote-gate.ts:1036-1039`). Promotion therefore requires
-**max < 20 min**, not only p90 ≤ 15 min. Measured headroom today is
-~4.4× (4m35s binding leg on the candidate push). The macOS leg has no such headroom in advance: the spec
-expects an unmodified suite to exceed 15 min on a macOS runner if the trace's
-per-spawn hypothesis holds, which is why the promotion clock starts only after
-E's top-10 reduction merges.
+Each gate _attempt_ refuses after 20 minutes (`merge-queue-gate.yml:100`,
+`:165-168`; `gate.yml:269` → `promote-gate.ts:1035-1038`). That bounds an
+attempt, not the macOS run. Under the recommended layout, row 5b makes
+`ci-macos` completion wake a fresh `cq-gate` attempt
+(`workflow_run`, `types: completed`), and that attempt's deadline starts after
+the run has already finished. The 15-minute `schedule` sweep (`gate.yml:65-66`)
+also starts a fresh deciding attempt each time (§5.1). So the successor can
+promote a tip whose macOS leg ran longer than 20 minutes. Only the legacy gate
+is bound by **max < 20 min**, because it makes one attempt per candidate push
+(`merge-queue-gate.yml:34-36`), and while both are live that bound decides
+which promoter wins, not whether the tip promotes. A slow macOS leg costs
+latency and refusal noise (a timed-out attempt per earlier wake), not
+promotion. Measured headroom on the Linux legs today is ~4.4× (4m35s binding
+leg on the candidate push). The spec expects an unmodified suite to exceed
+15 min on a macOS runner if the trace's per-spawn hypothesis holds, which is
+why the promotion clock starts only after E's top-10 reduction merges.
 
-**Recommendation: do not pre-emptively raise the wait.** Raise
+**Recommendation: do not pre-emptively raise the wait, and do not treat a
+pilot max ≥ 15 min as a reason to raise it by itself.** Raise
 `{{GATE_TIMEOUT_MIN}}` (both instances, `policy/templates/instances.json:34`
 and `:59`, and therefore both templates) **in the same change** as the macOS
-promotion, and only if the 10-candidate pilot shows max ≥ 15 min. Two reasons:
+promotion, and only if the 10-candidate pilot shows a cost that the wake path
+does not absorb. One example is decide-time spent waiting while the next wake
+is already guaranteed. Another is the legacy gate's single attempt refusing
+candidates that the successor then promotes only after a long delay. The
+successor's fresh-deadline attempts already tolerate a slow run, and there
+are two further reasons:
 (i) a raised wait is a weaker gate for every other obligation, so paying for it
 before the evidence is a pure cost; (ii) `gate.yml`'s `decide` job has a fixed
 40-minute timeout (`gate.yml:135`) and `policy/templates/README.md:53` warns
@@ -527,7 +594,9 @@ Two aggregates, both reading the **merge-queue SHA**, never a PR head.
 `trust/dist/selfhost/promote-gate.js`):
 
 1. `wake` verifies the triggering run and that the ref is the default branch for
-   a dispatch (`:78-129`); on a schedule sweep it exits without deciding.
+   a dispatch (`:78-129`); on a `schedule` sweep or a dispatch the verify step
+   exits 0 (`:102-105`) and `decide` resolves its own subject, so every sweep
+   is a fresh promotion attempt with its own deadline (§3.3).
 2. `decide` runs from the **trust ref**, in `environment: promote`, as the sole
    member of concurrency group `promote` with `cancel-in-progress: false`
    (`:136-141`) — a promotion is never cancelled mid-push — and refuses a
@@ -539,8 +608,11 @@ Two aggregates, both reading the **merge-queue SHA**, never a PR head.
    `head_sha=tip&event=push&branch=merge-queue` run to have
    `conclusion === 'success'` **and every job in it `completed`/`success` with
    a runner and steps** (`:999-1024`, `:487-536`).
-5. Anything not green → poll to `--timeoutMin` (20) → `refuse('timeout: …')`
-   (`:1035-1039`); a recheck pass that loses green → `refuse` (`:1031-1034`).
+5. A failed `cq/ratchet` verdict or a failed verified run → `refuse`
+   immediately (`:987-990`, `:1019-1022`); only missing or pending evidence is
+   polled to `--timeoutMin` (20), then `refuse('timeout: …')` (`:1035-1038`);
+   a recheck pass that is no longer green also refuses immediately
+   (`:1031-1034`).
 
 Fail-closed properties worth stating because they are the reason the reconciled
 set can be trusted: missing ≠ pass, skipped ≠ pass, cancelled ≠ pass, at both
@@ -574,10 +646,16 @@ Rollback is the recorded inverse of §2.6 / §3.4, and it is **not** quiet:
 - Ordering: trust-list and producer changes travel in the **same** change. A PR
   that removed only the producer, or only the list entry, would either fail D11
   outright or leave the aggregate reading an obligation with no producer.
-- Outward-facing steps (S4 rulesets, S5/S6 protection) are applied by the owner,
-  last, in the same pass — and the render check
+- Outward-facing steps (S4 rulesets, S5/S6 protection) are applied by the owner
+  in the same pass, ordered by direction. A live requirement may name a
+  context only while its producer runs on every PR head. On promotion it is
+  added after the producer exists (for macOS, after phase A and before the
+  phase-B change merges, §2.6). On demotion or rollback it is removed
+  **first**, before the change that removes or renames the producer (§3.4).
+  Otherwise the rollback PR itself waits on a required context it no longer
+  produces and hangs with no failing check. Afterwards the render check
   (`scripts/github-settings-drift.mjs:162-176`, which reads both the rulesets and
-  each branch's protection) must be re-run afterwards to confirm the applied
+  each branch's protection) must be re-run to confirm the applied
   state matches the template.
 - After any rollback, the next promotion must re-establish the full aggregate
   before it can promote: with `static-macos` demoted, nothing in S1–S6 names it,
