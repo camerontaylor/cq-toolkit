@@ -70,9 +70,10 @@ LEGACY (retires at C2) and `:15` the successor the P1 promotion job.
 > holds while that policy is in force: S7 (`gate.yml`) runs report-only
 > (no `--push`), and S3 (`merge-queue-gate.yml`) promotes only a
 > merge-queue sha carrying a `crq/promotion-review` success from an allowed
-> reviewer. Promotion is therefore `(all S3 requirements on the reviewed sha)
-AND (the promotion review)`, and S7-only obligations (`from-source`) do
-> not block promotion until S7 learns the review signal and pushes again.
+> reviewer. Promotion is therefore
+> `(all S3 requirements on the reviewed sha) AND (the promotion review)`, and
+> S7-only obligations (`from-source`) do not block promotion until S7 learns
+> the review signal and pushes again.
 
 ### 1.2 The disagreement, stated explicitly
 
