@@ -70,6 +70,19 @@ jobs:
   with-peer:
     name: build+test with the optional agent SDK peer
     runs-on: ubuntu-latest
+    # The peer half runs the npm-era posture — peers auto-installed (npm 7+
+    # brings peer deps along) — and it must do so UNIFORMLY: pnpm persists
+    # the effective settings into every lockfile it rewrites, so the old
+    # per-command --config.auto-install-peers=true on the add left the
+    # checkout-local lockfile recording autoInstallPeers: true while every
+    # later step resolved it as false (pnpm-workspace.yaml) and each frozen
+    # install — including the verify-before-run install inside `pnpm run` —
+    # aborted with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH (run 37117399190).
+    # Job-level env keeps the settings fingerprint consistent across the add
+    # and all later steps. Checkout-local only: the committed lockfile still
+    # records the workspace posture (false).
+    env:
+      PNPM_CONFIG_AUTO_INSTALL_PEERS: "true"
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -85,15 +98,18 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - name: Install dependencies (optional peer absent)
-        run: pnpm install --frozen-lockfile
+      # No standalone frozen install before the add: under this job's env it
+      # would compare the committed lockfile's recorded autoInstallPeers
+      # (false) against the job's effective true and abort — and it is
+      # redundant, `pnpm add` is itself a full materializing install.
       # The pinned peer, added only in this throwaway checkout (pnpm has no
       # --no-save): the committed package.json keeps the SDK as an optional
       # peerDependency only and the committed lockfile stays peer-free —
       # this half proves the with-peer posture, not a dependency change.
-      # auto-install-peers brings the SDK's own peers, as npm would.
+      # The job env's auto-install-peers brings the SDK's own peers, as npm
+      # would.
       - name: Install the optional agent SDK peer (pinned, checkout-local)
-        run: pnpm add --save-optional --config.auto-install-peers=true @anthropic-ai/claude-agent-sdk@0.3.270
+        run: pnpm add --save-optional @anthropic-ai/claude-agent-sdk@0.3.270
       - name: Typecheck ratchet
         run: node scripts/ratchet-typecheck.mjs
       - name: Lint
