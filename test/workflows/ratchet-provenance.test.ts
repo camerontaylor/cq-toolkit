@@ -181,7 +181,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       // A head with open PRs into both branches must be judged against the
       // merge-queue target, regardless of API array order.
       expect(resolveJob).toMatch(
-        /if index\(\\"merge-queue\\"\) then \\"merge-queue\\"\s*elif index\(\\"main\\"\) then \\"main\\"\s*else empty end/,
+        /if index\("merge-queue"\) then "merge-queue"\s*elif index\("main"\) then "main"\s*else empty end/,
       );
       const fetch = jobs.get('fetch') ?? '';
       expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
