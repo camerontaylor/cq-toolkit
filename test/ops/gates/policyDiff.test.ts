@@ -790,6 +790,215 @@ describe('policyDiff: workflows', SLOW, () => {
   });
 });
 
+describe('policyDiff: local actions of required-check producers', SLOW, () => {
+  // Own range bases, so the shared trust tree (and every case above) keeps a
+  // `static` producer with no local action: `origin/merge-queue` is the
+  // trust commit plus a producer running ./.github/actions/gate, which nests
+  // ./.github/actions/inner; `origin/main` is the same with gate's metadata
+  // carrying a `uses:` the line scan cannot read.
+  const GATE = '.github/actions/gate/action.yml';
+  const INNER = '.github/actions/inner/action.yml';
+  const INNER_SCRIPT = '.github/actions/inner/check.sh';
+  const OTHER = '.github/actions/other/action.yml';
+  const PRODUCER = `${CI_PATH}:static`;
+  const GATE_ACTION = wf(
+    'name: gate',
+    'runs:',
+    '  using: composite',
+    '  steps:',
+    '    # the inner gate',
+    '    - uses: ./.github/actions/inner',
+    '    - shell: bash',
+    '      run: npm run lint',
+  );
+  const INNER_ACTION = wf(
+    'name: inner',
+    'runs:',
+    '  using: composite',
+    '  steps:',
+    '    - shell: bash',
+    '      run: ${{ github.action_path }}/check.sh',
+  );
+  const LA_FILES: Readonly<Record<string, string>> = {
+    [CI_PATH]: edit(
+      CI_PATH,
+      '      - run: npm run lint\n',
+      '      - uses: ./.github/actions/gate\n      - run: npm run lint\n',
+    ),
+    [GATE]: GATE_ACTION,
+    [INNER]: INNER_ACTION,
+    [INNER_SCRIPT]: 'npm run lint\n',
+    [OTHER]: 'runs:\n  using: composite\n  steps: []\n',
+  };
+  const deepChain: Record<string, string> = {
+    [GATE]: GATE_ACTION.replace('./.github/actions/inner', './.github/actions/d0'),
+  };
+  for (let i = 0; i < 10; i += 1) {
+    deepChain[`.github/actions/d${i}/action.yml`] =
+      `runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/d${i + 1}\n`;
+  }
+  const changed = (path: string, target: string): unknown => ({
+    kind: 'required-check',
+    path,
+    reason: `changes ${path} in local action ./${target} run by ${PRODUCER}, a producer of required check static`,
+  });
+  let c: Record<string, string>;
+  let laBase: string;
+  let brokenBase: string;
+  beforeAll(() => {
+    const bases = importCommits(repo, {
+      'la-base': { files: LA_FILES },
+      'la-broken': {
+        files: { ...LA_FILES, [GATE]: GATE_ACTION.replace('- uses: ./', '- uses: >-\n        ./') },
+      },
+    });
+    laBase = bases['la-base']!;
+    brokenBase = bases['la-broken']!;
+    gitIn(repo, ['update-ref', 'refs/remotes/origin/merge-queue', laBase]);
+    gitIn(repo, ['update-ref', 'refs/remotes/origin/main', brokenBase]);
+    c = importCommits(
+      repo,
+      {
+        'la-action-edit': {
+          files: { [GATE]: GATE_ACTION.replace('npm run lint', 'npm run lint -- --quiet') },
+        },
+        'la-nested-edit': { files: { [INNER_SCRIPT]: 'true\n' } },
+        'la-unrelated': { files: { 'src/a.ts': 'export const a = 2;\n' } },
+        'la-other-action': { files: { [OTHER]: 'runs:\n  using: composite\n  steps: [] # x\n' } },
+        'la-comment': {
+          files: { [GATE]: GATE_ACTION.replace('# the inner gate', '# the whole inner gate') },
+        },
+        'la-metadata-gone': { files: { [INNER]: null } },
+        'la-metadata-symlink': {
+          files: { [INNER]: null },
+          symlinks: { [INNER]: '../gate/action.yml' },
+        },
+        'la-escape': {
+          files: { [GATE]: `${GATE_ACTION}    - uses: ./.github/../outside\n` },
+        },
+        'la-cycle': {
+          files: { [INNER]: `${INNER_ACTION}    - uses: ./.github/actions/gate/\n` },
+        },
+        'la-deep': { files: deepChain },
+        'la-broken-unrelated': {
+          files: { 'src/a.ts': 'export const a = 3;\n' },
+          from: brokenBase,
+        },
+      },
+      laBase,
+    );
+  }, HOOK_MS);
+
+  const judge = (name: string, posture: ProtectedPathsPosture = 'diff-check') =>
+    run(c[name]!, posture, {
+      base: name.startsWith('la-broken')
+        ? 'refs/remotes/origin/main'
+        : 'refs/remotes/origin/merge-queue',
+    });
+
+  test('an edit only to a local action a producer runs needs a human under diff-check', async () => {
+    const out = await judge('la-action-edit');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: GATE, reason: 'changes a protected path' },
+      changed(GATE, '.github/actions/gate'),
+    ]);
+    expect(out.verdict).toBe('needs-human');
+    expect((await judge('la-action-edit', 'human')).verdict).toBe('needs-human');
+  });
+
+  test('a comment-only edit to the action metadata is still a producer change', async () => {
+    // Unlike workflow job text, a local action is compared by path, not normalised text.
+    const out = await judge('la-comment');
+    expect(out.findings).toContainEqual(changed(GATE, '.github/actions/gate'));
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('any file under a nested local action is followed transitively', async () => {
+    const out = await judge('la-nested-edit');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: INNER_SCRIPT, reason: 'changes a protected path' },
+      changed(INNER_SCRIPT, '.github/actions/inner'),
+    ]);
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('unchanged local actions add no finding', async () => {
+    const out = await judge('la-unrelated');
+    expect(out.findings).toEqual([]);
+    expect(out.verdict).toBe('pass');
+  });
+
+  test('a local action no producer runs is only a protected path', async () => {
+    const out = await judge('la-other-action');
+    expect(kinds(out)).toEqual(['protected-path']);
+    expect(out.verdict).toBe('pass');
+  });
+
+  test('nested-use cycles terminate and are judged by path', async () => {
+    const out = await judge('la-cycle');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: INNER, reason: 'changes a protected path' },
+      changed(INNER, '.github/actions/inner'),
+    ]);
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test.each([
+    ['la-metadata-gone', 'no action.yml or action.yaml'],
+    ['la-metadata-symlink', 'not a regular file'],
+  ])('local action metadata unreadable at the subject (%s) fails closed', async (name, why) => {
+    const out = await judge(name);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: './.github/actions/inner',
+      reason: expect.stringMatching(
+        new RegExp(
+          `^local action of required check static unresolvable at the subject \\(${PRODUCER.replace(/\./g, '\\.')}: .*${why}`,
+        ),
+      ) as unknown,
+    });
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a `..` escape in a nested local use fails closed', async () => {
+    const out = await judge('la-escape');
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: './.github/../outside',
+      reason: expect.stringContaining('unresolvable at the subject') as unknown,
+    });
+    expect(out.findings.find((f) => f.path === './.github/../outside')?.reason).toContain(
+      'dot segment',
+    );
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a nesting chain past the depth bound fails closed', async () => {
+    const out = await judge('la-deep');
+    expect(out.findings).toContainEqual(
+      expect.objectContaining({
+        kind: 'required-check',
+        reason: expect.stringContaining(`${PRODUCER} nests local actions deeper than 8`) as unknown,
+      }),
+    );
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('an unreadable `uses:` in unchanged metadata fails closed at both ends', async () => {
+    const out = await judge('la-broken-unrelated');
+    for (const side of ['range base', 'subject']) {
+      expect(out.findings).toContainEqual({
+        kind: 'required-check',
+        path: './.github/actions/gate',
+        reason: expect.stringContaining(
+          `unresolvable at the ${side} (${PRODUCER}: ${GATE}: unreadable uses line`,
+        ) as unknown,
+      });
+    }
+    expect(out.verdict).toBe('needs-human');
+  });
+});
+
 describe('policyDiff: unsafe paths (#224 composition)', SLOW, () => {
   let c: Record<string, string>;
   beforeAll(() => {

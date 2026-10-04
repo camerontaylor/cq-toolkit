@@ -259,6 +259,95 @@ function isUnder(path: string, target: string): boolean {
   return target === '.' || path === target || path.startsWith(`${target}/`);
 }
 
+/** Longest chain of nested local actions followed before failing closed. */
+const LOCAL_ACTION_MAX_DEPTH = 8;
+
+/** The metadata files a local action may carry; both are read when both exist. */
+const ACTION_METADATA = ['action.yml', 'action.yaml'] as const;
+
+/**
+ * The `uses: ./` targets in one local action's metadata at `rev` (normalised
+ * as `WorkflowJob.localUses`), or why they cannot be known. Never throws: a
+ * target that is not a canonical repo-relative path (a `..` escape, a `.` or
+ * empty segment), metadata absent or not a regular file, or a line naming
+ * `uses:` that is not a single plain value all return a reason.
+ */
+async function nestedLocalUses(
+  repo: string,
+  rev: string,
+  target: string,
+): Promise<string[] | string> {
+  if (target !== '.') {
+    try {
+      assertRepoRelPath(target, 'local action');
+    } catch (err) {
+      return messageOf(err);
+    }
+  }
+  const out: string[] = [];
+  let found = false;
+  for (const name of ACTION_METADATA) {
+    const path = target === '.' ? name : `${target}/${name}`;
+    let text: string | null;
+    try {
+      text = await gitReadBlob(repo, rev, path);
+    } catch (err) {
+      return messageOf(err);
+    }
+    if (text === null) continue;
+    found = true;
+    for (const line of text.split('\n')) {
+      if (/^\s*#/.test(line) || !/\buses\s*:/.test(line)) continue;
+      const value = /^\s*(?:-\s+)?uses\s*:\s*(['"]?)([\w.][^\s'"#]*)\1\s*(?:#.*)?$/.exec(line)?.[2];
+      if (value === undefined)
+        return `${path}: unreadable uses line ${JSON.stringify(line.trim())}`;
+      if (value.startsWith('./')) out.push(value.slice(2).replace(/\/+$/, '') || '.');
+    }
+  }
+  return found ? out : `no ${ACTION_METADATA.join(' or ')}`;
+}
+
+/**
+ * Every local action `roots` (target → the producer job using it) reach at
+ * `rev`, following nested `uses: ./` transitively: a visited set stops
+ * cycles, and a chain longer than {@link LOCAL_ACTION_MAX_DEPTH} is
+ * undecidable. Never throws; each target {@link nestedLocalUses} cannot
+ * resolve is an `undecidable` entry, so the caller fails closed.
+ */
+async function localActionsAt(
+  repo: string,
+  rev: string,
+  roots: ReadonlyMap<string, string>,
+): Promise<{ targets: Map<string, string>; undecidable: { target: string; why: string }[] }> {
+  const targets = new Map<string, string>();
+  const undecidable: { target: string; why: string }[] = [];
+  let frontier = [...roots];
+  for (let depth = 0; frontier.length > 0; depth += 1) {
+    if (depth > LOCAL_ACTION_MAX_DEPTH) {
+      for (const [target, user] of frontier) {
+        undecidable.push({
+          target,
+          why: `${user} nests local actions deeper than ${LOCAL_ACTION_MAX_DEPTH}`,
+        });
+      }
+      break;
+    }
+    const next: [string, string][] = [];
+    for (const [target, user] of frontier) {
+      if (targets.has(target)) continue;
+      targets.set(target, user);
+      const nested = await nestedLocalUses(repo, rev, target);
+      if (typeof nested === 'string') {
+        undecidable.push({ target, why: `${user}: ${nested}` });
+        continue;
+      }
+      for (const inner of nested) if (!targets.has(inner)) next.push([inner, user]);
+    }
+    frontier = next;
+  }
+  return { targets, undecidable };
+}
+
 /**
  * The current `cq-override` record. Never throws: an unreadable events file
  * is `invalid` with its reason; a subject the record cannot apply to is
@@ -581,7 +670,8 @@ export function createPolicyDiff(
     // required-check: producers at the range base vs the subject. A
     // producer counts as changed only when what produces the check changed:
     // its job's normalised text (so a comment-only edit is not a change), the
-    // workflow-level context, or the file itself (removed or unparseable).
+    // workflow-level context, the file itself (removed or unparseable), or
+    // any path under a local action the job runs.
     // A trigger change is already its own `trigger-changed` finding.
     const producers = (flows: Flows, check: string): Map<string, string[]> => {
       const out = new Map<string, string[]>();
@@ -613,6 +703,49 @@ export function createPolicyDiff(
         for (const id of jobs) {
           if (!had.has(id)) {
             add('required-check', wf, `adds a producer of required check ${check} (${wf}:${id})`);
+          }
+        }
+      }
+      // Local actions a producer runs (`uses: ./`, nested ones followed), at
+      // the end that runs them: a change under one changes what produces the
+      // check though no job text changed. One that cannot be resolved at
+      // either end fails closed.
+      const actions = new Map<string, string>();
+      for (const [rev, side, flows, jobs] of [
+        [rangeBase, 'range base', baseFlows, before],
+        [subject, 'subject', subjectFlows, after],
+      ] as const) {
+        const roots = new Map<string, string>();
+        for (const [wf, ids] of jobs) {
+          const scan = flows.get(wf)?.scan;
+          if (scan?.ok !== true) continue;
+          for (const id of ids) {
+            for (const target of scan.jobs.get(id)?.localUses ?? []) {
+              if (!roots.has(target)) roots.set(target, `${wf}:${id}`);
+            }
+          }
+        }
+        const resolved = await localActionsAt(input.repo, rev, roots);
+        for (const [target, user] of resolved.targets) {
+          if (!actions.has(target)) actions.set(target, user);
+        }
+        for (const { target, why } of resolved.undecidable) {
+          add(
+            'required-check',
+            `./${target}`,
+            `local action of required check ${check} unresolvable at the ${side} (${why})`,
+          );
+        }
+      }
+      for (const path of safe) {
+        for (const [target, user] of actions) {
+          if (isUnder(path, target)) {
+            add(
+              'required-check',
+              path,
+              `changes ${path} in local action ./${target} run by ${user}, a producer of required check ${check}`,
+            );
+            break;
           }
         }
       }
