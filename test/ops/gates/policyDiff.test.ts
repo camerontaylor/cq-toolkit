@@ -937,12 +937,20 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
         'la-deep-dedup': { files: dedupChain },
         'la-hidden-cr': {
           files: {
-            [GATE]: `${GATE_ACTION.replace('\n', '\r# x\r    - Uses: ./.github/actions/other\r')}`,
+            // The hidden line sits behind a `#` line: an LF-only splitter
+            // reads the whole physical line as a comment and skips it.
+            [GATE]: GATE_ACTION.replace(
+              'name: gate\n',
+              'name: gate\n# x\r    - Uses: ./.github/actions/other\n',
+            ),
           },
         },
         'la-hidden-ls': {
           files: {
-            [GATE]: GATE_ACTION.replace('\n', '\u2028    - Uses: ./.github/actions/other\u2028'),
+            [GATE]: GATE_ACTION.replace(
+              'name: gate\n',
+              'name: gate\n# x\u2028    - Uses: ./.github/actions/other\n',
+            ),
           },
         },
         'la-root-continued': {
