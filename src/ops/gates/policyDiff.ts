@@ -61,6 +61,7 @@ import type { ProtectedPathsConfig, ProtectedPathsPosture } from './policyConfig
 import { isProtectedPolicyPath } from './protectedPaths.js';
 import {
   diffWorkflow,
+  hasNonLiteralUses,
   hasUnresolvableCheckName,
   isWorkflowPath,
   producersOf,
@@ -266,11 +267,29 @@ const LOCAL_ACTION_MAX_DEPTH = 8;
 const ACTION_METADATA = ['action.yml', 'action.yaml'] as const;
 
 /**
+ * The one `uses:` line shape the metadata scan reads: an optional `- `, the
+ * plain lowercase key, then one plain or quoted value with no `#`, `\`, quote
+ * or space in it, then an optional comment (whitespace before `#`, as YAML
+ * requires).
+ */
+const STRICT_USES = /^\s*(?:-\s+)?uses\s*:\s*(['"]?)([\w.][^\s'"#\\]*)\1(?:\s+#.*)?\s*$/;
+
+/**
+ * Lines that may carry a `uses` key {@link STRICT_USES} does not read: any
+ * mention of `uses` in any case (a quoted, explicit or capitalised key), a
+ * double-quoted escape that can spell one (`\x`, `\u`, `\U`), an explicit
+ * key (`?`), or an alias used as a key (`*name :`).
+ */
+const SUSPECT_USES = /uses|\\[xu]|(?:^|[\s{[,])(?:\?(?:\s|$)|\*[^\s,[\]{}]+\s*:)/i;
+
+/**
  * The `uses: ./` targets in one local action's metadata at `rev` (normalised
  * as `WorkflowJob.localUses`), or why they cannot be known. Never throws: a
  * target that is not a canonical repo-relative path (a `..` escape, a `.` or
- * empty segment), metadata absent or not a regular file, or a line naming
- * `uses:` that is not a single plain value all return a reason.
+ * empty segment), metadata absent or not a regular file, or a line that may
+ * name a `uses` key ({@link SUSPECT_USES}) but is not one {@link STRICT_USES}
+ * value all return a reason. Prose mentioning `uses` fails closed too: the
+ * scan may over-flag, never under-flag.
  */
 async function nestedLocalUses(
   repo: string,
@@ -297,10 +316,14 @@ async function nestedLocalUses(
     if (text === null) continue;
     found = true;
     for (const line of text.split('\n')) {
-      if (/^\s*#/.test(line) || !/\buses\s*:/.test(line)) continue;
-      const value = /^\s*(?:-\s+)?uses\s*:\s*(['"]?)([\w.][^\s'"#]*)\1\s*(?:#.*)?$/.exec(line)?.[2];
-      if (value === undefined)
-        return `${path}: unreadable uses line ${JSON.stringify(line.trim())}`;
+      if (/^\s*#/.test(line)) continue;
+      const value = STRICT_USES.exec(line)?.[2];
+      if (value === undefined) {
+        if (SUSPECT_USES.test(line)) {
+          return `${path}: unreadable uses line ${JSON.stringify(line.trim())}`;
+        }
+        continue;
+      }
       if (value.startsWith('./')) out.push(value.slice(2).replace(/\/+$/, '') || '.');
     }
   }
@@ -325,6 +348,7 @@ async function localActionsAt(
   for (let depth = 0; frontier.length > 0; depth += 1) {
     if (depth > LOCAL_ACTION_MAX_DEPTH) {
       for (const [target, user] of frontier) {
+        if (targets.has(target)) continue;
         undecidable.push({
           target,
           why: `${user} nests local actions deeper than ${LOCAL_ACTION_MAX_DEPTH}`,
@@ -332,7 +356,8 @@ async function localActionsAt(
       }
       break;
     }
-    const next: [string, string][] = [];
+    // Keyed by target, so a target two actions nest is one frontier entry.
+    const next = new Map<string, string>();
     for (const [target, user] of frontier) {
       if (targets.has(target)) continue;
       targets.set(target, user);
@@ -341,9 +366,11 @@ async function localActionsAt(
         undecidable.push({ target, why: `${user}: ${nested}` });
         continue;
       }
-      for (const inner of nested) if (!targets.has(inner)) next.push([inner, user]);
+      for (const inner of nested) {
+        if (!targets.has(inner) && !next.has(inner)) next.set(inner, user);
+      }
     }
-    frontier = next;
+    frontier = [...next];
   }
   return { targets, undecidable };
 }
@@ -709,7 +736,8 @@ export function createPolicyDiff(
       // Local actions a producer runs (`uses: ./`, nested ones followed), at
       // the end that runs them: a change under one changes what produces the
       // check though no job text changed. One that cannot be resolved at
-      // either end fails closed.
+      // either end fails closed, as does a producer `uses:` whose value is
+      // not a literal (a block scalar): it may name one.
       const actions = new Map<string, string>();
       for (const [rev, side, flows, jobs] of [
         [rangeBase, 'range base', baseFlows, before],
@@ -720,7 +748,16 @@ export function createPolicyDiff(
           const scan = flows.get(wf)?.scan;
           if (scan?.ok !== true) continue;
           for (const id of ids) {
-            for (const target of scan.jobs.get(id)?.localUses ?? []) {
+            const job = scan.jobs.get(id);
+            if (job === undefined) continue;
+            if (hasNonLiteralUses(job)) {
+              add(
+                'required-check',
+                wf,
+                `local action of required check ${check} unresolvable at the ${side} (${wf}:${id}: a uses: value is not a literal)`,
+              );
+            }
+            for (const target of job.localUses) {
               if (!roots.has(target)) roots.set(target, `${wf}:${id}`);
             }
           }

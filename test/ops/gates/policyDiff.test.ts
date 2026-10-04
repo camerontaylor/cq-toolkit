@@ -795,12 +795,30 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
   // `static` producer with no local action: `origin/merge-queue` is the
   // trust commit plus a producer running ./.github/actions/gate, which nests
   // ./.github/actions/inner; `origin/main` is the same with gate's metadata
-  // carrying a `uses:` the line scan cannot read.
+  // carrying a `uses:` the line scan cannot read and the producer carrying a
+  // block-scalar `uses:`. Both carry twin.yml, whose `twin` job also runs
+  // gate: it produces a required check only under TWIN_POLICY's trust commit.
   const GATE = '.github/actions/gate/action.yml';
   const INNER = '.github/actions/inner/action.yml';
   const INNER_SCRIPT = '.github/actions/inner/check.sh';
   const OTHER = '.github/actions/other/action.yml';
+  const OTHER_EDIT = 'runs:\n  using: composite\n  steps: [] # x\n';
+  const MOVED = '.github/actions/moved/action.yml';
+  const MOVED_SCRIPT = '.github/actions/moved/check.sh';
+  const TWIN_PATH = '.github/workflows/twin.yml';
   const PRODUCER = `${CI_PATH}:static`;
+  const TWIN = wf(
+    'name: twin',
+    'on:',
+    '  pull_request:',
+    'permissions:',
+    '  contents: read',
+    'jobs:',
+    '  twin:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - uses: ./.github/actions/gate',
+  );
   const GATE_ACTION = wf(
     'name: gate',
     'runs:',
@@ -829,7 +847,9 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
     [INNER]: INNER_ACTION,
     [INNER_SCRIPT]: 'npm run lint\n',
     [OTHER]: 'runs:\n  using: composite\n  steps: []\n',
+    [TWIN_PATH]: TWIN,
   };
+  const ROOT_BLOCK = '      - uses: >-\n          ./.github/actions/gate\n';
   const deepChain: Record<string, string> = {
     [GATE]: GATE_ACTION.replace('./.github/actions/inner', './.github/actions/d0'),
   };
@@ -842,18 +862,37 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
     path,
     reason: `changes ${path} in local action ./${target} run by ${PRODUCER}, a producer of required check static`,
   });
+  const notLiteral = (side: string): unknown => ({
+    kind: 'required-check',
+    path: CI_PATH,
+    reason: `local action of required check static unresolvable at the ${side} (${PRODUCER}: a uses: value is not a literal)`,
+  });
   let c: Record<string, string>;
   let laBase: string;
   let brokenBase: string;
+  let twinTrust: string;
   beforeAll(() => {
     const bases = importCommits(repo, {
       'la-base': { files: LA_FILES },
       'la-broken': {
-        files: { ...LA_FILES, [GATE]: GATE_ACTION.replace('- uses: ./', '- uses: >-\n        ./') },
+        files: {
+          ...LA_FILES,
+          [GATE]: GATE_ACTION.replace('- uses: ./', '- uses: >-\n        ./'),
+          [CI_PATH]: LA_FILES[CI_PATH]!.replace(
+            '      - run: npm run lint\n',
+            `${ROOT_BLOCK.replace('/gate', '/other')}      - run: npm run lint\n`,
+          ),
+        },
+      },
+      'la-twin-trust': {
+        files: {
+          [POLICY_LIST_PATH]: `${JSON.stringify({ ...POLICY, requiredChecks: ['static', 'twin'] }, null, 2)}\n`,
+        },
       },
     });
     laBase = bases['la-base']!;
     brokenBase = bases['la-broken']!;
+    twinTrust = bases['la-twin-trust']!;
     gitIn(repo, ['update-ref', 'refs/remotes/origin/merge-queue', laBase]);
     gitIn(repo, ['update-ref', 'refs/remotes/origin/main', brokenBase]);
     c = importCommits(
@@ -880,6 +919,80 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
           files: { [INNER]: `${INNER_ACTION}    - uses: ./.github/actions/gate/\n` },
         },
         'la-deep': { files: deepChain },
+        'la-sibling': { files: { '.github/actions/gate2/x': 'x\n' } },
+        'la-ref-add': {
+          files: {
+            [GATE]: `${GATE_ACTION}    - uses: ./.github/actions/other\n`,
+            [OTHER]: OTHER_EDIT,
+          },
+        },
+        'la-ref-remove': {
+          files: {
+            [GATE]: GATE_ACTION.replace('    - uses: ./.github/actions/inner\n', ''),
+            [INNER_SCRIPT]: 'true\n',
+          },
+        },
+        'la-ref-rename': {
+          files: {
+            [GATE]: GATE_ACTION.replace('./.github/actions/inner', './.github/actions/moved'),
+            [INNER]: null,
+            [INNER_SCRIPT]: null,
+            [MOVED]: INNER_ACTION,
+            [MOVED_SCRIPT]: 'npm run lint\n',
+          },
+        },
+        'la-value-single-quoted': {
+          files: {
+            [GATE]: GATE_ACTION.replace('./.github/actions/inner', "'./.github/actions/other'"),
+            [OTHER]: OTHER_EDIT,
+          },
+        },
+        'la-value-double-quoted': {
+          files: {
+            [GATE]: GATE_ACTION.replace('./.github/actions/inner', '"./.github/actions/other"'),
+            [OTHER]: OTHER_EDIT,
+          },
+        },
+        'la-value-comment': {
+          files: {
+            [GATE]: GATE_ACTION.replace(
+              './.github/actions/inner',
+              './.github/actions/other # pinned',
+            ),
+            [OTHER]: OTHER_EDIT,
+          },
+        },
+        'la-key-double-quoted': {
+          files: { [GATE]: GATE_ACTION.replace('- uses:', '- "uses":') },
+        },
+        'la-key-single-quoted': {
+          files: { [GATE]: GATE_ACTION.replace('- uses:', "- 'uses':") },
+        },
+        'la-key-uppercase': { files: { [GATE]: GATE_ACTION.replace('- uses:', '- Uses:') } },
+        'la-key-escaped': {
+          files: { [GATE]: GATE_ACTION.replace('- uses:', '- "\\u0075ses":') },
+        },
+        'la-key-explicit': {
+          files: {
+            [GATE]: GATE_ACTION.replace(
+              '- uses: ./.github/actions/inner',
+              '- ? uses\n      : ./.github/actions/inner',
+            ),
+          },
+        },
+        'la-value-hash': {
+          files: {
+            [GATE]: GATE_ACTION.replace('./.github/actions/inner', './.github/actions/inner#2'),
+          },
+        },
+        'la-root-block': {
+          files: {
+            [CI_PATH]: LA_FILES[CI_PATH]!.replace(
+              '      - uses: ./.github/actions/gate\n',
+              ROOT_BLOCK,
+            ),
+          },
+        },
         'la-broken-unrelated': {
           files: { 'src/a.ts': 'export const a = 3;\n' },
           from: brokenBase,
@@ -995,6 +1108,107 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
         ) as unknown,
       });
     }
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a block-scalar `uses:` in an unchanged producer fails closed at both ends', async () => {
+    // workflowScan reads no literal from `uses: >-`, so localUses omits it.
+    const out = await judge('la-broken-unrelated');
+    expect(out.findings).toContainEqual(notLiteral('range base'));
+    expect(out.findings).toContainEqual(notLiteral('subject'));
+  });
+
+  test('a block-scalar `uses:` in a producer at the subject fails closed', async () => {
+    const out = await judge('la-root-block');
+    expect(out.findings).toContainEqual(notLiteral('subject'));
+    expect(out.findings).not.toContainEqual(notLiteral('range base'));
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a sibling sharing the action directory as a name prefix is not under it', async () => {
+    const out = await judge('la-sibling');
+    expect(out.findings).toEqual([
+      {
+        kind: 'protected-path',
+        path: '.github/actions/gate2/x',
+        reason: 'changes a protected path',
+      },
+    ]);
+    expect(out.verdict).toBe('pass');
+  });
+
+  test('a nested reference added at the subject is traced there', async () => {
+    const out = await judge('la-ref-add');
+    expect(out.findings).toContainEqual(changed(GATE, '.github/actions/gate'));
+    expect(out.findings).toContainEqual(changed(OTHER, '.github/actions/other'));
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a nested reference removed at the subject is still traced at the range base', async () => {
+    const out = await judge('la-ref-remove');
+    expect(out.findings).toContainEqual(changed(GATE, '.github/actions/gate'));
+    expect(out.findings).toContainEqual(changed(INNER_SCRIPT, '.github/actions/inner'));
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a renamed nested action is traced under both names', async () => {
+    const out = await judge('la-ref-rename');
+    for (const [path, target] of [
+      [GATE, '.github/actions/gate'],
+      [INNER, '.github/actions/inner'],
+      [INNER_SCRIPT, '.github/actions/inner'],
+      [MOVED, '.github/actions/moved'],
+      [MOVED_SCRIPT, '.github/actions/moved'],
+    ] as const) {
+      expect(out.findings).toContainEqual(changed(path, target));
+    }
+    expect(out.findings.filter((f) => f.reason.includes('unresolvable'))).toEqual([]);
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test.each(['la-value-single-quoted', 'la-value-double-quoted', 'la-value-comment'])(
+    'a nested `uses:` value read through quotes or a trailing comment is traced (%s)',
+    async (name) => {
+      const out = await judge(name);
+      expect(out.findings).toContainEqual(changed(OTHER, '.github/actions/other'));
+      expect(out.findings.filter((f) => f.reason.includes('unresolvable'))).toEqual([]);
+      expect(out.verdict).toBe('needs-human');
+    },
+  );
+
+  test.each([
+    'la-key-double-quoted',
+    'la-key-single-quoted',
+    'la-key-uppercase',
+    'la-key-escaped',
+    'la-key-explicit',
+    'la-value-hash',
+  ])('a nested `uses` the strict line scan does not read fails closed (%s)', async (name) => {
+    const out = await judge(name);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: './.github/actions/gate',
+      reason: expect.stringContaining(
+        `unresolvable at the subject (${PRODUCER}: ${GATE}: unreadable uses line`,
+      ) as unknown,
+    });
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a change under an action two required checks run is one finding per check', async () => {
+    const out = await run(c['la-action-edit']!, 'diff-check', {
+      base: 'refs/remotes/origin/merge-queue',
+      trustRef: twinTrust,
+    });
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: GATE, reason: 'changes a protected path' },
+      changed(GATE, '.github/actions/gate'),
+      {
+        kind: 'required-check',
+        path: GATE,
+        reason: `changes ${GATE} in local action ./.github/actions/gate run by ${TWIN_PATH}:twin, a producer of required check twin`,
+      },
+    ]);
     expect(out.verdict).toBe('needs-human');
   });
 });
