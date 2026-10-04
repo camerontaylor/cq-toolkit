@@ -1274,16 +1274,23 @@ def signer_alert(q: Dict[str, Any], item: Optional[Dict[str, Any]], text: str, l
 
 
 def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
-    """The signer publishes its CodeRabbit rate-limit backoff in ledger/backoff.json
-    ({"v":1,"item","wait_minutes","until","at"}); the quota is shared, so it
-    extends crq's global cooldown. (If ledger/ is unwritable, results.started_at
-    and rate_limited results still reach crq through harvest_signer.)"""
+    """The signer publishes deferrals in ledger/backoff.json ({"v":1,"item",
+    "wait_minutes","until","at","reason":"budget"|"rate_limit"}). A rate limit is
+    the shared CodeRabbit quota, so it extends crq's global cooldown. A budget
+    deferral is only the signer's own 2/h cap: it must not stall crq's PR
+    reviews, it only explains an unclaimed request (see harvest_signer). (If
+    ledger/ is unwritable, rate_limited results still reach crq via harvest.)"""
     try:
         b = json.loads((SPOOL / "ledger" / "backoff.json").read_text())
         until = parse_iso(b["until"]) if b.get("v") == 1 and b.get("until") else None
     except (OSError, ValueError, KeyError, TypeError):
         return
+    if until:
+        q.setdefault("promotion", {})["signer_deferral"] = {"item": b.get("item"), "until": iso(until),
+                                                           "reason": b.get("reason")}
     cur = parse_iso(q.get("cooldown_until"))
+    if b.get("reason", "rate_limit") != "rate_limit":
+        return
     if until and until > now() and (cur is None or until > cur):
         q["cooldown_until"] = iso(until)
         log.append(f"signer backoff ({b.get('item')}, {b.get('wait_minutes')}m) → cooldown until {q['cooldown_until']}")
@@ -1352,9 +1359,16 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 return f"{iid}: main moved, but the signer already took the request — awaiting its result"
             recut_promotion(q, item, log, dry, "withdrawn", "main moved before the signer claimed the request")
             return "; ".join(log)
-        if age > PROMO.get("signer_down_min", 30) and not item.get("down_alerted") and not dry:
+        # a healthy signer defers unclaimed (budget / rate limit): count from the end of its published deferral
+        d = (q.get("promotion") or {}).get("signer_deferral") or {}
+        ref = parse_iso(item["request"]["requested_at"])
+        if d.get("item") in (iid, None) and d.get("until") and parse_iso(d["until"]) > ref:
+            ref = parse_iso(d["until"])
+        idle = (now() - ref).total_seconds() / 60
+        if idle > PROMO.get("signer_down_min", 30) and not item.get("down_alerted") and not dry:
             item["down_alerted"] = iso()
-            signer_alert(q, item, f"{iid} unclaimed for {age:.0f}m — signer down?", log)
+            signer_alert(q, item, f"{iid} unclaimed for {age:.0f}m ({idle:.0f}m past any published deferral) — "
+                                  f"signer down?", log)
         return "; ".join(log) or None
     if dry:
         return f"would harvest signer result {iid}"

@@ -170,9 +170,15 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
   - At most one request is outstanding.
   - A request counts as a start and as in flight under crq's ≤5/h and ≤2 limits.
   - Every request is a FULL `main..batch` review. There are no deltas.
-- **Shared quota**: when the signer's `ledger/backoff.json` (`{v,item,wait_minutes,until,at}`)
-  is in the future, crq extends its global cooldown to it. A rate-limited result
-  does the same.
+- **Shared quota and deferrals**: the signer checks its coverage and budget before claiming,
+  and may DEFER a request unclaimed. It publishes the deferral in `ledger/backoff.json`
+  (`{v,item,wait_minutes,until,at,reason}`).
+  - `reason: "rate_limit"` (or no reason): shared CodeRabbit quota, so crq extends its global
+    cooldown. A rate-limited result does the same.
+  - `reason: "budget"`: the signer's own 2/h cap. It does not touch crq's cooldown, so PR
+    reviews keep running.
+  - Either way, the signer-down timer counts from the later of `requested_at` and the
+    deferral's `until`.
 - **Spool permissions**: `requests/` is `root:crq-spool` 2775 (setgid, no sticky bit), and
   operator and `crq` are both in `crq-spool`. Ticks are spawned by the **Paseo daemon**, so
   restart Paseo after `dseditgroup`; a running daemon won't have the new group. The signer
@@ -180,7 +186,8 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
   either wins or gets ENOENT. Any group member can replace a request, but the
   signer's `request_sha256` echo makes a swapped request visible to crq as a mismatch alert.
 - **Claim / stall**: `results/<id>.claimed` means the run is in flight. crq alerts if a claimed
-  run has no result after 90 min, or a request stays unclaimed for 30 min (signer down).
+  run has no result after 90 min, or a request stays unclaimed for 30 min past any published
+  deferral (signer down).
   - If `main` moves before the claim, crq withdraws its own request and re-cuts.
 - **Result**: `results/<id>.json` must echo the item, base and batch, plus
   `request_sha256` of crq's bytes. On a mismatch crq alerts and ignores the file.
