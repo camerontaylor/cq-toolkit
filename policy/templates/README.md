@@ -184,9 +184,13 @@ only the merger's recheck enforces) and `gates.policyDiff`
 (methods-w1-10 Decision 12). The legacy gate guards promotion with a merge-queue-tip guard
 plus two merge-base checks, in order: if the gated sha is already an
 ancestor of `main`, the promote is a logged no-op; if the gated sha is not
-the CURRENT `merge-queue` tip, the gate refuses (a manual dispatch may never
-promote an off-queue or stale commit — the tip's own gate run supersedes
-it); if `main` is not an ancestor of the gated sha (main diverged),
+the CURRENT `merge-queue` tip, it is not promoted (a manual dispatch may
+never promote an off-queue or stale commit): a commit the tip has moved past
+is SUPERSEDED, so the run ends green with a "superseded by `<tip>`" summary
+and the tip's own gate run decides, while a commit off the queue refuses. The
+same supersession check runs before the check wait refuses, because a newer
+queue push is what cancels the older commit's checks; on the current tip a
+failing, skipped, cancelled or missing check still refuses (I4); if `main` is not an ancestor of the gated sha (main diverged),
 the gate refuses and a human merges `main` into `merge-queue`; only then
 does it push `<sha>:refs/heads/main` — an update the server would reject as
 non-ff anyway if the guards had somehow raced.

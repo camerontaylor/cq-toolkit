@@ -16,7 +16,8 @@
 //      can spin zero times and promote; a populated list passes the guard
 //      (positive control, exit 0) in both files.
 //   3. The promotion text: the merge-queue-tip guard, the skipped case
-//      branch, and a checkout pinned to exactly 40 lowercase hex chars.
+//      branch, the superseded exit (green, no promotion), and a checkout
+//      pinned to exactly 40 lowercase hex chars.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -222,6 +223,13 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
           'is not the current merge-queue tip',
         );
         expect(text, `${label}: the skipped case branch`).toContain('concluded skipped');
+        // Superseded is not failed: a commit the queue tip moved past ends
+        // green and promotes nothing; every post-wait step is skipped.
+        expect(text, `${label}: the superseded summary`).toContain('superseded by');
+        expect(
+          text.match(/^ {8}if: steps\.wait\.outputs\.superseded_by == ''$/gm)?.length,
+          `${label}: checkout, validate and promote skip a superseded run`,
+        ).toBe(3);
         const checkoutLines = text
           .split(/\r?\n/)
           .filter((line) => line.includes('uses: actions/checkout@'));

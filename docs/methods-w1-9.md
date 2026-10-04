@@ -95,6 +95,10 @@ alongside the acceptance check.
   `npm ci --ignore-scripts` and fetches the subject, base and `cq-state` as objects. It fetches
   the timeline label events, runs `gates.policyDiff`, and posts `cq/policy` with the report as
   the check-run summary and step summary. It maps `vars.CQ_MERGE_PROTECTED_PATHS`.
+  A `fail` or `needs-human` verdict is a red `cq/policy` check run, not a red job: the job
+  fails only when the verifier crashed or the post failed (cq-accept's rule). A triggering
+  head that no open same-repo PR into `merge-queue`/`main` carries (superseded, closed,
+  merged, or another base) is nothing to judge: a notice, no verdict, a green run.
 - `cq/policy` is **not required** in W1.9. W1.10's C2 makes it required and moves posting to the
   verdict App. As W1.7 recorded for `cq/ratchet`, a `GITHUB_TOKEN` check run is not yet a trust
   anchor (D-F).
