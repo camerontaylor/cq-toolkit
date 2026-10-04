@@ -52,8 +52,9 @@ vi.mock('../../src/kernel/journal.js', async (importOriginal) => {
 });
 
 // Mirrors journal.ts private PUBLICATION_STARTUP_MS; update if that bound changes.
-// First acquisition: helper 10s + boot lookup 10s + startup/I/O margin 5s.
-// Later acquisitions reuse the successful boot identity: helper 10s + margin 5s.
+// First acquisition: boot lookup 10s + guard/record I/O 10s (the retired flock
+// helper's slot, kept until re-measured) + startup/I/O margin 5s. Later
+// acquisitions reuse the successful boot identity: guard/record I/O 10s + 5s.
 const ACQUISITION_STEP_MS = 2 * 10_000 + 5_000;
 function journalEnclosure(steps: number): number {
   return ACQUISITION_STEP_MS + (steps - 1) * 15_000 + 5_000;
@@ -458,7 +459,8 @@ test(
     );
     try {
       // Eligibility has been decided and the complete replacement is ready,
-      // but the owning publisher has not renamed it yet.
+      // but the owning publisher has not renamed it yet (its succession
+      // claim is made): its live guard lease refuses the late reclaimer.
       await awaitStage(publicationPaused.promise, running, 'publication pause');
       await expect(acquirePlanLock(dir, plan.id, 'late-reclaimer')).rejects.toThrow(
         'acquisition in progress',

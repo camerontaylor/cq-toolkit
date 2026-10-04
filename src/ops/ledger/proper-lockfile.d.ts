@@ -1,4 +1,4 @@
-/** Minimal ambient types for proper-lockfile (the package ships none) — only what the ledger's pathLedgerStore uses. */
+/** Minimal ambient types for proper-lockfile (the package ships none) — only what the repo uses (ledger store, sweep/review locks, the journal publication guard). */
 declare module 'proper-lockfile' {
   /** Options of proper-lockfile's lock (the subset the ledger relies on). */
   export interface LockOptions {

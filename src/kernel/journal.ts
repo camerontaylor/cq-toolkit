@@ -20,7 +20,7 @@
 // line, and a line whose event.runId does not match the file's run: a hole
 // or misattribution in complete evidence is corruption, not a torn write,
 // and silently accepting it would poison the fold.
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFile,
@@ -36,8 +36,9 @@ import {
 } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
 import { runLadder } from './governor.js';
 import { JournalEventSchema } from './schema.js';
@@ -59,6 +60,18 @@ export function assertSafeRunId(runId: string): void {
   }
 }
 
+/**
+ * Longest plan id a journaled run can lock. NAME_MAX (255 bytes on the
+ * supported local filesystems) bounds every lock artifact name, and the
+ * longest is the release tombstone `<planId>.lock.json.<nonce>.released.tmp`
+ * (planId + 60; the publication temporary, claim and aborted-claim
+ * temporaries are shorter). Refused before any artifact exists, so no step
+ * of the protocol can fail mid-way with ENAMETOOLONG. A longer id never
+ * completed a journaled run before this bound either: its tombstone, and
+ * so every release, already failed.
+ */
+const MAX_LOCKED_PLAN_ID = 255 - '.lock.json.'.length - 36 - '.released.tmp'.length;
+
 const PlanLockRecordSchema = z
   .object({
     nonce: z.string().uuid(),
@@ -78,11 +91,75 @@ export interface PlanLock {
   release(): Promise<void>;
 }
 
-// Process startup/completion only: observed good helper max 7580ms and sysctl
-// 5223ms (healthy windows 39–145ms). 10s adds headroom to these samples, not
-// a guaranteed host bound: exceeding it still refuses. Operation and socket
+// Boot-identity process startup/completion only: observed sysctl max 5223ms
+// (healthy windows 39–145ms). 10s adds headroom to these samples, not a
+// guaranteed host bound: exceeding it still refuses. Operation and socket
 // probe budgets are separate and unchanged.
 const PUBLICATION_STARTUP_MS = 10_000;
+
+/**
+ * Publication guard lease (proper-lockfile, mkdir strategy). The guard is
+ * held only for one acquisition — eligibility decision plus record
+ * publication — never for the run; the run's lease stays the record.
+ *
+ * - `stale` 30s: the repo's proper-lockfile window (ledger store, git
+ *   mutex). The guarded section includes the first boot lookup (bounded at
+ *   10s, observed 5.2s under load) and fsyncs, so a refresh can be delayed
+ *   by event-loop or threadpool saturation; 30s is 3× that bound before a
+ *   live acquirer can be judged stale. It is also the recovery cost: a
+ *   holder that dies mid-acquisition makes contenders refuse as busy for
+ *   at most 30s (flock released on death; this lease must age out).
+ * - `update` 5s: six refreshes per stale window, so 25s of consecutive
+ *   missed refreshes are absorbed before staleness.
+ * - `retries` 0: the flock guard was non-blocking (LOCK_NB) and contenders
+ *   refuse as busy rather than queue; a STALE guard needs no retry, as the
+ *   library removes it and re-attempts within the same call.
+ * - `realpath` false: the guarded path is a name, not a file (realpath
+ *   would demand it exist). The lock directory is a single entry inside
+ *   the journal directory, so exclusion holds however that directory is
+ *   reached.
+ *
+ * Safety does NOT rest on this lease: a stalled holder can be displaced
+ * (and wall-clock steps or host sleep age a lease too), and the library's
+ * unlock removes the directory unconditionally. Every publication is
+ * therefore fenced independently — exclusive `link` creation, exclusive
+ * succession claims ({@link claimSuccession}), and the record nonce. The
+ * guard keeps contention off those paths.
+ */
+const GUARD_LOCK_OPTIONS: LockOptions = {
+  stale: 30_000,
+  update: 5_000,
+  retries: 0,
+  realpath: false,
+};
+
+/**
+ * proper-lockfile is loaded on first guard acquisition, never at import:
+ * its module body registers a `signal-exit@3` exit hook, which installs
+ * SIGINT/SIGTERM/SIGHUP/… listeners and patches `process.emit`/`reallyExit`.
+ * The kernel is in the driver/runCli import graph, and only executable
+ * entrypoints may change signal disposition (shared/process-signals.ts).
+ *
+ * Once a journaled run has acquired, those listeners stay installed for the
+ * process lifetime (as they already do once any ops lockfile user loads).
+ * They do not disturb the runner's signal handling: a signal-exit listener
+ * acts only when it is the SOLE listener for the signal, so while
+ * `installProcessSignalCleanup` is installed it is a no-op and the kill
+ * ladder's grace runs unchanged. When that cleanup finishes it removes its
+ * listener and re-raises; signal-exit is then sole, unloads itself, runs
+ * proper-lockfile's exit hook (rmdirSync of any guard still held, which
+ * only shortens the ≤30s busy window), and re-raises again into the default
+ * disposition, so the signal exit status is preserved. The `reallyExit`
+ * patch passes the exit code through unchanged. In an embedding host with
+ * no signal listeners the re-raise likewise yields the default behaviour.
+ */
+let lockfileModule: Promise<{ lock: typeof lock }> | undefined;
+
+function loadLockfile(): Promise<{ lock: typeof lock }> {
+  lockfileModule ??= import('proper-lockfile');
+  return lockfileModule;
+}
+
 let bootIdentityPromise: Promise<string> | undefined;
 
 function bootIdentity(): Promise<string> {
@@ -209,11 +286,18 @@ function closeServer(server: Server): Promise<void> {
 
 /**
  * ADR-0003 §2.5: exclusive record creation, recorded socket + pid/boot
- * liveness, and nonce fences. No timestamp lease: SIGSTOP is never death.
- * Records are published whole (link/rename of a synced temporary).
- * Invalid/half-written and unreleased foreign-host records refuse without
- * stealing. Release renames a tombstone over OUR inode only, never over or
- * unlinking a rival's replacement; the tombstone remains reclaimable.
+ * liveness, and nonce fences. No timestamp lease on the record: SIGSTOP is
+ * never death. Records are published whole (exclusive link of a synced
+ * temporary, or its rename under an exclusive succession claim). Invalid/half-written
+ * and unreleased foreign-host records refuse without stealing. Release
+ * renames a tombstone over OUR inode only, never over or unlinking a rival's
+ * replacement; the tombstone remains reclaimable.
+ *
+ * Acquisition runs under a publication guard lease (GUARD_LOCK_OPTIONS).
+ * Its compromise is lease loss, detected at the next fence: acquisition
+ * refuses with the same `lock-lost` error the runner's fence raises, and
+ * anything published is rolled back. The guard only reduces contention;
+ * exclusive link creation and succession claims are the fence.
  */
 export async function acquirePlanLock(
   journalDir: string,
@@ -222,11 +306,16 @@ export async function acquirePlanLock(
 ): Promise<PlanLock> {
   assertSafeRunId(planId);
   assertSafeRunId(runId);
+  if (planId.length > MAX_LOCKED_PLAN_ID) {
+    throw new Error(
+      `journal: plan id '${planId}' is ${planId.length} chars; plan lock artifact names allow at most ${MAX_LOCKED_PLAN_ID}`,
+    );
+  }
   await mkdir(journalDir, { recursive: true });
   // Legacy publishers recorded no owner in this directory. Neither a dead
   // record nor time proves fleet quiescence: never migrate it automatically.
-  // Fresh repaired journals use a permanent guard inode. Legacy journals need
-  // an operator-attested, separately governed migration before they can run.
+  // Legacy journals need an operator-attested, separately governed migration
+  // before they can run.
   const legacy = join(journalDir, `${planId}.lock.acquiring`);
   try {
     await lstat(legacy);
@@ -234,16 +323,31 @@ export async function acquirePlanLock(
   } catch (error) {
     if (!isEnoent(error)) throw error;
   }
-  const guard = await acquirePublicationGuard(join(journalDir, `${planId}.lock.guard`), planId);
+  const guard = await acquirePublicationGuard(
+    join(journalDir, `${planId}.lock.guard`),
+    planId,
+    runId,
+  );
   let acquired: PlanLock | undefined;
   try {
-    acquired = await acquirePlanLockRecord(journalDir, planId, runId);
+    acquired = await acquirePlanLockRecord(journalDir, planId, runId, guard.assertHeld);
   } catch (error) {
-    await guard.close();
+    // The acquisition's own failure is the root cause; a guard release that
+    // fails too must not replace it.
+    await guard.release().catch(() => undefined);
     throw error;
   }
   try {
-    await guard.close(); // last OFD reference: no explicit unlock, unlink or truncation
+    // Last fence. No compromise can land between it and the release: no
+    // await separates them, and the library's release (realpath: false)
+    // marks the lease released synchronously, so it cannot reject with
+    // ERELEASED here. A compromise recorded once the release is under way (a
+    // refresh stat already in flight sees the lease directory removed) is
+    // swallowed only if the directory removal also failed; that is safe
+    // because the published record is fenced by its exclusive link or
+    // claim, not by the guard.
+    guard.assertHeld();
+    await guard.release();
   } catch (error) {
     await acquired.release();
     throw error;
@@ -255,94 +359,66 @@ function acquisitionBusy(planId: string): Error {
   return new Error(`journal: plan lock acquisition in progress or interrupted for '${planId}'`);
 }
 
-// flock is associated with the shared open file description, unlike fcntl
-// process locks. The child exits WITHOUT unlocking; the parent's fd keeps it.
-const FLOCK_PROGRAM = 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))';
+function lostWhileAcquiring(planId: string, why: string, cause?: unknown): Error {
+  return new Error(
+    `journal: lock-lost while acquiring plan '${planId}' — ${why}`,
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+interface PublicationGuard {
+  /** Throws the lease-loss error once the guard lease is reported compromised. */
+  assertHeld(): void;
+  release(): Promise<void>;
+}
+
 async function acquirePublicationGuard(
   path: string,
   planId: string,
-  spawnHelper: typeof spawn = spawn,
-): Promise<Awaited<ReturnType<typeof open>>> {
-  // a+ is one create-or-open syscall, RDWR for flock's NFS emulation. This
-  // zero-byte inode is never read, truncated, renamed or unlinked by us.
-  const guard = await open(path, 'a+', 0o600);
-  let helper: ReturnType<typeof spawn> | undefined;
-  let closed:
-    | Promise<{ code: number | null; signal: NodeJS.Signals | null; error?: Error }>
-    | undefined;
-  let stderr = '';
+  runId: string,
+): Promise<PublicationGuard> {
+  // The library default throws asynchronously from its refresh timer, outside
+  // every try here (process-killing). Record compromise and surface it at the
+  // acquisition's fence points as lease loss instead.
+  let compromised: Error | undefined;
+  let release: () => Promise<void>;
   try {
-    const outcome = await runLadder(
-      async (context) => {
-        helper = spawnHelper('/usr/bin/perl', ['-e', FLOCK_PROGRAM], {
-          stdio: [guard.fd, 'ignore', 'pipe'],
-        });
-        const child = helper;
-        closed = new Promise((resolve) => {
-          let spawnError: Error | undefined;
-          child.once('error', (error) => {
-            spawnError = error;
-          });
-          child.once('close', (code, signal) =>
-            resolve({ code, signal, ...(spawnError !== undefined ? { error: spawnError } : {}) }),
-          );
-        });
-        child.stderr?.on('data', (bytes: Buffer) => {
-          stderr = (stderr + bytes.toString()).slice(0, 4096);
-        });
-        const kill = (): void => {
-          child.kill('SIGKILL');
-        };
-        context.setCancelPort({ hardCancel: kill, kill });
-        context.signal.addEventListener('abort', kill, { once: true });
-        try {
-          const ended = await closed;
-          if (context.signal.aborted)
-            throw new Error(
-              `journal: publication lock helper startup/completion deadline exceeded after ${PUBLICATION_STARTUP_MS}ms (possible slow host)`,
-            );
-          return ended;
-        } finally {
-          context.signal.removeEventListener('abort', kill);
-        }
+    const { lock } = await loadLockfile();
+    release = await lock(path, {
+      ...GUARD_LOCK_OPTIONS,
+      onCompromised: (error) => {
+        compromised ??= error;
       },
-      { wallClockMs: PUBLICATION_STARTUP_MS, abortGraceMs: 0, killGraceMs: 0 },
-      { op: 'journal-publication-lock', jobKey: planId, attempt: 1 },
-    );
-    // A ladder can detach its task. Reap the helper before releasing our fd:
-    // no inherited reference may survive into eligibility or a later acquire.
-    if (outcome.outcome === 'killed') helper?.kill('SIGKILL');
-    await closed;
-    if (outcome.outcome === 'threw') throw outcome.error;
-    if (outcome.outcome === 'killed')
-      throw new Error(
-        `journal: publication lock helper startup/completion deadline exceeded after ${PUBLICATION_STARTUP_MS}ms (possible slow host)`,
-      );
-    const ended = outcome.value;
-    if (ended.error !== undefined)
-      throw new Error('journal: publication lock helper capability failed', { cause: ended.error });
-    if (ended.signal !== null || ended.code !== 0) {
-      if (ended.signal === null && ended.code === 3) throw acquisitionBusy(planId);
-      throw new Error(
-        `journal: publication lock helper capability failed (exit=${String(ended.code)}, signal=${String(ended.signal)}, stderr=${stderr})`,
-      );
-    }
-    const held = await guard.stat();
-    const published = await stat(path);
-    if (held.dev !== published.dev || held.ino !== published.ino) {
-      throw new Error('journal: publication guard inode changed — refusing acquisition');
-    }
-    return guard;
+    });
   } catch (error) {
-    await guard.close();
-    throw error;
+    if (errorCode(error) === 'ELOCKED') throw acquisitionBusy(planId);
+    throw new Error(`journal: publication guard for plan '${planId}' run '${runId}' failed`, {
+      cause: error,
+    });
   }
+  return {
+    assertHeld(): void {
+      if (compromised !== undefined) {
+        throw lostWhileAcquiring(planId, 'publication guard lease compromised', compromised);
+      }
+    },
+    async release(): Promise<void> {
+      try {
+        await release();
+      } catch (error) {
+        // A compromised lease is already released by the library (ERELEASED)
+        // and its directory may be a successor's: nothing of ours remains.
+        if (compromised === undefined) throw error;
+      }
+    },
+  };
 }
 
 async function acquirePlanLockRecord(
   journalDir: string,
   planId: string,
   runId: string,
+  fence: () => void,
 ): Promise<PlanLock> {
   const path = join(journalDir, `${planId}.lock.json`);
   const nonce = randomUUID();
@@ -363,7 +439,7 @@ async function acquirePlanLockRecord(
   const temporary = `${path}.${nonce}.tmp`;
   try {
     await writeDurable(temporary, `${JSON.stringify(record)}\n`);
-    await publishRecord(path, temporary, record);
+    await publishRecord(path, temporary, record, planId, fence);
   } finally {
     await unlink(temporary).catch((cleanupError: unknown) => {
       if (!isEnoent(cleanupError)) throw cleanupError;
@@ -379,7 +455,8 @@ async function acquirePlanLockRecord(
     // Publish the tombstone atomically, and only over OUR inode: a rival's
     // replacement (lock lost) is never clobbered. A live owner's unreleased
     // record is never reclaimable, so no rival can publish between the
-    // inode check and the rename.
+    // inode check and the rename: replacing it needs the succession claim
+    // on our nonce, which no one can take while we are live and unreleased.
     const tombstone = `${path}.${nonce}.released.tmp`;
     try {
       await writeDurable(tombstone, `${JSON.stringify({ ...record, released: true })}\n`);
@@ -403,17 +480,21 @@ async function acquirePlanLockRecord(
     }
   };
   const assertHeld = async (): Promise<void> => {
-    const current = await readLockRecord(path);
-    if (current.nonce !== nonce || current.released === true) {
-      throw new Error(`journal: lock-lost for plan '${planId}' run '${runId}'`);
-    }
+    const lost = (): Error => new Error(`journal: lock-lost for plan '${planId}' run '${runId}'`);
+    const current = await readLockRecord(path).catch((error: unknown) => {
+      // No canonical record is no lease (publication never empties the
+      // name, so only tampering can): nothing of ours is published.
+      if (isEnoent(error)) throw lost();
+      throw error;
+    });
+    if (current.nonce !== nonce || current.released === true) throw lost();
   };
   try {
     handle = await open(path, 'r+');
     // Verify the inode opened after publication before touching it.
     const contents = await handle.readFile('utf8');
     if (PlanLockRecordSchema.parse(JSON.parse(contents) as unknown).nonce !== nonce) {
-      throw new Error(`journal: lock-lost while acquiring plan '${planId}'`);
+      throw lostWhileAcquiring(planId, 'the published record is not ours');
     }
     await syncDir(journalDir);
     await listen(server, record.socketPath);
@@ -423,6 +504,7 @@ async function acquirePlanLockRecord(
     // process runs; release/rollback close the server explicitly.
     server.unref();
     await assertHeld();
+    fence();
   } catch (error) {
     try {
       if (listening) await closeServer(server);
@@ -467,12 +549,21 @@ async function writeDurable(path: string, contents: string): Promise<void> {
   }
 }
 
-/** Exclusive create via link(2); otherwise reclaim an eligible record by rename. */
+/**
+ * Exclusive create via link(2); otherwise reclaim an eligible record under
+ * a succession claim. `fence` is the publication guard's lease check: a
+ * compromise already recorded refuses before publication is attempted; one
+ * recorded during the awaited link or rename is detected at the next fence
+ * (after owner setup), and anything published is rolled back.
+ */
 async function publishRecord(
   path: string,
   temporary: string,
   record: PlanLockRecord,
+  planId: string,
+  fence: () => void,
 ): Promise<void> {
+  fence();
   try {
     await link(temporary, path);
     return;
@@ -487,25 +578,192 @@ async function publishRecord(
       cause: readError,
     });
   }
-  if (previous.released !== true) {
-    // A foreign host's liveness evidence is unverifiable from here; only
-    // its explicit release tombstone makes the record reclaimable.
-    if (previous.host !== record.host) {
-      throw new Error(
-        `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
-      );
+  // A retransmitted link (NFS) can report EEXIST for the very link that
+  // published OUR record: our nonce in it is the ownership proof.
+  if (previous.nonce === record.nonce) return;
+  await assertReclaimable(previous, record);
+  await claimSuccession(path, temporary, record, previous, planId, fence);
+}
+
+/** Refuses unless `previous` is released, or provably dead on this host. */
+async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecord): Promise<void> {
+  if (previous.released === true) return;
+  // A foreign host's liveness evidence is unverifiable from here; only its
+  // explicit release tombstone makes the record reclaimable.
+  if (previous.host !== record.host) {
+    throw new Error(
+      `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
+    );
+  }
+  if (
+    (await socketIsAlive(previous.socketPath)) ||
+    (previous.bootId === record.bootId && pidIsAlive(previous.pid))
+  ) {
+    throw new Error(`journal: plan locked by '${previous.runId}'`);
+  }
+}
+
+/**
+ * Succession claims: the fence that makes a stale or stolen publication
+ * guard unable to publish over a live owner. POSIX has no conditional
+ * rename, and the guard lease can be taken over from a holder stalled past
+ * `stale` between its eligibility decision and its publication. So every
+ * replacement of a record is authorized by EXCLUSIVE creation of
+ * `<lock>.<predecessor nonce>.claim` — a link of our synced temporary, so
+ * the claim names its claimant whole. Each record can be claimed exactly
+ * once, and claims are never removed (one per reclamation, kept as
+ * evidence like seq tombstones), so the claims form one chain and the
+ * canonical record only ever advances along it. A judgment that went stale
+ * finds its claim taken and walks the chain forward instead of renaming
+ * over whatever is canonical now. A claimant is walked past when:
+ *
+ *   - it is itself claimed: its claimant proved it released, aborted or
+ *     dead, and those facts are permanent for a nonce, so a successor claim
+ *     is proof it can never own again (no probe of a superseded claimant);
+ *   - its claim is released: its publication failed and it abandoned the
+ *     claim ({@link abandonClaim}); only a claimant ever marks its own claim;
+ *   - its canonical record is its released tombstone, or it is provably dead
+ *     (crashed between claim and publication, or after).
+ *
+ * Otherwise a live (or foreign-host) claimant refuses, exactly as its
+ * record would; if it is not canonical it never published, and the refusal
+ * names the claim file for an operator. A claim naming OUR nonce is ours (a
+ * retransmitted link) and publishes. An unreadable canonical record refuses:
+ * only its absence is not corruption.
+ *
+ * `fence` (the guard lease check) only keeps contention off this path: a
+ * compromise noted after a fence still lets the awaited link or rename
+ * publish, and is detected at the next fence; anything published is rolled
+ * back. Claims, not the guard, are the fence.
+ *
+ * The canonical name is only ever replaced atomically (rename) by the
+ * unique claimant of the chain's tail, or by its owner's own tombstone, so
+ * it is never empty and a live owner's record is never displaced: every
+ * record between the canonical one and the tail is unpublished, and each
+ * was claimed on proof that it is released, aborted or dead.
+ */
+async function claimSuccession(
+  path: string,
+  temporary: string,
+  record: PlanLockRecord,
+  judged: PlanLockRecord,
+  planId: string,
+  fence: () => void,
+): Promise<void> {
+  let predecessor = judged;
+  // Bounded like claimSeq: a chain this long is corruption, not contention.
+  for (let step = 0; step < 10_000; step++) {
+    // Eligibility (or the previous step's probe) awaited: re-check the lease
+    // before claiming (contention only; see above).
+    fence();
+    const claim = claimPath(path, predecessor.nonce);
+    try {
+      await link(temporary, claim);
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error;
+      let claimant: PlanLockRecord;
+      try {
+        claimant = await readLockRecord(claim);
+      } catch (readError) {
+        throw new Error(`journal: corrupt plan lock claim '${claim}' — refusing acquisition`, {
+          cause: readError,
+        });
+      }
+      // A retransmitted link (NFS) can report EEXIST for the very link that
+      // created OUR claim: our nonce in it is the ownership proof.
+      if (claimant.nonce !== record.nonce) {
+        await assertPassable(path, claim, claimant, record);
+        predecessor = claimant;
+        continue;
+      }
     }
-    if (
-      (await socketIsAlive(previous.socketPath)) ||
-      (previous.bootId === record.bootId && pidIsAlive(previous.pid))
-    ) {
-      throw new Error(`journal: plan locked by '${previous.runId}'`);
+    // The claim is ours alone: this rename can only replace the claimed
+    // record or its dead or aborted claimants' successors, never a live owner.
+    try {
+      await rename(temporary, path);
+    } catch (error) {
+      // A retransmitted rename (NFS) can fail for the very rename that
+      // published OUR record: our nonce in it is the ownership proof.
+      const current = await readLockRecord(path).catch(() => undefined);
+      if (current?.nonce === record.nonce) return;
+      // The publication's own failure is the root cause; an abandonment
+      // that fails too leaves the claim live until this process exits.
+      await abandonClaim(path, claim, record).catch(() => undefined);
+      throw error;
+    }
+    return;
+  }
+  throw new Error(
+    `journal: plan lock succession for '${planId}' exceeds 10000 claims — refusing acquisition`,
+  );
+}
+
+function claimPath(path: string, nonce: string): string {
+  return `${path}.${nonce}.claim`;
+}
+
+/** Refuses unless `claimant` (the holder of `claim`) can be walked past. */
+async function assertPassable(
+  path: string,
+  claim: string,
+  claimant: PlanLockRecord,
+  record: PlanLockRecord,
+): Promise<void> {
+  let current: PlanLockRecord | undefined;
+  try {
+    current = await readLockRecord(path);
+  } catch (readError) {
+    // Publication never empties the name, so absence is tampering, not a
+    // record; anything else unreadable is corruption and fails closed.
+    if (!isEnoent(readError)) {
+      throw new Error(`journal: corrupt or unreadable plan lock '${path}' — refusing acquisition`, {
+        cause: readError,
+      });
     }
   }
-  // The publication guard excludes other eligibility checks until this
-  // replacement is durable, listening, and fenced. No stale reclaimer can
-  // publish over an owner that acquired after its eligibility decision.
-  await rename(temporary, path);
+  try {
+    await lstat(claimPath(path, claimant.nonce));
+    return; // superseded: claimed on permanent proof it can never own again
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  }
+  if (claimant.released === true) return; // aborted by its own claimant
+  if (current?.nonce === claimant.nonce && current.released === true) return;
+  try {
+    await assertReclaimable(claimant, record);
+  } catch (refusal) {
+    if (current?.nonce === claimant.nonce) throw refusal;
+    // Neither canonical nor claimed: publishing it, and then being replaced,
+    // both need a claim on it, so the claimant never published. Name the
+    // claim: no record exists to explain the refusal.
+    throw new Error(
+      `journal: plan lock claim '${claim}' names run '${claimant.runId}' on host '${claimant.host}', whose record was never published (still publishing, or its publication failed) — if that run's process has exited (same host) or is known dead (foreign host), remove the claim file to unblock acquisition`,
+      { cause: refusal },
+    );
+  }
+}
+
+/**
+ * Marks OUR claim released after our publication failed, so the walk passes
+ * it instead of probing a live pid that will never publish. Only a
+ * claimant ever replaces its own claim, and only once it has committed to
+ * never publishing under this nonce (the rename failed; the temporary is
+ * then discarded). The rename keeps the claim name occupied throughout, so
+ * the predecessor can never be claimed twice.
+ */
+async function abandonClaim(path: string, claim: string, record: PlanLockRecord): Promise<void> {
+  const aborted = `${path}.${record.nonce}.aborted.tmp`;
+  try {
+    // Our nonce in the claim is the ownership proof.
+    if ((await readLockRecord(claim)).nonce !== record.nonce) return;
+    await writeDurable(aborted, `${JSON.stringify({ ...record, released: true })}\n`);
+    await rename(aborted, claim);
+    await syncDir(dirname(path));
+  } finally {
+    await unlink(aborted).catch((cleanupError: unknown) => {
+      if (!isEnoent(cleanupError)) throw cleanupError;
+    });
+  }
 }
 
 /**
