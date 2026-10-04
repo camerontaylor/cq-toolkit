@@ -31,8 +31,8 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}`
-are the instantiation tokens; the static job's last step,
-`uses: ./.github/actions/static-gate`, is this repo's `{{COMMANDS...}}`
+are the instantiation tokens; the static job's last step, the call to the
+local action `./.github/actions/static-gate`, is this repo's `{{COMMANDS...}}`
 slot. That repo-owned composite action holds the seven command steps — the
 static gate (TS7 compiler ratchet and typed Oxlint), then format check,
 `test:unit`, `test:e2e`, Knip, build, and the generated-op-docs drift
