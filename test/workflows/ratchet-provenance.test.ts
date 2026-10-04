@@ -110,14 +110,14 @@ describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.
       expect(fetch).toMatch(/persist-credentials: false/);
       expect(fetch).toContain('git bundle create');
       expect(fetch).toContain('actions/upload-artifact@');
-      expect(fetch).not.toMatch(/npm ci|npm run|vitest|ratchet\.recomputeTypecheck/);
+      expect(fetch).not.toMatch(/pnpm install|pnpm run|vitest|ratchet\.recomputeTypecheck/);
       const measure = jobs.get('measure') ?? '';
       expect(measure).toMatch(/^ {4}needs: fetch$/m);
       expect(measure).not.toMatch(/^ {4}permissions:/m);
       expect(measure).toContain('actions/download-artifact@');
       expect(measure).toContain('git checkout --detach "$SUBJECT"');
       expect(measure).not.toMatch(/actions\/checkout@|github\.token|GH_TOKEN/);
-      expect(measure).toMatch(/npm ci/);
+      expect(measure).toMatch(/pnpm install --frozen-lockfile/);
     },
   );
 
@@ -149,12 +149,12 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(refs.length).toBeGreaterThan(0);
       for (const ref of refs) expect(ref).toBe('${{ github.sha }}');
       // Installs run no lifecycle scripts; nothing restores a cache.
-      for (const install of body.matchAll(/npm ci[^\n]*/g)) {
+      for (const install of body.matchAll(/pnpm install[^\n]*/g)) {
         expect(install[0]).toContain('--ignore-scripts');
       }
       expect(body).toMatch(/cache: ''/);
-      expect(body).not.toMatch(/cache: npm|actions\/cache/);
-      expect(body).not.toMatch(/vitest|npm test|npm run test/);
+      expect(body).not.toMatch(/cache: p?npm|actions\/cache/);
+      expect(body).not.toMatch(/vitest|pnpm test|pnpm run test/);
       // No checkout persists its credential: fetches scope a read-only
       // credential to their own step (a GIT_CONFIG_* extra-header).
       expect(body).toMatch(/persist-credentials: false/);
@@ -189,7 +189,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(fetch).toContain('GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"');
       expect(fetch).toContain('git bundle create');
       expect(fetch).not.toMatch(
-        /npm ci|npm run|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
+        /pnpm install|pnpm run|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
       );
       const compute = jobs.get('compute') ?? '';
       expect(compute).toMatch(/^\s{4}permissions: \{\}$/m);

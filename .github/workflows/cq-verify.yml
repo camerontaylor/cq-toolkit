@@ -7,7 +7,8 @@
 # (RS-4 T-2/T-8). Everything that decides comes from the trust ref
 # (`github.sha` here, the default-branch tip):
 #   - the verifier code: the toolkit built from the trust checkout with
-#     `npm ci --ignore-scripts` (never the head's dist/ or node_modules);
+#     `pnpm install --frozen-lockfile --ignore-scripts` (never the head's
+#     dist/ or node_modules);
 #   - the ratchet definitions and definition set: `baselines/ratchets.json`
 #     read with `git cat-file` AT THE TRUST REF;
 #   - the baselines: read at the trust ref the same way.
@@ -67,6 +68,12 @@ permissions: {}
 concurrency:
   group: cq-verify-${{ github.event.workflow_run.id || inputs.measure_run_id }}
   cancel-in-progress: false
+
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
   resolve:
@@ -237,6 +244,11 @@ jobs:
             "${RUNNER_TEMP}/cq-source/source.bundle" \
             'refs/cq-transfer/*:refs/cq-transfer/*'
           git -C trust checkout --detach "$TRUST"
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -246,8 +258,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: Recompute typecheck-count over the attribute-free head tree
         id: count
         env:
@@ -396,6 +408,11 @@ jobs:
           git -C trust update-ref "refs/remotes/origin/${BASE}" \
             refs/cq-transfer/base
           git -C trust checkout --detach "$TRUST"
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -405,8 +422,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: Restore the validated measurement (numbers only, no head bytes)
         env:
           MEASUREMENT_JSON: ${{ needs.measurement.outputs.json }}

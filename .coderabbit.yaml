@@ -30,7 +30,7 @@ reviews:
     - '!.zcode/**'
     - '!.paseo/**'
     - '!.claude/worktrees/**'
-    - '!package-lock.json'
+    - '!pnpm-lock.yaml'
   path_instructions:
     - path: src/kernel/**
       instructions: >-

@@ -67,7 +67,7 @@ function command(
   args: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
 ) {
-  if (script === 'ratchet-typecheck' || script === 'fix') copyRatchetEngine(ROOT, root);
+  if (script === 'ratchet-typecheck') copyRatchetEngine(ROOT, root);
   return spawnSync(process.execPath, [`scripts/${script}.mjs`, ...args], {
     cwd: root,
     env,
@@ -127,15 +127,15 @@ describe('full static gate versus explicit-file fast lint', { timeout: 60_000 },
 });
 
 describe('owned-file command contract', { timeout: 60_000 }, () => {
-  it('formats only the explicit file, handles spaces and shell characters literally, and checks dependents', () => {
+  it('formats only the explicit file, handles spaces and shell characters literally, and runs no static gate', () => {
     const root = fixture();
     const file = 'src/owned space;$.ts';
     writeFileSync(join(root, file), 'export const owned="ok"');
     writeFileSync(join(root, 'src/other.ts'), 'export const other: string = 42;\n');
     const original = readFileSync(join(root, 'src/other.ts'), 'utf8');
     const result = command(root, 'fix', [file, 'src/deleted.ts']);
-    expect(result.status).toBe(1);
-    expect(result.stdout + result.stderr).toContain('error TS2322');
+    expect(result.status).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain('error TS2322');
     expect(readFileSync(join(root, file), 'utf8')).toBe("export const owned = 'ok';\n");
     expect(readFileSync(join(root, 'src/other.ts'), 'utf8')).toBe(original);
   });
@@ -185,7 +185,7 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
       ...process.env,
       OXLINT_EXIT: '1',
     });
-    expect(result.status).toBe(17);
+    expect(result.status).toBe(1);
     const calls: unknown = readFileSync(log, 'utf8')
       .trim()
       .split('\n')
@@ -200,14 +200,17 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
         file,
       ],
       ['oxfmt', file],
-      ['static'],
     ]);
     rmSync(log);
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXFMT_EXIT: '8' }).status,
     ).toBe(1);
     expect(readFileSync(log, 'utf8')).not.toContain('static');
-    writeFileSync(join(root, 'scripts/ratchet-typecheck.mjs'), 'process.exit(0);');
+    rmSync(log);
+    // deleted-only input and a clean file: still zero full-gate spawns.
+    expect(command(root, 'fix', ['src/deleted.ts']).status).toBe(0);
+    expect(command(root, 'fix', ['src/owned space.ts']).status).toBe(0);
+    expect(existsSync(log) ? readFileSync(log, 'utf8') : '').not.toContain('static');
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXLINT_EXIT: '1' }).status,
     ).toBe(1);
