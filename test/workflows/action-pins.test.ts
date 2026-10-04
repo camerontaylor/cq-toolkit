@@ -21,7 +21,7 @@
 //      not the word — and the key match is QUOTE-AWARE, so a quoted
 //      `'persist-credentials':` spelling cannot hide).
 //   3. policy/templates/README.md documents the policy ("## Action pinning").
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -89,10 +89,15 @@ const pinnedFiles = [
 ];
 
 // A local action ref is accepted only in its exact in-repo form and only
-// when the action it names exists in this commit.
+// when the action it names exists in this commit as a real directory: a
+// symlinked action directory is skipped by the scan above (Dirent
+// isDirectory() does not follow links), so accepting a ref to one would let
+// its unpinned `uses:` escape the pin check.
 function isLocalAction(ref: string): boolean {
   const m = /^\.\/\.github\/actions\/([A-Za-z0-9._-]+)$/.exec(ref);
-  return m !== null && m[1] !== '.' && m[1] !== '..' && existsSync(join(ROOT, ref, 'action.yml'));
+  if (m === null || m[1] === '.' || m[1] === '..') return false;
+  const dir = join(ROOT, ref);
+  return existsSync(dir) && lstatSync(dir).isDirectory() && existsSync(join(dir, 'action.yml'));
 }
 
 // Split the workflow text into top-level step blocks: a block starts at a

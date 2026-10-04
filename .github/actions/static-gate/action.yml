@@ -7,9 +7,12 @@
 #
 # The caller checks out the repo (persist-credentials: false), sets up pnpm
 # and Node, and installs dependencies first; the step list here starts at
-# the static gate. Changes here change the `static` required check's
-# producer: `.github/` is a protected path, so they are governed like an
-# edit to ci.yml itself.
+# the static gate. Changes here change what the `static` required check
+# runs. `.github/` is a protected path, so an edit here always raises a D11
+# `protected-path` finding (needs a human under the default `human` posture).
+# Until policyDiff counts local actions used by a required-check job as that
+# check's producer (follow-up PR), the `diff-check` posture passes such an
+# edit where the same change inline in ci.yml would need a human.
 name: static-gate
 description: The static gate's ordered command steps, shared by ci.yml static and macos-venue.yml static-macos.
 
@@ -42,7 +45,8 @@ runs:
       run: pnpm run format:check
     # The split mirrors the two package scripts (`test:unit` excludes the e2e
     # tree, `test:e2e` selects it), so a red unit run and a red e2e run
-    # are two separate reports instead of one `pnpm run test` line. With a
+    # are separate log groups (and, with a report dir, separate JSON files)
+    # inside this action's one job step, not one `pnpm run test` line. With a
     # report dir, `--reporter=default` keeps the console output and `json`
     # adds the file (cac dot notation: `--outputFile.json=` targets only the
     # json reporter). The input reaches the shell through env, never
