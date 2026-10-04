@@ -51,6 +51,9 @@ jobs:
         run: pnpm run check:static
       - name: Check formatting
         run: pnpm run format:check
+      # The split mirrors the two package scripts (`test:unit` excludes the e2e
+      # tree, `test:e2e` selects it), so a red unit run and a red e2e run
+      # are two separate reports instead of one `pnpm run test` line.
       - name: Test unit
         run: pnpm run test:unit
       - name: Test e2e/acp

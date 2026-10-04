@@ -28,19 +28,33 @@ silently orphans the required context while every id-keyed check stays
 green. Checkouts in required-check jobs are pinned to immutable commit SHAs
 and set `persist-credentials: false` — they run repo code and never push.
 
-## Worked example — this repo's static job, plus its from-source companion
+## Worked example — this repo's static job plus its from-source companion
 
-`{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the six command steps below are this repo's
+`{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}`
+are the instantiation tokens; the seven command steps below are this repo's
 `{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, test, Knip, build, and the generated-op-docs drift check. This repo's
+format check, `test:unit`, `test:e2e`, Knip, build, and the generated-op-docs drift
+check. This repo's
 `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
-tokens (`ubuntu-latest`, `24`, `pnpm install --frozen-lockfile`) and adding
-the provenance header.
+tokens (`ubuntu-latest`, `24`, `pnpm install --frozen-lockfile`) and adding the
+provenance header. Substitution is literal per token, so the instance is
+byte-for-byte the fenced block below once the header line is prepended.
 The `from-source` companion job below mirrors ci.yml's second job exactly
 (tokens swapped) so a regeneration carries it instead of silently dropping
 it; it is deliberately not a required check — see its comment.
+
+### The macOS venue is a separate workflow, on purpose
+
+This repo's non-required macOS full-gate mirror (`static-macos`) lives in
+its own workflow file, `.github/workflows/macos-venue.yml` (repo-owned,
+listed under `nonTemplated` in `instances.json`), not in this template.
+The promotion gate reads `ci.yml` by workflow path and requires the whole
+run — every job in it — to have succeeded on the tip (`gate.yml`
+`--verifiedWorkflows`, `checkVerifiedRun`). A job inside `ci.yml` is
+therefore a required wait no matter which check-name lists omit it: a
+macOS-only failure or timeout would block promotion. A job in a workflow
+outside the verified list cannot.
 
 ```yaml
 name: ci
@@ -95,8 +109,13 @@ jobs:
         run: pnpm run check:static
       - name: Check formatting
         run: pnpm run format:check
-      - name: Test
-        run: pnpm run test
+      # The split mirrors the two package scripts (`test:unit` excludes the e2e
+      # tree, `test:e2e` selects it), so a red unit run and a red e2e run
+      # are two separate reports instead of one `pnpm run test` line.
+      - name: Test unit
+        run: pnpm run test:unit
+      - name: Test e2e/acp
+        run: pnpm run test:e2e
       - name: Check unused files and dependencies
         run: pnpm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
@@ -153,7 +172,13 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the six
+permissions shape exactly as shown, swap the tokens, and replace the seven
 command steps with your own `{{COMMANDS...}}` — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
+
+A portable (macOS) venue is a separate, non-required workflow file that is
+NOT listed in the gate's verified workflows; keep it that way until a pilot
+says otherwise, and promote it in one change across every declaration of
+the required set (including the gate's workflow list). A job added to the
+verified workflow without that discipline is a required wait.
