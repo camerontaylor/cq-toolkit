@@ -1066,7 +1066,7 @@ def cut_promotion(q: Dict[str, Any], log: List[str], dry: bool, base: str, batch
     if promotion_mode() == "signer":
         iid = fresh_signer_id(q, batch)
         if iid is None:
-            signer_alert(q, None, f"no fresh signer id left for batch {batch[:10]} (4 attempts used)", log)
+            signer_alert(q, None, f"no fresh signer id left for batch {batch[:10]} (10 attempts used)", log)
             return None
     else:
         iid = f"promo-{batch[:10]}{'-delta' if reviewed else ''}"
@@ -1234,7 +1234,9 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
 
 SIGNER = PROMO.get("signer", {})
 SPOOL = Path(SIGNER.get("spool_dir", "/Users/Shared/crq-spool"))
-SIGNER_ID = re.compile(r"^promo-[0-9a-f]{10}\+{0,3}$")
+SIGNER_ID = re.compile(r"^promo-[0-9a-f]{10}\+{0,9}$")
+SIGNER_DONE_CODES = {"success_present", "already_in_main"}
+SIGNER_RECUT_CODES = {"base_not_main", "main_not_ancestor", "checks_not_green", "subject_moved"}
 SIGNER_STATES = ("requested", "signer_running")
 _MODE: Dict[str, str] = {}
 
@@ -1288,9 +1290,9 @@ def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
 
 
 def fresh_signer_id(q: Dict[str, Any], batch: str) -> Optional[str]:
-    """promo-<sha10> plus up to three '+', unused in the queue AND in results/
+    """promo-<sha10> plus up to nine '+', unused in the queue AND in results/
     (the signer treats an existing results/<id>.json as already done)."""
-    for k in range(4):
+    for k in range(10):
         iid = f"promo-{batch[:10]}{'+' * k}"
         if not any(i["id"] == iid for i in q["items"]) and not (SPOOL / "results" / f"{iid}.json").exists():
             return iid
@@ -1344,11 +1346,12 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 signer_alert(q, item, f"{iid} claimed but no result after {age:.0f}m (signer CLI timeout 75m)", log)
             return "; ".join(log) or None
         if item["base_sha"] != main_sha() and not dry:  # stale before the signer claimed it: withdraw (contract B)
-            if not claim_f.exists():
-                req_f.unlink(missing_ok=True)
-            if not claim_f.exists():
-                recut_promotion(q, item, log, dry, "withdrawn", "main moved before the signer claimed the request")
-                return "; ".join(log)
+            try:
+                req_f.unlink()  # the signer renames a request to a dot-name before claiming: we win, or ENOENT
+            except FileNotFoundError:
+                return f"{iid}: main moved, but the signer already took the request — awaiting its result"
+            recut_promotion(q, item, log, dry, "withdrawn", "main moved before the signer claimed the request")
+            return "; ".join(log)
         if age > PROMO.get("signer_down_min", 30) and not item.get("down_alerted") and not dry:
             item["down_alerted"] = iso()
             signer_alert(q, item, f"{iid} unclaimed for {age:.0f}m — signer down?", log)
@@ -1387,6 +1390,13 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     if o == "completed" and r.get("posted_state") == "success":
         item.update(state="promoting", success_at=posted.get("at") or iso(), cycles=[{"run_id": f"signer:{iid}"}])
         return f"{iid}: signer success → promoting"
+    if o == "completed" and r.get("posted_state") not in ("success", "failure"):
+        # reviewed, but the signer's final post failed: re-request; its coverage ledger usually posts without a new CLI run
+        item["failures"] = item.get("failures", 0) + 1
+        nb = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
+        recut_promotion(q, item, log, dry, "retried", f"signer completed without a final status ({r.get('posted_state')})",
+                        not_before=nb)
+        return "; ".join(log)
     if o == "completed" and r.get("posted_state") == "failure":
         item.update(state="findings", cycles=[{"run_id": f"signer:{iid}"}],
                     blocking=[{"n": x.get("n"), "severity": x.get("severity"), "file": x.get("file"), "line": x.get("line"),
@@ -1406,6 +1416,19 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["state"] = "blocked"
         signer_alert(q, item, q["pause_reason"], log)
         return "; ".join(log)
+    code = r.get("reason_code")
+    if o in ("rejected", "error") and code:  # machine reason codes; never regex the reason text
+        why = f"{code}: {str(r.get('reason') or '')[:150]}"
+        if code in SIGNER_DONE_CODES:
+            item.update(state="done", last_error=f"signer {o} {why} (treated as done)")
+            return f"{iid}: signer {o} {code} → done"
+        if code in SIGNER_RECUT_CODES:
+            item.update(state="rejected", last_error=f"signer {o} {why}")
+            q.setdefault("promotion", {})["requested"] = True  # re-cut from the current main / newest green tip
+            return f"{iid}: signer {o} {code} → re-cut"
+        item.update(state="blocked", last_error=f"signer {o} {why}")
+        signer_alert(q, item, f"{iid}: signer {o} {why}", log)
+        return "; ".join(log)
     if o in ("error", "interrupted"):
         item["failures"] = item.get("failures", 0) + 1
         nb = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
@@ -1416,17 +1439,9 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         signer_alert(q, item, f"{iid}: signer secret scan blocked main={item['base_sha'][:10]}..{item['batch_sha'][:10]} "
                               f"— owner must inspect (nothing uploaded)", log)
         return "; ".join(log)
-    if o == "rejected":
-        why = str(r.get("reason") or "")
-        if "success" in why.lower() or "already in main" in why.lower():
-            item.update(state="done", last_error=f"signer rejected: {why[:150]} (treated as done)")
-            return f"{iid}: signer rejected ({why[:80]}) → done"
-        if re.search(r"main|base|checks not green|not green", why, re.I):
-            item.update(state="rejected", last_error=f"signer rejected: {why[:150]}")
-            q.setdefault("promotion", {})["requested"] = True  # re-cut from the current main / newest green tip
-            return f"{iid}: signer rejected ({why[:80]}) → re-cut"
-        item.update(state="blocked", last_error=f"signer rejected: {why[:150]}")
-        signer_alert(q, item, f"{iid}: signer rejected the request: {why[:200]}", log)
+    if o == "rejected":  # without a reason_code: contract violation
+        item.update(state="blocked", last_error=f"signer rejected without reason_code: {str(r.get('reason'))[:150]}")
+        signer_alert(q, item, f"{iid}: signer rejected without a reason_code ({str(r.get('reason'))[:150]})", log)
         return "; ".join(log)
     item["state"] = "blocked"
     signer_alert(q, item, f"{iid}: unknown signer outcome {o!r}", log)

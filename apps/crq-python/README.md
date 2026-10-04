@@ -165,7 +165,7 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
 - **Request**: crq writes `/Users/Shared/crq-spool/requests/<id>.json` with
   `{v,kind:"promotion",item,base_sha,batch_sha,requested_at}`.
   - The write is atomic (tmp + rename), and the file is never rewritten.
-  - The id matches `promo-<sha10>` plus up to three `+`. Ids are fresh: not used in the queue
+  - The id matches `promo-<sha10>` plus up to nine `+`. Ids are fresh: not used in the queue
     or in `results/`.
   - At most one request is outstanding.
   - A request counts as a start and as in flight under crq's ≤5/h and ≤2 limits.
@@ -174,7 +174,10 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
   is in the future, crq extends its global cooldown to it. A rate-limited result
   does the same.
 - **Spool permissions**: `requests/` is `root:crq-spool` 2775 (setgid, no sticky bit), and
-  operator and `crq` are both in `crq-spool`. Any group member can replace a request, but the
+  operator and `crq` are both in `crq-spool`. Ticks are spawned by the **Paseo daemon**, so
+  restart Paseo after `dseditgroup`; a running daemon won't have the new group. The signer
+  renames a request to a dot-name before it writes `.claimed`, so crq's pre-claim withdrawal
+  either wins or gets ENOENT. Any group member can replace a request, but the
   signer's `request_sha256` echo makes a swapped request visible to crq as a mismatch alert.
 - **Claim / stall**: `results/<id>.claimed` means the run is in flight. crq alerts if a claimed
   run has no result after 90 min, or a request stays unclaimed for 30 min (signer down).
@@ -190,8 +193,13 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
   - `auth` → queue pause plus an alert.
   - `error`/`interrupted` → backoff, then a fresh id.
   - `secret_scan_blocked` → alert.
-  - `rejected` → done if the reason is success-present or already-in-main. Re-cut if `main`
-    moved or the checks are not green. Alert for anything else.
+  - `rejected`/`error` that carry a `reason_code` are handled by code, never by reason text:
+    `success_present`/`already_in_main` → done; `base_not_main`/`main_not_ancestor`/
+    `checks_not_green`/`subject_moved` → re-cut; anything else (`gate_not_pinned`,
+    `bad_request`, `coverage`, `internal`, `not_on_queue`, …) → alert. A `rejected` without a
+    code is also an alert. A plain `error` with no code is retried.
+  - `completed` with no final status (the signer's post failed) → retry with backoff. The
+    signer's coverage ledger usually posts without a new CLI run.
   - Findings and severity counts go to `state/ledger/promotion-findings.md`.
 - **Switch-over**: a user-era promotion still open when the gate switches is re-requested
   once as a signer item.
