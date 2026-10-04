@@ -1100,16 +1100,18 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
     if mode == "signer_unconfigured":
         if not st.get("unconfigured_alerted") and not dry:
             st["unconfigured_alerted"] = iso()
-            signer_alert(q, None, "main's gate pins cq-reviewer[bot] but promotion.signer.reviewer_bot_id is unset or "
-                                  "not in the gate — promotion halted (no User statuses: they would go red)", log)
-        return log + ["promotion: HALTED — signer pinned on main but reviewer_bot_id not configured"]
+            signer_alert(q, None, f"reviewer identity not pinned: {_MODE_WHY.get('origin/main', '?')} — promotion "
+                                  f"halted (no User statuses: they would go red). Fill promotion.signer from the "
+                                  f"owner's registration record only.", log)
+        return log + [f"promotion: HALTED — reviewer identity not pinned ({_MODE_WHY.get('origin/main', '?')})"]
     main = main_sha()
     if not st.get("last_promoted_at"):
-        st["last_promoted_at"] = git("log", "-1", "--format=%cI", "origin/main")[:19] + "Z"
+        # epoch, not %cI: %cI carries the committer's UTC offset, and truncating it to "...Z" skewed this by hours
+        st["last_promoted_at"] = iso(dt.datetime.fromtimestamp(int(git("log", "-1", "--format=%ct", "origin/main")), dt.timezone.utc))
     item = open_promotion(q)
     if mode == "signer" and item and not item.get("signer") and item["state"] != "reviewing":
         # cut under the User-status gate: its statuses no longer count — re-request a full signer review
-        recut_promotion(q, item, log, dry, "superseded", "gate switched to the cq-reviewer signer")
+        recut_promotion(q, item, log, dry, "superseded", "gate switched to the promotion reviewer signer")
         return log
     if item and item["state"] in ("pending", "findings", "split_needed", "chain_next", "blocked") \
             and is_ancestor(item["batch_sha"], main):
@@ -1224,9 +1226,9 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
     return log
 
 
-# ----------------------------------------------------------- signer mode (cq-reviewer[bot], contract v1)
+# ----------------------------------------------------------- signer mode (promotion reviewer bot, contract v1)
 #
-# Once main's merge-queue-gate.yml pins the cq-reviewer bot (cq-toolkit PR-B),
+# Once main's merge-queue-gate.yml pins the promotion reviewer bot (cq-toolkit PR-B),
 # the gate trusts only that bot's statuses. The signer (the dedicated `crq`
 # macOS user) then reviews AND posts. crq only spools requests and reads
 # results: it never judges success and never posts a status. Until the pin is
@@ -1239,22 +1241,54 @@ SIGNER_DONE_CODES = {"success_present", "already_in_main"}
 SIGNER_RECUT_CODES = {"base_not_main", "main_not_ancestor", "checks_not_green", "subject_moved"}
 SIGNER_STATES = ("requested", "signer_running")
 _MODE: Dict[str, str] = {}
+_MODE_WHY: Dict[str, str] = {}
+# A THIRD PARTY's public App (owner cqrect, App 1175046), wrongly pinned on
+# 2026-10-04 from a public-API lookup by a guessed name. Never trusted, never
+# used, even if it reappears in config. The reviewer identity comes ONLY from the
+# owner's registration record (toolkit-research/plans/app-registration-session-20261004.md).
+BANNED_BOT_IDS = {202921479}
+BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
+GATE_UNSET = "@@UNSET-REVIEWER-BOT-LOGIN@@"
+GATE_PIN = re.compile(r"--arg bot_login '([^']*)'.*?--argjson bot_id (-?\d+)", re.S)
+
+
+def reviewer_identity() -> Optional[Tuple[str, int]]:
+    """(bot login, numeric bot user id) from config, or None (unpinned → fail closed).
+    No defaults anywhere: an unset, malformed or banned identity is never trusted."""
+    login, bot_id = SIGNER.get("app_login"), SIGNER.get("reviewer_bot_id")
+    if not isinstance(login, str) or not login.endswith("[bot]") or isinstance(bot_id, bool) or not isinstance(bot_id, int):
+        return None
+    if bot_id <= 0 or bot_id in BANNED_BOT_IDS or login in BANNED_BOT_LOGINS:
+        return None
+    return login, bot_id
 
 
 def promotion_mode_at(rev: str) -> str:
-    """'signer' when the gate at `rev` pins cq-reviewer[bot] by login AND numeric
-    id; 'signer_unconfigured' when it pins the login but crq lacks/mismatches the
-    id (never post User statuses then: the gate would refuse them red); else 'user'."""
+    """'signer' only when the gate at `rev` pins a reviewer bot (rendered
+    `--arg bot_login '<login>'` + `--argjson bot_id <n>`) that EXACTLY equals crq's
+    configured identity. 'signer_unconfigured' when the gate has the bot-pin
+    machinery but it is UNSET (PR-B sentinels), pins an identity crq does not
+    have, or is unparseable: promotion halts (a User status would be refused red).
+    'user' when the gate has no bot pin at all (the #269 User-allowlist gate)."""
     if rev not in _MODE:
         p = run(["git", "show", f"{rev}:.github/workflows/merge-queue-gate.yml"], cwd=CLONE, check=False)
         text = p.stdout if p.returncode == 0 else ""
-        bot_id = SIGNER.get("reviewer_bot_id")
-        if SIGNER.get("app_login", "cq-reviewer[bot]") not in text:
-            _MODE[rev] = "user"
-        elif bot_id and re.search(rf"(?<!\d){int(bot_id)}(?!\d)", text):
-            _MODE[rev] = "signer"
+        m = GATE_PIN.search(text)
+        ident = reviewer_identity()
+        if GATE_UNSET in text or (m and (m.group(1).startswith("@@UNSET") or int(m.group(2)) <= 0)):
+            _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", "the gate's reviewer identity is an UNSET sentinel"
+        elif m:
+            pinned = (m.group(1), int(m.group(2)))
+            if ident and ident == pinned:
+                _MODE[rev] = "signer"
+            else:
+                _MODE[rev] = "signer_unconfigured"
+                _MODE_WHY[rev] = (f"the gate pins {pinned[0]}/{pinned[1]} but crq's identity is "
+                                  f"{'unset' if not ident else f'{ident[0]}/{ident[1]}'}")
+        elif re.search(r"bot_login|bot_id|REVIEWER_BOT", text):
+            _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", "the gate has an unrecognised reviewer-pin format"
         else:
-            _MODE[rev] = "signer_unconfigured"
+            _MODE[rev] = "user"
     return _MODE[rev]
 
 
@@ -1502,8 +1536,8 @@ def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str,
     if not is_ancestor(last, main):
         reasons.append(f"main did not fast-forward ({last[:10]} is not an ancestor of {main[:10]})")
     sts = promotion_statuses(main)
-    bot = [x for x in sts if x["login"] == SIGNER.get("app_login", "cq-reviewer[bot]") and x["type"] == "Bot"
-           and str(x.get("creator_id")) == str(SIGNER.get("reviewer_bot_id"))]
+    ident = reviewer_identity()  # None → nothing is trusted (fail closed)
+    bot = [x for x in sts if ident and x["type"] == "Bot" and x["login"] == ident[0] and x.get("creator_id") == ident[1]]
     others = [f"{x['login']}({x['type']},{x.get('creator_id')}) {x['state']}" for x in sts if x not in bot]
     if others:
         rec["other_creators"] = others
@@ -1511,7 +1545,8 @@ def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str,
     if auth:
         rec["status"] = auth
     if not auth or auth["state"] != "success":
-        reasons.append("no trusted cq-reviewer[bot] success on the new main sha" + (f" (newest is {auth['state']})" if auth else ""))
+        reasons.append("no trusted reviewer-bot success on the new main sha" + (f" (newest is {auth['state']})" if auth else "")
+                       + ("" if ident else " — reviewer identity not pinned in crq"))
         return reasons, notes
     desc = auth.get("description") or ""
     m = re.search(r"(?:^|\s)main=([0-9a-f]{40})(?:\s|$)", desc)
@@ -1847,7 +1882,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             try:
                 if item["kind"] == "promotion" and promotion_mode() != "user":
                     if promotion_mode() != "signer":
-                        raise NotReady("gate pins cq-reviewer[bot] but promotion.signer.reviewer_bot_id is unset/mismatched")
+                        raise NotReady("reviewer identity not pinned (signer_unconfigured)")
                     if item["base_sha"] != main_sha():
                         raise NotReady("main moved since the cut; re-cut pending")
                     if dry:
@@ -2097,6 +2132,24 @@ def cmd_measure() -> None:
               f"{str(m['focus']):>6} {str(m['docs_only'])[0]}    {i['state']}")
 
 
+def cmd_selfcheck() -> int:
+    """Negative check: the third-party App identity wrongly pinned on 2026-10-04 must
+    never reappear in config, and an unset identity must keep signer mode off."""
+    raw = (ROOT / "config.json").read_text()
+    bad = [str(x) for x in BANNED_BOT_IDS if str(x) in raw] + [x for x in BANNED_BOT_LOGINS if x in raw]
+    ident, mode = reviewer_identity(), promotion_mode()
+    print(f"reviewer identity: {ident or 'UNPINNED (fail closed)'}; main gate mode: {mode}"
+          f"{' (' + _MODE_WHY.get('origin/main', '') + ')' if mode == 'signer_unconfigured' else ''}")
+    if bad:
+        print(f"FAIL: config.json contains banned third-party identity {bad}")
+        return 1
+    if ident is None and mode == "signer":
+        print("FAIL: signer mode with an unpinned identity")
+        return 1
+    print("ok")
+    return 0
+
+
 def with_lock(fn, *a, **kw):
     STATE.mkdir(parents=True, exist_ok=True)
     fh = LOCK.open("w")
@@ -2184,12 +2237,15 @@ def main() -> int:
         p = sub.add_parser(a)
         p.add_argument("item")
         p.add_argument("reason", nargs="?")
+    sub.add_parser("selfcheck", help="assert config carries no banned/third-party reviewer identity")
     p = sub.add_parser("_review")
     p.add_argument("run_id")
     args = ap.parse_args()
 
     if args.cmd == "_review":
         return cmd_review_child(args.run_id)
+    if args.cmd == "selfcheck":
+        return cmd_selfcheck()
     if args.cmd == "init":
         with_lock(cmd_init, args.force)
     elif args.cmd == "measure":

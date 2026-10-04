@@ -150,14 +150,29 @@ status, and crq posts that status.
   `gh api user` is `camerontaylor` (User) and refuses otherwise, because a non-allowed creator
   turns the gate red. Config: `config.json` `promotion`.
 
-### Signer mode (cq-reviewer[bot], contract v1 with 4cc7efeb)
+### Signer mode (promotion reviewer bot, contract v1 with 4cc7efeb)
 
-Signer mode switches on by itself. It is active once **`origin/main`**'s
-`.github/workflows/merge-queue-gate.yml` contains both `cq-reviewer[bot]` and
-`promotion.signer.reviewer_bot_id` (cq-toolkit PR-B). There is no manual flip. If the gate names
-the login but the id is unset or differs, crq is in `signer_unconfigured`: promotion **halts**
-with an alert and crq posts no User statuses, because the gate would refuse them red.
-Otherwise, user mode behaves as described above.
+**Reviewer identity.** The reviewer is `promotion.signer.app_login` (a `…[bot]` login) plus
+`reviewer_bot_id` (the numeric bot user id). These are taken ONLY from the owner's
+registration record, `toolkit-research/plans/app-registration-session-20261004.md`, and never
+from a public-API lookup by name. Until that record exists both are `null`. crq has no
+built-in defaults. An unset, malformed or banned identity is never trusted (fail closed).
+`cq-reviewer[bot]`/`202921479` is a THIRD PARTY's public App (owner `cqrect`, App 1175046). It
+was wrongly pinned on 2026-10-04, is banned in code, and `crq.py selfcheck` fails if it
+appears in `config.json`.
+
+**Mode** is judged from the gate at a given rev (`origin/main` for crq's own actions, the
+previous `main` for the audit):
+- `user`: the gate has no bot pin. This is the #269 User-allowlist gate, and today's behaviour.
+- `signer`: the gate renders `--arg bot_login '<login>'` … `--argjson bot_id <n>`, and that
+  pair EXACTLY equals crq's configured identity.
+- `signer_unconfigured`: the gate's pin is PR-B's UNSET sentinel (`@@UNSET-REVIEWER-BOT-LOGIN@@`
+  / `-1`), pins an identity crq doesn't have, or is in a format crq doesn't recognise.
+  Promotion HALTS with a "reviewer identity not pinned" alert, and crq posts no User statuses
+  (the gate would refuse them red).
+
+Going live is one config edit (`app_login` + `reviewer_bot_id` from the record), alongside
+the gate's pin and the signer's config.
 
 In signer mode the signer, the dedicated `crq` macOS user, runs the CodeRabbit CLI, does the
 secret scan, and posts every status. crq judges nothing and posts nothing:
@@ -211,9 +226,9 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
 - **Switch-over**: a user-era promotion still open when the gate switches is re-requested
   once as a signer item.
 - **Audit**: the advance is judged by the gate that ran, i.e. the previous `main`'s copy.
-  - Primary rule: the newest status by (`cq-reviewer[bot]`, `Bot`, `creator.id ==
+  - Primary rule: the newest status by (configured `app_login`, `Bot`, `creator.id ==
     reviewer_bot_id`) must be `success`, and its `main=<base>` must be contained in the previous
-    `main`. Otherwise **UNVERIFIED** with an alert.
+    `main`. With the identity unset nothing is trusted. Otherwise **UNVERIFIED** with an alert.
   - `override…` statuses are logged, not alerted.
   - Corroboration is informational (`promotion_uncorroborated` event): `crq#<id>` is a crq item
     for this batch, and its result has `posted.status_id`/`state` matching the authorizing
