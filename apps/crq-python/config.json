@@ -44,7 +44,7 @@
     "signer": {
       "spool_dir": "/Users/Shared/crq-spool",
       "app_login": "cq-reviewer[bot]",
-      "reviewer_bot_id": null
+      "reviewer_bot_id": 202921479
     },
     "signer_stall_min": 90,
     "signer_down_min": 30

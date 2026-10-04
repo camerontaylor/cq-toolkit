@@ -1271,6 +1271,22 @@ def signer_alert(q: Dict[str, Any], item: Optional[Dict[str, Any]], text: str, l
     log.append(f"promotion: SIGNER ALERT {text[:200]}")
 
 
+def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
+    """The signer publishes its CodeRabbit rate-limit backoff in ledger/backoff.json
+    ({"v":1,"item","wait_minutes","until","at"}); the quota is shared, so it
+    extends crq's global cooldown. (If ledger/ is unwritable, results.started_at
+    and rate_limited results still reach crq through harvest_signer.)"""
+    try:
+        b = json.loads((SPOOL / "ledger" / "backoff.json").read_text())
+        until = parse_iso(b["until"]) if b.get("v") == 1 and b.get("until") else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    cur = parse_iso(q.get("cooldown_until"))
+    if until and until > now() and (cur is None or until > cur):
+        q["cooldown_until"] = iso(until)
+        log.append(f"signer backoff ({b.get('item')}, {b.get('wait_minutes')}m) → cooldown until {q['cooldown_until']}")
+
+
 def fresh_signer_id(q: Dict[str, Any], batch: str) -> Optional[str]:
     """promo-<sha10> plus up to three '+', unused in the queue AND in results/
     (the signer treats an existing results/<id>.json as already done)."""
@@ -1765,6 +1781,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             if msg:
                 log.append(msg)
     q["last_tick"] = iso()
+    if PROMO.get("enabled") and promotion_mode() == "signer":
+        apply_signer_backoff(q, log)
     log += enroll(q, dry)
     try:
         log += promotion_audit(q, dry)

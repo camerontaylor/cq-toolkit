@@ -170,6 +170,12 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
   - At most one request is outstanding.
   - A request counts as a start and as in flight under crq's ≤5/h and ≤2 limits.
   - Every request is a FULL `main..batch` review. There are no deltas.
+- **Shared quota**: when the signer's `ledger/backoff.json` (`{v,item,wait_minutes,until,at}`)
+  is in the future, crq extends its global cooldown to it. A rate-limited result
+  does the same.
+- **Spool permissions**: `requests/` is `root:crq-spool` 2775 (setgid, no sticky bit), and
+  operator and `crq` are both in `crq-spool`. Any group member can replace a request, but the
+  signer's `request_sha256` echo makes a swapped request visible to crq as a mismatch alert.
 - **Claim / stall**: `results/<id>.claimed` means the run is in flight. crq alerts if a claimed
   run has no result after 90 min, or a request stays unclaimed for 30 min (signer down).
   - If `main` moves before the claim, crq withdraws its own request and re-cuts.
