@@ -30,9 +30,10 @@ env:
 
 jobs:
   # The job id stays `static-macos`: the check name the baseline report and
-  # any future promotion pair on. It mirrors the static job's seven command
-  # steps verbatim (an edit to one is an edit to both) because a true
-  # full-gate mirror makes a macOS-only failure visible anywhere in the gate.
+  # any future promotion pair on. It runs the static job's command steps
+  # from the SAME composite action (.github/actions/static-gate) because a
+  # true full-gate mirror makes a macOS-only failure visible anywhere in the
+  # gate; one definition means the mirror cannot go stale.
   static-macos:
     runs-on: macos-latest
     # Same cq-state skip as the static job (review-debt #226): the ledger
@@ -62,35 +63,21 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      # Mirrored from the static job above, verbatim: the mirror is the
-      # point, so an edit to one body's steps is an edit to both.
-      - name: Static gate
-        run: pnpm run check:static
-      - name: Check formatting
-        run: pnpm run format:check
-      # Timing probe (baseline component A): this job alone also writes the
-      # vitest JSON report (per-file durations) for each test invocation.
-      # `--reporter=default` keeps the console output; `json` adds the file
-      # (cac dot notation: `--outputFile.json=` targets only the json
-      # reporter). The paths sit under $RUNNER_TEMP, outside the worktree, so
-      # Knip and the build below never see them. `--coverage` stays OFF —
-      # the ratchet is the instrumented Linux venue. These steps carry no
-      # `if:` beyond the one noted on e2e: they remain the gate.
-      - name: Test unit
-        run: pnpm run test:unit --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-unit.json"
-      # `!cancelled()`, not the implicit success(): a red unit run must not
-      # skip e2e, or the failing candidates lose their e2e timing. The unit
-      # failure still fails the job — this only keeps later evidence
-      # flowing.
-      - name: Test e2e/acp
-        if: ${{ !cancelled() }}
-        run: pnpm run test:e2e --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-reports/vitest-e2e.json"
-      - name: Check unused files and dependencies
-        run: pnpm run knip
-      - name: Build
-        run: pnpm run build
-      - name: Check generated op docs
-        run: pnpm run gen:op-docs:check
+      # The static job's command steps, from the one shared definition (see
+      # the action's header). Timing probe (baseline component A): this job
+      # alone also writes the vitest JSON report (per-file durations) for
+      # each test invocation, under $RUNNER_TEMP — outside the worktree, so
+      # Knip and the build never see them. `--coverage` stays OFF: the
+      # ratchet is the instrumented Linux venue. `e2e-after-failure` runs
+      # e2e after a red unit run (unless cancelled), so failing candidates
+      # keep their e2e timing; the unit failure still fails the job — it only
+      # keeps later evidence flowing. Every other step keeps the implicit
+      # success(): they remain the gate.
+      - name: Static gate steps (.github/actions/static-gate)
+        uses: ./.github/actions/static-gate
+        with:
+          vitest-json-dir: ${{ runner.temp }}/vitest-reports
+          e2e-after-failure: 'true'
       # The reporter writes in onFinished, so a red test run still leaves
       # both files. This step proves both exist and parse (it is what
       # catches a wrong reporter flag); it runs after a red test step

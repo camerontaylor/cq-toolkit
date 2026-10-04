@@ -31,10 +31,13 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}`
-are the instantiation tokens; the seven command steps below are this repo's
-`{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, `test:unit`, `test:e2e`, Knip, build, and the generated-op-docs drift
-check. This repo's
+are the instantiation tokens; the static job's last step,
+`uses: ./.github/actions/static-gate`, is this repo's `{{COMMANDS...}}`
+slot. That repo-owned composite action holds the seven command steps — the
+static gate (TS7 compiler ratchet and typed Oxlint), then format check,
+`test:unit`, `test:e2e`, Knip, build, and the generated-op-docs drift
+check — as the ONE definition the macOS venue below shares. It is not a
+template: it runs this package's own scripts. This repo's
 `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `pnpm install --frozen-lockfile`) and adding the
@@ -48,7 +51,10 @@ it; it is deliberately not a required check — see its comment.
 
 This repo's non-required macOS full-gate mirror (`static-macos`) lives in
 its own workflow file, `.github/workflows/macos-venue.yml` (repo-owned,
-listed under `nonTemplated` in `instances.json`), not in this template.
+listed under `nonTemplated` in `instances.json`), not in this template. It
+runs the same `./.github/actions/static-gate` action as the static job
+(with inputs for its vitest JSON timing reports), so the mirror is the
+static gate by construction, not by hand-kept copy.
 The promotion gate reads `ci.yml` by workflow path and requires the whole
 run — every job in it — to have succeeded on the tip (`gate.yml`
 `--verifiedWorkflows`, `checkVerifiedRun`). A job inside `ci.yml` is
@@ -104,32 +110,13 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
-      # One compiler ratchet plus typed lint; aliases must not duplicate it.
-      - name: Static gate
-        run: pnpm run check:static
-      - name: Check formatting
-        run: pnpm run format:check
-      # The split mirrors the two package scripts (`test:unit` excludes the e2e
-      # tree, `test:e2e` selects it), so a red unit run and a red e2e run
-      # are two separate reports instead of one `pnpm run test` line.
-      - name: Test unit
-        run: pnpm run test:unit
-      - name: Test e2e/acp
-        run: pnpm run test:e2e
-      - name: Check unused files and dependencies
-        run: pnpm run knip
-      # Emit gate: the ratchet step above is the typecheck gate; this step
-      # emits dist/ and recompiles (checked emit, no --noCheck) — the
-      # deliberate, boring-safe choice.
-      - name: Build
-        run: pnpm run build
-      # Generated-artifact drift gate (ws-i scope item 5): the generator's
-      # --check mode recomputes the per-op reference and fails on any drift
-      # (missing, changed, or stale docs/ops/*.md) without writing. It reads
-      # the BUILT registry, so this step follows the build above; its output
-      # is deterministic (no timestamps, no absolute paths).
-      - name: Check generated op docs
-        run: pnpm run gen:op-docs:check
+      # The hand-replaced COMMANDS slot: the static gate's seven command
+      # steps live in ONE repo-owned composite action, shared with the
+      # macOS venue's static-macos mirror (macos-venue.yml), so the two run
+      # one step list. Checkout, toolchain and install stay above: a local
+      # action is read from the checked-out workspace.
+      - name: Static gate steps (.github/actions/static-gate)
+        uses: ./.github/actions/static-gate
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
@@ -172,8 +159,10 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the seven
-command steps with your own `{{COMMANDS...}}` — then add the resulting
+permissions shape exactly as shown, swap the tokens, and replace the
+`./.github/actions/static-gate` step with your own `{{COMMANDS...}}` —
+inline run-steps, or your own local composite action if a second venue
+must run the same gate — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
 
