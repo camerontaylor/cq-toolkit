@@ -11,8 +11,8 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | file                          | what it is                                                                                                                                                                                                                       |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `init-merge-queue.yml`        | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD (env `automation`)                                                                                                                         |
-| `merge-queue-gate.yml`        | LEGACY (retires at C2): on push to `merge-queue`, wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards                       |
-| `gate.yml`                    | `cq-gate`, the P1 promotion job (ADR-0004 D-K): `wake` verifies the trigger, `decide` (env `promote`, sole member of group `promote`) runs `promote-gate` from the trust ref and promotes the merge-queue tip by atomic CAS push |
+| `merge-queue-gate.yml`        | BATCH PROMOTER (retires at C2; docs/promotion-policy.md): on a `crq/promotion-review` status or a dispatch, verifies the review and I4 on the reviewed sha, then fast-forwards `main` to it behind queue, base and review guards |
+| `gate.yml`                    | `cq-gate`, the P1 promotion job (ADR-0004 D-K): `wake` verifies the trigger, `decide` (env `promote`, group `promote`) runs `promote-gate` from the trust ref; REPORT-ONLY (no `--push`) under the batch promotion policy        |
 | `sync-merge-queue.yml`        | on push to `main`: API-only triage (zero clone) that opens or reuses a `main → merge-queue` sync PR when `main` has commits the queue lacks, and dispatches both gates on `main` when the queue is ahead (env `automation`)      |
 | `live-merge.yml`              | dispatch-only live drill: runs the F5 merge-prs integration test against a fresh private scratch repo on github.com (records its runs in `docs/drills/2026-09-f5.md`; env `drill`)                                               |
 | `required-check.md`           | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                                                                       |
@@ -170,30 +170,37 @@ policy.
 
 Merge commits only. PRs merge into `merge-queue` with merge commits, the
 queue advances only by merging, and `main` advances only by fast-forward
-promotion of a fully checked `merge-queue` HEAD. The gates are the ONLY
-components that advance `main` — during C1 two of them, `merge-queue-gate`
-and `gate.yml` (`cq-gate`); C2 retires the first. Both push atomically with
-a compare-and-swap on the queue tip, so running both is race-safe. Sync's
-ahead case never writes `main` itself — it dispatches the gates, so every
-promotion is behind a gate's checks and guards. Never squash, never rewrite
-history, never force-push, never touch `main` by any other path. `cq-gate`
-admits `main..tip` only through its closure rule (every commit a clean
-first-parent merge of a merged PR into `merge-queue`, or reachable from
-such a PR's head) and recomputes I2's evidence rows (not its settle, which
-only the merger's recheck enforces) and `gates.policyDiff`
-(methods-w1-10 Decision 12). The legacy gate guards promotion with a merge-queue-tip guard
-plus two merge-base checks, in order: if the gated sha is already an
-ancestor of `main`, the promote is a logged no-op; if the gated sha is not
-the CURRENT `merge-queue` tip, it is not promoted (a manual dispatch may
-never promote an off-queue or stale commit): a commit the tip has moved past
-is SUPERSEDED, so the run ends green with a "superseded by `<tip>`" summary
-and the tip's own gate run decides, while a commit off the queue refuses. The
-same supersession check runs before the check wait refuses, because a newer
-queue push is what cancels the older commit's checks; on the current tip a
-failing, skipped, cancelled or missing check still refuses (I4); if `main` is not an ancestor of the gated sha (main diverged),
-the gate refuses and a human merges `main` into `merge-queue`; only then
-does it push `<sha>:refs/heads/main` — an update the server would reject as
-non-ff anyway if the guards had somehow raced.
+promotion of a fully checked, promotion-REVIEWED `merge-queue` commit
+([docs/promotion-policy.md](../../docs/promotion-policy.md)). The gates are
+the ONLY components that advance `main` — during C1 two of them,
+`merge-queue-gate` and `gate.yml` (`cq-gate`); C2 retires the first. Under
+the batch promotion policy `cq-gate` runs report-only (no `--push`), so
+`merge-queue-gate` is the one promoter until the gate CLI learns the
+promotion-review signal. Sync's ahead case never writes `main` itself — it
+dispatches the gates, and an unreviewed tip just ends "awaiting promotion
+review". Never squash, never rewrite history, never force-push, never touch
+`main` by any other path. `cq-gate` admits `main..tip` only through its
+closure rule (every commit a clean first-parent merge of a merged PR into
+`merge-queue`, or reachable from such a PR's head) and recomputes I2's
+evidence rows (not its settle, which only the merger's recheck enforces) and
+`gates.policyDiff` (methods-w1-10 Decision 12).
+
+`merge-queue-gate` promotes only on a REVIEW: the newest
+`crq/promotion-review` commit status on the sha posted by an allowed USER
+(`vars.CQ_PROMOTION_REVIEWERS`, blank = the repository owner; statuses from
+GITHUB_TOKEN or any App are Bots and never count) is `success` and binds its
+reviewed base as `main=<sha>` in the description. An unreviewed, pending or
+blocked sha, or one already in `main`, ends green with no promotion: waiting
+is not failing. With a review it waits until every required check on its
+list succeeded on the sha (I4: skipped, cancelled or missing is never a
+pass), then guards, in order: already an ancestor of `main` is a logged
+no-op; a sha off `merge-queue` (not the tip or an ancestor of it) refuses;
+`main` not an ancestor of the sha (diverged) refuses and a human merges
+`main` into `merge-queue`; a review base `main` does not contain refuses
+(`main..sha` would hold unreviewed commits). Only then does it push
+`<sha>:refs/heads/main` without force, so the server rejects anything but a
+fast-forward. The REVIEWED sha promotes, even when newer merges have moved
+the queue tip past it.
 
 ## Action pinning
 
