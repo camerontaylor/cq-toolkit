@@ -1,0 +1,94 @@
+# The static gate's command steps — the ONE definition shared by ci.yml's
+# required `static` job and macos-venue.yml's non-required `static-macos`
+# full-gate mirror. This is the repo's filling of the hand-replaced
+# `{{COMMANDS...}}` slot in policy/templates/required-check.md: repo-owned
+# (pnpm scripts of this package), not a template, so an adopter replaces the
+# calling step with their own commands rather than copying this file.
+#
+# The caller checks out the repo (persist-credentials: false), sets up pnpm
+# and Node, and installs dependencies first; the step list here starts at
+# the static gate. Changes here change what the `static` required check
+# runs. `.github/` is a protected path, so an edit here always raises a D11
+# `protected-path` finding (needs a human under the default `human` posture).
+# Until policyDiff counts local actions used by a required-check job as that
+# check's producer (follow-up PR), the `diff-check` posture passes such an
+# edit where the same change inline in ci.yml would need a human.
+name: static-gate
+description: The static gate's ordered command steps, shared by ci.yml static and macos-venue.yml static-macos.
+
+inputs:
+  vitest-json-dir:
+    description: >-
+      When non-empty, test:unit and test:e2e also write the vitest JSON report
+      (vitest-unit.json, vitest-e2e.json) into this directory, keeping the
+      default console reporter. Empty (the default) runs the tests unchanged.
+    required: false
+    default: ''
+  e2e-after-failure:
+    description: >-
+      'true' runs test:e2e after an earlier step failed (unless the run was
+      cancelled), so a red unit run still yields its e2e evidence; the earlier
+      failure still fails the step. Default 'false': e2e is skipped after a
+      failure, like every other step.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # One compiler ratchet plus typed lint; aliases must not duplicate it.
+    - name: Static gate
+      shell: bash
+      run: pnpm run check:static
+    - name: Check formatting
+      shell: bash
+      run: pnpm run format:check
+    # The split mirrors the two package scripts (`test:unit` excludes the e2e
+    # tree, `test:e2e` selects it), so a red unit run and a red e2e run
+    # are separate log groups (and, with a report dir, separate JSON files)
+    # inside this action's one job step, not one `pnpm run test` line. With a
+    # report dir, `--reporter=default` keeps the console output and `json`
+    # adds the file (cac dot notation: `--outputFile.json=` targets only the
+    # json reporter). The input reaches the shell through env, never
+    # interpolated into the script.
+    - name: Test unit
+      shell: bash
+      env:
+        VITEST_JSON_DIR: ${{ inputs.vitest-json-dir }}
+      run: |
+        if [ -n "$VITEST_JSON_DIR" ]; then
+          pnpm run test:unit --reporter=default --reporter=json --outputFile.json="$VITEST_JSON_DIR/vitest-unit.json"
+        else
+          pnpm run test:unit
+        fi
+    # Inside a composite, success() reads this action's own step status
+    # (github.action_status), so `!cancelled() && success()` is the default
+    # gate; the input widens it to `!cancelled()` only.
+    - name: Test e2e/acp
+      if: ${{ !cancelled() && (success() || inputs.e2e-after-failure == 'true') }}
+      shell: bash
+      env:
+        VITEST_JSON_DIR: ${{ inputs.vitest-json-dir }}
+      run: |
+        if [ -n "$VITEST_JSON_DIR" ]; then
+          pnpm run test:e2e --reporter=default --reporter=json --outputFile.json="$VITEST_JSON_DIR/vitest-e2e.json"
+        else
+          pnpm run test:e2e
+        fi
+    - name: Check unused files and dependencies
+      shell: bash
+      run: pnpm run knip
+    # Emit gate: the ratchet step above is the typecheck gate; this step
+    # emits dist/ and recompiles (checked emit, no --noCheck) — the
+    # deliberate, boring-safe choice.
+    - name: Build
+      shell: bash
+      run: pnpm run build
+    # Generated-artifact drift gate (ws-i scope item 5): the generator's
+    # --check mode recomputes the per-op reference and fails on any drift
+    # (missing, changed, or stale docs/ops/*.md) without writing. It reads
+    # the BUILT registry, so this step follows the build above; its output
+    # is deterministic (no timestamps, no absolute paths).
+    - name: Check generated op docs
+      shell: bash
+      run: pnpm run gen:op-docs:check
