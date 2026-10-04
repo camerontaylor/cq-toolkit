@@ -5,6 +5,13 @@
 # ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). See
 # policy/templates/README.md for the token table and the entitlement facts.
 #
+# SUPERSEDED is not FAILED: when the gated commit is a strict ancestor of
+# the CURRENT merge-queue tip (a newer queue push moved past it, which is
+# also what cancels its checks), the run ends green with a "superseded by
+# <tip>" summary and promotes nothing; the tip's own run decides. For the
+# current tip, a failing, skipped, cancelled or missing check still
+# refuses (a red run).
+#
 # RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): during C1 this gate runs
 # ALONGSIDE cq-gate (gate.yml, the P1 promotion job); the two are the only
 # components that advance main, and both promote with an atomic
@@ -82,10 +89,38 @@ jobs:
           echo "gating ${sha}"
           echo "SHA=${sha}" >> "$GITHUB_ENV"
       - name: Wait for required checks on the gated sha (API only)
+        id: wait
         env:
           GH_TOKEN: ${{ secrets.{{PROMOTE_SECRET}} }}
         run: |
           set -euo pipefail
+          # SUPERSEDED is not FAILED: a gated sha that is a strict ancestor
+          # of the CURRENT merge-queue tip can never be promoted (the tip
+          # guard below), and a newer queue push is what cancels its
+          # checks. Its run ends green with a "superseded by <tip>"
+          # summary; the tip's own gate run decides. `superseded_by` prints
+          # the tip when SHA is superseded and nothing otherwise; it runs in
+          # a command substitution, so an API error prints nothing and the
+          # gate falls back to refusing. For the current tip (or a sha off
+          # the queue) a failing, skipped, cancelled or missing check still
+          # refuses.
+          superseded_by() {
+            local tip state
+            tip="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/merge-queue" --jq .object.sha)"
+            [ -n "${tip}" ] && [ "${tip}" != "${SHA}" ] || return 0
+            state="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${SHA}...${tip}" --jq .status)"
+            if [ "${state}" = ahead ]; then printf '%s' "${tip}"; fi
+          }
+          end_superseded() {
+            echo "superseded: ${SHA} is no longer the merge-queue tip (superseded by $1) — not promoted; the tip's own gate run decides"
+            {
+              echo '## merge-queue-gate: superseded'
+              echo
+              echo "\`${SHA}\` is superseded by the merge-queue tip \`$1\`: not promoted; the tip's own gate run decides."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "superseded_by=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
           # EVERY required check belongs on this wait list (README
           # "How instantiation works" step 4): a required check missing here
           # lets the gate fast-forward main while it is pending or failed.
@@ -98,6 +133,9 @@ jobs:
           fi
           deadline=$(( $(date +%s) + {{GATE_TIMEOUT_MIN}} * 60 ))
           while :; do
+            # A superseded sha has nothing left to wait for.
+            by="$(superseded_by)"
+            if [ -n "${by}" ]; then end_superseded "${by}"; fi
             failing=0
             waiting=0
             # filter=latest keeps one row per check name PER REPORTING
@@ -155,6 +193,10 @@ jobs:
               esac
             done
             if [ "${failing}" -ne 0 ]; then
+              # Re-read the tip AFTER the checks: the push that cancelled a
+              # check has already moved it. Only a superseded sha is spared.
+              by="$(superseded_by)"
+              if [ -n "${by}" ]; then end_superseded "${by}"; fi
               exit 1
             fi
             if [ "${waiting}" -eq 0 ]; then
@@ -162,32 +204,37 @@ jobs:
               exit 0
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
+              by="$(superseded_by)"
+              if [ -n "${by}" ]; then end_superseded "${by}"; fi
               echo "refusing: timed out after {{GATE_TIMEOUT_MIN}} minutes waiting for required checks on ${SHA} — never promote unchecked"
               exit 1
             fi
             sleep 30
           done
-      # The wait above is API-only and may refuse or time out — a refusing
-      # run must not have paid for a clone at all. Full history is needed
-      # only by the guards and the push below; the token input re-keys the
-      # origin remote to the promote PAT so the ff-push authenticates
-      # with it.
+      # The wait above is API-only and may refuse, time out or end
+      # superseded — none of those runs may pay for a clone at all. Full
+      # history is needed only by the guards and the push below; the token
+      # input re-keys the origin remote to the promote PAT so the ff-push
+      # authenticates with it.
       # Pinned to an immutable commit SHA; persist-credentials deliberately
       # stays ON here: this job pushes with the promote PAT and runs no repo
       # code that could exfiltrate it.
       - name: Check out the merge-queue head (full history, promote-token remote)
+        if: steps.wait.outputs.superseded_by == ''
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           ref: merge-queue
           fetch-depth: 0
           token: ${{ secrets.{{PROMOTE_SECRET}} }}
       - name: Validate the gated sha
+        if: steps.wait.outputs.superseded_by == ''
         run: |
           set -euo pipefail
           # SHA is SHA_INPUT verbatim when dispatch supplied one — verify it
           # names a real commit in the fetched history before any use.
           git rev-parse --verify "${SHA}^{commit}"
       - name: Fast-forward promote the gated sha to main (guarded)
+        if: steps.wait.outputs.superseded_by == ''
         run: |
           set -euo pipefail
           git fetch origin main merge-queue
@@ -197,10 +244,16 @@ jobs:
           fi
           # Tip guard: the gate promotes ONLY the current merge-queue tip.
           # A manual dispatch (or a race with a newer queue push) must never
-          # promote an off-queue or stale commit; the tip's own gate run
-          # supersedes it, so refusing here loses no promotion.
+          # promote an off-queue or stale commit. A queue commit the tip has
+          # moved past is SUPERSEDED: not promoted, the run stays green and
+          # the tip's own gate run decides. A sha off the queue refuses.
           queue_tip="$(git rev-parse origin/merge-queue)"
           if [ "${SHA}" != "${queue_tip}" ]; then
+            if git merge-base --is-ancestor "${SHA}" "${queue_tip}"; then
+              echo "superseded: ${SHA} is not the current merge-queue tip (superseded by ${queue_tip}) — not promoted; the tip's own gate run decides"
+              echo "## merge-queue-gate: superseded by \`${queue_tip}\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             echo "refusing: ${SHA} is not the current merge-queue tip (${queue_tip}) — promotion advances main to the tip only"
             exit 1
           fi
@@ -215,5 +268,18 @@ jobs:
           # advances to a commit that is still the queue tip at push time.
           # (A value-changing second refspec is impossible on success: that
           # direction is a rewind, which is exactly the rejection.)
-          git push --atomic origin "${SHA}:refs/heads/main" "${SHA}:refs/heads/merge-queue"
+          if ! git push --atomic origin "${SHA}:refs/heads/main" "${SHA}:refs/heads/merge-queue"; then
+            # A rejected CAS whose cause is a newer queue push is the same
+            # supersession, raced; any other rejection refuses.
+            git fetch origin merge-queue
+            queue_tip="$(git rev-parse origin/merge-queue)"
+            if [ "${SHA}" != "${queue_tip}" ] &&
+              git merge-base --is-ancestor "${SHA}" "${queue_tip}"; then
+              echo "superseded: the queue advanced to ${queue_tip} during the push — not promoted; the tip's own gate run decides"
+              echo "## merge-queue-gate: superseded by \`${queue_tip}\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "refusing: the atomic push of ${SHA} was rejected"
+            exit 1
+          fi
           echo "promoted ${SHA} to main by pure fast-forward (atomic tip CAS)"

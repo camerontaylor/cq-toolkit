@@ -20,6 +20,9 @@
 #   - `resolve` verifies the triggering run (workflow path, event, repository
 #     id — fork runs are refused) and resolves the subject from `head_sha`,
 #     never `head_branch`; a PR subject's base comes from the commit→PR API.
+#     No open same-repo PR into merge-queue/main with that head
+#     (superseded, closed, merged or another base) is NOTHING TO JUDGE: a
+#     notice, no verdict, every later job skipped, a green run.
 #   - `fetch` has read-only repository access (a step-scoped credential,
 #     never persisted into .git/config) and transfers the trust and
 #     subject git objects — and the base ref, so the merge-base that starts
@@ -35,7 +38,9 @@
 #     only a numbers-only JSON crosses to `judge`, which therefore never
 #     unpacks a single byte the head authored (F5).
 #   - `judge` is the SIGNING job: it runs the trusted verifier over git
-#     objects + those numbers and posts the `cq/ratchet` check run. It runs
+#     objects + those numbers and posts the `cq/ratchet` check run (a fail
+#     or needs-human verdict is a RED CHECK RUN, not a red job: the job
+#     fails only when trusted code crashed or the post failed). It runs
 #     no head code, holds `checks: write` only, runs in environment
 #     `cq-verdict`, and checks the trust ref out of the bundle with no
 #     persisted credential. `compute` stays credential-free: the signing
@@ -130,19 +135,53 @@ jobs:
             pull_request)
               # The subject is head_sha; the PR (and its base) comes from
               # the commit→PR API, never from pull_requests[]
-              # (ADR-0004 D-C.2).
-              base="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
-                --jq "[.[] | select(.state == \"open\"
-                   and .head.sha == \"${subject}\"
-                   and .head.repo.id == ${REPO_ID}) | .base.ref]
-                 | map(select(. == \"merge-queue\" or . == \"main\"))
-                 | if index(\"merge-queue\") then \"merge-queue\"
-                   elif index(\"main\") then \"main\"
-                   else empty end")"
-              [ -n "$base" ] || {
-                echo "refusing: no open same-repo PR"
-                echo "into merge-queue/main has head ${subject}"
-                exit 1; }
+              # (ADR-0004 D-C.2). Every page, slurped into one array; an
+              # API error fails the step (assignment under `set -e`,
+              # `pipefail`).
+              list_pulls() {
+                gh api --paginate \
+                  "repos/${REPO}/commits/${subject}/pulls?per_page=100" \
+                  | jq -s 'add // []'
+              }
+              base_of() {
+                jq -r --arg sha "$subject" --argjson repo "$REPO_ID" \
+                  '[.[] | select(.state == "open"
+                     and .head.sha == $sha
+                     and .head.repo.id == $repo) | .base.ref]
+                   | map(select(. == "merge-queue" or . == "main"))
+                   | if index("merge-queue") then "merge-queue"
+                     elif index("main") then "main"
+                     else empty end' <<<"$pulls"
+              }
+              pulls="$(list_pulls)"
+              base="$(base_of)"
+              if [ -z "$base" ]; then
+                # The commit→PR association can lag a push, and nothing
+                # re-runs this verdict: look once more before skipping.
+                sleep "${CQ_ASSOC_RETRY_SECONDS:-20}"
+                pulls="$(list_pulls)"
+                base="$(base_of)"
+              fi
+              if [ -z "$base" ]; then
+                # NOTHING TO JUDGE, not a refusal (cq-accept's rule): the
+                # PR has moved past this head (superseded), is closed or
+                # merged, or targets another base. No verdict is posted,
+                # every later job is skipped and the run stays green. A
+                # current head gets its own cq-measure run and verdict.
+                # An empty association even after the retry is reported
+                # as unconfirmed, not as a superseded or closed PR.
+                same_repo="$(jq --argjson repo "$REPO_ID" \
+                  '[.[] | select(.head.repo.id == $repo)] | length' \
+                  <<<"$pulls")"
+                if [ "$same_repo" = 0 ]; then
+                  msg="nothing to judge: commit→PR association unconfirmed: no same-repo PR lists ${subject} (looked twice)"
+                else
+                  msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (superseded, closed or merged, or another base)"
+                fi
+                echo "::notice title=cq-verify::${msg}"
+                echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+                exit 0
+              fi
               kind='pr'
               ;;
             push)
@@ -164,6 +203,9 @@ jobs:
   fetch:
     name: fetch trust and subject objects
     needs: resolve
+    # An empty subject is resolve's "nothing to judge" (no verdict owed);
+    # `compute` needs this job, so it skips with it.
+    if: needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -291,7 +333,9 @@ jobs:
   measurement:
     name: measurement
     needs: [resolve]
-    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    if: >-
+      ${{ !cancelled() && needs.resolve.result == 'success'
+      && needs.resolve.outputs.subject != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # F5: this artifact is HEAD-AUTHORED bytes — cq-measure runs head code
@@ -360,8 +404,10 @@ jobs:
     name: judge
     needs: [resolve, compute, measurement]
     # A failed recompute still yields a (failing) verdict; only an
-    # unresolved subject yields none.
-    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    # unresolved subject, or resolve's "nothing to judge", yields none.
+    if: >-
+      ${{ !cancelled() && needs.resolve.result == 'success'
+      && needs.resolve.outputs.subject != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The verdict signer's environment (Decision 6): its only secret is the
@@ -492,6 +538,7 @@ jobs:
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
+          TYPECHECK_COUNT: ${{ needs.compute.outputs.typecheck_count }}
         run: |
           set -euo pipefail
           # Anything but an ok op result with verdict "pass" is a failure;
@@ -521,5 +568,17 @@ jobs:
               }' > "${RUNNER_TEMP}/check-run.json"
           gh api -X POST "repos/${REPO}/check-runs" \
             --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
-          jq -e '.conclusion == "success"' \
-            "${RUNNER_TEMP}/check-run.json" >/dev/null
+          # A fail or needs-human verdict is a RED CHECK RUN, not a red job
+          # (cq-accept's rule): cq/ratchet carries it. The job fails only
+          # when trusted code crashed (the verifier gave no ok result, or
+          # the trusted recompute gave no count) or the post failed. A
+          # failed cq-measure is a failing verdict: its own run reports it.
+          if ! jq -e '.status == "ok"' "${RUNNER_TEMP}/verdict.json" \
+            >/dev/null; then
+            echo 'ratchet verifier crashed: see the cq/ratchet check run'
+            exit 1
+          fi
+          if ! [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
+            echo 'trusted typecheck recompute produced no count: see the compute job'
+            exit 1
+          fi
