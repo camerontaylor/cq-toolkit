@@ -63,6 +63,9 @@ function newestSrcMtimeMs() {
   return newest;
 }
 
+/** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
+let distPrepared = false;
+
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
@@ -79,10 +82,14 @@ function newestSrcMtimeMs() {
  * error fails loudly here, never downstream.
  */
 export function ensureDist() {
+  // Build-once per process: every consumer in one invocation reuses the first
+  // preparation instead of re-walking src/ or re-running `pnpm run build`.
+  if (distPrepared) return;
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
     if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
+      distPrepared = true;
       return; // dist exists and is newer than every src file — reuse it
     }
   } catch {
@@ -101,6 +108,7 @@ export function ensureDist() {
       }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
   }
+  distPrepared = true;
 }
 
 /**
