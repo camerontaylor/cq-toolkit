@@ -10,10 +10,14 @@
 #     blank = the repository owner). A status posted by GITHUB_TOKEN or any
 #     App is a Bot and is ignored, so a PR head's workflow cannot forge it.
 #     A description starting `override` is the owner's override, logged.
+#     The review is re-read immediately before the push: unless that same
+#     review is still the newest allowed one (and `success`), the gate
+#     promotes nothing.
 #   - I4: every required check on the gate's wait list SUCCEEDED on the sha
 #     (a skipped, cancelled or missing required check is never a pass).
-#   - GUARDS: the sha is on merge-queue (an ancestor of, or equal to, its
-#     tip), main is an ancestor of the sha, and it is not already in main.
+#   - GUARDS: the sha is on merge-queue's first-parent line (its tip or an
+#     earlier queue state), main is an ancestor of the sha, and it is not
+#     already in main.
 # The REVIEWED sha is what promotes, not whatever the queue tip is now.
 #
 # Carriers: `status` (crq posting the review wakes the gate; the job runs
@@ -84,12 +88,35 @@ jobs:
       github.ref ==
       format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
-    # Promotions serialize; a running promotion is never cancelled
-    # mid-push. Job-level, so the skipped runs of unrelated statuses never
-    # enter (or displace a pending promotion from) the group.
+    # Promotions of one TARGET serialize; a running promotion is never
+    # cancelled mid-push. The group is keyed by the target — the status's
+    # sha, the dispatched sha, or `merge-queue-tip` for a tip dispatch —
+    # because a group keeps only ONE pending run: a single shared group let
+    # sync's tip dispatch displace a queued promotion of a reviewed sha,
+    # and nothing retried that sha. Runs for different targets may overlap
+    # safely: the push is fast-forward-only and the guards re-check
+    # ancestry, so an older target that main has passed ends a no-op.
+    # Job-level, so the skipped runs of unrelated statuses never enter (or
+    # displace a pending promotion from) a group.
     concurrency:
-      group: merge-queue-gate
+      group: merge-queue-gate-${{ github.event.sha || inputs.sha || 'merge-queue-tip' }}
       cancel-in-progress: false
+    env:
+      # The review read, shared by the review step and the pre-push re-read
+      # so both apply the SAME trust filter. Input: the slurped pages of
+      # the sha's statuses; $allowed: the reviewer list. Every
+      # crq/promotion-review status; the newest one an allowed USER posted
+      # is the review (a later failure — a blocking finding — overrides an
+      # earlier success).
+      REVIEW_JQ: |
+        add // [] | map(select(.context == "crq/promotion-review")
+          | {id, state, description, created_at,
+             login: .creator.login, type: .creator.type})
+        | ($allowed | split(",") | map(gsub("^\\s+|\\s+$"; ""))
+          | map(select(length > 0))) as $ok
+        | def trusted: .type == "User" and (.login as $l | any($ok[]; . == $l));
+        {review: (map(select(trusted)) | max_by([.created_at, .id])),
+         others: (map(select(trusted | not)) | length)}
     steps:
       # The gated sha reaches the script via env: indirection — never a
       # textual ${{ }} interpolation. A status event gates the status's sha
@@ -135,20 +162,10 @@ jobs:
               exit 0;;
           esac
           reviewers="${REVIEWERS_VAR:-${OWNER}}"
-          # Every crq/promotion-review status on the sha; the newest one an
-          # allowed USER posted is the review (a later failure — a blocking
-          # finding — overrides an earlier success).
+          # Every page of the sha's statuses through the job's REVIEW_JQ.
           rows="$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" \
-            --jq '.[] | select(.context == "crq/promotion-review")
-              | {id, state, description, created_at,
-                 login: .creator.login, type: .creator.type}' |
-            jq -s --arg allowed "${reviewers}" '
-              ($allowed | split(",") | map(gsub("^\\s+|\\s+$"; ""))
-                | map(select(length > 0))) as $ok
-              | def trusted: .type == "User" and (.login as $l | any($ok[]; . == $l));
-              {review: (map(select(trusted)) | max_by([.created_at, .id])),
-               others: (map(select(trusted | not)) | length)}')"
+            "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" |
+            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
           others="$(jq -r '.others' <<<"${rows}")"
           if jq -e '.review == null' <<<"${rows}" >/dev/null; then
             if [ "${GITHUB_EVENT_NAME}" = status ] || [ "${others}" -gt 0 ]; then
@@ -170,9 +187,14 @@ jobs:
           [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || {
             echo "refusing: the review on ${sha} binds no reviewed base (description needs main=<40-hex>)"
             exit 1; }
+          review_id="$(jq -r '.review.id' <<<"${rows}")"
+          [[ "${review_id}" =~ ^[0-9]+$ ]] || {
+            echo "refusing: review status id '${review_id}'"; exit 1; }
           kind=review
           case "${description}" in override*) kind=override;; esac
           echo "REVIEW_BASE=${base}" >> "$GITHUB_ENV"
+          # The promotion step re-reads the review and requires this one.
+          echo "REVIEW_ID=${review_id}" >> "$GITHUB_ENV"
           {
             echo "## merge-queue-gate: promoting \`${sha}\`"
             echo
@@ -290,6 +312,10 @@ jobs:
           git rev-parse --verify "${SHA}^{commit}"
       - name: Fast-forward promote the gated sha to main (guarded)
         if: steps.review.outputs.promote == 'true'
+        env:
+          REVIEWERS_VAR: ${{ vars.CQ_PROMOTION_REVIEWERS }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git fetch origin main merge-queue
@@ -297,13 +323,18 @@ jobs:
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
             exit 0
           fi
-          # Queue guard: the gate promotes only a commit ON merge-queue (the
-          # tip or an ancestor of it — the REVIEWED batch tip, which newer
-          # merges may already have passed). A manual dispatch must never
-          # promote an off-queue commit.
+          # Queue guard: the gate promotes only a commit ON merge-queue's
+          # FIRST-PARENT line (the tip or an earlier queue state — the
+          # REVIEWED batch tip, which newer merges may already have passed).
+          # Plain ancestry is not enough: a PR-branch commit reachable only
+          # through a merge's second parent was never a queue state. A
+          # manual dispatch must never promote an off-queue commit. Full
+          # history (fetch-depth 0), so the line is complete; to a file, so
+          # an early grep exit cannot fail the pipeline.
           queue_tip="$(git rev-parse origin/merge-queue)"
-          if ! git merge-base --is-ancestor "${SHA}" "${queue_tip}"; then
-            echo "refusing: ${SHA} is not on merge-queue (not an ancestor of the merge-queue tip ${queue_tip}) — promotion advances main along the queue only"
+          git rev-list --first-parent "${queue_tip}" > "${RUNNER_TEMP}/queue-line"
+          if ! grep -qx "${SHA}" "${RUNNER_TEMP}/queue-line"; then
+            echo "refusing: ${SHA} is not on merge-queue (not on the first-parent line of the merge-queue tip ${queue_tip}) — promotion advances main along the queue only"
             exit 1
           fi
           if ! git merge-base --is-ancestor origin/main "${SHA}"; then
@@ -316,6 +347,28 @@ jobs:
             ! git merge-base --is-ancestor "${REVIEW_BASE}" origin/main; then
             echo "refusing: the review's base ${REVIEW_BASE} is not in main, so main..${SHA} holds unreviewed commits — re-review from main"
             exit 1
+          fi
+          # Re-read the review IMMEDIATELY before the push, with the same
+          # trust filter (REVIEW_JQ): the check wait above can last the
+          # whole timeout, and a crq `failure` (a blocking finding) posted
+          # meanwhile must stop this promotion. Only the very review
+          # verified above, still the newest trusted one, may promote; a
+          # newer success review wakes its own gate run.
+          reviewers="${REVIEWERS_VAR:-${OWNER}}"
+          rows="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
+            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
+          now_id="$(jq -r '.review.id // "none"' <<<"${rows}")"
+          now_state="$(jq -r '.review.state // "none"' <<<"${rows}")"
+          if [ "${now_id}" != "${REVIEW_ID}" ] || [ "${now_state}" != success ]; then
+            msg="the review changed while the gate waited (newest trusted review: status ${now_id}, ${now_state})"
+            echo "awaiting promotion review: ${msg} — ${SHA} not promoted (docs/promotion-policy.md)"
+            {
+              echo '## merge-queue-gate: awaiting promotion review'
+              echo
+              echo "\`${SHA}\`: ${msg}. Not promoted."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           # Fast-forward only: no --force, so the server rejects any update
           # that is not a fast-forward of main (a concurrent promotion).

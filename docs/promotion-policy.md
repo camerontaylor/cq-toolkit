@@ -44,15 +44,32 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 1. The newest `crq/promotion-review` status on it from an allowed reviewer is `success`, and it
    binds `main=<base>`. Allowed reviewers are user accounts listed in `vars.CQ_PROMOTION_REVIEWERS`
    (blank means the repository owner). Statuses posted with `GITHUB_TOKEN` or by any App come from
-   Bots and never count, so a PR head's workflow cannot forge one.
+   Bots and never count, so a PR head's workflow cannot forge one. The gate re-reads the status
+   immediately before the push: if a newer one (such as a crq `failure`) arrived during the check
+   wait, it promotes nothing.
 2. Every required check on its wait list succeeded **on that SHA** (I4: skipped, cancelled or
    missing is never a pass).
-3. It is on `merge-queue`, `main` is an ancestor of it, and `<base>` is in `main`. A base that
-   `main` does not contain would leave unreviewed commits in `main..sha`.
+3. It is on `merge-queue`'s first-parent line (a queue state, not a PR-branch commit reached
+   through a merge's second parent), `main` is an ancestor of it, and `<base>` is in `main`. A
+   base that `main` does not contain would leave unreviewed commits in `main..sha`.
 
 The crq status event wakes the gate. A dispatch of `merge-queue-gate` with a `sha` re-runs it.
+Gate runs serialize per target SHA, so a tip dispatch never displaces a queued promotion of a
+reviewed SHA.
 `cq-gate` (`gate.yml`) runs report-only while this policy holds. It must learn this signal before
 C2 retires `merge-queue-gate`.
+
+## Accepted limit
+
+Owner ruling (2026-10-04): accept this limit now, fix it with a dedicated identity later.
+
+- Every fleet agent runs `gh` as the owner, so a `crq/promotion-review` status is not proof
+  against a misbehaving agent. The allowed-reviewer check rules out only `GITHUB_TOKEN`, App and
+  fork forgery.
+- The compensating control is **detective**. After every promotion, crq matches the status that
+  promoted `main` against its own review ledger. A promotion status with no matching crq record
+  raises a loud alert. This check lives on the crq side, implemented by the crq steward.
+- The fix is a dedicated reviewer identity. Follow-up: dedicated crq reviewer App.
 
 ## Owner override
 

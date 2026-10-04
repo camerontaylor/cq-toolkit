@@ -190,9 +190,13 @@ jobs:
               ;;
             ahead)
               # merge-queue is ahead of main: promotion is the gates' job.
-              # Their tip and merge-base guards make re-dispatch idempotent,
-              # and their concurrency groups serialize it behind any
-              # running promotion.
+              # merge-queue-gate promotes the tip only if it carries a
+              # promotion review (else it ends green, awaiting one); its
+              # already-in-main, queue-line and ancestry guards and the
+              # fast-forward-only push make re-dispatch idempotent. Its
+              # concurrency group is per target, so this tip dispatch never
+              # displaces a pending promotion of a reviewed sha. cq-gate
+              # (gate.yml) is report-only and never pushes.
               dispatch_gate merge-queue-gate.yml
               dispatch_gate gate.yml
               ;;

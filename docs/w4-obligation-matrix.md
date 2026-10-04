@@ -40,7 +40,7 @@ from each other.
 | --- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S1  | `policy/protected-paths.json` → `requiredChecks`     | `:15`                                                                                                                                                                                               | context name                                 | `static`, `denylist`, `ratchet`                                                                                                                             | D11 `cq/policy` (`src/ops/gates/policyDiff.ts:606`); mechanically tied to S3 by `test/ops/gates/policyDiff.test.ts:1132-1137`                                                                      |
 | S2  | `scripts/denylist-scan` → `REQUIRED_WORKFLOW_CHECKS` | `:165-173`                                                                                                                                                                                          | (workflow file, check) pair                  | `denylist.yml:denylist`, `ci.yml:static`, `ratchet.yml:ratchet`                                                                                             | the I4 self-test: file exists, declares a job of exactly that id at first indent with no `name:` override, both triggers unfiltered (`:150-164`, `:174-179`)                                       |
-| S3  | legacy promotion gate wait list                      | `.github/workflows/merge-queue-gate.yml:93`; template `policy/templates/merge-queue-gate.yml:92`; token `policy/templates/instances.json:58`                                                        | context name                                 | `static,denylist,ratchet`                                                                                                                                   | the gate itself: fail-closed on empty (`:94-99`), 20-min deadline (`:100`, `:165-168`), per-name verdict fold (`:119-157`)                                                                         |
+| S3  | legacy promotion gate wait list                      | `.github/workflows/merge-queue-gate.yml:214`; template `policy/templates/merge-queue-gate.yml:213`; token `policy/templates/instances.json:58`                                                      | context name                                 | `static,denylist,ratchet`                                                                                                                                   | the gate itself: fail-closed on empty (`:217-220`), 20-min deadline (`:221`, `:286-289`), per-name verdict fold (`:241-277`)                                                                       |
 | S4  | ruleset template `R2`                                | `policy/templates/github-settings.json:61-75` (contexts `:65-73`, `strict_required_status_checks_policy: false` at `:63`); ruleset target `merge-queue` at `:39-44`                                 | (context, `integration_id`)                  | `cq/policy`, `cq/ratchet`, `cq/acceptance` (pinned `{{VERDICT_APP_ID}}`); `static`, `denylist`, `from-source`, `pack-audit` (pinned 15368 = GitHub Actions) | GitHub, **at C2 only** — `classicBranchProtection` is `null` for both branches (`:80-83`) and the repository has **zero live rulesets** (API `repos/camerontaylor/cq-toolkit/rulesets` → length 0) |
 | S5  | live classic protection, `main`                      | API `branches/main/protection`                                                                                                                                                                      | (context, app)                               | `static`, `denylist`, `ratchet`, all app 15368; `strict` unset                                                                                              | GitHub, on PRs into `main`                                                                                                                                                                         |
 | S6  | live classic protection, `merge-queue`               | API `branches/merge-queue/protection`                                                                                                                                                               | (context, app)                               | `static`, `denylist`, `from-source`, `pack-audit` (app 15368) **+ `ratchet` with `app_id: null`**                                                           | GitHub, on PRs into `merge-queue` (this is what blocks a queue merge, per `policy/templates/README.md:108`)                                                                                        |
@@ -48,9 +48,9 @@ from each other.
 
 Both promotion gates are `active` on GitHub today
 (`actions/workflows/merge-queue-gate.yml` → `state: active`;
-`actions/workflows/gate.yml` → `state: active`). Both are live, and they are
-**alternative promoters, not an AND**: each fast-forwards `main` on its own
-prerequisites with a compare-and-swap on the queue tip
+`actions/workflows/gate.yml` → `state: active`). Both are live. As C1 was
+designed they are **alternative promoters, not an AND**: each fast-forwards
+`main` on its own prerequisites with a compare-and-swap on the queue tip
 (`policy/templates/README.md:175-176`), so the first gate whose own set is
 green promotes. During C1 promotion is therefore an **OR of two complete
 predicates** — `(all S3 requirements) OR (all S7 requirements)` — not a union
@@ -70,7 +70,9 @@ LEGACY (retires at C2) and `:15` the successor the P1 promotion job.
 > holds while that policy is in force: S7 (`gate.yml`) runs report-only
 > (no `--push`), and S3 (`merge-queue-gate.yml`) promotes only a
 > merge-queue sha carrying a `crq/promotion-review` success from an allowed
-> reviewer. Promotion is therefore
+> reviewer. S3 is the only promoter, and it no longer swaps on the queue
+> tip: it fast-forwards `main` to the reviewed sha, which may trail the tip
+> on the queue's first-parent line. Promotion is therefore
 > `(all S3 requirements on the reviewed sha) AND (the promotion review)`, and
 > S7-only obligations (`from-source`) do not block promotion until S7 learns
 > the review signal and pushes again.
@@ -150,7 +152,7 @@ Both absences are structural, not incidental:
 
 Two timing facts the promotion decision needs: the candidate's binding leg
 today is `ratchet` at 4m35s (run 2; `static` finished at 4m14s) against a
-20-minute gate deadline (`merge-queue-gate.yml:100` and `gate.yml:269`), i.e.
+20-minute gate deadline (`merge-queue-gate.yml:221` and `gate.yml:269`), i.e.
 **~4.4× headroom** (the slower post-promotion `main` run, `static` 5m04s, is
 still ~3.9×), and two runs of the same job on the
 same SHA differed by 16% (`static` 5m04s vs 4m14s) and 1.8% (`ratchet` 4m40s vs
@@ -183,7 +185,7 @@ Two invariants fall out, and both are already the live behaviour:
 - Anything in the legacy gate list must be push-produced. Putting a
   PR-head-only context — `pack-audit` or `cq/acceptance` — into
   `{{GATE_CHECKS}}` today would stall every promotion for the full 20 minutes
-  and then refuse (`merge-queue-gate.yml:165-168`) — a total queue freeze, not
+  and then refuse (`merge-queue-gate.yml:286-289`) — a total queue freeze, not
   a red PR. `from-source` is not in that class: `ci.yml:12-14` triggers on an
   unfiltered `push` and its job is defined at `:82-110`, so it is push-produced
   and satisfiable (§2.4).
@@ -426,17 +428,19 @@ macOS job would convert an infrastructure skip into a queue freeze.
 
 ### 3.3 The 20-minute interaction
 
-Each gate _attempt_ refuses after 20 minutes (`merge-queue-gate.yml:100`,
-`:165-168`; `gate.yml:269` → `promote-gate.ts:1035-1038`). That bounds an
+Each gate _attempt_ refuses after 20 minutes (`merge-queue-gate.yml:221`,
+`:286-289`; `gate.yml:269` → `promote-gate.ts:1035-1038`). That bounds an
 attempt, not the macOS run. Under the recommended layout, row 5b makes
 `ci-macos` completion wake a fresh `cq-gate` attempt
 (`workflow_run`, `types: completed`), and that attempt's deadline starts after
 the run has already finished. The 15-minute `schedule` sweep (`gate.yml:65-66`)
 also starts a fresh deciding attempt each time (§5.1). So the successor can
 promote a tip whose macOS leg ran longer than 20 minutes. Only the legacy gate
-is bound by **max < 20 min**, because it makes one attempt per candidate push
-(`merge-queue-gate.yml:34-36`), and while both are live that bound decides
-which promoter wins, not whether the tip promotes. A slow macOS leg costs
+is bound by **max < 20 min**, because it makes one attempt per promotion
+review status or dispatch (`merge-queue-gate.yml:24-29`). It is the only
+promoter under the batch policy (S7 is report-only), so a timed-out attempt
+leaves that reviewed sha unpromoted until a re-dispatch or a fresh review
+status retries it. A slow macOS leg costs
 latency and refusal noise (a timed-out attempt per earlier wake), not
 promotion. Measured headroom on the Linux legs today is ~4.4× (4m35s binding
 leg on the candidate push). The spec expects an unmodified suite to exceed
@@ -511,7 +515,7 @@ coverage, in parallel, in the same ~5-minute window.
 | trust ref                         | none (head-defined)                                                                    | none (head-defined), and `ratchet.yml:4-5` says so explicitly               | **yes**                                                                                                                                                                                                                               |
 | producer permissions              | `contents: read`, no credential persistence                                            | `contents: read`, no credential persistence                                 | **yes**                                                                                                                                                                                                                               |
 | toolchain                         | `ubuntu-latest`, node 24, `pnpm install --frozen-lockfile`, same immutable action pins | identical                                                                   | **yes**                                                                                                                                                                                                                               |
-| triggers                          | unfiltered `push` + `pull_request`                                                     | unfiltered `push` + `pull_request` + `workflow_dispatch`                    | **no** — equal for automatic push/PR runs only; a dispatched `ratchet` on the tip adds a same-name suite that the legacy gate folds in (`merge-queue-gate.yml:104-136`), so a pending or failed dispatch can hold or refuse promotion |
+| triggers                          | unfiltered `push` + `pull_request`                                                     | unfiltered `push` + `pull_request` + `workflow_dispatch`                    | **no** — equal for automatic push/PR runs only; a dispatched `ratchet` on the tip adds a same-name suite that the legacy gate folds in (`merge-queue-gate.yml:237-277`), so a pending or failed dispatch can hold or refuse promotion |
 | suite membership                  | default discovery, split in two invocations                                            | default discovery, one instrumented invocation                              | **yes**                                                                                                                                                                                                                               |
 | test evidence class               | plain pass/fail over the suite                                                         | pass/fail **with instrumentation**, plus a metric derived from the same run | **no**                                                                                                                                                                                                                                |
 | other obligations in the same job | 6 non-test gates                                                                       | 3 ratchet gates, one of which needs full history                            | **no**                                                                                                                                                                                                                                |
@@ -588,19 +592,22 @@ examined:
 
 Two aggregates, both reading the **merge-queue SHA**, never a PR head.
 
-**Legacy gate** (`.github/workflows/merge-queue-gate.yml:70-170`):
+**Legacy gate** (`.github/workflows/merge-queue-gate.yml:77-385`):
 
-1. Resolve the gated sha: explicit input, else `GITHUB_SHA` on push, else the
-   `merge-queue` ref tip from the API (`:70-84`).
-2. Refuse on an empty wait list (`:94-99`) — an empty list would validate
+1. Resolve the gated sha: explicit input, else the `crq/promotion-review`
+   status's sha, else the `merge-queue` ref tip from the API (`:137-145`);
+   then require its promotion review (`:157-204`), else end green, awaiting.
+2. Refuse on an empty wait list (`:217-220`) — an empty list would validate
    nothing.
-3. `deadline = now + 20 min` (`:100`).
-4. Read `commits/${SHA}/check-runs?filter=latest`, all pages (`:116-118`).
-5. Fold **every** row per check name (`:119-136`): missing → wait; any
+3. `deadline = now + 20 min` (`:221`).
+4. Read `commits/${SHA}/check-runs?filter=latest`, all pages (`:237-239`).
+5. Fold **every** row per check name (`:241-277`): missing → wait; any
    incomplete → wait; `skipped` → **fail**; any non-success conclusion →
    **fail**; all rows success → pass. One verdict per name, never per row.
-6. Any failure → exit 1 immediately (`:158-160`); all pass → promote (`:161-164`);
-   deadline reached → exit 1 (`:165-168`). `sleep 30` between polls.
+6. Any failure → exit 1 immediately (`:279-281`); all pass → promote (`:282-285`);
+   deadline reached → exit 1 (`:286-289`). `sleep 30` between polls.
+7. Before the fast-forward push: the first-parent queue, ancestry and
+   reviewed-base guards, then a re-read of the review (`:327-373`).
 
 **Successor gate** (`.github/workflows/gate.yml:131-315` →
 `trust/dist/selfhost/promote-gate.js`):
