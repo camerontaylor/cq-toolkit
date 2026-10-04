@@ -155,6 +155,49 @@ async function pumped<T>(
   return promise;
 }
 
+/**
+ * Advance the clock in pump steps until `gated` fires — the gate-mid-run
+ * analogue of `pumped`. Freezing BETWEEN dispatches is what keeps a later
+ * job's pre-entry I/O from burning its own wall-clock budget: a ladder that
+ * arms while the pump is stopped cannot fire its abort rung before the op
+ * body is entered. A run that settles before the gate fired throws here: the
+ * caller's next gated await could never resolve, and failing loudly on the
+ * settlement (instead of at the framework timeout) keeps the run's own
+ * failure mode visible.
+ */
+async function pumpUntil<T>(
+  promise: Promise<T>,
+  clock: VirtualClock,
+  gated: () => boolean,
+  maxAdvance = 600_000,
+): Promise<void> {
+  let settled = false;
+  void promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  let advanced = 0;
+  while (!settled && !gated()) {
+    clock.advance(10);
+    advanced += 10;
+    if (advanced > maxAdvance) {
+      throw new Error(
+        `pumpUntil: gate not reached after advancing ${maxAdvance}ms of virtual time`,
+      );
+    }
+    await tick();
+  }
+  if (!gated()) {
+    throw new Error(
+      'pumpUntil: run settled before the gate fired — the gated await could never resolve',
+    );
+  }
+}
+
 /** Poll a condition across macrotask turns (deterministic, no real time). */
 async function waitFor(condition: () => boolean, what: string): Promise<void> {
   for (let i = 0; i < 10_000 && !condition(); i++) {
@@ -2297,23 +2340,60 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
         ),
         clock,
       );
+      let markHangEntered: () => void = () => {};
+      const hangEntered = new Promise<void>((resolve) => {
+        markHangEntered = resolve;
+      });
       const hangOp = async (): Promise<OpResult<unknown>> => {
+        markHangEntered();
         const ctx = currentJobContext();
         if (ctx !== undefined) ctx.signal.addEventListener('abort', () => {}); // ignored
         return new Promise<never>(() => {}); // hangs forever — only the ladder may end it
       };
+      // j2's gate: the SAME race one dispatch later. Once j1's kill frees the
+      // slot, j2's ladder arms a fresh 100ms wall-clock rung on this clock
+      // while its own pre-entry path (job-started append, plan-lock fence) is
+      // real I/O — CI-observed: under load the rung aborted j2 before entry
+      // and the `indeterminate` refusal folded back to `running` in statusOf.
+      let markOkEntered: () => void = () => {};
+      const okEntered = new Promise<void>((resolve) => {
+        markOkEntered = resolve;
+      });
+      const gatedOkOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+        markOkEntered();
+        return okOp(raw);
+      };
       const plan = independentPlan('plan-evidence', 2);
       plan.jobs[0] = { id: 'j1', op: 'hang', input: { jobId: 'j1' } };
       plan.jobs[1] = { id: 'j2', op: 'ok', input: { jobId: 'j2' } };
-      const report = await pumped(
-        runPlan(
-          plan,
-          { concurrency: 1, stopOnError: false, journalDir: dir },
-          viewWith(entry('hang', hangOp), entry('ok', okOp)),
-          { governor, allowAdvisory: true },
-        ),
-        clock,
+      const running = runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('hang', hangOp), entry('ok', gatedOkOp)),
+        { governor, allowAdvisory: true },
       );
+      // The pre-invocation fence does real I/O: hold the virtual clock until
+      // the body is entered, or a slow host burns the 100ms job budget first
+      // and the job ends as a never-ran cancel instead of a kill verdict.
+      await hangEntered;
+      // Then advance only until j1's kill verdict is recorded (in memory, so
+      // always before j2's dispatch begins) and freeze again through j2's
+      // pre-entry I/O — only then may time run.
+      await pumpUntil(running, clock, () =>
+        governor.events.some(
+          (event) =>
+            event.kind === 'completed' &&
+            event.jobKey === 'j1' &&
+            event.status === 'budget-exhausted',
+        ),
+      );
+      // The entry gate alone can strand here: if the run settles in this
+      // window (say j2's invocation fence fails), `okEntered` never resolves.
+      // Race it against the run so the runner's own rejection surfaces — or
+      // an early resolve falls through to the assertions below — instead of
+      // the framework timeout eating the failure and the finally cleanup.
+      await Promise.race([okEntered, running]);
+      const report = await pumped(running, clock);
 
       const events = await openRunLog(dir).read(report.runId);
       expect(events[0]).toMatchObject({ type: 'run-started', planId: 'plan-evidence' });
