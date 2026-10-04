@@ -184,6 +184,7 @@ spaces and metacharacters remain literal. Empty lists, directories, file symlink
 repository escapes and tooling metadata are rejected; deleted files are skipped.
 An all-deleted list is a successful no-op. Checks never format tracked files.
 `check` runs format, the static gate once, tests and Knip; CI uses the same scripts.
+It is not a local verification route ([focused-checks contract](../docs/focused-checks-contract.md) §1).
 
 ## Calibrated unused-code gate
 

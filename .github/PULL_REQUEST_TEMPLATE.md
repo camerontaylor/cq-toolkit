@@ -16,14 +16,14 @@ prevents opening the PR.
 
 ### Cycle 1
 
-- Gates before review (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
+- Gates before review (focused set: static / format / affected tests / knip per its condition / diff checks — base-to-HEAD, staged, unstaged exits):
 - Command (verbatim):
 - Reviewed HEAD: <!-- sha at review time -->
 - Dirty-diff identity: <!-- sha256 of `git diff --binary --full-index HEAD` after staging own new files; "clean tree" if committed -->
 - Log location: <!-- saved NDJSON path, outside the repo -->
 - Completion:
 - Findings (critical / major / minor / trivial):
-- Gates after addressing (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
+- Gates after addressing (focused set: static / format / affected tests / knip per its condition / diff checks — base-to-HEAD, staged, unstaged exits):
 
 ### Cycle 2
 
@@ -33,7 +33,7 @@ prevents opening the PR.
 - Log location:
 - Completion:
 - Findings (critical / major / minor / trivial):
-- Gates after addressing (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
+- Gates after addressing (focused set: static / format / affected tests / knip per its condition / diff checks — base-to-HEAD, staged, unstaged exits):
 
 ## Adjudications — every critical/major; remaining minors if material
 
@@ -43,14 +43,22 @@ prevents opening the PR.
 
 ## Final gates (actual exits, final implementation state)
 
-- [ ] `node scripts/ratchet-typecheck.mjs` — exit 0
-- [ ] `pnpm run lint` — exit 0
-- [ ] `pnpm run test` — exit 0
+Focused set, per [docs/focused-checks-contract.md](../docs/focused-checks-contract.md) —
+the static gate once (`lint`/`typecheck` are its aliases), the format check, the
+affected tests, Knip under its condition, and the three diff checks:
+
+- [ ] `pnpm run check:static` — exit 0 (once; `lint`/`typecheck` are aliases)
+- [ ] `pnpm run format:check` — exit 0
+- [ ] `pnpm exec vitest run <affected test files>` — exit 0, or not applicable (zero affected tests: record the determination and why the diff cannot affect any)
+- [ ] `pnpm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration, adds no file, adds or changes no import, and removes or rewires no last import)
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
 - [ ] `git diff --check` — clean (unstaged tracked)
 
-CI on the PR: build, from-source smoke, denylist scan + self-test.
+No local full-suite gate: `pnpm run test` / `test:unit` is CI's obligation (green
+required CI on the exact candidate SHA is the sole full-gate authority).
+
+CI on the PR: the full suite, build, from-source smoke, denylist scan + self-test.
 
 CLI cycles are author-side pre-PR evidence; the CodeRabbit App's PR review
 and non-author acceptance (doctrine I2) are judged on the opened PR at its
