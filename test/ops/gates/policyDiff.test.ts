@@ -1182,9 +1182,11 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
 
   test('a nested `uses:` continued onto the next line fails closed', async () => {
     const out = await judge('la-nested-continued');
+    // The unresolvable target is the action whose METADATA is ambiguous
+    // (gate), as for the hidden-line cases, not the action it names.
     expect(out.findings).toContainEqual({
       kind: 'required-check',
-      path: './.github/actions/inner',
+      path: './.github/actions/gate',
       reason: expect.stringContaining(
         `${GATE}: uses value continues onto the next line`,
       ) as unknown,
