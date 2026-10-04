@@ -1249,7 +1249,8 @@ _MODE_WHY: Dict[str, str] = {}
 BANNED_BOT_IDS = {202921479}
 BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
 GATE_UNSET = "@@UNSET-REVIEWER-BOT-LOGIN@@"
-GATE_PIN = re.compile(r"--arg bot_login '([^']*)'.*?--argjson bot_id (-?\d+)", re.S)
+GATE_PIN_LOGIN = re.compile(r"--arg bot_login '([^']*)'")
+GATE_PIN_ID = re.compile(r"--argjson bot_id (-?\d+)")
 
 
 def reviewer_identity() -> Optional[Tuple[str, int]]:
@@ -1273,12 +1274,17 @@ def promotion_mode_at(rev: str) -> str:
     if rev not in _MODE:
         p = run(["git", "show", f"{rev}:.github/workflows/merge-queue-gate.yml"], cwd=CLONE, check=False)
         text = p.stdout if p.returncode == 0 else ""
-        m = GATE_PIN.search(text)
+        # every rendered pin occurrence must agree (same rule as the signer's gate_pins_signer)
+        logins, ids = set(GATE_PIN_LOGIN.findall(text)), {int(x) for x in GATE_PIN_ID.findall(text)}
         ident = reviewer_identity()
-        if GATE_UNSET in text or (m and (m.group(1).startswith("@@UNSET") or int(m.group(2)) <= 0)):
+        if GATE_UNSET in text or any(x.startswith("@@UNSET") for x in logins) or any(x <= 0 for x in ids):
             _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", "the gate's reviewer identity is an UNSET sentinel"
-        elif m:
-            pinned = (m.group(1), int(m.group(2)))
+        elif logins or ids:
+            if len(logins) != 1 or len(ids) != 1:
+                _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", (f"the gate's reviewer pins are inconsistent "
+                                                                    f"(logins {sorted(logins)}, ids {sorted(ids)})")
+                return _MODE[rev]
+            pinned = (next(iter(logins)), next(iter(ids)))
             if ident and ident == pinned:
                 _MODE[rev] = "signer"
             else:
