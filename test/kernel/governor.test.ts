@@ -2375,7 +2375,11 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
       // The pre-invocation fence does real I/O: hold the virtual clock until
       // the body is entered, or a slow host burns the 100ms job budget first
       // and the job ends as a never-ran cancel instead of a kill verdict.
-      await hangEntered;
+      // Raced against the run like `okEntered` below: if the run settles
+      // before j1's body is entered, its rejection surfaces here (an early
+      // resolve falls through to pumpUntil's settled-before-gate throw)
+      // instead of stranding until the framework timeout.
+      await Promise.race([hangEntered, running]);
       // Then advance only until j1's kill verdict is recorded (in memory, so
       // always before j2's dispatch begins) and freeze again through j2's
       // pre-entry I/O — only then may time run.
