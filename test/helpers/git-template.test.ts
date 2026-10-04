@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { cloneTemplate, createGitTemplate, scrubbedGitEnv } from './git-template.js';
+import { scrubbedGitEnv } from './git-env.js';
+import { cloneTemplate, createGitTemplate } from './git-template.js';
 
 function git(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {

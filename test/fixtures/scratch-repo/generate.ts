@@ -20,7 +20,7 @@
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scrubbedGitEnv } from '../../helpers/git-template.js';
+import { scrubbedGitEnv } from '../../helpers/git-env.js';
 
 /** The seeded alpha failure message — stable across every probe of any run. */
 export const ALPHA_FAILURE_MESSAGE = 'expected 3, got 2';
