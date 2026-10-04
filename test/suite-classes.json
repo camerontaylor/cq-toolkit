@@ -27,6 +27,7 @@
   "test/e2e/merge/live.test.ts": "integration",
   "test/e2e/review/live.test.ts": "integration",
   "test/e2e/sweep/sweep.e2e.test.ts": "integration",
+  "test/global-setup.test.ts": "pure",
   "test/harness/git-closed-forms.test.ts": "process",
   "test/harness/mcp-bin.test.ts": "process",
   "test/harness/mcp-server.test.ts": "process",
