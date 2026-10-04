@@ -1,29 +1,23 @@
-// W2.4 process proofs. No TTL stealing, TMPDIR split, or stale-owner unlink.
-import {
-  spawn,
-  type ChildProcess,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptions,
-} from 'node:child_process';
+// W2.4 process proofs. No record TTL stealing (only the acquisition guard
+// lease ages out), TMPDIR split, or stale-owner unlink.
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import {
-  access,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
-  rename,
   rm,
   stat,
   unlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { LockOptions } from 'proper-lockfile';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { createGovernor } from '../../src/kernel/governor.js';
@@ -31,23 +25,61 @@ import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { Op, OpRegistryEntry } from '../../src/kernel/types.js';
 
-const helperHooks = vi.hoisted(() => ({
-  spawn: undefined as
-    | ((args: readonly string[], options: SpawnOptions) => ChildProcess)
-    | undefined,
+// Event gates only: the guard library and the filesystem run for real; the
+// hooks observe its options and pause at named publication points.
+const hooks = vi.hoisted(() => ({
+  guardAcquired: undefined as ((options: LockOptions) => void) | undefined,
+  beforeClaim: undefined as (() => Promise<void>) | undefined,
+  afterPublication: undefined as (() => void) | undefined,
 }));
-vi.mock('node:child_process', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
+vi.mock('proper-lockfile', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('proper-lockfile')>();
   return {
     ...actual,
-    spawn(file: string, args: readonly string[], options: SpawnOptions) {
-      if (file === '/usr/bin/perl' && helperHooks.spawn !== undefined) {
-        return helperHooks.spawn(args, options);
-      }
-      return actual.spawn(file, args, options);
+    async lock(file: string, options?: LockOptions) {
+      const release = await actual.lock(file, options);
+      hooks.guardAcquired?.(options ?? {});
+      return release;
     },
   };
 });
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async link(...args: Parameters<typeof actual.link>) {
+      // A succession claim: eligibility has been decided, nothing published.
+      if (typeof args[1] === 'string' && args[1].endsWith('.claim')) await hooks.beforeClaim?.();
+      await actual.link(...args);
+    },
+    async open(...args: Parameters<typeof actual.open>) {
+      const handle = await actual.open(...args);
+      // The post-publication owner handle: the record is canonical.
+      if (typeof args[0] === 'string' && args[0].endsWith('.lock.json') && args[1] === 'r+') {
+        hooks.afterPublication?.();
+      }
+      return handle;
+    },
+  };
+});
+
+// proper-lockfile judges staleness by the guard directory's mtime against
+// the wall clock (Date.now() - stale). Tests age a lease as data — an mtime
+// at the epoch — instead of waiting out the real 30s window.
+const LEASE_EPOCH = new Date(0);
+const GUARD = 'locked.lock.guard.lock';
+function compromisedError(): Error {
+  return Object.assign(new Error('Unable to update lock within the stale threshold'), {
+    code: 'ECOMPROMISED',
+  });
+}
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 // Run the actual sources in another process without a build or extra package.
 // Node's strip-types supplies the TS syntax; the loader maps source .js imports.
@@ -66,6 +98,7 @@ const script = `
 import { acquirePlanLock, claimSeq, openRunLog } from ${JSON.stringify(journalUrl)};
 import { createInterface } from 'node:readline';
 import cp from 'node:child_process';
+import os from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
 let bootCalls = 0;
@@ -81,18 +114,17 @@ if (process.env.J_TEST_BOOT_CACHE === 'yes') {
   syncBuiltinESMExports();
 }
 if (process.env.J_TEST_PAUSE_PUBLICATION === 'yes') {
-  const original = cp.spawn;
-  cp.spawn = (...args) => {
-    const child = original(...args);
-    if (args[0] === '/usr/bin/perl') {
-      child.prependOnceListener('close', (code) => {
-        if (code === 0) {
-          console.log(JSON.stringify({ status: 'publication-held', helperExit: code }));
-          process.kill(process.pid, 'SIGSTOP');
-        }
-      });
+  // hostname() is first called while building the record: the guard lease
+  // is held and nothing is published yet.
+  const original = os.hostname;
+  let paused = false;
+  os.hostname = () => {
+    if (!paused) {
+      paused = true;
+      console.log(JSON.stringify({ status: 'publication-held' }));
+      process.kill(process.pid, 'SIGSTOP');
     }
-    return child;
+    return original();
   };
   syncBuiltinESMExports();
 }
@@ -151,8 +183,10 @@ interface Worker {
   next(): Promise<Message>;
   exited: Promise<void>;
 }
-// Mirrors journal.ts private 10s helper + 10s boot bounds; the remaining
-// 5s covers measured Node/loader startup. Update on source-bound drift.
+// Mirrors journal.ts's private 10s boot bound; the remaining 15s covers
+// measured Node/loader startup and guard/record I/O under load (the retired
+// flock helper's 10s slot, kept until re-measured). Update on source-bound
+// drift.
 const CHILD_STEP_MS = 2 * 10_000 + 5_000;
 const workers: Worker[] = [];
 const directories: string[] = [];
@@ -233,8 +267,22 @@ async function record(dir: string): Promise<Record<string, unknown>> {
   if (typeof value.socketPath === 'string') sockets.add(value.socketPath);
   return value;
 }
+function workRegistry(calls: string[]): OpRegistryView {
+  const candidate: OpRegistryEntry<never, never> = {
+    name: 'work',
+    inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
+    importer: () =>
+      Promise.resolve((async () => {
+        calls.push('a');
+        return { status: 'ok', value: 'a' };
+      }) as unknown as Op<never, never>),
+  };
+  return { get: () => candidate };
+}
 afterEach(async () => {
-  helperHooks.spawn = undefined;
+  hooks.guardAcquired = undefined;
+  hooks.beforeClaim = undefined;
+  hooks.afterPublication = undefined;
   for (const worker of workers.splice(0)) {
     if (worker.child.exitCode === null && worker.child.signalCode === null) {
       worker.child.kill('SIGCONT');
@@ -335,16 +383,7 @@ test(
     owner.child.kill('SIGKILL');
     await owner.exited;
     const calls: string[] = [];
-    const candidate: OpRegistryEntry<never, never> = {
-      name: 'work',
-      inputSchema: z.object({ id: z.string() }) as unknown as z.ZodType<never>,
-      importer: () =>
-        Promise.resolve((async () => {
-          calls.push('a');
-          return { status: 'ok', value: 'a' };
-        }) as unknown as Op<never, never>),
-    };
-    const registry: OpRegistryView = { get: () => candidate };
+    const registry = workRegistry(calls);
     const governor = createGovernor({ maxUsd: 10 });
     const report = await runPlan(
       { id: 'locked', jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
@@ -504,103 +543,9 @@ test('an interrupted publication guard refuses without unsafe automatic reclamat
   await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-function fakeHelper(code: number | null, signal: NodeJS.Signals | null = null, error?: Error) {
-  const child = new EventEmitter() as unknown as ChildProcess;
-  const kill = vi.fn(() => {
-    queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
-    return true;
-  });
-  child.kill = kill;
-  queueMicrotask(() => {
-    if (error !== undefined) child.emit('error', error);
-    child.emit('close', code, signal);
-  });
-  return { child, kill };
-}
-
-test.each([
-  { code: 3, signal: null, message: 'acquisition in progress or interrupted' },
-  { code: 4, signal: null, message: 'capability failed' },
-  { code: 2, signal: null, message: 'capability failed' },
-  { code: null, signal: 'SIGTERM' as const, message: 'capability failed' },
-])(
-  'flock helper refuses exit=$code signal=$signal without record publication',
-  async ({ code, signal, message }) => {
-    const dir = await directory();
-    helperHooks.spawn = (args, options) => {
-      expect(args).toEqual(['-e', 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))']);
-      expect(options.stdio).toEqual([expect.any(Number), 'ignore', 'pipe']);
-      return fakeHelper(code, signal).child;
-    };
-    await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow(message);
-    expect(await readFile(join(dir, 'locked.lock.guard'), 'utf8')).toBe('');
-    await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-  },
-);
-
-test('missing flock helper refuses and closes its guard descriptor', async () => {
-  const dir = await directory();
-  helperHooks.spawn = () =>
-    fakeHelper(-2, null, Object.assign(new Error('missing helper'), { code: 'ENOENT' })).child;
-  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toMatchObject({
-    cause: { code: 'ENOENT' },
-  });
-  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-});
-
-test('hung flock helper is killed and reaped before startup/completion deadline refusal', async () => {
-  const dir = await directory();
-  const child = new EventEmitter() as unknown as ChildProcess;
-  let reaped = false;
-  const kill = vi.fn(() => {
-    queueMicrotask(() => {
-      reaped = true;
-      child.emit('close', null, 'SIGKILL');
-    });
-    return true;
-  });
-  child.kill = kill;
-  helperHooks.spawn = () => child;
-  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow(
-    'startup/completion deadline exceeded after 10000ms (possible slow host)',
-  );
-  expect(kill).toHaveBeenCalledWith('SIGKILL');
-  expect(reaped).toBe(true);
-  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-}, 15000);
-
-test('post-flock inode replacement refuses before publishing a record', async () => {
-  const dir = await directory();
-  const guardPath = join(dir, 'locked.lock.guard');
-  helperHooks.spawn = () => {
-    const child = new EventEmitter() as unknown as ChildProcess;
-    child.kill = () => true;
-    (async () => {
-      await rename(guardPath, `${guardPath}.displaced`);
-      await writeFile(guardPath, '');
-      child.emit('close', 0, null);
-    })().catch((error: unknown) => {
-      child.emit('error', error);
-      child.emit('close', 4, null);
-    });
-    return child;
-  };
-  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow('inode changed');
-  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-});
-
-test('invalid inherited descriptor fails closed without publication', async () => {
-  const dir = await directory();
-  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-  helperHooks.spawn = (args, options) =>
-    actual.spawn('/usr/bin/perl', args, { ...options, stdio: [2147483647, 'ignore', 'pipe'] });
-  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toThrow();
-  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
-});
-
-// Enclosure: seed and paused child each 25s; cached parent contention/recovery share remaining 25s.
+// Enclosure: seed and paused child each 25s; parent contention/recovery share remaining 25s.
 test(
-  'helper-exit handshake retains exclusion through SIGSTOP; SIGKILL recovers a complete record',
+  'guard lease retains exclusion through SIGSTOP; a SIGKILLed holder recovers once its lease is stale',
   async () => {
     const dir = await directory();
     const path = join(dir, 'locked.lock.json');
@@ -610,68 +555,225 @@ test(
     const prior = await readFile(path, 'utf8');
     const held = start(dir, 'interrupted', { J_TEST_PAUSE_PUBLICATION: 'yes' });
     expect(await held.next()).toMatchObject({ status: 'publication-held' });
-    const inode = await stat(join(dir, 'locked.lock.guard'));
     await expect(acquirePlanLock(dir, 'locked', 'contender')).rejects.toThrow(
       'acquisition in progress',
     );
     expect(await readFile(path, 'utf8')).toBe(prior);
     held.child.kill('SIGKILL');
     await held.exited;
+    // The trade against flock: death no longer releases the guard. Until
+    // the dead holder's lease is stale, acquisition still refuses as busy.
+    await expect(acquirePlanLock(dir, 'locked', 'too-soon')).rejects.toThrow(
+      'acquisition in progress',
+    );
+    expect(await readFile(path, 'utf8')).toBe(prior);
+    await utimes(join(dir, GUARD), LEASE_EPOCH, LEASE_EPOCH);
     const recovered = await acquirePlanLock(dir, 'locked', 'recovered');
     try {
       await recovered.assertHeld();
     } finally {
       await recovered.release();
     }
-    const after = await stat(join(dir, 'locked.lock.guard'));
-    expect({ dev: after.dev, ino: after.ino, size: after.size }).toEqual({
-      dev: inode.dev,
-      ino: inode.ino,
-      size: 0,
-    });
     expect((await record(dir)).runId).toBe('recovered');
+    expect(await readdir(dir)).not.toContain(GUARD);
   },
   3 * CHILD_STEP_MS,
 );
 
-// Enclosure: four helper-only calls at 10s plus 10s control/I/O margin.
+/** Gate the next succession claim only: the judgment is made, nothing is published. */
+function gateNextClaim(): { judged: Promise<void>; resume: () => void } {
+  const judged = deferred();
+  const resume = deferred();
+  hooks.beforeClaim = async () => {
+    hooks.beforeClaim = undefined;
+    judged.resolve();
+    await resume.promise;
+  };
+  return { judged: judged.promise, resume: resume.resolve };
+}
+
+test('a stale guard lease taken over cannot let its displaced holder publish over the new owner', async () => {
+  const dir = await directory();
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const seedNonce = String((await record(dir)).nonce);
+  const gate = gateNextClaim();
+  const displaced = acquirePlanLock(dir, 'locked', 'displaced').then(
+    () => 'acquired',
+    (error: unknown) => (error as Error).message,
+  );
+  let owner: Awaited<ReturnType<typeof acquirePlanLock>> | undefined;
+  try {
+    // The displaced holder judged the seed tombstone reclaimable and holds
+    // the guard. Its lease goes stale (a stall past `stale`): a new owner
+    // takes the guard over and claims the same tombstone first.
+    await gate.judged;
+    await utimes(join(dir, GUARD), LEASE_EPOCH, LEASE_EPOCH);
+    owner = await acquirePlanLock(dir, 'locked', 'owner');
+    const owned = await record(dir);
+    expect(owned).toMatchObject({ runId: 'owner' });
+    const ownedInode = await stat(join(dir, 'locked.lock.json'));
+    gate.resume();
+    // The seed's claim is taken by a live, unreleased owner: refuse, never
+    // replace (the canonical record was never touched, inode included).
+    expect(await displaced).toContain("plan locked by 'owner'");
+    expect(await record(dir)).toEqual(owned);
+    const after = await stat(join(dir, 'locked.lock.json'));
+    expect({ dev: after.dev, ino: after.ino }).toEqual({
+      dev: ownedInode.dev,
+      ino: ownedInode.ino,
+    });
+    expect(
+      JSON.parse(await readFile(join(dir, `locked.lock.json.${seedNonce}.claim`), 'utf8')),
+    ).toEqual(owned);
+    await owner.assertHeld();
+    await owner.release();
+    expect(await record(dir)).toEqual({ ...owned, released: true });
+  } finally {
+    gate.resume();
+    await displaced;
+    await owner?.release();
+  }
+  expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+});
+
+// Enclosure: one child acquisition plus its release.
 test(
-  'live inherited-descriptor flock retains same-process exclusion after helper exit',
-  async (context) => {
-    try {
-      await access('/usr/bin/perl');
-    } catch {
-      context.skip();
-      return;
-    }
+  'a stale judgment walks the succession past a released claimant instead of replacing blindly',
+  async () => {
     const dir = await directory();
-    const path = join(dir, 'live.guard');
-    const first = await open(path, 'a+', 0o600);
-    const second = await open(path, 'a+', 0o600);
-    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
-    const flock = (fd: number) =>
-      new Promise<number | null>((resolve, reject) => {
-        const helper = actual.spawn(
-          '/usr/bin/perl',
-          ['-e', 'exit(flock(STDIN,6)?0:(($!{EWOULDBLOCK}||$!{EAGAIN})?3:4))'],
-          { stdio: [fd, 'ignore', 'pipe'] },
-        );
-        helper.once('error', reject);
-        helper.once('close', (code) => resolve(code));
-      });
+    const seed = await acquirePlanLock(dir, 'locked', 'seed');
+    await seed.release();
+    const gate = gateNextClaim();
+    const late = acquirePlanLock(dir, 'locked', 'late');
+    void late.catch(() => undefined); // observed below
     try {
-      expect(await flock(first.fd)).toBe(0); // holder handshake before contender
-      expect(await flock(second.fd)).toBe(3);
-      expect(await flock(first.fd)).toBe(0); // same OFD is a reference to one lock
-      await first.close();
-      expect(await flock(second.fd)).toBe(0);
+      await gate.judged;
+      // While the late acquirer's judgment of the seed is stale, another
+      // process takes the aged guard over, claims the seed, owns, releases.
+      // (Cross-process, as in production: proper-lockfile keeps one lock
+      // entry per path per process.)
+      await utimes(join(dir, GUARD), LEASE_EPOCH, LEASE_EPOCH);
+      const between = start(dir, 'between');
+      expect((await between.next()).status).toBe('acquired');
+      between.child.stdin.write('release\n');
+      expect((await between.next()).status).toBe('released');
+      await between.exited;
+      const tombstone = await record(dir);
+      expect(tombstone).toMatchObject({ runId: 'between', released: true });
+      gate.resume();
+      // The seed's claim names 'between', whose canonical record is its
+      // released tombstone: the late acquirer succeeds IT, by its own claim.
+      const lease = await late;
+      try {
+        await lease.assertHeld();
+        expect(await record(dir)).toMatchObject({ runId: 'late' });
+        expect(
+          JSON.parse(
+            await readFile(join(dir, `locked.lock.json.${String(tombstone.nonce)}.claim`), 'utf8'),
+          ),
+        ).toMatchObject({ runId: 'late' });
+      } finally {
+        await lease.release();
+      }
     } finally {
-      await first.close().catch(() => undefined);
-      await second.close();
+      gate.resume();
+      await late.catch(() => undefined);
     }
   },
   2 * CHILD_STEP_MS,
 );
+
+test('a claimant that died between claim and publication is succeeded, not wedged', async () => {
+  const dir = await directory();
+  const path = join(dir, 'locked.lock.json');
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const prior = await record(dir);
+  // A crashed reclaimer: its claim on the seed exists, its record was never
+  // published, and its pid/socket are dead on this host.
+  const crashed = {
+    nonce: randomUUID(),
+    socketPath: '/tmp/no-such-cq-j.sock',
+    pid: 2147483647,
+    host: prior.host,
+    bootId: prior.bootId,
+    runId: 'crashed',
+  };
+  await writeFile(`${path}.${String(prior.nonce)}.claim`, JSON.stringify(crashed));
+  const lease = await acquirePlanLock(dir, 'locked', 'recovered');
+  try {
+    await lease.assertHeld();
+    expect(await record(dir)).toMatchObject({ runId: 'recovered' });
+    expect(JSON.parse(await readFile(`${path}.${crashed.nonce}.claim`, 'utf8'))).toMatchObject({
+      runId: 'recovered',
+    });
+  } finally {
+    await lease.release();
+  }
+});
+
+test('a guard lease compromised before publication refuses as lock-lost and publishes nothing', async () => {
+  const dir = await directory();
+  hooks.guardAcquired = (options) => {
+    // The handler records; it must never throw into the library's timer.
+    expect(() => options.onCompromised?.(compromisedError())).not.toThrow();
+  };
+  await expect(acquirePlanLock(dir, 'locked', 'compromised')).rejects.toMatchObject({
+    message: expect.stringContaining('lock-lost while acquiring') as unknown,
+    cause: { code: 'ECOMPROMISED' },
+  });
+  expect(await readdir(dir)).toEqual([]);
+});
+
+test('a guard lease compromised after publication rolls back to our released tombstone', async () => {
+  const dir = await directory();
+  let compromise: (() => void) | undefined;
+  hooks.guardAcquired = (options) => {
+    compromise = () => options.onCompromised?.(compromisedError());
+  };
+  hooks.afterPublication = () => compromise?.();
+  await expect(acquirePlanLock(dir, 'locked', 'compromised')).rejects.toThrow(
+    'lock-lost while acquiring',
+  );
+  expect(await record(dir)).toMatchObject({ runId: 'compromised', released: true });
+  expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  hooks.guardAcquired = undefined;
+  hooks.afterPublication = undefined;
+  // A tombstone is reclaimable: the loss wedges nothing.
+  const next = await acquirePlanLock(dir, 'locked', 'next');
+  await next.release();
+});
+
+test('runPlan treats a compromised guard lease as lease loss before reading or journaling history', async () => {
+  const dir = await directory();
+  hooks.guardAcquired = (options) => options.onCompromised?.(compromisedError());
+  const calls: string[] = [];
+  await expect(
+    runPlan(
+      { id: 'locked', jobs: [{ id: 'a', op: 'work', input: { id: 'a' } }] },
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      workRegistry(calls),
+    ),
+  ).rejects.toThrow('lock-lost');
+  expect(calls).toEqual([]);
+  // No run file, seq claim, lock record, temporary, or guard directory.
+  expect(await readdir(dir)).toEqual([]);
+});
+
+test('a guard fault other than a held lease refuses without record publication', async () => {
+  const dir = await directory();
+  // A stale non-directory at the guard name: the library's stale removal
+  // (rmdir) fails, which is a fault, not contention.
+  await writeFile(join(dir, GUARD), '');
+  await utimes(join(dir, GUARD), LEASE_EPOCH, LEASE_EPOCH);
+  await expect(acquirePlanLock(dir, 'locked', 'refused')).rejects.toMatchObject({
+    message: expect.stringContaining('publication guard') as unknown,
+    cause: { code: 'ENOTDIR' },
+  });
+  await expect(readFile(join(dir, 'locked.lock.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readFile(join(dir, GUARD), 'utf8')).toBe('');
+});
 
 // Enclosure: three sequential child acquisitions; first failure must remain retryable.
 test(
