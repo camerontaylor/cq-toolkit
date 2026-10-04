@@ -150,6 +150,54 @@ status, and crq posts that status.
   `gh api user` is `camerontaylor` (User) and refuses otherwise, because a non-allowed creator
   turns the gate red. Config: `config.json` `promotion`.
 
+### Signer mode (cq-reviewer[bot], contract v1 with 4cc7efeb)
+
+Signer mode switches on by itself. It is active once **`origin/main`**'s
+`.github/workflows/merge-queue-gate.yml` contains both `cq-reviewer[bot]` and
+`promotion.signer.reviewer_bot_id` (cq-toolkit PR-B). There is no manual flip. If the gate names
+the login but the id is unset or differs, crq is in `signer_unconfigured`: promotion **halts**
+with an alert and crq posts no User statuses, because the gate would refuse them red.
+Otherwise, user mode behaves as described above.
+
+In signer mode the signer, the dedicated `crq` macOS user, runs the CodeRabbit CLI, does the
+secret scan, and posts every status. crq judges nothing and posts nothing:
+
+- **Request**: crq writes `/Users/Shared/crq-spool/requests/<id>.json` with
+  `{v,kind:"promotion",item,base_sha,batch_sha,requested_at}`.
+  - The write is atomic (tmp + rename), and the file is never rewritten.
+  - The id matches `promo-<sha10>` plus up to three `+`. Ids are fresh: not used in the queue
+    or in `results/`.
+  - At most one request is outstanding.
+  - A request counts as a start and as in flight under crq's ≤5/h and ≤2 limits.
+  - Every request is a FULL `main..batch` review. There are no deltas.
+- **Claim / stall**: `results/<id>.claimed` means the run is in flight. crq alerts if a claimed
+  run has no result after 90 min, or a request stays unclaimed for 30 min (signer down).
+  - If `main` moves before the claim, crq withdraws its own request and re-cuts.
+- **Result**: `results/<id>.json` must echo the item, base and batch, plus
+  `request_sha256` of crq's bytes. On a mismatch crq alerts and ignores the file.
+  - `completed`+`success` → `promoting`.
+  - `completed`+`failure` → `findings`. The banner names the conductor, whose
+    `promotion-resolve` triggers a full re-review of `main..newest-green-tip`. There is no
+    agent-judged success.
+  - `skipped`/`too_large` → halve (as in user mode, but every prefix is a full review).
+  - `rate_limited` → global cooldown, then a fresh id.
+  - `auth` → queue pause plus an alert.
+  - `error`/`interrupted` → backoff, then a fresh id.
+  - `secret_scan_blocked` → alert.
+  - `rejected` → done if the reason is success-present or already-in-main. Re-cut if `main`
+    moved or the checks are not green. Alert for anything else.
+  - Findings and severity counts go to `state/ledger/promotion-findings.md`.
+- **Switch-over**: a user-era promotion still open when the gate switches is re-requested
+  once as a signer item.
+- **Audit**: the advance is judged by the gate that ran, i.e. the previous `main`'s copy.
+  - Primary rule: the newest status by (`cq-reviewer[bot]`, `Bot`, `creator.id ==
+    reviewer_bot_id`) must be `success`, and its `main=<base>` must be contained in the previous
+    `main`. Otherwise **UNVERIFIED** with an alert.
+  - `override…` statuses are logged, not alerted.
+  - Corroboration is informational (`promotion_uncorroborated` event): `crq#<id>` is a crq item
+    for this batch, and its result has `posted.status_id`/`state` matching the authorizing
+    status and `request_sha256` matching crq's request.
+
 ### Promotion audit (compensating control for #269's accepted P1)
 
 Any fleet agent that holds the owner's `gh` auth can post `crq/promotion-review`. So every

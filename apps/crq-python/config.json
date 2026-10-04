@@ -40,6 +40,13 @@
     "poster": "camerontaylor",
     "alert_agent_id": "00000000-0000-4000-8000-000000000004",
     "allowed_reviewers": [],
-    "resolver": "conductor (acceptance conductor reviewer-example)"
+    "resolver": "conductor (acceptance conductor reviewer-example)",
+    "signer": {
+      "spool_dir": "/Users/Shared/crq-spool",
+      "app_login": "cq-reviewer[bot]",
+      "reviewer_bot_id": null
+    },
+    "signer_stall_min": 90,
+    "signer_down_min": 30
   }
 }
