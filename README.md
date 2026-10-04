@@ -137,9 +137,8 @@ the focused set in [docs/focused-checks-contract.md](docs/focused-checks-contrac
 `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `pnpm lint:fast <file...>`
-or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting,
-then runs the full-project static gate — use the contract's validated leaf
-commands when you want fixes without that gate. Build, smoke and denylist remain
-separate gates.
+or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting
+of those files only; it runs no static gate, so run `pnpm run check:static` for
+dependents. Build, smoke and denylist remain separate gates.
 See [local static policy](lint/README.md) for pins, compiler fallback evidence,
 rule decisions and compatibility changes.

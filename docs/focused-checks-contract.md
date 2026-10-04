@@ -100,72 +100,36 @@ owner.
 A passing focused test does not prove its dependents; that is exactly what the
 candidate run is for.
 
-## 3. `pnpm fix` is not file-scoped
+## 3. `pnpm fix` is file-scoped
 
-`pnpm fix <owned-file...>` rewrites only the listed files, but it **always
-ends by running the full-project static gate** (`scripts/fix.mjs` runs
-`scripts/ratchet-typecheck.mjs` with no file list, including for deleted-only
-inputs). It is therefore a full-project static gate wearing a file-scoped
-costume — never use it as routine per-turn feedback.
+`pnpm fix <owned-file...>` runs safe Oxlint fixes and Oxfmt on the listed
+files **only**; it launches no static gate and no tests (`scripts/fix.mjs`,
+fix-only since #255). It is the supported per-file fix route. The
+project-wide static gate is its own explicit command, `pnpm run check:static`,
+run at the checkpoints in §1 — a file-scoped fix never establishes the
+correctness of dependents.
 
-Invoking the leaf tools directly **bypasses** the containment checks in
-`scripts/lib/owned-files.mjs`, so validate the same list through that module
-first; it rejects a path outside the repository, a `.git`/`node_modules`/
-`.agents`/`.codex` entry, a symlink, and a non-regular file, and exits non-zero
-before any tool runs:
+Before any tool runs, `scripts/fix.mjs` validates the list through
+`scripts/lib/owned-files.mjs`, which rejects a path outside the repository, a
+`.git`/`node_modules`/`.agents`/`.codex` entry, a symlink, and a non-regular
+file, and exits non-zero. `ownedFiles()` deliberately accepts a deleted path and
+then omits it from its return value, and it de-duplicates, so both tools
+receive exactly the surviving regular files: a deleted-only list is a no-op
+(`fix: only deleted files; no files to rewrite`), and a mixed diff formats and
+fixes only the files that still exist. Suggestions and dangerous fixes are
+excluded; formatting receives the same argument list as the lint fixes.
 
-```bash
-( # subshell: `set -e` fail-fast without killing the caller's shell
-set -e
-OWNED=$(mktemp)
-trap 'rm -f "$OWNED"' EXIT
-# 1. validate AND filter → a private mktemp list: the surviving regular files, NUL-separated
-#    (paths containing spaces survive), and an EMPTY file when nothing survives
-OWNED="$OWNED" node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { ownedFiles } from "./scripts/lib/owned-files.mjs"; writeFileSync(process.env.OWNED, ownedFiles(process.argv.slice(1)).join("\0"));' -- <files>
-# 2. safe lint fixes for THAT list (safe fixes only; suggestions and dangerous fixes are excluded);
-#    oxlint's exit 1 (findings left, nothing lintable, or a config error) is tolerated INSIDE
-#    the per-batch wrapper; any higher exit fails xargs (123 GNU, 1 BSD) and `set -e` stops
-if [ -s "$OWNED" ]; then
-  xargs -0 sh -c 'node node_modules/oxlint/bin/oxlint --config .oxlintrc.json --disable-nested-config --fix "$@" || [ $? -eq 1 ]' sh < "$OWNED"
-else
-  echo "owned-files: nothing to rewrite (empty or deleted-only list)"
-fi
-# 3. formatting for exactly the same paths
-if [ -s "$OWNED" ]; then
-  xargs -0 node node_modules/oxfmt/bin/oxfmt < "$OWNED"
-else
-  echo "owned-files: nothing to format (empty or deleted-only list)"
-fi
-)
-```
+Oxlint's exit 1 (findings left, nothing lintable — e.g. a docs-only list — or an
+unreadable configuration) is tolerated and passed through as `pnpm fix`'s exit
+status; anything above 1, and any Oxfmt failure, fails the command. A
+`pnpm fix` exit of 0 or 1 is therefore not a lint verdict: read its output, and
+take the verdict from `lint:fast` or the static gate.
 
-**Validate-then-substitute: steps 2 and 3 consume step 1's output, never the
-original `<files>` list.** `ownedFiles()` deliberately accepts a deleted path and
-then omits it from its return value, and it also de-duplicates; passing the raw
-list on would hand deleted or repeated paths to a mutating tool. A deleted-only
-diff yields an empty `$OWNED` list, both `if` branches take the
-`else` path, and the sequence ends as a no-op — the same outcome
-`scripts/fix.mjs` reports for deleted-only inputs. A mixed diff formats and fixes
-only the files that still exist. The guard must test emptiness rather than
-pipe a blank line into the tools: `xargs` ignores blank input, so an unguarded
-command would run with **no file arguments** — the repository-wide invocation
-the next paragraph forbids.
-
-This is the canonical spelling of the leaf commands; `AGENTS.md` repeats it
-verbatim rather than varying it. Invoke the pinned binaries through `node`
-rather than `pnpm dlx`, which can resolve a newer oxlint/oxfmt than the pinned
-devDependency. On a docs-only list `oxlint` reports "No files found to lint" and
-exits 1 — the level `scripts/fix.mjs` tolerates (it throws only above 1) — while
-the formatting step still applies. Exit 1 is also oxlint's status for remaining
-findings and for an unreadable configuration, so a green block is not a lint
-verdict: read its output, and take the verdict from `lint:fast` or the static gate.
-
-Validation is a separate process from the mutation, so this is check-then-act,
-not a lock: re-run step 1 whenever the list changes. Batch supported files into
-one invocation per tool, never omit the file list, and never substitute a
-repository-wide glob. `pnpm run format:check` remains the
-read-only whole-tree formatting check — a candidate-level check, not per-turn
-feedback.
+Never invoke the leaf tools (`oxlint --fix`, `oxfmt`) directly: that bypasses
+the containment checks above, and an invocation that omits the file list or
+substitutes a repository-wide glob rewrites the whole tree. `pnpm run
+format:check` remains the read-only whole-tree formatting check — a
+candidate-level check, not per-turn feedback.
 
 Read-only syntactic feedback on an explicit list is genuinely file-scoped and
 is the right default:
@@ -173,9 +137,6 @@ is the right default:
 ```bash
 pnpm lint:fast <owned-file...>
 ```
-
-`scripts/fix.mjs` itself is tracked for a later change that gives it fix-only
-behaviour; until then the three steps above are the supported route.
 
 ## 4. Records
 

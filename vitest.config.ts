@@ -12,14 +12,122 @@
 // sub-granularity and must never decide a ratchet) — plus `text` for the
 // human-readable table. Opt-in per run via --coverage; plain `vitest run` is
 // unchanged.
+//
+// Projects (execution-policy slice 2, component D): every test/**/*.test.ts
+// is classified in test/suite-classes.json as pure | process | integration |
+// live. The projects below derive their file lists from that manifest, so
+// the classification is auditable and a file absent from the manifest falls
+// into `process` (conservative: real-process budgets, serial; this includes
+// the lint/rules RuleTester suites). The process-backed projects carry
+// distinct `sequence.groupOrder`s (process 1, live 2, integration 3) so a
+// bare run keeps the old root-level global serialization: same-order
+// projects run concurrently, different orders run one after another.
+// Selection:
+//   npm run test:unit == --project pure --project process --project live
+//   npm run test:e2e  == --project integration
+// Coverage and reporters stay ROOT-level (they are absent from the
+// per-project options), so the ratchet's bare `vitest run --coverage` still
+// runs every project and writes one coverage/coverage-summary.json.
+import { existsSync, readFileSync } from 'node:fs';
 import { configDefaults, defineConfig } from 'vitest/config';
+
+type SuiteClass = 'pure' | 'process' | 'integration' | 'live';
+
+const manifest = JSON.parse(
+  readFileSync(new URL('./test/suite-classes.json', import.meta.url), 'utf8'),
+) as Record<string, SuiteClass>;
+const filesOf = (cls: SuiteClass): string[] =>
+  Object.entries(manifest)
+    .filter(([, c]) => c === cls)
+    .map(([file]) => file);
+
+const suiteClasses: readonly string[] = ['pure', 'process', 'integration', 'live'];
+for (const [file, cls] of Object.entries(manifest)) {
+  // Drift is loud: a stale manifest entry would silently shrink a project,
+  // and a misspelled class would silently demote the file to `process`.
+  if (!existsSync(new URL(`./${file}`, import.meta.url))) {
+    throw new Error(`test/suite-classes.json lists a missing file: ${file}`);
+  }
+  if (file.startsWith('test/e2e/') && cls !== 'integration') {
+    throw new Error(`test/suite-classes.json must classify ${file} as integration, not ${cls}`);
+  }
+  if (!suiteClasses.includes(cls)) {
+    throw new Error(`test/suite-classes.json gives ${file} an unknown class: ${String(cls)}`);
+  }
+}
+
+const classified = [...filesOf('pure'), ...filesOf('integration'), ...filesOf('live')];
+// Everything under test/e2e is integration by location, even when a new file
+// has not been added to the manifest yet (it must not fall into `process`).
+const e2eGlob = 'test/e2e/**/*.test.ts';
 
 export default defineConfig({
   test: {
-    // Process-backed suites have real startup and termination deadlines.
-    // Run files serially so competing fixtures do not consume those budgets.
-    fileParallelism: false,
     exclude: [...configDefaults.exclude, '**/dist/**'],
+    projects: [
+      {
+        // No process, git, network or env/cwd mutation; own tmp dirs only.
+        // fileParallelism stays false: the parallel-safety gate (3 green
+        // parallel runs + 1 shuffled run of this project) was NOT executed
+        // because testing was waived by the owner for this change. Enabling
+        // it later means `fileParallelism: true` plus a distinct
+        // `sequence.groupOrder` (projects with different worker counts must
+        // not share one, and groups run one after another — so a parallel
+        // pure group saves at most its own wall time, ~4% ceiling:
+        // opportunistic, never a metric).
+        extends: true,
+        test: {
+          name: 'pure',
+          include: filesOf('pure'),
+          testTimeout: 5_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Real child processes (git, the fake agent CLI, node subprocesses)
+        // with genuine startup/termination deadlines: serial files so
+        // competing fixtures do not consume those budgets. Also the home of
+        // every unclassified file.
+        extends: true,
+        test: {
+          name: 'process',
+          sequence: { groupOrder: 1 },
+          include: ['test/**/*.test.ts', 'lint/**/*.test.ts'],
+          exclude: [...configDefaults.exclude, '**/dist/**', e2eGlob, ...classified],
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Opt-in live-service legs (skipped unless their env flag is set);
+        // same budgets as process, which they drive for real.
+        extends: true,
+        test: {
+          name: 'live',
+          sequence: { groupOrder: 2 },
+          include: filesOf('live'),
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
+        },
+      },
+      {
+        // Today's `test:e2e` selection. Budgets are pinned to the vitest
+        // defaults these files already run under (5s/10s) — they carry their
+        // own explicit per-test timeouts, which the project must not shrink
+        // or raise.
+        extends: true,
+        test: {
+          name: 'integration',
+          sequence: { groupOrder: 3 },
+          include: [e2eGlob, ...filesOf('integration')],
+          testTimeout: 5_000,
+          hookTimeout: 10_000,
+          fileParallelism: false,
+        },
+      },
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary'],

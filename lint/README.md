@@ -178,10 +178,11 @@ mode and untouched by fast mode (POSIX fixture; Windows not exercised locally).
 
 `pnpm fix <file...>` validates the complete list before writes, runs safe Oxlint
 `--fix` (no suggestions/dangerous fixes), formats the same files with Oxfmt,
-then runs the whole static gate. Paths are argv entries, never shell fragments;
+and stops: it runs no static gate and no tests, so run `pnpm run check:static`
+separately for dependents. Paths are argv entries, never shell fragments;
 spaces and metacharacters remain literal. Empty lists, directories, file symlinks,
 repository escapes and tooling metadata are rejected; deleted files are skipped.
-An all-deleted fix still checks the package. Checks never format tracked files.
+An all-deleted list is a successful no-op. Checks never format tracked files.
 `check` runs format, the static gate once, tests and Knip; CI uses the same scripts.
 
 ## Calibrated unused-code gate
