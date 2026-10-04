@@ -29,7 +29,7 @@ import type { Op, OpRegistryEntry } from '../../src/kernel/types.js';
 // hooks observe its options and pause at named publication points.
 const hooks = vi.hoisted(() => ({
   guardAcquired: undefined as ((options: LockOptions) => void) | undefined,
-  beforeClaim: undefined as (() => Promise<void>) | undefined,
+  beforeClaim: undefined as ((temporary: string, claim: string) => Promise<void>) | undefined,
   afterPublication: undefined as (() => void) | undefined,
 }));
 vi.mock('proper-lockfile', async (importOriginal) => {
@@ -49,7 +49,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     async link(...args: Parameters<typeof actual.link>) {
       // A succession claim: eligibility has been decided, nothing published.
-      if (typeof args[1] === 'string' && args[1].endsWith('.claim')) await hooks.beforeClaim?.();
+      if (
+        typeof args[0] === 'string' &&
+        typeof args[1] === 'string' &&
+        args[1].endsWith('.claim')
+      ) {
+        await hooks.beforeClaim?.(args[0], args[1]);
+      }
       await actual.link(...args);
     },
     async open(...args: Parameters<typeof actual.open>) {
@@ -545,7 +551,7 @@ test('an interrupted publication guard refuses without unsafe automatic reclamat
 
 // Enclosure: seed and paused child each 25s; parent contention/recovery share remaining 25s.
 test(
-  'guard lease retains exclusion through SIGSTOP; a SIGKILLed holder recovers once its lease is stale',
+  'guard lease retains exclusion through SIGSTOP within its 30s stale bound; a SIGKILLed holder recovers once its lease is stale',
   async () => {
     const dir = await directory();
     const path = join(dir, 'locked.lock.json');
@@ -708,6 +714,75 @@ test('a claimant that died between claim and publication is succeeded, not wedge
     await lease.release();
   }
 });
+
+test('a retransmitted claim link reporting EEXIST for our own claim publishes, not refuses', async () => {
+  const dir = await directory();
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  // NFS: the claim link succeeded, its reply was lost, and the retransmit
+  // reports EEXIST. The claim already holds our own (synced) record.
+  hooks.beforeClaim = async (temporary, claim) => {
+    hooks.beforeClaim = undefined;
+    await writeFile(claim, await readFile(temporary));
+  };
+  const lease = await acquirePlanLock(dir, 'locked', 'retransmit');
+  try {
+    await lease.assertHeld();
+    const held = await record(dir);
+    expect(held).toMatchObject({ runId: 'retransmit' });
+    const claims = (await readdir(dir)).filter((name) => name.endsWith('.claim'));
+    expect(claims).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(dir, claims[0] ?? ''), 'utf8'))).toEqual(held);
+  } finally {
+    await lease.release();
+  }
+});
+
+test.each([
+  { claimant: 'foreign-host', host: 'foreign-host', pid: 2147483647 },
+  // Same host and alive (our own pid): a claimant whose rename faulted.
+  { claimant: 'live-unpublished', host: undefined, pid: process.pid },
+])(
+  'a never-published $claimant claim refuses naming the claim file, and its removal unblocks',
+  async ({ claimant, host, pid }) => {
+    const dir = await directory();
+    const path = join(dir, 'locked.lock.json');
+    const seed = await acquirePlanLock(dir, 'locked', 'seed');
+    await seed.release();
+    const prior = await record(dir);
+    const priorBytes = await readFile(path, 'utf8');
+    const claim = `${path}.${String(prior.nonce)}.claim`;
+    // The claim on the seed exists, but the seed tombstone is still canonical.
+    await writeFile(
+      claim,
+      JSON.stringify({
+        nonce: randomUUID(),
+        socketPath: '/tmp/no-such-cq-j.sock',
+        pid,
+        host: host ?? prior.host,
+        bootId: prior.bootId,
+        runId: claimant,
+      }),
+    );
+    const refusal = acquirePlanLock(dir, 'locked', 'blocked');
+    await expect(refusal).rejects.toThrow(`plan lock claim '${claim}' names run '${claimant}'`);
+    await expect(refusal).rejects.toThrow('never published');
+    await expect(refusal).rejects.toMatchObject({
+      cause: { message: expect.stringContaining('plan locked') as unknown },
+    });
+    expect(await readFile(path, 'utf8')).toBe(priorBytes);
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    // The operator remedy the message names: remove the claim file.
+    await unlink(claim);
+    const lease = await acquirePlanLock(dir, 'locked', 'unblocked');
+    try {
+      await lease.assertHeld();
+      expect(await record(dir)).toMatchObject({ runId: 'unblocked' });
+    } finally {
+      await lease.release();
+    }
+  },
+);
 
 test('a guard lease compromised before publication refuses as lock-lost and publishes nothing', async () => {
   const dir = await directory();

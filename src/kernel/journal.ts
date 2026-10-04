@@ -38,8 +38,7 @@ import { createConnection, createServer, type Server } from 'node:net';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { lock } from 'proper-lockfile';
-import type { LockOptions } from 'proper-lockfile';
+import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
 import { runLadder } from './governor.js';
 import { JournalEventSchema } from './schema.js';
@@ -121,6 +120,34 @@ const GUARD_LOCK_OPTIONS: LockOptions = {
   retries: 0,
   realpath: false,
 };
+
+/**
+ * proper-lockfile is loaded on first guard acquisition, never at import:
+ * its module body registers a `signal-exit@3` exit hook, which installs
+ * SIGINT/SIGTERM/SIGHUP/… listeners and patches `process.emit`/`reallyExit`.
+ * The kernel is in the driver/runCli import graph, and only executable
+ * entrypoints may change signal disposition (shared/process-signals.ts).
+ *
+ * Once a journaled run has acquired, those listeners stay installed for the
+ * process lifetime (as they already do once any ops lockfile user loads).
+ * They do not disturb the runner's signal handling: a signal-exit listener
+ * acts only when it is the SOLE listener for the signal, so while
+ * `installProcessSignalCleanup` is installed it is a no-op and the kill
+ * ladder's grace runs unchanged. When that cleanup finishes it removes its
+ * listener and re-raises; signal-exit is then sole, unloads itself, runs
+ * proper-lockfile's exit hook (rmdirSync of any guard still held, which
+ * only shortens the ≤30s busy window), and re-raises again into the default
+ * disposition, so the signal exit status is preserved. The `reallyExit`
+ * patch passes the exit code through unchanged. In an embedding host with
+ * no signal listeners the re-raise likewise yields the default behaviour.
+ */
+let lockfileModule: Promise<{ lock: typeof lock }> | undefined;
+
+function loadLockfile(): Promise<{ lock: typeof lock }> {
+  lockfileModule ??= import('proper-lockfile');
+  return lockfileModule;
+}
+
 let bootIdentityPromise: Promise<string> | undefined;
 
 function bootIdentity(): Promise<string> {
@@ -255,9 +282,10 @@ function closeServer(server: Server): Promise<void> {
  * replacement; the tombstone remains reclaimable.
  *
  * Acquisition runs under a publication guard lease (GUARD_LOCK_OPTIONS).
- * Its compromise is lease loss: acquisition refuses with the same
- * `lock-lost` error the runner's fence raises, rolling back any record it
- * published.
+ * Its compromise is lease loss, detected at the next fence: acquisition
+ * refuses with the same `lock-lost` error the runner's fence raises, and
+ * anything published is rolled back. The guard only reduces contention;
+ * exclusive link creation and succession claims are the fence.
  */
 export async function acquirePlanLock(
   journalDir: string,
@@ -293,6 +321,10 @@ export async function acquirePlanLock(
     throw error;
   }
   try {
+    // Last fence. A compromise recorded during the release itself is
+    // swallowed (the library has already dropped the lease); that is safe
+    // because the published record is fenced by its exclusive link or
+    // claim, not by the guard.
     guard.assertHeld();
     await guard.release();
   } catch (error) {
@@ -329,6 +361,7 @@ async function acquirePublicationGuard(
   // acquisition's fence points as lease loss instead.
   let compromised: Error | undefined;
   let release: () => Promise<void>;
+  const { lock } = await loadLockfile();
   try {
     release = await lock(path, {
       ...GUARD_LOCK_OPTIONS,
@@ -498,7 +531,9 @@ async function writeDurable(path: string, contents: string): Promise<void> {
 /**
  * Exclusive create via link(2); otherwise reclaim an eligible record under
  * a succession claim. `fence` is the publication guard's lease check: a
- * compromised guard refuses before any publication is attempted.
+ * compromise already recorded refuses before publication is attempted; one
+ * recorded during the awaited link or rename is detected at the next fence
+ * (after owner setup), and anything published is rolled back.
  */
 async function publishRecord(
   path: string,
@@ -560,7 +595,15 @@ async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecor
  *   - a claimant whose canonical record is its released tombstone, or that
  *     is provably dead (crashed between claim and publication, or after),
  *     is succeeded by claiming ITS nonce;
- *   - a live (or foreign-host) claimant refuses, exactly as its record would.
+ *   - a live (or foreign-host) claimant refuses, exactly as its record would;
+ *     if the claimed record is still canonical (the claimant never
+ *     published), the refusal names the claim file for an operator;
+ *   - a claim naming OUR nonce is ours (a retransmitted link) and publishes.
+ *
+ * `fence` (the guard lease check) only keeps contention off this path: a
+ * compromise noted after a fence still lets the awaited link or rename
+ * publish, and is detected at the next fence; anything published is rolled
+ * back. Claims, not the guard, are the fence.
  *
  * The canonical name is only ever replaced atomically (rename) by the
  * unique claimant of what it replaces, or by its owner's own tombstone, so
@@ -577,7 +620,8 @@ async function claimSuccession(
   let predecessor = judged;
   // Bounded like claimSeq: a chain this long is corruption, not contention.
   for (let step = 0; step < 10_000; step++) {
-    // Eligibility (or the previous step's probe) awaited: re-check the lease.
+    // Eligibility (or the previous step's probe) awaited: re-check the lease
+    // before claiming (contention only; see above).
     fence();
     const claim = `${path}.${predecessor.nonce}.claim`;
     try {
@@ -592,12 +636,27 @@ async function claimSuccession(
           cause: readError,
         });
       }
-      const current = await readLockRecord(path).catch(() => undefined);
-      if (current?.nonce !== claimant.nonce || current.released !== true) {
-        await assertReclaimable(claimant, record);
+      // A retransmitted link (NFS) can report EEXIST for the very link that
+      // created OUR claim: our nonce in it is the ownership proof.
+      if (claimant.nonce !== record.nonce) {
+        const current = await readLockRecord(path).catch(() => undefined);
+        if (current?.nonce !== claimant.nonce || current.released !== true) {
+          try {
+            await assertReclaimable(claimant, record);
+          } catch (refusal) {
+            // The claimed record is still canonical, so the claimant never
+            // published (a claimant's rename is the only way past it). Name
+            // the claim: no record exists to explain the refusal.
+            if (current?.nonce !== predecessor.nonce) throw refusal;
+            throw new Error(
+              `journal: plan lock claim '${claim}' names run '${claimant.runId}' on host '${claimant.host}', whose record was never published (still publishing, or abandoned) — if that run is gone, remove the claim file to unblock acquisition`,
+              { cause: refusal },
+            );
+          }
+        }
+        predecessor = claimant;
+        continue;
       }
-      predecessor = claimant;
-      continue;
     }
     // The claim is ours alone: this rename can only replace the claimed
     // record or its dead claimants' successors, never a live owner.

@@ -274,13 +274,50 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
     `--journal-dir` can edit a `job-finished.costUSD` undetected — the
     fold validates shape, not provenance. The future fix is a per-run
     chained hash over the journal lines, verified at fold time.
-  - **No plan lock yet (deferred to W2.4).** Concurrent governed runs over
-    one journal dir are ≈2C: two processes can both fold and both dispatch
-    before either's spend lands. The W2.4 lock (ADR-0003 §2.5 — a
-    kernel-held socket, not an mtime) closes it; a naive `open('wx')` lock
-    was rejected for W2.2 because a crashed holder would wedge the plan
-    (fail-closed with no stale-lock recovery), which is a worse operational
-    failure than the documented race.
+  - **Concurrent runs over one journal dir (closed by W2.4).** Without a
+    lock, concurrent governed runs are ≈2C: two processes can both fold
+    and both dispatch before either's spend lands. The W2.4 plan lock
+    (below) closes it; a naive `open('wx')` lock was rejected because a
+    crashed holder would wedge the plan (fail-closed with no stale-lock
+    recovery).
+
+## Plan lock (W2.4, ADR-0003 §2.5)
+
+A journaled run holds `<journalDir>/<planId>.lock.json` for its lifetime
+(`acquirePlanLock` in `journal.ts`). The record names the owner: nonce, a
+kernel-held probe socket, pid, host, boot identity and runId. Liveness is
+the socket and pid/boot evidence, never an mtime, so a SIGSTOPped owner is
+never treated as dead. Every dispatch is fenced on the record nonce, and an
+owner whose record was displaced fails closed (`journal: lock-lost`).
+
+- **Guard plus claims.** Acquisition (the eligibility decision plus record
+  publication) runs under a short publication guard: a proper-lockfile
+  lease on `<planId>.lock.guard.lock` (stale 30 s, refreshed every 5 s, no
+  retries). The guard only reduces contention; it is not what makes the
+  lock safe. A new record is published by exclusive `link(2)`. Replacing a
+  released or dead owner's record first needs an exclusive
+  `<planId>.lock.json.<predecessor nonce>.claim` (also a `link`), so each
+  record can be succeeded exactly once and a live owner is never replaced.
+  A guard compromise is detected at the next fence, and anything already
+  published is rolled back to a released tombstone.
+- **Drain #259-era runners before rollout.** Runners from #259 took a perl
+  `flock` on `<planId>.lock.guard` and reclaimed without claims. They do
+  not exclude new runners during acquisition, and they can displace a new
+  owner (which then fails closed). On a shared journal dir, stop every
+  #259-era runner before starting new ones. Leftover `<planId>.lock.guard`
+  files are inert.
+- **≤30 s busy window after a crash.** If a process dies while holding the
+  guard (mid-acquisition), other acquirers refuse with `plan lock
+acquisition in progress or interrupted` until the guard lease is stale,
+  at most 30 s. Retry after that. A crash after acquisition leaves only the
+  record. On the same host that record is reclaimable as soon as its owner
+  is provably dead; a foreign host's record needs its release tombstone.
+- **`.claim` files accumulate.** One `<planId>.lock.json.<nonce>.claim` is
+  kept per reclamation as evidence, like `<planId>.seq.<n>` tombstones. They
+  are never removed automatically (GC is a follow-up). If a claim names a
+  run whose record was never published, acquisition refuses with an error
+  naming the claim file. Once that run is gone, removing the file unblocks
+  acquisition.
 
 ## Reserve-then-settle (W2.3, ADR-0003 §2.2/§2.3)
 
