@@ -314,10 +314,20 @@ acquisition in progress or interrupted` until the guard lease is stale,
   is provably dead; a foreign host's record needs its release tombstone.
 - **`.claim` files accumulate.** One `<planId>.lock.json.<nonce>.claim` is
   kept per reclamation as evidence, like `<planId>.seq.<n>` tombstones. They
-  are never removed automatically (GC is a follow-up). If a claim names a
-  run whose record was never published, acquisition refuses with an error
-  naming the claim file. Once that run is gone, removing the file unblocks
-  acquisition.
+  are never removed automatically (GC is a follow-up). Acquisition walks the
+  claim chain past claimants that were themselves claimed, released, or
+  provably dead. A claimant whose publication fails marks its own claim
+  released, so a retry (even in the same process) is not wedged. If a claim
+  names a run whose record was never published and whose process may still
+  be alive (still publishing, or its publication failed and the claim could
+  not be marked), acquisition refuses with an error naming the claim file.
+  If that run's process has exited (same host) or is known dead (foreign
+  host), removing the file unblocks acquisition.
+- **Plan id length.** A journaled run's plan id is at most 195 characters,
+  so the longest lock artifact (`<planId>.lock.json.<nonce>.released.tmp`)
+  fits a 255-byte file name. A longer id is refused before anything is
+  created; such ids could never release their lock before this bound
+  either.
 
 ## Reserve-then-settle (W2.3, ADR-0003 §2.2/§2.3)
 

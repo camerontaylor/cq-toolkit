@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   unlink,
@@ -30,6 +31,8 @@ import type { Op, OpRegistryEntry } from '../../src/kernel/types.js';
 const hooks = vi.hoisted(() => ({
   guardAcquired: undefined as ((options: LockOptions) => void) | undefined,
   beforeClaim: undefined as ((temporary: string, claim: string) => Promise<void>) | undefined,
+  beforePublish: undefined as ((temporary: string, path: string) => Promise<void>) | undefined,
+  beforeRename: undefined as ((from: string, to: string) => Promise<void>) | undefined,
   afterPublication: undefined as (() => void) | undefined,
 }));
 vi.mock('proper-lockfile', async (importOriginal) => {
@@ -56,7 +59,21 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       ) {
         await hooks.beforeClaim?.(args[0], args[1]);
       }
+      // An exclusive first publication of the canonical record.
+      if (
+        typeof args[0] === 'string' &&
+        typeof args[1] === 'string' &&
+        args[1].endsWith('.lock.json')
+      ) {
+        await hooks.beforePublish?.(args[0], args[1]);
+      }
       await actual.link(...args);
+    },
+    async rename(...args: Parameters<typeof actual.rename>) {
+      if (typeof args[0] === 'string' && typeof args[1] === 'string') {
+        await hooks.beforeRename?.(args[0], args[1]);
+      }
+      await actual.rename(...args);
     },
     async open(...args: Parameters<typeof actual.open>) {
       const handle = await actual.open(...args);
@@ -288,6 +305,8 @@ function workRegistry(calls: string[]): OpRegistryView {
 afterEach(async () => {
   hooks.guardAcquired = undefined;
   hooks.beforeClaim = undefined;
+  hooks.beforePublish = undefined;
+  hooks.beforeRename = undefined;
   hooks.afterPublication = undefined;
   for (const worker of workers.splice(0)) {
     if (worker.child.exitCode === null && worker.child.signalCode === null) {
@@ -736,6 +755,206 @@ test('a retransmitted claim link reporting EEXIST for our own claim publishes, n
   } finally {
     await lease.release();
   }
+});
+
+test('a retransmitted publication link reporting EEXIST for our own record publishes, not refuses', async () => {
+  const dir = await directory();
+  // NFS: the first link published our record, its reply was lost, and the
+  // retransmit reports EEXIST. The canonical record is already ours.
+  hooks.beforePublish = async (temporary, path) => {
+    hooks.beforePublish = undefined;
+    await writeFile(path, await readFile(temporary));
+  };
+  const lease = await acquirePlanLock(dir, 'locked', 'retransmit');
+  try {
+    await lease.assertHeld();
+    expect(await record(dir)).toMatchObject({ runId: 'retransmit' });
+    expect((await readdir(dir)).filter((name) => name.endsWith('.claim'))).toEqual([]);
+  } finally {
+    await lease.release();
+  }
+  expect(await record(dir)).toMatchObject({ runId: 'retransmit', released: true });
+});
+
+/** Fault the next publication rename onto the canonical record only. */
+function faultNextPublication(fault: (from: string, to: string) => Promise<void>): void {
+  hooks.beforeRename = async (from, to) => {
+    if (!to.endsWith('.lock.json')) return;
+    hooks.beforeRename = undefined;
+    await fault(from, to);
+  };
+}
+
+test('a claimant whose publication rename fails abandons its claim, so a same-process retry succeeds it', async () => {
+  const dir = await directory();
+  const path = join(dir, 'locked.lock.json');
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const prior = await record(dir);
+  const priorBytes = await readFile(path, 'utf8');
+  faultNextPublication(() =>
+    Promise.reject(Object.assign(new Error('injected rename fault'), { code: 'EIO' })),
+  );
+  await expect(acquirePlanLock(dir, 'locked', 'faulted')).rejects.toMatchObject({ code: 'EIO' });
+  expect(await readFile(path, 'utf8')).toBe(priorBytes);
+  const claim = `${path}.${String(prior.nonce)}.claim`;
+  const abandoned = JSON.parse(await readFile(claim, 'utf8')) as Record<string, unknown>;
+  // Still this live process's claim, marked released by its claimant: it
+  // never published and never will.
+  expect(abandoned).toMatchObject({ runId: 'faulted', pid: process.pid, released: true });
+  expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  const lease = await acquirePlanLock(dir, 'locked', 'retry');
+  try {
+    await lease.assertHeld();
+    expect(await record(dir)).toMatchObject({ runId: 'retry' });
+    expect(
+      JSON.parse(await readFile(`${path}.${String(abandoned.nonce)}.claim`, 'utf8')),
+    ).toMatchObject({ runId: 'retry' });
+    expect(JSON.parse(await readFile(claim, 'utf8'))).toEqual(abandoned);
+  } finally {
+    await lease.release();
+  }
+});
+
+test('a publication rename reporting failure after it published us succeeds, not abandons', async () => {
+  const dir = await directory();
+  const path = join(dir, 'locked.lock.json');
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const prior = await record(dir);
+  // NFS: the rename published our record, and its retransmit reports ENOENT.
+  faultNextPublication(async (from, to) => {
+    await rename(from, to);
+    throw Object.assign(new Error('retransmitted rename'), { code: 'ENOENT' });
+  });
+  const lease = await acquirePlanLock(dir, 'locked', 'landed');
+  try {
+    await lease.assertHeld();
+    expect(await record(dir)).toMatchObject({ runId: 'landed' });
+    // We own the plan: the claim on the seed stays live.
+    expect(
+      JSON.parse(await readFile(`${path}.${String(prior.nonce)}.claim`, 'utf8')),
+    ).not.toHaveProperty('released');
+  } finally {
+    await lease.release();
+  }
+});
+
+test('a stale judgment follows a successor claim past a superseded claimant whose process lives on', async () => {
+  const dir = await directory();
+  const path = join(dir, 'locked.lock.json');
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const prior = await record(dir);
+  const gate = gateNextClaim();
+  const late = acquirePlanLock(dir, 'locked', 'late');
+  void late.catch(() => undefined); // observed below
+  try {
+    await gate.judged;
+    // While the late judgment is stale, the chain advanced two steps:
+    // 'superseded' claimed the seed and was itself claimed by 'successor',
+    // whose released tombstone is canonical. Both pids are alive (ours), so
+    // a probe of 'superseded' would refuse; its successor claim proves it can
+    // never own again.
+    const owner = (runId: string): Record<string, unknown> & { nonce: string } => ({
+      nonce: randomUUID(),
+      socketPath: '/tmp/no-such-cq-j.sock',
+      pid: process.pid,
+      host: prior.host,
+      bootId: prior.bootId,
+      runId,
+    });
+    const superseded = owner('superseded');
+    const successor = owner('successor');
+    await writeFile(`${path}.${String(prior.nonce)}.claim`, JSON.stringify(superseded));
+    await writeFile(`${path}.${superseded.nonce}.claim`, JSON.stringify(successor));
+    await writeFile(path, JSON.stringify({ ...successor, released: true }));
+    gate.resume();
+    const lease = await late;
+    try {
+      await lease.assertHeld();
+      expect(await record(dir)).toMatchObject({ runId: 'late' });
+      expect(JSON.parse(await readFile(`${path}.${successor.nonce}.claim`, 'utf8'))).toMatchObject({
+        runId: 'late',
+      });
+      expect(JSON.parse(await readFile(`${path}.${String(prior.nonce)}.claim`, 'utf8'))).toEqual(
+        superseded,
+      );
+    } finally {
+      await lease.release();
+    }
+  } finally {
+    gate.resume();
+    await late.catch(() => undefined);
+  }
+});
+
+test.each([
+  { corruption: 'malformed JSON', bytes: '{"nonce":' },
+  { corruption: 'a schema violation', bytes: JSON.stringify({ runId: 'not-a-record' }) },
+])(
+  'an unreadable canonical record ($corruption) met while walking claims refuses, never replaced',
+  async ({ bytes }) => {
+    const dir = await directory();
+    const path = join(dir, 'locked.lock.json');
+    const seed = await acquirePlanLock(dir, 'locked', 'seed');
+    await seed.release();
+    const prior = await record(dir);
+    const crashed = {
+      nonce: randomUUID(),
+      socketPath: '/tmp/no-such-cq-j.sock',
+      pid: 2147483647,
+      host: prior.host,
+      bootId: prior.bootId,
+      runId: 'crashed',
+    };
+    const gate = gateNextClaim();
+    const walker = acquirePlanLock(dir, 'locked', 'walker');
+    void walker.catch(() => undefined); // observed below
+    try {
+      await gate.judged;
+      // After the judgment: a dead claimant holds the seed's claim (so the
+      // walker must look at the canonical record), which is now corrupt.
+      await writeFile(`${path}.${String(prior.nonce)}.claim`, JSON.stringify(crashed));
+      await writeFile(path, bytes);
+      gate.resume();
+      await expect(walker).rejects.toThrow(`corrupt or unreadable plan lock '${path}'`);
+      expect(await readFile(path, 'utf8')).toBe(bytes);
+      const names = await readdir(dir);
+      expect(names).not.toContain(`locked.lock.json.${crashed.nonce}.claim`);
+      expect(names.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      gate.resume();
+      await walker.catch(() => undefined);
+    }
+  },
+);
+
+test('a plan id at the 195-char bound completes publication, succession and release', async () => {
+  const dir = await directory();
+  const planId = `p${'x'.repeat(194)}`;
+  const first = await acquirePlanLock(dir, planId, 'first');
+  await first.release();
+  // Reclamation takes a claim; release writes the longest artifact, the
+  // tombstone temporary (exactly 255 bytes here).
+  const second = await acquirePlanLock(dir, planId, 'second');
+  try {
+    await second.assertHeld();
+  } finally {
+    await second.release();
+  }
+  expect(
+    JSON.parse(await readFile(join(dir, `${planId}.lock.json`), 'utf8')) as Record<string, unknown>,
+  ).toMatchObject({ runId: 'second', released: true });
+  expect((await readdir(dir)).filter((name) => name.endsWith('.claim'))).toHaveLength(1);
+});
+
+test('a plan id past the bound refuses before creating any artifact', async () => {
+  const dir = await directory();
+  await expect(acquirePlanLock(dir, `p${'x'.repeat(195)}`, 'too-long')).rejects.toThrow(
+    'allow at most 195',
+  );
+  expect(await readdir(dir)).toEqual([]);
 });
 
 test.each([

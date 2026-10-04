@@ -36,7 +36,7 @@ import {
 } from 'node:fs/promises';
 import { createConnection, createServer, type Server } from 'node:net';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
@@ -59,6 +59,18 @@ export function assertSafeRunId(runId: string): void {
     );
   }
 }
+
+/**
+ * Longest plan id a journaled run can lock. NAME_MAX (255 bytes on the
+ * supported local filesystems) bounds every lock artifact name, and the
+ * longest is the release tombstone `<planId>.lock.json.<nonce>.released.tmp`
+ * (planId + 60; the publication temporary, claim and aborted-claim
+ * temporaries are shorter). Refused before any artifact exists, so no step
+ * of the protocol can fail mid-way with ENAMETOOLONG. A longer id never
+ * completed a journaled run before this bound either: its tombstone, and
+ * so every release, already failed.
+ */
+const MAX_LOCKED_PLAN_ID = 255 - '.lock.json.'.length - 36 - '.released.tmp'.length;
 
 const PlanLockRecordSchema = z
   .object({
@@ -294,6 +306,11 @@ export async function acquirePlanLock(
 ): Promise<PlanLock> {
   assertSafeRunId(planId);
   assertSafeRunId(runId);
+  if (planId.length > MAX_LOCKED_PLAN_ID) {
+    throw new Error(
+      `journal: plan id '${planId}' is ${planId.length} chars; plan lock artifact names allow at most ${MAX_LOCKED_PLAN_ID}`,
+    );
+  }
   await mkdir(journalDir, { recursive: true });
   // Legacy publishers recorded no owner in this directory. Neither a dead
   // record nor time proves fleet quiescence: never migrate it automatically.
@@ -321,8 +338,12 @@ export async function acquirePlanLock(
     throw error;
   }
   try {
-    // Last fence. A compromise recorded during the release itself is
-    // swallowed (the library has already dropped the lease); that is safe
+    // Last fence. No compromise can land between it and the release: no
+    // await separates them, and the library's release (realpath: false)
+    // marks the lease released synchronously, so it cannot reject with
+    // ERELEASED here. A compromise recorded once the release is under way (a
+    // refresh stat already in flight sees the lease directory removed) is
+    // swallowed only if the directory removal also failed; that is safe
     // because the published record is fenced by its exclusive link or
     // claim, not by the guard.
     guard.assertHeld();
@@ -361,8 +382,8 @@ async function acquirePublicationGuard(
   // acquisition's fence points as lease loss instead.
   let compromised: Error | undefined;
   let release: () => Promise<void>;
-  const { lock } = await loadLockfile();
   try {
+    const { lock } = await loadLockfile();
     release = await lock(path, {
       ...GUARD_LOCK_OPTIONS,
       onCompromised: (error) => {
@@ -557,6 +578,9 @@ async function publishRecord(
       cause: readError,
     });
   }
+  // A retransmitted link (NFS) can report EEXIST for the very link that
+  // published OUR record: our nonce in it is the ownership proof.
+  if (previous.nonce === record.nonce) return;
   await assertReclaimable(previous, record);
   await claimSuccession(path, temporary, record, previous, planId, fence);
 }
@@ -588,17 +612,24 @@ async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecor
  * `<lock>.<predecessor nonce>.claim` — a link of our synced temporary, so
  * the claim names its claimant whole. Each record can be claimed exactly
  * once, and claims are never removed (one per reclamation, kept as
- * evidence like seq tombstones), so a judgment that went stale finds its
- * claim taken and walks the succession forward instead of renaming over
- * whatever is canonical now:
+ * evidence like seq tombstones), so the claims form one chain and the
+ * canonical record only ever advances along it. A judgment that went stale
+ * finds its claim taken and walks the chain forward instead of renaming
+ * over whatever is canonical now. A claimant is walked past when:
  *
- *   - a claimant whose canonical record is its released tombstone, or that
- *     is provably dead (crashed between claim and publication, or after),
- *     is succeeded by claiming ITS nonce;
- *   - a live (or foreign-host) claimant refuses, exactly as its record would;
- *     if the claimed record is still canonical (the claimant never
- *     published), the refusal names the claim file for an operator;
- *   - a claim naming OUR nonce is ours (a retransmitted link) and publishes.
+ *   - it is itself claimed: its claimant proved it released, aborted or
+ *     dead, and those facts are permanent for a nonce, so a successor claim
+ *     is proof it can never own again (no probe of a superseded claimant);
+ *   - its claim is released: its publication failed and it abandoned the
+ *     claim ({@link abandonClaim}); only a claimant ever marks its own claim;
+ *   - its canonical record is its released tombstone, or it is provably dead
+ *     (crashed between claim and publication, or after).
+ *
+ * Otherwise a live (or foreign-host) claimant refuses, exactly as its
+ * record would; if it is not canonical it never published, and the refusal
+ * names the claim file for an operator. A claim naming OUR nonce is ours (a
+ * retransmitted link) and publishes. An unreadable canonical record refuses:
+ * only its absence is not corruption.
  *
  * `fence` (the guard lease check) only keeps contention off this path: a
  * compromise noted after a fence still lets the awaited link or rename
@@ -606,8 +637,10 @@ async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecor
  * back. Claims, not the guard, are the fence.
  *
  * The canonical name is only ever replaced atomically (rename) by the
- * unique claimant of what it replaces, or by its owner's own tombstone, so
- * it is never empty and a live owner's record is never displaced.
+ * unique claimant of the chain's tail, or by its owner's own tombstone, so
+ * it is never empty and a live owner's record is never displaced: every
+ * record between the canonical one and the tail is unpublished, and each
+ * was claimed on proof that it is released, aborted or dead.
  */
 async function claimSuccession(
   path: string,
@@ -623,7 +656,7 @@ async function claimSuccession(
     // Eligibility (or the previous step's probe) awaited: re-check the lease
     // before claiming (contention only; see above).
     fence();
-    const claim = `${path}.${predecessor.nonce}.claim`;
+    const claim = claimPath(path, predecessor.nonce);
     try {
       await link(temporary, claim);
     } catch (error) {
@@ -639,33 +672,98 @@ async function claimSuccession(
       // A retransmitted link (NFS) can report EEXIST for the very link that
       // created OUR claim: our nonce in it is the ownership proof.
       if (claimant.nonce !== record.nonce) {
-        const current = await readLockRecord(path).catch(() => undefined);
-        if (current?.nonce !== claimant.nonce || current.released !== true) {
-          try {
-            await assertReclaimable(claimant, record);
-          } catch (refusal) {
-            // The claimed record is still canonical, so the claimant never
-            // published (a claimant's rename is the only way past it). Name
-            // the claim: no record exists to explain the refusal.
-            if (current?.nonce !== predecessor.nonce) throw refusal;
-            throw new Error(
-              `journal: plan lock claim '${claim}' names run '${claimant.runId}' on host '${claimant.host}', whose record was never published (still publishing, or abandoned) — if that run is gone, remove the claim file to unblock acquisition`,
-              { cause: refusal },
-            );
-          }
-        }
+        await assertPassable(path, claim, claimant, record);
         predecessor = claimant;
         continue;
       }
     }
     // The claim is ours alone: this rename can only replace the claimed
-    // record or its dead claimants' successors, never a live owner.
-    await rename(temporary, path);
+    // record or its dead or aborted claimants' successors, never a live owner.
+    try {
+      await rename(temporary, path);
+    } catch (error) {
+      // A retransmitted rename (NFS) can fail for the very rename that
+      // published OUR record: our nonce in it is the ownership proof.
+      const current = await readLockRecord(path).catch(() => undefined);
+      if (current?.nonce === record.nonce) return;
+      // The publication's own failure is the root cause; an abandonment
+      // that fails too leaves the claim live until this process exits.
+      await abandonClaim(path, claim, record).catch(() => undefined);
+      throw error;
+    }
     return;
   }
   throw new Error(
     `journal: plan lock succession for '${planId}' exceeds 10000 claims — refusing acquisition`,
   );
+}
+
+function claimPath(path: string, nonce: string): string {
+  return `${path}.${nonce}.claim`;
+}
+
+/** Refuses unless `claimant` (the holder of `claim`) can be walked past. */
+async function assertPassable(
+  path: string,
+  claim: string,
+  claimant: PlanLockRecord,
+  record: PlanLockRecord,
+): Promise<void> {
+  let current: PlanLockRecord | undefined;
+  try {
+    current = await readLockRecord(path);
+  } catch (readError) {
+    // Publication never empties the name, so absence is tampering, not a
+    // record; anything else unreadable is corruption and fails closed.
+    if (!isEnoent(readError)) {
+      throw new Error(`journal: corrupt or unreadable plan lock '${path}' — refusing acquisition`, {
+        cause: readError,
+      });
+    }
+  }
+  try {
+    await lstat(claimPath(path, claimant.nonce));
+    return; // superseded: claimed on permanent proof it can never own again
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  }
+  if (claimant.released === true) return; // aborted by its own claimant
+  if (current?.nonce === claimant.nonce && current.released === true) return;
+  try {
+    await assertReclaimable(claimant, record);
+  } catch (refusal) {
+    if (current?.nonce === claimant.nonce) throw refusal;
+    // Neither canonical nor claimed: publishing it, and then being replaced,
+    // both need a claim on it, so the claimant never published. Name the
+    // claim: no record exists to explain the refusal.
+    throw new Error(
+      `journal: plan lock claim '${claim}' names run '${claimant.runId}' on host '${claimant.host}', whose record was never published (still publishing, or its publication failed) — if that run's process has exited (same host) or is known dead (foreign host), remove the claim file to unblock acquisition`,
+      { cause: refusal },
+    );
+  }
+}
+
+/**
+ * Marks OUR claim released after our publication failed, so the walk passes
+ * it instead of probing a live pid that will never publish. Only a
+ * claimant ever replaces its own claim, and only once it has committed to
+ * never publishing under this nonce (the rename failed; the temporary is
+ * then discarded). The rename keeps the claim name occupied throughout, so
+ * the predecessor can never be claimed twice.
+ */
+async function abandonClaim(path: string, claim: string, record: PlanLockRecord): Promise<void> {
+  const aborted = `${path}.${record.nonce}.aborted.tmp`;
+  try {
+    // Our nonce in the claim is the ownership proof.
+    if ((await readLockRecord(claim)).nonce !== record.nonce) return;
+    await writeDurable(aborted, `${JSON.stringify({ ...record, released: true })}\n`);
+    await rename(aborted, claim);
+    await syncDir(dirname(path));
+  } finally {
+    await unlink(aborted).catch((cleanupError: unknown) => {
+      if (!isEnoent(cleanupError)) throw cleanupError;
+    });
+  }
 }
 
 /**
