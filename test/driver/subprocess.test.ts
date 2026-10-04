@@ -281,7 +281,9 @@ function fakeManagedScript(
     if (frame['method'] !== 'stdin') return;
     if (directive?.kind === 'block-until-abort') return;
     if (directive?.kind === 'fail') {
-      peer.stderr('simulated hard failure');
+      // The fixture CLI's fail persona: the vendor quota-with-reset stderr
+      // (conformance leg s classifies it `quota` and extracts resetAt).
+      peer.stderr("You've hit your use limit · resets 1h30m");
       peer.finish(1);
       return;
     }
@@ -1391,8 +1393,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
     // Structural OS-signal-ladder budget: SIGTERM grace, then SIGKILL, then
     // descendant teardown are each subject to host-load swings beyond the
-    // five-second process-death poll above.
-  }, 20_000);
+    // five-second process-death poll above, after a PID-readiness poll of
+    // up to 20s: the budget stays above both sequential windows.
+  }, 30_000);
 
   test('stdout retention is a bounded TAIL: droppedBytes counted, every line still observed (#19-10)', async () => {
     await withScratch(async (scratchDir) => {

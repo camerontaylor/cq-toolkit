@@ -355,12 +355,6 @@ function fakeAcpScript(
         });
         return;
       case 'session/set_config_option':
-        update(peer, {
-          sessionUpdate: 'config_option_update',
-          configOptions: [
-            { id: 'model', category: 'model', type: 'select', currentValue: model, options: [] },
-          ],
-        });
         respond(peer, frame['id'] as number, { modes: { currentModeId: 'build' } });
         return;
       case 'session/prompt':
@@ -371,6 +365,15 @@ function fakeAcpScript(
           peer.finish(1);
           return;
         }
+        // The materialization update rides the prompt flow, as in the real
+        // fixture, so the observed-model legs verify response-side folding
+        // rather than a pre-prompt echo of the requested model.
+        update(peer, {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model', category: 'model', type: 'select', currentValue: model, options: [] },
+          ],
+        });
         if (directive?.kind === 'tool-then-reply') {
           const requestId = 100;
           pendingPermission = {
