@@ -123,10 +123,22 @@ status, and crq posts that status.
   `state/ledger/promotion-findings.md`.
   - Failed, interrupted or rate-limited runs post nothing new and are retried (backoff ≤60
     min). They are never blocked.
-  - A CLI-skipped review posts `error` and the item is blocked, so the owner must re-cut or
-    override.
-- **Findings**: crq cannot tell by itself that a finding is addressed. Someone runs
-  `crq.py promotion-resolve <n|all> "<fixed in PR #N | rebuttal>"`. Once all are resolved:
+- **Skipped or too large** (`review_skipped`, or a size refusal classified as `too_large`): no
+  escalation at first.
+  - crq re-cuts the oldest contiguous half of the batch's merges, at the newest green commit
+    within that half, and keeps halving until CodeRabbit accepts.
+  - The original tip is then promoted prefix by prefix (`continue_to`), each prefix at most the
+    accepted size (`batch_cap`).
+  - A chain that carries resolved findings never posts `success` short of its fix tip
+    (`must_reach`). Clean prefixes before the fix just chain to the next delta.
+  - Only a refused single-merge batch escalates: an `error` status, a
+    `promotion_escalated` event, an OWNER OVERRIDE banner and a Paseo alert.
+  - `status.md` lists every attempt (`promotion attempts`) with its size and reason.
+  - A promotion whose batch is already in `main`, for example after an override, closes itself.
+- **Findings**: crq cannot tell by itself that a finding is addressed. By the chancellor's
+  ruling, the **acceptance conductor** runs `crq.py promotion-resolve <n|all> "<fixed in PR #N |
+  rebuttal>"` once the fix is in merge-queue. The PROMOTION BLOCKED banner in `status.md` names
+  the conductor (`promotion.resolver`). Once all are resolved:
   - the newest green tip descends from the batch → a delta item over `batch..tip`, still
     bound to the original base;
   - the tip is unchanged → `success` on the batch itself ("blocking dispositioned");

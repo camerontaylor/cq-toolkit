@@ -248,6 +248,10 @@ def secret_scan(base: str, head: str, out: Path) -> Tuple[bool, Dict[str, Any]]:
 # ----------------------------------------------------------- NDJSON
 
 
+SIZE_REFUSAL = re.compile(r"too (large|big|many (files|changes|lines))|diff (is )?too|file limit|max(imum)? (number of )?files"
+                          r"|exceed\w* (the )?(max\w*|limit|size)", re.I)
+
+
 def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     bad_lines = 0
@@ -278,7 +282,9 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
         et = str(e.get("errorType", "")).lower()
         msg = str(e.get("message", ""))
         res["message"] = f"{e.get('errorType')}: {msg}"[:400]
-        if "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
+        if SIZE_REFUSAL.search(f"{et} {msg}"):
+            res.update(outcome="too_large")
+        elif "rate" in et or "limit" in et or "quota" in et or "rate limit" in msg.lower():
             wait = str((e.get("metadata") or {}).get("waitTime", ""))
             m = re.search(r"(\d+)\s*(second|minute|hour)", wait)
             mins = None
@@ -787,14 +793,12 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # error / interrupted / skipped: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
-    if item["kind"] == "promotion" and o == "skipped":
-        item["state"] = "blocked"  # never reported as success; owner re-cuts or overrides
-        post_promotion_status(item, item["batch_sha"], "error",
-                              f"review skipped by CLI main={item['base_sha']} crq#{item['id']}"[:140], [])
+    if item["kind"] == "promotion" and o in ("skipped", "too_large"):
+        item["state"] = "split_needed"  # promotion_tick re-cuts a smaller prefix (never reported as success)
     elif item["kind"] == "promotion":  # retried, never blocked: promotion must not stall on a flaky run
         item["state"] = "pending"
         item["not_before"] = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
-    elif o == "skipped" or item["failures"] >= CONFIG["max_item_failures"]:
+    elif o in ("skipped", "too_large") or item["failures"] >= CONFIG["max_item_failures"]:
         item["state"] = "blocked"
     else:
         item["state"] = "pending"
@@ -929,7 +933,7 @@ def harvest_addressing(item: Dict[str, Any], dry: bool) -> Optional[str]:
 # base..batch (or reviewed..batch for a delta) and posts the status.
 
 PROMO = CONFIG.get("promotion", {})
-OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "blocked")
+OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "split_needed", "chain_next", "blocked")
 MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
 
 
@@ -992,17 +996,77 @@ def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str,
     log.append(f"promotion: posted {state} on {sha[:10]}: {desc}")
 
 
+def first_parents(start: str, end: str) -> List[str]:
+    """merge-queue first-parent commits in start..end, oldest first (one per merge)."""
+    return git("rev-list", "--first-parent", "--reverse", f"{start}..{end}").split()
+
+
+def green_within(fps: List[str], log: List[str]) -> Optional[str]:
+    """Newest commit of a contiguous oldest-first prefix whose gate checks are all green."""
+    for sha in reversed(fps):
+        v = checks_verdict(sha)
+        if v == "pass":
+            return sha
+        log.append(f"promotion: skip tip {sha[:10]} ({v})")
+    return None
+
+
+def split_promotion(q: Dict[str, Any], item: Dict[str, Any], log: List[str], dry: bool) -> None:
+    """CodeRabbit skipped/refused the batch: re-cut the oldest contiguous half of
+    its merges; escalate to the owner only when a single-merge batch is refused."""
+    st = q.setdefault("promotion", {})
+    start = item.get("reviewed_sha") or item["base_sha"]
+    fps = first_parents(start, item["batch_sha"])
+    outcome = (item.get("attempts") or [{}])[-1].get("outcome", "skipped")
+    if len(fps) <= 1:
+        if dry:
+            log.append(f"promotion: would escalate {item['id']} (single-merge batch {outcome})")
+            return
+        item.update(state="blocked", last_error=f"single-merge batch {outcome} by CodeRabbit — owner override needed")
+        post_promotion_status(item, item["batch_sha"], "error",
+                              f"review {outcome} on 1-merge batch main={item['base_sha']} crq#{item['id']}"[:140], log)
+        st.setdefault("escalations", []).append({"at": iso(), "item": item["id"], "sha": item["batch_sha"],
+                                                 "base": item["base_sha"], "outcome": outcome, "acked": None})
+        st["attempts"] = st.get("attempts", []) + [{"at": iso(), "item": item["id"], "merges": 1, "why": f"{outcome} → ESCALATED"}]
+        event("promotion_escalated", item=item["id"], sha=item["batch_sha"], outcome=outcome)
+        notify_owner(f"crq PROMOTION NEEDS OWNER OVERRIDE: CodeRabbit {outcome} the single-merge batch "
+                     f"{item['batch_sha'][:10]} (main={item['base_sha'][:10]}). Override per docs/promotion-policy.md, "
+                     f"then `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
+        log.append(f"promotion: {item['id']} single-merge batch {outcome} → escalated to owner")
+        return
+    n = len(fps) // 2
+    tip = green_within(fps[:n], log)
+    if not tip:
+        log.append(f"promotion: {item['id']} {outcome}; no green tip in the oldest {n} merges yet — waiting")
+        return
+    if not dry:
+        item.update(state="split", last_error=f"{outcome} at {len(fps)} merges → re-cut to {n}")
+        st["continue_to"] = st.get("continue_to") or item["batch_sha"]
+        st["batch_cap"] = n
+    cut_promotion(q, log, dry, item["base_sha"], tip, f"{outcome} at {len(fps)} merges → oldest {n}",
+                  reviewed=item.get("reviewed_sha"), carried=item.get("blocking"),
+                  must_reach=(item.get("must_reach") or item["batch_sha"]) if item.get("blocking") else None)
+
+
 def open_promotion(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return next((i for i in q["items"] if i["kind"] == "promotion" and i["state"] in OPEN_PROMO_STATES), None)
 
 
 def cut_promotion(q: Dict[str, Any], log: List[str], dry: bool, base: str, batch: str, why: str,
-                  reviewed: Optional[str] = None, carried: Optional[List[Dict[str, Any]]] = None) -> None:
+                  reviewed: Optional[str] = None, carried: Optional[List[Dict[str, Any]]] = None,
+                  must_reach: Optional[str] = None) -> None:
     iid = f"promo-{batch[:10]}{'-delta' if reviewed else ''}"
+    while any(i["id"] == iid for i in q["items"]):
+        iid += "+"
+    merges = len(first_parents(reviewed or base, batch))
     item = new_item(q, log, dry, id=iid, pr=0, kind="promotion", base_sha=base, batch_sha=batch,
-                    reviewed_sha=reviewed, blocking=carried or [], why=why)
+                    reviewed_sha=reviewed, blocking=carried or [], merges=merges, why=why)
+    if must_reach and must_reach != batch:
+        item["must_reach"] = must_reach  # carries resolved findings: success only once the fix tip is reviewed
     if not dry:
-        q.setdefault("promotion", {})["requested"] = False
+        st = q.setdefault("promotion", {})
+        st["requested"] = False
+        st["attempts"] = (st.get("attempts", []) + [{"at": iso(), "item": iid, "merges": merges, "why": why}])[-30:]
     log.append(f"promotion: {'would cut' if dry else 'cut'} {item['id']} {(reviewed or base)[:10]}..{batch[:10]} "
                f"main={base[:10]} ({why})")
 
@@ -1019,6 +1083,13 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
     if not st.get("last_promoted_at"):
         st["last_promoted_at"] = git("log", "-1", "--format=%cI", "origin/main")[:19] + "Z"
     item = open_promotion(q)
+    if item and item["state"] in ("pending", "findings", "split_needed", "chain_next", "blocked") \
+            and is_ancestor(item["batch_sha"], main):
+        if not dry:  # e.g. the owner overrode an escalated batch: the slot must not stay held
+            item.update(state="done", last_error=f"batch already in main {main[:10]} (promoted outside crq)")
+            event("promoted_outside_crq", item=item["id"], sha=item["batch_sha"])
+        log.append(f"promotion: {item['id']} batch already in main → closed")
+        item = None
     if item and item["state"] == "promoting":
         if is_ancestor(item["batch_sha"], main):
             if not dry:
@@ -1071,8 +1142,36 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
         else:
             open_n = sum(1 for b in item["blocking"] if not b.get("resolution"))
             return log + [f"promotion: {item['id']} waiting on {open_n} unresolved blocking finding(s)"]
+    if item and item["state"] == "chain_next":
+        st_cap = st.get("batch_cap")
+        rest = first_parents(item["batch_sha"], item["must_reach"])
+        tip = green_within(rest[:st_cap or len(rest)], log)
+        if tip:
+            if not dry:
+                item["state"] = "done"
+            cut_promotion(q, log, dry, item["base_sha"], tip, f"chained delta toward fix tip {item['must_reach'][:10]}",
+                          reviewed=item["batch_sha"], carried=item["blocking"], must_reach=item["must_reach"])
+        return log
+    if item and item["state"] == "split_needed":
+        split_promotion(q, item, log, dry)
+        return log
     if item:
         return log  # pending / reviewing / blocked: the start loop and harvest own it
+    target = st.get("continue_to")
+    if target and is_ancestor(target, main):
+        if not dry:
+            st.pop("continue_to", None)
+            st.pop("batch_cap", None)
+        log.append(f"promotion: split batch {target[:10]} fully promoted")
+    elif target:  # promote a split batch prefix by prefix, at the size CodeRabbit accepted
+        rest = first_parents(main, target)
+        tip = green_within(rest[:st.get("batch_cap") or len(rest)], log)
+        if tip:
+            cut_promotion(q, log, dry, main, tip, f"continuing split batch toward {target[:10]} "
+                          f"(≤{st.get('batch_cap')} of {len(rest)} remaining merges)")
+        else:
+            log.append(f"promotion: continuing split batch toward {target[:10]}; no green tip in the next prefix yet")
+        return log
     merges = int(git("rev-list", "--count", "--merges", "--first-parent", f"{main}..origin/merge-queue"))
     age_h = (now() - parse_iso(st["last_promoted_at"])).total_seconds() / 3600
     why = ("on demand" if st.get("requested") else
@@ -1210,6 +1309,9 @@ def harvest_promotion(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str,
                         if any(b["severity"] == s for b in new))
         post_promotion_status(item, item["batch_sha"], "failure", f"blocked: {sev} main={base}", log)
         item["state"] = "findings"
+    elif item.get("must_reach") and item["must_reach"] != item["batch_sha"]:
+        item["state"] = "chain_next"  # clean, but the fix is beyond this prefix: never promote without it
+        log.append(f"prefix clean; continuing toward fix tip {item['must_reach'][:10]} before any success")
     else:
         desc = (f"delta {item['reviewed_sha'][:12]}.. main={base} crq#{item['id']}" if item.get("reviewed_sha")
                 else f"reviewed main={base} crq#{item['id']}")
@@ -1505,7 +1607,8 @@ def write_status(q: Dict[str, Any]) -> None:
         elif i["kind"] == "promotion":
             cyc = f"{len(i.get('cycles', []))}/1"
             unresolved = sum(1 for b in i.get("blocking", []) if not b.get("resolution"))
-            i_extra = (f"{(i.get('reviewed_sha') or i['base_sha'])[:10]}..{i['batch_sha'][:10]} main={i['base_sha'][:10]}"
+            i_extra = (f"{(i.get('reviewed_sha') or i['base_sha'])[:10]}..{i['batch_sha'][:10]} ({i.get('merges', '?')} merges) "
+                       f"main={i['base_sha'][:10]}"
                        f"{f'; {unresolved} blocking unresolved' if unresolved else ''}")
         else:
             cyc = f"{len(i.get('cycles', []))}/1"
@@ -1531,6 +1634,21 @@ def write_status(q: Dict[str, Any]) -> None:
     alerts = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) if not x.get("acked")]
     banner = [f"> **ALERT — PROMOTION UNVERIFIED:** main → `{x['to'][:12]}` at {x['at']}: {'; '.join(x['reasons'])[:300]}. "
               f"Ack: `crq.py promotion-ack {x['to'][:10]} \"<reason>\"`" for x in alerts]
+    st_p = q.get("promotion") or {}
+    for x in st_p.get("escalations", []):
+        if not x.get("acked"):
+            banner.append(f"> **ALERT — PROMOTION NEEDS OWNER OVERRIDE:** CodeRabbit {x['outcome']} the single-merge batch "
+                          f"`{x['sha'][:12]}` (main=`{x['base'][:12]}`, {x['item']}). Owner: override per "
+                          f"docs/promotion-policy.md, then `crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
+    for i in items:
+        if i["kind"] == "promotion" and i["state"] == "findings":
+            open_b = [b for b in i.get("blocking", []) if not b.get("resolution")]
+            if open_b:
+                banner.append(f"> **PROMOTION BLOCKED ({i['id']}, batch `{i['batch_sha'][:12]}`):** {len(open_b)} unresolved "
+                              + ", ".join(f"#{b['n']} {b['severity']} {b['file']}:{b.get('line')}" for b in open_b)[:300]
+                              + f". {PROMO.get('resolver', 'conductor')}: fix in merge-queue, then "
+                              f"`crq.py promotion-resolve <n|all> \"fixed in PR #N\"`")
+    attempts = [f"{a['item']} ({a['merges']} merges: {a['why']})" for a in st_p.get("attempts", [])[-6:]]
     md = [f"# CodeRabbit review queue — status ({iso()})", "", *banner, *([""] if banner else []),
           f"- queue: {'**PAUSED** — ' + str(q.get('pause_reason')) if q.get('paused') else 'active'}",
           f"- schedule: `{sched}` {next_run}",
@@ -1541,7 +1659,9 @@ def write_status(q: Dict[str, Any]) -> None:
           f"- open-PR CLI reviews still owed: {owed_open}",
           f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'}"
           f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
-          f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}",
+          f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}"
+          f"{'; splitting toward ' + st_p['continue_to'][:10] + ' at ≤' + str(st_p.get('batch_cap')) + ' merges' if st_p.get('continue_to') else ''}",
+          f"- promotion attempts (newest last): {' → '.join(attempts) or '—'}",
           f"- last tick: {q.get('last_tick')}", "",
           "| item | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
@@ -1643,8 +1763,8 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
         q["pause_reason"] = reason if action == "pause" else None
     elif action == "promotion-ack":
         sha, _, why = (reason or "").partition(" ")
-        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", [])
-               if not x.get("acked") and (sha == "all" or x["to"].startswith(sha))]
+        hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) + (q.get("promotion") or {}).get("escalations", [])
+               if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]
         if not hit or not why.strip():
             sys.exit('usage: crq.py promotion-ack <main-sha-prefix|all> "<reason>" (no matching open alert?)')
         for x in hit:

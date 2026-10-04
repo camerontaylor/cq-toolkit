@@ -39,6 +39,7 @@
     "tip_search_depth": 15,
     "poster": "camerontaylor",
     "alert_agent_id": "00000000-0000-4000-8000-000000000004",
-    "allowed_reviewers": []
+    "allowed_reviewers": [],
+    "resolver": "conductor (acceptance conductor reviewer-example)"
   }
 }
