@@ -5,4 +5,5 @@ export function selectAffected(input: {
   changed: readonly string[];
   allTests: readonly string[];
   related: readonly string[] | null;
+  missing?: readonly string[];
 }): { files: string[]; fallback: boolean; reason: string };

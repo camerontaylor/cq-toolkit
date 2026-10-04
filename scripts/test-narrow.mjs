@@ -15,14 +15,24 @@
 //      reviewed non-import map); fallbacks, oversize selections and
 //      integration/live suites are refused (see planRun);
 //   5. build once: ensureDist() (#255) rebuilds dist only when stale, then
-//      the vitest child gets CQ_DIST_PREPARED=1 so test/global-setup.ts does
-//      not build again;
+//      the vitest child gets CQ_DIST_PREPARED=1 so the root globalSetup
+//      (test/global-setup.ts, the build-once harvest) does not build again;
 //   6. ONE vitest invocation: the plan's projects, serial files, one worker,
-//      a JSON report for the counts, killed after RUN_TIMEOUT_MS;
+//      a JSON report for the counts, in its own process group (recorded in
+//      the lock, so a killed runner cannot leave an orphan that runs beside
+//      the next one), killed after RUN_TIMEOUT_MS;
 //   7. one stable summary line on stdout (`test:narrow result=… exit=…`),
 //      printed on every exit path.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from 'node:fs';
 import { constants, getPriority, loadavg, setPriority, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,37 +53,52 @@ import {
 const SCRIPT = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SCRIPT), '..');
 const REEXEC_MARK = 'CQ_TEST_NARROW_REEXEC';
+const POSIX = process.platform !== 'win32';
+const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 const argv = process.argv.slice(2);
 const say = (line) => process.stderr.write(`test:narrow: ${line}\n`);
 const toPosix = (path) => path.split(sep).join('/');
 const repoRelative = (path) => toPosix(relative(ROOT, resolve(ROOT, path)));
 const signalExit = (signal) => 128 + (constants.signals[signal] ?? 1);
+/** Synchronous: stdout to a pipe is asynchronous on macOS, and we exit next. */
+const emit = (fields) => {
+  const line = `${summaryLine(fields)}\n`;
+  try {
+    writeSync(1, line);
+  } catch {
+    process.stdout.write(line);
+  }
+};
 
 // 1. Priority ---------------------------------------------------------------
 if (getPriority() < NICE_INCREMENT) {
-  if (process.platform === 'win32') {
+  if (!POSIX) {
     setPriority(constants.priority.PRIORITY_BELOW_NORMAL);
   } else if (process.env[REEXEC_MARK] === '1') {
-    process.stdout.write(
-      `${summaryLine({ result: 'refused', exit: 2, reason: `priority ${getPriority()} after nice -n ${NICE_INCREMENT}` })}\n`,
-    );
+    const reason = `priority ${getPriority()} after nice -n ${NICE_INCREMENT}`;
+    emit({ result: 'refused', exit: 2, reason });
     process.exit(2);
   } else {
-    const child = spawn('nice', ['-n', String(NICE_INCREMENT), process.execPath, SCRIPT, ...argv], {
+    const niced = spawn('nice', ['-n', String(NICE_INCREMENT), process.execPath, SCRIPT, ...argv], {
       stdio: 'inherit',
       env: { ...process.env, [REEXEC_MARK]: '1' },
     });
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-      process.on(signal, () => child.kill(signal));
-    }
-    child.on('error', (error) => {
-      process.stdout.write(
-        `${summaryLine({ result: 'error', exit: 1, reason: `cannot re-exec under nice: ${error.message}` })}\n`,
-      );
+    // A terminal signal reaches both processes (same group); the niced one
+    // relays each signal to its vitest group once, so the duplicate is moot.
+    for (const signal of SIGNALS) process.on(signal, () => niced.kill(signal));
+    niced.on('error', (error) => {
+      emit({ result: 'error', exit: 1, reason: `cannot re-exec under nice: ${error.message}` });
       process.exit(1);
     });
-    child.on('exit', (code, signal) => process.exit(code ?? signalExit(signal)));
-    // The niced child does the work; this process only relays its exit.
+    niced.on('exit', (code, signal) => {
+      // Killed by a signal, the niced process printed no summary: print one.
+      if (signal !== null) {
+        const reason = `niced runner killed by ${signal}`;
+        emit({ result: 'interrupted', exit: signalExit(signal), reason });
+      }
+      process.exit(code ?? signalExit(signal));
+    });
+    // The niced process does the work; this one only relays its exit.
     await new Promise(() => {});
   }
 }
@@ -92,31 +117,47 @@ const summary = {
 let printed = false;
 let releaseLock = () => {};
 let child = null;
+let childDone = false;
+let interruptedBy = null;
+const relayed = new Set();
 
+/** Signal vitest's whole process group (its pool workers and their spawns). */
+const signalChild = (signal) => {
+  if (child === null || childDone || child.pid === undefined) return;
+  try {
+    if (POSIX) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // the group is gone already
+  }
+};
 const finish = (fields) => {
   Object.assign(summary, fields);
   if (!printed) {
     printed = true;
-    process.stdout.write(`${summaryLine(summary)}\n`);
+    emit(summary);
   }
   releaseLock();
   process.exit(summary.exit);
 };
-// Every exit path — including a library's process.exit (ensureDist's fail) —
-// prints the summary and frees the lock.
+// Every exit path — including a library's process.exit (ensureDist's fail)
+// and an uncaught exception — stops vitest's group, prints the summary and
+// frees the lock, in that order: the lock is never free while tests run.
 process.on('exit', (code) => {
+  signalChild('SIGKILL');
   if (!printed) {
     printed = true;
-    process.stdout.write(
-      `${summaryLine({ ...summary, result: 'error', exit: code, reason: summary.reason ?? 'exited before a result' })}\n`,
-    );
+    emit({ ...summary, result: 'error', exit: code, reason: summary.reason ?? 'exited early' });
   }
   releaseLock();
 });
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+for (const signal of SIGNALS) {
   process.on(signal, () => {
-    if (child !== null) child.kill(signal); // its exit handler finishes
-    else finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+    if (child === null) finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+    interruptedBy ??= signal;
+    if (relayed.has(signal)) return;
+    relayed.add(signal);
+    signalChild(signal); // the child's exit handler finishes
   });
 }
 
@@ -153,6 +194,8 @@ const git = (args) => {
   return res.stdout;
 };
 const zsplit = (out) => out.split('\0').filter(Boolean);
+const diffNames = (...revs) =>
+  zsplit(git(['diff', '--name-only', '--no-renames', '-z', '--end-of-options', ...revs]));
 
 let changed;
 try {
@@ -169,14 +212,14 @@ try {
     });
   } else if (opts.range !== null) {
     summary.source = `range:${opts.range}`;
-    changed = zsplit(git(['diff', '--name-only', '--no-renames', '-z', opts.range]));
+    changed = diffNames(opts.range);
   } else {
     const ref = opts.base ?? DEFAULT_BASE;
-    const mergeBase = git(['merge-base', ref, 'HEAD']).trim();
+    const mergeBase = git(['merge-base', '--end-of-options', ref, 'HEAD']).trim();
     summary.source = `base:${ref}@${mergeBase.slice(0, 10)}`;
     changed = [
-      ...zsplit(git(['diff', '--name-only', '--no-renames', '-z', `${mergeBase}..HEAD`])),
-      ...zsplit(git(['diff', '--name-only', '--no-renames', '-z', 'HEAD'])),
+      ...diffNames(`${mergeBase}..HEAD`),
+      ...diffNames('HEAD'),
       ...zsplit(git(['ls-files', '--others', '--exclude-standard', '-z'])),
     ];
   }
@@ -184,6 +227,7 @@ try {
   finish({ result: 'refused', exit: 2, reason: error.message });
 }
 changed = [...new Set(changed)].sort();
+const missing = changed.filter((f) => !existsSync(f));
 
 const manifest = JSON.parse(readFileSync(join(ROOT, 'test/suite-classes.json'), 'utf8'));
 // Every test file on disk, classified or not (unclassified ones run in the
@@ -200,11 +244,11 @@ const allTests = [
   .sort();
 
 // The import-graph query loads vitest's module graph (no tests execute); it
-// runs only for changed sources that still exist.
+// runs only for changed sources that still exist (deleted ones fall back).
 let related = [];
 let relatedError = null;
 const sources = changed.filter(
-  (f) => /^(src|scripts)\//.test(f) && /\.(ts|mts|js|mjs)$/.test(f) && existsSync(f),
+  (f) => /^(src|scripts)\//.test(f) && /\.(ts|mts|js|mjs)$/.test(f) && !missing.includes(f),
 );
 if (sources.length > 0) {
   try {
@@ -222,7 +266,7 @@ if (sources.length > 0) {
   }
 }
 
-const selection = selectAffected({ changed, allTests, related });
+const selection = selectAffected({ changed, allTests, related, missing });
 if (relatedError !== null) selection.reason += `: ${relatedError}`;
 const named = changed.filter((f) => opts.files.length > 0 && allTests.includes(f));
 const plan = planRun({ selection, named, manifest, include: opts.include });
@@ -241,11 +285,16 @@ say(`${changed.length} changed file(s) -> ${files.length} test file(s)`);
 for (const r of plan.run) say(`  ${r.project.padEnd(11)} ${r.file}`);
 for (const d of plan.dropped)
   say(`  skipped (${d.project}; needs --include-${d.project}) ${d.file}`);
+const droppedNote =
+  plan.dropped.length === 0
+    ? undefined
+    : `${plan.dropped.length} ${[...new Set(plan.dropped.map((d) => d.project))].join('/')} ` +
+      'file(s) also cover the change and were not run (--include-<class> runs them)';
 
-if (opts.dryRun) finish({ result: 'dry-run', exit: 0 });
+if (opts.dryRun) finish({ result: 'dry-run', exit: 0, reason: droppedNote });
 if (files.length === 0) {
   // Never start vitest with no file filter: that would be the full suite.
-  finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
+  finish({ result: 'nothing', exit: 0, reason: droppedNote ?? 'no test file covers the change' });
 }
 
 // 5. Build once --------------------------------------------------------------
@@ -266,9 +315,10 @@ const vitestArgs = [
   '--reporter=default',
   '--reporter=json',
   `--outputFile.json=${reportPath}`,
-  ...(opts.testNamePattern === null ? [] : ['--testNamePattern', opts.testNamePattern]),
-  // Absolute paths: vitest matches an absolute filter by path prefix, so a
-  // filter cannot pick up a different file whose name merely contains it.
+  ...(opts.testNamePattern === null ? [] : [`--testNamePattern=${opts.testNamePattern}`]),
+  // Absolute paths: vitest keeps a test file whose path starts with an
+  // absolute filter (and whose relative path contains it); the post-run
+  // check below catches any extra file such a match would pull in.
   ...files.map((f) => join(ROOT, f)),
 ];
 say(
@@ -280,13 +330,15 @@ child = spawn(process.execPath, vitestArgs, {
   cwd: ROOT,
   stdio: 'inherit',
   env: { ...process.env, CQ_DIST_PREPARED: '1' },
+  detached: POSIX, // own process group: signalChild reaches every descendant
 });
+if (POSIX && child.pid !== undefined) lock.annotate({ childPgid: child.pid });
 let timedOut = false;
 const timer = setTimeout(() => {
   timedOut = true;
   say(`run exceeded ${RUN_TIMEOUT_MS / 60_000} min; terminating`);
-  child.kill('SIGTERM');
-  setTimeout(() => child.kill('SIGKILL'), 10_000).unref();
+  signalChild('SIGTERM');
+  setTimeout(() => signalChild('SIGKILL'), 10_000).unref();
 }, RUN_TIMEOUT_MS);
 timer.unref();
 
@@ -296,6 +348,10 @@ child.on('error', (error) => {
 });
 child.on('exit', (code, signal) => {
   clearTimeout(timer);
+  // Sweep anything the run left behind in its group before the lock frees;
+  // after that the pgid is never signalled again (it could be reused).
+  signalChild('SIGKILL');
+  childDone = true;
   let report = null;
   try {
     report = readReport(JSON.parse(readFileSync(reportPath, 'utf8')), repoRelative);
@@ -305,14 +361,19 @@ child.on('exit', (code, signal) => {
   rmSync(reportDir, { recursive: true, force: true });
   const exit = code ?? signalExit(signal);
   const fields = { exit, durationMs: Date.now() - started, ...report };
-  const unexpected = (report?.ran ?? []).filter((f) => !files.includes(f));
+  const ran = report?.ran ?? [];
+  const unexpected = ran.filter((f) => !files.includes(f));
+  const unrun = files.filter((f) => !ran.includes(f));
+  const failWith = (reason) => Object.assign(fields, { result: 'fail', exit: exit || 1, reason });
   if (timedOut) Object.assign(fields, { result: 'timeout', reason: 'RUN_TIMEOUT_MS exceeded' });
-  else if (unexpected.length > 0) {
-    Object.assign(fields, {
-      result: 'fail',
-      reason: `ran unselected files: ${unexpected.join(',')}`,
-    });
-    if (exit === 0) fields.exit = 1;
-  } else fields.result = exit === 0 ? 'pass' : 'fail';
+  else if (interruptedBy !== null) {
+    Object.assign(fields, { result: 'interrupted', reason: interruptedBy });
+  } else if (unexpected.length > 0) failWith(`ran unselected files: ${unexpected.join(',')}`);
+  else if (exit !== 0) fields.result = 'fail';
+  // A pass must prove itself: a report, every selected file in it, a test.
+  else if (report === null) failWith('vitest wrote no JSON report');
+  else if (unrun.length > 0) failWith(`selected files did not run: ${unrun.join(',')}`);
+  else if (report.tests.total === 0) failWith('no tests executed');
+  else Object.assign(fields, { result: 'pass', reason: droppedNote });
   finish(fields);
 });

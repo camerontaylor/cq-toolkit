@@ -8,7 +8,8 @@
 //      to the suites that own them;
 //   3. a broad FALLBACK — every unit test file — when the impact is unknown
 //      (a changed file that is neither a test, a mapped file, an import-graph
-//      hit, nor an inert path) or the import-graph query itself failed.
+//      hit, nor an inert path; a DELETED source, whose importers the graph
+//      can no longer see) or the import-graph query itself failed.
 // Inert paths (plain prose that no test reads) select nothing and never
 // trigger the fallback.
 
@@ -49,7 +50,14 @@ export const NON_IMPORT_MAP = [
       /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
     ],
   ],
-  [/^\.github\/workflows\//, [/^test\/workflows\//]],
+  [
+    /^\.github\/workflows\//,
+    [
+      /^test\/workflows\//,
+      /^test\/ops\/gates\/(workflowScan|policyDiff)\.test\.ts$/,
+      /^test\/scripts\/github-settings\.test\.ts$/,
+    ],
+  ],
   // Dependency and compiler inputs affect every test project.
   [
     /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.pnpmfile\.[cm]?js|tsconfig[^/]*\.json)$/,
@@ -77,12 +85,15 @@ const toPosix = (path) => path.replaceAll('\\', '/');
 const full = (allTests, reason) => ({ files: [...allTests].sort(), fallback: true, reason });
 
 /**
- * @param {{ changed: string[], allTests: string[], related: string[] | null }} input
- *   `related` is the import-graph hit list, or null when that query failed.
+ * @param {{ changed: string[], allTests: string[], related: string[] | null, missing?: string[] }} input
+ *   `related` is the import-graph hit list, or null when that query failed;
+ *   `missing` lists changed paths that no longer exist (deletions).
  * @returns {{ files: string[], fallback: boolean, reason: string }}
  */
-export function selectAffected({ changed, allTests, related }) {
+export function selectAffected({ changed, allTests, related, missing = [] }) {
   if (related === null) return full(allTests, 'import-graph query failed');
+  const deleted = changed.find((path) => isSource(path) && missing.includes(path));
+  if (deleted !== undefined) return full(allTests, `deleted source ${deleted}`);
   const selected = new Set(related.map(toPosix).filter((test) => allTests.includes(test)));
   for (const path of changed) {
     if (isTest(path)) {

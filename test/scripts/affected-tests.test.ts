@@ -132,6 +132,31 @@ describe('selectAffected', () => {
     });
   });
 
+  it('maps workflow edits to every suite that reads the real workflow files', () => {
+    const readers = [
+      'test/ops/gates/policyDiff.test.ts',
+      'test/ops/gates/workflowScan.test.ts',
+      'test/scripts/github-settings.test.ts',
+    ];
+    expect(
+      selectAffected({
+        changed: ['.github/workflows/ci.yml'],
+        allTests: [...allTests, ...readers],
+        related: [],
+      }).files,
+    ).toEqual([...readers, 'test/workflows/d.test.ts']);
+  });
+
+  it('falls back when a source file was deleted: its importers are unknown', () => {
+    const result = selectAffected({
+      changed: ['src/kernel/gone.ts', 'README.md'],
+      allTests,
+      related: [],
+      missing: ['src/kernel/gone.ts'],
+    });
+    expect(result).toMatchObject({ fallback: true, reason: 'deleted source src/kernel/gone.ts' });
+  });
+
   it('falls back to every test when a changed file has no mapping', () => {
     const result = selectAffected({ changed: ['mystery/file.bin'], allTests, related: [] });
     expect(result.fallback).toBe(true);

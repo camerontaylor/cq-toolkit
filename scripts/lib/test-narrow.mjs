@@ -76,9 +76,10 @@ export function parseArgs(argv) {
       const value = () => {
         const next = inline ?? args.shift();
         inline = undefined;
-        if (next === undefined || next === '' || (next.startsWith('-') && eq === -1)) {
-          throw new Error(`${flag} requires a value`);
-        }
+        if (next === undefined || next === '') throw new Error(`${flag} requires a value`);
+        // Values reach git and vitest argv: an option-shaped value is refused
+        // in both spellings so it can never be read as an option there.
+        if (next.startsWith('-')) throw new Error(`${flag} requires a value, got ${next}`);
         return next;
       };
       if (flag === '-h' || flag === '--help') return { ok: false, help: true };

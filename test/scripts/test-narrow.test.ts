@@ -65,7 +65,9 @@ describe('parseArgs', () => {
   it('refuses malformed values instead of reading them as files', () => {
     expect(refusal(['--dry-run=1'])).toBe('--dry-run takes no value');
     expect(refusal(['--base'])).toBe('--base requires a value');
-    expect(refusal(['--base', '--dry-run'])).toBe('--base requires a value');
+    expect(refusal(['--base', '--dry-run'])).toBe('--base requires a value, got --dry-run');
+    expect(refusal(['--range=--output=x..y'])).toBe('--range requires a value, got --output=x..y');
+    expect(refusal(['--base=--fork-point'])).toContain('requires a value');
     expect(refusal(['--max-wait', String(MAX_WAIT_CEILING_S + 1)])).toContain('0..');
     expect(refusal(['--max-wait', '1.5'])).toContain('whole seconds');
     expect(refusal(['--range', 'HEAD'])).toContain('<a>..<b>');

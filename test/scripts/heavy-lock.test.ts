@@ -1,12 +1,13 @@
 // Host-wide single-flight lock (scripts/lib/heavy-lock.mjs): acquire,
-// contention with a bounded wait, stale reclaim, the reclaim race, and the
-// token-checked release. Pure: own temp dirs only; liveness, clock and sleep
+// contention with a bounded wait, stale and orphan reclaim, the guarded
+// reclaim race, and the token-checked release. Pure: own temp dirs only; liveness, clock and sleep
 // are injected (no process is signalled, no real waiting).
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  GUARD_STALE_MS,
   MAX_HOLD_MS,
   MISSING_OWNER_MS,
   acquireLock,
@@ -105,20 +106,20 @@ describe('acquireLock', () => {
     expect(fs.readdirSync(dir)).toEqual(['lock']); // the stale copy was removed
   });
 
-  it('restores a lock that changed hands between the judgement and the rename', async () => {
+  it('leaves a lock alone when it changed hands before the reclaim guard was taken', async () => {
     holderRecord(99, 'tok-dead');
-    // Simulate a waiter that reclaimed and re-acquired first: the directory
-    // our rename moves already belongs to a live owner.
+    // Another waiter reclaims and re-acquires between our judgement and our
+    // guard: the record under the guard is no longer the one judged stale.
     const racingFs = {
       ...fs,
-      renameSync: (from: fs.PathLike, to: fs.PathLike) => {
-        if (String(from) === lock && readOwner(lock)?.token === 'tok-dead') {
+      mkdirSync: (target: fs.PathLike) => {
+        if (String(target) === `${lock}.reclaim`) {
           fs.writeFileSync(
             join(lock, 'owner.json'),
             JSON.stringify({ pid: 7, token: 'tok-new', startedAt: new Date().toISOString() }),
           );
         }
-        fs.renameSync(from, to);
+        fs.mkdirSync(target);
       },
     } as typeof fs;
     const got = await acquireLock({
@@ -129,6 +130,66 @@ describe('acquireLock', () => {
     });
     expect(got).toMatchObject({ acquired: false, holder: { pid: 7, token: 'tok-new' } });
     expect(readOwner(lock)?.token).toBe('tok-new');
+    expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
+  });
+
+  it('kills an orphaned child group before reclaiming its lock', async () => {
+    holderRecord(99, 'tok-dead');
+    const record = JSON.parse(fs.readFileSync(join(lock, 'owner.json'), 'utf8')) as object;
+    fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ ...record, childPgid: 555 }));
+    const killed: number[] = [];
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: {
+        isAlive: () => false,
+        groupAlive: (pgid) => pgid === 555 && killed.length === 0,
+        killGroup: (pgid) => void killed.push(pgid),
+        token: () => 'tok-h',
+        log: () => {},
+      },
+    });
+    expect(killed).toEqual([555]);
+    expect(got.acquired).toBe(true);
+  });
+
+  it('waits while another reclaimer holds a fresh guard, and clears a stale one', async () => {
+    holderRecord(99, 'tok-dead');
+    fs.mkdirSync(`${lock}.reclaim`);
+    const busy = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { isAlive: () => false, token: () => 'tok-i', log: () => {} },
+    });
+    expect(busy.acquired).toBe(false);
+    expect(readOwner(lock)?.token).toBe('tok-dead');
+
+    const past = (Date.now() - GUARD_STALE_MS - 5_000) / 1000;
+    fs.utimesSync(`${lock}.reclaim`, past, past);
+    const c = clock(Date.now());
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 10_000,
+      info,
+      deps: { ...c, isAlive: () => false, token: () => 'tok-j', log: () => {} },
+    });
+    expect(got.acquired).toBe(true);
+    expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
+  });
+
+  it('annotates its own record with the child group', async () => {
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { token: () => 'tok-k', log: () => {} },
+    });
+    if (!got.acquired) throw new Error('expected the lock');
+    got.annotate({ childPgid: 4321 });
+    expect(readOwner(lock)).toMatchObject({ token: 'tok-k', childPgid: 4321, ...info });
+    got.release();
   });
 
   it('releases only while the record still carries its own token', async () => {
@@ -158,20 +219,43 @@ describe('staleReason', () => {
   const fresh = new Date(now).toISOString();
 
   it('keeps a live, recent owner', () => {
-    expect(staleReason(owner(fresh), now, { now, isAlive: () => true })).toBeNull();
+    expect(
+      staleReason(owner(fresh), now, { now, isAlive: () => true, groupAlive: () => false }),
+    ).toBeNull();
   });
 
   it('gives a missing record MISSING_OWNER_MS to appear', () => {
-    expect(staleReason(null, now - MISSING_OWNER_MS, { now, isAlive: () => true })).toBeNull();
-    expect(staleReason(null, now - MISSING_OWNER_MS - 1, { now, isAlive: () => true })).toBe(
-      'no owner record',
-    );
+    expect(
+      staleReason(null, now - MISSING_OWNER_MS, {
+        now,
+        isAlive: () => true,
+        groupAlive: () => false,
+      }),
+    ).toBeNull();
+    expect(
+      staleReason(null, now - MISSING_OWNER_MS - 1, {
+        now,
+        isAlive: () => true,
+        groupAlive: () => false,
+      }),
+    ).toBe('no owner record');
   });
 
   it('treats a dead pid or an over-long hold as stale', () => {
-    expect(staleReason(owner(fresh), now, { now, isAlive: () => false })).toContain('is gone');
+    expect(
+      staleReason(owner(fresh), now, { now, isAlive: () => false, groupAlive: () => false }),
+    ).toContain('is gone');
+    expect(
+      staleReason({ ...owner(fresh), childPgid: 9 }, now, {
+        now,
+        isAlive: () => false,
+        groupAlive: (pgid) => pgid === 9,
+      }),
+    ).toContain('orphaned child group');
     const old = new Date(now - MAX_HOLD_MS - 1).toISOString();
-    expect(staleReason(owner(old), now, { now, isAlive: () => true })).toContain('MAX_HOLD_MS');
+    expect(
+      staleReason(owner(old), now, { now, isAlive: () => true, groupAlive: () => false }),
+    ).toContain('MAX_HOLD_MS');
   });
 
   it('reclaims an ownerless directory once it is old enough', async () => {
