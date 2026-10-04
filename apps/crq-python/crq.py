@@ -761,6 +761,10 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             else:
                 record["addressing"] = "none needed (no critical/major findings; minor/trivial recorded, not chased)"
                 advance_open(item)
+        elif item["kind"] == "promotion":
+            item.setdefault("cycles", []).append(record)
+            ledger_append(item, meta, cls, rdir)
+            return f"{item['id']}: completed ({cls['findings']} findings) {harvest_promotion(item, meta, cls, rdir)}"
         else:
             item.setdefault("cycles", []).append(record)
             ledger_append(item, meta, cls, rdir)
@@ -783,7 +787,14 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     # error / interrupted / skipped: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
-    if o == "skipped" or item["failures"] >= CONFIG["max_item_failures"]:
+    if item["kind"] == "promotion" and o == "skipped":
+        item["state"] = "blocked"  # never reported as success; owner re-cuts or overrides
+        post_promotion_status(item, item["batch_sha"], "error",
+                              f"review skipped by CLI main={item['base_sha']} crq#{item['id']}"[:140], [])
+    elif item["kind"] == "promotion":  # retried, never blocked: promotion must not stall on a flaky run
+        item["state"] = "pending"
+        item["not_before"] = iso(now() + dt.timedelta(minutes=min(60, CONFIG["error_backoff_min"] * 2 ** (item["failures"] - 1))))
+    elif o == "skipped" or item["failures"] >= CONFIG["max_item_failures"]:
         item["state"] = "blocked"
     else:
         item["state"] = "pending"
@@ -910,13 +921,216 @@ def harvest_addressing(item: Dict[str, Any], dry: bool) -> Optional[str]:
     return None
 
 
+# ----------------------------------------------------------- promotion to main
+#
+# cq-toolkit docs/promotion-policy.md (PR #269): main is promoted in batches,
+# and only to a merge-queue sha carrying an owner-posted `crq/promotion-review`
+# status whose description binds `main=<base>`. crq cuts the batch, reviews
+# base..batch (or reviewed..batch for a delta) and posts the status.
+
+PROMO = CONFIG.get("promotion", {})
+OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "blocked")
+MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
+
+
+def promotion_gate_live() -> bool:
+    """The gate only exists once #269's policy is on main; before that a
+    promotion review would spend quota on nothing."""
+    return run(["git", "cat-file", "-e", "origin/main:docs/promotion-policy.md"], cwd=CLONE, check=False).returncode == 0
+
+
+def main_sha() -> str:
+    return run(["gh", "api", f"repos/{REPO}/git/ref/heads/main", "--jq", ".object.sha"], timeout=60).stdout.strip()
+
+
+def checks_verdict(sha: str) -> str:
+    """Mirror merge-queue-gate's I4 fold over check-runs?filter=latest: per
+    required name, pass only when EVERY row is completed+success."""
+    rows = run(["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs?filter=latest", "--paginate", "--jq",
+                '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'], timeout=120).stdout.splitlines()
+    for name in PROMO.get("checks", ["static", "denylist", "ratchet"]):
+        mine = [r.split("\t") for r in rows if r.split("\t")[0] == name]
+        if not mine:
+            return f"{name} missing"
+        bad = [f"{s}/{c}" for _n, s, c in mine if s != "completed" or c != "success"]
+        if bad:
+            return f"{name} {bad[0]}"
+    return "pass"
+
+
+def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
+    """Newest first-parent merge-queue commit beyond `base` whose gate checks all passed."""
+    for sha in git("rev-list", "--first-parent", "-n", str(PROMO.get("tip_search_depth", 15)),
+                   f"{base}..origin/merge-queue").split():
+        v = checks_verdict(sha)
+        if v == "pass":
+            return sha
+        log.append(f"promotion: skip tip {sha[:10]} ({v})")
+    return None
+
+
+def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str, log: List[str]) -> None:
+    if not MAIN_TOKEN.search(desc) or len(desc) > 140:
+        raise RuntimeError(f"bad promotion status description: {desc!r}")
+    if not PROMO.get("post_status", False):
+        log.append(f"promotion: status NOT posted (post_status off): {state} {sha[:10]} {desc}")
+        return
+    # A status from a non-allowed creator turns the gate RED; never post as anyone but the owner's User.
+    who = run(["gh", "api", "user", "--jq", '.login + " " + .type'], timeout=60).stdout.strip()
+    if who != f"{PROMO['poster']} User":
+        raise RuntimeError(f"refusing to post {PROMO['status_context']}: gh auth is {who!r}, not {PROMO['poster']} (User)")
+    run(["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
+         "-f", f"state={state}", "-f", f"description={desc}"], timeout=60)
+    item.setdefault("statuses", []).append({"at": iso(), "sha": sha, "state": state, "description": desc})
+    event("promotion_status", item=item["id"], sha=sha, state=state, description=desc)
+    log.append(f"promotion: posted {state} on {sha[:10]}: {desc}")
+
+
+def open_promotion(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return next((i for i in q["items"] if i["kind"] == "promotion" and i["state"] in OPEN_PROMO_STATES), None)
+
+
+def cut_promotion(q: Dict[str, Any], log: List[str], dry: bool, base: str, batch: str, why: str,
+                  reviewed: Optional[str] = None, carried: Optional[List[Dict[str, Any]]] = None) -> None:
+    iid = f"promo-{batch[:10]}{'-delta' if reviewed else ''}"
+    item = new_item(q, log, dry, id=iid, pr=0, kind="promotion", base_sha=base, batch_sha=batch,
+                    reviewed_sha=reviewed, blocking=carried or [], why=why)
+    if not dry:
+        q.setdefault("promotion", {})["requested"] = False
+    log.append(f"promotion: {'would cut' if dry else 'cut'} {item['id']} {(reviewed or base)[:10]}..{batch[:10]} "
+               f"main={base[:10]} ({why})")
+
+
+def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
+    """Advance the (single) open promotion, or cut a new one when a trigger fired."""
+    log: List[str] = []
+    if not PROMO.get("enabled"):
+        return log
+    if not promotion_gate_live():
+        return ["promotion: dormant (origin/main has no docs/promotion-policy.md yet)"]
+    st = q.setdefault("promotion", {})
+    main = main_sha()
+    if not st.get("last_promoted_at"):
+        st["last_promoted_at"] = git("log", "-1", "--format=%cI", "origin/main")[:19] + "Z"
+    item = open_promotion(q)
+    if item and item["state"] == "promoting":
+        if is_ancestor(item["batch_sha"], main):
+            if not dry:
+                item["state"] = "done"
+                st.update(last_promoted_sha=item["batch_sha"], last_promoted_at=iso())
+                event("promoted", item=item["id"], sha=item["batch_sha"])
+            log.append(f"promotion: main reached {item['batch_sha'][:10]} → {item['id']} done")
+            item = None
+        elif not is_ancestor(item["base_sha"], main):
+            if not dry:
+                item.update(state="skipped", last_error=f"main moved to {main[:10]}, which lacks the review base")
+            log.append(f"promotion: {item['id']} superseded (main {main[:10]} lacks base) → re-cut")
+            item = None
+        else:
+            since = (now() - parse_iso(item["success_at"])).total_seconds() / 60
+            if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched") and not dry:
+                if PROMO.get("post_status"):
+                    run(["gh", "workflow", "run", "merge-queue-gate.yml", "--repo", REPO, "--ref", "main",
+                         "-f", f"sha={item['batch_sha']}"], check=False, timeout=60)
+                item["dispatched"] = iso()
+                event("promotion_dispatch", item=item["id"], sha=item["batch_sha"])
+                log.append(f"promotion: main not at {item['batch_sha'][:10]} {since:.0f}m after success → gate dispatched")
+            return log
+    if item and item["state"] == "findings":
+        if not is_ancestor(item["base_sha"], main):
+            if not dry:
+                item.update(state="skipped", last_error=f"main moved to {main[:10]}, which lacks the review base")
+            item = None
+        elif all(b.get("resolution") for b in item["blocking"]):
+            tip = newest_green_tip(main, log)
+            if tip == item["batch_sha"]:
+                n = len(item["blocking"])
+                if not dry:
+                    post_promotion_status(item, tip, "success",
+                                          f"reviewed; {n} blocking dispositioned main={item['base_sha']} crq#{item['id']}"[:140], log)
+                    item.update(state="promoting", success_at=iso())
+                return log
+            if tip and is_ancestor(item["batch_sha"], tip):
+                if not dry:
+                    item["state"] = "done"
+                cut_promotion(q, log, dry, item["base_sha"], tip, f"blocking findings of {item['id']} addressed",
+                              reviewed=item["batch_sha"], carried=item["blocking"])
+                return log
+            if tip:
+                if not dry:
+                    item.update(state="skipped", last_error=f"new green tip {tip[:10]} does not descend from the batch")
+                item = None
+            else:
+                return log + ["promotion: findings resolved; waiting for a green merge-queue tip"]
+        else:
+            open_n = sum(1 for b in item["blocking"] if not b.get("resolution"))
+            return log + [f"promotion: {item['id']} waiting on {open_n} unresolved blocking finding(s)"]
+    if item:
+        return log  # pending / reviewing / blocked: the start loop and harvest own it
+    merges = int(git("rev-list", "--count", "--merges", "--first-parent", f"{main}..origin/merge-queue"))
+    age_h = (now() - parse_iso(st["last_promoted_at"])).total_seconds() / 3600
+    why = ("on demand" if st.get("requested") else
+           f"{merges} merges since last promotion" if merges >= PROMO.get("merges_trigger", 5) else
+           f"{age_h:.1f}h since last promotion" if merges and age_h >= PROMO.get("hours_trigger", 8) else None)
+    if not why:
+        return log
+    tip = newest_green_tip(main, log)
+    if not tip:
+        return log + [f"promotion: trigger fired ({why}) but no merge-queue tip beyond main has all gate checks green"]
+    cut_promotion(q, log, dry, main, tip, why)
+    return log
+
+
+def blocking_findings(ndjson: Path) -> List[Dict[str, Any]]:
+    out = []
+    for line in ndjson.read_text(errors="replace").splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") == "finding" and e.get("severity") in BLOCKING_SEVERITIES:
+            m = re.search(r" at line (\d+)", e.get("codegenInstructions") or e.get("comment") or "")
+            out.append({"n": len(out) + 1, "severity": e["severity"], "file": e.get("fileName"),
+                        "line": int(m.group(1)) if m else None, "resolution": None})
+    return out
+
+
+def harvest_promotion(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any], rdir: Path) -> str:
+    log: List[str] = []
+    new = blocking_findings(rdir / "review.ndjson")
+    base = item["base_sha"]
+    if new:
+        item["blocking"] = item.get("blocking", []) + [dict(b, n=len(item.get("blocking", [])) + k + 1, run=meta["run_id"])
+                                                       for k, b in enumerate(new)]
+        sev = ", ".join(f"{sum(1 for b in new if b['severity'] == s)} {s}" for s in ("critical", "major")
+                        if any(b["severity"] == s for b in new))
+        post_promotion_status(item, item["batch_sha"], "failure", f"blocked: {sev} main={base}", log)
+        item["state"] = "findings"
+    else:
+        desc = (f"delta {item['reviewed_sha'][:12]}.. main={base} crq#{item['id']}" if item.get("reviewed_sha")
+                else f"reviewed main={base} crq#{item['id']}")
+        post_promotion_status(item, item["batch_sha"], "success", desc[:140], log)
+        item.update(state="promoting", success_at=iso())
+    return "; ".join(log)
+
+
+def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
+    base = item.get("reviewed_sha") or item["base_sha"]
+    if not is_ancestor(base, item["batch_sha"]):
+        raise NotReady(f"{base[:10]} is not an ancestor of batch {item['batch_sha'][:10]}")
+    scope = f"delta {base[:10]}..{item['batch_sha'][:10]}" if item.get("reviewed_sha") else \
+        f"main {base[:10]}..{item['batch_sha'][:10]}"
+    return {"base": base, "head": item["batch_sha"], "target": "origin/main", "cycle": None, "branch": None,
+            "label": f"promotion review — {scope}", "notes": []}
+
+
 # ----------------------------------------------------------- tick
 
 
 def rank(item: Dict[str, Any]) -> int:
     """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
     follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog."""
-    if item["kind"] == "open":
+    if item["kind"] in ("open", "promotion"):
         return 0
     if item["kind"] == "delta":
         return 2 if item.get("followup") == "merged" else 1
@@ -924,7 +1138,8 @@ def rank(item: Dict[str, Any]) -> int:
 
 
 def sort_key(item: Dict[str, Any]) -> Tuple:
-    return (0 if item.get("boost") else 1, rank(item), item.get("order", 999))
+    # promotion (and its delta) takes the next start slot ahead of everything (docs/promotion-policy.md)
+    return (0 if item["kind"] == "promotion" else 1, 0 if item.get("boost") else 1, rank(item), item.get("order", 999))
 
 
 # ----------------------------------------------------------- enrollment
@@ -1052,6 +1267,10 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append(msg)
     q["last_tick"] = iso()
     log += enroll(q, dry)
+    try:
+        log += promotion_tick(q, dry)
+    except Exception as exc:  # never let promotion bookkeeping stop the queue
+        log.append(f"promotion: error {exc}"[:300])
     started = None
     if q.get("paused"):
         log.append(f"queue paused: {q.get('pause_reason')}")
@@ -1074,7 +1293,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 item["wait_reason"] = f"waiting for {item['depends_on']}"
                 continue
             try:
-                if item["kind"] == "merged":
+                if item["kind"] == "promotion":
+                    plan = plan_promotion(item)
+                elif item["kind"] == "merged":
                     plan = plan_merged(item, dry)
                 else:
                     info = pr_info(item["pr"])
@@ -1115,6 +1336,9 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             else:
                 started = launch(q, item, plan)
                 log.append(f"started {item['id']} [{plan['label']}] run {started}")
+                if item["kind"] == "promotion" and item["state"] == "reviewing":
+                    post_promotion_status(item, item["batch_sha"], "pending",
+                                          f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
             break
         else:
             log.append("no eligible item this tick")
@@ -1168,9 +1392,14 @@ def write_status(q: Dict[str, Any]) -> None:
     for i in items:
         if i["kind"] == "open":
             cyc = f"{i.get('prior_cycles', 0) + len(i.get('cycles', []))}/2"
+        elif i["kind"] == "promotion":
+            cyc = f"{len(i.get('cycles', []))}/1"
+            unresolved = sum(1 for b in i.get("blocking", []) if not b.get("resolution"))
+            i_extra = (f"{(i.get('reviewed_sha') or i['base_sha'])[:10]}..{i['batch_sha'][:10]} main={i['base_sha'][:10]}"
+                       f"{f'; {unresolved} blocking unresolved' if unresolved else ''}")
         else:
             cyc = f"{len(i.get('cycles', []))}/1"
-        extra = ""
+        extra = i_extra if i["kind"] == "promotion" else ""
         if i["kind"] == "merged" and i.get("measure"):
             m = i["measure"]
             extra = f"survival {m['survival']} ({m['surviving']}/{m['added']}), focus {m['focus']}"
@@ -1197,6 +1426,9 @@ def write_status(q: Dict[str, Any]) -> None:
           f"{', '.join(i['id'] + ' (' + i['run']['run_id'] + ')' for i in inflight(q)) or 'none'}",
           f"- addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
           f"- open-PR CLI reviews still owed: {owed_open}",
+          f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'}"
+          f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
+          f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}",
           f"- last tick: {q.get('last_tick')}", "",
           "| item | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
@@ -1296,6 +1528,21 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
     if action in ("pause", "resume"):
         q["paused"] = action == "pause"
         q["pause_reason"] = reason if action == "pause" else None
+    elif action == "promote":
+        q.setdefault("promotion", {})["requested"] = True  # cut on the next tick (on demand)
+    elif action == "promotion-resolve":
+        item = open_promotion(q)
+        if not item or item["state"] != "findings":
+            sys.exit("no promotion is waiting on findings")
+        which, _, how = (reason or "").partition(" ")
+        if not how.strip():
+            sys.exit('usage: crq.py promotion-resolve <finding-n|all> "<disposition: fixed in PR #N / rebuttal>"')
+        hit = [b for b in item["blocking"] if which == "all" or str(b["n"]) == which]
+        if not hit:
+            sys.exit(f"no blocking finding {which}")
+        for b in hit:
+            b["resolution"] = f"{iso()} {how.strip()}"
+        item_id = item["id"]
     else:
         item = next((i for i in q["items"] if i["id"] == item_id), None)
         if not item:
@@ -1327,9 +1574,12 @@ def main() -> int:
     sub.add_parser("status")
     p = sub.add_parser("synth")
     p.add_argument("pr", type=int)
-    for a in ("pause", "resume"):
+    for a in ("pause", "resume", "promote"):
         p = sub.add_parser(a)
         p.add_argument("reason", nargs="?")
+    p = sub.add_parser("promotion-resolve", help='mark blocking finding(s) of the open promotion addressed')
+    p.add_argument("finding", help="finding number, or all")
+    p.add_argument("disposition")
     for a in ("requeue", "skip", "block"):
         p = sub.add_parser(a)
         p.add_argument("item")
@@ -1362,6 +1612,8 @@ def main() -> int:
         base, head, n = build_synthetic(item)
         print(f"PR #{args.pr}: {n} paths; base {base} head {head}")
         print(git("diff", "--shortstat", base, head))
+    elif args.cmd == "promotion-resolve":
+        with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     else:
         with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
     return 0

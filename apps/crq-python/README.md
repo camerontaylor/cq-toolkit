@@ -101,6 +101,43 @@ touches the main checkout or any agent's PR worktree.
   `state/ledger/`. No follow-up PRs or issues are opened without owner
   approval.
 
+## Promotion to `main` (cq-toolkit `docs/promotion-policy.md`, PR #269)
+
+crq does nothing for promotion until `origin/main` contains `docs/promotion-policy.md`.
+After that, `main` advances only to a merge-queue sha that carries a `crq/promotion-review`
+status, and crq posts that status.
+
+- **Cut** (`promotion_tick`, at most one promotion open): triggers are on demand
+  (`crq.py promote`), ≥5 first-parent merges in `main..merge-queue`, or ≥8 h since the last
+  promotion with ≥1 merge. The batch is the newest first-parent merge-queue commit whose
+  `static`, `denylist` and `ratchet` checks all passed. Like the gate's I4 rule, this reads
+  `check-runs?filter=latest` and requires every row with that name to be completed+success.
+  The base is `main` from `gh api …/git/ref/heads/main`.
+- **Start**: a `promotion` item takes the next start slot ahead of everything else. The cap,
+  cooldown, `max_inflight` and secret scan still apply, and it never pre-empts a running
+  review. It reviews `base..batch` (or `reviewed..batch` for a delta) in a detached worktree at
+  the batch, and posts `pending` when the review starts.
+- **Harvest**: no critical/major finding → `success` (`reviewed main=<base> crq#<id>` or
+  `delta <reviewed12>.. main=<base> crq#<id>`), then state `promoting`. Otherwise →
+  `failure` (`blocked: N major main=<base>`), then state `findings`. Findings also go to
+  `state/ledger/promotion-findings.md`.
+  - Failed, interrupted or rate-limited runs post nothing new and are retried (backoff ≤60
+    min). They are never blocked.
+  - A CLI-skipped review posts `error` and the item is blocked, so the owner must re-cut or
+    override.
+- **Findings**: crq cannot tell by itself that a finding is addressed. Someone runs
+  `crq.py promotion-resolve <n|all> "<fixed in PR #N | rebuttal>"`. Once all are resolved:
+  - the newest green tip descends from the batch → a delta item over `batch..tip`, still
+    bound to the original base;
+  - the tip is unchanged → `success` on the batch itself ("blocking dispositioned");
+  - the tip does not descend → re-cut from `main`.
+- **Promoting**: when `main` contains the batch, the promotion is done. If `main` has not
+  moved 20 min after `success`, crq dispatches `merge-queue-gate.yml -f sha=<batch>` once.
+  If `main` moves somewhere that lacks the base, crq re-cuts.
+- **Identity**: statuses are posted with the host's `gh` auth. Before every post, crq checks
+  `gh api user` is `camerontaylor` (User) and refuses otherwise, because a non-allowed creator
+  turns the gate red. Config: `config.json` `promotion`.
+
 ## Merged PRs: supersession and the synthetic diff
 
 - **Survival.** Take the lines the PR added (`git diff --numstat merge^1
