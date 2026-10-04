@@ -637,52 +637,48 @@ test('a stale guard lease taken over cannot let its displaced holder publish ove
   expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
 });
 
-// Enclosure: one child acquisition plus its release.
-test(
-  'a stale judgment walks the succession past a released claimant instead of replacing blindly',
-  async () => {
-    const dir = await directory();
-    const seed = await acquirePlanLock(dir, 'locked', 'seed');
-    await seed.release();
-    const gate = gateNextClaim();
-    const late = acquirePlanLock(dir, 'locked', 'late');
-    void late.catch(() => undefined); // observed below
+test('a stale judgment walks the succession past a released claimant instead of replacing blindly', async () => {
+  const dir = await directory();
+  const path = join(dir, 'locked.lock.json');
+  const seed = await acquirePlanLock(dir, 'locked', 'seed');
+  await seed.release();
+  const prior = await record(dir);
+  const gate = gateNextClaim();
+  const late = acquirePlanLock(dir, 'locked', 'late');
+  void late.catch(() => undefined); // observed below
+  try {
+    await gate.judged;
+    // While the late acquirer's judgment of the seed is stale, another run
+    // claimed the seed, owned the plan, and released. Built as data: no
+    // guard ageing or second process, so no refresh timer is raced.
+    const between = {
+      nonce: randomUUID(),
+      socketPath: '/tmp/no-such-cq-j.sock',
+      pid: process.pid, // alive: only its released tombstone permits succession
+      host: prior.host,
+      bootId: prior.bootId,
+      runId: 'between',
+    };
+    await writeFile(`${path}.${String(prior.nonce)}.claim`, JSON.stringify(between));
+    await writeFile(path, JSON.stringify({ ...between, released: true }));
+    gate.resume();
+    // The seed's claim names 'between', whose canonical record is its
+    // released tombstone: the late acquirer succeeds IT, by its own claim.
+    const lease = await late;
     try {
-      await gate.judged;
-      // While the late acquirer's judgment of the seed is stale, another
-      // process takes the aged guard over, claims the seed, owns, releases.
-      // (Cross-process, as in production: proper-lockfile keeps one lock
-      // entry per path per process.)
-      await utimes(join(dir, GUARD), LEASE_EPOCH, LEASE_EPOCH);
-      const between = start(dir, 'between');
-      expect((await between.next()).status).toBe('acquired');
-      between.child.stdin.write('release\n');
-      expect((await between.next()).status).toBe('released');
-      await between.exited;
-      const tombstone = await record(dir);
-      expect(tombstone).toMatchObject({ runId: 'between', released: true });
-      gate.resume();
-      // The seed's claim names 'between', whose canonical record is its
-      // released tombstone: the late acquirer succeeds IT, by its own claim.
-      const lease = await late;
-      try {
-        await lease.assertHeld();
-        expect(await record(dir)).toMatchObject({ runId: 'late' });
-        expect(
-          JSON.parse(
-            await readFile(join(dir, `locked.lock.json.${String(tombstone.nonce)}.claim`), 'utf8'),
-          ),
-        ).toMatchObject({ runId: 'late' });
-      } finally {
-        await lease.release();
-      }
+      await lease.assertHeld();
+      expect(await record(dir)).toMatchObject({ runId: 'late' });
+      expect(JSON.parse(await readFile(`${path}.${between.nonce}.claim`, 'utf8'))).toMatchObject({
+        runId: 'late',
+      });
     } finally {
-      gate.resume();
-      await late.catch(() => undefined);
+      await lease.release();
     }
-  },
-  2 * CHILD_STEP_MS,
-);
+  } finally {
+    gate.resume();
+    await late.catch(() => undefined);
+  }
+});
 
 test('a claimant that died between claim and publication is succeeded, not wedged', async () => {
   const dir = await directory();
