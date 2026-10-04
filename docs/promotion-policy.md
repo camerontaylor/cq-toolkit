@@ -66,10 +66,14 @@ Owner ruling (2026-10-04): accept this limit now, fix it with a dedicated identi
 - Every fleet agent runs `gh` as the owner, so a `crq/promotion-review` status is not proof
   against a misbehaving agent. The allowed-reviewer check rules out only `GITHUB_TOKEN`, App and
   fork forgery.
-- The compensating control is **detective**. After every promotion, crq matches the status that
-  promoted `main` against its own review ledger. A promotion status with no matching crq record
-  raises a loud alert. This check lives on the crq side, implemented by the crq steward.
-- The fix is a dedicated reviewer identity. Follow-up: dedicated crq reviewer App.
+- The compensating control is **detective**. On each crq tick, crq audits the newest `main`
+  advance against its own review ledger: the status that promoted it must match a crq record,
+  and a promotion status with no matching record raises a loud alert. Only the newest of several
+  promotions within one tick is audited. This check lives on the crq side, implemented by the
+  crq steward.
+- The fix is a dedicated reviewer identity. Follow-up: dedicated crq reviewer App. The gate's
+  trust filter (`REVIEW_JQ`) admits only `User` creators today, so that follow-up must also
+  make it admit the App's id.
 
 ## Owner override
 
