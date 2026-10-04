@@ -5,6 +5,12 @@
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
+//      The one non-SHA form is a LOCAL action (`uses: ./.github/actions/<name>`):
+//      GitHub reads it from the checked-out workspace, i.e. the same commit
+//      as the workflow itself, so it is exactly as immutable — but only when
+//      it names a directory under .github/actions/ that carries an
+//      action.yml. Every such local action file is itself scanned here, so
+//      its own `uses:` steps must be SHA-pinned like any workflow's.
 //   2. The persist-credentials split: generated ci.yml, denylist.yml, and
 //      install-matrix.yml run repo code, so their checkouts must drop
 //      the token (`persist-credentials: false`); the queue-mechanics
@@ -15,13 +21,14 @@
 //      not the word — and the key match is QUOTE-AWARE, so a quoted
 //      `'persist-credentials':` spelling cannot hide).
 //   3. policy/templates/README.md documents the policy ("## Action pinning").
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
+const ACTIONS_DIR = join(ROOT, '.github/actions');
 
 // The template files (source of truth) that carry `uses:` steps or are
 // otherwise part of the pinning policy — the ratchet family included (W1.7).
@@ -67,7 +74,31 @@ const workflowFiles = readdirSync(WORKFLOWS_DIR)
   .filter((name) => /\.ya?ml$/.test(name)) // GitHub executes both .yml and .yaml
   .sort()
   .map((name) => join(WORKFLOWS_DIR, name));
-const pinnedFiles = [...workflowFiles, ...TEMPLATE_FILES.map((rel) => join(ROOT, rel))];
+// Local composite actions (.github/actions/<name>/action.yml): their own
+// `uses:` steps run with the calling job, so they are pinned too.
+const localActionFiles = existsSync(ACTIONS_DIR)
+  ? readdirSync(ACTIONS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(ACTIONS_DIR, entry.name, 'action.yml'))
+      .sort()
+  : [];
+const pinnedFiles = [
+  ...workflowFiles,
+  ...localActionFiles,
+  ...TEMPLATE_FILES.map((rel) => join(ROOT, rel)),
+];
+
+// A local action ref is accepted only in its exact in-repo form and only
+// when the action it names exists in this commit as a real directory: a
+// symlinked action directory is skipped by the scan above (Dirent
+// isDirectory() does not follow links), so accepting a ref to one would let
+// its unpinned `uses:` escape the pin check.
+function isLocalAction(ref: string): boolean {
+  const m = /^\.\/\.github\/actions\/([A-Za-z0-9._-]+)$/.exec(ref);
+  if (m === null || m[1] === '.' || m[1] === '..') return false;
+  const dir = join(ROOT, ref);
+  return existsSync(dir) && lstatSync(dir).isDirectory() && existsSync(join(dir, 'action.yml'));
+}
 
 // Split the workflow text into top-level step blocks: a block starts at a
 // `- ` item line whose indent equals the steps-list base indent (taken from
@@ -95,9 +126,14 @@ function stepBlocks(text: string): string[] {
 }
 
 describe('action pins: every uses: is an immutable commit SHA', () => {
+  it('scans every local action directory, and each carries an action.yml', () => {
+    for (const file of localActionFiles) expect(existsSync(file), file).toBe(true);
+  });
+
   it.each(pinnedFiles)('pins every uses: in %s to exactly 40 lowercase hex chars', (file) => {
     const failures: string[] = [];
     for (const { line, ref } of usesRefs(readFileSync(file, 'utf8'))) {
+      if (isLocalAction(ref)) continue; // same-commit workspace action (header §1)
       const tag = ref.slice(ref.lastIndexOf('@') + 1); // ref after the LAST '@'
       if (!/^[0-9a-f]{40}$/.test(tag)) {
         failures.push(`${file}:${line} pins "${ref}"`);

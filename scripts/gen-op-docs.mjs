@@ -4,8 +4,8 @@
 // (src/registry/index.ts), one docs/ops/<name>.md per registry entry,
 // carrying the op name, its input schema, and the result taxonomy. The
 // registry is the single source of truth, so the docs cannot silently drift
-// from the code; the ci.yml drift step regenerates them and fails on a dirty
-// docs/ops (the step is instantiated from policy/templates/required-check.md).
+// from the code; the static gate's drift step (.github/actions/static-gate,
+// run by ci.yml's static job) regenerates them and fails on a dirty docs/ops.
 //
 // DETERMINISM (the drift check is meaningful only if the output is stable):
 //   - entries are emitted one file per op, named <op>.md;
