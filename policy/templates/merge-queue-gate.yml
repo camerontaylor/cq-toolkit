@@ -6,12 +6,18 @@
 #     that the PINNED reviewer posted is `success`, and its description
 #     binds the reviewed range as `main=<40-hex>` (that base must be main
 #     or an ancestor of main, so main..sha was reviewed). The pinned
-#     reviewer is the `cq-reviewer` App's bot user, matched by ALL THREE of
-#     creator.type == "Bot", creator.login == {{REVIEWER_BOT_LOGIN}} and
-#     creator.id == {{REVIEWER_BOT_ID}} (a status carries no app id, so the
-#     bot user is the identity: the `[bot]` login suffix is reserved for
+#     reviewer is the promotion reviewer App's bot user, matched by ALL
+#     THREE of creator.type == "Bot", creator.login == {{REVIEWER_BOT_LOGIN}}
+#     and creator.id == {{REVIEWER_BOT_ID}} (a status carries no app id, so
+#     the bot user is the identity: the `[bot]` login suffix is reserved for
 #     Apps and slugs are globally unique, and the numeric id survives even
-#     a hypothetical slug reuse). The values are template tokens, not repo
+#     a hypothetical slug reuse). The identity comes ONLY from the owner's
+#     registration record
+#     (toolkit-research/plans/app-registration-session-20261004.md): until
+#     that record exists the tokens are UNSET placeholders and BOTH steps
+#     refuse fail-closed ("reviewer identity not pinned") — never a
+#     public-API lookup by guessed name, since a stranger's public App can
+#     own any name. The values are template tokens, not repo
 #     variables: changing a token value takes a reviewed promotion, while
 #     an admin token can edit a repo variable without review. Any other
 #     creator — the repository owner's own User login, GITHUB_TOKEN, and
@@ -63,10 +69,16 @@
 #                       names, e.g. static,denylist
 #   GATE_TIMEOUT_MIN -> minutes to wait for the checks before refusing
 #                       (default 20)
-#   REVIEWER_BOT_LOGIN -> the pinned reviewer's bot login, "cq-reviewer[bot]"
+#   REVIEWER_BOT_LOGIN -> the pinned reviewer's bot login, from the owner's
+#                        registration record
+#                        (toolkit-research/plans/app-registration-session-
+#                        20261004.md). While UNSET (the shipped placeholder
+#                        starts `@@UNSET`), the rendered gate refuses
+#                        fail-closed on every run.
 #   REVIEWER_BOT_ID   -> the pinned reviewer's numeric bot user id (a JSON
 #                        number at run time: passed with --argjson, never
-#                        --arg, so the compare is numeric). The RENDERED
+#                        --arg, so the compare is numeric), same record
+#                        source, same UNSET fail-closed rule. The RENDERED
 #                        file must carry both literals: crq's signer-mode
 #                        activation greps main's copy of this file for
 #                        them. They are not repo variables on purpose: a
@@ -149,6 +161,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Fail closed while the reviewer identity is unpinned (both steps):
+          # the tokens are UNSET placeholders until the owner's registration
+          # record (toolkit-research/plans/app-registration-session-
+          # 20261004.md) provides the real bot login + numeric id. Never a
+          # public-API lookup by guessed name — a stranger's public App can
+          # own any name.
+          case "{{REVIEWER_BOT_LOGIN}}" in
+            @@UNSET*)
+              echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
+              exit 1;;
+          esac
           if [ -n "${SHA_INPUT}" ]; then
             sha="${SHA_INPUT}"
           elif [ "${GITHUB_EVENT_NAME}" = "status" ]; then
@@ -333,6 +356,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          case "{{REVIEWER_BOT_LOGIN}}" in
+            @@UNSET*)
+              echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
+              exit 1;;
+          esac
           git fetch origin main merge-queue
           if git merge-base --is-ancestor "${SHA}" origin/main; then
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
