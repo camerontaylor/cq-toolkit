@@ -126,6 +126,7 @@
   "test/plans/sweep.test.ts": "process",
   "test/sandbox/config.test.ts": "pure",
   "test/sandbox/launcher.test.ts": "process",
+  "test/scripts/affected-tests.test.ts": "pure",
   "test/scripts/demo-eval-axes.test.ts": "process",
   "test/scripts/github-settings.test.ts": "process",
   "test/scripts/knip.test.ts": "process",
