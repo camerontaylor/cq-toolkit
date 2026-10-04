@@ -15,9 +15,10 @@
 //      check list must exit 1 with the refusing message BEFORE the wait loop
 //      can spin zero times and promote; a populated list passes the guard
 //      (positive control, exit 0) in both files.
-//   3. The promotion text: the merge-queue-tip guard, the skipped case
-//      branch, the superseded exit (green, no promotion), and a checkout
-//      pinned to exactly 40 lowercase hex chars.
+//   3. The promotion text: the on-queue guard, the promotion-review
+//      requirement (status context, User creators, reviewed base, no push
+//      trigger), the skipped case branch, the awaiting exit (green, no
+//      promotion), and a checkout pinned to exactly 40 lowercase hex chars.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -216,20 +217,26 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     }
   });
 
-  describe('promotion guard, skipped refusal, and the immutable checkout pin', () => {
+  describe('promotion guards, review signal, skipped refusal, and the checkout pin', () => {
     for (const { label, text } of gates) {
-      it(`carries the tip guard, the skipped case branch, and a 40-hex checkout pin (${label})`, () => {
-        expect(text, `${label}: the merge-queue-tip guard`).toContain(
-          'is not the current merge-queue tip',
+      it(`carries the queue guard, the review signal, the skipped branch, a 40-hex pin (${label})`, () => {
+        expect(text, `${label}: the on-queue guard`).toContain('is not on merge-queue');
+        // Batch policy: promotion needs the crq/promotion-review status from
+        // an allowed USER, bound to a reviewed base, and no push trigger.
+        expect(text, `${label}: the review status context`).toContain(
+          "github.event.context == 'crq/promotion-review'",
         );
+        expect(text, `${label}: bots never count as reviewers`).toContain('.type == "User"');
+        expect(text, `${label}: the reviewed-base binding`).toContain('REVIEW_BASE');
+        expect(text, `${label}: no push trigger`).not.toMatch(/^ {2}push:/m);
         expect(text, `${label}: the skipped case branch`).toContain('concluded skipped');
-        // Superseded is not failed: a commit the queue tip moved past ends
-        // green and promotes nothing; every post-wait step is skipped.
-        expect(text, `${label}: the superseded summary`).toContain('superseded by');
+        // Waiting is not failing: an unreviewed or blocked sha ends green
+        // and promotes nothing; every step after the review is skipped.
+        expect(text, `${label}: the awaiting summary`).toContain('awaiting promotion review');
         expect(
-          text.match(/^ {8}if: steps\.wait\.outputs\.superseded_by == ''$/gm)?.length,
-          `${label}: checkout, validate and promote skip a superseded run`,
-        ).toBe(3);
+          text.match(/^ {8}if: steps\.review\.outputs\.promote == 'true'$/gm)?.length,
+          `${label}: wait, checkout, validate and promote run only for a reviewed sha`,
+        ).toBe(4);
         const checkoutLines = text
           .split(/\r?\n/)
           .filter((line) => line.includes('uses: actions/checkout@'));

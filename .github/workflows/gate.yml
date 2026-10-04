@@ -26,9 +26,17 @@
 #   - `decide` is the SOLE member of concurrency group `promote`, and runs in
 #     environment `promote` (main-only branch policy).
 #
-# C1 (ADR-0004 D-H.3.1): this gate runs ALONGSIDE merge-queue-gate.yml. Both
-# promote with an atomic compare-and-swap push, so running both is race-safe
-# (RS-4 T-20). merge-queue-gate.yml retires at C2.
+# C1 (ADR-0004 D-H.3.1): this gate runs ALONGSIDE merge-queue-gate.yml.
+#
+# REPORT-ONLY under the batch promotion policy (docs/promotion-policy.md):
+# promotion to main requires a CodeRabbit promotion review of the batch,
+# which only merge-queue-gate.yml checks today. So this gate runs the CLI
+# WITHOUT `--push`: it judges the queue tip and reports `would-promote`,
+# `noop` or `refused` in the step summary, and never advances main. Its
+# verdict is advisory, so a refusal is not a red run (cq-accept's rule):
+# the job fails only when the gate crashed. Before C2 retires
+# merge-queue-gate.yml, the gate CLI must learn the promotion-review signal
+# and the reviewed-sha subject; then `--push` and red-on-refused return.
 #
 # Credential (Decision 7): a promoter-App installation token when
 # `vars.CQ_PROMOTER_APP_CLIENT_ID` is set; otherwise the interim
@@ -267,7 +275,6 @@ jobs:
             --defaultBranch="$DEFAULT_BRANCH"
             --verifiedWorkflows=ci.yml,denylist.yml
             --timeoutMin=20
-            --push
           )
           if [ -n "$VERDICT_APP_ID" ]; then
             args+=(--verdictAppId="$VERDICT_APP_ID")
@@ -310,7 +317,7 @@ jobs:
               + "\n\n```text\n"
               + ($report | gsub("`{3,}"; "` ` `"))
               + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
-          # Green only when the tip was promoted or there was nothing to do.
-          jq -e '.status == "ok"
-            and (.value.verdict | IN("promoted", "noop"))' \
-            "${RUNNER_TEMP}/gate.json" >/dev/null
+          # Report-only (batch policy, see the header): every verdict is
+          # advisory and lives in the summary above. Red only when the gate
+          # itself crashed (no ok result).
+          jq -e '.status == "ok"' "${RUNNER_TEMP}/gate.json" >/dev/null

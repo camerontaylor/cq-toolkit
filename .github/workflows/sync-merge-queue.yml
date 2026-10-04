@@ -15,7 +15,10 @@
 #     on the DEFAULT ref (`ref=main`, D-A.2: a dispatch runs the dispatched
 #     ref's copy of the workflow, so never merge-queue's). Each gate resolves
 #     the merge-queue tip itself. During C1 both gates run; C2 retires
-#     merge-queue-gate.yml and its dispatch below.
+#     merge-queue-gate.yml and its dispatch below. Under the batch promotion
+#     policy (docs/promotion-policy.md) a dispatch is only a nudge: an
+#     unreviewed tip ends "awaiting promotion review" (a green run), and
+#     cq-gate is report-only.
 # See policy/templates/README.md for the token table and the entitlement
 # facts.
 #
