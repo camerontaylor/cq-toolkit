@@ -64,6 +64,10 @@ const e2eGlob = 'test/e2e/**/*.test.ts';
 export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, '**/dist/**'],
+    // Build once before collection (root-level, so it runs once per
+    // invocation whatever --project selection is made). Skipped when the
+    // caller sets CQ_DIST_PREPARED=1 after making dist fresh itself.
+    globalSetup: ['./test/global-setup.ts'],
     projects: [
       {
         // No process, git, network or env/cwd mutation; own tmp dirs only.
