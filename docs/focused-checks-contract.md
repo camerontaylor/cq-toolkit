@@ -110,20 +110,23 @@ run at the checkpoints in §1 — a file-scoped fix never establishes the
 correctness of dependents.
 
 Before any tool runs, `scripts/fix.mjs` validates the list through
-`scripts/lib/owned-files.mjs`, which rejects a path outside the repository, a
-`.git`/`node_modules`/`.agents`/`.codex` entry, a symlink, and a non-regular
-file, and exits non-zero. `ownedFiles()` deliberately accepts a deleted path and
-then omits it from its return value, and it de-duplicates, so both tools
-receive exactly the surviving regular files: a deleted-only list is a no-op
-(`fix: only deleted files; no files to rewrite`), and a mixed diff formats and
-fixes only the files that still exist. Suggestions and dangerous fixes are
-excluded; formatting receives the same argument list as the lint fixes.
+`scripts/lib/owned-files.mjs`, which rejects an empty list, a path outside the
+repository, a `.git`/`node_modules`/`.agents`/`.codex` entry, a symlink, and a
+non-regular file, and exits non-zero. `ownedFiles()` deliberately accepts a
+deleted path and then omits it from its return value, and it de-duplicates, so
+both tools receive exactly the surviving regular files: a deleted-only list is a
+no-op (`fix: only deleted files; no files to rewrite`, on stdout), and a mixed
+diff formats and fixes only the files that still exist. Suggestions and
+dangerous fixes are excluded; formatting receives the same argument list as the
+lint fixes.
 
 Oxlint's exit 1 (findings left, nothing lintable — e.g. a docs-only list — or an
 unreadable configuration) is tolerated and passed through as `pnpm fix`'s exit
-status; anything above 1, and any Oxfmt failure, fails the command. A
-`pnpm fix` exit of 0 or 1 is therefore not a lint verdict: read its output, and
-take the verdict from `lint:fast` or the static gate.
+status, so the formatting step still runs. Every failure — a rejected list, an
+Oxlint exit above 1, an Oxfmt failure — **also** exits 1, reported as a
+`fix: …` line on **stderr**, so the status alone cannot tell a tolerated lint
+result from a failed command: read the output. A `pnpm fix` exit is never a lint
+verdict; take that from `lint:fast` or the static gate.
 
 Never invoke the leaf tools (`oxlint --fix`, `oxfmt`) directly: that bypasses
 the containment checks above, and an invocation that omits the file list or
