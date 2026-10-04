@@ -8,7 +8,9 @@
     "scripts/*.mjs",
     "scripts/lib/affected-tests.d.mts",
     "scripts/lib/eval-axes-select.d.mts",
+    "scripts/lib/heavy-lock.d.mts",
     "scripts/lib/render-templates.d.mts",
+    "scripts/lib/test-narrow.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
     "test/fixtures/cli-smoke-ops/smoke/*.js"

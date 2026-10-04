@@ -14,7 +14,8 @@ so a warm install in a fresh worktree is a symlink pass.
 - `pnpm run check:static` — TS7 compiler ratchet plus typed Oxlint;
   `pnpm run lint` and `pnpm run typecheck` are aliases (run only one)
 - `pnpm run format:check`
-- `pnpm run test`
+- `pnpm test:narrow` — the only local test command (see Local testing);
+  the full suite (`pnpm run test`) is CI-only
 - `pnpm run knip`
 
 CI additionally runs the build, the from-source smoke plan, and the
@@ -27,8 +28,30 @@ Use `pnpm lint:fast <owned-file...>` for syntactic feedback and
 `pnpm fix <owned-file...>` for safe lint fixes and formatting of those
 files only (it runs no static gate and no tests; run `pnpm run check:static`
 explicitly for dependents). Lists must be explicit; never format the repository per turn.
-`pnpm run check` runs formatting checks, the static gate once, tests and Knip.
+`pnpm run check` runs formatting checks, the static gate once, the full test
+suite and Knip, so it is CI-only too; locally run its non-test parts on their own.
 Changed-file lint does not establish correctness of dependents.
+
+## Local testing
+
+The only permitted local test command is `pnpm test:narrow …`. The full
+suite (`pnpm run test`, `test:unit`, `test:e2e`, `check`, bare `vitest`) is
+CI-only. Do not choose test files, vitest flags or concurrency yourself:
+
+- `pnpm test:narrow` — the tests for your changes since the merge-base with
+  `origin/merge-queue`, plus the working tree.
+- `pnpm test:narrow <file...>` — named test files, or source files mapped to
+  their tests. `--range <a>..<b>` selects a commit range; `--dry-run` prints
+  the plan and runs nothing; `--help` lists the rest.
+
+It re-execs under `nice -n 5`, waits (bounded, visibly) for the host-wide
+lock, so there is one run per host, rebuilds dist only when stale, and runs
+one serial vitest invocation. It refuses more than 10 files, selections that
+fall back to every test, `integration`/`live` suites without
+`--include-integration`/`--include-live`, `--watch`, `--coverage` and every
+other vitest flag. A refusal is the answer: name a narrower set of files,
+never work around it. Quote the final `test:narrow result=…` line as
+evidence. Exit 75 means the lock stayed busy: retry later, never bypass.
 
 ## GLM peak-hour blackout
 

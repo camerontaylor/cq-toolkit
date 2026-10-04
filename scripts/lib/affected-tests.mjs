@@ -1,5 +1,5 @@
-// Pure selection logic for scripts/affected-tests.mjs (kept free of process
-// and git access so test/scripts/affected-tests.test.ts exercises it directly).
+// Pure selection logic for scripts/test-narrow.mjs (kept free of process and
+// git access so test/scripts/affected-tests.test.ts exercises it directly).
 //
 // A changed file maps to test files three ways, unioned:
 //   1. the static import graph (`related`, supplied by the caller);
@@ -20,7 +20,7 @@ export const NON_IMPORT_MAP = [
   [/^test\/fixtures\//, [/^(test|lint)\//]],
   [/^test\/helpers\//, [/^(test|lint)\//]],
   [/^scripts\//, [/^test\/scripts\//, /^test\/workflows\//]],
-  // The CLI smoke test runs `npm run build`, which executes this script by path.
+  // The CLI smoke test runs `pnpm run build`, which executes this script by path.
   [/^scripts\/copy-prompt-assets\.mjs$/, [/^test\/cli\/plans\.smoke\.test\.ts$/]],
   // Source-tree scanners read src/** from disk: no import-graph edge.
   [
@@ -35,8 +35,26 @@ export const NON_IMPORT_MAP = [
   // Docs and prompts that code or tests read at runtime.
   [/^(docs\/(dd-1-|methods-)|src\/.*\.md$)/, [/^test\//]],
   [/^(vitest\.config\.ts|test\/suite-classes\.json)$/, [/^(test|lint)\//]],
+  // Root configs that specific suites read from disk.
+  [
+    /^knip\.json$/,
+    [/^test\/scripts\/knip\.test\.ts$/, /^test\/ops\/gates\/protectedPaths\.test\.ts$/],
+  ],
+  [
+    /^(\.oxlintrc\.json|lint\/(?!.*\.test\.ts$).*)$/,
+    [
+      /^lint\//,
+      /^test\/scripts\/(oxlint-boundaries|static-conformance|tooling-commands)\.test\.ts$/,
+      /^test\/ops\/gates\/protectedPaths\.test\.ts$/,
+      /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
+    ],
+  ],
+  [/^\.github\/workflows\//, [/^test\/workflows\//]],
   // Dependency and compiler inputs affect every test project.
-  [/^(package\.json|package-lock\.json|tsconfig[^/]*\.json)$/, [/^(test|lint)\//]],
+  [
+    /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.pnpmfile\.[cm]?js|tsconfig[^/]*\.json)$/,
+    [/^(test|lint)\//],
+  ],
 ];
 
 /** Paths whose edits no test reads: prose and repo metadata. */
@@ -52,6 +70,10 @@ const isTest = (path) => /^(test|lint)\/.*\.test\.ts$/.test(path);
 // selects nothing rather than falling back.
 const isSource = (path) => /^src\/.*\.(ts|mts|js|mjs)$/.test(path);
 
+// Vitest reports module ids with the platform separator; every manifest entry
+// and pattern here is a repository-relative POSIX path.
+const toPosix = (path) => path.replaceAll('\\', '/');
+
 const full = (allTests, reason) => ({ files: [...allTests].sort(), fallback: true, reason });
 
 /**
@@ -61,7 +83,7 @@ const full = (allTests, reason) => ({ files: [...allTests].sort(), fallback: tru
  */
 export function selectAffected({ changed, allTests, related }) {
   if (related === null) return full(allTests, 'import-graph query failed');
-  const selected = new Set(related.filter((test) => allTests.includes(test)));
+  const selected = new Set(related.map(toPosix).filter((test) => allTests.includes(test)));
   for (const path of changed) {
     if (isTest(path)) {
       if (allTests.includes(path)) selected.add(path);

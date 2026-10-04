@@ -45,7 +45,7 @@ prevents opening the PR.
 
 - [ ] `node scripts/ratchet-typecheck.mjs` — exit 0
 - [ ] `pnpm run lint` — exit 0
-- [ ] `pnpm run test` — exit 0
+- [ ] `pnpm test:narrow` — exit 0 (paste its `test:narrow result=…` line; full suite is CI-only)
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
 - [ ] `git diff --check` — clean (unstaged tracked)

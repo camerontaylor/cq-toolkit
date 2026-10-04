@@ -24,6 +24,16 @@ describe('selectAffected', () => {
     });
   });
 
+  it('normalizes platform-separated import-graph hits to POSIX paths', () => {
+    expect(
+      selectAffected({
+        changed: ['src/kernel/x.ts'],
+        allTests,
+        related: ['test\\kernel\\b.test.ts'],
+      }).files,
+    ).toEqual(['test/kernel/b.test.ts']);
+  });
+
   it('selects a changed test file itself, and ignores unknown test paths', () => {
     expect(
       selectAffected({
@@ -51,7 +61,13 @@ describe('selectAffected', () => {
   });
 
   it('maps fixtures, dependency metadata and baselines to every consumer', () => {
-    for (const path of ['test/fixtures/x.ts', 'package.json', 'tsconfig.json']) {
+    for (const path of [
+      'test/fixtures/x.ts',
+      'package.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'tsconfig.json',
+    ]) {
       expect(selectAffected({ changed: [path], allTests, related: [] }).files).toEqual(allTests);
     }
     const gates = ['test/ops/gates/g.test.ts', 'test/workflows/d.test.ts'];
@@ -88,6 +104,32 @@ describe('selectAffected', () => {
     );
     expect(pick('src/ops/new/x.ts')).toContain('test/cli/registry.test.ts');
     expect(pick('src/ops/new/x.ts')).toContain('test/cli/conformance.test.ts');
+  });
+
+  it('maps root configs, lint sources and workflows to the suites that read them', () => {
+    const pool = [
+      ...allTests,
+      'lint/rules/r.test.ts',
+      'test/scripts/knip.test.ts',
+      'test/scripts/oxlint-boundaries.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ];
+    const pick = (path: string) => selectAffected({ changed: [path], allTests: pool, related: [] });
+    expect(pick('knip.json').files).toEqual([
+      'test/ops/gates/protectedPaths.test.ts',
+      'test/scripts/knip.test.ts',
+    ]);
+    for (const path of ['.oxlintrc.json', 'lint/plugin.mjs']) {
+      expect(pick(path).files).toEqual([
+        'lint/rules/r.test.ts',
+        'test/ops/gates/protectedPaths.test.ts',
+        'test/scripts/oxlint-boundaries.test.ts',
+      ]);
+    }
+    expect(pick('.github/workflows/ci.yml')).toMatchObject({
+      files: ['test/workflows/d.test.ts'],
+      fallback: false,
+    });
   });
 
   it('falls back to every test when a changed file has no mapping', () => {

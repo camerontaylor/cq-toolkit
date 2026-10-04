@@ -118,13 +118,15 @@ out with `PNPM_CONFIG_VIRTUAL_STORE_TYPE=project`.
 
 Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
 `pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
-Formatting is `pnpm run format:check`, runtime tests are `pnpm run test`, and
+Formatting is `pnpm run format:check`, runtime tests are `pnpm run test` (the full
+suite, CI-only; the only local test command is `pnpm test:narrow`), and
 checked declaration emit is `pnpm run build`. See [the local static policy](lint/README.md)
 for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-Use `pnpm run check` for read-only formatting, static checks, tests and Knip. `lint` and
+`pnpm run check` runs read-only formatting, static checks, the full test suite and Knip
+(CI-only because of the suite). `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `pnpm lint:fast <file...>`
 or `pnpm fix <file...>`. The latter applies safe lint fixes and formatting

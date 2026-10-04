@@ -127,7 +127,8 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`pnpm run check:static`, `pnpm run format:check`, `pnpm run test`, `pnpm run knip`, and
+`pnpm run check:static`, `pnpm run format:check`, `pnpm test:narrow` (the full
+suite is CI-only), `pnpm run knip`, and
 the three whitespace/conflict-marker checks below. Use the immutable `BASE`
 from §3 and stage your own new files before these checks so they are covered:
 
@@ -198,7 +199,7 @@ its actual exits in the PR body:
 
 - `pnpm run check:static`
 - `pnpm run format:check`
-- `pnpm run test`
+- `pnpm test:narrow` (quote its `test:narrow result=…` line; the full suite is CI-only)
 - `pnpm run knip`
 - `git diff --check "$BASE" HEAD` (committed PR changes)
 - `git diff --check --cached` (staged changes)

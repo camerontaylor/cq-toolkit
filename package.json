@@ -30,6 +30,7 @@
     "test": "vitest run",
     "test:unit": "vitest run --project pure --project process --project live",
     "test:e2e": "vitest run --project integration",
+    "test:narrow": "node scripts/test-narrow.mjs",
     "denylist": "./scripts/denylist-scan",
     "gen:op-docs": "node scripts/gen-op-docs.mjs",
     "gen:op-docs:check": "node scripts/gen-op-docs.mjs --check",
