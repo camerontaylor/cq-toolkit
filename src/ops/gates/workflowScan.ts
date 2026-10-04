@@ -571,11 +571,23 @@ function valueText(lines: readonly Line[], span: Span): string {
   return [lines[span.at]!.value, rest].filter((s) => s !== '').join('\n');
 }
 
-/** A scalar value's literal: unquoted inline value, or `null` if it is not a literal. */
-function literalOf(lines: readonly Line[], span: Span | undefined): string | null {
+/**
+ * A scalar value's literal: unquoted inline value, or `null` if it is not a
+ * literal. With `wholeValue`, a plain value that continues onto more-indented
+ * content lines is not a literal either (GitHub reads `a` + `x` as `a x`);
+ * only `uses` tracing opts in, so other keys keep their single-line reading.
+ */
+function literalOf(
+  lines: readonly Line[],
+  span: Span | undefined,
+  wholeValue = false,
+): string | null {
   if (!span) return null;
   const inline = lines[span.at]!.value;
   if (inline === '' || /^[|>]/.test(inline)) return null;
+  if (wholeValue && lines.slice(span.at + 1, span.end).some((l) => l.kind === 'content')) {
+    return null;
+  }
   return unquote(inline);
 }
 
@@ -960,7 +972,7 @@ function readJob(
   const localUses = new Set<string>();
   let nonLiteralUses = false;
   const addLocal = (span: Span | undefined): void => {
-    const target = literalOf(lines, span);
+    const target = literalOf(lines, span, true);
     if (span !== undefined && target === null) nonLiteralUses = true;
     if (target?.startsWith('./')) localUses.add(target.slice(2).replace(/\/+$/, '') || '.');
   };

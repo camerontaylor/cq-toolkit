@@ -274,13 +274,16 @@ const ACTION_METADATA = ['action.yml', 'action.yaml'] as const;
  */
 const STRICT_USES = /^\s*(?:-\s+)?uses\s*:\s*(['"]?)([\w.][^\s'"#\\]*)\1(?:\s+#.*)?\s*$/;
 
+/** YAML line breaks: CRLF, a lone CR or LF, NEL, LS and PS. */
+const YAML_LINE_BREAK = /\r\n?|[\n\u0085\u2028\u2029]/;
+
 /**
- * Lines that may carry a `uses` key {@link STRICT_USES} does not read: any
- * mention of `uses` in any case (a quoted, explicit or capitalised key), a
- * double-quoted escape that can spell one (`\x`, `\u`, `\U`), an explicit
+ * Lines that may carry a `uses` key {@link STRICT_USES} does not read: the
+ * word `uses` in any case (a quoted or capitalised key; `causes` and
+ * `statuses` do not match), a double-quoted escape that can spell one (`\x`, `\u`, `\U`), an explicit
  * key (`?`), or an alias used as a key (`*name :`).
  */
-const SUSPECT_USES = /uses|\\[xu]|(?:^|[\s{[,])(?:\?(?:\s|$)|\*[^\s,[\]{}]+\s*:)/i;
+const SUSPECT_USES = /\buses\b|\\[xu]|(?:^|[\s{[,])(?:\?(?:\s|$)|\*[^\s,[\]{}]+\s*:)/i;
 
 /**
  * The `uses: ./` targets in one local action's metadata at `rev` (normalised
@@ -315,7 +318,9 @@ async function nestedLocalUses(
     }
     if (text === null) continue;
     found = true;
-    for (const line of text.split('\n')) {
+    // Every YAML line break, not just `\n`: a lone `\r`, NEL, LS or PS can hide a `uses:`.
+    const rows = text.split(YAML_LINE_BREAK);
+    for (const [i, line] of rows.entries()) {
       if (/^\s*#/.test(line)) continue;
       const value = STRICT_USES.exec(line)?.[2];
       if (value === undefined) {
@@ -323,6 +328,12 @@ async function nestedLocalUses(
           return `${path}: unreadable uses line ${JSON.stringify(line.trim())}`;
         }
         continue;
+      }
+      // A plain value continuing onto a deeper line is a different value to GitHub.
+      const column = /^\s*(?:-\s+)?/.exec(line)![0].length;
+      const next = rows.slice(i + 1).find((r) => r.trim() !== '' && !/^\s*#/.test(r));
+      if (next !== undefined && /^\s*/.exec(next)![0].length > column) {
+        return `${path}: uses value continues onto the next line ${JSON.stringify(next.trim())}`;
       }
       if (value.startsWith('./')) out.push(value.slice(2).replace(/\/+$/, '') || '.');
     }

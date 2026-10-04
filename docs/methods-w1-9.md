@@ -198,10 +198,12 @@ alongside the acceptance check.
      required-check producers it is transitive (8 levels, cycle-safe) and fails closed. A
      composite's `run:` references and other paths outside its own directory are not traced
      (decision 4). The metadata scan is a strict line match, not a YAML parser: a line that may
-     name a `uses` key (any mention of `uses` in any case, a double-quoted `\x`/`\u` escape, an
+     name a `uses` key (the word `uses` in any case, a double-quoted `\x`/`\u` escape, an
      explicit `?` key, an alias used as a key) and is not one plain `uses:` value fails closed,
-     so prose in an action's `description:` that mentions `uses` sends every range to a human,
-     even one that leaves the action unchanged.
+     so prose in an action's `description:` that uses the word `uses` sends every range to a human,
+     even one that leaves the action unchanged (`causes` and `statuses` do not). A `uses:` value
+     followed by a more-indented line is a continued plain scalar and fails closed, and the scan
+     splits lines on every YAML break (`\r`, NEL, U+2028, U+2029), not only `\n`.
    - `cq-policy` concurrency is keyed per signal run, so a stale run can post after a newer one.
      The verdict is bound to `<trust>:<subject>` in `external_id`, and W1.10's gate selects by
      trust SHA.

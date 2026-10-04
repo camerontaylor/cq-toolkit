@@ -857,6 +857,21 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
     deepChain[`.github/actions/d${i}/action.yml`] =
       `runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/d${i + 1}\n`;
   }
+  // d6 nests d7 and e, and d7 nests e: e is in the depth-8 frontier AND queued
+  // again for depth 9, where the bound check must skip it as already visited.
+  const dedupChain: Record<string, string> = {
+    [GATE]: GATE_ACTION.replace('./.github/actions/inner', './.github/actions/d0'),
+    '.github/actions/e/action.yml': 'runs:\n  using: composite\n  steps: []\n',
+  };
+  for (let i = 0; i < 7; i += 1) {
+    const uses =
+      i === 6
+        ? '    - uses: ./.github/actions/d7\n    - uses: ./.github/actions/e\n'
+        : `    - uses: ./.github/actions/d${i + 1}\n`;
+    dedupChain[`.github/actions/d${i}/action.yml`] = `runs:\n  using: composite\n  steps:\n${uses}`;
+  }
+  dedupChain['.github/actions/d7/action.yml'] =
+    'runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/e\n';
   const changed = (path: string, target: string): unknown => ({
     kind: 'required-check',
     path,
@@ -919,6 +934,41 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
           files: { [INNER]: `${INNER_ACTION}    - uses: ./.github/actions/gate/\n` },
         },
         'la-deep': { files: deepChain },
+        'la-deep-dedup': { files: dedupChain },
+        'la-hidden-cr': {
+          files: {
+            [GATE]: `${GATE_ACTION.replace('\n', '\r# x\r    - Uses: ./.github/actions/other\r')}`,
+          },
+        },
+        'la-hidden-ls': {
+          files: {
+            [GATE]: GATE_ACTION.replace('\n', '\u2028    - Uses: ./.github/actions/other\u2028'),
+          },
+        },
+        'la-root-continued': {
+          files: {
+            [CI_PATH]: LA_FILES[CI_PATH]!.replace(
+              '      - uses: ./.github/actions/gate\n',
+              '      - uses: ./.github/actions/gate\n          x\n',
+            ),
+          },
+        },
+        'la-nested-continued': {
+          files: {
+            [GATE]: GATE_ACTION.replace(
+              '- uses: ./.github/actions/inner',
+              '- uses: ./.github/actions/inner\n        x',
+            ),
+          },
+        },
+        'la-prose-causes': {
+          files: {
+            [GATE]: GATE_ACTION.replace(
+              'name: gate\n',
+              'name: gate\ndescription: Fixes what causes the statuses to differ.\n',
+            ),
+          },
+        },
         'la-sibling': { files: { '.github/actions/gate2/x': 'x\n' } },
         'la-ref-add': {
           files: {
@@ -1095,6 +1145,49 @@ describe('policyDiff: local actions of required-check producers', SLOW, () => {
       }),
     );
     expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a nesting chain whose past-the-bound target was already visited is not flagged', async () => {
+    const out = await judge('la-deep-dedup');
+    expect(out.findings.filter((f) => f.reason.includes('nests local actions deeper'))).toEqual([]);
+    expect(out.findings.filter((f) => f.reason.includes('unresolvable'))).toEqual([]);
+  });
+
+  test.each(['la-hidden-cr', 'la-hidden-ls'])(
+    'a `uses:` hidden behind a YAML line break other than \\n (%s) fails closed',
+    async (name) => {
+      const out = await judge(name);
+      expect(out.findings).toContainEqual({
+        kind: 'required-check',
+        path: './.github/actions/gate',
+        reason: expect.stringContaining(`${GATE}: unreadable uses line`) as unknown,
+      });
+      expect(out.verdict).toBe('needs-human');
+    },
+  );
+
+  test('a root `uses:` continued onto the next line fails closed', async () => {
+    const out = await judge('la-root-continued');
+    expect(out.findings).toContainEqual(notLiteral('subject'));
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a nested `uses:` continued onto the next line fails closed', async () => {
+    const out = await judge('la-nested-continued');
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: './.github/actions/inner',
+      reason: expect.stringContaining(
+        `${GATE}: uses value continues onto the next line`,
+      ) as unknown,
+    });
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('prose with "causes" or "statuses" in metadata is not an unreadable uses line', async () => {
+    const out = await judge('la-prose-causes');
+    expect(out.findings.filter((f) => f.reason.includes('unreadable uses line'))).toEqual([]);
+    expect(out.findings).toContainEqual(changed(GATE, '.github/actions/gate'));
   });
 
   test('an unreadable `uses:` in unchanged metadata fails closed at both ends', async () => {
