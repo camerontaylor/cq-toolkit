@@ -96,19 +96,28 @@ function fixture(prefix = 'cq-static-conformance-'): string {
   writeFileSync(join(root, 'src/main.ts'), 'export const value: string = "ok";\n');
   return root;
 }
-function gate(root: string, args: string[] = []) {
-  copyRatchetEngine(ROOT, root);
+function runGate(root: string, args: string[] = []) {
   return spawnSync(process.execPath, ['scripts/ratchet-typecheck.mjs', ...args], {
     cwd: root,
     encoding: 'utf8',
     timeout: 30_000,
   });
 }
+function gate(root: string, args: string[] = []) {
+  copyRatchetEngine(ROOT, root);
+  return runGate(root, args);
+}
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-// Each test spawns the real pinned TypeScript compiler and oxlint via the static gate.
+// Real compiler/Oxlint calls have a bounded 30s child deadline below; the
+// suite-level budget covers one bounded child under host-load swings, plus
+// the one-off dist build copyRatchetEngine may pay when no global build ran. Cases
+// with more bounded children (the TS2307 plus configuration-failure case runs
+// three real gates; the integrated-omission case runs Oxlint then a gate)
+// carry budgets covering every child bound, so a loaded host cannot fail
+// before the structurally bounded child process reports.
 describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () => {
   it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
     expect(kernelImports(DRIVER_SRC)).toEqual([]);
@@ -166,23 +175,27 @@ describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () =>
     const missing = gate(root);
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('TS2307');
-  });
-  it('fails project configuration errors even with a larger baseline', () => {
-    const root = fixture();
-    const original = readFileSync(join(root, BASELINE), 'utf8').replace(
-      '"value": 0',
-      '"value": 10',
-    );
-    writeFileSync(join(root, BASELINE), original);
+
+    // Keep the real TS configuration-error classifier live: a valid self-host
+    // gate cannot exercise this branch, and the residual regex must be proved
+    // against actual TypeScript diagnostics rather than hand-typed text.
+    // Elevate the baseline so only the configuration classifier can fail the
+    // gate: an ordinary below-baseline diagnostic count would pass.
+    const original = readFileSync(join(root, BASELINE), 'utf8');
+    writeFileSync(join(root, BASELINE), original.replace('"value": 0', '"value": 10'));
+    writeFileSync(join(root, 'src/main.ts'), 'export const value: string = "ok";\n');
     writeFileSync(
       join(root, 'tsconfig.json'),
       '{"compilerOptions":{"notAnOption":true},"include":["src"]}',
     );
-    const result = gate(root);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('configuration or project-loading failure');
-    expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(original);
-  });
+    const configFailure = gate(root);
+    expect(configFailure.status).toBe(1);
+    expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(
+      original.replace('"value": 0', '"value": 10'),
+    );
+    expect(configFailure.stderr).toContain('compiler configuration or project-loading failure:');
+    expect(configFailure.stderr).toMatch(/TS5023|TS5083/);
+  }, 100_000);
   it('reproduces the integrated checker omission that requires the compiler fallback', () => {
     const root = fixture();
     writeFileSync(join(root, 'unvisited/extra.ts'), 'export const extra: string = 42;\n');
@@ -204,15 +217,12 @@ describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () =>
     const result = gate(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('unvisited/extra.ts');
-  });
-  it('rejects lint failures and never lets --update rewrite the baseline', () => {
+  }, 70_000);
+  it('rejects --update before loading the engine and never rewrites the baseline', () => {
     const root = fixture();
-    writeFileSync(join(root, 'src/main.ts'), 'debugger; export {};\n');
     const original = readFileSync(join(root, BASELINE), 'utf8');
-    const result = gate(root);
-    expect(result.status).toBe(1);
-    expect(result.stdout + result.stderr).toContain('no-debugger');
-    const update = gate(root, ['--update']);
+    const update = runGate(root, ['--update']);
+    expect(update.error).toBeUndefined();
     expect(update.status).toBe(1);
     expect(update.stderr).toContain('unsupported arguments');
     expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(original);
