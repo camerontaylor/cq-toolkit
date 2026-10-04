@@ -112,12 +112,13 @@ afterEach(() => {
 });
 
 // Real compiler/Oxlint calls have a bounded 30s child deadline below; the
-// suite-level budget covers one bounded child under host-load swings. Cases
+// suite-level budget covers one bounded child under host-load swings, plus
+// the one-off dist build copyRatchetEngine may pay when no global build ran. Cases
 // with more bounded children (the TS2307 plus configuration-failure case runs
 // three real gates; the integrated-omission case runs Oxlint then a gate)
 // carry budgets covering every child bound, so a loaded host cannot fail
 // before the structurally bounded child process reports.
-describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () => {
+describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () => {
   it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
     expect(kernelImports(DRIVER_SRC)).toEqual([]);
   });

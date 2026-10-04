@@ -81,56 +81,61 @@ afterEach(() => {
 });
 
 describe('full static gate versus explicit-file fast lint', { timeout: 60_000 }, () => {
-  it('asserts the compiler diagnostic and all four Oxlint diagnostics in two full gates', () => {
-    // Fixture A isolates the compiler leg. Its real tsc failure short-circuits
-    // the gate before Oxlint, exactly as the production ratchet does.
-    const compilerRoot = fixture();
-    const compilerFile = 'src/compiler.ts';
-    writeFileSync(join(compilerRoot, compilerFile), 'export const value: string = 42;');
-    const compilerFast = command(compilerRoot, 'lint-fast', [compilerFile]);
-    expect(compilerFast.error).toBeUndefined();
-    expect(compilerFast.status, compilerFast.stdout + compilerFast.stderr).toBe(0);
-    const compilerFull = command(compilerRoot, 'ratchet-typecheck');
-    expect(compilerFull.error).toBeUndefined();
-    expect(compilerFull.status).toBe(1);
-    expect(compilerFull.stdout + compilerFull.stderr).toContain('error TS2322');
+  // Two fixtures, five lint-fast runs and two full gates share this budget.
+  it(
+    'asserts the compiler diagnostic and all four Oxlint diagnostics in two full gates',
+    { timeout: 120_000 },
+    () => {
+      // Fixture A isolates the compiler leg. Its real tsc failure short-circuits
+      // the gate before Oxlint, exactly as the production ratchet does.
+      const compilerRoot = fixture();
+      const compilerFile = 'src/compiler.ts';
+      writeFileSync(join(compilerRoot, compilerFile), 'export const value: string = 42;');
+      const compilerFast = command(compilerRoot, 'lint-fast', [compilerFile]);
+      expect(compilerFast.error).toBeUndefined();
+      expect(compilerFast.status, compilerFast.stdout + compilerFast.stderr).toBe(0);
+      const compilerFull = command(compilerRoot, 'ratchet-typecheck');
+      expect(compilerFull.error).toBeUndefined();
+      expect(compilerFull.status).toBe(1);
+      expect(compilerFull.stdout + compilerFull.stderr).toContain('error TS2322');
 
-    // Fixture B is tsc-clean, so one real full gate reaches Oxlint and emits
-    // every type-aware and syntactic diagnostic across the four files.
-    const oxlintRoot = fixture();
-    const oxlintCases = [
-      ['floating', 'src/floating.ts', 'Promise.resolve(42);', 'no-floating-promises', 0],
-      [
-        'unsafe',
-        'src/unsafe.ts',
-        'export const value: string = JSON.parse("42");',
-        'no-unsafe-assignment',
-        0,
-      ],
-      [
-        'exhaustive',
-        'src/exhaustive.ts',
-        "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
-        'switch-exhaustiveness-check',
-        0,
-      ],
-      ['syntactic', 'src/syntactic.ts', 'debugger;', 'no-debugger', 1],
-    ] as const;
-    for (const [, file, code] of oxlintCases) writeFileSync(join(oxlintRoot, file), code);
+      // Fixture B is tsc-clean, so one real full gate reaches Oxlint and emits
+      // every type-aware and syntactic diagnostic across the four files.
+      const oxlintRoot = fixture();
+      const oxlintCases = [
+        ['floating', 'src/floating.ts', 'Promise.resolve(42);', 'no-floating-promises', 0],
+        [
+          'unsafe',
+          'src/unsafe.ts',
+          'export const value: string = JSON.parse("42");',
+          'no-unsafe-assignment',
+          0,
+        ],
+        [
+          'exhaustive',
+          'src/exhaustive.ts',
+          "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
+          'switch-exhaustiveness-check',
+          0,
+        ],
+        ['syntactic', 'src/syntactic.ts', 'debugger;', 'no-debugger', 1],
+      ] as const;
+      for (const [, file, code] of oxlintCases) writeFileSync(join(oxlintRoot, file), code);
 
-    for (const [, file, , , fastStatus] of oxlintCases) {
-      const fast = command(oxlintRoot, 'lint-fast', [file]);
-      expect(fast.error).toBeUndefined();
-      expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
-      if (file === 'src/syntactic.ts') expect(fast.stdout).toContain('no-debugger');
-    }
-    const oxlintFull = command(oxlintRoot, 'ratchet-typecheck');
-    expect(oxlintFull.error).toBeUndefined();
-    expect(oxlintFull.status).toBe(1);
-    for (const [name, , , diagnostic] of oxlintCases) {
-      expect(oxlintFull.stdout, name).toContain(diagnostic);
-    }
-  });
+      for (const [, file, , , fastStatus] of oxlintCases) {
+        const fast = command(oxlintRoot, 'lint-fast', [file]);
+        expect(fast.error).toBeUndefined();
+        expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
+        if (file === 'src/syntactic.ts') expect(fast.stdout).toContain('no-debugger');
+      }
+      const oxlintFull = command(oxlintRoot, 'ratchet-typecheck');
+      expect(oxlintFull.error).toBeUndefined();
+      expect(oxlintFull.status).toBe(1);
+      for (const [name, , , diagnostic] of oxlintCases) {
+        expect(oxlintFull.stdout + oxlintFull.stderr, name).toContain(diagnostic);
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'fast mode never starts the failing checker shim; full mode does',
