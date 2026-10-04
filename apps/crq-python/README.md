@@ -38,29 +38,51 @@ touches the main checkout or any agent's PR worktree.
      never passed.
    - `error`, `interrupted` or a timeout → the item backs off. After 3 of these
      it becomes `blocked`. A `review_skipped` run blocks the item immediately.
-3. **Start.** Starts are gated by the cap, the cooldown and `max_inflight`.
+   - A run without `exit.json` is `interrupted` only when it is provably gone:
+     neither the runner pid nor the CLI pid in `review.pid` is alive with a
+     matching command line.
+3. **Enroll** (from `gh pr list`, every tick):
+   - An open, non-draft PR into `merge-queue`, or stacked on a chain of open
+     PRs that ends there, with no item → an open item (two cycles).
+   - A PR whose head moved past its newest completed CLI review, with nothing
+     pending, in flight or blocked → one `prN-delta-<sha7>` item covering only
+     the new commits. If the PR was restacked meanwhile, the reviewed head is
+     replayed onto the new pin (`git merge-tree`), and the review compares the
+     new head with that replay. A pure restack is skipped without a run. A
+     replay conflict falls back to one full-diff review, not a two-cycle redo.
+   - A PR merged into `merge-queue` after the seed: never CLI-reviewed → a
+     merged-tier `prN-merged` item (supersession filter applies); reviewed at
+     an older head → a post-merge delta (target = the merge's first parent);
+     reviewed at the merged head → a `skipped` record, no run.
+   - A stacked PR merged into its parent branch shows up as the parent's head
+     moving, so the parent's delta covers it.
+4. **Start.** Starts are gated by the cap, the cooldown and `max_inflight`.
    Pick the first eligible item in this order: boosted (cycle 2 of an
-   in-progress pair), then open, then delta, then merged. Each open or delta PR
-   must pass three checks:
+   in-progress pair), open PR cycles, open-PR deltas, newly merged follow-ups
+   (merged-tier `new` and post-merge deltas), then the seeded merged backlog.
+   Each open PR or open-PR delta must pass three checks (post-merge deltas
+   skip them, since a merged head no longer moves and gets no addressing agent):
    - It is still open and not a draft.
    - No **running** Paseo agent is tied to it. A match is any of: `#N` in the
      title, `pr-N` in the cwd, or a cwd whose git branch is the PR branch.
    - Its last commit and the PR's `updatedAt` are both at least 30 min old.
      This is skipped when the head is our own addressing push.
    - `paseo ls` failing counts as "unknown", which blocks starts.
-4. **Pin the base** (§3). The base is `merge-base(origin/<PR base ref>, head)`,
+5. **Pin the base** (§3). The base is `merge-base(origin/<PR base ref>, head)`,
    pinned once per PR and reused for cycle 2.
    - If the pin stops being an ancestor of the head (the PR was restacked), the
      earlier cycles are voided and two cycles are owed again on a new pin.
    - The same applies when a tier-2 PR's recorded cycle-1 base differs from its
      current merge-base. #248 hit this rule: cycle 1 was at `596afb85`, it is
      now at `70de728`.
-5. **Secret-scan** the added and removed lines of `base..head` (§1). This
+6. **Secret-scan** the added and removed lines of `base..head` (§1). This
    applies the 9 classes in `policy/denylist/patterns.yml` (read from
    `origin/merge-queue`) plus the `gitleaks stdin` default rules. Any hit
    blocks the item. Matched content is never written down.
-6. Launch `coderabbit review --agent --base-commit <pin>` as a detached
-   session (`gtimeout 75m`). The next tick harvests it.
+7. Launch `coderabbit review --agent --base-commit <pin>` (`gtimeout 75m`)
+   through a double fork (`sh -c '… & echo $!'`). The runner is reparented to
+   launchd before the tick returns. The runner writes `review.pid` (its pid and
+   the CLI pid). A later tick harvests the run.
 
 ## Findings
 
@@ -116,4 +138,21 @@ python3 crq.py measure                    # recompute supersession for merged PR
 ```
 
 Tick agents are Paseo `claude/claude-haiku-4-5` runs that only execute
-`crq.py tick`. The runner archives every tick agent except the last 3.
+`crq.py tick`. The runner archives each finished tick agent and its workspace
+once, keeping the last 3. It tracks them in `queue.json` `archived_tick_runs`.
+
+**Why reviews must never be children of the tick (2026-10-04).** A tick agent
+runs `crq.py tick` with a 120 s Bash foreground limit. A slower tick is moved
+to the background, and the agent ends its turn. Claude Code then kills that
+task's whole descendant tree by ppid, which `setsid` does not escape. Re-archiving
+all ~117 past tick agents each tick made every tick about 6 min long, so every
+review still running about 2 min after launch was killed. That was 20 of 28
+merged-tier runs, logged as "interrupted: no exit status recorded" at the next
+tick. Two changes fix it: the double fork above (a review survives any tick or
+agent) and archive-once (a tick takes about 20 s).
+
+**Workspaces.** Paseo 0.11 schedules cannot target a workspace, so each tick
+agent gets its own throwaway workspace, which is archived as above.
+`paseo run --workspace <id>` replaces `--cwd` with the workspace's own
+directory. So addressing agents keep `--new-workspace local`, which keeps them
+in their worktree. That workspace is renamed `crq · address PR #N cN`.

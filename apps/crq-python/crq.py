@@ -27,6 +27,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -564,21 +565,67 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
             "notes": notes, "branch": info["headRefName"]}
 
 
+class NothingToReview(Exception):
+    pass
+
+
+def ensure_commit(pr: int, sha: str) -> bool:
+    """Merged/force-pushed heads may be gone from branch refs; fetch the PR ref."""
+    def have() -> bool:
+        return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=CLONE, check=False).returncode == 0
+    if not have():
+        git("fetch", "--quiet", "origin", f"+refs/pull/{pr}/head:refs/remotes/pr/{pr}", check=False)
+    return have()
+
+
 def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str, Any]:
-    if info["state"] != "OPEN":
+    """One informational review of what the last CLI review did not see.
+    Open PRs: since..head. Merged PRs: since..final head against the target as
+    it was at merge. Restacked (pin moved / since not an ancestor): replay the
+    reviewed head onto the new pin with merge-tree and review new-head vs that
+    replay, so only post-review changes show; a conflicting replay falls back
+    to the full PR diff (still ONE review, not a two-cycle redo)."""
+    merged = info["state"] == "MERGED"
+    if info["state"] not in ("OPEN", "MERGED"):
         raise NotReady(f"PR is {info['state']}")
     head = info["headRefOid"]
-    target = f"origin/{info['baseRefName']}"
-    base = git("merge-base", target, head)
-    scope = "full PR diff (old cycle head not an ancestor)"
+    if not ensure_commit(item["pr"], head):
+        raise NotReady(f"head {head[:10]} not fetchable")
+    target = f"{info['mergeCommit']['oid']}^1" if merged else f"origin/{info['baseRefName']}"
+    pin = git("merge-base", target, head)
+    base, review_head = pin, head
+    scope = "full PR diff (no usable last CLI-reviewed head)"
     since = item.get("since")
-    if since:
-        r = run(["git", "rev-parse", "--verify", "--quiet", f"{since}^{{commit}}"], cwd=CLONE, check=False)
-        if r.returncode == 0 and is_ancestor(r.stdout.strip(), head) and r.stdout.strip() != head:
-            base = r.stdout.strip()
-            scope = f"delta since last CLI-reviewed head {since}"
-    return {"base": base, "head": head, "target": target, "label": f"informational post-cycle review — {scope}",
-            "cycle": None, "notes": [], "branch": info["headRefName"]}
+    if since and ensure_commit(item["pr"], since):
+        since = git("rev-parse", f"{since}^{{commit}}")
+        if since == head:
+            raise NothingToReview(f"head {head[:10]} is the last CLI-reviewed head")
+        if is_ancestor(since, head) and git("merge-base", target, since) == pin:
+            base, scope = since, f"delta since last CLI-reviewed head {since[:10]}"
+        else:
+            m = run(["git", "merge-tree", "--write-tree", "--no-messages", pin, since], cwd=CLONE, check=False)
+            tree = m.stdout.split()[0] if m.returncode == 0 and m.stdout.strip() else None
+            if tree is None:
+                scope = f"full PR diff (reviewed head {since[:10]} does not replay cleanly onto {pin[:10]})"
+            elif tree == git("rev-parse", f"{head}^{{tree}}"):
+                raise NothingToReview(f"pure restack of reviewed head {since[:10]} onto {pin[:10]}; nothing unreviewed")
+            else:
+                scope = f"delta since {since[:10]}, replayed onto restacked pin {pin[:10]}"
+                if not dry:
+                    ident = dict(os.environ, GIT_AUTHOR_NAME="crq", GIT_AUTHOR_EMAIL="crq@localhost",
+                                 GIT_COMMITTER_NAME="crq", GIT_COMMITTER_EMAIL="crq@localhost")
+                    base = run(["git", "commit-tree", tree, "-p", pin, "-m",
+                                f"crq replay: PR #{item['pr']} reviewed head {since[:10]} on {pin[:10]}"],
+                               cwd=CLONE, env=ident).stdout.strip()
+                    review_head = run(["git", "commit-tree", f"{head}^{{tree}}", "-p", base, "-m",
+                                       f"crq replay head: PR #{item['pr']} at {head[:10]}"],
+                                      cwd=CLONE, env=ident).stdout.strip()
+                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-base", base)
+                    git("update-ref", f"refs/crq/synth/pr{item['pr']}-delta-head", review_head)
+    when = "post-merge" if merged else "post-cycle"
+    return {"base": base, "head": review_head, "pr_head": head, "target": target,
+            "label": f"informational {when} review — {scope}", "cycle": None, "notes": [],
+            "branch": None if merged else info["headRefName"]}
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -616,16 +663,21 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
     meta = {"run_id": run_id, "item_id": item["id"], "pr": item["pr"], "kind": item["kind"],
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
+            "pr_head": plan.get("pr_head", plan["head"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
     (rdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
-    log = (rdir / "runner.log").open("w")
-    proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
-                            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                            start_new_session=True, close_fds=True, cwd=str(ROOT))
+    # Double fork via sh: the review is reparented to launchd before this tick
+    # returns. A tick agent whose session ends while the tick is still running
+    # has its background task tree-killed by ppid walk; setsid alone does not
+    # escape that (20 merged-tier runs died ~2 min in, at tick-agent end).
+    child = " ".join(shlex.quote(a) for a in (sys.executable, str(Path(__file__).resolve()), "_review", run_id))
+    p = run(["/bin/sh", "-c", f"{child} </dev/null >>{shlex.quote(str(rdir / 'runner.log'))} 2>&1 & echo $!"],
+            cwd=ROOT, timeout=30)
+    pid = int(p.stdout.strip())
     item["state"] = "reviewing"
-    item["run"] = {"run_id": run_id, "pid": proc.pid, "started_at": meta["started_at"]}
+    item["run"] = {"run_id": run_id, "pid": pid, "started_at": meta["started_at"]}
     item["wait_reason"] = None
     q.setdefault("starts", []).append(meta["started_at"])
     event("review_started", item=item["id"], run=run_id, base=plan["base"], head=plan["head"], label=plan["label"])
@@ -634,14 +686,37 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
 
 def cmd_review_child(run_id: str) -> int:
     """Detached child: run the CLI once, record exit status. Never retries."""
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
     tmo = CONFIG["review_timeout_min"]
     cmd = ["gtimeout", "--kill-after=60", f"{tmo}m", *meta["cmd"]]
+    pidfile = rdir / "review.pid"
+    pidfile.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid()}) + "\n")
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
-        rc = subprocess.call(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+        pidfile.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid(), "cli_pid": proc.pid}) + "\n")
+        rc = proc.wait()
     (rdir / "exit.json").write_text(json.dumps({"exit": rc, "ended_at": iso(), "timed_out": rc == 124}) + "\n")
     return 0
+
+
+def proc_cmdline(pid: int) -> str:
+    return run(["ps", "-o", "command=", "-p", str(pid)], check=False, timeout=20).stdout.strip()
+
+
+def review_alive(rdir: Path, r: Dict[str, Any]) -> Optional[str]:
+    """Liveness probe for a detached review: returns why it counts as alive,
+    or None when it is provably gone (no matching runner or CLI process)."""
+    pf = rdir / "review.pid"
+    pids = json.loads(pf.read_text()) if pf.exists() else {"pid": r.get("pid")}
+    if pids.get("pid") and pid_alive(pids["pid"]) and r["run_id"] in proc_cmdline(pids["pid"]):
+        return f"runner pid {pids['pid']} alive"
+    if pids.get("cli_pid") and pid_alive(pids["cli_pid"]) and "coderabbit" in proc_cmdline(pids["cli_pid"]):
+        return f"CLI pid {pids['cli_pid']} alive (runner gone)"
+    if not pf.exists() and (now() - parse_iso(r["started_at"])).total_seconds() < 60:
+        return "just launched (no pidfile yet)"
+    return None
 
 
 # ----------------------------------------------------------- harvesting
@@ -652,9 +727,9 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     rdir = RUNS / r["run_id"]
     exitf = rdir / "exit.json"
     if not exitf.exists():
-        if pid_alive(r.get("pid")):
+        if review_alive(rdir, r):
             return None
-        exit_code = None
+        exit_code = None  # provably gone without an exit status → interrupted
     else:
         exit_code = json.loads(exitf.read_text())["exit"]
     if dry:
@@ -675,6 +750,7 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item["failures"] = 0
         item["last_error"] = None
         record = {"run_id": r["run_id"], "cycle": meta["cycle"], "base": meta["base"], "head": meta["head"],
+                  "pr_head": meta.get("pr_head", meta["head"]),
                   "dirty_diff": "clean tree", "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
         if item["kind"] == "open":
@@ -776,6 +852,9 @@ def spawn_addressing(item: Dict[str, Any], meta: Dict[str, Any], rdir: Path) -> 
         item["last_error"] = f"could not spawn addressing agent: {p.stderr.strip()[:200] or p.stdout[:200]}"
         event("blocked", item=item["id"], reason=item["last_error"])
         return
+    if ws:  # its own workspace (a shared one would override --cwd); give it a findable name
+        run(["paseo", "workspace", "rename", ws.group(1), f"crq · address PR #{item['pr']} c{cycle}"],
+            check=False, timeout=60, env=top_level_env())
     item["state"] = "addressing"
     item["addressing"] = {"agent_id": agent_id, "run_id": meta["run_id"], "cycle": cycle, "worktree": str(wt),
                           "wt_branch": wbranch, "result": str(result), "started_at": iso(),
@@ -834,9 +913,120 @@ def harvest_addressing(item: Dict[str, Any], dry: bool) -> Optional[str]:
 # ----------------------------------------------------------- tick
 
 
+def rank(item: Dict[str, Any]) -> int:
+    """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
+    follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog."""
+    if item["kind"] == "open":
+        return 0
+    if item["kind"] == "delta":
+        return 2 if item.get("followup") == "merged" else 1
+    return 2 if item.get("source") == "followup" else 3
+
+
 def sort_key(item: Dict[str, Any]) -> Tuple:
-    kind_rank = {"open": 0, "delta": 1, "merged": 2}[item["kind"]]
-    return (0 if item.get("boost") else 1, kind_rank, item.get("order", 999))
+    return (0 if item.get("boost") else 1, rank(item), item.get("order", 999))
+
+
+# ----------------------------------------------------------- enrollment
+
+
+def last_reviewed(q: Dict[str, Any], pr: int) -> Optional[Dict[str, Any]]:
+    """Newest completed CLI review of the PR's own head (open cycles and deltas)."""
+    recs = [c for i in q["items"] if i["pr"] == pr and i["kind"] in ("open", "delta") for c in i.get("cycles", [])]
+    return max(recs, key=lambda c: c["completed_at"]) if recs else None
+
+
+def reviewed_head(rec: Dict[str, Any]) -> str:
+    return rec.get("pr_head") or rec["head"]
+
+
+def chains_to_merge_queue(p: Dict[str, Any], by_head: Dict[str, Dict[str, Any]]) -> bool:
+    for _ in range(8):
+        if p["baseRefName"] == "merge-queue":
+            return True
+        p = by_head.get(p["baseRefName"])
+        if p is None:
+            return False
+    return False
+
+
+def next_order(q: Dict[str, Any]) -> int:
+    return max((i.get("order", 0) for i in q["items"]), default=0) + 1
+
+
+def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dict[str, Any]:
+    item = {"order": next_order(q), "state": "pending", "cycles": [], "attempts": [], **fields}
+    item["notes"] = [f"{iso()} auto-enrolled: {fields.get('why', '')}"]
+    item.pop("why", None)
+    q["items"].append(item)
+    if not dry:
+        event("enrolled", item=item["id"], reason=item["notes"][0])
+    log.append(f"{'DRY-RUN would enroll' if dry else 'enrolled'} {item['id']} ({item['notes'][0].split('auto-enrolled: ', 1)[1]})")
+    return item
+
+
+def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
+    """Each tick: (1) open non-draft PRs into merge-queue (or stacked on a chain
+    ending there) that are not enrolled → open item, two cycles; (2) a PR whose
+    head moved past its last CLI review, with nothing in flight → one delta item
+    for the new commits; (3) PRs merged into merge-queue after the seed →
+    never CLI-reviewed: merged-tier item (supersession filter); reviewed at an
+    older head: post-merge delta; reviewed at the merged head: recorded, skipped."""
+    log: List[str] = []
+    try:
+        opened = gh_json(["pr", "list", "--repo", REPO, "--state", "open", "--limit", "200", "--json",
+                          "number,isDraft,baseRefName,headRefName,headRefOid"])
+        merged = gh_json(["pr", "list", "--repo", REPO, "--state", "merged", "--base", "merge-queue", "--limit",
+                          "100", "--search", f"merged:>={q['created_at'][:10]}", "--json",
+                          "number,mergedAt,mergeCommit,headRefOid"])
+    except Exception as exc:
+        return [f"enrollment skipped: {exc}"[:300]]
+    by_head = {p["headRefName"]: p for p in opened}
+    for p in sorted(opened, key=lambda x: x["number"]):
+        n, head = p["number"], p["headRefOid"]
+        if p["isDraft"] or not chains_to_merge_queue(p, by_head):
+            continue
+        mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
+        if not mine:
+            stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
+            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
+                     why=f"open PR not yet enrolled{stacked}")
+            continue
+        if any(i["state"] in ("pending", "reviewing", "addressing", "blocked") for i in mine):
+            continue
+        last = last_reviewed(q, n)
+        if last and reviewed_head(last) != head and not any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
+            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", pr=n, kind="delta", followup="open",
+                     since=reviewed_head(last), why=f"head moved {reviewed_head(last)[:10]} → {head[:10]} after CLI review")
+    seeded_at = parse_iso(q["created_at"])
+    for p in sorted(merged, key=lambda x: x["mergedAt"]):
+        n, head = p["number"], p["headRefOid"]
+        if parse_iso(p["mergedAt"]) <= seeded_at or any(i["pr"] == n and i["kind"] == "merged" for i in q["items"]):
+            continue
+        mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
+        if any(i["state"] in ("reviewing", "addressing") for i in mine):
+            continue  # harvest first
+        for i in mine:
+            if i["kind"] == "open" and i["state"] == "pending":
+                i["state"] = "skipped"
+                i["last_error"] = "merged before its cycles ran → post-merge follow-up"
+        if any(i["kind"] == "delta" and i["state"] == "pending" for i in mine):
+            continue  # a pending delta now plans against the merged head
+        last = last_reviewed(q, n)
+        common = dict(pr=n, merge_commit=p["mergeCommit"]["oid"], merged_at=p["mergedAt"])
+        if last is None:
+            item = new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup",
+                            why="merged after the seed without a CLI review → merged-tier", **common)
+            apply_measure(item)
+        elif reviewed_head(last) == head:
+            new_item(q, log, dry, id=f"pr{n}-merged", kind="merged", source="followup", state="skipped",
+                     last_error=f"merged head {head[:10]} already CLI-reviewed ({last['run_id']})",
+                     why="merged after the seed; merged head already reviewed", **common)
+        else:
+            new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", kind="delta", followup="merged",
+                     since=reviewed_head(last), why=f"merged with commits after its last CLI review "
+                     f"({reviewed_head(last)[:10]} → {head[:10]}) → post-merge delta", **common)
+    return log
 
 
 def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
@@ -861,6 +1051,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             if msg:
                 log.append(msg)
     q["last_tick"] = iso()
+    log += enroll(q, dry)
     started = None
     if q.get("paused"):
         log.append(f"queue paused: {q.get('pause_reason')}")
@@ -887,19 +1078,28 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                     plan = plan_merged(item, dry)
                 else:
                     info = pr_info(item["pr"])
-                    if info["state"] != "OPEN":
+                    post_merge = item["kind"] == "delta" and info["state"] == "MERGED"
+                    if info["state"] != "OPEN" and not post_merge:
                         if not dry:
                             item["state"] = "skipped"
                             item["last_error"] = f"PR {info['state'].lower()} before review"
                         log.append(f"{item['id']}: PR {info['state']} → skipped")
                         continue
-                    qr = None if ignore_quiet else quiet_reason(item, info)
+                    # merged heads are immutable and get no addressing agent: no busy/quiet gate
+                    qr = None if ignore_quiet or post_merge else quiet_reason(item, info)
                     if qr:
                         item["wait_reason"] = qr
                         continue
                     plan = (plan_open if item["kind"] == "open" else plan_delta)(item, info, dry)
             except NotReady as exc:
                 item["wait_reason"] = str(exc)
+                continue
+            except NothingToReview as exc:
+                if not dry:
+                    item["state"] = "skipped"
+                    item["last_error"] = f"nothing to review: {exc}"
+                    event("skipped", item=item["id"], reason=item["last_error"])
+                log.append(f"{item['id']}: nothing to review ({exc}) → skipped")
                 continue
             except Exception as exc:
                 item["wait_reason"] = f"planning error: {exc}"[:300]
@@ -922,13 +1122,18 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
                     if i["state"] == "pending" and i.get("wait_reason")]
     if not dry:
+        save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
+        cleanup_tick_agents(q)
         save_queue(q)
         write_status(q)
-        cleanup_tick_agents()
     return log
 
 
-def cleanup_tick_agents() -> None:
+def cleanup_tick_agents(q: Dict[str, Any]) -> None:
+    """Archive finished tick agents except the last few — each one ONCE.
+    Re-archiving every past run each tick (~3 s per run) pushed ticks past the
+    tick agent's 120 s foreground limit, so the agent ended mid-tick and its
+    process tree (then including the review child) was killed."""
     sid = CONFIG.get("schedule_id")
     if not sid:
         return
@@ -938,10 +1143,18 @@ def cleanup_tick_agents() -> None:
         return
     done = [r for r in runs if r.get("agentId") and r.get("status") != "running"]
     keep = CONFIG["keep_tick_agents"]
+    if "archived_tick_runs" in q:
+        archived = set(q["archived_tick_runs"])
+    else:  # first run of this version: every earlier tick already archived all but the newest few
+        archived = {r["id"] for r in done[:-(keep + 1)]}
     for r in done[:-keep] if len(done) > keep else []:
+        if r["id"] in archived:
+            continue
         run(["paseo", "archive", r["agentId"]], check=False, timeout=60)
         if r.get("workspaceId"):
             run(["paseo", "workspace", "archive", r["workspaceId"]], check=False, timeout=60)
+        archived.add(r["id"])
+    q["archived_tick_runs"] = [r["id"] for r in runs if r["id"] in archived][-500:]
 
 
 # ----------------------------------------------------------- status
@@ -963,7 +1176,9 @@ def write_status(q: Dict[str, Any]) -> None:
             extra = f"survival {m['survival']} ({m['surviving']}/{m['added']}), focus {m['focus']}"
         last = (i.get("attempts") or [{}])[-1]
         why = i.get("wait_reason") if i["state"] == "pending" else (i.get("last_error") or "")
-        rows.append(f"| {i['id']} | {i['kind']}{' t' + str(i['tier']) if i.get('tier') else ''} | {i['state']} | {cyc} "
+        kind = (f"{i['kind']}{' t' + str(i['tier']) if i.get('tier') else ''}"
+                f"{' new' if i.get('source') == 'followup' else ''}{' post-merge' if i.get('followup') == 'merged' else ''}")
+        rows.append(f"| {i['id']} | {kind} | {i['state']} | {cyc} "
                     f"| {(i.get('pinned_base') or '')[:10]} | {last.get('outcome', '')} | {(why or '')[:110]} | {extra} |")
     sched = CONFIG.get("schedule_id")
     next_run = ""
@@ -1025,21 +1240,28 @@ def cmd_init(force: bool) -> None:
     print(f"initialised {len(items)} items")
 
 
+def apply_measure(i: Dict[str, Any]) -> None:
+    """Supersession filter for a merged item (pending ↔ skipped while unreviewed)."""
+    i["measure"] = measure_merged(i)
+    m = i["measure"]
+    ok = ((m["survival"] or 0) >= CONFIG["merged_min_survival"]
+          and m["covered_surviving"] >= CONFIG["merged_min_surviving_lines"])
+    if i["state"] in ("pending", "skipped") and not i.get("cycles"):
+        i["state"] = "pending" if ok else "skipped"
+        i["last_error"] = None if ok else (
+            f"superseded/too small: survival {m['survival']} ({m['surviving']}/{m['added']} added lines still "
+            f"blamed to the PR); only {m['covered_surviving']} sit in paths where the PR is ≥"
+            f"{CONFIG.get('merged_min_file_focus', 0.25)} of later churn")
+
+
 def cmd_measure() -> None:
     q = load_queue()
     fetch()
     merged = [i for i in q["items"] if i["kind"] == "merged"]
     for i in merged:
-        i["measure"] = measure_merged(i)
-        m = i["measure"]
-        ok = ((m["survival"] or 0) >= CONFIG["merged_min_survival"]
-              and m["covered_surviving"] >= CONFIG["merged_min_surviving_lines"])
-        if i["state"] in ("pending", "skipped") and not i.get("cycles"):
-            i["state"] = "pending" if ok else "skipped"
-            i["last_error"] = None if ok else (
-                f"superseded/too small: survival {m['survival']} ({m['surviving']}/{m['added']} added lines still "
-                f"blamed to the PR); only {m['covered_surviving']} sit in paths where the PR is ≥"
-                f"{CONFIG.get('merged_min_file_focus', 0.25)} of later churn")
+        if i.get("source") == "followup" and i["state"] == "skipped" and not i.get("measure"):
+            continue  # merged head already reviewed; not a supersession decision
+        apply_measure(i)
     # rank: code before docs-only, then most surviving non-doc lines first
     ranked = sorted(merged, key=lambda i: (i["measure"]["docs_only"], -i["measure"]["surviving_nondoc"],
                                            -i["measure"]["surviving"]))
