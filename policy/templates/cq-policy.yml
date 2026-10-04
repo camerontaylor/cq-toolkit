@@ -134,15 +134,33 @@ jobs:
               # (ADR-0004 D-C.2). Exactly one open same-repo PR into
               # merge-queue or main must carry the subject as its head:
               # the label record is per PR, so an ambiguous PR is refused.
-              pulls="$(gh api "repos/${REPO}/commits/${subject}/pulls")"
-              matches="$(jq -c --arg sha "$subject" --argjson repo "$REPO_ID" \
-                '[.[] | select(.state == "open"
-                   and .head.sha == $sha
-                   and .head.repo.id == $repo
-                   and (.base.ref == "merge-queue"
-                     or .base.ref == "main"))
-                   | {number, base: .base.ref}]' <<<"$pulls")"
+              # Every page, slurped into one array; an API error fails the
+              # step (assignment under `set -e`, `pipefail`).
+              list_pulls() {
+                gh api --paginate \
+                  "repos/${REPO}/commits/${subject}/pulls?per_page=100" \
+                  | jq -s 'add // []'
+              }
+              match_pulls() {
+                jq -c --arg sha "$subject" --argjson repo "$REPO_ID" \
+                  '[.[] | select(.state == "open"
+                     and .head.sha == $sha
+                     and .head.repo.id == $repo
+                     and (.base.ref == "merge-queue"
+                       or .base.ref == "main"))
+                     | {number, base: .base.ref}]' <<<"$pulls"
+              }
+              pulls="$(list_pulls)"
+              matches="$(match_pulls)"
               count="$(jq 'length' <<<"$matches")"
+              if [ "$count" = 0 ]; then
+                # The commit→PR association can lag a push, and nothing
+                # re-runs this verdict: look once more before skipping.
+                sleep "${CQ_ASSOC_RETRY_SECONDS:-20}"
+                pulls="$(list_pulls)"
+                matches="$(match_pulls)"
+                count="$(jq 'length' <<<"$matches")"
+              fi
               case "$count" in
                 0)
                   # NOTHING TO JUDGE, not a refusal (cq-accept's rule): the
@@ -150,16 +168,21 @@ jobs:
                   # merged, or targets another base (a stacked PR). No
                   # verdict is posted, `judge` is skipped and the run stays
                   # green. A current head gets its own cq-signal run and
-                  # verdict; the gate recomputes policy itself.
+                  # verdict; the gate recomputes policy itself. An empty
+                  # association even after the retry is reported as
+                  # unconfirmed, not as a superseded or closed PR.
                   carriers="$(jq -r --arg sha "$subject" \
                     --argjson repo "$REPO_ID" '
                     [.[] | select(.head.repo.id == $repo)
                      | "#\(.number) \(.state) into \(.base.ref)"
                        + (if .head.sha == $sha then ""
                           else " (head moved to \(.head.sha[0:12]))" end)]
-                    | if length == 0 then "none" else join("; ") end' \
-                    <<<"$pulls")"
-                  msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (same-repo PRs containing it: ${carriers})"
+                    | join("; ")' <<<"$pulls")"
+                  if [ -z "$carriers" ]; then
+                    msg="nothing to judge: commit→PR association unconfirmed: no same-repo PR lists ${subject} (looked twice)"
+                  else
+                    msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (same-repo PRs containing it: ${carriers})"
+                  fi
                   echo "::notice title=cq-policy::${msg}"
                   echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
                   exit 0;;
