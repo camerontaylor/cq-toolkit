@@ -50,11 +50,13 @@ export const NON_IMPORT_MAP = [
       /^test\/ops\/sweep\/unit-registry\.test\.ts$/,
     ],
   ],
+  // Workflows and composite actions: the suites that read them from disk.
   [
-    /^\.github\/workflows\//,
+    /^\.github\/(workflows|actions)\//,
     [
       /^test\/workflows\//,
-      /^test\/ops\/gates\/(workflowScan|policyDiff)\.test\.ts$/,
+      /^test\/ops\/gates\/(workflowScan|policyDiff|protectedPaths)\.test\.ts$/,
+      /^test\/ops\/ratchet\/definitions\.test\.ts$/,
       /^test\/scripts\/github-settings\.test\.ts$/,
     ],
   ],
@@ -69,7 +71,7 @@ export const NON_IMPORT_MAP = [
 export const INERT = [
   /^docs\/(?!ops\/|dd-1-|methods-)/,
   /^(README|LICENSE|CHANGELOG|AGENTS|CLAUDE)[^/]*$/,
-  /^\.github\/(?!workflows\/)/,
+  /^\.github\/(?!workflows\/|actions\/)/,
 ];
 
 const isTest = (path) => /^(test|lint)\/.*\.test\.ts$/.test(path);

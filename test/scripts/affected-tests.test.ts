@@ -127,24 +127,32 @@ describe('selectAffected', () => {
       ]);
     }
     expect(pick('.github/workflows/ci.yml')).toMatchObject({
-      files: ['test/workflows/d.test.ts'],
+      files: ['test/ops/gates/protectedPaths.test.ts', 'test/workflows/d.test.ts'],
       fallback: false,
     });
   });
 
-  it('maps workflow edits to every suite that reads the real workflow files', () => {
+  it('maps workflow and composite-action edits to every suite that reads them', () => {
     const readers = [
       'test/ops/gates/policyDiff.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
       'test/ops/gates/workflowScan.test.ts',
+      'test/ops/ratchet/definitions.test.ts',
       'test/scripts/github-settings.test.ts',
     ];
+    for (const path of ['.github/workflows/ci.yml', '.github/actions/static-gate/action.yml']) {
+      expect(
+        selectAffected({ changed: [path], allTests: [...allTests, ...readers], related: [] }),
+      ).toEqual({
+        files: [...readers, 'test/workflows/d.test.ts'],
+        fallback: false,
+        reason: 'mapped',
+      });
+    }
+    // Other .github metadata stays inert prose.
     expect(
-      selectAffected({
-        changed: ['.github/workflows/ci.yml'],
-        allTests: [...allTests, ...readers],
-        related: [],
-      }).files,
-    ).toEqual([...readers, 'test/workflows/d.test.ts']);
+      selectAffected({ changed: ['.github/PULL_REQUEST_TEMPLATE.md'], allTests, related: [] }),
+    ).toEqual({ files: [], fallback: false, reason: 'mapped' });
   });
 
   it('falls back when a source file was deleted: its importers are unknown', () => {
