@@ -965,7 +965,8 @@ describe('main — usage reporting', () => {
     ).rejects.toThrow();
     const report = JSON.parse(readFileSync(out, 'utf8')) as { sweepUsage: unknown; error: string };
     expect(report.sweepUsage).toEqual(buildSweepUsage(SelfhostDefaults.maxTokens, []));
-    expect(report.error).toContain('injected listing failure');
+    expect(report.error).toContain('gh failed (exit 1)');
+    expect(report.error).toContain(LIST_PATH);
   });
 
   test('a fresh dry run creates the artifact directory and waits for stdout before appending', async () => {
