@@ -698,6 +698,33 @@ describe('pure configuration resolution', () => {
   });
 
   describe('post-merge #285 review findings', () => {
+    it('requires own properties for verified path evidence fields', () => {
+      const canonical = '/var/tmp/canonical-sessions';
+      const inheritedInput = Object.assign(Object.create({ input: sessions }), {
+        realpath: canonical,
+      }) as { input: string; realpath: string };
+      const inheritedRealpath = Object.assign(Object.create({ realpath: canonical }), {
+        input: sessions,
+      }) as { input: string; realpath: string };
+
+      for (const evidence of [inheritedInput, inheritedRealpath]) {
+        expect(() =>
+          resolve({
+            env: { CQ_DRIVER_SESSIONS_DIR: sessions },
+            verifiedRealpaths: { CQ_DRIVER_SESSIONS_DIR: evidence },
+          }),
+        ).toThrow(/verified workspace path evidence required/);
+      }
+
+      const config = resolve({
+        env: { CQ_DRIVER_SESSIONS_DIR: sessions },
+        verifiedRealpaths: {
+          CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: canonical },
+        },
+      });
+      expect(entryValue('driver.sessionsDir', config)).toBe(canonical);
+    });
+
     // MAJOR (PRRT_kwDOUY73E86qLJRX): Object.fromEntries reintroduces
     // Object.prototype, so a polluted inherited name could be read back as
     // configuration on a direct lookup such as env.CQ_PROFILE.

@@ -134,6 +134,16 @@ function ownEntries<V>(record: Readonly<Record<string, V>>): Record<string, V> {
   return copy;
 }
 
+function ownVerifiedRealpaths(
+  record: NonNullable<ResolveConfigOptions['verifiedRealpaths']>,
+): NonNullable<ResolveConfigOptions['verifiedRealpaths']> {
+  const copy = Object.create(null) as NonNullable<ResolveConfigOptions['verifiedRealpaths']>;
+  for (const [name, evidence] of Object.entries(record)) {
+    copy[name] = evidence && typeof evidence === 'object' ? ownEntries(evidence) : evidence;
+  }
+  return copy;
+}
+
 function validForeignBaseUrl(value: string): boolean {
   if (!/^https:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value)) return false;
   try {
@@ -669,7 +679,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     ...(ownInput.env ? { env: ownEntries(ownInput.env) } : {}),
     ...(ownInput.values ? { values: ownEntries(ownInput.values) } : {}),
     ...(ownInput.verifiedRealpaths
-      ? { verifiedRealpaths: ownEntries(ownInput.verifiedRealpaths) }
+      ? { verifiedRealpaths: ownVerifiedRealpaths(ownInput.verifiedRealpaths) }
       : {}),
   });
   const platform = options.platform ?? (process.platform === 'win32' ? 'win32' : 'posix');
