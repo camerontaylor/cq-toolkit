@@ -14,17 +14,20 @@
 //     the loop's pushes under its stale name — renamed heads and failed
 //     revalidation reads are recorded rows, never dispatches;
 //   - each qualifying PR runs the SHIPPED runReviewLoop with the frozen
-//     SelfhostDefaults (driver model, maxUsd default) and the loop's own
+//     SelfhostDefaults (driver model, maxTokens default) and the loop's own
 //     defaults UNCHANGED — in particular classifyConfig is never overridden,
 //     so defaultLoopClassifyConfig's bot-authored-thread suppression stays
 //     ON (the skipResponderAuthoredThreads:false flip was the live drills'
 //     single-identity deviation, never a deployment setting);
-//   - the maxUsd cap is SWEEP-LEVEL: the configured (or default) cap is
-//     carried forward across the PRs in listing order — each PR's loop gets
-//     the REMAINING budget, each loop's fix-run cost rollup (DD-9,
-//     fixReport.costUSD) decrements it, and a PR reached at ≤ 0 remaining is
-//     recorded `sweep budget exhausted (I9)` instead of silently skipping or
-//     silently multiplying the advertised cap by the PR count;
+//   - the TOKEN cap is SWEEP-LEVEL: SelfhostDefaults.maxTokens (the served
+//     model is unpriced, so a default USD cap would trip the governor's DD-9
+//     unpriced-usage fail-loud) is carried forward across the PRs in listing
+//     order — each PR's loop gets the REMAINING budget, each loop's fix-run
+//     token rollup (fixReport.usage) decrements it, and a PR reached at ≤ 0
+//     remaining is recorded `sweep budget exhausted (I9)` instead of
+//     silently skipping or silently multiplying the advertised cap by the
+//     PR count. An explicit USD cap (--max-usd, for a priced model) rides
+//     the same carry-forward alongside it; there is no USD default;
 //   - responderLogin rides cfg (the token's user in CI, passed by the
 //     workflow as --responder-login) — the round-3 deployment requirement:
 //     the loop's own identity drives the thread last-word suppression, and
@@ -63,7 +66,7 @@ import type { GhFn } from '../ops/review/gh.js';
 import { makeGhRunner } from '../ops/review/gh.js';
 import { fileWorktreeRegistry } from '../ops/review/prWorktree.js';
 import { fetchReviewState } from '../ops/review/fetchReviewState.js';
-import { runReviewLoop } from '../plans/review-loop.js';
+import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
 import { listOpenPrs } from './candidates.js';
 import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
@@ -212,11 +215,15 @@ export interface SelfReviewLoopCfg {
    * Null = author-blind verify — the documented fallback, never a guess.
    */
   responderLogin: string | null;
-  /** USD-cap override; default SelfhostDefaults.maxUsd (I9). SWEEP-LEVEL:
-   * the cap is carried forward across the run's PRs (each loop gets the
-   * remaining budget, decremented by each fix run's cost rollup), never the
-   * full cap re-granted per PR. */
+  /** OPTIONAL USD cap (I9); absent → no USD cap (the default cap is the
+   * token cap — the served model is unpriced). SWEEP-LEVEL: carried forward
+   * across the run's PRs (each loop gets the remaining budget, decremented
+   * by each fix run's cost rollup), never the full cap re-granted per PR. */
   maxUsd?: number;
+  /** Token-cap override; default SelfhostDefaults.maxTokens (I9). SWEEP-LEVEL
+   * exactly like maxUsd: the remaining tokens are carried forward, each fix
+   * run's token rollup decrementing them. Programmatic only — no CLI flag. */
+  maxTokens?: number;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
@@ -298,8 +305,10 @@ const EXCLUDE_DRAFTED_AFTER_LISTING = 'converted to draft after listing';
  * of the loop even on throw, so the sweep carries forward the REMAINDER
  * instead of burning the whole budget on a guessed ceiling.
  */
-const sweepSpendDeducted = (usd: number): string =>
-  `accounted spend ${String(Number(usd.toPrecision(6)))} deducted from the sweep budget`;
+const sweepSpendDeducted = (usd: number, tokens: number): string =>
+  `accounted spend ${String(Number(usd.toPrecision(6)))}${
+    tokens > 0 ? ` and ${String(tokens)} tokens` : ''
+  } deducted from the sweep budget`;
 
 /**
  * The pre-loop exclusion reason for a listing row, or null when the row is
@@ -400,7 +409,9 @@ export async function runSelfReviewLoop(
   // The SWEEP-LEVEL cap (I9): one budget for the whole run, carried forward
   // in listing order — re-granting the full cap per PR would multiply the
   // advertised cap by the PR count.
-  let remaining = cfg.maxUsd ?? SelfhostDefaults.maxUsd;
+  let remainingTokens = cfg.maxTokens ?? SelfhostDefaults.maxTokens;
+  // USD is opt-in: undefined = no USD cap and no USD bookkeeping.
+  let remainingUsd: number | undefined = cfg.maxUsd;
   const results: Array<{ pr: number; outcome: ReviewLoopOutcome }> = [];
   const failures: Array<{ pr: number; error: string }> = [];
   const excluded: Array<{ pr: number; reason: string }> = [];
@@ -418,7 +429,7 @@ export async function runSelfReviewLoop(
     // The sweep cap gates before any worktree or dispatch: a PR reached at
     // ≤ 0 remaining is a recorded row, never a silent skip and never a
     // loop under a spent budget (I9 — honest stop, honest bookkeeping).
-    if (remaining <= 0) {
+    if (remainingTokens <= 0 || (remainingUsd !== undefined && remainingUsd <= 0)) {
       excluded.push({ pr: row.pr, reason: EXCLUDE_SWEEP_BUDGET });
       continue;
     }
@@ -477,6 +488,7 @@ export async function runSelfReviewLoop(
     // its budget carries forward unchanged (the old dispatch-log proxy is
     // gone — it persisted across runs and mis-timed appends).
     let accountedThisPr = 0;
+    let accountedTokensThisPr = 0;
     const opts: ReviewLoopOpts = {
       owner: cfg.owner,
       repo: cfg.repo,
@@ -493,7 +505,8 @@ export async function runSelfReviewLoop(
       nowMs: deps.nowMs(),
       runOptions: {
         journalDir: join(journalRoot, `${String(row.pr)}-${String(stamp)}`),
-        maxUsd: remaining,
+        maxTokens: remainingTokens,
+        ...(remainingUsd !== undefined ? { maxUsd: remainingUsd } : {}),
       },
       // The wall-clock ladder's LIMITS half (I8/I9; review-debt #137's arming
       // for the REVIEW path — the merge path arms it in self-merge-prs.ts):
@@ -510,8 +523,9 @@ export async function runSelfReviewLoop(
       worktreeRoot,
       // Propagated spend (review-debt #186): recorded per PR, used on the
       // thrown path below.
-      onSpend: (usd) => {
+      onSpend: (usd, tokens = 0) => {
         accountedThisPr = usd;
+        accountedTokensThisPr = tokens;
       },
       // Tests-only injection: absent → runReviewLoop builds its own default
       // view (the central registry, the run-plan path).
@@ -528,8 +542,12 @@ export async function runSelfReviewLoop(
       // rollup consumed nothing this entry can account for: decrement only
       // on a present, finite number, never on absence.
       const cost = outcome.fixReport?.costUSD;
-      if (typeof cost === 'number' && Number.isFinite(cost)) {
-        remaining -= cost;
+      if (remainingUsd !== undefined && typeof cost === 'number' && Number.isFinite(cost)) {
+        remainingUsd -= cost;
+      }
+      const tokens = totalTokens(outcome.fixReport?.usage);
+      if (Number.isFinite(tokens)) {
+        remainingTokens -= tokens;
       }
     } catch (error) {
       // FAIL-CLOSED SWEEP BUDGET, PROPAGATED SPEND (review-debt #186): the
@@ -539,13 +557,18 @@ export async function runSelfReviewLoop(
       // (accountedThisPr 0 — a worktree/registry fault) deducts nothing and
       // the budget carries forward unchanged.
       const message = oneLine(error instanceof Error ? error.message : String(error));
-      if (accountedThisPr > 0) {
-        remaining -= accountedThisPr;
+      if (remainingUsd !== undefined && accountedThisPr > 0) {
+        remainingUsd -= accountedThisPr;
+      }
+      if (accountedTokensThisPr > 0) {
+        remainingTokens -= accountedTokensThisPr;
       }
       failures.push({
         pr: row.pr,
         error:
-          accountedThisPr > 0 ? `${message} — ${sweepSpendDeducted(accountedThisPr)}` : message,
+          accountedThisPr > 0 || accountedTokensThisPr > 0
+            ? `${message} — ${sweepSpendDeducted(accountedThisPr, accountedTokensThisPr)}`
+            : message,
       });
     }
   }

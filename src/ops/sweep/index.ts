@@ -25,6 +25,7 @@ export type {
 export {
   SWEEP_UNIT_OP,
   ledgerSignature,
+  legacyLedgerSignature,
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
   parseNullDelimitedChangedFiles,

@@ -85,12 +85,15 @@ const PlanSweepLedgerConfigSchema = z
 /**
  * One per-package baseline signature. The signature bound mirrors the
  * ledger's committed-entry bound (1..500 — the recipe's 8-hex output is
- * well within); the op itself stays lenient on this advisory data.
+ * well within); the op itself stays lenient on this advisory data. The
+ * optional `legacySignature` (scheme-1 signature, escalation-only) carries
+ * the same bound.
  */
 const PlanSweepBaselineSchema = z
   .object({
     package: z.string().min(1),
     signature: z.string().min(1).max(500),
+    legacySignature: z.string().min(1).max(500).exactOptional(),
   })
   .strict();
 

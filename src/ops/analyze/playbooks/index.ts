@@ -26,9 +26,11 @@ export type {
   PlaybookDispatchInput,
   PlaybookDispatchOutcome,
   PlaybookDispatchRecord,
+  PlaybookDispatchUnverified,
   PlaybookQuarantineListInput,
   PlaybookQuarantineListReport,
   PlaybookRegisterInput,
   PlaybookRegistered,
   PlaybookRegistry,
+  PlaybookRestoreReport,
 } from './registry.js';
