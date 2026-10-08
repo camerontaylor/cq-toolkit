@@ -72,7 +72,7 @@ const ROOT_BUILD_INPUTS = [
  * present, every required input must exist; any fault degrades to
  * "never fresh" (Infinity), i.e. rebuild.
  */
-function newestBuildInputMtimeMs() {
+function newestBuildInputMtimeMs(paths = []) {
   let hasSources;
   try {
     if (!statSync(join(ROOT, 'src')).isDirectory()) return Infinity;
@@ -86,7 +86,10 @@ function newestBuildInputMtimeMs() {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) walk(abs);
-      else newest = Math.max(newest, statSync(abs).mtimeMs);
+      else {
+        newest = Math.max(newest, statSync(abs).mtimeMs);
+        paths.push(abs);
+      }
     }
   };
   const measure = (read) => {
@@ -100,7 +103,13 @@ function newestBuildInputMtimeMs() {
   if (hasSources && !measure(() => walk(join(ROOT, 'src')))) return Infinity;
   for (const input of ROOT_BUILD_INPUTS) {
     const abs = join(ROOT, input);
-    if (!measure(() => (newest = Math.max(newest, statSync(abs).mtimeMs)))) return Infinity;
+    if (
+      !measure(() => {
+        newest = Math.max(newest, statSync(abs).mtimeMs);
+        paths.push(abs);
+      })
+    )
+      return Infinity;
   }
   return newest;
 }
@@ -108,18 +117,25 @@ function newestBuildInputMtimeMs() {
 /** Worktree-local runtime state, ignored by git and outside the package allowlist. */
 const BUILD_MARKER = join(ROOT, '.cq', 'build-complete');
 /** Bind a marker to its actual dist tree and compiled entrypoints (including symlinked fixtures). */
-const buildIdentity = () =>
-  JSON.stringify({
+const buildIdentity = () => {
+  const inputs = [];
+  if (!Number.isFinite(newestBuildInputMtimeMs(inputs))) {
+    throw new Error('cannot inventory build inputs');
+  }
+  return JSON.stringify({
+    inputs: inputs.sort(),
     dist: realpathSync(join(ROOT, 'dist')),
     index: statSync(join(ROOT, 'dist', 'index.js')).mtimeMs,
     engine: statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js')).mtimeMs,
   });
+};
 
 /** Invalidate prior success before the compiler or asset step can change dist. */
 export function invalidateBuild() {
   rmSync(BUILD_MARKER, { force: true });
-  // Upgrade an existing checkout without letting the old marker ship in a pack.
-  rmSync(join(ROOT, 'dist', '.build-complete'), { force: true });
+  // tsc does not remove outputs for deleted inputs. Every rebuild starts clean,
+  // including upgrades from markers that did not record the input path set.
+  rmSync(join(ROOT, 'dist'), { recursive: true, force: true });
 }
 
 /** Called only by the final successful step of the package build command. */
@@ -131,7 +147,8 @@ export function markBuildComplete() {
 
 /**
  * ensureDist's reuse test: `dist/index.js` and the ratchet engine entry exist
- * and the successful build marker and dist are newer than every build input.
+ * and the successful build marker binds the current input path set and dist
+ * identity, with the marker and dist newer than every build input.
  * False (rebuild) on any output fault — no
  * dist yet (CI cold checkout) or unreadable. test-narrow uses it to run the
  * build itself, as a child its host lock records.

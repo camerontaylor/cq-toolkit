@@ -40,7 +40,7 @@ Options:
   --include-integration      allow suites classified integration
   --include-live             allow suites classified live
   -t <pattern>               diagnostic only: match full test names; successful
-                             runs report result=filtered, never gate evidence
+                             runs report result="filtered", never gate evidence
   --max-wait <seconds>       bound the wait for the host lock (default and
                              ceiling ${MAX_WAIT_CEILING_S})
   -h, --help                 this text
@@ -204,10 +204,16 @@ export function projectsOf(run) {
 
 /**
  * The stable one-line summary agents quote. Keys always appear, in this
- * order; absent values print as `-`. Free text (reason) is JSON-quoted.
+ * order; absent values print as `-`. Every string value is JSON-quoted so
+ * filenames and refs cannot inject extra evidence lines.
  */
 export function summaryLine(s) {
-  const dash = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
+  const dash = (v) =>
+    v === undefined || v === null || v === ''
+      ? '-'
+      : typeof v === 'string'
+        ? JSON.stringify(v)
+        : String(v);
   const secs = (ms) => (typeof ms === 'number' ? `${(ms / 1000).toFixed(1)}s` : '-');
   const fields = [
     ['result', s.result],

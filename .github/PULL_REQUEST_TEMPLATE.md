@@ -7,6 +7,10 @@
 - Intended PR target: <!-- merge-queue (documented queue flow) or main — this task's actual target; state which -->
 - Base (immutable): <!-- merge-base sha vs the intended target; the SAME base for both cycles -->
 
+<!-- Set BASE to the immutable SHA above (against origin/main for direct-to-main
+PRs). At every checkpoint — before cycle 1, after cycle 1, and after cycle 2 —
+run affected tests with pnpm test:narrow --base "$BASE"; never use a moving ref. -->
+
 ## CodeRabbit CLI cycles — both required, each including addressing ([docs/coderabbit-review.md](../docs/coderabbit-review.md))
 
 A cycle counts only when the CLI exits successfully, the stream ends with a
@@ -49,7 +53,7 @@ affected tests, Knip under its condition, and the three diff checks:
 
 - [ ] `pnpm run check:static` — exit 0 (once; `lint`/`typecheck` are aliases)
 - [ ] `pnpm run format:check` — exit 0
-- [ ] `pnpm test:narrow` — exit 0; paste its `test:narrow result=…` line (`result=nothing` = zero affected tests: record why the diff cannot affect any)
+- [ ] `pnpm test:narrow --base "$BASE"` — exit 0; paste its `test:narrow result=…` line (`result="nothing"` = zero affected tests: record why the diff cannot affect any; `result="filtered"` is diagnostic only, never gate evidence)
 - [ ] `pnpm run knip` — exit 0, or not applicable (diff touches no entrypoints, exports, dependencies or configuration, adds no file, adds or changes no import, and removes or rewires no last import)
 - [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
 - [ ] `git diff --check --cached` — clean (staged)
