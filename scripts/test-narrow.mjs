@@ -47,6 +47,7 @@ import {
   NICE_INCREMENT,
   RUN_TIMEOUT_MS,
   USAGE,
+  loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
   planRun,
@@ -461,7 +462,9 @@ const vitestArgs = [
   ...files.map((f) => join(ROOT, f)),
 ];
 say(
-  `exec nice(${getPriority()}) node ${vitestArgs.map((a) => toPosix(relative(ROOT, a)) || a).join(' ')}`,
+  `exec nice(${getPriority()}) node ${loggedVitestArgs(vitestArgs)
+    .map((a) => toPosix(relative(ROOT, a)) || a)
+    .join(' ')}`,
 );
 
 // The load stamp belongs to the timed interval: sampled at its start.

@@ -58,6 +58,118 @@ describe('acquireLock', () => {
     expect(fs.existsSync(lock)).toBe(false);
   });
 
+  it('never publishes an ownerless directory while a creator is paused', async () => {
+    const racingFs = {
+      ...fs,
+      mkdtempSync: (prefix: string) => {
+        const temporary = fs.mkdtempSync(prefix);
+        expect(fs.existsSync(lock)).toBe(false);
+        holderRecord(7, 'fresh');
+        return temporary;
+      },
+    } as typeof fs;
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { fs: racingFs, token: () => 'ours', isAlive: () => true, log: () => {} },
+    });
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)?.token).toBe('fresh');
+    expect(fs.readdirSync(dir)).toEqual(['lock']);
+  });
+
+  it.each(['EEXIST', 'ENOTEMPTY'])(
+    'cleans private initialization after a %s publication collision',
+    async (code) => {
+      const racingFs = {
+        ...fs,
+        renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+          if (String(to) === lock) {
+            expect(readOwner(String(from))?.token).toBe('ours');
+            holderRecord(7, 'fresh');
+            throw Object.assign(new Error('held'), { code });
+          }
+          fs.renameSync(from, to);
+        },
+      } as typeof fs;
+      const got = await acquireLock({
+        path: lock,
+        maxWaitMs: 0,
+        info,
+        deps: { fs: racingFs, token: () => 'ours', isAlive: () => true, log: () => {} },
+      });
+      expect(got.acquired).toBe(false);
+      expect(readOwner(lock)?.token).toBe('fresh');
+      expect(fs.readdirSync(dir)).toEqual(['lock']);
+    },
+  );
+
+  it('verifies the published token before reporting acquisition', async () => {
+    const racingFs = {
+      ...fs,
+      renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+        fs.renameSync(from, to);
+        if (String(to) === lock) {
+          fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 7, token: 'fresh' }));
+        }
+      },
+    } as typeof fs;
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { fs: racingFs, token: () => 'ours', isAlive: () => true, log: () => {} },
+    });
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)?.token).toBe('fresh');
+  });
+
+  it('keeps a fresh empty legacy directory on the existing wait path', async () => {
+    fs.mkdirSync(lock);
+    const got = await acquireLock({ path: lock, maxWaitMs: 0, info, deps: { log: () => {} } });
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)).toBeNull();
+    expect(fs.readdirSync(dir)).toEqual(['lock']);
+  });
+
+  it.each(['before writing', 'before renaming'])(
+    'does not annotate a replacement owner %s',
+    async (phase) => {
+      const replace = () =>
+        fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 7, token: 'fresh' }));
+      const racingFs = {
+        ...fs,
+        writeFileSync: (target: fs.PathOrFileDescriptor, data: string) => {
+          fs.writeFileSync(target, data);
+          if (phase === 'before renaming' && String(target) === join(lock, 'owner.ours.tmp'))
+            replace();
+        },
+      } as typeof fs;
+      const got = await acquireLock({
+        path: lock,
+        maxWaitMs: 0,
+        info,
+        deps: {
+          fs: racingFs,
+          token: () => 'ours',
+          log: () => {},
+          processStartMs: () => {
+            if (phase === 'before writing') replace();
+            return Date.now();
+          },
+        },
+      });
+      expect(got.acquired).toBe(true);
+      if (got.acquired) {
+        expect(got.annotate({ childPgid: 8 })).toBeUndefined();
+        expect(got.stillHeld()).toBe(false);
+      }
+      expect(readOwner(lock)).toEqual({ pid: 7, token: 'fresh' });
+      expect(fs.readdirSync(lock)).toEqual(['owner.json']);
+    },
+  );
+
   it('waits while a live owner holds it, reports, and times out without acquiring', async () => {
     holderRecord(99, 'tok-live');
     const c = clock(Date.now());

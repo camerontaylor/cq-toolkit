@@ -228,6 +228,11 @@ export function summaryLine(s) {
   return `test:narrow ${line}${s.reason ? ` reason=${JSON.stringify(s.reason)}` : ''}`;
 }
 
+/** Keep internal worker-count controls out of operator run records. */
+export function loggedVitestArgs(args) {
+  return args.filter((arg) => !arg.startsWith('--maxWorkers='));
+}
+
 /**
  * Read the counts, the executed files and, per file, how many tests actually
  * executed (assertion status passed or failed; skipped, pending, todo and

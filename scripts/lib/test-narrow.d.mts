@@ -55,6 +55,7 @@ export interface Summary {
   reason?: string;
 }
 export function summaryLine(summary: Summary): string;
+export function loggedVitestArgs(args: readonly string[]): string[];
 export function readReport(report: unknown, toRelative: (path: string) => string): RunReport | null;
 export interface RunReport {
   tests: TestCounts;

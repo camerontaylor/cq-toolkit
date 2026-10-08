@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -21,6 +22,7 @@ import {
   MAX_FILES,
   MAX_WAIT_CEILING_S,
   classOf,
+  loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
   planRun,
@@ -544,5 +546,45 @@ describe('spawnLocked', () => {
       }),
     ).toEqual({ child, identity });
     expect(events).toEqual(['pending', 'fence', 'spawn', 'identity']);
+  });
+});
+
+describe('operator records', () => {
+  it('omits the worker-count control from logs while preserving execution arguments', () => {
+    const args = ['vitest.mjs', 'run', '--maxWorkers=1', '--no-file-parallelism', 'test/a.test.ts'];
+    expect(loggedVitestArgs(args)).toEqual([
+      'vitest.mjs',
+      'run',
+      '--no-file-parallelism',
+      'test/a.test.ts',
+    ]);
+    expect(args).toContain('--maxWorkers=1');
+  });
+
+  it('does not propagate command metadata into the parsed JSON report or summary', () => {
+    const raw = {
+      argv: ['--maxWorkers=1'],
+      numTotalTests: 1,
+      numPassedTests: 1,
+      testResults: [{ name: 'test/a.test.ts', assertionResults: [{ status: 'passed' }] }],
+    };
+    const report = readReport(raw, String);
+    expect(report).not.toBeNull();
+    expect(JSON.stringify(report)).not.toContain('--maxWorkers');
+    expect(summaryLine({ result: 'pass', exit: 0, ...report })).not.toContain('--maxWorkers');
+  });
+
+  it('routes the harness live operator example through the live class gate', () => {
+    const source = readFileSync(new URL('../driver/harness-live.test.ts', import.meta.url), 'utf8');
+    expect(source).toContain('pnpm test:narrow --include-live test/driver/harness-live.test.ts');
+    expect(source).not.toMatch(/pnpm exec vitest|npx vitest/);
+    const parsed = options(['--include-live', 'test/driver/harness-live.test.ts']);
+    expect(
+      planRun({
+        selection: { files: parsed.files, fallback: false, reason: 'explicit' },
+        manifest: { 'test/driver/harness-live.test.ts': 'live' },
+        include: parsed.include,
+      }).ok,
+    ).toBe(true);
   });
 });

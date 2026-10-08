@@ -4,8 +4,11 @@
 //
 // Protocol (every step is synchronous, so the release can run from an
 // `exit` handler):
-//   - acquire = atomic mkdir of LOCK_PATH, then owner.json written via a
-//     temp file + rename (a reader sees the whole record or none of it);
+//   - acquire = initialize owner.json via temp file + rename in a unique
+//     sibling directory, then atomically rename that directory to LOCK_PATH
+//     and verify our token. A paused creator cannot write into another
+//     holder's directory. Later record writes verify our token before
+//     writing the temp file and again before renaming it into place;
 //     `annotate` later adds the pid of the owner's detached child group and
 //     that group leader's start time (its identity);
 //   - the holder is LIVE while its pid runs AND that process started no later
@@ -189,12 +192,19 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   let lastReport = -Infinity;
   let record = null;
 
-  const writeRecord = () => {
-    const temp = join(path, `owner.${token}.tmp`);
-    fs.writeFileSync(temp, `${JSON.stringify(record)}\n`);
-    fs.renameSync(temp, ownerFile(path));
-  };
   const stillHeld = () => readOwner(path, fs)?.token === token;
+  const writeRecord = (directory = path) => {
+    if (directory === path && !stillHeld()) return false;
+    const temp = join(directory, `owner.${token}.tmp`);
+    try {
+      fs.writeFileSync(temp, `${JSON.stringify(record)}\n`);
+      if (directory === path && !stillHeld()) return false;
+      fs.renameSync(temp, ownerFile(directory));
+      return directory !== path || stillHeld();
+    } finally {
+      fs.rmSync(temp, { force: true });
+    }
+  };
   const release = () => {
     if (readOwner(path, fs)?.token === token) fs.rmSync(path, { recursive: true, force: true });
   };
@@ -213,27 +223,34 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       childPending: childPending || undefined,
       childPendingAt: childPending ? new Date(deps.now()).toISOString() : undefined,
     };
-    writeRecord();
-    return record;
+    if (writeRecord()) return record;
   };
 
   const tryCreate = () => {
+    // Preserve the grace/reclaim path for empty legacy lock directories.
+    if (fs.existsSync(path)) return false;
+    const temporary = fs.mkdtempSync(`${path}.acquire-`);
     try {
-      fs.mkdirSync(path);
-    } catch (error) {
-      if (error.code === 'EEXIST') return false;
-      throw error;
+      record = {
+        pid: deps.pid,
+        token,
+        host: hostname(),
+        cwd: info.cwd,
+        command: info.command,
+        startedAt: new Date(deps.now()).toISOString(),
+      };
+      writeRecord(temporary);
+      if (fs.existsSync(path)) return false;
+      try {
+        fs.renameSync(temporary, path);
+      } catch (error) {
+        if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') return false;
+        throw error;
+      }
+      return stillHeld();
+    } finally {
+      fs.rmSync(temporary, { recursive: true, force: true });
     }
-    record = {
-      pid: deps.pid,
-      token,
-      host: hostname(),
-      cwd: info.cwd,
-      command: info.command,
-      startedAt: new Date(deps.now()).toISOString(),
-    };
-    writeRecord();
-    return true;
   };
 
   /** Remove the lock iff it still holds the judged record and is still stale. */
