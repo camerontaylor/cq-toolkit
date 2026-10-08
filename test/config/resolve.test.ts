@@ -141,6 +141,18 @@ describe('pure configuration resolution', () => {
     expect(JSON.stringify(config)).not.toContain('private');
   });
 
+  it('classifies Windows secret suffixes case-insensitively by presence only', () => {
+    for (const name of ['VENDOR_API_KEY', 'vendor_api_key', 'Vendor_Api_Key']) {
+      const marker = `private-${name}`;
+      const config = resolve({ env: { [name]: marker }, platform: 'win32' });
+
+      expect(config.credentials).toEqual({ [name]: 'set' });
+      expect(JSON.stringify(config)).not.toContain(marker);
+    }
+
+    expect(resolve({ env: { vendor_api_key: 'private' } }).credentials).toEqual({});
+  });
+
   it('accepts the RS-15 call-only governance inputs without env mirrors', () => {
     const config = resolve({
       optIn: ['attended', 'budget.raiseCap', 'budget.legacyJournal=reset'],

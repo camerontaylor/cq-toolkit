@@ -108,8 +108,9 @@ function nonblank(value: string | undefined): string | undefined {
   return value === undefined || value.trim() === '' ? undefined : value.trim();
 }
 
-function isSecret(name: string): boolean {
-  return secretSuffixes.some((suffix) => name.endsWith(suffix));
+function isSecret(name: string, platform: 'posix' | 'win32' = 'posix'): boolean {
+  const classifiedName = platform === 'win32' ? name.toUpperCase() : name;
+  return secretSuffixes.some((suffix) => classifiedName.endsWith(suffix));
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -703,7 +704,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     if (/^cq_/i.test(name) && !name.startsWith('CQ_'))
       throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
-    if (isSecret(name) && nonblank(envValue(env, name, platform)) !== undefined) {
+    if (isSecret(name, platform) && nonblank(envValue(env, name, platform)) !== undefined) {
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
       else credentials[name] = 'set';
     }
