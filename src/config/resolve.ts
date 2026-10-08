@@ -139,7 +139,10 @@ function ownVerifiedRealpaths(
 ): NonNullable<ResolveConfigOptions['verifiedRealpaths']> {
   const copy = Object.create(null) as NonNullable<ResolveConfigOptions['verifiedRealpaths']>;
   for (const [name, evidence] of Object.entries(record)) {
-    copy[name] = evidence && typeof evidence === 'object' ? ownEntries(evidence) : evidence;
+    copy[name] =
+      evidence && typeof evidence === 'object' && !Array.isArray(evidence)
+        ? ownEntries(evidence)
+        : evidence;
   }
   return copy;
 }
@@ -262,8 +265,12 @@ function assertOutsideWorkspace(
     typeof root !== 'string' ||
     !isConfigAbsolute(root, platform) ||
     !evidence ||
+    typeof evidence !== 'object' ||
+    Array.isArray(evidence) ||
+    !Object.hasOwn(evidence, 'input') ||
     typeof evidence.input !== 'string' ||
     evidence.input !== input ||
+    !Object.hasOwn(evidence, 'realpath') ||
     typeof evidence.realpath !== 'string' ||
     !isConfigAbsolute(evidence.realpath, platform)
   )

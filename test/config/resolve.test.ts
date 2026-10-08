@@ -706,12 +706,27 @@ describe('pure configuration resolution', () => {
       const inheritedRealpath = Object.assign(Object.create({ realpath: canonical }), {
         input: sessions,
       }) as { input: string; realpath: string };
+      const inheritedFunction = Object.setPrototypeOf(function evidence() {}, {
+        input: sessions,
+        realpath: canonical,
+      });
+      const malformedArray = Object.assign([], { input: sessions, realpath: canonical });
 
-      for (const evidence of [inheritedInput, inheritedRealpath]) {
+      const malformedEvidence: unknown[] = [
+        inheritedInput,
+        inheritedRealpath,
+        inheritedFunction,
+        malformedArray,
+        null,
+        'invalid-evidence',
+      ];
+      for (const evidence of malformedEvidence) {
         expect(() =>
           resolve({
             env: { CQ_DRIVER_SESSIONS_DIR: sessions },
-            verifiedRealpaths: { CQ_DRIVER_SESSIONS_DIR: evidence },
+            verifiedRealpaths: {
+              CQ_DRIVER_SESSIONS_DIR: evidence,
+            } as unknown as NonNullable<Parameters<typeof resolveConfig>[0]['verifiedRealpaths']>,
           }),
         ).toThrow(/verified workspace path evidence required/);
       }
