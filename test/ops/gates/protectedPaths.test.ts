@@ -107,12 +107,31 @@ describe('worker gate / ratchet definition-set sync (F1, F2)', () => {
  * `PROTECTED_CONFIG_PATH_PATTERNS`.
  */
 const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
-  '(^|\\/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__)\\/': [
-    'test/unit/a.ts',
-    'src/__mocks__/fs.ts',
-  ],
+  '(^|\\/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__|cypress|e2e|test-utils)\\/':
+    [
+      'test/unit/a.ts',
+      'src/__mocks__/fs.ts',
+      'cypress/support/commands.ts',
+      'e2e/login.ts',
+      'src/test-utils/render.ts',
+    ],
   '\\.(?:test|spec)\\.[cm]?[jt]sx?$': ['src/a.test.ts', 'src/b.spec.mts'],
   '\\.config\\.[^/]+$': ['vitest.config.ts', 'packages/a/vite.config.js'],
+  '(?:^|\\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\\.(?:[cm]?[jt]sx?|py)$': [
+    'src/setupTests.ts',
+    'globalSetup.ts',
+    'test/globalSetup.mts',
+    'global-setup.ts',
+    'global.setup.mjs',
+    'conftest.py',
+  ],
+  '(?:^|\\/)\\.env\\.test(?:\\.[^/]+)?$': ['.env.test', 'packages/a/.env.test.local'],
+  '(?:^|\\/)(?:oxlint\\.json|karma\\.conf\\.[cm]?[jt]s)$': [
+    'oxlint.json',
+    'karma.conf.js',
+    'karma.conf.ts',
+    'karma.conf.mts',
+  ],
   '^baselines(?:\\/|$)': ['baselines/coverage--coverage--a8ceec8f7024.json'],
   '(?:^|\\/)\\.node-version$': ['.node-version'],
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
