@@ -40,6 +40,10 @@ of record (plan §6 + §11).
 
 ### 1. Publish `1.0.0` to npm
 
+This step stays on npm: `93bbf19` predates the pnpm migration and ships
+`package-lock.json`. Releases cut from later SHAs use pnpm (`pnpm pack`,
+`pnpm publish`), whose tarball manifest differs from npm's.
+
 Run from a clean checkout of the promoted `main` SHA (`93bbf19`); the
 `prepack` hook builds `dist/` automatically, so no manual build is needed.
 

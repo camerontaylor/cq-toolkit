@@ -145,6 +145,7 @@
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import {
+  acquirePlanLock,
   assertNoSeqGap,
   assertSafeRunId,
   candidateRunsForPlan,
@@ -171,6 +172,7 @@ import type {
   JobOutcome,
   JobState,
   JournalEvent,
+  Op,
   OpRegistryEntry,
   OpResult,
   Plan,
@@ -387,8 +389,9 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * then the lazily imported op. Every failure mode — a throwing registry
  * lookup, a missing registry entry, schema violation, a throwing op or
  * importer, a contract-violating return, a non-serializable return — becomes
- * an honest `failed` OpResult. This function never throws, so a bad op (or a
- * bad registry) can never corrupt the journal or kill the run.
+ * an honest `failed` OpResult. Ordinary op errors never throw, so a bad op
+ * (or registry) cannot corrupt the journal or kill the run. The private
+ * infrastructure guard rejects to the run's shared failure authority.
  *
  * `onDispatchUnknown` marks every post-invocation failure the returned
  * verdict cannot carry: the op BODY rejecting, or a body that RESOLVED to
@@ -405,6 +408,10 @@ async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
   onDispatchUnknown?: () => void,
+  guard?: {
+    beforeBody(): Promise<OpResult<unknown> | undefined | void>;
+    assertAllowed(): OpResult<unknown> | undefined | void;
+  },
 ): Promise<OpResult<unknown>> {
   // The lookup itself is guarded: a registry.get that throws must fail THIS
   // job, not reject the whole run.
@@ -426,15 +433,27 @@ async function executeOp(
   } catch (err) {
     return { status: 'failed', error: messageOf(err) };
   }
+  let op: Op<never, never>;
   try {
-    const op = await entry.importer();
+    op = await entry.importer();
+  } catch (err) {
+    return { status: 'failed', error: messageOf(err) };
+  }
+  // Validation and import may await arbitrarily. Recheck immediately before
+  // entering the body, OUTSIDE the ordinary op-error conversion. The sync
+  // check closes the failure microtask window after the async nonce read.
+  const preparationRefusal = await guard?.beforeBody();
+  if (preparationRefusal !== undefined) return preparationRefusal;
+  const entryRefusal = guard?.assertAllowed();
+  if (entryRefusal !== undefined) return entryRefusal;
+  try {
     let raw: OpResult<unknown>;
     try {
       raw = await op(parsed as never);
     } catch (err) {
       // The op BODY rejected: the dispatch was entered, so spend may exist
       // that no evidence fold will ever see. Signal it, then fall into the
-      // shared handler below (the never-throws contract is unchanged).
+      // shared handler below (ordinary op-error conversion is unchanged).
       onDispatchUnknown?.();
       throw err;
     }
@@ -493,6 +512,12 @@ async function executeOp(
   }
 }
 
+interface LeaseState {
+  lock?: Awaited<ReturnType<typeof acquirePlanLock>>;
+  /** A killed op's body was detached and may still run: never release. */
+  detached?: boolean;
+}
+
 /**
  * Run one plan to completion (or honest early stop) and return its report.
  * See the header for the full contract. The optional `gov` handle turns the
@@ -504,6 +529,34 @@ export async function runPlan(
   opts: RunOptions,
   registry: OpRegistryView,
   gov?: Governance,
+): Promise<RunReport> {
+  // The lifecycle owns release even when folding fails before the run's
+  // signal listener exists. Keep this wrapper separate from run semantics.
+  const lease: LeaseState = {};
+  let report: RunReport;
+  try {
+    report = await runPlanUnderLease(plan, opts, registry, gov, lease);
+  } catch (error) {
+    // The run's own failure is the root cause: a release that fails too
+    // (often the same disk fault) must not replace it. An unreleased record
+    // of a finished process stays reclaimable by pid/socket liveness.
+    // A detached op body may still be running: keep the lease fenced.
+    if (lease.detached !== true) await lease.lock?.release().catch(() => undefined);
+    throw error;
+  }
+  // Fail closed: a killed in-process op is detached, not stopped. Its record
+  // stays unreleased so no overlapping run can enter the job; it becomes
+  // reclaimable only when this process dies (pid/socket liveness).
+  if (lease.detached !== true) await lease.lock?.release();
+  return report;
+}
+
+async function runPlanUnderLease(
+  plan: Plan,
+  opts: RunOptions,
+  registry: OpRegistryView,
+  gov: Governance | undefined,
+  lease: LeaseState,
 ): Promise<RunReport> {
   // Caps guard, BEFORE anything else: a cap without a governor is a lie —
   // there would be no admission gate and no spend observation to enforce it.
@@ -599,6 +652,18 @@ export async function runPlan(
   // mode-independent by construction.
   const journalDir = opts.journalDir;
   const runLog: RunLog | undefined = journalDir !== undefined ? openRunLog(journalDir) : undefined;
+  // One failure authority, shared by BOTH emit paths and every dispatch.
+  // An infrastructure failure cancels the governed ladders and waiters;
+  // already dispatched jobs still settle while the wave drains. The run
+  // rejects with the original error instead of returning a success report.
+  let runFailure: { error: unknown } | undefined;
+  const failRun = (error: unknown): void => {
+    runFailure ??= { error };
+    if (governedDispatch) governor?.tripSignal(`journal: run stopped after ${messageOf(error)}`);
+  };
+  const throwIfFailed = (): void => {
+    if (runFailure !== undefined) throw runFailure.error;
+  };
   // THE LINE-COUNT LEDGER (W2.3 fix round, comp 2): every emitted event is
   // counted and the total rides run-finished as `eventCount`, so the resume
   // fold's line-count check (journal.foldOrderRuns) can detect a line
@@ -608,7 +673,12 @@ export async function runPlan(
   let journalledCount = 0;
   const emit = async (event: JournalEvent): Promise<void> => {
     journalledCount += 1;
-    if (runLog) await runLog.append(runId, event);
+    try {
+      if (runLog) await runLog.append(runId, event);
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
   };
   // The WRITE-AHEAD channel (W2.3): reservation-opened must be durable
   // BEFORE the dispatch runs and reservation-settled BEFORE the outcome is
@@ -617,8 +687,32 @@ export async function runPlan(
   // resume, A12b) instead of silent lost spend.
   const emitDurable = async (event: JournalEvent): Promise<void> => {
     journalledCount += 1;
-    if (runLog) await runLog.append(runId, event, { durable: true });
+    try {
+      if (runLog) await runLog.append(runId, event, { durable: true });
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
   };
+
+  // Hold the plan's lease before inspecting or seeding ANY shared history,
+  // including plain runs and the ungoverned-over-governed escape.
+  const planLock =
+    journalDir !== undefined ? await acquirePlanLock(journalDir, plan.id, runId) : undefined;
+  if (planLock !== undefined) lease.lock = planLock;
+  const fenceDispatch = async (): Promise<void> => {
+    throwIfFailed();
+    try {
+      await planLock?.assertHeld();
+    } catch (error) {
+      failRun(error);
+      throw error;
+    }
+    // A sibling emit may have failed while the fence read was in flight.
+    throwIfFailed();
+  };
+
+  await planLock?.assertHeld();
 
   // --- Fold: EVERY prior run of this plan, v1-then-v2 ----------------------
   // EVERY run over a journal dir folds (ADR-0003 §2.1 is unqualified: a run
@@ -1044,7 +1138,7 @@ export async function runPlan(
       // p-limit starts queued tasks when a slot frees; re-check the stop flag at
       // actual start so "do not START any further jobs" holds while in-flight
       // ones still complete.
-      if (stop.requested) return;
+      if (stop.requested || runFailure !== undefined) return;
 
       await emit({
         type: 'job-started',
@@ -1055,7 +1149,11 @@ export async function runPlan(
         attempt: 1, // ungoverned dispatches are single-attempt by construction
       });
 
-      const result = await executeOp(job, (name) => registry.get(name));
+      await fenceDispatch();
+      const result = await executeOp(job, (name) => registry.get(name), undefined, {
+        beforeBody: fenceDispatch,
+        assertAllowed: throwIfFailed,
+      });
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
       await emit({
@@ -1078,7 +1176,7 @@ export async function runPlan(
     const governedRunOne = async (job: ManifestJob): Promise<void> => {
       if (governor === undefined) return; // unreachable behind governedDispatch
       // p-limit start re-check (same rule as the plain path).
-      if (stop.requested) return;
+      if (stop.requested || runFailure !== undefined) return;
 
       // A12c (W2.3): an ADVISORY-classified dispatch is refused UNATTENDED
       // without an explicit escape (`attended: true`, or `allowAdvisory`).
@@ -1222,6 +1320,15 @@ export async function runPlan(
       // (the settle's basis reads the dispatch's ending), and the composed
       // dispatch signal's cleanup.
       let reservation: BudgetReservation | undefined;
+      let preserveOpenedReservation = false;
+      const fenceInvocation = async (): Promise<void> => {
+        try {
+          await fenceDispatch();
+        } catch (error) {
+          preserveOpenedReservation = true;
+          throw error;
+        }
+      };
       let settledCharge:
         | { charged: number; basis: 'observed' | 'full'; priced: boolean }
         | undefined;
@@ -1229,7 +1336,8 @@ export async function runPlan(
       // The op body's own rejection, or a post-invocation value the contract
       // rejects — the UNKNOWN-status endings executeOp's contract flattens
       // into a `failed` verdict. The settle's basis reads the signal; the
-      // ladder's 'threw' outcome cannot, because executeOp never rejects.
+      // ladder's 'threw' outcome cannot distinguish these from a private
+      // invocation-guard rejection, which preserves the opened fact instead.
       let dispatchUnknown = false;
       // The dispatch-closed guard: once the ladder settles, the dispatch's
       // evidence window is CLOSED — a detached (killed) op promise's late
@@ -1259,6 +1367,41 @@ export async function runPlan(
                 'cancelled: the run-level signal tripped the governor before this queued dispatch ran',
             }
           : { status: 'budget-exhausted' };
+      };
+
+      let dispatchSignal: AbortSignal | undefined;
+      const invocationPermission = (): OpResult<unknown> | undefined => {
+        // Infrastructure failure remains a run rejection with an unresolved
+        // opened fact. Ordinary cancellation instead follows normal settlement.
+        try {
+          throwIfFailed();
+        } catch (error) {
+          preserveOpenedReservation = true;
+          throw error;
+        }
+        if (dispatchClosed) {
+          // A detached preparation cannot reopen an already settled dispatch,
+          // or append fresh governor evidence after its slot was released.
+          return { status: 'indeterminate', detail: 'cancelled: dispatch already closed' };
+        }
+        if (governor.tripped) return queuedRefusal(governor.tripKind === 'signal');
+        if (dispatchSignal?.aborted === true) {
+          return {
+            status: 'indeterminate',
+            detail: 'cancelled: dispatch signal aborted before invocation',
+          };
+        }
+        return undefined;
+      };
+      const dispatchGuard = {
+        async beforeBody(): Promise<OpResult<unknown> | undefined> {
+          const refusal = invocationPermission();
+          if (refusal !== undefined) return refusal;
+          await fenceInvocation();
+          return invocationPermission();
+        },
+        // No await separates this check from entry into the operation body.
+        assertAllowed: invocationPermission,
       };
 
       // Interpret ONE ladder outcome into the job's verdict: the completion
@@ -1314,14 +1457,14 @@ export async function runPlan(
             elapsedMs: ladderOutcome.elapsedMs,
             atMs: governor.now(),
           });
-          // The runner's failure semantics stay in charge: convert the
-          // unexpected throw (executeOp itself never throws) into the
-          // honest per-job failure so the run continues.
+          // The runner's catch retains ordinary per-job failure semantics;
+          // a private infrastructure guard instead rejects the whole run.
           throw ladderOutcome.error;
         }
         // Rung 3 fired: the op was killed — detached in-process with
         // its rejections suppressed — and the honest known-cause
         // verdict is recorded in its place (I9).
+        lease.detached = true;
         governor.record({
           kind: 'completed',
           op: job.op,
@@ -1341,7 +1484,8 @@ export async function runPlan(
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
         const ladderOutcome = await runLadder(
-          () => {
+          (context) => {
+            dispatchSignal = context.signal;
             dispatchUnknown = false;
             return executeOp(
               job,
@@ -1349,6 +1493,7 @@ export async function runPlan(
               () => {
                 dispatchUnknown = true;
               },
+              dispatchGuard,
             );
           },
           governor.ladderSpec,
@@ -1385,9 +1530,8 @@ export async function runPlan(
         // whether the charge is 'observed' (definitive verdict) or 'full'
         // (killed / indeterminate / threw — unknown status).
         outcome = ladderOutcome;
-        const interpreted = interpretOutcome(ladderOutcome, attempt);
-        dispatchClosed = true; // close the evidence window BEFORE the settle reads it
-        return interpreted;
+        dispatchClosed = true; // close invocation and evidence before interpretation/settlement
+        return interpretOutcome(ladderOutcome, attempt);
       };
 
       try {
@@ -1437,10 +1581,15 @@ export async function runPlan(
               throw err;
             });
             reservation = granted;
+            // Durable write-ahead, then ownership fence, then dispatch.
+            // A lost fence leaves the durable reservation unresolved for
+            // full loss charging/quarantine on resume, without invocation.
+            await fenceInvocation();
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
               dispatchClosed = true; // a 'threw' outcome escapes interpretOutcome — closed here
+              throwIfFailed(); // infrastructure failures reject the run, not an OpResult
               result = { status: 'failed', error: messageOf(err) };
             }
           }
@@ -1448,14 +1597,23 @@ export async function runPlan(
           // UNCAPPED (reservation-less): the W2.2 dispatch unchanged —
           // evidence folds roll the ledger and the token cap binds; there is
           // no USD capacity to hold a reservation against.
+          await fenceInvocation();
           try {
             result = await runDispatchLadder(admission.attempt);
           } catch (err) {
             dispatchClosed = true; // same as above
+            throwIfFailed();
             result = { status: 'failed', error: messageOf(err) };
           }
         }
       } finally {
+        if (reservation !== undefined && preserveOpenedReservation) {
+          // The durable opened fact behind a failed invocation fence stays
+          // UNRESOLVED (ADR §2.2 step 6). Release only local capacity; resume
+          // charges the durable amount in full and quarantines until release.
+          governor.abandonReservation(reservation);
+          reservation = undefined;
+        }
         if (reservation !== undefined) {
           // SETTLE — durable BEFORE the job's outcome is journalled. The
           // basis is 'full' when the dispatch ended in UNKNOWN status
@@ -1536,72 +1694,92 @@ export async function runPlan(
     const runOne = governedDispatch ? governedRunOne : plainRunOne;
 
     for (const wave of waveJobs) {
-      if (stop.requested) break;
+      if (stop.requested || runFailure !== undefined) break;
       const submissions: Array<Promise<void>> = [];
-      for (const job of wave) {
-        // Already classified (quarantined this run — W2.3): never dispatched,
-        // the row stands as the quarantine pass set it.
-        if (entries.has(job.id)) continue;
-        // Ready iff every dependency ended ok (skipped-replayed jobs count as
-        // done — they carry a verified prior ok).
-        const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
-        if (!ready) {
-          // Under a signal stop the row stays UNCLASSIFIED here — it may be
-          // merely unresolved (the cancel landed before its dependency could
-          // dispatch), and fabricating `blocked` at dispatch time would lie
-          // about it; the stop sweep below owns the classification.
-          if (!cancelledRun()) {
-            entries.set(job.id, {
-              result: blockedResult(job),
-              state: 'blocked',
-              origin: 'blocked',
-            });
+      try {
+        for (const job of wave) {
+          if (runFailure !== undefined) break;
+          // Already classified (quarantined this run — W2.3): never dispatched,
+          // the row stands as the quarantine pass set it.
+          if (entries.has(job.id)) continue;
+          // Ready iff every dependency ended ok (skipped-replayed jobs count as
+          // done — they carry a verified prior ok).
+          const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
+          if (!ready) {
+            // Under a signal stop the row stays UNCLASSIFIED here — it may be
+            // merely unresolved (the cancel landed before its dependency could
+            // dispatch), and fabricating `blocked` at dispatch time would lie
+            // about it; the stop sweep below owns the classification.
+            if (!cancelledRun()) {
+              entries.set(job.id, {
+                result: blockedResult(job),
+                state: 'blocked',
+                origin: 'blocked',
+              });
+            }
+            continue;
           }
-          continue;
+          // Replay skip: terminal ok + same op + same input hash → zero
+          // invocation, outcome reconstructed from the journal event. Re-attested
+          // with a finish-only event so THIS run's journal stays self-contained
+          // for the next resume — copying usage AND costUSD (annex §3 rule 1;
+          // the ledger seed prices a run from its own journal, so a dropped
+          // costUSD would make the re-attested spend invisible).
+          const prior = replay.get(job.id);
+          if (
+            prior !== undefined &&
+            prior.opId === job.op &&
+            prior.inputsHash === job.inputsHash &&
+            prior.result.status === 'ok'
+          ) {
+            await emit({
+              type: 'job-finished',
+              runId,
+              at: now(),
+              jobId: job.id,
+              opId: prior.opId,
+              inputsHash: prior.inputsHash,
+              result: prior.result,
+              ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+              ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
+            });
+            entries.set(job.id, {
+              result: prior.result,
+              state: 'done',
+              ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+              ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
+              origin: 'replayed',
+            });
+            continue;
+          }
+          // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
+          // flow through the same gate. The job is left unclassified; the stop
+          // sweep marks it queued (or blocked) and the honest-stop pass below
+          // owns the budget attribution.
+          if (governedDispatch && governor !== undefined && governor.tripped) {
+            break;
+          }
+          // Catch immediately, including while the producer awaits a replay
+          // emit, so no rejected job promise can become unhandled before the
+          // wave's drain attaches. failRun preserves the original rejection.
+          submissions.push(
+            limit(async () => {
+              try {
+                await runOne(job);
+              } catch (error) {
+                failRun(error);
+              }
+            }),
+          );
         }
-        // Replay skip: terminal ok + same op + same input hash → zero
-        // invocation, outcome reconstructed from the journal event. Re-attested
-        // with a finish-only event so THIS run's journal stays self-contained
-        // for the next resume — copying usage AND costUSD (annex §3 rule 1;
-        // the ledger seed prices a run from its own journal, so a dropped
-        // costUSD would make the re-attested spend invisible).
-        const prior = replay.get(job.id);
-        if (
-          prior !== undefined &&
-          prior.opId === job.op &&
-          prior.inputsHash === job.inputsHash &&
-          prior.result.status === 'ok'
-        ) {
-          await emit({
-            type: 'job-finished',
-            runId,
-            at: now(),
-            jobId: job.id,
-            opId: prior.opId,
-            inputsHash: prior.inputsHash,
-            result: prior.result,
-            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
-            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
-          });
-          entries.set(job.id, {
-            result: prior.result,
-            state: 'done',
-            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
-            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
-            origin: 'replayed',
-          });
-          continue;
-        }
-        // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
-        // flow through the same gate. The job is left unclassified; the stop
-        // sweep marks it queued (or blocked) and the honest-stop pass below
-        // owns the budget attribution.
-        if (governedDispatch && governor !== undefined && governor.tripped) {
-          break;
-        }
-        submissions.push(limit(() => runOne(job)));
+      } catch (error) {
+        failRun(error);
       }
-      await Promise.all(submissions);
+      const settled = await Promise.allSettled(submissions);
+      for (const result of settled) {
+        if (result.status === 'rejected') failRun(result.reason as unknown);
+      }
+      throwIfFailed();
     }
 
     // --- Stop sweep: classify jobs this run never started --------------------
@@ -1629,7 +1807,11 @@ export async function runPlan(
         if (entries.has(job.id)) continue;
         const anyNotOk = job.dependsOn.some(definitivelyNotOk);
         if (anyNotOk) {
-          entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+          entries.set(job.id, {
+            result: blockedResult(job),
+            state: 'blocked',
+            origin: 'blocked',
+          });
         } else {
           entries.set(job.id, {
             result: { status: 'indeterminate', detail: 'queued: run stopped before dispatch' },
