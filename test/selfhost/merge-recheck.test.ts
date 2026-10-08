@@ -1005,6 +1005,15 @@ describe('trustPolicyFromConfig', () => {
     expect(Object.isFrozen(CONSERVATIVE_TRUST_POLICY)).toBe(true);
   });
 
+  test('the promotion reviewer bot is structurally excluded (cq-promotion-reviewer)', () => {
+    expect(STRUCTURAL_EXCLUDED_LOGINS).toContain('cq-promotion-reviewer[bot]');
+    const policy = trustPolicyFromConfig({
+      trustedBots: ['cq-promotion-reviewer[bot]', 'cq-promotion-reviewer'],
+    });
+    expect([...policy.trustedBots]).toEqual([]);
+    expect(policy.excludedLogins.has('cq-promotion-reviewer[bot]')).toBe(true);
+  });
+
   test('bot logins normalize to the bare name; excluded identities are dropped', () => {
     const policy = trustPolicyFromConfig({
       trustedBots: [

@@ -20,33 +20,42 @@ checks to finish. The **base** is `main` at cut time. Only one promotion is open
 
 ## What gets reviewed
 
-One CodeRabbit CLI review of `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Promotion review covers `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Clean coverage comes from a clean full review or signer-recorded clean internal deltas
+extending clean full coverage, only while no dirty taint exists. See the coverage rule below.
 crq gives a `promotion` item **absolute priority for the next start slot** (crq allows at most 5
 starts per hour). It does not pre-empt a running review.
 
 crq reports the state as a commit status on the batch tip: context `crq/promotion-review`, posted
-with the owner's `gh` auth (see [the interface](#the-crq-interface)).
+by the promotion-review signer as the pinned reviewer bot `cq-promotion-reviewer[bot]` (identity:
+the owner's registration record, `app-registration-session-20261004.md` @ `408c87f` — see
+[the interface](#the-crq-interface)).
 
 ## What blocks
 
-- An **unaddressed critical or major** finding blocks. crq posts `failure` and the batch waits.
+- A critical or major finding blocks. The signer posts `failure` and the batch waits.
 - **Minor** findings go to the crq ledger and never block.
-- Fixes land in `merge-queue` through normal PRs. The new batch tip `T2` must descend from the
-  reviewed tip `T1`. crq runs a **delta review of `T1..T2` only**. When it is clean and the
-  blocking findings are addressed, crq posts `success` on `T2`, still bound to the **original
-  base**: `base..T1` was covered by the full review and `T1..T2` by the delta review.
+- A dirty batch cannot be cleared by a same-byte rerun, even a clean full rerun. A blocking
+  finding requires a fix landing in `merge-queue`, a post-fix new batch, and a fresh clean
+  **full signer review** of `main..<new tip>` completed after the latest dirty result.
+  Clean internal deltas cannot clear dirty taint. Rejecting a false positive is a human
+  decision and goes through an owner override.
 
 ## What promotes
 
 `merge-queue-gate` fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
 now. Merges that land after the cut wait for the next batch. The gate promotes the SHA only when:
 
-1. The newest `crq/promotion-review` status on it from an allowed reviewer is `success`, and it
-   binds `main=<base>`. Allowed reviewers are user accounts listed in `vars.CQ_PROMOTION_REVIEWERS`
-   (blank means the repository owner). Statuses posted with `GITHUB_TOKEN` or by any App come from
-   Bots and never count, so a PR head's workflow cannot forge one. The gate re-reads the status
-   immediately before the push: if a newer one (such as a crq `failure`) arrived during the check
-   wait, it promotes nothing.
+1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
+   binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
+   by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
+   `339373542` (pinned in the gate template from the registration record @ `408c87f`, not a repo
+   variable; an UNSET token leaves the gate refusing fail-closed). Any other creator — including
+   the repository owner's own
+   login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
+   a red refusal when no trusted review exists. The gate re-reads the status
+   immediately before the push: if a newer one (such as a signer `failure`) arrived during the
+   check wait, it promotes nothing.
 2. Every required check on its wait list succeeded **on that SHA** (I4: skipped, cancelled or
    missing is never a pass).
 3. It is on `merge-queue`'s first-parent line (a queue state, not a PR-branch commit reached
@@ -61,43 +70,69 @@ C2 retires `merge-queue-gate`.
 
 ## Accepted limit
 
-Owner ruling (2026-10-04): accept this limit now, fix it with a dedicated identity later.
+Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269. The gate
+now filters the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
+`cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
+`408c87f` (the gate refuses fail-closed while unpinned).
+PR-B remains on hold until S2 observes the actual status creator as
+`cq-promotion-reviewer[bot]` / `339373542` / `Bot` on the scratch repository.
 
-- Every fleet agent runs `gh` as the owner, so a `crq/promotion-review` status is not proof
-  against a misbehaving agent. The allowed-reviewer check rules out only `GITHUB_TOKEN`, App and
-  fork forgery.
-- The compensating control is **detective**. On each crq tick, crq audits the newest `main`
-  advance against its own review ledger: the status that promoted it must match a crq record,
-  and a promotion status with no matching record raises a loud alert. Only the newest of several
-  promotions within one tick is audited. This check lives on the crq side, implemented by the
-  crq steward.
-- The fix is a dedicated reviewer identity. Follow-up: dedicated crq reviewer App. The gate's
-  trust filter (`REVIEW_JQ`) admits only `User` creators today, so that follow-up must also
-  make it admit the App's id.
+- The gate accepts only the pinned creator identity; the owner's token alone cannot post a
+  trusted review status. The App key lives in the dedicated `crq` account's home on ceres,
+  the headless CachyOS signer host (registration record §Host). This identity filter does
+  not prove exclusive signer custody while agents can obtain root on either host.
+- Owner D10 owns the infrastructure hardening. Until the owner hardens both neptune and
+  ceres, root-capable agents can reach the key. This includes removing agent-reachable
+  passwordless sudo, ceres's root-equivalent `docker` access, and revisiting sshd password
+  authentication, plus restricting the owner's credentials to interactive use. D4 also
+  requires a dedicated restricted forced-command spool key; the spool transport must not
+  grant an agent a general shell or access to the signer key. These are outstanding
+  conditions, not evidence of owner approval or completed hardening.
+- The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
+  authorized by a trusted bot success bound to the previous main, and corroborates it against its
+  own spool records; anything else raises a loud alert. Only the newest of several promotions
+  within one tick is audited.
 
 ## Owner override
 
-The owner posts the status by hand. The gate logs it as an override in its run summary:
+The owner runs the `crq-override` tool — installed beside the signer in root-owned
+`/opt/cq-reviewer/` on ceres — from the owner's own machine,
+`ssh ceres`, then `sudo -u crq`. ceres is headless, so the macOS plan's login-window design
+became this intended procedure: the issuing session must not be routed through neptune.
+Its isolation remains conditional on the outstanding owner hardening below. The tool verifies
+the target sha is a queue state beyond `main`, computes `main` itself, posts the status as
+`cq-promotion-reviewer[bot]`, and logs the override to the signer's audit log:
 
 ```sh
-gh api -X POST repos/camerontaylor/cq-toolkit/statuses/<sha> \
-  -f context=crq/promotion-review -f state=success \
-  -f description="override main=$(gh api repos/camerontaylor/cq-toolkit/git/ref/heads/main --jq .object.sha) <reason>"
+sudo -u crq /opt/cq-reviewer/crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
 ```
+
+The gate logs the `override` prefix in its run summary.
+
+**Accepted limit (the override is not agent-proof today).** Neptune agents can reach
+`ctaylor@ceres` without a password, and ctaylor holds NOPASSWD sudo and root-equivalent
+`docker` access on ceres. A root-capable agent can reach the PEM and mint an override or
+another trusted status. The accepted inability to be agent-proof remains until owner D10
+hardens both neptune and ceres, restricts owner authentication to credentials agents cannot
+use, and D4 supplies a dedicated restricted forced-command spool key. A physical-touch
+credential alone does not close existing agent-reachable root or general-shell paths.
+The terminal procedure above is conditional; it is not a claim of agent-proof isolation.
 
 I4 still applies: an override skips the review, never the required checks.
 
-## When the crq host is offline
+## When the signer is offline
 
-Nothing posts a review, so nothing promotes. **Promotion waits; nothing fails red.** A gate run
-woken by sync's dispatch or by hand ends green with "awaiting promotion review". When the host
-returns, crq picks up from the last promotion: it cuts a batch if a trigger has fired.
+Nothing posts a review while ceres is down, so nothing promotes. **Promotion waits; nothing
+fails red.** A gate run woken by sync's dispatch or by hand ends green with "awaiting promotion
+review". When the host returns, crq picks up from the last promotion: it cuts a batch if a
+trigger has fired. The override needs the same host (`crq-override` runs on ceres under `crq`
+from the owner's own ssh), so while the host is down there is no remote override path either.
 
 ## What a red gate run means
 
 A red run means a human must act. The causes are:
 
-- a `crq/promotion-review` status from a creator who is not an allowed reviewer;
+- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`;
 - a reviewed SHA whose required checks failed, were skipped or cancelled, or never reported
   within the timeout;
 - a reviewed SHA that is off `merge-queue`;
@@ -110,6 +145,10 @@ runs.
 
 ## The crq interface
 
+Signer mode, which this change arms: every request is a full `base_sha..batch_sha` review —
+there are no delta items and no agent-judged success. The delta-item mechanics in the next three
+bullets describe the interim user mode and are rewritten when the policy doc is (PR-D).
+
 - **Item kind:** `promotion`, carrying `batch_sha` (40-hex), `base_sha` (`main` at cut time), and
   for a delta item, `reviewed_sha` (the previously reviewed tip, an ancestor of `batch_sha`).
 - **Priority:** a `promotion` item takes the next start slot ahead of everything else, and so does
@@ -119,12 +158,24 @@ runs.
   delta item, run in a detached checkout at `batch_sha`. The run counts only when the CLI exits
   successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
-- **Status:** `POST repos/<owner>/<repo>/statuses/<batch_sha>` with the owner's `gh` auth:
+- **Coverage (PR-A contract):** success requires signer-recorded clean full coverage or
+  clean internal deltas extending it, only absent dirty taint. A completed dirty review
+  (any critical/major finding) invalidates clean coverage and stays sticky for that batch.
+  A same-byte rerun cannot clear it. After a fix, a new batch requires a fresh clean full
+  review covering the whole range after the latest dirty result; internal deltas cannot
+  satisfy this recovery requirement. Failed, skipped or incomplete runs cannot clear taint.
+  Coverage is determined by signer records, never an agent's judgment of addressed findings.
+- **Status:** posted by the promotion-review signer (its installation token minted from the App
+  key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
+  (identity per the registration record @ `408c87f`):
   - `context`: `crq/promotion-review`
-  - `state`: `pending` while reviewing, `success` when no critical/major finding is unaddressed,
-    `failure` when one is
+  - `state`: `pending` while reviewing; `success` only with clean whole-range coverage
+    under the sticky coverage rule above; `failure` when a completed review found any
+    critical/major finding; `error` for a skipped, oversized, secret-scan-blocked or otherwise
+    failed run (the batch is re-cut or escalated, never promoted)
   - `description` (140 characters at most) always carries `main=<base_sha>`, for example
-    `reviewed main=<base_sha> crq#<id>`, `delta <reviewed_sha12>.. main=<base_sha>`, or
-    `blocked: 2 major main=<base_sha>`
+    `reviewed main=<base_sha> crq#<id>`,
+    `blocked: 1 critical/2 major main=<base_sha> crq#<id>`, or
+    `review too_large main=<base_sha> crq#<id>`
   - `target_url`: optional link to the review record
 - **After promotion:** `main` equals `batch_sha`. The next batch's base is that SHA.
