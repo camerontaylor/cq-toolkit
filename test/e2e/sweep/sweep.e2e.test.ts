@@ -189,7 +189,9 @@ function optsFor(
     driver: {
       provider: 'cq-d4-e2e',
       model: 'sweep-fake',
-      budget: { maxUsd: 1 },
+      // An ENFORCED cap the fake agent (unpriced 'sweep-fake', 20 tokens per
+      // run) stays well inside: a maxUsd cap would trip on unpriced usage.
+      budget: { maxTokens: 1_000_000 },
     } satisfies SweepUnitDriverConfig,
     // The scenario's DEPLOYMENT factory config (ADR-0002 §2.5): role
     // 'fixer' + the fake provider → the subprocess lane over the fake agent
@@ -244,7 +246,7 @@ function focusedUnitBindings(scene: Scenario, driver: Driver) {
     }),
     driver,
     modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-    budget: { maxUsd: 1 },
+    budget: { maxTokens: 1_000_000 },
     prompt: () => 'focused real-git contract',
     git: makeGhRunner({ bin: 'git', timeoutMs: 30_000 }),
   };

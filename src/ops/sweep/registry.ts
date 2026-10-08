@@ -27,6 +27,7 @@ import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
 import type { CleanupInput } from './cleanup.js';
+import { fixerBudgetFault } from './internal/fixerBudget.js';
 import type { PlanSweepInput, WorkUnit } from './planSweep.js';
 import type { SalvageInput } from './salvage.js';
 import type { SweepUnitDispatchInput, SweepUnitReport } from './unit.js';
@@ -272,8 +273,12 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
         provider: z.string().min(1),
         model: z.string().min(1),
         toolPolicy: ToolPolicySchema.exactOptional(),
-        budget: BudgetSchema.refine((budget) => Object.keys(budget).length > 0, {
-          message: 'driver.budget must set at least one cap',
+        // Fail closed (PR #246 review): only caps sweep.unit ENFORCES are
+        // admitted — maxTokens/maxUsd/wallClockMs, at least one; maxAttempts
+        // is refused (the rescue lane owns attempts). See fixerBudget.ts.
+        budget: BudgetSchema.superRefine((budget, ctx) => {
+          const fault = fixerBudgetFault(budget);
+          if (fault !== null) ctx.addIssue({ code: 'custom', message: `driver.budget: ${fault}` });
         }),
       })
       .strict()

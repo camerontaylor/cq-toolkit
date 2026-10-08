@@ -31,6 +31,7 @@ import {
   classifyStagePaths,
   compileStagePathPatterns,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
+  GUARDED_SECTION_MAX_GIT_CALLS,
   makePushBranch,
   makeSweepUnitOp,
   mutexWaiterRetries,
@@ -108,6 +109,27 @@ describe('sweep.unit registry entry (jSKJF)', () => {
         driver: { ...VALID.driver!, budget: {} },
       }).success,
     ).toBe(false);
+    // FAIL CLOSED (PR #246 review): only caps the unit op enforces are
+    // admitted. maxAttempts — alone or beside an enforced cap — is refused
+    // (each rescue redispatch is its own job), as are unusable values.
+    for (const budget of [
+      { maxAttempts: 3 },
+      { maxTokens: 1000, maxAttempts: 3 },
+      { maxTokens: 0 },
+      { wallClockMs: 1.5 },
+      { wallClockMs: 2 ** 31 },
+    ]) {
+      expect(
+        SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver: { ...VALID.driver!, budget } })
+          .success,
+      ).toBe(false);
+    }
+    for (const budget of [{ maxTokens: 1000 }, { wallClockMs: 600_000 }, { maxUsd: 0.5 }]) {
+      expect(
+        SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver: { ...VALID.driver!, budget } })
+          .success,
+      ).toBe(true);
+    }
     // A context-only input (the builder's enrichment before knobs are layered) parses.
     expect(
       SweepUnitDispatchInputSchema.safeParse({
@@ -221,6 +243,12 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(() =>
       bindingsFromDispatch({ ...VALID, driver: { ...VALID.driver!, budget: {} } }, fakeFactory),
     ).toThrow(/driver.budget is required/);
+    expect(() =>
+      bindingsFromDispatch(
+        { ...VALID, driver: { ...VALID.driver!, budget: { maxAttempts: 2 } } },
+        fakeFactory,
+      ),
+    ).toThrow(/maxAttempts is not enforceable/);
     const expected = DEFAULT_UNIT_PROMPT_TEMPLATE.replaceAll('{package}', 'alpha')
       .replaceAll('{fixer}', 'fix')
       .replaceAll('{worktree}', '/worktrees/fix/alpha');
@@ -557,8 +585,17 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
       lockPath: '/locks/custom.lock',
       staleMs: 5000,
     });
-    expect(mutexWaiterRetries(600_000)).toBe(13);
-    expect(100 * (2 ** mutexWaiterRetries(600_000) - 1)).toBeGreaterThan(600_000);
+    // The waiter outlasts a live holder that spends the git timeout on EVERY
+    // call of the longest guarded section (PR #246 review), not just one.
+    expect(GUARDED_SECTION_MAX_GIT_CALLS).toBe(6);
+    expect(mutexWaiterRetries(600_000)).toBe(16);
+    for (const timeoutMs of [1_000, 30_000, 600_000]) {
+      expect(100 * (2 ** mutexWaiterRetries(timeoutMs) - 1)).toBeGreaterThanOrEqual(
+        GUARDED_SECTION_MAX_GIT_CALLS * timeoutMs,
+      );
+    }
+    // The crash-recovery floor stands for short timeouts (> the 30s stale window).
+    expect(mutexWaiterRetries(1_000)).toBe(9);
     // The resolved segments override rides the bindings (jTPa1).
     const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' }, fakeFactory);
     expect(renamed.segments).toEqual({

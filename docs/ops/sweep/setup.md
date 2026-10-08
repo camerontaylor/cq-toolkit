@@ -21,8 +21,19 @@ worktree. SDK callers may inject `installDeps(worktreePath)` in
 `SweepUnitBindings`. Choose a command trusted by the project; omit
 `--ignore-scripts` only when its lifecycle scripts are required and trusted.
 
+On Windows the hook is spawned without a shell, so a `.cmd` shim such as
+`npm` does not resolve; route it through `cmd.exe` explicitly
+(`{"command":"cmd.exe","args":["/d","/s","/c","npm ci --ignore-scripts"]}`).
+A Windows timeout kills only the direct child, not lifecycle-script
+descendants (the harness's documented v1 process-group limitation).
+
 The default sandbox request is `workspace-write`; the worker binary must
-enforce it. Dispatched fixers require at least one `driver.budget` cap, such
-as `maxUsd`, `maxTokens`, or `wallClockMs`. Enforcement is lane-specific: the
-subprocess lane enforces only `maxTokens` (checked after the run), leaving
-`maxUsd` to caller accounting and `wallClockMs` to the governor.
+enforce it. Dispatched fixers require at least one `driver.budget` cap:
+`maxTokens`, `maxUsd`, or `wallClockMs`. The unit op enforces every cap it
+accepts, whichever lane the driver factory resolves. `wallClockMs` aborts
+the fixer when it elapses. `maxTokens` and `maxUsd` are checked against the
+settled run's usage and cost. A breach fails the unit as `[INFRA]` before
+anything is staged. Under `maxUsd`, a run that reports usage but no cost (an
+unpriced model) is a breach: a USD cap cannot bind it. `maxAttempts` is
+rejected, because each rescue redispatch is a separate job; bound attempts
+with the plan's `rescue.maxRedispatch`.

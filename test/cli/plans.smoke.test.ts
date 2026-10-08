@@ -284,7 +284,8 @@ async function buildRealSweepFamilyPlan(kind: 'sweep' | 'test-fix'): Promise<Rea
   const driver: SweepUnitDriverConfig = {
     provider: 'cq-t43-smoke',
     model: 'sweep-fake',
-    budget: { maxUsd: 1 },
+    // Enforced by the unit op; the unpriced fake would trip a maxUsd cap.
+    budget: { maxTokens: 1_000_000 },
   };
   const check: SweepUnitCheckConfig = {
     adapter: 'tsc-lines',

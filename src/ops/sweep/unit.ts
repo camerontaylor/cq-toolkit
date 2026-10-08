@@ -51,6 +51,7 @@ import { runArgvCommand } from '../../harness/run.js';
 import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
 import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
+import { fixerBudgetBreach, fixerBudgetFault, startFixerDeadline } from './internal/fixerBudget.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
 import type { WorktreeEffects } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -286,7 +287,10 @@ export interface SweepUnitBindings {
    * default DEFAULT_UNIT_GIT_TIMEOUT_MS (the worktreeFor family's 600s).
    */
   gitTimeoutMs?: number;
-  /** Budget caps for the fixer invocation; at least one cap is required. */
+  /**
+   * Budget caps for the fixer invocation, ENFORCED by the op: at least one
+   * of maxTokens/maxUsd/wallClockMs; maxAttempts is refused (internal/fixerBudget.ts).
+   */
   budget: Budget;
   /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). */
   prompt: (unit: WorkUnit, worktree: SweepWorkspace) => string;
@@ -404,6 +408,25 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
 }
 
 /**
+ * An op-enforced fixer budget trip: the same `failed` [INFRA] shape as a
+ * lane-reported 'budget' stop, naming the breached cap.
+ */
+function budgetTripResult(
+  unit: WorkUnit,
+  breach: string,
+  sessionId: string | undefined,
+): { status: 'failed'; error: string } {
+  return {
+    status: 'failed',
+    error: tagged(
+      'infra',
+      `sweep.unit ${unit.package}: the fixer worker stopped with reason 'budget' — ${breach}` +
+        (sessionId !== undefined ? ` (session ${sessionId})` : ''),
+    ),
+  };
+}
+
+/**
  * The 'sweep.unit' op factory: the per-package pipeline as ONE composition —
  * worktreeFor → baselineProbe → baseline snapshot (run state) → fixer (via
  * the Driver seam) → baselineProbe again → regressionGate → stage →
@@ -476,8 +499,9 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *      unit with nothing on the remote never assembles an empty-diff PR.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
-  if (bindings.budget === undefined || Object.keys(bindings.budget).length === 0) {
-    throw new Error('sweep.unit: a nonempty budget is required');
+  const budgetFault = fixerBudgetFault(bindings.budget);
+  if (budgetFault !== null) {
+    throw new Error(`sweep.unit: ${budgetFault}`);
   }
   const probe = makeBaselineProbe(bindings.runCheck);
   const worktreeFor = makeWorktreeFor(
@@ -543,6 +567,12 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     let denial: string | undefined;
     let errorClass: string | undefined;
     let sessionId: string | undefined;
+    // The op ENFORCES every accepted budget cap (internal/fixerBudget.ts):
+    // the wallClockMs deadline rides the run's signal, and the usage/cost
+    // caps are checked on the settled result — lane-neutral, so a cap is
+    // never accepted and then ignored by a lane that does not enforce it.
+    let budgetBreach: string | undefined;
+    const deadline = startFixerDeadline(currentJobContext()?.signal, bindings.budget.wallClockMs);
     try {
       // NO pre-created session record: the worktree rides the invocation as
       // its workspace binding (ADR-0002 §2.4) — the lane creates the fresh
@@ -564,9 +594,12 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
           workspace: { path: worktree.path },
           budget: bindings.budget,
         },
-        { signal: currentJobContext()?.signal },
+        { signal: deadline.signal },
       );
       stopReason = worker.stopReason;
+      budgetBreach = deadline.expired()
+        ? `wallClockMs ${String(bindings.budget.wallClockMs)} elapsed`
+        : fixerBudgetBreach(bindings.budget, worker);
       const first = worker.denials[0];
       if (first !== undefined) denial = `${first.tool}: ${first.reason}`;
       if (worker.errorClass !== undefined) errorClass = worker.errorClass;
@@ -578,7 +611,15 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       // provider/role, a missing key env, a workspace realpath mismatch —
       // ADR-0002 §2.9's throw rows) — the human's to arrange, so
       // `needs-human`, never `failed` (which would claim the fixer ran and
-      // broke; review-debt #186).
+      // broke; review-debt #186). A throw after the budget deadline fired is
+      // the budget trip, not a misconfiguration.
+      if (deadline.expired()) {
+        return budgetTripResult(
+          unit,
+          `wallClockMs ${String(bindings.budget.wallClockMs)} elapsed`,
+          undefined,
+        );
+      }
       if (currentJobContext()?.signal.aborted === true) {
         return {
           status: 'indeterminate',
@@ -589,7 +630,13 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         status: 'needs-human',
         reason: `sweep.unit ${unit.package}: the fixer driver could not dispatch — ${messageOf(err)}`,
       };
+    } finally {
+      deadline.dispose();
     }
+    // A breached cap fails the unit before any of the fixer's work is
+    // staged — whatever stop reason the lane reported (an elapsed deadline
+    // surfaces as 'aborted', which must not read as a resumable cancel).
+    if (budgetBreach !== undefined) return budgetTripResult(unit, budgetBreach, sessionId);
     // A RESOLVED governed cancellation — the governor's signal fired and a
     // conforming driver settled the aborted run with stopReason 'aborted'
     // (§2.1) — is the same I8 posture as the thrown-abort path above: no
@@ -1465,7 +1512,7 @@ export interface SweepUnitDriverConfig {
   model: string;
   /** Tool policy; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
-  /** Budget caps; at least one cap is required. */
+  /** Budget caps, enforced by the op: at least one of maxTokens/maxUsd/wallClockMs; maxAttempts is refused. */
   budget: Budget;
 }
 
@@ -1605,21 +1652,34 @@ function inheritedEnv(): Record<string, string> {
   return env;
 }
 
-/** Exponential backoff retries whose nominal waiter span covers one Git call. */
+/**
+ * The most Git subprocesses one holder runs inside a single guarded section
+ * on this mutex: cleanup's removal (worktree list, tip read, status, unlock,
+ * remove, then branch delete — or the re-lock when removal fails) is six;
+ * worktreeFor's create (prune, add, lock, plus the remove and branch-delete
+ * rollback when locking fails) is five. Raise it when a section grows.
+ */
+export const GUARDED_SECTION_MAX_GIT_CALLS = 6;
+
+/** Exponential backoff retries whose nominal waiter span covers a whole guarded section. */
 export function mutexWaiterRetries(gitTimeoutMs: number): number {
-  // One holder may spend the full git timeout in its critical section.
-  // Give a waiter at least that long, while retaining crash recovery's
-  // 30-second stale-window floor when a shorter Git timeout is configured.
-  return Math.max(9, Math.ceil(Math.log2(gitTimeoutMs / 100 + 1)));
+  // A live holder may spend the git timeout on EVERY call of its critical
+  // section. Give a waiter at least that long, while retaining crash
+  // recovery's 30-second stale-window floor when a short timeout is set.
+  const sectionMs = GUARDED_SECTION_MAX_GIT_CALLS * gitTimeoutMs;
+  return Math.max(9, Math.ceil(Math.log2(sectionMs / 100 + 1)));
 }
 
 /** Resolve the shared Git directory so linked worktrees use one mutex. */
-function gitCommonDir(repoRoot: string): string {
+function gitCommonDir(repoRoot: string, gitTimeoutMs: number): string {
   try {
     const path = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
       cwd: repoRoot,
       encoding: 'utf8',
-      timeout: DEFAULT_UNIT_GIT_TIMEOUT_MS,
+      // The caller's per-subprocess cap: this lookup is synchronous, so an
+      // unbounded stall would block every concurrent job in the runner.
+      timeout: gitTimeoutMs,
+      killSignal: 'SIGKILL',
     }).trim();
     if (path === '') throw new Error('empty git common dir');
     return path;
@@ -1666,8 +1726,9 @@ export function bindingsFromDispatch(
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
-  if (input.driver.budget === undefined || Object.keys(input.driver.budget).length === 0) {
-    throw new Error('sweep.unit: driver.budget is required and must set at least one cap');
+  const budgetFault = fixerBudgetFault(input.driver.budget);
+  if (budgetFault !== null) {
+    throw new Error(`sweep.unit: driver.budget is required and enforceable — ${budgetFault}`);
   }
   // The factory resolves BEFORE any effect is constructed: an unresolvable
   // binding (unknown provider, no lane bound for the role) is a
@@ -1679,9 +1740,10 @@ export function bindingsFromDispatch(
   // All linked worktrees of this repository share the same Git directory.
   // Only local mutations use this mutex; the network push runs afterward.
   const worktreesDir = input.worktreesDir ?? resolve(input.repoRoot, '..', 'worktrees', 'cq');
+  const gitTimeoutMs = input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS;
   const mutex: WorktreeMutexConfig = input.mutex ?? {
-    lockPath: join(gitCommonDir(input.repoRoot), 'cq-git-mutex'),
-    retries: mutexWaiterRetries(input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS),
+    lockPath: join(gitCommonDir(input.repoRoot, gitTimeoutMs), 'cq-git-mutex'),
+    retries: mutexWaiterRetries(gitTimeoutMs),
   };
   // jTPa1: the plan builder's resolved segments win (collision-safe); a bare
   // dispatch derives its own.
