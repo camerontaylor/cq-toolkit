@@ -162,7 +162,7 @@ describe('served-model real construction paths', () => {
       });
       const bindings = bindingsFromDispatch(
         {
-          repoRoot: root,
+          repoRoot: join(root, 'repo'), // synthetic: not yet materialised
           worktreesDir: join(root, 'worktrees'),
           runPrefix: 'cq/construction',
           base: 'main',
@@ -172,6 +172,7 @@ describe('served-model real construction paths', () => {
           driver: {
             model: 'construction-model',
             provider: 'construction',
+            budget: { wallClockMs: 600_000, maxUsd: 1 },
           },
           check: { adapter: 'tsc-lines', command: 'unused', args: [] },
         },
