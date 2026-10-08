@@ -1,6 +1,6 @@
 # ADR 0003 — Governed runner, budgets as ceilings, human-approval token
 
-> Publication note (W7.2): copied from `toolkit-research` branch `research/g1-adr-reconciliation` at `bf5f540`. The status above records the later owner G1 decision. References below to pending G1 approval or draft status describe the source text at its drafting date; accepted preconditions and residuals remain binding.
+> Publication note (W7.2): copied from `toolkit-research` branch `research/g1-adr-reconciliation` at `bf5f540`. The status below records the later owner G1 decision. References below to pending G1 approval or draft status describe the source text at its drafting date; accepted preconditions and residuals remain binding.
 
 Status: **accepted** (owner G1 sign-off, 2026-09-26; binding work-item preconditions and residuals retained)
 
@@ -510,12 +510,10 @@ utilization, remaining, resetAt}]}`, several windows live at once (e.g. the Clau
   consume. `report.usage` = Σ settled usage over reservations whose basis ≠ `full`.
 - **Exit codes** (`cli/exit.ts`; the header's "`budget` is the only value" is rewritten):
 
-  | `earlyStopReason`                                                  | Exit                                  |
-  | ------------------------------------------------------------------ | ------------------------------------- |
-  | `budget`, `stalled`, `deferred`, `lock-lost`, `provider`, `signal` | **3** (needs a human, or retry later) |
-
-  I1 fixes the operation exit codes at `{0,1,2,3}`; a cancel stop is a needs-human stop, so `signal` maps to **3**
-  and no shell-convention 130/143 is assigned.
+  | `earlyStopReason`                                        | Exit                                                                                                           |
+  | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+  | `budget`, `stalled`, `deferred`, `lock-lost`, `provider` | **3** (needs a human, or retry later)                                                                          |
+  | `signal`                                                 | **130** for SIGINT, **143** for SIGTERM (shell convention); **3** for an SDK-supplied signal with no OS signal |
 
   Row-based mapping is unchanged. **Kernel refusals (reconciled, critic r2 m-a):**
   - the **lock refusal** (`plan locked by <runId>`) is **transient** → **3** ("retry later"). Automation treats 2
@@ -523,9 +521,9 @@ utilization, remaining, resetAt}]}`, several windows live at once (e.g. the Clau
   - the v1-journal refusal and the ungoverned-over-governed refusal are a missing `--opt-in`, which is
     arg-shaped → **2**, mapped from a **typed error class** the CLI catches, never by message matching. That
     keeps `cli/exit.ts:5-15`'s rule that 2 is never derived from a _taxonomy value_.
-  - **Contract unchanged, recorded:** the documented exit contract stays `{0,1,2,3}` (I1) and
-    `exitCodeForRunReport`'s return type stays `0|1|3`. Only the `cli/exit.ts` header's "`budget` is the only
-    value" claim is rewritten.
+  - **Contract widening, recorded:** the documented exit contract grows from four codes `{0,1,2,3}` to six (adding
+    130/143), and `exitCodeForRunReport`'s return type widens from `0|1|3`. The `cli/exit.ts` header is rewritten
+    accordingly.
 
 ## 3. Consequences
 
