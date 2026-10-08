@@ -1,7 +1,8 @@
 # instantiated from policy/templates/gate.yml — edit the template, not this file
 # cq-gate — the P1 promotion job (ADR-0004 D-K; W1.10): promotes the
-# merge-queue tip to main when every commit in main..tip is admitted by the
-# closure rule and every admitted PR's verdicts and acceptance hold.
+# REVIEWED sha to main when every commit in main..subject is admitted by the
+# closure rule, every admitted PR's verdicts and acceptance hold, and the
+# pinned reviewer's promotion review of the range is a success (PR-C).
 #
 # Carrier (P1): `workflow_run` on `ci` and `cq-measure` for merge-queue push
 # runs, a `schedule` sweep (every 15 minutes — it bounds promotion latency
@@ -15,28 +16,38 @@
 #     branch `merge-queue` and repository id. It carries NO data forward: a
 #     junk trigger fails `wake` and never enters the `promote` group.
 #   - `decide` resolves its own subject: the gate CLI reads the merge-queue
-#     tip and main itself (D-K.3), never from the event. Its code is the
+#     tip and main itself, walks the queue's first-parent line to the newest
+#     commit carrying a trusted promotion-review success bound into main
+#     (the SUBJECT), and never reads either from the event. Its code is the
 #     toolkit built from the trust ref (`github.sha`, the default-branch tip)
 #     with `pnpm install --frozen-lockfile --ignore-scripts`. The head is
-#     only git objects plus API data (check runs, PRs, reviews): nothing the
-#     queue authored runs here, and no PR artifact is read.
+#     only git objects plus API data (commit statuses, check runs, PRs,
+#     reviews): nothing the queue authored runs here, and no PR artifact is
+#     read.
+#   - The promotion review is trusted from the pinned reviewer ONLY:
+#     creator.type "Bot" AND the recorded bot login AND its numeric id
+#     (REVIEWER_BOT_* tokens below, from the registration record) — a commit
+#     status carries no app id, so the bot user is the identity. Any other
+#     creator's crq/promotion-review status on the tip, with no trusted
+#     review anywhere, is a RED refusal; with a reviewed subject below it,
+#     it is inert noise (the subject is what promotes, never the tip).
 #   - Every read uses this job's GITHUB_TOKEN. The promotion credential
 #     reaches only the gate step, where the CLI puts it in a step-scoped
 #     GIT_CONFIG_* extra-header for the one atomic push (Decision 13).
 #   - `decide` is the SOLE member of concurrency group `promote`, and runs in
 #     environment `promote` (main-only branch policy).
 #
-# C1 (ADR-0004 D-H.3.1): this gate runs ALONGSIDE merge-queue-gate.yml.
-#
-# REPORT-ONLY under the batch promotion policy (docs/promotion-policy.md):
-# promotion to main requires a CodeRabbit promotion review of the batch,
-# which only merge-queue-gate.yml checks today. So this gate runs the CLI
-# WITHOUT `--push`: it judges the queue tip and reports `would-promote`,
-# `noop` or `refused` in the step summary, and never advances main. Its
-# verdict is advisory, so a refusal is not a red run (cq-accept's rule):
-# the job fails only when the gate crashed. Before C2 retires
-# merge-queue-gate.yml, the gate CLI must learn the promotion-review signal
-# and the reviewed-sha subject; then `--push` and red-on-refused return.
+# PROMOTES (C2: this gate is now the only component that advances main;
+# merge-queue-gate.yml is retired by C2's deletion): the CLI runs WITH
+# `--push` and promotes the reviewed SUBJECT by a single main-refspec
+# fast-forward leased at the main it read — the queue is never written, so
+# a tip ahead of the reviewed sha simply waits for its own review. Green
+# verdicts: `promoted`, `noop` (the queue holds nothing beyond main),
+# `awaiting` (no reviewed commit yet — the normal state between batches),
+# `would-promote` (a dry run). A `refused` verdict is a RED run (the gate
+# judged and said no: closure, acceptance, policy, verdict, verified-run or
+# foreign-signal refusals need a human); the job also stays red when the
+# gate itself crashed.
 #
 # Credential (Decision 7): a promoter-App installation token when
 # `vars.CQ_PROMOTER_APP_CLIENT_ID` is set; otherwise the interim
@@ -45,9 +56,9 @@
 #
 # Instantiate (each token below is written in double braces in the body):
 #   GATE_WORKFLOWS   -> comma list of workflow FILE names whose merge-queue
-#                       push runs must have succeeded on the tip (the gate
-#                       reads them by workflow path, never by check name),
-#                       e.g. ci.yml,denylist.yml
+#                       push runs must have succeeded on the SUBJECT (the
+#                       gate reads them by workflow path, never by check
+#                       name), e.g. ci.yml,denylist.yml
 #   GATE_TIMEOUT_MIN -> minutes the gate waits for verdicts and those runs
 #                       before refusing (default 20). CEILING: the wait
 #                       plus checkout, install and build must stay under
@@ -56,6 +67,13 @@
 #                       enforces this for the instance). Above that the
 #                       runner may kill `decide` mid-wait: still no
 #                       promotion (fails closed), but the report is lost.
+#   REVIEWER_BOT_LOGIN -> the pinned promotion reviewer's bot login, from
+#                        the owner's registration record (UNSET/@@UNSET
+#                        values make the CLI refuse before any read — the
+#                        identity is never guessed from a name lookup).
+#   REVIEWER_BOT_ID   -> the pinned reviewer's numeric bot user id (same
+#                        record, numeric compare via --argjson-style flag
+#                        parsing). Same UNSET fail-closed rule.
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — values reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -275,6 +293,9 @@ jobs:
             --defaultBranch="$DEFAULT_BRANCH"
             --verifiedWorkflows=ci.yml,denylist.yml
             --timeoutMin=20
+            --reviewerBotLogin=cq-promotion-reviewer[bot]
+            --reviewerBotId=339373542
+            --push
           )
           if [ -n "$VERDICT_APP_ID" ]; then
             args+=(--verdictAppId="$VERDICT_APP_ID")
@@ -290,7 +311,7 @@ jobs:
              and (.[0].status != "ok" or
                ((.[0].value | type) == "object"
                 and (.[0].value.verdict
-                  | IN("promoted", "would-promote", "noop", "refused"))
+                  | IN("promoted", "would-promote", "noop", "awaiting", "refused"))
                 and (.[0].value.report | type) == "array"
                 and all(.[0].value.report[]; type == "string")))' \
             "${RUNNER_TEMP}/gate.json" >/dev/null 2>&1; then
@@ -317,7 +338,8 @@ jobs:
               + "\n\n```text\n"
               + ($report | gsub("`{3,}"; "` ` `"))
               + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
-          # Report-only (batch policy, see the header): every verdict is
-          # advisory and lives in the summary above. Red only when the gate
-          # itself crashed (no ok result).
-          jq -e '.status == "ok"' "${RUNNER_TEMP}/gate.json" >/dev/null
+          # With --push this gate IS the promoter (C2): green verdicts are
+          # promoted / noop / awaiting / would-promote; a refused verdict is
+          # a RED run (the gate judged and said no — a human looks), and a
+          # crashed gate stays red.
+          jq -e '.status == "ok" and .value.verdict != "refused"' "${RUNNER_TEMP}/gate.json" >/dev/null
