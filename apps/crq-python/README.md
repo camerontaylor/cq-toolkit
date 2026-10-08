@@ -174,10 +174,20 @@ previous `main` for the audit):
 Going live is one config edit (`app_login` + `reviewer_bot_id` from the record), alongside
 the gate's pin and the signer's config.
 
-In signer mode the signer, the dedicated `crq` macOS user, runs the CodeRabbit CLI, does the
+In signer mode the signer runs the CodeRabbit CLI. It is a systemd unit running as user `crq` on **queue-host**. It does the
 secret scan, and posts every status. crq judges nothing and posts nothing:
 
-- **Request**: crq writes `/Users/Shared/crq-spool/requests/<id>.json` with
+- **Transport**: the spool is `queue-host:/var/lib/crq-spool` (`promotion.signer.spool`).
+  - crq runs on worker-host and pushes and reads over `ssh -o BatchMode=yes`. queue-host stays
+    outbound-only.
+  - Remote commands are built only from constant sub-paths plus ids that already match
+    `^promo-[0-9a-f]{10}\+{0,9}$`, and every path is quoted.
+  - A per-item snapshot (claimed / request / result) costs one round trip per tick.
+  - **ssh or spool failure means the state is unknown**: no new request, no withdrawal, never
+    counted as signer-down. After 30 min a distinct "queue-host unreachable" alert fires once.
+    After recovery, the signer-down timer restarts from the recovery time.
+  - `host: null` makes it a local directory, used only by simulations.
+- **Request**: crq writes `requests/<id>.json` with
   `{v,kind:"promotion",item,base_sha,batch_sha,requested_at}`.
   - The write is atomic (tmp + rename), and the file is never rewritten.
   - The id matches `promo-<sha10>` plus up to nine `+`. Ids are fresh: not used in the queue
@@ -194,9 +204,10 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
     reviews keep running.
   - Either way, the signer-down timer counts from the later of `requested_at` and the
     deferral's `until`.
-- **Spool permissions**: `requests/` is `root:crq-spool` 2775 (setgid, no sticky bit), and
-  operator and `crq` are both in `crq-spool`. Ticks are spawned by the **Paseo daemon**, so
-  restart Paseo after `dseditgroup`; a running daemon won't have the new group. The signer
+- **Spool permissions (queue-host)**: the parent is root:root 0755. `requests/` is `root:crq-spool`
+  2775 (setgid, no sticky bit), and `operator@queue-host` and `crq` are both in `crq-spool`.
+  `results/` and `ledger/` are crq:crq 0755 with files 0644. crq reaches queue-host as
+  `operator@queue-host` over ssh, so a new group applies on the next ssh login. The signer
   renames a request to a dot-name before it writes `.claimed`, so crq's pre-claim withdrawal
   either wins or gets ENOENT. Any group member can replace a request, but the
   signer's `request_sha256` echo makes a swapped request visible to crq as a mismatch alert.

@@ -42,10 +42,13 @@
     "allowed_reviewers": [],
     "resolver": "conductor (acceptance conductor reviewer-example)",
     "signer": {
-      "spool_dir": "/Users/Shared/crq-spool",
       "app_login": null,
       "reviewer_bot_id": null,
-      "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)"
+      "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
+      "spool": {
+        "host": "queue-host",
+        "dir": "/var/lib/crq-spool"
+      }
     },
     "signer_stall_min": 90,
     "signer_down_min": 30

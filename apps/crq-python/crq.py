@@ -1064,7 +1064,13 @@ def cut_promotion(q: Dict[str, Any], log: List[str], dry: bool, base: str, batch
                   reviewed: Optional[str] = None, carried: Optional[List[Dict[str, Any]]] = None,
                   must_reach: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if promotion_mode() == "signer":
-        iid = fresh_signer_id(q, batch)
+        try:
+            iid = fresh_signer_id(q, batch)
+        except SpoolUnreachable as exc:
+            spool_unreachable(q, exc, log)
+            q.setdefault("promotion", {})["requested"] = True  # re-cut once the spool is back
+            return None
+        spool_ok(q)
         if iid is None:
             signer_alert(q, None, f"no fresh signer id left for batch {batch[:10]} (10 attempts used)", log)
             return None
@@ -1235,7 +1241,147 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
 # on main, everything above runs unchanged ("user" mode).
 
 SIGNER = PROMO.get("signer", {})
-SPOOL = Path(SIGNER.get("spool_dir", "/Users/Shared/crq-spool"))
+
+
+class SpoolUnreachable(Exception):
+    """The spool could not be read or written (ssh down, dir missing): state UNKNOWN."""
+
+
+class Spool:
+    """Request/result spool of contract v1. The signer runs on queue-host, so the spool
+    lives there (/var/lib/crq-spool) and crq pushes/reads over `ssh -o
+    BatchMode=yes` (queue-host stays outbound-only: no listener, no companion
+    service). `host: null` = a local directory (simulations). Remote commands
+    are built ONLY from constant sub-paths plus ids that already passed
+    SIGNER_ID, and every path is shlex-quoted regardless."""
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self.host = cfg.get("host")
+        self.dir = cfg.get("dir") or "/var/lib/crq-spool"
+
+    @staticmethod
+    def _id(iid: str) -> str:
+        if not SIGNER_ID.match(iid):
+            raise ValueError(f"refusing spool access for id {iid!r}")
+        return iid
+
+    def _path(self, rel: str) -> Path:
+        return Path(self.dir) / rel
+
+    def _ssh(self, script: str, data: Optional[bytes] = None) -> str:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
+               "-o", "ServerAliveCountMax=2", self.host, script]
+        try:
+            p = subprocess.run(cmd, input=data, capture_output=True, timeout=45)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise SpoolUnreachable(f"ssh {self.host}: {exc}"[:200])
+        if p.returncode != 0:
+            raise SpoolUnreachable(f"ssh {self.host} exit {p.returncode}: {p.stderr.decode(errors='replace').strip()[:200]}")
+        return p.stdout.decode(errors="replace")
+
+    def _cd(self) -> str:
+        return f"cd {shlex.quote(self.dir)} || {{ echo 'spool dir missing' >&2; exit 3; }}; "
+
+    def snapshot(self, iid: str) -> Dict[str, Any]:
+        """One round trip: {claimed, request, result: text|None} for one id."""
+        iid = self._id(iid)
+        res, claim, req = f"results/{iid}.json", f"results/{iid}.claimed", f"requests/{iid}.json"
+        if not self.host:
+            r = self._path(res)
+            return {"claimed": self._path(claim).exists(), "request": self._path(req).exists(),
+                    "result": r.read_text() if r.exists() else None}
+        out = self._ssh(self._cd() + f"test -e {shlex.quote(claim)} && echo C=1 || echo C=0; "
+                        f"test -e {shlex.quote(req)} && echo R=1 || echo R=0; "
+                        f"if test -e {shlex.quote(res)}; then echo RES=1; cat {shlex.quote(res)}; else echo RES=0; fi")
+        head = out.split("\n", 3)
+        if len(head) < 3 or head[0] not in ("C=0", "C=1") or head[1] not in ("R=0", "R=1") or head[2] not in ("RES=0", "RES=1"):
+            raise SpoolUnreachable(f"unexpected snapshot reply from {self.host}: {out[:80]!r}")
+        return {"claimed": head[0] == "C=1", "request": head[1] == "R=1",
+                "result": (head[3] if len(head) > 3 else "") if head[2] == "RES=1" else None}
+
+    def read(self, rel: str) -> Optional[str]:
+        """Constant relative paths only (ledger/backoff.json) or results/<valid id>.json."""
+        if not (rel == "ledger/backoff.json" or (rel.startswith("results/") and rel.endswith(".json")
+                                                  and self._id(rel[8:-5]))):
+            raise ValueError(f"refusing spool read {rel!r}")
+        if not self.host:
+            f = self._path(rel)
+            return f.read_text() if f.exists() else None
+        out = self._ssh(self._cd() + f"if test -e {shlex.quote(rel)}; then echo Y; cat {shlex.quote(rel)}; else echo N; fi")
+        if out.startswith("Y\n"):
+            return out[2:]
+        if out.strip() == "N":
+            return None
+        raise SpoolUnreachable(f"unexpected read reply from {self.host}: {out[:80]!r}")
+
+    def results_exist(self, ids: List[str]) -> set:
+        ids = [self._id(i) for i in ids]
+        if not self.host:
+            return {i for i in ids if self._path(f"results/{i}.json").exists()}
+        out = self._ssh(self._cd() + "; ".join(f"test -e {shlex.quote(f'results/{i}.json')} && echo {shlex.quote(i)}"
+                                               for i in ids) + "; echo END")
+        if not out.rstrip().endswith("END"):
+            raise SpoolUnreachable(f"unexpected exists reply from {self.host}")
+        return {line for line in out.split() if line in ids}
+
+    def write_request(self, iid: str, body: bytes) -> None:
+        """tmp + rename inside requests/ (atomic on the spool's filesystem)."""
+        iid = self._id(iid)
+        tmp, final = f".{iid}.json.tmp", f"{iid}.json"
+        if not self.host:
+            d = self._path("requests")
+            (d / tmp).write_bytes(body)
+            (d / tmp).replace(d / final)
+            return
+        self._ssh(f"cd {shlex.quote(self.dir + '/requests')} || exit 3; cat > {shlex.quote(tmp)} && "
+                  f"mv -f {shlex.quote(tmp)} {shlex.quote(final)}", data=body)
+
+    def withdraw(self, iid: str) -> bool:
+        """Unlink crq's own unclaimed request: True = removed, False = ENOENT (the
+        signer renamed it before claiming: it is the signer's now)."""
+        iid = self._id(iid)
+        rel = f"requests/{iid}.json"
+        if not self.host:
+            try:
+                self._path(rel).unlink()
+                return True
+            except FileNotFoundError:
+                return False
+        q_ = shlex.quote(rel)
+        out = self._ssh(self._cd() + f"if rm -- {q_} 2>/dev/null; then echo RM; elif test -e {q_}; then echo ERR; "
+                                     f"else echo ENOENT; fi").strip()
+        if out == "RM":
+            return True
+        if out == "ENOENT":
+            return False
+        raise SpoolUnreachable(f"withdraw of {iid} on {self.host} failed: {out[:80]!r}")
+
+
+SPOOL = Spool(SIGNER.get("spool") or {"host": None, "dir": SIGNER.get("spool_dir")})
+
+
+def spool_ok(q: Dict[str, Any]) -> None:
+    st = q.setdefault("promotion", {})
+    if st.get("spool_fail_since"):
+        st["spool_recovered_at"] = iso()
+        event("spool_recovered", since=st["spool_fail_since"])
+    st.pop("spool_fail_since", None)
+    st.pop("spool_fail_alerted", None)
+
+
+def spool_unreachable(q: Dict[str, Any], exc: Exception, log: List[str]) -> str:
+    """ssh/spool failure = UNKNOWN: no new request, no withdrawal, never counted as
+    signer-down; after 30 min a distinct '<host> unreachable' alert (once)."""
+    st = q.setdefault("promotion", {})
+    st.setdefault("spool_fail_since", iso())
+    mins = (now() - parse_iso(st["spool_fail_since"])).total_seconds() / 60
+    if mins > PROMO.get("signer_down_min", 30) and not st.get("spool_fail_alerted"):
+        st["spool_fail_alerted"] = iso()
+        signer_alert(q, None, f"{SPOOL.host or 'spool'} unreachable for {mins:.0f}m (signer state unknown; no requests "
+                              f"or withdrawals meanwhile): {exc}", log)
+    msg = f"promotion: spool unreachable ({mins:.0f}m): {exc}"[:240]
+    log.append(msg)
+    return msg
 SIGNER_ID = re.compile(r"^promo-[0-9a-f]{10}\+{0,9}$")
 SIGNER_DONE_CODES = {"success_present", "already_in_main"}
 SIGNER_RECUT_CODES = {"base_not_main", "main_not_ancestor", "checks_not_green", "subject_moved"}
@@ -1321,7 +1467,12 @@ def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
     reviews, it only explains an unclaimed request (see harvest_signer). (If
     ledger/ is unwritable, rate_limited results still reach crq via harvest.)"""
     try:
-        b = json.loads((SPOOL / "ledger" / "backoff.json").read_text())
+        raw = SPOOL.read("ledger/backoff.json")
+    except SpoolUnreachable as exc:
+        spool_unreachable(q, exc, log)
+        return
+    try:
+        b = json.loads(raw or "")
         until = parse_iso(b["until"]) if b.get("v") == 1 and b.get("until") else None
     except (OSError, ValueError, KeyError, TypeError):
         return
@@ -1339,11 +1490,9 @@ def apply_signer_backoff(q: Dict[str, Any], log: List[str]) -> None:
 def fresh_signer_id(q: Dict[str, Any], batch: str) -> Optional[str]:
     """promo-<sha10> plus up to nine '+', unused in the queue AND in results/
     (the signer treats an existing results/<id>.json as already done)."""
-    for k in range(10):
-        iid = f"promo-{batch[:10]}{'+' * k}"
-        if not any(i["id"] == iid for i in q["items"]) and not (SPOOL / "results" / f"{iid}.json").exists():
-            return iid
-    return None
+    cands = [f"promo-{batch[:10]}{'+' * k}" for k in range(10)]
+    taken = SPOOL.results_exist(cands)  # may raise SpoolUnreachable (cut_promotion handles it)
+    return next((i for i in cands if i not in taken and not any(x["id"] == i for x in q["items"])), None)
 
 
 def request_promotion_review(q: Dict[str, Any], item: Dict[str, Any], log: List[str]) -> None:
@@ -1352,10 +1501,11 @@ def request_promotion_review(q: Dict[str, Any], item: Dict[str, Any], log: List[
         raise NotReady(f"item id {item['id']} does not fit the signer id pattern")
     body = json.dumps({"v": 1, "kind": "promotion", "item": item["id"], "base_sha": item["base_sha"],
                        "batch_sha": item["batch_sha"], "requested_at": iso()}, sort_keys=True).encode()
-    req_dir = SPOOL / "requests"
-    tmp = req_dir / f".{item['id']}.json.tmp"
-    tmp.write_bytes(body)
-    tmp.replace(req_dir / f"{item['id']}.json")
+    try:
+        SPOOL.write_request(item["id"], body)
+    except SpoolUnreachable as exc:
+        raise NotReady(spool_unreachable(q, exc, log))
+    spool_ok(q)
     item["state"] = "requested"
     item["request"] = {"sha256": hashlib.sha256(body).hexdigest(), "requested_at": json.loads(body)["requested_at"]}
     q.setdefault("starts", []).append(item["request"]["requested_at"])  # signer runs share crq's CLI budget
@@ -1381,11 +1531,14 @@ def recut_promotion(q: Dict[str, Any], item: Dict[str, Any], log: List[str], dry
 def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Optional[str]:
     log: List[str] = []
     iid = item["id"]
-    res_f, claim_f, req_f = (SPOOL / "results" / f"{iid}.json", SPOOL / "results" / f"{iid}.claimed",
-                             SPOOL / "requests" / f"{iid}.json")
+    try:
+        snap = SPOOL.snapshot(iid)
+    except SpoolUnreachable as exc:
+        return spool_unreachable(q, exc, log)  # unknown: no state change, no withdrawal, not signer-down
+    spool_ok(q)
     age = (now() - parse_iso(item["request"]["requested_at"])).total_seconds() / 60
-    if not res_f.exists():
-        if claim_f.exists():
+    if snap["result"] is None:
+        if snap["claimed"]:
             if not dry:
                 item["state"] = "signer_running"
             if age > PROMO.get("signer_stall_min", 90) and not item.get("stall_alerted") and not dry:
@@ -1393,15 +1546,19 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                 signer_alert(q, item, f"{iid} claimed but no result after {age:.0f}m (signer CLI timeout 75m)", log)
             return "; ".join(log) or None
         if item["base_sha"] != main_sha() and not dry:  # stale before the signer claimed it: withdraw (contract B)
-            try:
-                req_f.unlink()  # the signer renames a request to a dot-name before claiming: we win, or ENOENT
-            except FileNotFoundError:
-                return f"{iid}: main moved, but the signer already took the request — awaiting its result"
+            try:  # the signer renames a request to a dot-name before claiming: we win, or ENOENT
+                if not SPOOL.withdraw(iid):
+                    return f"{iid}: main moved, but the signer already took the request — awaiting its result"
+            except SpoolUnreachable as exc:
+                return spool_unreachable(q, exc, log)
             recut_promotion(q, item, log, dry, "withdrawn", "main moved before the signer claimed the request")
             return "; ".join(log)
         # a healthy signer defers unclaimed (budget / rate limit): count from the end of its published deferral
         d = (q.get("promotion") or {}).get("signer_deferral") or {}
         ref = parse_iso(item["request"]["requested_at"])
+        back = parse_iso((q.get("promotion") or {}).get("spool_recovered_at"))
+        if back and back > ref:  # time the spool was unreachable is not the signer's
+            ref = back
         if d.get("item") in (iid, None) and d.get("until") and parse_iso(d["until"]) > ref:
             ref = parse_iso(d["until"])
         idle = (now() - ref).total_seconds() / 60
@@ -1413,7 +1570,7 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     if dry:
         return f"would harvest signer result {iid}"
     try:
-        r = json.loads(res_f.read_text())
+        r = json.loads(snap["result"])
     except ValueError as exc:
         signer_alert(q, item, f"{iid}: unparseable signer result ({exc})", log)
         item["state"] = "blocked"
@@ -1570,8 +1727,11 @@ def audit_signer_advance(q: Dict[str, Any], last: str, main: str, rec: Dict[str,
     else:
         rec["item"] = item["id"]
         try:
-            r = json.loads((SPOOL / "results" / f"{item['id']}.json").read_text())
-        except (OSError, ValueError):
+            r = json.loads(SPOOL.read(f"results/{item['id']}.json") or "{}")
+        except SpoolUnreachable as exc:
+            r = {}
+            notes.append(f"results/{item['id']}.json unavailable ({exc})")
+        except ValueError:
             r = {}
         posted = r.get("posted") or {}
         if r.get("outcome") != "completed" or posted.get("state") != "success" or posted.get("status_id") != auth["id"]:
