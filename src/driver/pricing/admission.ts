@@ -171,10 +171,18 @@ function claudeDeferResolution(
   const blockingWindows: string[] = [];
   const blockingResets: number[] = [];
   const anyResetMs: number[] = [];
-  /** The latest endpoint reset among observations that NAME `window`. */
+  /**
+   * The latest endpoint reset among observations that NAME `window` and do not
+   * report headroom: an `exhausted: false` reset is a routine window boundary,
+   * not a release time (the `QuotaObservation` contract), and `observedReleaseMs`
+   * drops it for the same reason.
+   */
   const endpointResetMs = (window: string): number | undefined => {
     const resets = observations
-      .filter((observation) => normalizedWindow(observation.window) === window)
+      .filter(
+        (observation) =>
+          normalizedWindow(observation.window) === window && observation.exhausted !== false,
+      )
       .map((observation) => isoResetMs(observation.resetsAt))
       .filter((resetMs): resetMs is number => resetMs !== undefined);
     return resets.length === 0 ? undefined : Math.max(...resets);
@@ -264,7 +272,14 @@ export function classifyProviderSignal(
   }
   const marker = firstMatchingRule(profile, signal);
   if (marker !== undefined) {
-    const resolution = claudeDeferResolution(signal, observations);
+    // The unified-window headers describe an exhausted allowance, so they only
+    // support a defer time for a `quota` rule. A throttle rule that happens to
+    // see those headers on a non-exhausted response would otherwise inherit a
+    // routine window reset as its release time.
+    const resolution: DeferResolution =
+      marker.errorClass === 'quota'
+        ? claudeDeferResolution(signal, observations)
+        : { kind: 'none' };
     // Retry-after precedence reaches the RULE path too, not just the generic
     // branch below. A rule that is NOT the unified marker-header set describes a
     // TRANSIENT condition (claude-subscription's documented status-only 429,
@@ -433,8 +448,18 @@ function ruleMatches(fact: ErrorSignalFact, signal: ProviderSignal): boolean {
     return false;
   }
   if (fact.httpStatus !== undefined && fact.httpStatus !== signal.httpStatus) return false;
-  if (fact.markerHeader !== undefined && headerValue(signal, fact.markerHeader) === undefined) {
-    return false;
+  if (fact.markerHeader !== undefined) {
+    const marker = headerValue(signal, fact.markerHeader);
+    if (marker === undefined) return false;
+    // A rule that names the values that signal its class must see one of them:
+    // the unified headers also ride ordinary non-exhausted responses
+    // (`allowed`), where their mere presence says nothing about exhaustion.
+    if (
+      fact.markerValues !== undefined &&
+      !fact.markerValues.includes(marker.trim().toLowerCase())
+    ) {
+      return false;
+    }
   }
   return true;
 }

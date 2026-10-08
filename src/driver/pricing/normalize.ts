@@ -63,9 +63,16 @@ export function servedAliasIds(
   // Own keys only: a lane, provider or model id such as `constructor` would
   // otherwise resolve to an `Object.prototype` member, and spreading that as an
   // alias list throws instead of answering "nothing declared".
+  //
+  // The requested key is read in the LANE's normalised form, exactly as the
+  // served-model seam reads it (`servedModelCheck` looks the policy up by
+  // `normaliseModelId(lane, requested)`): a request the seam admitted as an alias
+  // must not come back here with an empty alias set and be reclassified as an
+  // undeclared remap, nor lose its declared aliases from the reserved set.
   const byProvider = ownEntry(table, lane);
   const byRequested = byProvider === undefined ? undefined : ownEntry(byProvider, provider);
-  return (byRequested === undefined ? undefined : ownEntry(byRequested, requested)) ?? [];
+  const key = normaliseModelId(lane as LaneId, requested);
+  return (byRequested === undefined ? undefined : ownEntry(byRequested, key)) ?? [];
 }
 
 /** How the observed served id was reconciled with the requested (canonical) id. */
@@ -159,9 +166,15 @@ export function resolvePricedModel(args: {
   // An observed alias is billed at ITS OWN rates (a `deepseek-chat` request served
   // as `deepseek-flash` costs the flash row). An alias with no table entry of its
   // own leaves the rates ABSENT — a `glm-5.3-flash` request served as `glm-5.3`
-  // must not be billed at the cheaper flash row. The one exception is a dated
-  // snapshot of the requested id (`claude-haiku-4-5-20251001`), the same model.
+  // must not be billed at the cheaper flash row. A declaration only says a remap
+  // is ADMISSIBLE, never that its rate is the same, so the spelling of an alias
+  // (`model-x` -> `model-x-20261001`) proves nothing about its price. The one
+  // exception is a documented equivalence: Anthropic's dateless id is a
+  // convenience alias that resolves to the dated API id of the same model
+  // (`claude-haiku-4-5` -> `claude-haiku-4-5-20251001`, ./candidate-aliases.ts),
+  // so the dated snapshot is the same model on that provider and no other.
   const isDatedSnapshot = (alias: string): boolean => {
+    if (args.modelSpec.provider !== 'anthropic') return false;
     const base = `${normalise(requested)}-`;
     const rest = normalise(alias).slice(base.length);
     return normalise(alias).startsWith(base) && /^\d{8}$/.test(rest);

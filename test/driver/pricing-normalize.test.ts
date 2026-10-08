@@ -129,6 +129,48 @@ describe('resolvePricedModel', () => {
     expect(resolved.rates).toBeUndefined();
   });
 
+  test('a dated alias is price-equivalent only on Anthropic, never inferred from the spelling', () => {
+    const anthropic = resolvePricedModel({
+      lane: 'subprocess',
+      modelSpec: HAIKU,
+      servedModel: 'claude-haiku-4-5-20251001',
+      aliases: ALIASES,
+    });
+    expect(anthropic.rates).toEqual(priceOf(HAIKU));
+    // A deployment policy `deepseek-chat -> deepseek-chat-20261001` declares the
+    // remap admissible; it does not say the dated revision costs the same.
+    const other = resolvePricedModel({
+      lane: 'ai-sdk',
+      modelSpec: DEEPSEEK_CHAT,
+      servedModel: 'deepseek-chat-20261001',
+      aliases: { 'ai-sdk': { deepseek: { 'deepseek-chat': ['deepseek-chat-20261001'] } } },
+    });
+    expect(other.via).toBe('alias');
+    expect(other.rates).toBeUndefined();
+  });
+
+  test('a non-normalised acp request reads the policy under the same key the seam does', () => {
+    const aliases: ServedAliasTable = { acp: { zai: { 'glm-5.3-flash': ['glm-5.3'] } } };
+    expect(servedAliasIds(aliases, 'acp', 'zai', 'GLM-5.3-FLASH')).toEqual(['glm-5.3']);
+    const resolved = resolvePricedModel({
+      lane: 'acp',
+      modelSpec: { provider: 'zai', model: 'GLM-5.3-FLASH' },
+      servedModel: 'builtin:bigmodel\\GLM-5.3',
+      aliases,
+    });
+    expect(resolved.via).toBe('alias');
+    expect(resolved.candidates).toEqual(['GLM-5.3-FLASH', 'glm-5.3']);
+    // Identity lanes stay byte-exact: no case-folding of the requested key.
+    expect(
+      servedAliasIds(
+        { subprocess: { zai: { 'glm-5.3-flash': ['x'] } } },
+        'subprocess',
+        'zai',
+        'GLM-5.3-FLASH',
+      ),
+    ).toEqual([]);
+  });
+
   test('an UNDECLARED served id resolves to no price and never to zero', () => {
     const resolved = resolvePricedModel({
       lane: 'subprocess',

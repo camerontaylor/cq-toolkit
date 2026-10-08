@@ -169,8 +169,14 @@ export interface ErrorSignalFact {
    */
   readonly endpointMatch?: string;
   readonly httpStatus?: number;
-  /** A header whose PRESENCE discriminates this class (Claude unified quota). */
+  /** A header whose presence — and, with `markerValues`, whose value — discriminates this class (Claude unified quota). */
   readonly markerHeader?: string;
+  /**
+   * The lowercase values of `markerHeader` that signal this class. Absent means
+   * presence alone discriminates. Claude's unified headers ride non-exhausted
+   * responses too (`allowed`), so there only `rejected` is exhaustion evidence.
+   */
+  readonly markerValues?: readonly string[];
   readonly errorClass: 'rate-limit' | 'quota' | 'provider-error';
   readonly provenance: Provenance;
 }
@@ -357,6 +363,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
     errorSignals: [
       {
         markerHeader: 'anthropic-ratelimit-unified-status',
+        markerValues: ['rejected'],
         errorClass: 'quota',
         provenance: {
           kind: 'rs14-capture',

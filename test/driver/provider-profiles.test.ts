@@ -220,6 +220,59 @@ describe('classifyProviderSignal', () => {
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 
+  test('a unified-status header that is not `rejected` is not quota evidence', () => {
+    // The headers ride ordinary responses (`allowed`); a transient failure that
+    // carries them must not be parked until a routine window reset.
+    for (const value of ['allowed', 'allowed_warning', '']) {
+      const verdict = classifyProviderSignal('claude-subscription', {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': value,
+          'anthropic-ratelimit-unified-5h-reset': '1790269200',
+        },
+      });
+      expect(verdict.errorClass, `status '${value}'`).toBe('rate-limit');
+      expect(verdict.deferUntilMs).toBeUndefined();
+    }
+    const rejected = classifyProviderSignal('claude-subscription', {
+      httpStatus: 429,
+      headers: { 'anthropic-ratelimit-unified-status': ' Rejected ' },
+    });
+    expect(rejected.errorClass).toBe('quota');
+  });
+
+  test('a TARGETED endpoint observation that reports headroom does NOT fill a blocking window', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          // no 5h reset header: only the endpoint could supply it
+        },
+      },
+      // A routine window boundary, not a release time (`exhausted: false`).
+      { window: '5h', resetsAt: '2026-09-28T05:00:00Z', exhausted: false },
+    );
+    expect(verdict.errorClass).toBe('quota');
+    expect(verdict.deferUntilMs).toBeUndefined();
+    expect(verdict.advisoryReason).toBeDefined();
+    // The same observation, explicitly exhausted, IS the release time.
+    const exhausted = classifyProviderSignal(
+      'claude-subscription',
+      {
+        httpStatus: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+        },
+      },
+      { window: '5h', resetsAt: '2026-09-28T05:00:00Z', exhausted: true },
+    );
+    expect(exhausted.deferUntilMs).toBe(Date.parse('2026-09-28T05:00:00Z'));
+  });
+
   // The cross-window trap: an endpoint `resetsAt` carries a time but NOT a window
   // identity, so it cannot stand in for a blocking window's own missing reset.
   test('an UNTARGETED endpoint resetsAt does NOT fill a blocking window with no reset', () => {
