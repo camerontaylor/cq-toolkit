@@ -4,7 +4,7 @@
 - **Date:** 2026-09-24
 - **Related:** [ADR-0002 Annex B](0002-annex-b-config.md) (secret keys and their environments)
 
-Post-acceptance notes N7 and N8 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N7, N8 and N9 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## Context
 
@@ -74,7 +74,7 @@ All deciding verifiers run under `workflow_run` from the default-branch definiti
    - every workflow file that is a `workflow_run` source or produces a required check or verdict input: `ci.yml`, `denylist.yml`, `cq-measure.yml`, `cq-signal.yml`, and every privileged workflow;
    - measurement configs: **`vitest.config.*`, `vite.config.*`, `vitest.workspace.*`** (globbed, so a new higher-precedence config name can't escape the set), coverage config, `tsconfig*.json` **and every file reachable from their `extends`/`references` graph** (e.g. a `config/base.json` target), `package.json` (whole file, not just scripts);
    - **`**/.gitattributes`** (`export-ignore`/`export-subst` steer any attribute-honouring extraction, and attributes also change diff and merge behaviour);
-   - **lockfiles** (`package-lock.json`, `npm-shrinkwrap.json`), `.npmrc`, `.nvmrc`/`.node-version`, `engines`;
+   - **lockfiles** (`package-lock.json`, `npm-shrinkwrap.json`), `.npmrc`, `.nvmrc`/`.node-version`, `engines`; (pnpm equivalents: post-acceptance note N9);
    - the tool manifest (`.cq/tool/**`);
    - [`baselines/ratchets.json`](../../baselines/ratchets.json), the protected-path list and the required-check list.
 

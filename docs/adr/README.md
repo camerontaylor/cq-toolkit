@@ -144,3 +144,19 @@ permanently, outside the interim set
 `drill`). **Open:** before C3, the owner decides whether D-D.2 gains an
 explicit exception for the drill PAT, or C3 also revokes it and the drill
 moves to non-human authentication.
+
+### N9 — ADR-0004 D-B, D-C.4 and D-E: npm commands after the move to pnpm
+
+ADR-0004 was written when the repository used npm, so it names
+`npm ci --ignore-scripts`, `package-lock.json` and `npm-shrinkwrap.json`. The
+repository now uses pnpm. The verifier templates install with
+`pnpm install --frozen-lockfile --ignore-scripts`
+([`policy/templates/cq-verify.yml`](../../policy/templates/cq-verify.yml)),
+and the protected-path set also covers `pnpm-lock.yaml`,
+`pnpm-workspace.yaml` and `.pnpmfile.*`
+([`src/ops/gates/protectedPaths.ts`](../../src/ops/gates/protectedPaths.ts)).
+The rules are unchanged: a frozen lockfile install with lifecycle scripts
+disabled, and every lockfile and package-manager config in the definition
+set. For this repository's own checks, read the npm names as the
+equivalent pnpm ones. D-E's adopter install (`npm ci --ignore-scripts`, then
+`npm audit signatures`) is unchanged.
