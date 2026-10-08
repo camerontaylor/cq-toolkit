@@ -70,6 +70,7 @@ export function runVerdict(input: {
   files: readonly string[];
   timedOut: boolean;
   interruptedBy: string | null;
+  testNamePattern?: string | null;
 }): { result: string; exit: number; reason?: string };
 
 /** Fences and records one injected heavy spawn. */

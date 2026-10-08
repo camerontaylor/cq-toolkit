@@ -495,5 +495,12 @@ if (run.error !== undefined) {
   finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
 }
 const exit = run.code ?? signalExit(run.signal);
-const verdict = runVerdict({ exit, report, files, timedOut: run.timedOut, interruptedBy });
+const verdict = runVerdict({
+  exit,
+  report,
+  files,
+  timedOut: run.timedOut,
+  interruptedBy,
+  testNamePattern: opts.testNamePattern,
+});
 finish({ durationMs, ...report, ...verdict });

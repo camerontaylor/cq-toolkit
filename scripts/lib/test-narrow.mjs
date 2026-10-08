@@ -39,7 +39,8 @@ Options:
   --dry-run, --list          take the lock, print the plan, run nothing
   --include-integration      allow suites classified integration
   --include-live             allow suites classified live
-  -t <pattern>               only tests whose full name matches <pattern>
+  -t <pattern>               diagnostic only: match full test names; successful
+                             runs report result=filtered, never gate evidence
   --max-wait <seconds>       bound the wait for the host lock (default and
                              ceiling ${MAX_WAIT_CEILING_S})
   -h, --help                 this text
@@ -275,8 +276,16 @@ const EXIT_TIMEOUT = 124;
  * at least one executed test — skipped and todo tests (all of a file's,
  * under a `-t` that matches only other files) prove nothing. A timeout or an
  * interrupt never exits 0, even when vitest raced it to a clean exit.
+ * Name-filtered successes are diagnostic only, never gate passes.
  */
-export function runVerdict({ exit, report, files, timedOut, interruptedBy }) {
+export function runVerdict({
+  exit,
+  report,
+  files,
+  timedOut,
+  interruptedBy,
+  testNamePattern = null,
+}) {
   const ran = report?.ran ?? [];
   const unexpected = ran.filter((f) => !files.includes(f));
   const unrun = files.filter((f) => !ran.includes(f));
@@ -297,6 +306,13 @@ export function runVerdict({ exit, report, files, timedOut, interruptedBy }) {
   if (unrun.length > 0) return fail(`selected files did not run: ${unrun.join(',')}`);
   const idle = files.filter((f) => (report.executed[f] ?? 0) === 0);
   if (idle.length > 0) return fail(`no tests executed in: ${idle.join(',')}`);
+  if (testNamePattern !== null) {
+    return {
+      result: 'filtered',
+      exit,
+      reason: `diagnostic only; not gate evidence: testNamePattern=${JSON.stringify(testNamePattern)}`,
+    };
+  }
   return { result: 'pass', exit };
 }
 
