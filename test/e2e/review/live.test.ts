@@ -3,7 +3,7 @@
 // real git, a spawned worker subprocess — no fakes anywhere in the loop's
 // seams. Opt-in only: `describe.skipIf(!process.env.LIVE_GH)` — CI never
 // sets LIVE_GH (the dispatch-gated .github/workflows/live-review.yml does),
-// so an ordinary `npm test` SKIPS this file cleanly, and module scope stays
+// so an ordinary `pnpm test` SKIPS this file cleanly, and module scope stays
 // inert (every live call happens inside beforeAll/tests, never at import).
 //
 // What it proves, in two runs against ONE seeded scratch repo:

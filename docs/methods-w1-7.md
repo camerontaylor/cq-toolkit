@@ -58,6 +58,11 @@ that holds the write token, and bypasses merge-queue.
   `ratchet-propose` split into a credential-free measure leg and a `workflow_run` proposer in
   env `automation` that opens the PR against `merge-queue`. The legacy `ratchet.yml` stays the
   required check until W1.10's C2 retires it; its guard now uses the hardened diff.
+  cq-verify follows cq-accept's rule: a `fail` or `needs-human` verdict is a red `cq/ratchet`
+  check run, not a red job. The job fails only when trusted code crashed (no ok verifier
+  result, or no recompute count) or the post failed. A head that no open same-repo PR into
+  `merge-queue`/`main` carries is nothing to judge (a notice, no verdict, a green run). The
+  gate reads the verdict row and only the COMPLETION of the default-branch cq-verify run.
 - **Guard pairing**: a deleted baseline must be replaced, in the same diff, by an added
   baseline of the same `(target, metric)`, judged as a modification. An unreplaced delete fails.
 - **Coverage granularity**: one decimal place, half-up, everywhere (source normalisation, diff
