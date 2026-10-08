@@ -17,34 +17,65 @@
 //      engine accepts as text) runs through `makeAstGrepCodemod` over the
 //      injected runner and store: scan → collision check → freshness
 //      anchor → apply, with per-file results and the engine's best-effort
-//      rollback. The engine primitive's `approved: true` is satisfied
-//      INTERNALLY here, and that is not a bypass: the gates that matter for
-//      a playbook dispatch live AROUND the engine — the quarantine consult
-//      before it, the playbook's own verifier after it — and dispatch is a
-//      consumer-invoked op (authored asset, registered by id, dispatched by
-//      id) that is NEVER present in the shipped analyze plan, so the plan
-//      runner's autonomous path cannot reach it (UC §1 row 9). Any engine
-//      fault (scan parse, collision, write/rollback) is a `failed` dispatch
-//      with nothing verified and NO quarantine — the playbook did not fail
-//      its verifier; the machinery failed before one could run.
+//      rollback. The engine's `approved: true` is NO LONGER the
+//      authorization: since W4.3 it is only the primitive's INTRA-OP
+//      freshness anchor (ADR-0003 §2/§6 keeps that boolean for exactly
+//      this), and the authorization is an approval GRANT exercised and
+//      consumed around this call under the workspace mutation lock. The
+//      pre-apply bytes of every target are captured FIRST, so a
+//      non-passing verdict can be rolled back (step 5). A dispatch with no
+//      grant bound is refused `needs-human` before the engine runs. Any
+//      engine fault (scan parse, collision, write/rollback) is a `failed`
+//      dispatch with nothing verified and NO quarantine — the playbook did
+//      not fail its verifier; the machinery failed before one could run.
+//      The approval token is spent by then, which is ADR-0003 §4c's crash
+//      analysis: burning a token on a failed mutation is safe, replaying it
+//      is not.
 //   4. THE VERIFIER — the playbook's command runs through the injected
 //      verifier (playbooks/verifier.ts) and the verdict decides the
 //      dispatch outcome AND the playbook's quarantine state:
 //        - 'pass'          → `ok`, outcome 'verified'.
 //        - 'fail'          → the playbook is QUARANTINED (a ledger record
-//          carrying the verifier's reason) and the dispatch returns `ok`
-//          with outcome 'verifier-failed' and `quarantined: true` — the
-//          honest report of a real state: the remediation WAS applied and
-//          it provably did NOT hold. The status mapping follows the
-//          regressionGate precedent: a definitive verdict is the op's
-//          DECISION OUTPUT, not an op failure — the full evidence rides the
-//          structured value, which a bare `failed` error string could not
-//          carry. An `ok` here never means "the remediation held"; the
-//          `outcome` discriminator is the verdict.
+//          carrying the verifier's reason), the applied edits are RESTORED
+//          (step 5), and the dispatch returns `failed` — a remediation
+//          that provably did not hold is a FAILED dispatch. The
+//          regressionGate "a definitive verdict is decision output"
+//          precedent does NOT apply here, and step 5 is why: because the
+//          workspace is returned to its pre-dispatch bytes, there is no
+//          applied state left to report as a success, and a bare `ok` is
+//          exactly the shape a status-only caller (a plan step, a summary
+//          line) reads as "the remediation held".
 //        - 'indeterminate' → the dispatch returns `indeterminate` — an
 //          unobservable verdict must not PUNISH the playbook (no
-//          quarantine) any more than it may PASS it (I5). The prose says
-//          plainly that edits were applied but are unverified.
+//          quarantine) any more than it may PASS it (I5). The edits are
+//          restored too, and the prose says plainly that the verdict was
+//          unobservable.
+//   5. ROLLBACK ON A NON-PASSING VERDICT (W4.3) — a `fail` or an
+//      `indeterminate` restores every file the apply rewrote, from the
+//      bytes captured before it ran, through the SAME store. The restore
+//      report names what was restored and — the part that must never be
+//      softened — what is STRANDED (a file the restore could not put
+//      back), so the exact on-disk state is always knowable.
+//      THE RESTORE IS A MUTATION, so it runs under the SAME workspace
+//      mutation lock as the apply (O-6) AND it is CONDITIONAL: it writes the
+//      pre-apply bytes back only if the file still holds the exact bytes THIS
+//      dispatch wrote. A concurrent approved dispatch of another playbook may
+//      legitimately have written the same workspace while this verifier was
+//      running, and a blind restore would silently discard that work — a lost
+//      update between the ops' own writers, which no amount of "the workspace
+//      is under approval" excuses. A file that no longer matches is reported
+//      STRANDED, untouched, with the digests on both sides.
+//      RESIDUAL, stated rather than hidden: "a pass is the only outcome that
+//      leaves the workspace alone" is true of THIS dispatch's own edits, NOT
+//      of the workspace under concurrent approved dispatches. Two approved
+//      dispatches over overlapping targets can interleave such that B
+//      restores A's verifier-failed bytes as its own pre-apply baseline —
+//      A's stranded evidence makes the state detectable, and nothing is
+//      CLOBBERED (both reports are truthful from their own frame), but a
+//      failed remediation can survive on disk. Recorded as a residual in the
+//      family NOTES; the fix would fingerprint the pre-apply capture inside
+//      the mutation critical section rather than trusting the pre-capture
+//      bytes as the restore baseline.
 //
 // THE TRACE CUT (journal-record shape): every dispatch is supposed to leave
 // a journal record, but the kernel journal seam (src/kernel/journal.ts) is
@@ -52,17 +83,26 @@
 // dispatch event, and append() requires event.runId to match the file's
 // run; faking a runId/jobId would poison the resume fold's per-job facts.
 // So v1 RETURNS the dispatch record in the result instead: the exported
-// {@link PlaybookDispatchRecord} shape rides `value.record` on the two `ok`
-// outcomes. The frozen OpResult taxonomy gives `indeterminate` no value
-// slot, so there the record rides `detail` as serialized JSON (same shape);
-// an early `failed` termination (steps 1–3) records no trace beyond the
-// error string — nothing was applied, nothing was quarantined, and the
-// taxonomy has no payload slot. The full `trace` query op and a durable
-// dispatch journal are post-v1 (recorded in the family NOTES.md).
+// {@link PlaybookDispatchRecord} shape rides `value.record` on the `ok`
+// outcome. The frozen OpResult taxonomy gives `indeterminate` no value slot
+// and `failed` no payload slot, so on BOTH non-ok verifier paths the record
+// rides `detail`/`error` as serialized JSON (same shape, same reason). An
+// early `failed` termination (steps 1–3) records no trace beyond the error
+// string — nothing was applied, nothing was quarantined, and the taxonomy
+// has no payload slot. The full `trace` query op and a durable dispatch
+// journal are post-v1 (recorded in the family NOTES.md).
 import type { Op, OpResult } from '../../../kernel/types.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
+import type { ApprovalAuthority, ApprovedMutation } from '../approval.js';
+import {
+  approvalInputDigest,
+  contentFingerprint,
+  DENY_ALL_APPROVALS,
+  withApprovedMutation,
+  withMutationLock,
+} from '../approval.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
-import type { CodemodFileApplied } from '../codemod/astGrep.js';
+import type { CodemodFileApplied, CodemodReport } from '../codemod/astGrep.js';
 import { makeAstGrepCodemod } from '../codemod/astGrep.js';
 import type { Playbook, VerifierCommand } from './format.js';
 import type { QuarantineLedger, QuarantineRecord } from './quarantine.js';
@@ -247,9 +287,15 @@ export function makePlaybookRegisterOp(
     try {
       playbooks.register(input.playbook);
     } catch (err) {
-      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+      return {
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
-    return { status: 'ok', value: { id: input.playbook.id, total: playbooks.list().length } };
+    return {
+      status: 'ok',
+      value: { id: input.playbook.id, total: playbooks.list().length },
+    };
   };
 }
 
@@ -270,7 +316,10 @@ export interface PlaybookQuarantineListReport {
 export function makePlaybookQuarantineListOp(
   quarantine: QuarantineLedger,
 ): Op<PlaybookQuarantineListInput, PlaybookQuarantineListReport> {
-  return async () => ({ status: 'ok', value: { records: quarantine.records() } });
+  return async () => ({
+    status: 'ok',
+    value: { records: quarantine.records() },
+  });
 }
 
 /** JSON-serializable input of the `analyze.playbookDispatch` op. */
@@ -293,6 +342,15 @@ export interface PlaybookDispatchDeps {
   run: RunCheck;
   /** The store binding for the containment root (the registry binds the path store over `input.dir`). */
   storeFor: (input: PlaybookDispatchInput) => AnalyzeFileStore;
+  /**
+   * The ADR-0003 approval seam, DEFAULTING TO THE DENY-ALL authority: with
+   * nothing bound, a dispatch is refused `needs-human` at the mutation and
+   * the engine's internal `approved: true` authorizes nothing. The
+   * registry adapter that binds the kernel's verified approvals is #238's
+   * file and is deliberately NOT edited here; until it lands, this default
+   * is the honest fail-closed state rather than the bypass W4.3 removed.
+   */
+  approval?: ApprovalAuthority;
 }
 
 /**
@@ -312,34 +370,66 @@ export interface PlaybookDispatchRecord {
   verifier: PlaybookVerifierOutcome;
   outcome: 'verified' | 'verifier-failed' | 'verifier-indeterminate';
   quarantined: boolean;
+  /**
+   * The step-5 rollback evidence. Present ONLY on the non-passing
+   * outcomes, where the applied edits were restored; absent on 'verified',
+   * where nothing was rolled back and there is nothing to report.
+   */
+  restore?: PlaybookRestoreReport;
 }
 
-/** The dispatch report for a VERIFIER-OBSERVED outcome (both `ok` statuses are definitive verdicts — module header). */
-export type PlaybookDispatchOutcome =
-  | {
-      outcome: 'verified';
-      playbookId: string;
-      targets: string[];
-      plannedEdits: number;
-      unfixedMatches: number;
-      files: CodemodFileApplied[];
-      note?: string;
-      record: PlaybookDispatchRecord;
-    }
-  | {
-      outcome: 'verifier-failed';
-      playbookId: string;
-      targets: string[];
-      plannedEdits: number;
-      unfixedMatches: number;
-      files: CodemodFileApplied[];
-      note?: string;
-      /** Always true on this outcome: the failed verdict WROTE the quarantine record. */
-      quarantined: true;
-      /** The verifier's failure reason — the same string the ledger record carries. */
-      verifierReason: string;
-      record: PlaybookDispatchRecord;
-    };
+/**
+ * The step-5 rollback report (W4.3). `stranded` is the load-bearing field:
+ * a file the restore could NOT put back is not folded into `restored`, and
+ * its presence means the workspace is NOT the pre-dispatch state the prose
+ * otherwise claims.
+ */
+export interface PlaybookRestoreReport {
+  /** The files the apply rewrote (the restore's candidate set). */
+  attempted: string[];
+  /** The files whose pre-apply bytes were written back. */
+  restored: string[];
+  /** The files that could NOT be restored, with the fault for each. */
+  stranded: Array<{ file: string; error: string }>;
+}
+
+/** The dispatch report for the ONE `ok` outcome: the verifier passed. */
+export interface PlaybookDispatchOutcome {
+  outcome: 'verified';
+  playbookId: string;
+  targets: string[];
+  plannedEdits: number;
+  unfixedMatches: number;
+  files: CodemodFileApplied[];
+  note?: string;
+  record: PlaybookDispatchRecord;
+}
+
+/**
+ * The evidence for a NON-PASSING verdict. Since W4.3 both variants are
+ * non-`ok` (a `fail` dispatch is `failed`, an `indeterminate` one is
+ * `indeterminate`), and the frozen OpResult taxonomy gives neither a
+ * payload slot — so this shape rides `error`/`detail` as serialized JSON
+ * on the same trace cut the dispatch record already uses. It is exported so
+ * a consumer can parse the JSON it finds there.
+ */
+export interface PlaybookDispatchUnverified {
+  outcome: 'verifier-failed' | 'verifier-indeterminate';
+  playbookId: string;
+  targets: string[];
+  plannedEdits: number;
+  unfixedMatches: number;
+  /** The files the apply rewrote — restored afterwards (see {@link restore}). */
+  files: CodemodFileApplied[];
+  note?: string;
+  /** True exactly on 'verifier-failed': the observed failure WROTE the quarantine record. */
+  quarantined: boolean;
+  /** The verifier's reason — on 'verifier-failed' the same string the ledger record carries. */
+  verifierReason: string;
+  /** The step-5 rollback evidence for the restore that followed the verdict. */
+  restore: PlaybookRestoreReport;
+  record: PlaybookDispatchRecord;
+}
 
 /**
  * Build the `analyze.playbookDispatch` op over the injected seams. The
@@ -395,31 +485,165 @@ export function makePlaybookDispatchOp(
     try {
       store = deps.storeFor(input);
     } catch (err) {
-      return { status: 'failed', error: `playbook dispatch: ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `playbook dispatch: ${messageOf(err)}`,
+      };
     }
     const targets = [...new Set(input.targets)].sort();
-    const codemod = makeAstGrepCodemod(deps.run, () => store);
-    const engineResult = await codemod({
-      dir: input.dir,
-      rule: JSON.stringify(playbook.rule),
-      files: targets,
-      dryRun: false,
-      // The engine primitive's approval flag, satisfied internally — the
-      // approval gates that matter live AROUND it (module header, step 3).
-      approved: true,
-      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-    });
+    // ---- 3a. PRE-APPLY CAPTURE (W4.3, step 5's precondition). The bytes
+    // every target holds RIGHT NOW, before the engine can touch anything.
+    // Without this the only outcomes are "the edits stay" and "the edits
+    // are wrong on disk forever": a verifier failure has nothing to restore
+    // from, which is precisely the state W4.3 closes. A read fault here is
+    // `failed` with nothing written — the capture is the precondition, not
+    // an optimization.
+    const preApply = new Map<string, Uint8Array>();
+    for (const file of targets) {
+      try {
+        preApply.set(file, await store.readBytes(file));
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `playbook dispatch: could not capture the pre-apply bytes of '${file}', which the rollback on a non-passing verifier verdict depends on — nothing was written (${messageOf(err)})`,
+        };
+      }
+    }
+    // ---- 3b. THE MUTATION BOUNDARY (ADR-0003 §4c). The engine call IS
+    // the write, and it is reached only through `withApprovedMutation`:
+    // the grant is re-checked against the CURRENT workspace state and its
+    // nonce spent in one critical section of the workspace mutation lock,
+    // held through the engine's whole mutating call. The engine's own
+    // `approved: true` is the intra-op freshness anchor, not the
+    // authorization — the plan-JSON-shaped boolean cannot reach a byte on
+    // disk through this path (A16).
+    const subject = {
+      op: 'analyze.playbookDispatch',
+      workspace: input.dir,
+      targets,
+      // The RESOLVED playbook's rule and verifier are digested too, not only
+      // its id: the registry is process-scoped and re-registrable, so an id
+      // alone would let a token approved for one rule authorize another
+      // registered under the same name.
+      inputDigest: approvalInputDigest({
+        playbookId: input.playbookId,
+        rule: playbook.rule,
+        verifier: playbook.verifier,
+        dir: input.dir,
+        targets,
+        timeoutMs: input.timeoutMs,
+      }),
+    };
+    // The try wraps the AWAIT itself, not the destructuring below: a
+    // PostApplyReadFault is thrown from inside the write callback, so it
+    // surfaces as a rejection of withApprovedMutation, after the lock has
+    // been released.
+    // Set on entering the write callback, i.e. once the exercise granted —
+    // what separates an acquire-side lock fault (token UNSPENT, nothing
+    // written) from a release-side one (token spent, edits may be on disk).
+    let writeEntered = false;
+    let approved: ApprovedMutation<{
+      engine: OpResult<CodemodReport>;
+      applied: Map<string, string>;
+    }>;
+    try {
+      approved = await withApprovedMutation(
+        deps.approval ?? DENY_ALL_APPROVALS,
+        subject,
+        async (
+          scope,
+        ): Promise<{
+          engine: OpResult<CodemodReport>;
+          applied: Map<string, string>;
+        }> => {
+          writeEntered = true;
+          // NESTED COMPOSITION (ADR-0003 §6): the engine primitive receives
+          // the scope for the approval THIS dispatch already exercised, so the
+          // inner write runs under the already-held lock and already-consumed
+          // nonce WITHOUT exercising a second approval — which would throw on
+          // at-most-once. A scope is not a bypass: it is minted only inside
+          // this critical section, is not serializable, and carries no nonce.
+          const engine = await makeAstGrepCodemod(
+            deps.run,
+            () => store,
+            undefined,
+            scope,
+          )({
+            dir: input.dir,
+            rule: JSON.stringify(playbook.rule),
+            files: targets,
+            dryRun: false,
+            // NOT the authorization: the primitive's intra-op freshness
+            // anchor, which ADR-0003 §2/§6 keeps. The authorization is the
+            // grant consumed above.
+            approved: true,
+            ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+          });
+          // THE POST-APPLY FINGERPRINTS, read back INSIDE the same critical
+          // section that wrote them. They are what step 5's conditional
+          // restore compares against, so "the file still holds what I
+          // wrote" is answered from bytes this dispatch itself produced,
+          // not from a digest the engine reported and never re-read.
+          const written = new Map<string, string>();
+          if (engine.status === 'ok' && engine.value.mode === 'applied') {
+            for (const file of engine.value.files) {
+              try {
+                written.set(file.file, contentFingerprint(await store.readBytes(file.file)));
+              } catch (err) {
+                throw new PostApplyReadFault(file.file, messageOf(err));
+              }
+            }
+          }
+          return { engine, applied: written };
+        },
+      );
+    } catch (err) {
+      // A post-apply read fault lands here: the apply DID happen, and the
+      // one thing we can no longer prove is what the file holds, so no
+      // rollback is attempted. Saying so beats restoring blind.
+      if (err instanceof PostApplyReadFault) {
+        return {
+          status: 'failed',
+          error: `playbook dispatch: the remediation was applied, but re-reading '${err.file}' to fingerprint the applied bytes FAILED (${err.message}) — the rollback on a non-passing verifier verdict cannot be proven safe, so NO restore was attempted and the workspace holds the applied edits; inspect it by hand before re-dispatching`,
+        };
+      }
+      // A LOCK FAULT is a RESULT, not an escape (the applyRemediation and
+      // restoreTargets rule): a release fault can follow a completed engine
+      // write, and rejecting would leave applied-but-unverified edits on disk
+      // with no evidence. No verifier or restore runs — the section's
+      // exclusivity is unproven, so neither could be trusted.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT';
+      return {
+        status: 'failed',
+        error: `playbook dispatch: the workspace mutation lock faulted during the approved apply of playbook '${playbook.id}' — ${messageOf(err)}. ${tokenFate}; the targets were ${targets.map((file) => `'${file}'`).join(', ')} and NO verifier or rollback ran — a lock fault proves neither that the edits landed nor that they did not, so inspect the workspace before re-dispatching; this is NOT an approval refusal`,
+      };
+    }
+    if (approved.status === 'needs-human') {
+      return {
+        status: 'needs-human',
+        reason: `${approved.reason}; playbook '${playbook.id}' was not dispatched and no target of '${targets.length}' was read for modification — re-approve against the current workspace state to dispatch it`,
+      };
+    }
+    const engineResult: OpResult<CodemodReport> = approved.value.engine;
+    const postApply: Map<string, string> = approved.value.applied;
     if (engineResult.status !== 'ok') {
       // Unreachable by construction (approved: true, dryRun: false — and the
       // engine never returns budget-exhausted/indeterminate), but the frozen
       // taxonomy allows them, so they pass through honestly rather than
-      // being collapsed into a fabricated verdict.
+      // being collapsed into a fabricated verdict. The token is spent by
+      // now: ADR-0003 §4c's crash analysis makes a burn safe, a replay
+      // unsafe.
       return engineResult;
     }
     const applied = engineResult.value;
     if (applied.mode !== 'applied') {
       // Unreachable: dispatch always runs the apply mode (dryRun: false).
-      return { status: 'failed', error: 'playbook dispatch: the engine returned a dry-run report' };
+      return {
+        status: 'failed',
+        error: 'playbook dispatch: the engine returned a dry-run report',
+      };
     }
     const files = applied.files;
     // ---- 4. The playbook's own verifier decides the outcome.
@@ -480,6 +704,21 @@ export function makePlaybookDispatchOp(
       // The one quarantine entry path: an OBSERVED verifier failure. The
       // ledger record carries the verifier's reason verbatim — the evidence.
       deps.quarantine.quarantine(playbook.id, verifier.reason);
+      // STEP 5: a remediation that provably did not hold is rolled back to
+      // the pre-dispatch bytes before the status is decided, and the status
+      // is NOT `ok` — see the module header for why the regressionGate
+      // "verdict as decision output" precedent no longer applies. The
+      // restore is CONDITIONAL and LOCKED: see `restoreTargets`. It spends
+      // no nonce — the one write here that does not — and is bounded by a
+      // content-fingerprint guard instead (STRANDED when bytes moved).
+      const restore = await restoreTargets(
+        deps.approval ?? DENY_ALL_APPROVALS,
+        store,
+        input.dir,
+        preApply,
+        files.map((file) => file.file),
+        postApply,
+      );
       const record: PlaybookDispatchRecord = {
         kind: 'playbook-dispatch',
         playbookId: playbook.id,
@@ -490,28 +729,43 @@ export function makePlaybookDispatchOp(
         verifier,
         outcome: 'verifier-failed',
         quarantined: true,
+        restore,
+      };
+      const unverified: PlaybookDispatchUnverified = {
+        outcome: 'verifier-failed',
+        playbookId: playbook.id,
+        targets,
+        plannedEdits: applied.plannedEdits,
+        unfixedMatches: applied.unfixedMatches,
+        files,
+        ...(applied.note === undefined ? {} : { note: applied.note }),
+        quarantined: true,
+        verifierReason: verifier.reason,
+        restore,
+        record,
       };
       return {
-        status: 'ok',
-        value: {
-          outcome: 'verifier-failed',
-          playbookId: playbook.id,
-          targets,
-          plannedEdits: applied.plannedEdits,
-          unfixedMatches: applied.unfixedMatches,
-          files,
-          ...(applied.note === undefined ? {} : { note: applied.note }),
-          quarantined: true,
-          verifierReason: verifier.reason,
-          record,
-        },
+        status: 'failed',
+        error:
+          `playbook '${playbook.id}': the verifier FAILED (${verifier.reason}) — the applied remediation did not hold. ${restoreProse(restore)} The playbook is QUARANTINED (quarantined: true); lifting the quarantine is an explicit human action. ` +
+          `Dispatch evidence: ${JSON.stringify(unverified)}`,
       };
     }
     // 'indeterminate': an unobservable verdict must not punish the playbook
-    // (module header) — NO quarantine record is written, and the dispatch is
-    // honest that the edits ARE on disk but UNVERIFIED. The frozen OpResult
+    // (module header) — NO quarantine record is written. The edits are
+    // restored anyway (step 5): an unobservable verdict is not a licence to
+    // leave unverified changes on disk, and leaving them there is what
+    // forced the old "do NOT blindly re-run" warning. The frozen OpResult
     // taxonomy gives this status no value slot, so the trace record rides
     // `detail` as serialized JSON ({@link PlaybookDispatchRecord}).
+    const restore = await restoreTargets(
+      deps.approval ?? DENY_ALL_APPROVALS,
+      store,
+      input.dir,
+      preApply,
+      files.map((file) => file.file),
+      postApply,
+    );
     const record: PlaybookDispatchRecord = {
       kind: 'playbook-dispatch',
       playbookId: playbook.id,
@@ -522,13 +776,26 @@ export function makePlaybookDispatchOp(
       verifier,
       outcome: 'verifier-indeterminate',
       quarantined: false,
+      restore,
+    };
+    const unverified: PlaybookDispatchUnverified = {
+      outcome: 'verifier-indeterminate',
+      playbookId: playbook.id,
+      targets,
+      plannedEdits: applied.plannedEdits,
+      unfixedMatches: applied.unfixedMatches,
+      files,
+      ...(applied.note === undefined ? {} : { note: applied.note }),
+      quarantined: false,
+      verifierReason: verifier.reason,
+      restore,
+      record,
     };
     return {
       status: 'indeterminate',
       detail:
-        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — the remediation edits are ALREADY ON DISK (${String(applied.plannedEdits)} planned edit(s) across ${String(files.length)} file(s)) and remain UNVERIFIED; the playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5). ` +
-        `Do NOT blindly re-run the dispatch: it would RE-APPLY the rule over the already-edited targets, which is safe only when the rule's fix is idempotent — re-run the VERIFIER on its own instead. ` +
-        `Dispatch record: ${JSON.stringify(record)}`,
+        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — ${restoreProse(restore)} The playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5)${restore.stranded.length === 0 ? ', and re-running the dispatch is now safe because the workspace is back at its pre-dispatch bytes' : ', but do NOT re-dispatch until the stranded files are inspected and repaired — re-applying the rule over them may not be idempotent'}. ` +
+        `Dispatch evidence: ${JSON.stringify(unverified)}`,
     };
   };
   // IN-FLIGHT REJECTION (module header): each dispatch runs in the
@@ -548,6 +815,156 @@ export function makePlaybookDispatchOp(
         }
         throw err;
       });
+}
+
+/**
+ * STEP 5: restore the pre-apply bytes of every file the apply rewrote,
+ * through the SAME store the apply used (so containment, and the fault
+ * behavior, are identical).
+ *
+ * TWO properties, both load-bearing, and the second one is a correction of
+ * the first version of this function:
+ *
+ *  1. IT RUNS UNDER THE MUTATION LOCK. A restore is a write; running it
+ *     after the lock was released at the end of the apply let a concurrent
+ *     approved dispatch of ANOTHER playbook interleave its apply with this
+ *     one's rollback.
+ *  2. IT IS CONDITIONAL ON THE POST-APPLY BYTES (`expected`, the
+ *     fingerprints read back inside the apply's own critical section). A
+ *     file whose current bytes no longer match what THIS dispatch wrote
+ *     belongs to someone else's edit — a concurrent playbook, a human, a
+ *     hook — and a blind restore would silently delete it. Such a file is
+ *     reported STRANDED, UNTOUCHED, with both digests, and the prose then
+ *     refuses to claim the workspace is at its pre-dispatch state.
+ *
+ * The per-file outcome is honest in both directions: a file that could not
+ * be restored (write fault) and a file deliberately not restored (conflict)
+ * are both STRANDED, because from the caller's point of view they are the
+ * same fact — "this file is not back to the pre-dispatch bytes, and here is
+ * why".
+ *
+ * AND A LOCK FAULT IS A RESULT, NOT AN EXCEPTION. The mutation lock is a
+ * real filesystem primitive, and it throws in three ordinary ways: the
+ * waiter budget is exhausted (another writer holds it), the release fails,
+ * or the artifact is compromised while held. Letting any of those reject
+ * out of here would escape the op with NO result and NO evidence — the worst
+ * possible outcome, because the applied edits are already on disk and the
+ * caller would be left knowing nothing about them. So a lock fault is
+ * caught and reported: EVERY applied file is marked STRANDED, because a
+ * section whose exclusivity cannot be proven proves no restore, even one
+ * whose bytes were already written back before the fault.
+ */
+async function restoreTargets(
+  authority: ApprovalAuthority,
+  store: AnalyzeFileStore,
+  workspace: string,
+  preApply: ReadonlyMap<string, Uint8Array>,
+  rewritten: readonly string[],
+  expected: ReadonlyMap<string, string>,
+): Promise<PlaybookRestoreReport> {
+  const restored: string[] = [];
+  const stranded: Array<{ file: string; error: string }> = [];
+  const ordered = [...rewritten].sort();
+  const run = async (): Promise<void> => {
+    for (const file of ordered) {
+      const before = preApply.get(file);
+      if (before === undefined) {
+        // A file the apply reported but the capture did not hold: nothing to
+        // restore from, and saying so is the honest report.
+        stranded.push({ file, error: 'no pre-apply capture for this file' });
+        continue;
+      }
+      // COMPARE BEFORE WRITE: the guard that keeps this restore from
+      // clobbering a concurrent writer.
+      let current: Uint8Array;
+      try {
+        current = await store.readBytes(file);
+      } catch (err) {
+        stranded.push({
+          file,
+          error: `could not read the current bytes to compare — ${messageOf(err)}`,
+        });
+        continue;
+      }
+      const currentFingerprint = contentFingerprint(current);
+      const appliedFingerprint = expected.get(file);
+      if (appliedFingerprint !== undefined && currentFingerprint !== appliedFingerprint) {
+        stranded.push({
+          file,
+          error: `another writer changed this file while the verifier ran (this dispatch wrote ${String(appliedFingerprint)}, the file now holds ${currentFingerprint}) — NOT restored, because overwriting it would discard that writer's work`,
+        });
+        continue;
+      }
+      if (appliedFingerprint === undefined) {
+        stranded.push({
+          file,
+          error: 'no post-apply fingerprint for this file, so a conditional restore is impossible',
+        });
+        continue;
+      }
+      try {
+        await store.writeBytes(file, before);
+        restored.push(file);
+      } catch (err) {
+        stranded.push({ file, error: messageOf(err) });
+      }
+    }
+  };
+  let held: { ok: true; value: void } | { ok: false; reason: string };
+  try {
+    held = await withMutationLock(authority, workspace, run);
+  } catch (err) {
+    // A LOCK FAULT (acquire exhausted, release failed, artifact
+    // compromised). Nothing is claimed as restored: a section whose
+    // exclusivity cannot be proven proves no restore, and every applied
+    // file — including one whose bytes were already written back before the
+    // fault — is reported with the reason, so the caller can never read a
+    // clean rollback out of a run whose lock broke.
+    return {
+      attempted: ordered,
+      restored: [],
+      stranded: ordered.map((file) => ({
+        file,
+        error: `the workspace mutation lock faulted during the rollback (${messageOf(err)}) — the restore could not be run to a provable completion, so this file is not claimed as restored even if its pre-dispatch bytes were already written back`,
+      })),
+    };
+  }
+  if (!held.ok) {
+    // No lock bound: the restore cannot be made safe, so it is NOT run and
+    // every file is reported stranded with the reason.
+    return {
+      attempted: ordered,
+      restored: [],
+      stranded: ordered.map((file) => ({ file, error: held.reason })),
+    };
+  }
+  return { attempted: ordered, restored, stranded };
+}
+
+/**
+ * A post-apply re-read fault: the apply happened and the workspace is in an
+ * unknown-to-us state, so no rollback may be attempted.
+ */
+class PostApplyReadFault extends Error {
+  constructor(
+    readonly file: string,
+    detail: string,
+  ) {
+    super(detail);
+    this.name = 'PostApplyReadFault';
+  }
+}
+
+/**
+ * The rollback prose, split by the one fact a reader must not have to
+ * infer: a fully restored workspace is back at its pre-dispatch bytes; a
+ * restore with a STRANDED file is NOT, and says which file.
+ */
+function restoreProse(restore: PlaybookRestoreReport): string {
+  if (restore.stranded.length === 0) {
+    return `the applied edits were ROLLED BACK to their pre-dispatch bytes (${restore.restored.length} file(s) restored) and the workspace is back at its pre-dispatch state.`;
+  }
+  return `the applied edits were ROLLED BACK where possible, but the restore FAILED for ${restore.stranded.map((entry) => `${entry.file} (${entry.error})`).join(', ')} — those files are STRANDED and the workspace is NOT at its pre-dispatch state; restored: ${restore.restored.length === 0 ? 'none' : restore.restored.join(', ')}.`;
 }
 
 /** Error message of an unknown throwable, for `failed` results. */

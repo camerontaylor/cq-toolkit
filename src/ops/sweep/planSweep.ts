@@ -19,7 +19,13 @@
 //     baseline signatures are ALL in view.knownNoise contributes NO fix
 //     units; every baseline signature in view.needsHuman is routed to the
 //     report's needsHuman rows — the human routing surface — and is never
-//     repackaged as an auto-fix decision.
+//     repackaged as an auto-fix decision. A baseline's OPTIONAL
+//     legacySignature (the pre-W4.4 scheme-1 signature, see
+//     {@link legacyLedgerSignature}) is consulted for ESCALATION ONLY: an
+//     old-scheme needsHuman row keeps routing its package to a human until a
+//     human re-triages the row, while an old-scheme knownNoise row no longer
+//     suppresses (a one-time re-triage). The guard only ever adds
+//     escalation (fail closed, I5/I9).
 //   - Store faults never fabricate ok: a failing ledger query or a failing
 //     changed-files dep is a `failed` result — never a throw across the op
 //     seam, never a plan silently built on missing evidence.
@@ -27,7 +33,8 @@
 //     as an orphan, never silently dropped: the report must account for
 //     every file the dep showed it.
 import { execFile } from 'node:child_process';
-import { fingerprintFailure } from '../gates/fingerprint.js';
+import { fingerprintFailure, legacyFingerprintFailure } from '../gates/fingerprint.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { makeLedgerQuery } from '../ledger/ledger.js';
 import type { LedgerQueryInput, LedgerView } from '../ledger/ledger.js';
@@ -80,6 +87,12 @@ export interface PlanSweepLedgerConfig {
 export interface PlanSweepBaseline {
   package: string;
   signature: string;
+  /**
+   * The same failure's ledger signature under the previous scheme, from
+   * {@link legacyLedgerSignature} — set it whenever that returns non-null.
+   * Matched against view.needsHuman only, never against knownNoise.
+   */
+  legacySignature?: string;
 }
 
 /** JSON-serializable input of the sweep planner. */
@@ -176,6 +189,22 @@ export function ledgerSignature(failure: CheckFailure, tool: string): string {
 }
 
 /**
+ * The failure's ledger signature under the PREVIOUS signature scheme
+ * (scheme 1, before W4.4 re-keyed `vitest` failures by test name), or null
+ * when the scheme change left this tool's signatures untouched (every tool
+ * but `vitest`). Callers attach it to the baseline as `legacySignature` so
+ * escalations persisted under scheme 1 keep routing to a human — the ledger
+ * rows themselves carry only an opaque hash, so the scheme-1 row can be
+ * attributed to its package only through the live failure. Same `tool`
+ * precondition as {@link ledgerSignature}.
+ */
+export function legacyLedgerSignature(failure: CheckFailure, tool: string): string | null {
+  const signature = ledgerSignature(failure, tool);
+  const legacy = legacyFingerprintFailure(failure, { tool });
+  return legacy === signature ? null : legacy;
+}
+
+/**
  * Build the sweep planner over injected effects. Work units are the selected
  * packages × the requested fixers (a deduplicated, order-preserving set);
  * each unit becomes exactly ONE Job `{id, op: SWEEP_UNIT_OP, input: unit,
@@ -204,6 +233,9 @@ export function ledgerSignature(failure: CheckFailure, tool: string): string {
  * including for a suppressed package (the suppression skips AUTO-fix; the
  * row routes the signature to a human). A package with at least one fresh
  * signature still plans, its escalated signatures routed alongside. A
+ * baseline's `legacySignature` in needsHuman routes the same way (row
+ * signature = the legacy ledger row's signature); legacy signatures never
+ * suppress. A
  * non-ok query result, a missing queryLedger dep with ledger configured, or
  * a thrown/rejected dep is `failed` — never a fabricated ok, never a throw
  * across the op seam. Selector absence/malformation and manifest defects
@@ -303,10 +335,12 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
     }
 
     const baselinesByPackage = new Map<string, string[]>();
+    const legacyByPackage = new Map<string, string[]>();
     for (const baseline of input.baselineSignatures ?? []) {
-      const signatures = baselinesByPackage.get(baseline.package);
-      if (signatures === undefined) baselinesByPackage.set(baseline.package, [baseline.signature]);
-      else if (!signatures.includes(baseline.signature)) signatures.push(baseline.signature);
+      addSignature(baselinesByPackage, baseline.package, baseline.signature);
+      if (baseline.legacySignature !== undefined) {
+        addSignature(legacyByPackage, baseline.package, baseline.legacySignature);
+      }
     }
 
     let knownNoise: string[] = [];
@@ -358,13 +392,17 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
     // just because no changed file touches it. Baselines naming
     // non-manifest packages are ignored ENTIRELY (no suppression role, no
     // human-routing rows): a human must never be routed to a package the
-    // manifest does not define. Suppression is unchanged.
+    // manifest does not define. Suppression is unchanged. Legacy
+    // (scheme-1) signatures route here too, after the current ones, so an
+    // escalation persisted before the scheme change never silently lapses.
     const needsHuman: Array<{ package: string; signature: string }> = [];
     if (input.ledger !== undefined) {
       for (const [pkgName, signatures] of baselinesByPackage) {
         if (!byName.has(pkgName)) continue;
-        for (const signature of signatures) {
-          if (humanSignatures.includes(signature)) {
+        const routed = new Set<string>();
+        for (const signature of [...signatures, ...(legacyByPackage.get(pkgName) ?? [])]) {
+          if (!routed.has(signature) && humanSignatures.includes(signature)) {
+            routed.add(signature);
             needsHuman.push({ package: pkgName, signature });
           }
         }
@@ -473,6 +511,14 @@ function inputFaultOf(input: PlanSweepInput): string | null {
         baseline.signature === ''
       ) {
         return `sweep: baselineSignatures[${String(index)}] must carry a non-empty package and signature`;
+      }
+      // A malformed legacySignature fails the plan rather than being
+      // dropped: ignoring it could silently lapse an escalation (I5/I9).
+      if (
+        baseline.legacySignature !== undefined &&
+        (typeof baseline.legacySignature !== 'string' || baseline.legacySignature === '')
+      ) {
+        return `sweep: baselineSignatures[${String(index)}].legacySignature must be a non-empty string when present`;
       }
     }
   }
@@ -625,6 +671,13 @@ function sanitizedIdPart(raw: string): string {
   return raw.replace(/[^A-Za-z0-9._-]+/g, '-');
 }
 
+/** Append `signature` to `pkg`'s list in `byPackage`, deduplicated and order-preserving. */
+function addSignature(byPackage: Map<string, string[]>, pkg: string, signature: string): void {
+  const signatures = byPackage.get(pkg);
+  if (signatures === undefined) byPackage.set(pkg, [signature]);
+  else if (!signatures.includes(signature)) signatures.push(signature);
+}
+
 /** Error message of an unknown throwable, for `failed` results. */
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -658,19 +711,7 @@ const SWEEP_GIT_TIMEOUT_MS = 600_000;
  * dash-leading value is parsed as an OPTION before any terminator applies).
  */
 export function changedFilesArgs(base: string): string[] {
-  return [
-    'diff',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
-    '--name-status',
-    '-z',
-    base,
-    '--',
-  ];
+  return ['diff', ...SWEEP_DIFF_FLAGS, '--name-status', '-z', base, '--'];
 }
 
 /**

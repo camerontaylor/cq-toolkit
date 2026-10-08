@@ -26,7 +26,14 @@ export type { PerMillionRates, PriceTable } from './data.js';
  * not know it (exact provider-handle + model-id match).
  */
 export function priceOf(modelSpec: ModelSpec): PerMillionRates | undefined {
-  return PRICE_TABLE[modelSpec.provider]?.[modelSpec.model];
+  // Own-key lookups only: a plain index answers `constructor`/`toString` with a
+  // prototype member, which would read as a priced model with no rates.
+  const byModel = Object.hasOwn(PRICE_TABLE, modelSpec.provider)
+    ? PRICE_TABLE[modelSpec.provider]
+    : undefined;
+  return byModel !== undefined && Object.hasOwn(byModel, modelSpec.model)
+    ? byModel[modelSpec.model]
+    : undefined;
 }
 
 /**

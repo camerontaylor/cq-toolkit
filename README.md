@@ -119,9 +119,9 @@ out with `PNPM_CONFIG_VIRTUAL_STORE_TYPE=project`.
 Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
 `pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
 Formatting is `pnpm run format:check`, the tests you need are the ones your diff
-affects (`pnpm test:narrow`, the only local test command), and checked declaration emit is
-`pnpm run build`. **The full suite is not a local gate**: `pnpm run test` /
-`test:unit` runs in CI, and green required CI on the exact candidate SHA is the
+affects (`pnpm test:narrow`, the only local test command). **The full suite and
+the build are not local gates**: `pnpm run build` (checked declaration emit) and
+`pnpm run test` / `test:unit` run in CI, and green required CI on the exact candidate SHA is the
 sole full-gate authority — see
 [docs/focused-checks-contract.md](docs/focused-checks-contract.md). See
 [the local static policy](lint/README.md)

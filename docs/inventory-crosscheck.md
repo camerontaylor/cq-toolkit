@@ -8,7 +8,7 @@ against the shipped registry.
 How to reproduce the right-hand columns:
 
 ```sh
-npm run build
+pnpm run build
 node -e "import('./dist/registry/index.js').then(async (m) => \
   (await m.list()).forEach((e) => console.log(e.name)))" | sort
 node -e "import('./dist/plans/registry.js').then(async (m) => \

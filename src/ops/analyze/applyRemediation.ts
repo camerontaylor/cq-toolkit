@@ -31,17 +31,29 @@
 //      and the reason names the required shape { clusterId, approved: true }
 //      so the refusal is actionable. A well-formed approval with an UNKNOWN
 //      cluster id is a different fault — `failed`, listing the ids the
-//      sidecar actually carries.
+//      sidecar actually carries. The flag is NECESSARY BUT NOT SUFFICIENT
+//      since W4.3: it is a declared intent any plan author can write, so
+//      the write phase below additionally requires an APPROVAL GRANT that
+//      `approval.exercise` checks and consumes atomically at the mutation,
+//      under the workspace mutation lock (ADR-0003 §4c; approval.ts). With
+//      no authority bound — the shipped default, and the state the shared
+//      registry adapter is in until the kernel's verified-approval wiring
+//      lands — the write is refused `needs-human` with nothing written
+//      (A16: a forged `approved: true` never reaches a byte on disk).
+//      A DRY RUN writes nothing, so it needs no grant: it is the preview
+//      the human uses BEFORE approving anything.
 //   4. Remediation — scan the cluster's target files (planned edits) →
 //      collision check (any overlap blocks the WHOLE apply) → dryRun ?
-//      { diffs, planned edit count, no writes } : apply and report the
-//      per-file results with their after-digests. Splices are PREFLIGHTED
-//      (pure byte computations before the write phase), so splice failures
-//      strand nothing; only store write faults can strand, and the write
-//      phase rolls those back. An EMPTY planned-edit set
-//      is an honest `ok` with `plannedEdits: 0` and a `note` saying nothing
-//      matched — an empty plan is a real outcome, never a silent success
-//      story (the fields that are zero are right there in the result).
+//      { diffs, planned edit count, no writes } : exercise the approval and
+//      apply under the mutation lock, reporting the per-file results with
+//      their after-digests. Splices are PREFLIGHTED (pure byte computations
+//      before the write phase), so splice failures strand nothing; only
+//      store write faults can strand, and the write phase rolls those back.
+//      An EMPTY planned-edit set is an honest `ok` with `plannedEdits: 0`
+//      and a `note` saying nothing matched — an empty plan is a real
+//      outcome, never a silent success story (the fields that are zero are
+//      right there in the result), and it never consumes an approval: there
+//      is no write to approve.
 //
 // The cluster's targets are its member failures' file paths (nulls
 // contribute no target), deduplicated and sorted; the evidence digests were
@@ -56,6 +68,9 @@
 import { dirname, isAbsolute, relative } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import type { RunCheck } from '../gates/checkRunner.js';
+import type { ApprovalAuthority, ApprovalSubject } from './approval.js';
+import type { ApprovedMutation } from './approval.js';
+import { approvalInputDigest, DENY_ALL_APPROVALS, withApprovedMutation } from './approval.js';
 import type { AnalyzeFileStore } from './analysisStore.js';
 import type { CodemodFileApplied, CodemodFileDiff } from './codemod/astGrep.js';
 import {
@@ -91,7 +106,14 @@ export interface ApplyRemediationInput {
    * selected cluster.
    */
   signature?: string;
-  /** The explicit approval flag; anything but `true` refuses the op (`needs-human`). */
+  /**
+   * The DECLARED approval flag; anything but `true` refuses the op
+   * (`needs-human`). NECESSARY BUT NOT SUFFICIENT: it is a field any plan
+   * author writes, so on its own it authorizes nothing. The apply's write
+   * phase additionally requires an approval GRANT exercised and consumed at
+   * the mutation (ADR-0003 §4c, `approval.ts`); the dry run writes nothing
+   * and needs no grant.
+   */
   approved?: boolean;
   /** The consumer's ast-grep rule text (the mechanical remediation for this cluster). */
   rule: string;
@@ -134,10 +156,18 @@ export type ApplyRemediationReport =
  * runner seam). See the module header for the pinned, fail-closed order of
  * operations — every refusal above step 4 happens BEFORE any scan or write,
  * so a refused remediation has touched nothing.
+ *
+ * `approval` is the ADR-0003 approval seam, DEFAULTING TO THE DENY-ALL
+ * authority: with nothing bound, an apply is refused `needs-human` at the
+ * write and the flag alone never writes. The registry adapter that binds
+ * the kernel's verified approvals is #238's file and is deliberately NOT
+ * edited here; until it lands, this default is the honest fail-closed
+ * state rather than a bypass.
  */
 export function makeApplyRemediation(
   storeFor: (input: ApplyRemediationInput) => AnalyzeFileStore,
   run: RunCheck,
+  approval: ApprovalAuthority = DENY_ALL_APPROVALS,
 ): Op<ApplyRemediationInput, ApplyRemediationReport> {
   return async (input) => {
     // ---- 1. Sidecar validity (fail closed before anything else moves).
@@ -192,10 +222,13 @@ export function makeApplyRemediation(
     }
     // ---- 3. Approval FIRST (missing decision → needs-human), then the
     // cluster id resolution (unknown id with a present decision → failed).
+    // The flag is the DECLARED INTENT gate only; the grant is consumed at
+    // the write (step 4), and this is why the refusal below still has to
+    // happen first: an unapproved op must not even reach the authority.
     if (input.approved !== true || input.clusterId === undefined) {
       return {
         status: 'needs-human',
-        reason: `remediation is never auto-applied — an explicit cluster id AND an explicit approval flag are required, for the dry-run preview as much as for the apply; pass { clusterId: "<id>", approved: true }`,
+        reason: `remediation is never auto-applied — an explicit cluster id AND an explicit approval flag are required, for the dry-run preview as much as for the apply; pass { clusterId: "<id>", approved: true }. That flag is necessary but NOT sufficient: the apply's write also requires an approval token exercised and consumed at the mutation (ADR-0003)`,
       };
     }
     // Cluster selection, fail-closed on the FNV id collision: the id alone
@@ -312,6 +345,25 @@ export function makeApplyRemediation(
       plannedEdits.length === 0
         ? 'nothing matched the rule (or it carries no fix) for this cluster — no remediation was applied and none was needed'
         : undefined;
+    // THE EMPTY PLAN IS NOT A MUTATION: with no file to rewrite there is
+    // nothing to approve, so the honest empty result is returned WITHOUT
+    // touching the approval seam — consuming a human's token to rewrite
+    // zero files would burn a decision for no write. A DRY RUN never
+    // touches the seam, so it keeps its own branch (and its `dry-run` mode).
+    if (!input.dryRun && pendingTargets(plannedEdits).length === 0) {
+      return {
+        status: 'ok',
+        value: {
+          mode: 'applied',
+          clusterId: cluster.id,
+          targets,
+          plannedEdits: 0,
+          unfixedMatches: scan.outcome.unfixedMatches,
+          files: [],
+          ...(note === undefined ? {} : { note }),
+        },
+      };
+    }
     if (input.dryRun) {
       let files: RemediationFileDiff[];
       try {
@@ -345,9 +397,8 @@ export function makeApplyRemediation(
     // NOTHING written and strands nothing. Only store WRITE faults can
     // strand files, and the write phase below rolls those back.
     const pending: Array<{ file: string; edits: number; after: Uint8Array; diff: string }> = [];
-    for (const file of targets) {
+    for (const file of pendingTargets(plannedEdits)) {
       const edits = plannedEdits.filter((edit) => edit.file === file);
-      if (edits.length === 0) continue; // nothing to rewrite — the file is not part of the applied set
       const before = current.get(file) as Uint8Array;
       try {
         pending.push({
@@ -363,67 +414,140 @@ export function makeApplyRemediation(
         };
       }
     }
-    const appliedFiles: RemediationFileApplied[] = [];
-    for (const item of pending) {
-      const file = item.file;
-      try {
-        await store.writeBytes(file, item.after);
-      } catch (err) {
-        // BEST-EFFORT ROLLBACK: partial multi-file apply is never stranded.
-        // The faulted file itself may hold a PARTIAL write (the store's
-        // writeFileSync is not atomic), and every target existed pre-apply —
-        // so the faulted file AND every already-written file are restored
-        // from the in-memory original bytes (`current`, verified unchanged
-        // pre-scan) through the same store, newest first, before faulting.
-        // When the rollback itself faults, the already-written wording
-        // survives and the rollback failure is named — the caller always
-        // knows the exact on-disk state.
-        const rolledBack: string[] = [];
-        const rollbackFaults: string[] = [];
-        let faultedFileRestoreFailed = '';
-        // The faulted file may hold a PARTIAL write — restore it best-effort
-        // first; its failure is noted but strands no already-written file.
-        try {
-          await store.writeBytes(file, current.get(file) as Uint8Array);
-        } catch (restoreErr) {
-          faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
-        }
-        for (const applied of [...appliedFiles].reverse()) {
+    // THE MUTATION BOUNDARY (W4.3 / ADR-0003 §4c). Everything above is
+    // pure or read-only; this is the first moment a byte can change, and it
+    // is reached only through `withApprovedMutation`: the grant is
+    // re-checked against the CURRENT workspace state and its nonce spent
+    // in ONE critical section of the workspace mutation lock, which is held
+    // through the whole write phase. A refusal here is `needs-human` with
+    // an untouched workspace — the op never reaches the store without a
+    // consumed grant, which is what makes a forged `approved: true`
+    // (A16) and a commit that landed between planning and writing
+    // (TOCTOU) both deny here instead of at some later, weaker check.
+    const subject: ApprovalSubject = {
+      op: 'analyze.applyRemediation',
+      workspace: storeRootOf(input),
+      targets: pending.map((item) => item.file),
+      inputDigest: approvalInputDigest({
+        sidecarPath: input.sidecarPath,
+        dir: input.dir,
+        clusterId: input.clusterId,
+        signature: input.signature,
+        rule: input.rule,
+        dryRun: input.dryRun,
+        timeoutMs: input.timeoutMs,
+      }),
+    };
+    // Whether the approved WRITE was actually entered. The exercise happens
+    // INSIDE the mutation lock, immediately before the write, so a fault
+    // acquiring the lock has NOT spent the token while a fault releasing or
+    // compromising it HAS. A catch clause cannot tell those apart by
+    // inspection, so the phase is recorded as it happens rather than
+    // guessed at in the message — claiming "spent" unconditionally would
+    // assert a fact that is false for the acquire case, and "unspent" would
+    // be false for the release case.
+    let writeEntered = false;
+    let approved: ApprovedMutation<RemediationFileApplied[]>;
+    try {
+      approved = await withApprovedMutation(approval, subject, async () => {
+        // Entering this callback is proof the exercise granted, i.e. the
+        // nonce is spent.
+        writeEntered = true;
+        const appliedFiles: RemediationFileApplied[] = [];
+        for (const item of pending) {
+          const file = item.file;
           try {
-            await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
-            rolledBack.push(applied.file);
-          } catch (rollbackErr) {
-            rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+            await store.writeBytes(file, item.after);
+          } catch (err) {
+            // BEST-EFFORT ROLLBACK: partial multi-file apply is never stranded.
+            // The faulted file itself may hold a PARTIAL write (the store's
+            // writeFileSync is not atomic), and every target existed pre-apply —
+            // so the faulted file AND every already-written file are restored
+            // from the in-memory original bytes (`current`, verified unchanged
+            // pre-scan) through the same store, newest first, before faulting.
+            // When the rollback itself faults, the already-written wording
+            // survives and the rollback failure is named — the caller always
+            // knows the exact on-disk state. The fault is THROWN out of the
+            // mutation (not returned as a value) so the approved write's
+            // return type stays "the applied files or nothing", and the
+            // lock is released on the way out.
+            const rolledBack: string[] = [];
+            const rollbackFaults: string[] = [];
+            let faultedFileRestoreFailed = '';
+            // The faulted file may hold a PARTIAL write — restore it best-effort
+            // first; its failure is noted but strands no already-written file.
+            try {
+              await store.writeBytes(file, current.get(file) as Uint8Array);
+            } catch (restoreErr) {
+              faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
+            }
+            for (const applied of [...appliedFiles].reverse()) {
+              try {
+                await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
+                rolledBack.push(applied.file);
+              } catch (rollbackErr) {
+                rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+              }
+            }
+            if (rollbackFaults.length === 0) {
+              const rolledBackNote =
+                rolledBack.length === 0
+                  ? 'no earlier files to roll back'
+                  : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
+              throw new ApplyWriteFault(
+                `remediation: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
+              );
+            }
+            // BOTH lists, verbatim: what was restored AND what is stranded —
+            // stranded means an applied file the rollback could NOT restore
+            // (a restored file is listed only under restored).
+            const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
+            const stranded = appliedFiles
+              .map((applied) => applied.file)
+              .filter((name) => !rolledBack.includes(name));
+            throw new ApplyWriteFault(
+              `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+            );
           }
+          appliedFiles.push({
+            file,
+            edits: item.edits,
+            diff: item.diff,
+            digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
+          });
         }
-        if (rollbackFaults.length === 0) {
-          const rolledBackNote =
-            rolledBack.length === 0
-              ? 'no earlier files to roll back'
-              : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
-          return {
-            status: 'failed',
-            error: `remediation: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
-          };
-        }
-        // BOTH lists, verbatim: what was restored AND what is stranded —
-        // stranded means an applied file the rollback could NOT restore
-        // (a restored file is listed only under restored).
-        const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
-        const stranded = appliedFiles
-          .map((applied) => applied.file)
-          .filter((file) => !rolledBack.includes(file));
-        return {
-          status: 'failed',
-          error: `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
-        };
-      }
-      appliedFiles.push({
-        file,
-        edits: item.edits,
-        diff: item.diff,
-        digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
+        return appliedFiles;
       });
+    } catch (err) {
+      if (err instanceof ApplyWriteFault) return { status: 'failed', error: err.message };
+      // A LOCK FAULT (waiter budget exhausted, release failed, artifact
+      // compromised) is a RESULT, not an escape. The mutation lock is a real
+      // filesystem primitive and it throws in ordinary situations; letting
+      // that reject out of the op would hand the caller an exception with no
+      // OpResult at all, while the applied set may be partially on disk.
+      // So it becomes `failed` — the op's own machinery failing, which is
+      // explicitly NOT an approval refusal and must not read as one.
+      //
+      // The token's fate is reported as the PHASE allows, never assumed:
+      // `writeEntered` is true only once the exercise granted, so a fault
+      // before the write means the nonce is still UNSPENT and re-approval
+      // after a repair is possible, while a fault after it means the token
+      // is spent and cannot be replayed. Either way the write set is named,
+      // because a lock fault proves neither that those files were written
+      // nor that they were not.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent (safe: a spent token cannot be replayed)'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT and may be re-approved once the lock is healthy';
+      return {
+        status: 'failed',
+        error: `remediation: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. ${tokenFate}, and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a LOCK FAULT is not a proof that any of them was written and not a proof that none was, so inspect the workspace before re-running; this is the op's machinery failing, NOT an approval refusal`,
+      };
+    }
+    if (approved.status === 'needs-human') {
+      return {
+        status: 'needs-human',
+        reason: `${approved.reason}; the remediation for cluster '${cluster.id}' was fully planned and NOTHING was written — re-approve against the current workspace state to apply it`,
+      };
     }
     return {
       status: 'ok',
@@ -433,12 +557,20 @@ export function makeApplyRemediation(
         targets,
         plannedEdits: plannedEdits.length,
         unfixedMatches: scan.outcome.unfixedMatches,
-        files: appliedFiles,
+        files: approved.value,
         ...(note === undefined ? {} : { note }),
       },
     };
   };
 }
+
+/** The files a plan actually rewrites: the distinct targets carrying at least one edit. */
+function pendingTargets(plannedEdits: Array<{ file: string }>): string[] {
+  return [...new Set(plannedEdits.map((edit) => edit.file))].sort();
+}
+
+/** A write-phase fault (with its rollback evidence) thrown out of the approved mutation. */
+class ApplyWriteFault extends Error {}
 
 /**
  * The `dir` the scan runs in — the same resolution the registry-bound store

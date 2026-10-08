@@ -194,7 +194,8 @@ blocked sha, or one already in `main`, ends green with no promotion: waiting
 is not failing. With a review it waits until every required check on its
 list succeeded on the sha (I4: skipped, cancelled or missing is never a
 pass), then guards, in order: already an ancestor of `main` is a logged
-no-op; a sha off `merge-queue` (not the tip or an ancestor of it) refuses;
+no-op; a sha off `merge-queue` (not on the first-parent line of the tip — the tip
+itself or a commit reached by following first parents) refuses;
 `main` not an ancestor of the sha (diverged) refuses and a human merges
 `main` into `merge-queue`; a review base `main` does not contain refuses
 (`main..sha` would hold unreviewed commits). Only then does it push

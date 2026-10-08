@@ -27,19 +27,30 @@ import { deepFreeze } from '../harness/config.js';
  */
 export interface SelfhostDefaultsConfig {
   /**
-   * The scheduled runs' USD cap (I9 — the budget cap is an HONEST STOP: the
-   * governor stops the run when the derived cost rollup crosses it rather
-   * than pretending to have finished — a one-job merge plan surfaces the
-   * trip as the budget-exhausted job row (stoppedEarly stays false), and
-   * the loop path's per-PR governors surface it through the job row too).
-   * This is the workflow's `--max-usd` default and feeds BOTH compositions:
-   * the merge dispatch path's RunOptions.maxUsd and the review loop's
-   * runOptions.maxUsd. The effective cap is min(RunOptions.maxUsd,
-   * Limits.maxUsd) — the frozen cap-precedence rule — so a caller may lower
-   * it per run but no composition can raise it past what the workflow
-   * passed.
+   * The scheduled runs' TOKEN cap (I9 — the budget cap is an HONEST STOP:
+   * the governor stops the run when the token rollup crosses it rather than
+   * pretending to have finished — a one-job merge plan surfaces the trip as
+   * the budget-exhausted job row (stoppedEarly stays false), and the loop
+   * path's per-PR governors surface it through the job row too). It feeds
+   * BOTH compositions: the merge dispatch path's RunOptions.maxTokens and
+   * the review loop's runOptions.maxTokens (sweep-level there, carried
+   * forward across the PRs).
+   *
+   * WHY TOKENS, NOT USD: the served model (`driver`, below) is UNPRICED, so
+   * its results carry no costUSD and the governor's DD-9 unpriced-usage
+   * trip fails a run loud the moment real usage folds under a configured
+   * maxUsd. maxTokens is the DD-9 escape for exactly that case — it binds
+   * independently of pricing. A USD cap stays available as an explicit
+   * opt-in (`--max-usd`, for an adopter whose model is priced); there is
+   * deliberately NO USD default.
+   *
+   * 2_000_000 ≈ the retired 1 USD stop at a ~$0.50/Mtok blended flash-class
+   * rate. The rollup sums input + output + cacheRead + cacheWrite (the
+   * governor's totalTokensOf), and one fix-worker run on a mid-size diff
+   * reads several hundred thousand cached tokens, so this admits a few
+   * fix runs per sweep and stops a runaway one.
    */
-  maxUsd: number;
+  maxTokens: number;
   /**
    * Per-job wall clock in milliseconds — arms the governor's wall-clock
    * ladder (rung 1 = this value) on the MERGE DISPATCH PATHS
@@ -68,9 +79,9 @@ export interface SelfhostDefaultsConfig {
    * NOTE (review r2): the served id is UNPRICED — `glm-5.3-flash` has no
    * published list rates (`src/driver/pricing/data.ts`, docs/dd-2), so a
    * dispatch reports usage with no costUSD and the governor's DD-9
-   * unpriced-usage trip fires under a configured maxUsd. Pricing the
-   * served id is the tracked DD-8 rate-refresh work; this PR does not
-   * fabricate a rate.
+   * unpriced-usage trip fires under a configured maxUsd — which is why the
+   * default cap above is `maxTokens`. Pricing the served id is the tracked
+   * DD-8 rate-refresh work; this config does not fabricate a rate.
    */
   driver: ModelSpec;
   /**
@@ -94,7 +105,7 @@ export interface SelfhostDefaultsConfig {
  * nested write throws instead of mutating the shared value.
  */
 export const SelfhostDefaults: SelfhostDefaultsConfig = deepFreeze({
-  maxUsd: 1,
+  maxTokens: 2_000_000,
   perJobWallClockMs: 300_000,
   driver: { provider: 'zai', model: 'glm-5.3-flash' },
   baseBranch: 'merge-queue',
