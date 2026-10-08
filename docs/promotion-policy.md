@@ -65,8 +65,21 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 The crq status event wakes the gate. A dispatch of `merge-queue-gate` with a `sha` re-runs it.
 Gate runs serialize per target SHA, so a tip dispatch never displaces a queued promotion of a
 reviewed SHA.
-`cq-gate` (`gate.yml`) runs report-only while this policy holds. It must learn this signal before
-C2 retires `merge-queue-gate`.
+The C implementation of `cq-gate` (`gate.yml`) understands the reviewed-subject signal but is
+under a **temporary safety hold**. All real C promotions are unavailable: `--push` refuses
+immediately after selecting a reviewed subject, before closure checks, check waits, verifier
+dispatch or push. Already-contained queue states still return `noop`, and no eligible reviewed
+subject still returns `awaiting`. Report-only evaluation without `--push` remains available;
+`would-promote` means eligibility evaluation passed, not that a safe promotion is available.
+
+C2 cutover is incomplete. The unsatisfied prerequisite is an enforceable queue-membership
+guard in the same transaction as the main update, or enforced coordination covering every
+queue-invalidating writer through that update. A final queue read is only an observation;
+an equal-OID queue refspec can be skipped and does not provide a transactional assertion.
+No runtime flag or owner override bypasses the C hold. Removing it requires a reviewed
+implementation of the missing guarantee, not a setting change. This change neither retires
+the old `merge-queue-gate` promoter nor resolves its queue-rewind atomicity residual; the
+earlier membership condition describes eligibility and does not establish that guarantee.
 
 ## Accepted limit
 

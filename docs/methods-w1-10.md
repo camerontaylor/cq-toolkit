@@ -176,6 +176,13 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - a scrubbed environment and validated revisions;
     - `--end-of-options`.
 
+    **Temporary C safety hold:** the historical push mechanism described below is not reached
+    by real C promotion requests. Once a reviewed subject is selected, `--push` refuses before
+    closure checks, waits or verifier dispatch. Main-only leases cannot enforce queue membership
+    in the same transaction; an equal-OID queue update may be skipped. C2 cutover remains
+    incomplete until an enforceable guard exists. Report-only `would-promote` establishes
+    eligibility only. This hold does not repair the old promoter's queue-rewind residual.
+
     The push credential travels in a step-scoped `GIT_CONFIG_*` extra-header, never in argv or
     `.git/config`. The push is a real compare-and-swap: `--atomic` with an explicit
     `--force-with-lease=refs/heads/main:<oid>` leased on the `main` the gate read at step 1, and
