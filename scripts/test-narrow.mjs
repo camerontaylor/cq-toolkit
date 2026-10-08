@@ -41,7 +41,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isTest, selectAffected } from './lib/affected-tests.mjs';
 import { scrubbedBuildEnv } from './lib/build-env.mjs';
-import { EX_TEMPFAIL, acquireLock, describeHolder } from './lib/heavy-lock.mjs';
+import { EX_TEMPFAIL, acquireLock, canSignalGroup, describeHolder } from './lib/heavy-lock.mjs';
 import {
   DEFAULT_BASE,
   NICE_INCREMENT,
@@ -54,6 +54,7 @@ import {
   readReport,
   runVerdict,
   signalExit,
+  spawnLocked,
   summaryLine,
 } from './lib/test-narrow.mjs';
 
@@ -121,6 +122,7 @@ let printed = false;
 let releaseLock = () => {};
 let child = null;
 let childDone = false;
+let childIdentity = null;
 let interruptedBy = null;
 const relayed = new Set();
 
@@ -128,7 +130,15 @@ const relayed = new Set();
 const signalChild = (signal) => {
   if (child === null || childDone || child.pid === undefined) return;
   try {
-    if (POSIX) process.kill(-child.pid, signal);
+    if (POSIX) {
+      if (!canSignalGroup(childIdentity)) {
+        say(
+          `skipping ${signal} for process group ${child.pid}: gone or leader identity unverified`,
+        );
+        return;
+      }
+      process.kill(-child.pid, signal);
+    }
     // Windows has no process groups and child.kill() ends only the leader:
     // end the whole tree (cmd/pnpm/tsc, vitest's workers) while it is alive.
     else spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
@@ -361,8 +371,25 @@ const runGroup = (command, args, { label, timeoutMs, ...options }) =>
   new Promise((done) => {
     let timedOut = false;
     childDone = false;
-    child = spawn(command, args, { cwd: ROOT, detached: POSIX, ...options });
-    if (POSIX && child.pid !== undefined) lock.annotate({ childPgid: child.pid });
+    try {
+      const spawned = spawnLocked(
+        lock,
+        () => {
+          child = spawn(command, args, { cwd: ROOT, detached: POSIX, ...options });
+          // Keep local identity even if writing the lock annotation throws.
+          childIdentity = { childPgid: child.pid, childStartedAt: new Date().toISOString() };
+          return child;
+        },
+        POSIX,
+      );
+      child = spawned.child;
+      childIdentity = spawned.identity ?? childIdentity;
+    } catch (error) {
+      if (error.code === EX_TEMPFAIL) {
+        finish({ result: 'lock-lost', exit: EX_TEMPFAIL, reason: error.message });
+      }
+      throw error;
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       say(`${label} exceeded ${timeoutMs / 60_000} min; terminating`);
@@ -453,6 +480,13 @@ try {
   // no report (vitest died early, or never started): counts stay '-'
 }
 rmSync(reportDir, { recursive: true, force: true });
+if (lockPinned) {
+  finish({
+    result: 'error',
+    exit: 1,
+    reason: 'the test run left processes that could not be safely swept',
+  });
+}
 if (run.error !== undefined) {
   finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
 }

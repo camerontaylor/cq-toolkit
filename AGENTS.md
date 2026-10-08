@@ -86,7 +86,8 @@ fall back to every test, `integration`/`live` suites without
 `--include-integration`/`--include-live`, `--watch`, `--coverage` and every
 other vitest flag. A refusal is the answer: name a narrower set of files,
 never work around it. Quote the final `test:narrow result=…` line as
-evidence. Exit 75 means the lock stayed busy: retry later, never bypass.
+evidence. Exit 75 means the lock stayed busy or ownership was lost before a child spawn:
+retry later, never bypass.
 
 ## GLM peak-hour blackout
 

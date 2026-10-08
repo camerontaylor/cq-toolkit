@@ -81,6 +81,12 @@ obligations with a named owner.
 
 `pnpm test:narrow` (`scripts/test-narrow.mjs`) performs this selection; do not
 make it by hand. `pnpm test:narrow --dry-run` prints it without running it.
+The runner checks its ownership token immediately before each build or test
+spawn; exit 75 means a busy lock or lost ownership, and requires retrying later.
+Live drills also use this runner: export credentials first, then run
+`LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`.
+This drill is classified `integration`; suites classified `live` require
+`--include-live`. Neither class bypasses the host lock or bounded runtime.
 
 1. Start from the files the diff actually touches: by default the changes
    since the merge-base with `origin/merge-queue` plus the working tree

@@ -20,6 +20,7 @@ import {
   runVerdict,
   signalExit,
   summaryLine,
+  spawnLocked,
 } from '../../scripts/lib/test-narrow.mjs';
 
 const options = (argv: string[]) => {
@@ -423,5 +424,54 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('spawnLocked', () => {
+  it.each(['build', 'vitest'])('refuses a %s spawn after ownership was lost', () => {
+    const events: string[] = [];
+    const lock = {
+      annotate: (record: { childPending?: boolean }) => {
+        expect(record).toEqual({ childPending: true });
+        events.push('pending');
+      },
+      stillHeld: () => {
+        events.push('fence');
+        return false;
+      },
+    };
+    try {
+      spawnLocked(lock, () => {
+        events.push('spawn');
+        return { pid: 9 };
+      });
+      throw new Error('expected lock-lost refusal');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 75 });
+    }
+    expect(events).toEqual(['pending', 'fence']);
+  });
+
+  it('records pending before spawning and replaces it with the group identity immediately after', () => {
+    const events: string[] = [];
+    const identity = { childPgid: 9, childStartedAt: '2026-10-08T01:02:03.000Z' };
+    const lock = {
+      annotate: (record: { childPending?: boolean; childPgid?: number | null }) => {
+        events.push(record.childPending ? 'pending' : 'identity');
+        return identity;
+      },
+      stillHeld: () => {
+        events.push('fence');
+        return true;
+      },
+    };
+    const child = { pid: 9 };
+    expect(
+      spawnLocked(lock, () => {
+        events.push('spawn');
+        return child;
+      }),
+    ).toEqual({ child, identity });
+    expect(events).toEqual(['pending', 'fence', 'spawn', 'identity']);
   });
 });

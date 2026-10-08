@@ -70,3 +70,16 @@ export function runVerdict(input: {
   timedOut: boolean;
   interruptedBy: string | null;
 }): { result: string; exit: number; reason?: string };
+
+/** Fences and records one injected heavy spawn. */
+export function spawnLocked<T extends { pid?: number }>(
+  lock: {
+    stillHeld: () => boolean;
+    annotate: (fields: {
+      childPgid?: number | null;
+      childPending?: boolean;
+    }) => { childPgid?: number; childStartedAt?: string } | void;
+  },
+  spawnChild: () => T,
+  recordGroup?: boolean,
+): { child: T; identity: { childPgid?: number; childStartedAt?: string } | void };

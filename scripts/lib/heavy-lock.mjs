@@ -21,13 +21,15 @@
 //   - the lock is STALE when the owner is dead and no unverifiable group
 //     runs, when owner.json is still absent MISSING_OWNER_MS after the mkdir
 //     (the owner died in between), or when the record is older than
-//     MAX_HOLD_MS (last-resort ceiling; test-narrow kills its own run long
-//     before that). At the ceiling an unverifiable group is still never
-//     killed: the lock is reclaimed around it, with a loud warning;
+//     MAX_HOLD_MS with no live owner or running group. A dead owner
+//     with an unrecorded pending spawn stays busy until that ceiling.
+//     An unverifiable running group stays busy even beyond that ceiling;
 //   - reclaim runs under a short-lived guard directory (one reclaimer at a
 //     time), re-judges the record under the guard, and removes the lock only
-//     if it still holds the record judged stale; a lock is never renamed or
-//     removed while it might be live;
+//     by atomically renaming it to a unique tombstone. Only a tombstone
+//     with the judged token is removed; a moved fresh record is restored
+//     when possible, otherwise preserved with a loud warning. Holders
+//     re-check their token immediately before every heavy child spawn;
 //   - release removes the directory only while it still holds OUR token.
 // The path is fixed (not $TMPDIR, which differs between agent harnesses on
 // one host): every worktree and every agent of the host contends on it.
@@ -41,7 +43,7 @@ export const LOCK_PATH =
   process.platform === 'win32'
     ? join(tmpdir(), 'cq-toolkit-heavy.lock')
     : '/tmp/cq-toolkit-heavy.lock';
-/** EX_TEMPFAIL (sysexits.h): the lock stayed busy for the whole wait. */
+/** EX_TEMPFAIL (sysexits.h): the lock stayed busy or ownership was lost before a spawn. */
 export const EX_TEMPFAIL = 75;
 export const MISSING_OWNER_MS = 30_000;
 export const MAX_HOLD_MS = 2 * 60 * 60 * 1000;
@@ -123,12 +125,15 @@ function unverifiedGroup(holder, processStartMs) {
   return Math.abs(actual - recorded) <= START_SLACK_MS ? null : 'its leader was reused';
 }
 
-/**
- * The verdict on a holder: `reason` why the lock is reclaimable (null while
- * it is busy), `kill` = a verified orphan group to kill first, `warn` = a
- * loud line for a ceiling reclaim around an unverifiable group, `note` = why
- * a dead owner's lock is still busy.
- */
+/** Signal only an extant group whose leader is gone or has the recorded identity. */
+export function canSignalGroup(holder, deps = defaultDeps()) {
+  const pgid = holder?.childPgid;
+  if (typeof pgid !== 'number' || !deps.groupAlive(pgid)) return false;
+  if (!deps.isAlive(pgid)) return true;
+  return unverifiedGroup(holder, deps.processStartMs) === null;
+}
+
+/** The reclaim reason (null while busy), verified orphan to kill, and busy note. */
 export function judgeHolder(holder, dirMtimeMs, deps) {
   const { now, isAlive: alive, groupAlive, processStartMs } = deps;
   if (holder === null) {
@@ -136,8 +141,14 @@ export function judgeHolder(holder, dirMtimeMs, deps) {
   }
   const started = Date.parse(holder.startedAt);
   const expired = Number.isFinite(started) && now - started > MAX_HOLD_MS;
-  if (!expired && alive(holder.pid, holder.startedAt)) return { reason: null };
+  if (alive(holder.pid, holder.startedAt)) return { reason: null };
   const pgid = holder.childPgid;
+  if (holder.childPending && typeof pgid !== 'number' && !expired) {
+    return {
+      reason: null,
+      note: 'owner is gone with an unrecorded pending child; the lock stays busy until MAX_HOLD_MS',
+    };
+  }
   if (typeof pgid !== 'number' || !groupAlive(pgid)) {
     return { reason: expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone` };
   }
@@ -145,12 +156,6 @@ export function judgeHolder(holder, dirMtimeMs, deps) {
   if (why === null) {
     const owner = expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone`;
     return { reason: `${owner}; orphaned child group ${pgid}`, kill: pgid };
-  }
-  if (expired) {
-    return {
-      reason: 'held past MAX_HOLD_MS',
-      warn: `child group ${pgid} still runs and cannot be verified (${why}); reclaiming WITHOUT killing it`,
-    };
   }
   return {
     reason: null,
@@ -165,7 +170,7 @@ export function describeHolder(holder) {
 
 /**
  * Wait (bounded) for the lock. Resolves {acquired: true, waitedMs, release,
- * annotate} or {acquired: false, waitedMs, holder} once maxWaitMs has
+ * annotate, stillHeld} or {acquired: false, waitedMs, holder} once maxWaitMs has
  * elapsed. `info` = {cwd, command} is recorded for whoever waits behind us.
  */
 export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: overrides = {} }) {
@@ -183,6 +188,7 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
     fs.writeFileSync(temp, `${JSON.stringify(record)}\n`);
     fs.renameSync(temp, ownerFile(path));
   };
+  const stillHeld = () => readOwner(path, fs)?.token === token;
   const release = () => {
     if (readOwner(path, fs)?.token === token) fs.rmSync(path, { recursive: true, force: true });
   };
@@ -190,12 +196,19 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
    * Record our current child group, and its leader's identity, while we
    * still hold the lock; `childPgid: null` clears it once the group is gone.
    */
-  const annotate = ({ childPgid }) => {
-    if (readOwner(path, fs)?.token !== token) return;
-    const startMs = childPgid === null ? null : deps.processStartMs(childPgid);
+  const annotate = ({ childPgid, childPending = false }) => {
+    if (!stillHeld()) return;
+    const startMs = typeof childPgid === 'number' ? deps.processStartMs(childPgid) : null;
     const childStartedAt = startMs === null ? undefined : new Date(startMs).toISOString();
-    record = { ...record, childPgid: childPgid ?? undefined, childStartedAt };
+    record = {
+      ...record,
+      childPgid: childPgid ?? undefined,
+      childStartedAt,
+      childPending: childPending || undefined,
+      childPendingAt: childPending ? new Date(deps.now()).toISOString() : undefined,
+    };
     writeRecord();
+    return record;
   };
 
   const tryCreate = () => {
@@ -257,8 +270,29 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
         );
         return;
       }
-      if (verdict.warn !== undefined) deps.log(`heavy-lock: WARNING: ${verdict.warn}`);
-      fs.rmSync(path, { recursive: true, force: true });
+      const tombstone = `${path}.reclaim-${deps.token()}`;
+      try {
+        fs.renameSync(path, tombstone);
+      } catch (error) {
+        if (error.code === 'ENOENT') return;
+        throw error;
+      }
+      const moved = readOwner(tombstone, fs);
+      const matches =
+        judged === null
+          ? moved === null && fs.statSync(tombstone).mtimeMs === judgedMtimeMs
+          : moved?.token === judged.token;
+      if (!matches) {
+        try {
+          fs.renameSync(tombstone, path);
+        } catch (error) {
+          deps.log(
+            `heavy-lock: WARNING: moved a fresh holder's lock; restore failed (${error.code}); preserved ${tombstone}; holder must stop before spawning`,
+          );
+        }
+        return;
+      }
+      fs.rmSync(tombstone, { recursive: true, force: true });
       deps.log(`heavy-lock: reclaimed a stale lock (${verdict.reason})`);
     } finally {
       fs.rmSync(guard, { recursive: true, force: true });
@@ -266,7 +300,8 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   };
 
   for (;;) {
-    if (tryCreate()) return { acquired: true, waitedMs: deps.now() - start, release, annotate };
+    if (tryCreate())
+      return { acquired: true, waitedMs: deps.now() - start, release, annotate, stillHeld };
     const holder = readOwner(path, fs);
     let dirMtimeMs;
     try {

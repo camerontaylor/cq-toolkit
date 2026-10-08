@@ -13,13 +13,16 @@ export interface LockOwner {
   command: string;
   startedAt: string;
   childPgid?: number;
+  childPending?: boolean;
+  /** ISO time recorded before a child spawn. */
+  childPendingAt?: string;
   /** ISO start time of the child group's leader, recorded with childPgid. */
   childStartedAt?: string;
 }
 export interface LockDeps {
   fs: typeof import('node:fs');
   now: () => number;
-  isAlive: (pid: number, startedAt: string) => boolean;
+  isAlive: (pid: number, startedAt?: string) => boolean;
   processStartMs: (pid: number) => number | null;
   groupAlive: (pgid: number) => boolean;
   killGroup: (pgid: number) => void;
@@ -28,11 +31,11 @@ export interface LockDeps {
   pid: number;
   token: () => string;
 }
-export function isAlive(pid: number, startedAt: string): boolean;
+export function isAlive(pid: number, startedAt?: string): boolean;
 export function readOwner(dir: string, fs?: typeof import('node:fs')): LockOwner | null;
 export interface JudgeDeps {
   now: number;
-  isAlive: (pid: number, startedAt: string) => boolean;
+  isAlive: (pid: number, startedAt?: string) => boolean;
   groupAlive: (pgid: number) => boolean;
   processStartMs: (pid: number) => number | null;
 }
@@ -40,7 +43,7 @@ export function judgeHolder(
   holder: LockOwner | null,
   dirMtimeMs: number,
   deps: JudgeDeps,
-): { reason: string | null; kill?: number; warn?: string; note?: string };
+): { reason: string | null; kill?: number; note?: string };
 export function describeHolder(holder: LockOwner | null): string;
 export function acquireLock(input: {
   path?: string;
@@ -52,7 +55,16 @@ export function acquireLock(input: {
       acquired: true;
       waitedMs: number;
       release: () => void;
-      annotate: (fields: { childPgid: number | null }) => void;
+      stillHeld: () => boolean;
+      annotate: (fields: {
+        childPgid?: number | null;
+        childPending?: boolean;
+      }) => LockOwner | undefined;
     }
   | { acquired: false; waitedMs: number; holder: LockOwner | null }
 >;
+
+export function canSignalGroup(
+  holder: Pick<LockOwner, 'childPgid' | 'childStartedAt'> | null,
+  deps?: Pick<LockDeps, 'isAlive' | 'groupAlive' | 'processStartMs'>,
+): boolean;

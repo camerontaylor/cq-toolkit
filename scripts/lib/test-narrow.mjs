@@ -14,6 +14,7 @@
 //     FULL suite, which is CI-only).
 
 import { constants } from 'node:os';
+import { EX_TEMPFAIL } from './heavy-lock.mjs';
 
 export const MAX_FILES = 10;
 export const NICE_INCREMENT = 5;
@@ -45,7 +46,10 @@ Options:
 
 Refused: --watch, --coverage, --ui and any other vitest flag; more than
 ${MAX_FILES} test files; selections that fall back to every test; selections
-that include integration or live suites without their --include flag.`;
+that include integration or live suites without their --include flag.
+Exit 75: host lock busy or ownership lost before a child spawn; retry later.
+Live drill (classified integration):
+  LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`;
 
 const REFUSED_FLAGS = {
   '--watch': 'watch mode never terminates and holds the host lock',
@@ -282,4 +286,18 @@ export function runVerdict({ exit, report, files, timedOut, interruptedBy }) {
   const idle = files.filter((f) => (report.executed[f] ?? 0) === 0);
   if (idle.length > 0) return fail(`no tests executed in: ${idle.join(',')}`);
   return { result: 'pass', exit };
+}
+
+/** Fence each heavy spawn and cover a crash between spawn and child annotation. */
+export function spawnLocked(lock, spawnChild, recordGroup = true) {
+  lock.annotate({ childPending: true });
+  if (!lock.stillHeld()) {
+    throw Object.assign(new Error('host lock ownership lost before child spawn'), {
+      code: EX_TEMPFAIL,
+    });
+  }
+  const child = spawnChild();
+  const identity =
+    recordGroup && child.pid !== undefined ? lock.annotate({ childPgid: child.pid }) : undefined;
+  return { child, identity };
 }

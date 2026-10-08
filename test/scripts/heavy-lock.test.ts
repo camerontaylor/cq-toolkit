@@ -12,6 +12,7 @@ import {
   MAX_HOLD_MS,
   MISSING_OWNER_MS,
   acquireLock,
+  canSignalGroup,
   judgeHolder,
   readOwner,
 } from '../../scripts/lib/heavy-lock.mjs';
@@ -49,7 +50,11 @@ describe('acquireLock', () => {
     });
     expect(got.acquired).toBe(true);
     expect(readOwner(lock)).toMatchObject({ pid: 4242, token: 'tok-a', ...info });
-    if (got.acquired) got.release();
+    if (got.acquired) {
+      expect(got.stillHeld()).toBe(true);
+      got.release();
+      expect(got.stillHeld()).toBe(false);
+    }
     expect(fs.existsSync(lock)).toBe(false);
   });
 
@@ -238,15 +243,15 @@ describe('acquireLock', () => {
     expect(log).toContain('reclaimed a stale lock (owner pid 99 is gone)');
   });
 
-  it('reclaims around an unverifiable group at MAX_HOLD_MS, loudly and without killing', async () => {
+  it('keeps an expired unverifiable group busy without killing', async () => {
     const old = new Date(Date.now() - MAX_HOLD_MS - 1_000).toISOString();
     const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, null, {
       startedAt: old,
     });
     expect(killed).toEqual([]);
-    expect(got.acquired).toBe(true);
-    expect(log).toContain('heavy-lock: WARNING: child group 555 still runs and cannot be verified');
-    expect(log).toContain('reclaiming WITHOUT killing it');
+    expect(got.acquired).toBe(false);
+    expect(log).toContain('the lock stays busy');
+    expect(log).not.toContain('reclaimed');
   });
 
   it('waits while another reclaimer holds a fresh guard, and clears a stale one', async () => {
@@ -286,7 +291,12 @@ describe('acquireLock', () => {
       },
     });
     if (!got.acquired) throw new Error('expected the lock');
+    got.annotate({ childPending: true });
+    expect(readOwner(lock)?.childPending).toBe(true);
+    expect(typeof readOwner(lock)?.childPendingAt).toBe('string');
     got.annotate({ childPgid: 4321 });
+    expect(readOwner(lock)).not.toHaveProperty('childPending');
+    expect(readOwner(lock)).not.toHaveProperty('childPendingAt');
     expect(readOwner(lock)).toMatchObject({
       token: 'tok-k',
       childPgid: 4321,
@@ -309,6 +319,7 @@ describe('acquireLock', () => {
     });
     if (!got.acquired) throw new Error('expected the lock');
     fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 1, token: 'someone-else' }));
+    expect(got.stillHeld()).toBe(false);
     got.release();
     expect(readOwner(lock)?.token).toBe('someone-else');
   });
@@ -342,10 +353,10 @@ describe('judgeHolder', () => {
     expect(reason(null, now - MISSING_OWNER_MS - 1, deps)).toBe('no owner record');
   });
 
-  it('treats a dead pid or an over-long hold as stale', () => {
+  it('treats a dead pid as stale but never expires a live owner', () => {
     expect(reason(owner(fresh), now, { ...deps, isAlive: () => false })).toContain('is gone');
     const old = new Date(now - MAX_HOLD_MS - 1).toISOString();
-    expect(reason(owner(old), now, deps)).toContain('MAX_HOLD_MS');
+    expect(reason(owner(old), now, deps)).toBeNull();
   });
 
   it('kills only a verified orphan group, and waits on an unverifiable one', () => {
@@ -377,5 +388,88 @@ describe('judgeHolder', () => {
       deps: { token: () => 'tok-g', log: () => {} },
     });
     expect(got.acquired).toBe(true);
+  });
+});
+
+describe('reclaim tombstone fence', () => {
+  it.each([false, true])(
+    'preserves a fresh holder moved by a paused reclaimer (restore blocked=%s)',
+    async (blocked) => {
+      holderRecord(99, 'stale');
+      const lines: string[] = [];
+      const tombstone = `${lock}.reclaim-reclaimer`;
+      const racingFs = {
+        ...fs,
+        renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+          if (String(from) === lock) {
+            fs.rmSync(lock, { recursive: true });
+            holderRecord(7, 'fresh');
+            fs.renameSync(from, to);
+            if (blocked) holderRecord(8, 'newer');
+            return;
+          }
+          fs.renameSync(from, to);
+        },
+      } as typeof fs;
+      const got = await acquireLock({
+        path: lock,
+        maxWaitMs: 0,
+        info,
+        deps: {
+          fs: racingFs,
+          isAlive: (pid) => pid !== 99,
+          token: () => 'reclaimer',
+          log: (line) => lines.push(line),
+        },
+      });
+      expect(got.acquired).toBe(false);
+      expect(readOwner(lock)?.token).toBe(blocked ? 'newer' : 'fresh');
+      if (blocked) {
+        expect(readOwner(tombstone)?.token).toBe('fresh');
+        expect(lines.join('\n')).toContain('WARNING: moved a fresh holder');
+        expect(lines.join('\n')).toContain('preserved');
+      } else {
+        expect(fs.existsSync(tombstone)).toBe(false);
+      }
+    },
+  );
+});
+
+describe('pending child and signal identity', () => {
+  const now = 10_000_000;
+  const holder = {
+    pid: 1,
+    token: 't',
+    host: 'h',
+    cwd: '/',
+    command: 'pending',
+    startedAt: new Date(now).toISOString(),
+    childPending: true,
+    childPendingAt: new Date(now).toISOString(),
+  };
+  const deps = { now, isAlive: () => false, groupAlive: () => false, processStartMs: () => null };
+
+  it('keeps a dead owner with an unrecorded spawn busy until the hold ceiling', () => {
+    expect(judgeHolder(holder, now, deps).reason).toBeNull();
+    expect(judgeHolder(holder, now, { ...deps, now: now + MAX_HOLD_MS }).reason).toBeNull();
+    expect(judgeHolder(holder, now, { ...deps, now: now + MAX_HOLD_MS + 1 }).reason).toBe(
+      'held past MAX_HOLD_MS',
+    );
+  });
+
+  it('signals only a living group with a gone or matching leader', () => {
+    const record = { childPgid: 9, childStartedAt: new Date(now).toISOString() };
+    const alive = {
+      ...deps,
+      isAlive: () => true,
+      groupAlive: () => true,
+      processStartMs: () => now,
+    };
+    expect(canSignalGroup(record, alive)).toBe(true);
+    expect(canSignalGroup(record, { ...alive, processStartMs: () => now + 60_000 })).toBe(false);
+    expect(canSignalGroup(record, { ...alive, processStartMs: () => null })).toBe(false);
+    expect(canSignalGroup(record, { ...alive, isAlive: () => false })).toBe(true);
+    expect(canSignalGroup(record, { ...alive, groupAlive: () => false })).toBe(false);
+    expect(canSignalGroup({ childPgid: 9 }, alive)).toBe(false);
   });
 });
