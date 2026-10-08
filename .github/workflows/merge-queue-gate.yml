@@ -8,8 +8,8 @@
 #     binds the reviewed range as `main=<40-hex>` (that base must be main
 #     or an ancestor of main, so main..sha was reviewed). The pinned
 #     reviewer is the promotion reviewer App's bot user, matched by ALL
-#     THREE of creator.type == "Bot", creator.login == @@UNSET-REVIEWER-BOT-LOGIN@@
-#     and creator.id == -1 (a status carries no app id, so
+#     THREE of creator.type == "Bot", creator.login == cq-promotion-reviewer[bot]
+#     and creator.id == 339373542 (a status carries no app id, so
 #     the bot user is the identity: the `[bot]` login suffix is reserved for
 #     Apps and slugs are globally unique, and the numeric id survives even
 #     a hypothetical slug reuse). The identity comes ONLY from the owner's
@@ -168,7 +168,7 @@ jobs:
           # 20261004.md) provides the real bot login + numeric id. Never a
           # public-API lookup by guessed name — a stranger's public App can
           # own any name.
-          case "@@UNSET-REVIEWER-BOT-LOGIN@@" in
+          case "cq-promotion-reviewer[bot]" in
             @@UNSET*)
               echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
               exit 1;;
@@ -205,12 +205,12 @@ jobs:
           # trusting only the pinned reviewer bot (login + numeric id).
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" |
-            jq -s --arg bot_login '@@UNSET-REVIEWER-BOT-LOGIN@@' \
-              --argjson bot_id -1 "${REVIEW_JQ}")"
+            jq -s --arg bot_login 'cq-promotion-reviewer[bot]' \
+              --argjson bot_id 339373542 "${REVIEW_JQ}")"
           others="$(jq -r '.others' <<<"${rows}")"
           if jq -e '.review == null' <<<"${rows}" >/dev/null; then
             if [ "${GITHUB_EVENT_NAME}" = status ] || [ "${others}" -gt 0 ]; then
-              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from the pinned reviewer (@@UNSET-REVIEWER-BOT-LOGIN@@/-1)"
+              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from the pinned reviewer (cq-promotion-reviewer[bot]/339373542)"
               exit 1
             fi
             await "no crq/promotion-review status"
@@ -357,7 +357,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "@@UNSET-REVIEWER-BOT-LOGIN@@" in
+          case "cq-promotion-reviewer[bot]" in
             @@UNSET*)
               echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
               exit 1;;
@@ -400,8 +400,8 @@ jobs:
           # newer success review wakes its own gate run.
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
-            jq -s --arg bot_login '@@UNSET-REVIEWER-BOT-LOGIN@@' \
-              --argjson bot_id -1 "${REVIEW_JQ}")"
+            jq -s --arg bot_login 'cq-promotion-reviewer[bot]' \
+              --argjson bot_id 339373542 "${REVIEW_JQ}")"
           now_id="$(jq -r '.review.id // "none"' <<<"${rows}")"
           now_state="$(jq -r '.review.state // "none"' <<<"${rows}")"
           if [ "${now_id}" != "${REVIEW_ID}" ] || [ "${now_state}" != success ]; then

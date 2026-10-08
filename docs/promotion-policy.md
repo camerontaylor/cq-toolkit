@@ -25,8 +25,9 @@ crq gives a `promotion` item **absolute priority for the next start slot** (crq 
 starts per hour). It does not pre-empt a running review.
 
 crq reports the state as a commit status on the batch tip: context `crq/promotion-review`, posted
-by the promotion-review signer as the pinned reviewer bot (whose identity comes only from the
-owner's registration record — see [the interface](#the-crq-interface)).
+by the promotion-review signer as the pinned reviewer bot `cq-promotion-reviewer[bot]` (identity:
+the owner's registration record, `app-registration-session-20261004.md` @ `408c87f` — see
+[the interface](#the-crq-interface)).
 
 ## What blocks
 
@@ -43,11 +44,11 @@ owner's registration record — see [the interface](#the-crq-interface)).
 now. Merges that land after the cut wait for the next batch. The gate promotes the SHA only when:
 
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
-   binds `main=<base>`. The pinned reviewer is the promotion reviewer App's bot user, matched by
-   all three of creator type `Bot`, its recorded login and its numeric id (pinned in the gate
-   template, not a repo variable; the values come only from the owner's registration record, and
-   the gate refuses fail-closed until they are pinned). Any other creator — including the
-   repository owner's own
+   binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
+   by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
+   `339373542` (pinned in the gate template from the registration record @ `408c87f`, not a repo
+   variable; an UNSET token leaves the gate refusing fail-closed). Any other creator — including
+   the repository owner's own
    login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
    a red refusal when no trusted review exists. The gate re-reads the status
    immediately before the push: if a newer one (such as a signer `failure`) arrived during the
@@ -67,9 +68,9 @@ C2 retires `merge-queue-gate`.
 ## Accepted limit
 
 Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
-for the review signal by the pinned reviewer-bot identity (login + numeric id + type `Bot`,
-filled only from the owner's registration record; the gate refuses fail-closed while they are
-unpinned).
+for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
+`cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
+`408c87f` (the gate refuses fail-closed while unpinned).
 
 - A `crq/promotion-review` status now proves the signer ran the review: its private key lives
   only in the dedicated `crq` macOS user's home — outside an unprivileged agent's reach (see the
@@ -89,7 +90,7 @@ unpinned).
 The owner runs the `crq-override` tool, installed beside the signer and executed from the `crq`
 account's own login session (Fast User Switching at the login window — never `su`/`sudo -u` from
 an agent-reachable terminal). It verifies the target sha is a queue state beyond `main`, computes
-`main` itself, posts the status as the pinned reviewer bot, and logs the override to the signer's
+`main` itself, posts the status as `cq-promotion-reviewer[bot]`, and logs the override to the signer's
 audit log:
 
 ```sh
@@ -115,7 +116,7 @@ the host is down there is no remote override path either.
 
 A red run means a human must act. The causes are:
 
-- a `crq/promotion-review` status from a creator other than the pinned reviewer bot;
+- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`;
 - a reviewed SHA whose required checks failed, were skipped or cancelled, or never reported
   within the timeout;
 - a reviewed SHA that is off `merge-queue`;
@@ -142,8 +143,8 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
-  key in the `crq` user's home) as the pinned reviewer bot (identity per the owner's registration
-  record):
+  key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
+  (identity per the registration record @ `408c87f`):
   - `context`: `crq/promotion-review`
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
     (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then

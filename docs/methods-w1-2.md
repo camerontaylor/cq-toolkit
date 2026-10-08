@@ -79,7 +79,7 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   `acceptReviewStates` keeps only APPROVED/COMMENTED, and a blank list
   means APPROVED. `automationLogin` is excluded. The structural bots
   (`github-actions[bot]`, `cq-automation[bot]`, `cq-verdict[bot]`,
-  `cq-promoter[bot]`) are always excluded, and a
+  `cq-promoter[bot]`, `cq-promotion-reviewer[bot]`) are always excluded, and a
   `trustedBots` entry naming
   an excluded identity is dropped. `CONSERVATIVE_TRUST_POLICY` is
   `trustPolicyFromConfig({})`.
