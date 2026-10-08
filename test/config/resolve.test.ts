@@ -673,4 +673,112 @@ describe('pure configuration resolution', () => {
       expect(Object.isFrozen(config.secrets.CQ_AUTOMATION_TOKEN)).toBe(true);
     });
   });
+
+  describe('post-merge #285 review findings', () => {
+    // MAJOR (PRRT_kwDOUY73E86qLJRX): Object.fromEntries reintroduces
+    // Object.prototype, so a polluted inherited name could be read back as
+    // configuration on a direct lookup such as env.CQ_PROFILE.
+    it('ignores Object.prototype pollution in caller records', () => {
+      const proto = Object.prototype as Record<string, unknown>;
+      proto.CQ_PROFILE = 'solo-maintainer';
+      proto.CQ_APPROVAL_LEDGER = {
+        input: `${state}/cq/approvals.ndjson`,
+        realpath: `${state}/cq/approvals.ndjson`,
+      };
+      proto['run.envPassthrough'] = 'PATH';
+      try {
+        expect(resolveConfig({ env: {} }).profile).toBe('conservative');
+        expect(resolveConfig().profile).toBe('conservative');
+        expect(() => resolve({ values: {} })).not.toThrow();
+        expect(() =>
+          resolve({
+            env: { CQ_APPROVAL_LEDGER: `${state}/cq/approvals.ndjson` },
+            verifiedRealpaths: {},
+          }),
+        ).toThrow(/verified workspace path evidence required/);
+      } finally {
+        delete proto.CQ_PROFILE;
+        delete proto.CQ_APPROVAL_LEDGER;
+        delete proto['run.envPassthrough'];
+      }
+    });
+
+    // MAJOR (PRRT_kwDOUY73E86qLJRe): a copied Windows process.env snapshot has
+    // no case-insensitive lookup, so a passthrough name must be screened
+    // against the case-variant value it resolves to downstream.
+    it('screens Windows passthrough names against case-variant values', () => {
+      const credential = 'https://user:pass@example.test';
+      expect(() =>
+        resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'gh_token', GH_TOKEN: credential } }),
+      ).toThrow(/cannot be passed through/);
+      expect(() =>
+        resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'safe_endpoint', SAFE_ENDPOINT: credential } }),
+      ).not.toThrow();
+      expect(() =>
+        resolve({
+          env: { CQ_RUN_ENV_PASSTHROUGH: 'safe_endpoint', SAFE_ENDPOINT: credential },
+          platform: 'win32',
+        }),
+      ).toThrow(/cannot be passed through/);
+    });
+
+    // MINOR (PRRT_kwDOUY73E86qLJRf): a Windows drive path is a filename even
+    // when it contains a colon and a '#'.
+    it('does not treat drive-prefixed paths as credential URLs', () => {
+      for (const value of ['C:\\cache#v1', 'C:/cache#v1']) {
+        expect(
+          entryValue(
+            'run.envPassthrough',
+            resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_CACHE', SAFE_CACHE: value } }),
+          ),
+        ).toEqual(['SAFE_CACHE']);
+      }
+      expect(() =>
+        resolve({
+          env: {
+            CQ_RUN_ENV_PASSTHROUGH: 'SAFE_CACHE',
+            SAFE_CACHE: 'https://user:pass@example.test',
+          },
+        }),
+      ).toThrow(/cannot be passed through/);
+    });
+
+    // MINOR (PRRT_kwDOUY73E86qLJJy): path.win32 accepts root-relative paths,
+    // which resolve against the current drive; a Windows executable location
+    // must be drive-qualified, a full UNC path, or a bare name.
+    it('requires a drive-qualified or UNC absolute executable path on Windows', () => {
+      expect(
+        entryValue(
+          'gh.bin',
+          resolve({ env: { CQ_GH_BIN: 'C:\\tools\\gh.exe' }, platform: 'win32' }),
+        ),
+      ).toBe('C:\\tools\\gh.exe');
+      expect(
+        entryValue(
+          'gh.bin',
+          resolve({ env: { CQ_GH_BIN: '\\\\server\\share\\gh.exe' }, platform: 'win32' }),
+        ),
+      ).toBe('\\\\server\\share\\gh.exe');
+      for (const value of ['/usr/local/bin/gh', '\\bin\\gh.exe', 'C:bin\\gh.exe']) {
+        expect(() => resolve({ env: { CQ_GH_BIN: value }, platform: 'win32' })).toThrow(
+          /bare executable name/,
+        );
+      }
+      expect(() =>
+        resolve({
+          env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["/bin/claude.exe"]' },
+          platform: 'win32',
+        }),
+      ).toThrow(/argv/);
+      expect(
+        entryValue(
+          'driver.subprocess.command',
+          resolve({
+            env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["C:\\\\bin\\\\claude.exe"]' },
+            platform: 'win32',
+          }),
+        ),
+      ).toEqual(['C:\\bin\\claude.exe']);
+    });
+  });
 });
