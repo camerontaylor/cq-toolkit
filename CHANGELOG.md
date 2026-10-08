@@ -1,18 +1,26 @@
 # Changelog
 
-## 0.2.0 — pending
+All notable changes to `@camerontaylor/cq-toolkit`. Entries are generated
+from merged pull-request titles, grouped by the v1 workstreams of
+`plans/toolkit-v1-plan.md` §7 and the `plans/breakdown/ws-*.md` files
+(both in the private research repo — they are not published here).
+Links default to the
+`camerontaylor/cq-toolkit` repository; WS-J links are repo-qualified.
 
-First planned npm publication. The owner chose 0.2 on 2026-10-01 because
-the project is not stable. This release is gated on the remaining
-prepublication hardening, review debt, accepted ADR implementation, and G2
-adversarial evidence. The final change list and release date will be filled
-from merged PRs in the reviewed release PR. The postpublication fixtures
-and self-host proofs complete G3. See the
+## Unreleased
+
+Changes since the `v1.0.1` source milestone. The next release is planned as
+`0.2.0`, the first npm publication (owner decision 2026-10-01: the project is
+not stable). It is gated on the remaining prepublication hardening, review
+debt, accepted ADR implementation and G2 adversarial evidence. The release cut
+adds the `0.2.0` header, date and version bump; postpublication fixtures and
+self-host proofs complete G3. See the
 [0.2 release runbook](docs/0.2-release-runbook.md).
 
-Draft change list — every PR merged to `merge-queue` after the `v1.0.1`
-source milestone, through `70de728` (#238). Generated from merged PR titles
-on 2026-10-02; the reviewed release PR finalizes grouping and wording.
+Draft change list — PRs merged to `merge-queue` after `v1.0.1`, through
+`70de728`, generated from merged PR titles on 2026-10-02.
+**Stale:** merges after `70de728` are not listed yet; the release cut
+regenerates the list and finalizes grouping and wording.
 
 - Driver fixes after `v1.0.1`: strip the draft-2020-12 meta-schema URI
   before the claude CLI sees the schema
@@ -60,13 +68,6 @@ on 2026-10-02; the reviewed release PR finalizes grouping and wording.
 The dated `v1.0.0` and `v1.0.1` entries below describe historical source
 milestones; neither version was published to npm. The `v1.0.0` source tag
 is retained and will not be moved.
-
-All notable changes to `@camerontaylor/cq-toolkit`. Entries are generated
-from merged pull-request titles, grouped by the v1 workstreams of
-`plans/toolkit-v1-plan.md` §7 and the `plans/breakdown/ws-*.md` files
-(both in the private research repo — they are not published here).
-Links default to the
-`camerontaylor/cq-toolkit` repository; WS-J links are repo-qualified.
 
 ## v1.0.1 — 2026-09-21
 
