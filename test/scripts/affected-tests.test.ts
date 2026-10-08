@@ -1,7 +1,7 @@
 // Mapping and fallback logic for the advisory affected-test selector
 // (scripts/lib/affected-tests.mjs). Pure: no git, no vitest invocation.
 import { describe, expect, it } from 'vitest';
-import { selectAffected } from '../../scripts/lib/affected-tests.mjs';
+import { isTest, selectAffected } from '../../scripts/lib/affected-tests.mjs';
 
 const allTests = [
   'test/driver/a.test.ts',
@@ -42,6 +42,25 @@ describe('selectAffected', () => {
         related: [],
       }).files,
     ).toEqual(['test/driver/a.test.ts']);
+  });
+
+  it('recognizes test files by the vitest include globs, .mjs tests included', () => {
+    expect(isTest('test/api-report.test.mjs')).toBe(true);
+    expect(isTest('test/kernel/b.test.ts')).toBe(true);
+    expect(isTest('lint/rules/x.test.ts')).toBe(true);
+    expect(isTest('lint/rules/x.test.mjs')).toBe(false); // lint/** includes .ts only
+    expect(isTest('test/helpers/git-env.ts')).toBe(false);
+    const withMjs = [...allTests, 'test/api-report.test.mjs'];
+    expect(
+      selectAffected({ changed: ['test/api-report.test.mjs'], allTests: withMjs, related: [] }),
+    ).toEqual({ files: ['test/api-report.test.mjs'], fallback: false, reason: 'mapped' });
+    expect(
+      selectAffected({
+        changed: ['src/kernel/x.ts'],
+        allTests: withMjs,
+        related: ['test/api-report.test.mjs'],
+      }).files,
+    ).toEqual(['test/api-report.test.mjs']);
   });
 
   it('selects nothing for inert prose edits without falling back', () => {

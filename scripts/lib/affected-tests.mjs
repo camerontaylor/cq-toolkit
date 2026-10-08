@@ -74,7 +74,9 @@ export const INERT = [
   /^\.github\/(?!workflows\/|actions\/)/,
 ];
 
-const isTest = (path) => /^(test|lint)\/.*\.test\.ts$/.test(path);
+// A test file by vitest.config.ts's include globs: `.test.ts` or `.test.mjs`
+// under test/, `.test.ts` under lint/.
+export const isTest = (path) => /^(test\/.*\.test\.(ts|mjs)|lint\/.*\.test\.ts)$/.test(path);
 // src/** is delegated to the import graph (plus the scanner rows above):
 // `related` is an aggregate answer, so a src file with no importing test
 // selects nothing rather than falling back.

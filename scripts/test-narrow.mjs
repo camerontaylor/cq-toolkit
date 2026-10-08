@@ -36,7 +36,7 @@ import {
 import { constants, getPriority, loadavg, setPriority, tmpdir, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { selectAffected } from './lib/affected-tests.mjs';
+import { isTest, selectAffected } from './lib/affected-tests.mjs';
 import { EX_TEMPFAIL, acquireLock, describeHolder } from './lib/heavy-lock.mjs';
 import {
   DEFAULT_BASE,
@@ -248,7 +248,7 @@ const allTests = [
     ),
   ]),
 ]
-  .filter((file) => file.endsWith('.test.ts') && existsSync(file))
+  .filter((file) => isTest(file) && existsSync(file))
   .sort();
 
 // The import-graph query loads vitest's module graph (no tests execute); it

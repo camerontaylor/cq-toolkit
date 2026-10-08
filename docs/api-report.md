@@ -31,7 +31,7 @@ against the packed tarball.
 Direct tooling tests can be run without the repository's full test suite:
 
 ```sh
-pnpm exec vitest run test/api-report.test.mjs
+pnpm test:narrow test/api-report.test.mjs
 ```
 
 Wildcard (`*`) export targets and array targets are rejected explicitly rather
