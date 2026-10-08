@@ -10,6 +10,7 @@ import { hackDetector } from '../../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
 import { classifyStagePaths } from '../../../src/ops/sweep/unit.js';
 import { isProtectedStagePath } from '../../../src/ops/gates/protectedPaths.js';
+import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
 
 const execFileAsync = promisify(execFile);
 const CLEANUP: string[] = [];
@@ -210,7 +211,7 @@ describe('RS-10 detector and totals regressions', () => {
   });
 
   test(
-    'real git: hostile binary/diff/textconv/external/noprefix config cannot hide staged bytes',
+    'real git: hostile binary/diff/textconv/external/noprefix config cannot hide staged test bytes',
     { timeout: 30_000 },
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'cq-tamper-git-'));
@@ -222,43 +223,143 @@ describe('RS-10 detector and totals regressions', () => {
       await git(['init', '-q', '-b', 'main']);
       await git(['config', 'user.email', 'test@example.invalid']);
       await git(['config', 'user.name', 'Test']);
-      writeFileSync(join(root, 'victim.ts'), 'export const value = 1;\n');
-      writeFileSync(join(root, '.gitattributes'), 'victim.ts -diff\n');
+      await git(['config', 'diff.noprefix', 'true']);
+      await git(['config', 'diff.mnemonicPrefix', 'true']);
+      await git(['config', 'diff.external', 'false']);
+      await git(['config', 'diff.hostile.textconv', 'false']);
+      writeFileSync(
+        join(root, 'victim.test.ts'),
+        [
+          "import { describe, expect, it } from 'vitest';",
+          '',
+          "describe('payment', () => {",
+          "  it('never fails to charge the card once', () => {",
+          '    expect(false).toBe(true);',
+          '  });',
+          '});',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(join(root, '.gitattributes'), 'victim.test.ts -diff\n');
       await git(['add', '.']);
       await git(['commit', '-q', '-m', 'base']);
       writeFileSync(
         join(root, '.gitattributes'),
-        ['victim.ts binary -diff textconv=hostile diff.external=false', '*.ts -diff', ''].join(
-          '\n',
-        ),
+        // Last match wins per attribute, so the victim line comes after the
+        // glob and `diff=hostile` after `binary`'s implied `-diff`.
+        ['*.ts -diff', 'victim.test.ts binary diff=hostile', ''].join('\n'),
       );
-      writeFileSync(join(root, 'victim.ts'), 'export const value = 2;\n');
+      // The worker's actual target: remove the failing test declaration while
+      // the hostile attributes would hide the edit. The verdict must identify
+      // THIS path and its removed bytes, not merely the attributes file.
+      writeFileSync(
+        join(root, 'victim.test.ts'),
+        [
+          "import { describe, expect, it } from 'vitest';",
+          '',
+          "describe('payment', () => {",
+          '});',
+          '',
+        ].join('\n'),
+      );
       await git(['add', '.']);
+      expect(await git(['check-attr', 'diff', '--', 'victim.test.ts'])).toBe(
+        'victim.test.ts: diff: hostile\n',
+      );
+      // Negative control: without --no-textconv Git runs the hostile driver
+      // (`false`) and refuses to render the diff at all, so the shared flags
+      // below are what expose the removed bytes.
+      await expect(
+        git([
+          'diff',
+          '--cached',
+          ...SWEEP_DIFF_FLAGS.filter((flag) => flag !== '--no-textconv'),
+          '--',
+        ]),
+      ).rejects.toThrow(/unable to read files to diff/);
 
-      const diff = await git([
-        '-c',
-        'diff.noprefix=false',
-        '-c',
-        'diff.mnemonicPrefix=true',
-        'diff',
-        '--cached',
-        '--text',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-renames',
-        '--src-prefix=a/',
-        '--dst-prefix=b/',
-        '--',
-      ]);
-      expect(diff).toContain('--- a/victim.ts');
-      expect(diff).toContain('+++ b/victim.ts');
-      expect(diff).toContain('+export const value = 2;');
+      const diff = await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']);
+      expect(diff).toContain('--- a/victim.test.ts');
+      expect(diff).toContain('+++ b/victim.test.ts');
+      expect(diff).toContain("-  it('never fails to charge the card once', () => {");
       expect(diff).not.toContain('Binary files');
-      expect(classifyStagePaths(pathsOf(diff)).kind).toBe('protected');
+      const paths = pathsOf(diff);
+      expect(isProtectedStagePath('victim.test.ts')).toBe(true);
+      const stage = classifyStagePaths(paths);
+      expect(stage.kind).toBe('protected');
+      expect(stage.paths).toContain('victim.test.ts');
+      expect(stage.paths).toContain('.gitattributes');
       const detected = await hackDetector({ diff });
+      expect(detected.status).toBe('ok');
+      const findings = detected.status === 'ok' ? detected.value : [];
+      expect(findings.some((finding) => finding.kind === 'protected-config')).toBe(true);
       expect(
-        detected.status === 'ok' && detected.value.some((f) => f.kind === 'protected-config'),
+        findings.some(
+          (finding) => finding.kind === 'removed-test' && finding.file === 'victim.test.ts',
+        ),
       ).toBe(true);
+    },
+  );
+
+  test(
+    'real git: a rename hiding a deleted test is split by the shared flags and refused by test identity',
+    { timeout: 30_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'cq-tamper-git-rename-'));
+      CLEANUP.push(root);
+      const git = async (args: string[]): Promise<string> => {
+        const result = await execFileAsync('git', args, { cwd: root, timeout: 10_000 });
+        return result.stdout;
+      };
+      await git(['init', '-q', '-b', 'main']);
+      await git(['config', 'user.email', 'test@example.invalid']);
+      await git(['config', 'user.name', 'Test']);
+      // The worker wants rename detection ON so the deleted test hides inside
+      // a "rename"; the shared production flags force --no-renames over any
+      // repo config and explicit prefixes over noprefix.
+      await git(['config', 'diff.renames', 'true']);
+      await git(['config', 'diff.noprefix', 'true']);
+      writeFileSync(join(root, 'auth.ts'), 'export const check = (): boolean => true;\n');
+      writeFileSync(
+        join(root, 'auth.test.ts'),
+        [
+          "import { expect, it } from 'vitest';",
+          '',
+          "it('rejects an expired token', () => {",
+          '  expect(false).toBe(true);',
+          '});',
+          '',
+        ].join('\n'),
+      );
+      await git(['add', '.']);
+      await git(['commit', '-q', '-m', 'base']);
+      await git(['mv', 'auth.test.ts', 'auth-utils.ts']);
+
+      const diff = await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']);
+      expect(diff).toContain('--- a/auth.test.ts');
+      expect(diff).toContain('+++ /dev/null');
+      expect(diff).toContain('+++ b/auth-utils.ts');
+      expect(diff).toContain("-it('rejects an expired token', () => {");
+      expect(diff).not.toContain('rename ');
+
+      const paths = pathsOf(diff);
+      expect(paths).toContain('auth.test.ts');
+      expect(paths).toContain('auth-utils.ts');
+      const stage = classifyStagePaths(paths);
+      expect(stage.kind).toBe('protected');
+      expect(stage.paths).toContain('auth.test.ts');
+
+      const detected = await hackDetector({ diff });
+      expect(detected.status).toBe('ok');
+      const findings = detected.status === 'ok' ? detected.value : [];
+      expect(
+        findings.some(
+          (finding) => finding.kind === 'deleted-test-file' && finding.file === 'auth.test.ts',
+        ),
+      ).toBe(true);
+      // Non-vacuous: no protected config path is staged here — the refusal
+      // names the removed test itself, purely by test identity.
+      expect(findings.some((finding) => finding.kind === 'protected-config')).toBe(false);
     },
   );
 });

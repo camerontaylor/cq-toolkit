@@ -182,7 +182,8 @@ describe('ratchet family op registry entries', () => {
           },
         })
       ).stdout.trim();
-    // Construct the real two-commit repository outside the assertion deadline.
+    // Construct the real two-commit repository outside the assertion deadline;
+    // the process project's 60s hookTimeout / 30s testTimeout cover the Git work.
     // Inline commit identity and signing settings avoid three setup subprocesses.
     beforeAll(async () => {
       repo = await mkdtemp(join(tmpdir(), 'cq-op-registry-ref-'));
@@ -213,7 +214,7 @@ describe('ratchet family op registry entries', () => {
       base = await git('rev-parse', 'HEAD');
       await writeFile(join(repo, rel), baseline(94), 'utf8');
       await git(...commitConfig, 'commit', '-q', '-am', 'tighten');
-    }, 30_000);
+    });
 
     afterAll(async () => {
       if (repo !== undefined) await rm(repo, { recursive: true, force: true });
@@ -232,7 +233,7 @@ describe('ratchet family op registry entries', () => {
       expect(await op({ repo, base: '--output=bad', head: 'HEAD' })).toMatchObject({
         status: 'failed',
       });
-    }, 15_000);
+    });
   });
 
   test('trusted verifier importers preserve failed op results', async () => {

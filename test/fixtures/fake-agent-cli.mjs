@@ -445,7 +445,16 @@ async function shutdownServers() {
     servers.map(async (conn) => {
       if (conn.exited || conn.child === undefined) return;
       conn.child.stdin.end();
-      const exited = await Promise.race([conn.exitPromise.then(() => true), sleep(2_000)]);
+      // The grace timer must be cleared once the server exits: an un-cleared
+      // 2s timer keeps this process's event loop alive, so every run with a
+      // well-behaved server paid the full grace before exiting. The bound
+      // itself is deliberate (stragglers get SIGKILL after 2s).
+      let timer;
+      const grace = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), 2_000);
+      });
+      const exited = await Promise.race([conn.exitPromise.then(() => true), grace]);
+      clearTimeout(timer);
       if (!exited) conn.child.kill('SIGKILL');
     }),
   );

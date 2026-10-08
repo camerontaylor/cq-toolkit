@@ -1,8 +1,8 @@
-// Slice C — the merge-queue gate's fail-closed mechanics, tested over BOTH
-// the generated workflow (.github/workflows/merge-queue-gate.yml) and its
-// source of truth (policy/templates/merge-queue-gate.yml): the files must
-// stay in lockstep, so every extracted program and every textual assertion
-// runs against both.
+// Slice C — the merge-queue gate's fail-closed mechanics, tested over the
+// generated workflow (.github/workflows/merge-queue-gate.yml) and its source
+// of truth (policy/templates/merge-queue-gate.yml). The extracted programs
+// and guards are byte-compared across both files; after that identity check,
+// the real awk matrix and shell guard run once against the shared copy.
 //
 // Pinned here:
 //   1. The awk verdict program (extracted verbatim from each file and run as
@@ -15,8 +15,10 @@
 //      check list must exit 1 with the refusing message BEFORE the wait loop
 //      can spin zero times and promote; a populated list passes the guard
 //      (positive control, exit 0) in both files.
-//   3. The promotion text: the merge-queue-tip guard, the skipped case
-//      branch, and a checkout pinned to exactly 40 lowercase hex chars.
+//   3. The promotion text: the on-queue guard, the promotion-review
+//      requirement (status context, User creators, reviewed base, no push
+//      trigger), the skipped case branch, the awaiting exit (green, no
+//      promotion), and a checkout pinned to exactly 40 lowercase hex chars.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -176,52 +178,61 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     ).toBe(normalize(template.text));
   });
 
-  // 18 real awk spawns (2 programs x 9 cases); a macOS awk cold start costs
-  // ~0.5-1s each, so this needs a generous timeout like the ratchet sandbox
-  // tests that spawn tsc.
-  it(
-    'runs the exact verdict matrix through both files\u2019 awk programs',
-    { timeout: 120_000 },
-    () => {
-      for (const { label, progFile } of gates) {
-        for (const testCase of VERDICT_CASES) {
-          const verdict = execFileSync('awk', ['-F', '\t', '-v', 'c=static', '-f', progFile], {
-            input: testCase.rows,
-            encoding: 'utf8',
-          }).trim();
-          expect(verdict, `${label}: ${testCase.name}`).toBe(testCase.expected);
-        }
-      }
-    },
-  );
-
-  describe('fail-closed empty-checks guard', () => {
-    for (const { label, text } of gates) {
-      it(`refuses an empty check list with exit 1 before any waiting (${label})`, () => {
-        const script = join(tmp, `empty-${label}.sh`);
-        writeFileSync(script, scriptFor(text, ''));
-        const res = spawnSync('bash', [script], { encoding: 'utf8' });
-        const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
-        expect(res.status, output).toBe(1);
-        expect(output).toContain('refusing: GATE_CHECKS is empty');
-      });
-
-      it(`positive control: a populated check list passes the guard with exit 0 (${label})`, () => {
-        const script = join(tmp, `populated-${label}.sh`);
-        writeFileSync(script, scriptFor(text, 'static,denylist'));
-        const res = spawnSync('bash', [script], { encoding: 'utf8' });
-        expect(res.status, `${res.stdout ?? ''}${res.stderr ?? ''}`).toBe(0);
-      });
+  // The identity assertion above proves both sources are byte-identical.
+  // Execute the matrix and guard once against that shared copy: 9 awk + 2
+  // bash instead of repeating the same programs for the template copy.
+  // Three observed runs took 34.26–46.61s; 100s is over 2× the slowest
+  // run while still bounding the 9-awk process matrix against a stall.
+  it('runs the exact verdict matrix through the shared awk program', { timeout: 100_000 }, () => {
+    const { label, progFile } = gates[0]!;
+    for (const testCase of VERDICT_CASES) {
+      const verdict = execFileSync('awk', ['-F', '\t', '-v', 'c=static', '-f', progFile], {
+        input: testCase.rows,
+        encoding: 'utf8',
+      }).trim();
+      expect(verdict, `${label}: ${testCase.name}`).toBe(testCase.expected);
     }
   });
 
-  describe('promotion guard, skipped refusal, and the immutable checkout pin', () => {
+  describe('fail-closed empty-checks guard', () => {
+    const { label, text } = gates[0]!;
+    it(`refuses an empty check list with exit 1 before any waiting (${label})`, () => {
+      const script = join(tmp, `empty-${label}.sh`);
+      writeFileSync(script, scriptFor(text, ''));
+      const res = spawnSync('bash', [script], { encoding: 'utf8' });
+      const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
+      expect(res.status, output).toBe(1);
+      expect(output).toContain('refusing: GATE_CHECKS is empty');
+    });
+
+    it(`positive control: a populated check list passes the guard with exit 0 (${label})`, () => {
+      const script = join(tmp, `populated-${label}.sh`);
+      writeFileSync(script, scriptFor(text, 'static,denylist'));
+      const res = spawnSync('bash', [script], { encoding: 'utf8' });
+      expect(res.status, `${res.stdout ?? ''}${res.stderr ?? ''}`).toBe(0);
+    });
+  });
+
+  describe('promotion guards, review signal, skipped refusal, and the checkout pin', () => {
     for (const { label, text } of gates) {
-      it(`carries the tip guard, the skipped case branch, and a 40-hex checkout pin (${label})`, () => {
-        expect(text, `${label}: the merge-queue-tip guard`).toContain(
-          'is not the current merge-queue tip',
+      it(`carries the queue guard, the review signal, the skipped branch, a 40-hex pin (${label})`, () => {
+        expect(text, `${label}: the on-queue guard`).toContain('is not on merge-queue');
+        // Batch policy: promotion needs the crq/promotion-review status from
+        // an allowed USER, bound to a reviewed base, and no push trigger.
+        expect(text, `${label}: the review status context`).toContain(
+          "github.event.context == 'crq/promotion-review'",
         );
+        expect(text, `${label}: bots never count as reviewers`).toContain('.type == "User"');
+        expect(text, `${label}: the reviewed-base binding`).toContain('REVIEW_BASE');
+        expect(text, `${label}: no push trigger`).not.toMatch(/^ {2}push:/m);
         expect(text, `${label}: the skipped case branch`).toContain('concluded skipped');
+        // Waiting is not failing: an unreviewed or blocked sha ends green
+        // and promotes nothing; every step after the review is skipped.
+        expect(text, `${label}: the awaiting summary`).toContain('awaiting promotion review');
+        expect(
+          text.match(/^ {8}if: steps\.review\.outputs\.promote == 'true'$/gm)?.length,
+          `${label}: wait, checkout, validate and promote run only for a reviewed sha`,
+        ).toBe(4);
         const checkoutLines = text
           .split(/\r?\n/)
           .filter((line) => line.includes('uses: actions/checkout@'));

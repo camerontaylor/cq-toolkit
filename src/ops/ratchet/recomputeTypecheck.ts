@@ -15,7 +15,7 @@
 //   - TRUSTED TOOLCHAIN OUTSIDE THE TREE: the tree lands in
 //     `<scratch>/tree`, which has no `node_modules` of its own; module and
 //     `@types` resolution walk up to `<scratch>/node_modules`, a symlink to
-//     the TRUST checkout's install (`npm ci --ignore-scripts`). The compiler
+//     the TRUST checkout's install (`pnpm install --frozen-lockfile --ignore-scripts`). The compiler
 //     binary is the trust checkout's `typescript/bin/tsc`, run by this
 //     process's node with an argv array (no shell).
 //   - NO HEAD CODE RUNS: tsc executes no project code and the tsc CLI does

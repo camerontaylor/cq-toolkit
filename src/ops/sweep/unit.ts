@@ -49,7 +49,9 @@ import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex } from './gitMutex.js';
+import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
+import type { WorktreeEffects } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { SweepWorkspace, WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
 
@@ -237,6 +239,13 @@ export interface SweepUnitBindings {
   mutex?: WorktreeMutexConfig;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
+  /**
+   * Optional worktree/git effects seam. The dispatch registry omits this and
+   * therefore keeps the shipped subprocess adapter; SDK callers can inject
+   * a fresh fake per op instance when they need to exercise unit orchestration
+   * without spawning git.
+   */
+  worktreeEffects?: WorktreeEffects;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
   runCheck: RunCheck;
   /** The per-package check command, resolved against the unit's worktree. */
@@ -451,9 +460,10 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
   const probe = makeBaselineProbe(bindings.runCheck);
   const worktreeFor = makeWorktreeFor(
-    makeSubprocessWorktreeEffects(bindings.repoRoot, {
-      timeoutMs: bindings.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
-    }),
+    bindings.worktreeEffects ??
+      makeSubprocessWorktreeEffects(bindings.repoRoot, {
+        timeoutMs: bindings.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
+      }),
   );
   return async (unit) => {
     // The RESOLVED segments: the plan builder's collision disambiguation
@@ -635,12 +645,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       worktree.path,
       'diff',
       '--cached',
-      '--text',
-      '--no-ext-diff',
-      '--no-textconv',
-      '--no-renames',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
+      ...SWEEP_DIFF_FLAGS,
       '--',
     ]);
     if (diff.code !== 0) {
@@ -1195,12 +1200,7 @@ async function enforceStagePathAllowlist(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1263,12 +1263,7 @@ async function commitStaged(
     worktree.path,
     'diff',
     '--cached',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--quiet',
   ]);
   if (empty.code !== 0 && empty.code !== 1) {
@@ -1782,12 +1777,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--name-status',
     '-z',
   ]);
@@ -1811,12 +1801,7 @@ async function verifyScannedTip(
     'diff',
     'HEAD^',
     'HEAD',
-    '--text',
-    '--no-ext-diff',
-    '--no-textconv',
-    '--no-renames',
-    '--src-prefix=a/',
-    '--dst-prefix=b/',
+    ...SWEEP_DIFF_FLAGS,
     '--',
   ]);
   if (committedDiff.code !== 0) {

@@ -1,7 +1,7 @@
 # `merge.runPrs`
 
 Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-op-docs.mjs).
-Do not edit by hand — run `npm run gen:op-docs`.
+Do not edit by hand — run `pnpm run gen:op-docs`.
 
 - **Family:** `merge`
 - **CLI:** `cq merge.runPrs [--<schema-key>=<value> ...] [--json]`; run `cq merge.runPrs --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))

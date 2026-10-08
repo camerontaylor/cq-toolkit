@@ -4,7 +4,7 @@
 
 /** Regex sources for test and test-support roots protected at every depth. */
 export const PROTECTED_TEST_ROOT_PATTERN_SOURCES: readonly string[] = Object.freeze([
-  '(^|/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__)/',
+  '(^|/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__|cypress|e2e|test-utils)/',
 ]);
 
 /** Regex sources for test/spec filenames in every supported module suffix. */
@@ -47,6 +47,12 @@ export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
  */
 export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /\.config\.[^/]+$/i,
+  // Runner entry points and environment files can alter or suppress test evidence.
+  // globalSetup is spelled separately because Vitest's canonical camelCase
+  // key has no [-.] separator for the alternation below to match.
+  /(?:^|\/)(?:setupTests|globalSetup|global[-.]setup|conftest)\.(?:[cm]?[jt]sx?|py)$/i,
+  /(?:^|\/)\.env\.test(?:\.[^/]+)?$/i,
+  /(?:^|\/)(?:oxlint\.json|karma\.conf\.[cm]?[jt]s)$/i,
   // Ratchet evidence: the definitions (ratchets.json) and every baseline a
   // ratchet is measured against. A worker baseline edit is a definition of
   // what the ratchet means, not ordinary content.
@@ -82,6 +88,8 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /^\.husky(?:\/|$)/i,
   /(?:^|\/)vitest\.(?:workspace|projects)\.(?:[cm]?[jt]sx?|json)$/i,
   /(?:^|\/)(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|poetry\.lock|uv\.lock|pdm\.lock|Pipfile\.lock|Gemfile\.lock|Cargo\.lock|composer\.lock|mix\.lock|go\.sum)$/i,
+  // pnpm settings and install hooks decide what a lockfile install materializes.
+  /(?:^|\/)(?:pnpm-workspace\.yaml|\.pnpmfile\.[cm]?js)$/i,
 ]);
 
 /** Every protected worker path, in one default-deny taxonomy. */
