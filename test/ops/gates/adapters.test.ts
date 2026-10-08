@@ -204,6 +204,42 @@ describe('vitest-json adapter (real captured fixture)', () => {
   });
 });
 
+describe('vitest-json adapter unnamed assertions', () => {
+  test('a failing assertion with no name fields is marked vitest-unnamed and keeps its location', () => {
+    const stdout = JSON.stringify({
+      success: false,
+      numTotalTests: 1,
+      testResults: [
+        {
+          name: '/tmp/a.test.ts',
+          status: 'failed',
+          assertionResults: [
+            {
+              status: 'failed',
+              location: { line: 10, column: 3 },
+              failureMessages: ['AssertionError: expected 1 to be 2\n  at x'],
+            },
+          ],
+        },
+      ],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 1 });
+    expect(result).toMatchObject({
+      verdict: 'parsed',
+      set: {
+        failures: [
+          {
+            line: 10,
+            column: 3,
+            ruleId: 'vitest-unnamed',
+            message: 'AssertionError: expected 1 to be 2',
+          },
+        ],
+      },
+    });
+  });
+});
+
 describe('eslint-json adapter (real captured fixture)', () => {
   const ESLINT_FILE = '/private/tmp/cq-gates-fixtures.TA8IFi/bad.ts';
 

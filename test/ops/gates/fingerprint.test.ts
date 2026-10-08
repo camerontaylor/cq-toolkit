@@ -401,6 +401,16 @@ describe('fingerprintSet', () => {
     );
   });
 
+  test('unnamed vitest assertions with the same message at different lines key differently', () => {
+    const unnamed = (line: number): string =>
+      fingerprintFailure(
+        failureOf({ line, column: 1, message: 'AssertionError', ruleId: 'vitest-unnamed' }),
+        { tool: 'vitest' },
+      );
+    expect(unnamed(10)).not.toBe(unnamed(200));
+    expect(unnamed(10)).toBe(unnamed(11));
+  });
+
   test('empty failure set yields an empty fingerprint set', () => {
     expect(fingerprintSet({ tool: 'eslint', failures: [], exitCode: 0 }).size).toBe(0);
   });

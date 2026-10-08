@@ -17,6 +17,14 @@ import type {
 /** `ruleId` marking a suite-level (no failing assertion) Vitest failure. */
 export const VITEST_SUITE_RULE_ID = 'vitest-suite';
 
+/**
+ * `ruleId` marking an assertion that carried NO test name (`fullName`,
+ * `ancestorTitles` and `title` all absent): its `message` is the first
+ * failure-message line, not a stable test name, so identity must stay
+ * position-based.
+ */
+export const VITEST_UNNAMED_RULE_ID = 'vitest-unnamed';
+
 /** Adapter for vitest's `--reporter=json` output. */
 export const vitestJsonAdapter: CheckAdapter = {
   name: 'vitest-json',
@@ -73,7 +81,8 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
       }
       failingAssertions++;
       const line = firstFailureLine(record);
-      const message = assertionMessage(record, line);
+      const name = assertionMessage(record, null);
+      const message = name ?? line;
       if (message === null) {
         return {
           verdict: 'indeterminate',
@@ -85,7 +94,8 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
         file,
         line: typeof location?.line === 'number' ? location.line : null,
         column: typeof location?.column === 'number' ? location.column : null,
-        ruleId: null,
+        // Discriminator: without a test name the message is error text, not identity.
+        ruleId: name === null ? VITEST_UNNAMED_RULE_ID : null,
         message,
         severity: 'error',
       });

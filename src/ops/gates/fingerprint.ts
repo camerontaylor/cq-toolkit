@@ -8,7 +8,7 @@
 // bucket, so they match by CONTENT instead: the normalized message — for
 // vitest assertions the FULL test name, since `adapters/vitest.ts` carries the
 // test's `fullName` (or `ancestorTitles`+`title`) in `message`. Suite-level
-// vitest failures (ruleId `vitest-suite`, free-form error text) use the
+// vitest failures (ruleId `vitest-suite` or `vitest-unnamed`, free-form error text) use the
 // first-line content regime instead. Duplicate canonical
 // identities receive occurrence ordinals, preserving counts without
 // depending on input order. Pure decision code: zero I/O.
@@ -34,7 +34,7 @@
 //     cannot collide across splits. The 32-bit FNV form is a compact
 //     display/ledger encoding of the key, NEVER the comparison unit, making
 //     novel/fixed detection deterministic rather than probabilistic.
-import { VITEST_SUITE_RULE_ID } from './adapters/vitest.js';
+import { VITEST_SUITE_RULE_ID, VITEST_UNNAMED_RULE_ID } from './adapters/vitest.js';
 import type { CheckFailure, FailureSet } from './checkRunner.js';
 
 /**
@@ -124,7 +124,7 @@ export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): st
  */
 export function legacyFingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
   const resolved = resolveConfig(cfg);
-  const ruleId = resolved.tool === 'vitest' && f.ruleId === VITEST_SUITE_RULE_ID ? null : f.ruleId;
+  const ruleId = resolved.tool === 'vitest' && isFreeFormVitestRule(f.ruleId) ? null : f.ruleId;
   return fnv1a32Hex(JSON.stringify(locationComponents({ ...f, ruleId }, resolved)));
 }
 
@@ -220,9 +220,14 @@ export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<stri
   return new Set(fingerprintPairs(s, cfg).map((pair) => pair.key));
 }
 
+/** Vitest failures whose message is free-form error text, not a test name. */
+function isFreeFormVitestRule(ruleId: string | null): boolean {
+  return ruleId === VITEST_SUITE_RULE_ID || ruleId === VITEST_UNNAMED_RULE_ID;
+}
+
 /** The component tuple of the pre-hash key: tool, normalized file, ruleId, severity, and the position regime. */
 function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
-  if (cfg.tool === 'vitest' && f.ruleId !== VITEST_SUITE_RULE_ID) {
+  if (cfg.tool === 'vitest' && !isFreeFormVitestRule(f.ruleId)) {
     const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
     return [cfg.tool, file, f.ruleId ?? '', f.severity, 'test-name', normalizeTestName(f.message)];
   }
@@ -254,8 +259,9 @@ function locationComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): 
  * Vitest identity: the FULL message with whitespace runs collapsed and
  * trimmed. `adapters/vitest.ts` already funnels the test's `fullName` (or
  * `ancestorTitles`+`title`) into `message`, so for a named test this is the
- * whole test name; suite-level failures (ruleId `vitest-suite`) never reach
- * this function — their free-form error text takes the first-line regime. Case is PRESERVED — distinct names differing only
+ * whole test name; suite-level (`vitest-suite`) and unnamed-assertion
+ * (`vitest-unnamed`) failures never reach this function — their free-form
+ * error text takes the position / first-line regime. Case is PRESERVED — distinct names differing only
  * in case stay distinct. NO length cap: hashing is O(n) anyway, and a cap
  * would only mint a prefix-collision class (two long distinct names sharing
  * a prefix would key identically).
