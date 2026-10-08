@@ -64,7 +64,7 @@ describe('daemon-owned container lifetime', () => {
     const calls = (await readFile(log, 'utf8')).trim().split('\n');
     expect(calls[0]).toMatch(/^create --name cq-sandbox-/);
     expect(calls[0]).not.toContain('--rm');
-    expect(calls.slice(1)).toEqual([`start --attach ${id}`, `rm --force ${id}`]);
+    expect(calls.slice(1)).toEqual([`start --attach ${id}`, `rm --force --volumes ${id}`]);
   });
 
   test('failed cleanup cannot return a successful child outcome', async () => {
@@ -79,7 +79,7 @@ describe('daemon-owned container lifetime', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/container cleanup unconfirmed.*daemon-unreachable/);
-    expect(await readFile(log, 'utf8')).toContain(`rm --force ${id}`);
+    expect(await readFile(log, 'utf8')).toContain(`rm --force --volumes ${id}`);
   });
 
   test('daemon exit status wins over a successful attach CLI', async () => {
@@ -93,7 +93,7 @@ describe('daemon-owned container lifetime', () => {
     expect(result.ok).toBe(false);
     expect(result.exitCode).toBe(7);
     expect(result.stdout).toContain('child-output');
-    expect(await readFile(log, 'utf8')).toContain(`rm --force ${id}`);
+    expect(await readFile(log, 'utf8')).toContain(`rm --force --volumes ${id}`);
   });
 
   test('a still-running container cannot produce a successful launch', async () => {
@@ -105,7 +105,7 @@ describe('daemon-owned container lifetime', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.spawnError).toMatch(/child exit could not be confirmed/);
-    expect(await readFile(log, 'utf8')).toContain(`rm --force ${id}`);
+    expect(await readFile(log, 'utf8')).toContain(`rm --force --volumes ${id}`);
   });
 
   test('failed create never starts and still attempts cleanup by its unique name', async () => {
@@ -118,7 +118,7 @@ describe('daemon-owned container lifetime', () => {
     expect(result.ok).toBe(false);
     const calls = await readFile(log, 'utf8');
     expect(calls).not.toContain('start --attach');
-    expect(calls).toMatch(/rm --force cq-sandbox-/);
+    expect(calls).toMatch(/rm --force --volumes cq-sandbox-/);
   });
 
   test('invalid creation identity never starts a container', async () => {
@@ -132,6 +132,83 @@ describe('daemon-owned container lifetime', () => {
     expect(result.spawnError).toMatch(/no valid immutable container ID/);
     const calls = await readFile(log, 'utf8');
     expect(calls).not.toContain('start --attach');
-    expect(calls).toMatch(/rm --force cq-sandbox-/);
+    expect(calls).toMatch(/rm --force --volumes cq-sandbox-/);
+  });
+
+  test('a slow create is not cut off by a short attach budget', async () => {
+    // Rationing P0: `create` ran under the request (attach) budget, so a
+    // short child deadline could kill the control-plane call before any ID
+    // existed.  Control-plane calls keep their own fixed budget.
+    const { adapter, dir, log } = await stub(
+      'echo attached',
+      'exit 0',
+      "/bin/sleep 1; printf '%064d\\n' 1",
+    );
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+      timeoutMs: 100,
+    });
+    const calls = (await readFile(log, 'utf8')).trim().split('\n');
+    expect(calls[0]).toMatch(/^create --name cq-sandbox-/);
+    expect(calls[1]).toBe(`start --attach ${id}`);
+    expect(result.spawnError).toBeUndefined();
+  });
+
+  test('the container CLI env is fixed; the child env rides only in a private env file', async () => {
+    // Codex P1: a passthrough DOCKER_HOST/HOME/PATH landed in the CLI's OWN
+    // environment and could retarget the daemon, config, or credential
+    // helpers the probe certified.  The stub records its own env and copies
+    // the env file it was handed during create.
+    const rec = await mkdtemp(join(tmpdir(), 'cq-container-rec-'));
+    scratch.push(rec);
+    const { adapter, dir, log } = await stub(
+      'exit 0',
+      'exit 0',
+      `env > '${rec}/cli-env'; while [ "$1" != --env-file ]; do shift; done; cp "$2" '${rec}/child-env'; echo "$2" > '${rec}/env-path'; printf '%064d\\n' 1`,
+    );
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+      parentEnv: {
+        PATH: `${dir}/bin`,
+        HOME: dir,
+        DOCKER_HOST: 'tcp://unprobed.invalid:2375',
+        KEEP: 'yes',
+      },
+      envPassthrough: ['DOCKER_HOST', 'KEEP'],
+    });
+    expect(result.ok).toBe(true);
+    const cliEnv = await readFile(`${rec}/cli-env`, 'utf8');
+    expect(cliEnv).not.toContain('DOCKER_HOST=');
+    expect(cliEnv).not.toContain('KEEP=');
+    expect(cliEnv).not.toContain(`PATH=${dir}/bin`);
+    expect(cliEnv).not.toContain(`HOME=${dir}\n`);
+    const childEnv = await readFile(`${rec}/child-env`, 'utf8');
+    expect(childEnv).toContain('DOCKER_HOST=tcp://unprobed.invalid:2375\n');
+    expect(childEnv).toContain('KEEP=yes\n');
+    expect(childEnv).toContain(`HOME=${dir}\n`);
+    // The env file is gone once create has read it — before any start.
+    const envPath = (await readFile(`${rec}/env-path`, 'utf8')).trim();
+    await expect(readFile(envPath, 'utf8')).rejects.toThrow(/ENOENT/);
+    const calls = await readFile(log, 'utf8');
+    expect(calls).toMatch(/--entrypoint=\/usr\/bin\/true test-image$/m);
+    expect(calls).not.toContain('unprobed.invalid');
+  });
+
+  test('a child env value with a line break is refused before any CLI call', async () => {
+    const { adapter, dir, log } = await stub('exit 0');
+    const result = await adapter.launch({
+      workspace: dir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+      parentEnv: { PATH: '/usr/bin:/bin', KEEP: 'a\nDOCKER_HOST=tcp://x' },
+      envPassthrough: ['KEEP'],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.spawnError).toMatch(/line break or NUL/);
+    await expect(readFile(log, 'utf8')).rejects.toThrow(/ENOENT/);
   });
 });

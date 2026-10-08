@@ -16,6 +16,7 @@ import {
   bwrapArgv,
   containerAdapter,
   containerArgv,
+  containerEnvFile,
   landlockAdapter,
   seatbeltAdapter,
   seatbeltProfile,
@@ -64,6 +65,17 @@ describe('seatbelt boundary construction', () => {
     );
     expect(profile).not.toMatch(/\(allow process-exec\*\)/);
     expect(profile).not.toContain('/usr/local');
+  });
+
+  test('no blanket Mach service grant reaches the child', () => {
+    // crq delta review: `(allow mach-lookup)` opened every global Mach
+    // service — a confined /usr/bin/pbpaste read the host clipboard under it
+    // (observed on darwin 24.6.0).  bsd.sb carries the startup services.
+    for (const network of ['model-only', 'allow'] as const) {
+      const profile = seatbeltProfile(network);
+      expect(profile).not.toMatch(/\(allow mach-lookup\)/);
+      expect(profile).not.toMatch(/\(allow mach-lookup\s*\(global-name-regex/);
+    }
   });
 
   test('the workspace arrives as the WS parameter, never as profile text', () => {
@@ -166,8 +178,8 @@ describe('linux and container boundary construction', () => {
       { image: 'cq-sandbox:latest' },
       '/ws',
       'model-only',
-      { PATH: '/bin' },
-      ['/usr/bin/true'],
+      '/private/env/child.env',
+      ['/usr/bin/true', '-x'],
     );
     expect(argv.slice(0, 2)).toEqual(['docker', 'run']);
     expect(argv.join(' ')).toContain('--network none');
@@ -181,13 +193,30 @@ describe('linux and container boundary construction', () => {
       '--volume',
       '/ws:/ws',
     ]);
-    // --env NAME without a value: the CLI reads the scrubbed launcher env, so
-    // no secret value lands in argv.
-    const envAt = argv.indexOf('--env');
-    expect(argv.slice(envAt, envAt + 2)).toEqual(['--env', 'PATH']);
-    expect(argv.join(' ')).not.toContain('PATH=');
-    expect(argv[argv.length - 2]).toBe('cq-sandbox:latest');
-    expect(argv[argv.length - 1]).toBe('/usr/bin/true');
+    // The child env rides in a private env file: no value lands in argv and
+    // no per-name --env makes the CLI read the child env from its own.
+    const envAt = argv.indexOf('--env-file');
+    expect(argv.slice(envAt, envAt + 2)).toEqual(['--env-file', '/private/env/child.env']);
+    expect(argv).not.toContain('--env');
+    // argv[0] is the entrypoint (Codex P2): an image ENTRYPOINT can never
+    // receive the request argv as its arguments instead of executing it.
+    expect(argv.slice(-3)).toEqual(['--entrypoint=/usr/bin/true', 'cq-sandbox:latest', '-x']);
+  });
+
+  test('a container argv without a command head is refused', () => {
+    for (const argv of [[], [''], ['-it']]) {
+      expect(() =>
+        containerArgv({ image: 'x' }, '/ws', 'model-only', '/private/env/child.env', argv),
+      ).toThrow(/argv\[0\] must be a command/);
+    }
+  });
+
+  test('the container env file round-trips names and values, refusing line breaks', () => {
+    expect(containerEnvFile({})).toBe('');
+    expect(containerEnvFile({ PATH: '/bin', KEEP: ' a=b c ' })).toBe('PATH=/bin\nKEEP= a=b c \n');
+    for (const bad of ['a\nINJECTED=1', 'a\rb', 'a\0b']) {
+      expect(containerEnvFile({ KEEP: bad })).toBeUndefined();
+    }
   });
 
   test('an unprovisioned landlock backend names its blocker instead of passing', async () => {
@@ -209,16 +238,18 @@ describe('linux and container boundary construction', () => {
     // (delta review): `00`, `000:1000` and `1000:00` are all root forms.
     for (const root of ['0', '0:0', '0:1000', '1000:0', '00', '000:1000', '1000:00']) {
       expect(() =>
-        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', {}, ['/usr/bin/true']),
+        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', '/e', ['/usr/bin/true']),
       ).toThrow(/non-root/);
     }
     for (const malformed of ['root', '65532:root', '-1']) {
       expect(() =>
-        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', {}, ['/usr/bin/true']),
+        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', '/e', [
+          '/usr/bin/true',
+        ]),
       ).toThrow(/numeric/);
     }
     // Any other fixed numeric identity is accepted verbatim.
-    const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', {}, [
+    const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', '/e', [
       '/usr/bin/true',
     ]);
     const userAt = argv.indexOf('--user');

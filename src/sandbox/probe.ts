@@ -267,7 +267,14 @@ function execRefusalAttributable(
       `^bwrap:\\s*(?:execvp|can't execute|cannot execute|exec)\\b[^\\n]*${escaped}`,
       'im',
     ),
-    container: new RegExp(`^(?:docker:|.*oci runtime.*exec:)\\b[^\\n]*${escaped}`, 'im'),
+    // The OCI runtime's start failure as the CLI relays it: one line naming
+    // the OCI runtime and the exact target in runc's exec: "<target>" form
+    // or crun's executable-file form (crq delta review: the earlier pattern
+    // required an impossible word boundary right after a colon).
+    container: new RegExp(
+      `^(?=[^\\n]*oci runtime)(?:docker: |error(?: response from daemon)?: )[^\\n]*(?:exec: "${escaped}"|executable file \`${escaped}\`)`,
+      'im',
+    ),
     landlock: new RegExp(`^landlock.*exec[^\\n]*${escaped}`, 'im'),
   };
   const canonical = new RegExp(`execvp\\(\\) of '${escaped}' failed:`, 'm');
@@ -981,6 +988,10 @@ async function probeBackendWithLaunch(
   });
 }
 
+/** Receipt placeholder for a candidate whose probe threw: launches nothing. */
+const refuseUnprobedLaunch: SandboxBackendAdapter['launch'] = () =>
+  Promise.reject(new Error('sandbox: this launcher probe failed; nothing was certified'));
+
 /**
  * Probe the platform's candidate list and certify only what the canaries
  * earned.  This is the B14 entry the suite variant calls before required mode
@@ -1000,9 +1011,11 @@ export async function certifyBackends(options: ProbeOptions = {}): Promise<Sandb
   for (const adapter of adapters) {
     // Bind the reference the canaries EXERCISED, as returned by the probe —
     // a second read of `adapter.launch` here could see a different function
-    // from an accessor (Opus review).  A thrown probe certifies nothing, so
-    // the fallback read only labels the blocker entry.
-    let launchRef = adapter.launch;
+    // from an accessor (Opus review).  The fallback is a refusing sentinel,
+    // never a read of `adapter.launch` outside the guard (Codex P2): a
+    // throwing accessor must become this candidate's blocker record, not
+    // reject the whole certification before later candidates are probed.
+    let launchRef: SandboxBackendAdapter['launch'] = refuseUnprobedLaunch;
     let record: BackendProbeRecord;
     try {
       ({ record, launchRef } = await probeBackendWithLaunch(adapter, {

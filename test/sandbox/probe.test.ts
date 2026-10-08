@@ -579,7 +579,12 @@ describe('required-mode execution is bounded by probe-earned certifications', ()
 
 describe.runIf(process.platform === 'darwin')('the real seatbelt certification', () => {
   test('the live canaries certify seatbelt under model-only posture', async () => {
+    // Deterministic seams (crq delta review): outbound reachability of the
+    // default external target and the host's /usr/local content must not
+    // decide this verdict; the seam stub is still a real executable outside
+    // the exec allowlist, attacked live.
     const certification = await certifyBackends({
+      ...seams(),
       adapters: [seatbeltAdapter()],
     });
     const record = certification.records.find((r) => r.backend === 'seatbelt');
@@ -706,12 +711,14 @@ describe('review hardening of the certification entry points', () => {
     const adapter = fakeAdapter('fs-only');
     const exercised = adapter.launch;
     const grantAll = vi.fn(() => Promise.resolve(result({ ok: true, exitCode: 0 })));
-    // First read (certifyBackends) and every read after the probe yields the
-    // grant-all; only the probe's own read yields the function the canaries
-    // ran.  Binding the grant-all would authorize a launch nobody probed.
+    // The probe's own entry read yields the function the canaries ran; every
+    // later read (receipt checks, launchCertified) yields the grant-all.
+    // certifyBackends performs no read of its own outside the guarded probe
+    // (Codex P2), so the probe's read is the first.  Binding the grant-all
+    // would authorize a launch nobody probed.
     let reads = 0;
     Object.defineProperty(adapter, 'launch', {
-      get: () => (++reads === 2 ? exercised : grantAll),
+      get: () => (++reads === 1 ? exercised : grantAll),
     });
     const certification = await certifyBackends({
       ...seams(),
@@ -727,5 +734,70 @@ describe('review hardening of the certification entry points', () => {
       }),
     ).rejects.toThrow(/launch method changed after certification/);
     expect(grantAll).not.toHaveBeenCalled();
+  });
+
+  test('a throwing launch accessor becomes that candidate blocker, not a rejected certification', async () => {
+    // Codex P2: the fallback launch read sat outside the per-candidate guard,
+    // so a throwing accessor rejected certifyBackends before later candidates
+    // were probed.
+    const throwing = fakeAdapter('fs-only');
+    Object.defineProperty(throwing, 'launch', {
+      get: () => {
+        throw new Error('launch accessor exploded');
+      },
+    });
+    const certification = await certifyBackends({
+      ...seams(),
+      network: 'allow',
+      adapters: [throwing, fakeAdapter('fs-only')],
+    });
+    expect(certification.records).toHaveLength(2);
+    expect(certification.records[0]?.certified).toBe(false);
+    expect(certification.records[0]?.blocker).toMatch(/probe failed: launch accessor exploded/);
+    expect(certification.certified).toEqual(['bwrap']);
+  });
+});
+
+describe('container exec-refusal attribution (crq delta review)', () => {
+  // A container-backed fake whose local-prefix exec fails the way the Docker
+  // CLI relays an OCI runtime start failure; every other canary follows the
+  // fs-only fake.  The earlier pattern required a word boundary right after a
+  // colon, so no real Docker line could ever be attributed.
+  const containerFake = (stderrFor: (target: string) => string): SandboxBackendAdapter => {
+    const inner = fakeAdapter('fs-only');
+    return {
+      ...inner,
+      backend: 'container',
+      launch: (request) =>
+        request.argv[0] === seams().localPrefixTarget
+          ? Promise.resolve(result({ exitCode: 127, stderr: stderrFor(request.argv[0]) }))
+          : inner.launch(request),
+    };
+  };
+
+  test('a Docker-shaped OCI exec refusal naming the target is attributed', async () => {
+    const record = await probeBackend(
+      containerFake(
+        (target) =>
+          'Error response from daemon: failed to create task for container: failed to create shim task: ' +
+          'OCI runtime create failed: runc create failed: unable to start container process: ' +
+          `error during container init: exec: "${target}": stat ${target}: no such file or directory: unknown\n` +
+          'Error: failed to start containers: 0000',
+      ),
+      { ...seams(), network: 'allow' },
+    );
+    expect(verdictOf(record, 'local-prefix-exec')).toBe('pass');
+  });
+
+  test('a Docker-shaped line naming a different target stays inconclusive', async () => {
+    const record = await probeBackend(
+      containerFake(
+        () =>
+          'Error response from daemon: OCI runtime create failed: unable to start container process: ' +
+          'exec: "/usr/local/bin/other": permission denied: unknown',
+      ),
+      { ...seams(), network: 'allow' },
+    );
+    expect(verdictOf(record, 'local-prefix-exec')).toBe('inconclusive');
   });
 });

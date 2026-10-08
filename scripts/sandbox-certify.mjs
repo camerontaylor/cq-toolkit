@@ -9,7 +9,7 @@
 // environmental blocker instead of quietly passing.
 //
 // Usage:
-//   npm run build && node scripts/sandbox-certify.mjs \
+//   pnpm run build && node scripts/sandbox-certify.mjs \
 //     [--network model-only|allow] [--model-proxy] [--json]
 //
 // --model-proxy composes model-only with a local proxy stand-in: only one
@@ -26,6 +26,37 @@
 import { stderr, stdout, exit } from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { parseArgs } from 'node:util';
+
+const USAGE = 'usage: sandbox-certify.mjs [--network model-only|allow] [--model-proxy] [--json]';
+
+// Strict parse BEFORE any probe work (Codex P2): an unknown, positional, or
+// repeated option is a usage error, never a silent fall-back to the default
+// posture — automation must get evidence for exactly the posture it asked for.
+let args;
+try {
+  const parsed = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      network: { type: 'string' },
+      'model-proxy': { type: 'boolean' },
+      json: { type: 'boolean' },
+    },
+    strict: true,
+    allowPositionals: false,
+    tokens: true,
+  });
+  const seen = new Set();
+  for (const token of parsed.tokens) {
+    if (token.kind !== 'option') continue;
+    if (seen.has(token.name)) throw new Error(`option '--${token.name}' given more than once`);
+    seen.add(token.name);
+  }
+  args = parsed.values;
+} catch (error) {
+  stderr.write(`sandbox-certify: ${error.message}\n${USAGE}\n`);
+  exit(2);
+}
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const probeUrl = pathToFileURL(join(repoRoot, 'dist', 'sandbox', 'probe.js'));
@@ -35,18 +66,17 @@ try {
   probe = await import(probeUrl.href);
 } catch (error) {
   stderr.write(
-    `sandbox-certify: cannot load dist/sandbox/probe.js — run \`npm run build\` first\n  ${error.message}\n`,
+    `sandbox-certify: cannot load dist/sandbox/probe.js — run \`pnpm run build\` first\n  ${error.message}\n`,
   );
   exit(2);
 }
 
-const networkFlag = process.argv.indexOf('--network');
-const network = networkFlag === -1 ? undefined : (process.argv[networkFlag + 1] ?? undefined);
+const network = args.network;
 if (network !== undefined && network !== 'model-only' && network !== 'allow') {
   stderr.write(`sandbox-certify: --network must be model-only or allow, got '${network}'\n`);
   exit(2);
 }
-const modelProxy = process.argv.includes('--model-proxy');
+const modelProxy = args['model-proxy'] === true;
 if (modelProxy && network === 'allow') {
   stderr.write('sandbox-certify: --model-proxy contradicts --network allow\n');
   exit(2);
@@ -63,7 +93,7 @@ try {
   exit(2);
 }
 
-if (process.argv.includes('--json')) {
+if (args.json === true) {
   stdout.write(`${JSON.stringify(certification, null, 2)}\n`);
 } else {
   stdout.write(

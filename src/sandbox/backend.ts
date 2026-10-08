@@ -320,16 +320,7 @@ function launcherInsideWorkspace(
   launcher: string,
   workspace: string,
 ): SandboxLaunchResult | undefined {
-  let real: string;
-  let realWorkspace: string;
-  try {
-    real = realpathSync(launcher);
-    realWorkspace = realpathSync(workspace);
-  } catch {
-    return undefined; // an unresolvable path fails at spawn / workspace validation
-  }
-  const rel = relative(realWorkspace, real);
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
+  if (pathInsideWorkspace(launcher, workspace)) {
     return {
       ok: false,
       exitCode: null,
@@ -341,6 +332,20 @@ function launcherInsideWorkspace(
     };
   }
   return undefined;
+}
+
+/** Whether `path` canonically resolves to or under the canonical workspace. */
+function pathInsideWorkspace(path: string, workspace: string): boolean {
+  let real: string;
+  let realWorkspace: string;
+  try {
+    real = realpathSync(path);
+    realWorkspace = realpathSync(workspace);
+  } catch {
+    return false; // an unresolvable path fails at spawn / workspace validation
+  }
+  const rel = relative(realWorkspace, real);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +425,10 @@ export function seatbeltProfile(network: SandboxNetwork, proxyPort?: number): st
     '(import "bsd.sb")',
     `(allow process-exec* ${execTrees})`,
     '(allow process-fork)',
-    '(allow mach-lookup)',
+    // NO blanket `(allow mach-lookup)` (crq delta review): it opened every
+    // global Mach service to the child — a confined /usr/bin/pbpaste read the
+    // host clipboard under it (observed on darwin 24.6.0).  bsd.sb grants the
+    // startup services, and every canary child runs without the blanket rule.
     '(allow sysctl-read)',
     '(allow ipc-posix-shm)',
     '(allow ipc-posix-sem)',
@@ -764,17 +772,25 @@ function validatedContainerUser(user: string | undefined): string {
 /**
  * `--cap-drop ALL` and a non-root `--user` are part of the boundary, not
  * optional hardening: the canaries certify the launcher exactly as built
- * here.  `--env NAME` (no value) makes the CLI read each name from its own
- * environment — the scrubbed launcher env passed by `launch` — so env VALUES
- * never appear in argv, where any local user could read them.
+ * here.  The child env arrives through `--env-file` (a private 0600 file
+ * written by `launch`), so env VALUES never appear in argv, where any local
+ * user could read them, and never enter the container CLI's OWN environment
+ * (Codex P1): a passthrough `DOCKER_HOST`, `HOME`, or `PATH` would otherwise
+ * retarget the daemon, config, or credential helpers the probe certified.
+ * `--entrypoint` pins `argv[0]` (Codex P2): an image ENTRYPOINT would
+ * otherwise receive the request argv as arguments instead of executing it.
  */
 export function containerArgv(
   options: ContainerAdapterOptions,
   workspace: string,
   network: SandboxNetwork,
-  env: Readonly<Record<string, string>>,
+  envFile: string,
   argv: readonly string[],
 ): string[] {
+  const [entrypoint, ...args] = argv;
+  if (entrypoint === undefined || entrypoint === '' || entrypoint.startsWith('-')) {
+    throw new Error(`sandbox: container argv[0] must be a command, got '${String(entrypoint)}'`);
+  }
   return [
     options.command ?? 'docker',
     'run',
@@ -794,11 +810,31 @@ export function containerArgv(
     workspace,
     '--tmpfs',
     '/tmp',
-    ...Object.entries(env).flatMap(([name]) => ['--env', name]),
+    '--env-file',
+    envFile,
+    `--entrypoint=${entrypoint}`,
     options.image,
-    ...argv,
+    ...args,
   ];
 }
+
+/**
+ * Serialize the child env for `--env-file`.  The format is one `NAME=value`
+ * per line with no escaping, so a value carrying a line break or NUL cannot
+ * be represented faithfully: `undefined` (the caller refuses the launch)
+ * rather than a silently altered environment.
+ */
+export function containerEnvFile(env: Readonly<Record<string, string>>): string | undefined {
+  const lines: string[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (/[\n\r\0]/.test(value)) return undefined;
+    lines.push(`${name}=${value}`);
+  }
+  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
+}
+
+/** Control-plane CLI budget (create/inspect/rm), independent of the child's. */
+const CONTAINER_CONTROL_TIMEOUT_MS = 15_000;
 
 export function containerAdapter(options: ContainerAdapterOptions): SandboxBackendAdapter {
   const backend: SandboxBackend = 'container';
@@ -818,6 +854,11 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
   // a parentEnv with a different PATH — one pointing into the workspace —
   // cannot select a different executable after certification.
   const launcher = resolveLauncher(resolved.command);
+  // The CLI's OWN environment is fixed at construction too (Codex P1): the
+  // daemon, context, config dir, and credential helpers it selects come from
+  // the adapter process — exactly what availability and the canaries ran
+  // under — never from a request's parentEnv or passthrough names.
+  const cliEnv = Object.freeze(launcherEnv({}));
   return {
     backend,
     workspaceParent: tmpdir,
@@ -829,8 +870,8 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
         };
       }
       const probe = await runChild(launcher, ['info', '--format', 'ok'], {
-        env: launcherEnv({}),
-        timeoutMs: 15_000,
+        env: { ...cliEnv },
+        timeoutMs: CONTAINER_CONTROL_TIMEOUT_MS,
         maxOutputChars: 4_000,
       });
       if (!probe.ok) {
@@ -868,20 +909,54 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
             'container cannot compose a loopback proxy under model-only (--network none); proxyPort is unsupported',
         };
       }
-      const env = launcherEnv(request);
+      const refusal = (message: string): SandboxLaunchResult => ({
+        ok: false,
+        exitCode: null,
+        signal: null,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        spawnError: message,
+      });
+      const envFileText = containerEnvFile(launcherEnv(request));
+      if (envFileText === undefined) {
+        return refusal(
+          'container child env holds a value with a line break or NUL; --env-file cannot carry it faithfully',
+        );
+      }
+      const [entrypoint] = request.argv;
+      if (entrypoint === undefined || entrypoint === '' || entrypoint.startsWith('-')) {
+        return refusal(`container argv[0] must be a command, got '${String(entrypoint)}'`);
+      }
       // Create without executing first: a timed-out `docker run` can leave
       // its daemon-owned child alive after the CLI dies. Only start an ID
       // returned by a completed create, and forcibly remove that exact ID
       // after EVERY attach outcome (including timeout/output overflow).
       const name = `cq-sandbox-${randomUUID()}`;
-      const argv = containerArgv(resolved, request.workspace, request.network, env, request.argv);
       const childOptions = {
         cwd: request.workspace,
-        env,
+        env: { ...cliEnv },
         timeoutMs: request.timeoutMs ?? 30_000,
         maxOutputChars: request.maxOutputChars ?? 64 * 1024,
       };
-      const createArgs = argv.slice(3); // omit --rm
+      // Control-plane calls get their own fixed budget (rationing P0): the
+      // request budget bounds the ATTACHED child only, so a short attach
+      // deadline can never cut off `create` before an ID exists.
+      const controlOptions = {
+        ...childOptions,
+        timeoutMs: CONTAINER_CONTROL_TIMEOUT_MS,
+        maxOutputChars: 4_000,
+      };
+      // The env file lives in a fresh 0700 directory OUTSIDE the workspace
+      // and exists only while `create` reads it — it is gone before any
+      // child of this launch can start.
+      const envDir = await mkdtemp(join(tmpdir(), 'cq-ctr-env-'));
+      if (pathInsideWorkspace(envDir, request.workspace)) {
+        await rm(envDir, { recursive: true, force: true });
+        return refusal(
+          'the container env-file directory resolves inside the model-writable workspace; refusing',
+        );
+      }
       let identity = name;
       let outcome: SandboxLaunchResult = {
         ok: false,
@@ -893,10 +968,25 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
         spawnError: 'container launch did not complete',
       };
       try {
-        const created = await runChild(launcher, ['create', '--name', name, ...createArgs], {
-          ...childOptions,
-          maxOutputChars: 4_000,
-        });
+        let created: SandboxLaunchResult;
+        try {
+          const envFile = join(envDir, 'child.env');
+          await writeFile(envFile, envFileText, { mode: 0o600 });
+          const createArgs = containerArgv(
+            resolved,
+            request.workspace,
+            request.network,
+            envFile,
+            request.argv,
+          ).slice(3); // omit `<cli> run --rm`
+          created = await runChild(
+            launcher,
+            ['create', '--name', name, ...createArgs],
+            controlOptions,
+          );
+        } finally {
+          await rm(envDir, { recursive: true, force: true });
+        }
         const id = created.stdout.trim();
         if (!created.ok) {
           outcome = created;
@@ -916,7 +1006,7 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
             const state = await runChild(
               launcher,
               ['inspect', '--format', '{{.State.Running}} {{.State.ExitCode}}', id],
-              { ...childOptions, timeoutMs: 15_000, maxOutputChars: 4_000 },
+              controlOptions,
             );
             const stopped = /^false (\d+)$/.exec(state.stdout.trim());
             if (!state.ok || stopped === null) {
@@ -934,11 +1024,13 @@ export function containerAdapter(options: ContainerAdapterOptions): SandboxBacke
       } finally {
         // A completed rm --force proves the known container is gone. Never
         // mistake killing the attach CLI for settlement of its descendants.
-        const removed = await runChild(launcher, ['rm', '--force', identity], {
-          ...childOptions,
-          timeoutMs: 15_000,
-          maxOutputChars: 4_000,
-        });
+        // --volumes also removes anonymous volumes an image VOLUME declared
+        // (Codex P2): create + manual rm does not get `run --rm`'s cleanup.
+        const removed = await runChild(
+          launcher,
+          ['rm', '--force', '--volumes', identity],
+          controlOptions,
+        );
         if (!removed.ok) {
           outcome = {
             ok: false,
