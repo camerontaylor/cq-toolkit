@@ -154,7 +154,8 @@ function credentialUrl(raw: string | undefined): boolean {
   // missing slashes, so screen every scheme-shaped value. A Windows drive
   // path (`C:\cache#v1`) is a filename whose `#` is not a URL fragment.
   const value = raw?.trim();
-  if (!value || /^[A-Za-z]:[\\/]/.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  if (!value || /^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value))
+    return false;
   try {
     const parsed = new URL(value);
     return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
@@ -165,7 +166,7 @@ function credentialUrl(raw: string | undefined): boolean {
 
 /**
  * Windows environment names are case-insensitive, but a copied process.env
- * snapshot is not, so a passthrough name can be stored under any casing.
+ * snapshot is not. Use this lookup for every resolver environment read.
  */
 function envValue(
   env: Readonly<Record<string, string | undefined>>,
@@ -213,6 +214,7 @@ function expandPath(
   value: string,
   env: Readonly<Record<string, string | undefined>>,
   key: ConfigKey,
+  platform: 'posix' | 'win32',
 ): string {
   // `$NAME` and `${NAME}` are separate complete forms; any other `$` or brace
   // syntax (`${A:-b}`, `${A`, `$A}`) is rejected rather than partially expanded.
@@ -221,7 +223,7 @@ function expandPath(
   const expanded = value.replace(
     pathVariable,
     (_match, braced: string | undefined, bare: string | undefined) => {
-      const replacement = nonblank(env[(braced ?? bare)!]);
+      const replacement = nonblank(envValue(env, (braced ?? bare)!, platform));
       if (!replacement || !isAbsolute(replacement))
         throw new Error(`${key.env}: unresolved absolute path variable`);
       return replacement;
@@ -490,8 +492,9 @@ function resolveValue(
     typeof value === 'string' &&
     value.startsWith('custom:')
   )
-    return `custom:${expandPath(value.slice('custom:'.length), env, key)}`;
-  if (key.type === 'path' && typeof value === 'string') return expandPath(value, env, key);
+    return `custom:${expandPath(value.slice('custom:'.length), env, key, platform)}`;
+  if (key.type === 'path' && typeof value === 'string')
+    return expandPath(value, env, key, platform);
   return value;
 }
 
@@ -652,12 +655,15 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
   // null prototype: an inherited property — from the caller's record or from a
   // polluted Object.prototype — never passed the own-key validation below, so
   // it is not configuration.
-  const options: ResolveConfigOptions = {
-    ...input,
-    ...(input.env ? { env: ownEntries(input.env) } : {}),
-    ...(input.values ? { values: ownEntries(input.values) } : {}),
-    ...(input.verifiedRealpaths ? { verifiedRealpaths: ownEntries(input.verifiedRealpaths) } : {}),
-  };
+  const ownInput = Object.assign(Object.create(null) as ResolveConfigOptions, input);
+  const options: ResolveConfigOptions = Object.assign(Object.create(null) as ResolveConfigOptions, {
+    ...ownInput,
+    ...(ownInput.env ? { env: ownEntries(ownInput.env) } : {}),
+    ...(ownInput.values ? { values: ownEntries(ownInput.values) } : {}),
+    ...(ownInput.verifiedRealpaths
+      ? { verifiedRealpaths: ownEntries(ownInput.verifiedRealpaths) }
+      : {}),
+  });
   const platform = options.platform ?? (process.platform === 'win32' ? 'win32' : 'posix');
   const env = options.env ?? ownEntries<string | undefined>({});
   const customProviderIds = Object.keys(env)
@@ -674,9 +680,9 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     .filter(
       (id) =>
         /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) &&
-        nonblank(env[`CQ_PROVIDER_${id.toUpperCase().replaceAll('-', '_')}_PROFILE`])?.startsWith(
-          'custom:',
-        ),
+        nonblank(
+          envValue(env, `CQ_PROVIDER_${id.toUpperCase().replaceAll('-', '_')}_PROFILE`, platform),
+        )?.startsWith('custom:'),
     );
   const registry = [...CONFIG_REGISTRY, ...providerKeysFor(customProviderIds)];
   const registryByEnv = new Map(registry.map((key) => [key.env, key]));
@@ -690,7 +696,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     if (/^cq_/i.test(name) && !name.startsWith('CQ_'))
       throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
-    if (isSecret(name) && nonblank(env[name]) !== undefined) {
+    if (isSecret(name) && nonblank(envValue(env, name, platform)) !== undefined) {
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
       else credentials[name] = 'set';
     }
@@ -708,7 +714,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     );
   }
   for (const name of FOREIGN_ENV_NAMES) {
-    const value = env[name];
+    const value = envValue(env, name, platform);
     if (nonblank(value) === undefined) continue;
     if (isSecret(name)) credentials[name] = 'set';
     else foreign[name] = value!;
@@ -719,11 +725,11 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     'DEEPSEEK_ANTHROPIC_BASE_URL',
     'ANTHROPIC_BASE_URL',
   ]) {
-    const value = nonblank(env[name]);
+    const value = nonblank(envValue(env, name, platform));
     if (value && !validForeignBaseUrl(value))
       throw new Error(`${name}: expected HTTPS URL without userinfo or query`);
   }
-  const profileRaw = nonblank(env.CQ_PROFILE);
+  const profileRaw = nonblank(envValue(env, 'CQ_PROFILE', platform));
   if (
     profileRaw !== undefined &&
     profileRaw !== 'conservative' &&
@@ -732,11 +738,12 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     throw new Error(`CQ_PROFILE: unsupported profile '${profileRaw}'`);
   }
   const profile: ConfigProfile = profileRaw === 'solo-maintainer' ? profileRaw : 'conservative';
-  const eventName = options.eventName ?? env.GITHUB_EVENT_NAME;
+  const eventName = options.eventName ?? envValue(env, 'GITHUB_EVENT_NAME', platform);
   if (
     eventName === 'pull_request' &&
     Object.keys(env).some(
-      (name) => name.startsWith('CQ_APPROVAL_') && nonblank(env[name]) !== undefined,
+      (name) =>
+        name.startsWith('CQ_APPROVAL_') && nonblank(envValue(env, name, platform)) !== undefined,
     )
   ) {
     throw new Error('CQ_APPROVAL_* is trusted-only and cannot be set by a pull_request workflow');
@@ -761,7 +768,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
 
   const entries: Record<string, ResolvedConfigEntry> = {};
   for (const key of registry) {
-    const raw = nonblank(env[key.env]);
+    const raw = nonblank(envValue(env, key.env, platform));
     const callRaw =
       options.values?.[key.id] ??
       optInValues.get(key.id) ??
