@@ -259,10 +259,12 @@ function assertOutsideWorkspace(
   const root = options.workspaceRootRealpath;
   const evidence = options.verifiedRealpaths?.[key.env];
   if (
-    !root ||
+    typeof root !== 'string' ||
     !isConfigAbsolute(root, platform) ||
     !evidence ||
+    typeof evidence.input !== 'string' ||
     evidence.input !== input ||
+    typeof evidence.realpath !== 'string' ||
     !isConfigAbsolute(evidence.realpath, platform)
   )
     throw new Error(`${key.env}: verified workspace path evidence required`);
