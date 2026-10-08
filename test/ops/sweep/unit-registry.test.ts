@@ -572,7 +572,7 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
     const bindings = bindingsFromDispatch(VALID, fakeFactory);
     expect(bindings.mutex).toEqual({
       lockPath: '/repo/.git/cq-git-mutex',
-      retries: 13,
+      retries: 16,
     });
     const overridden = bindingsFromDispatch(
       {
