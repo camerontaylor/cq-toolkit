@@ -729,9 +729,68 @@ export function bwrapAdapter(): SandboxBackendAdapter {
 // container — OCI runtime (docker/podman CLI), strictest out of the box
 // ---------------------------------------------------------------------------
 
+/**
+ * The default container image (Codex P2 on #244, owner ruling): a plain
+ * installation used to name a `cq-sandbox` image nobody ships, so the
+ * container fallback failed closed on every host that had not hand-built
+ * one.  The default is now the official Docker Hub `node` slim image for the
+ * Node line this repo targets (CI setup-node 24), pinned by its MULTI-ARCH
+ * INDEX digest — one immutable reference that resolves to the same bytes on
+ * linux/amd64 and linux/arm64, so no mutable tag can silently re-target the
+ * certified boundary and no per-arch digest table is needed.  The image
+ * carries bash + coreutils (every certification canary executes on them)
+ * plus node and corepack (pnpm via the project's `packageManager` pin); git
+ * deliberately stays out — git operations run on the host, outside the
+ * model-directed child.  Bumping is a one-line digest refresh; the procedure
+ * lives in docs/sandbox-container-image.md.
+ */
+export const DEFAULT_SANDBOX_IMAGE =
+  'node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20';
+
+/** A reference is digest-pinned when it ends in an immutable sha256 digest. */
+const DIGEST_PINNED_IMAGE = /@sha256:[a-f0-9]{64}$/;
+
+/**
+ * Validated at construction like `--user` (delta review P2): the image rides
+ * as a bare argv position after the fixed boundary flags, so a reference
+ * with whitespace/control characters or a leading `-` could ride as CLI
+ * flags instead of an image.  An override is digest-pinned by default — a
+ * mutable tag would let the image content change between the certification
+ * probe and a later launch while the receipt still names the old reference —
+ * and `allowUnpinnedImage` is the explicit opt-out for bring-your-own
+ * references a daemon can only resolve as a tag (e.g. a locally built image
+ * no registry has a digest for).
+ */
+function validatedContainerImage(image: string, allowUnpinned: boolean): string {
+  if (image === '' || /[\s\0]/.test(image) || image.startsWith('-')) {
+    throw new Error(
+      `sandbox: container image '${image}' must be a plain reference; whitespace, control characters, and a leading dash are refused (the image is a bare argv position, not a flag slot)`,
+    );
+  }
+  if ((image.match(/@/g) ?? []).length > 1) {
+    throw new Error(`sandbox: container image '${image}' carries more than one '@'`);
+  }
+  if (!DIGEST_PINNED_IMAGE.test(image) && !allowUnpinned) {
+    throw new Error(
+      `sandbox: container image '${image}' is not digest-pinned; pass 'name:tag@sha256:<64 hex>' so a mutable tag cannot silently re-target the certified boundary, or set allowUnpinnedImage to accept an unpinned reference explicitly`,
+    );
+  }
+  return image;
+}
+
 export interface ContainerAdapterOptions {
-  /** Image to run; a container backend without an image is not provisionable. */
-  image: string;
+  /**
+   * Image to run; defaults to DEFAULT_SANDBOX_IMAGE (digest-pinned official
+   * node slim).  A container backend without any image is not provisionable;
+   * a default keeps that claim honest without naming a phantom image.
+   */
+  image?: string;
+  /**
+   * Explicitly accept a non-digest-pinned `image` override.  Default false:
+   * the certified boundary binds an immutable digest, and relaxing that
+   * takes a named opt-in, like every other loosening here.
+   */
+  allowUnpinnedImage?: boolean;
   /** Container CLI binary (default `docker`). */
   command?: string;
   /**
@@ -779,6 +838,9 @@ function validatedContainerUser(user: string | undefined): string {
  * retarget the daemon, config, or credential helpers the probe certified.
  * `--entrypoint` pins `argv[0]` (Codex P2): an image ENTRYPOINT would
  * otherwise receive the request argv as arguments instead of executing it.
+ * The image reference is validated (`validatedContainerImage`): it rides as
+ * a bare argv position, so a flag-shaped or unpinned reference is refused —
+ * the digest-pinned DEFAULT_SANDBOX_IMAGE unless an override says otherwise.
  */
 export function containerArgv(
   options: ContainerAdapterOptions,
@@ -787,6 +849,10 @@ export function containerArgv(
   envFile: string,
   argv: readonly string[],
 ): string[] {
+  const image = validatedContainerImage(
+    options.image ?? DEFAULT_SANDBOX_IMAGE,
+    options.allowUnpinnedImage === true,
+  );
   const [entrypoint, ...args] = argv;
   if (entrypoint === undefined || entrypoint === '' || entrypoint.startsWith('-')) {
     throw new Error(`sandbox: container argv[0] must be a command, got '${String(entrypoint)}'`);
@@ -813,7 +879,7 @@ export function containerArgv(
     '--env-file',
     envFile,
     `--entrypoint=${entrypoint}`,
-    options.image,
+    image,
     ...args,
   ];
 }
@@ -836,17 +902,21 @@ export function containerEnvFile(env: Readonly<Record<string, string>>): string 
 /** Control-plane CLI budget (create/inspect/rm), independent of the child's. */
 const CONTAINER_CONTROL_TIMEOUT_MS = 15_000;
 
-export function containerAdapter(options: ContainerAdapterOptions): SandboxBackendAdapter {
+export function containerAdapter(options: ContainerAdapterOptions = {}): SandboxBackendAdapter {
   const backend: SandboxBackend = 'container';
   // Snapshot and freeze EVERY launch-relevant option at construction (Sol
   // final-head review): the adapter must never read caller-owned mutable
   // state after certification, or mutating options.command/image/user would
   // change the executable while adapter.launch stays identity-fixed and the
   // receipt cannot see it.  Validation also happens HERE, so a root --user
-  // is refused before any probe, not just at launch.
+  // or an unpinned image override is refused before any probe, not just at
+  // launch; an absent image resolves to DEFAULT_SANDBOX_IMAGE.
   const resolved = Object.freeze({
     command: options.command ?? 'docker',
-    image: options.image,
+    image: validatedContainerImage(
+      options.image ?? DEFAULT_SANDBOX_IMAGE,
+      options.allowUnpinnedImage === true,
+    ),
     user: validatedContainerUser(options.user),
   });
   // The CLI binary is fixed at construction (final-head review): a bare name
@@ -1144,8 +1214,10 @@ export function landlockAdapter(options: LandlockAdapterOptions = {}): SandboxBa
 
 /** The RS-13 candidates in the platform's `auto` selection order. */
 export function adaptersForPlatform(platform: NodeJS.Platform): SandboxBackendAdapter[] {
-  if (platform === 'darwin') return [seatbeltAdapter(), containerAdapter({ image: 'cq-sandbox' })];
-  if (platform === 'linux')
-    return [landlockAdapter(), bwrapAdapter(), containerAdapter({ image: 'cq-sandbox' })];
+  // The container leg carries DEFAULT_SANDBOX_IMAGE (Codex P2 on #244): the
+  // default is a digest-pinned official image, so a plain installation can
+  // actually provision the fallback instead of naming a phantom `cq-sandbox`.
+  if (platform === 'darwin') return [seatbeltAdapter(), containerAdapter()];
+  if (platform === 'linux') return [landlockAdapter(), bwrapAdapter(), containerAdapter()];
   return [];
 }
