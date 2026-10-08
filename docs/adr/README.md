@@ -50,6 +50,13 @@ something lands or which rule applies. The plan itself is not published.
     check where configured.
   - D13: repository settings are captured as code with a drift check.
   - D14: sandboxing is supported and conservative when blank.
+- **Open points** O-1…O-8 were left open at acceptance. Each is stated where
+  it arises: O-1 and O-2 in ADR-0002, O-3 to O-6 and O-8 in ADR-0003 §6 and
+  the approval-token annex, O-7 in ADR-0004 D-K.
+- **Design debts** DD-1…DD-9 are tracked limitations; some have their own
+  notes, such as [DD-1](../dd-1-abort-spike.md),
+  [DD-2](../dd-2-usd-normalization.md) and
+  [DD-9](../dd-9-api-equivalent-budget.md).
 - **Work labels.** `W<n>.<m>` are plan work items. S1–S6 are ADR-0002's
   landing slices (ADR-0002 §4). `RS-<n>` names the research study behind a
   section. These are labels only and need no lookup.
