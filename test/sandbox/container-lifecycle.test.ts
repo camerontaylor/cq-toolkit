@@ -44,7 +44,11 @@ esac
 `,
     { mode: 0o700 },
   );
-  return { dir, log, adapter: containerAdapter({ image: 'test-image', command }) };
+  return {
+    dir,
+    log,
+    adapter: containerAdapter({ image: 'test-image', allowUnpinnedImage: true, command }),
+  };
 }
 
 const id = '1'.padStart(64, '0');
