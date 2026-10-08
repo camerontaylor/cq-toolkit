@@ -1528,7 +1528,7 @@ def notify_owner(text: str) -> Dict[str, Any]:
         p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90, env=top_level_env())
         res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
     o = run(["osascript", "-e", f"display notification {json.dumps(text[:220])} with title "
-             f"\"crq: PROMOTION UNVERIFIED\" sound name \"Basso\""], check=False, timeout=30)
+             f"\"crq alert\" sound name \"Basso\""], check=False, timeout=30)
     res["osascript"] = o.returncode
     return res
 
@@ -1751,6 +1751,9 @@ def next_order(q: Dict[str, Any]) -> int:
 
 
 def new_item(q: Dict[str, Any], log: List[str], dry: bool, **fields: Any) -> Dict[str, Any]:
+    dup = next((i for i in q["items"] if i["id"] == fields.get("id")), None)
+    if dup is not None:  # ids are unique: an existing item (even skipped) is sticky
+        return dup
     item = {"order": next_order(q), "state": "pending", "cycles": [], "attempts": [], **fields}
     item["notes"] = [f"{iso()} auto-enrolled: {fields.get('why', '')}"]
     item.pop("why", None)
@@ -1800,6 +1803,8 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         if parse_iso(p["mergedAt"]) <= seeded_at or any(i["pr"] == n and i["kind"] == "merged" for i in q["items"]):
             continue
         mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
+        if any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
+            continue  # this merged head already has its delta (done, skipped as a pure restack, …): sticky
         if any(i["state"] in ("reviewing", "addressing") for i in mine):
             continue  # harvest first
         for i in mine:
@@ -1850,6 +1855,14 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             msg = harvest_addressing(item, dry)
             if msg:
                 log.append(msg)
+    prev = parse_iso(q.get("last_tick"))
+    stale_min = CONFIG.get("stale_alarm_min", 36)
+    if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:
+        gap = (now() - prev).total_seconds() / 60
+        event("tick_gap", last_tick=q["last_tick"], gap_min=round(gap))
+        log.append(f"tick gap: previous tick was {gap:.0f}m ago (> {stale_min}m) — chancellor alerted")
+        notify_owner(f"crq RECOVERED after an outage: the previous completed tick was {q['last_tick']} ({gap:.0f}m ago, "
+                     f"> {stale_min}m). Schedule runs may have reported 'succeeded' meanwhile. See {STATE / 'status.md'}.")
     q["last_tick"] = iso()
     if PROMO.get("enabled") and promotion_mode() == "signer":
         apply_signer_backoff(q, log)
@@ -1951,38 +1964,53 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                     if i["state"] == "pending" and i.get("wait_reason")]
     if not dry:
         save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
-        cleanup_tick_agents(q)
-        save_queue(q)
         write_status(q)
+        write_heartbeat(q)
+        cleanup_tick_agents(q)  # time-boxed, saves incrementally
+        save_queue(q)
     return log
 
 
-def cleanup_tick_agents(q: Dict[str, Any]) -> None:
-    """Archive finished tick agents except the last few — each one ONCE.
-    Re-archiving every past run each tick (~3 s per run) pushed ticks past the
-    tick agent's 120 s foreground limit, so the agent ended mid-tick and its
-    process tree (then including the review child) was killed."""
+def cleanup_tick_agents(q: Dict[str, Any], budget_s: Optional[float] = None) -> None:
+    """Archive finished tick agents (+ their workspaces) except the last few,
+    each ONCE, within a hard time budget; progress is saved after every
+    archive, the rest waits for the next tick. Runs AFTER status.md is
+    written, so a slow cleanup can never hide a successful tick.
+    History: re-archiving every past run (~3 s per paseo call) once pushed ticks
+    past the tick agent's 120 s limit (2026-10-04); on 2026-10-07 a backlog of
+    101 failed runs, plus a 500-entry cap that forgot the oldest runs, made each
+    tick ~330 s, so no tick ever persisted its progress (a self-feeding wedge)."""
     sid = CONFIG.get("schedule_id")
     if not sid:
         return
+    deadline = time.monotonic() + (budget_s if budget_s is not None else CONFIG.get("cleanup_budget_s", 30))
     try:
         runs = paseo_json(["schedule", "inspect", sid]).get("runs") or []
     except Exception:
         return
     done = [r for r in runs if r.get("agentId") and r.get("status") != "running"]
     keep = CONFIG["keep_tick_agents"]
-    if "archived_tick_runs" in q:
-        archived = set(q["archived_tick_runs"])
-    else:  # first run of this version: every earlier tick already archived all but the newest few
+    archived = set(q.get("archived_tick_runs") or [])
+    ids = [r["id"] for r in runs]
+    if archived:  # archiving is oldest-first: every run older than the oldest recorded one is done
+        first = min((ids.index(x) for x in archived if x in ids), default=0)
+        archived.update(ids[:first])
+    elif "archived_tick_runs" not in q:  # first run ever: earlier ticks archived all but the newest few
         archived = {r["id"] for r in done[:-(keep + 1)]}
-    for r in done[:-keep] if len(done) > keep else []:
-        if r["id"] in archived:
-            continue
-        run(["paseo", "archive", r["agentId"]], check=False, timeout=60)
+    todo = [r for r in (done[:-keep] if len(done) > keep else []) if r["id"] not in archived]
+    for n, r in enumerate(todo):
+        if time.monotonic() >= deadline:
+            q["cleanup_backlog"] = len(todo) - n
+            break
+        run(["paseo", "archive", r["agentId"]], check=False, timeout=30)
         if r.get("workspaceId"):
-            run(["paseo", "workspace", "archive", r["workspaceId"]], check=False, timeout=60)
+            run(["paseo", "workspace", "archive", r["workspaceId"]], check=False, timeout=30)
         archived.add(r["id"])
-    q["archived_tick_runs"] = [r["id"] for r in runs if r["id"] in archived][-500:]
+        q["archived_tick_runs"] = [x for x in ids if x in archived]  # bounded by the schedule's own run list
+        save_queue(q)
+    else:
+        q["cleanup_backlog"] = 0
+    q["archived_tick_runs"] = [x for x in ids if x in archived]
 
 
 # ----------------------------------------------------------- status
@@ -2136,6 +2164,23 @@ def cmd_measure() -> None:
         print(f"{i['pr']:>5} {m['added']:>6} {m['surviving']:>6} {str(m['survival']):>6} {str(m['file_level_focus']):>7} "
               f"{len(m['synthetic_paths']):>5} {len(m['excluded_paths']):>4} {m['synthetic_added']:>7} {m['covered_surviving']:>7} "
               f"{str(m['focus']):>6} {str(m['docs_only'])[0]}    {i['state']}")
+
+
+WATCHDOG_HOME = Path.home() / "Library" / "Application Support" / "crq"
+
+
+def write_heartbeat(q: Dict[str, Any]) -> None:
+    """For the agent-free launchd watchdog (ops/crq-watchdog.py), which may only
+    read files under ~ (TCC blocks launchd python from the external volume)."""
+    try:
+        WATCHDOG_HOME.mkdir(parents=True, exist_ok=True)
+        tmp = WATCHDOG_HOME / ".heartbeat.json.tmp"
+        tmp.write_text(json.dumps({"last_tick": q["last_tick"], "stale_alarm_min": CONFIG.get("stale_alarm_min", 36),
+                                   "schedule_id": CONFIG.get("schedule_id"), "root": str(ROOT),
+                                   "alert_agent_id": PROMO.get("alert_agent_id")}) + "\n")
+        tmp.replace(WATCHDOG_HOME / "heartbeat.json")
+    except OSError as exc:
+        event("heartbeat_failed", error=str(exc)[:200])
 
 
 def cmd_selfcheck() -> int:

@@ -298,6 +298,23 @@ Tick agents are Paseo `claude/claude-haiku-4-5` runs that only execute
 `crq.py tick`. The runner archives each finished tick agent and its workspace
 once, keeping the last 3. It tracks them in `queue.json` `archived_tick_runs`.
 
+**Tick health (2026-10-08).** A tick takes about 10 s. Tick-agent cleanup runs after
+`status.md` and the heartbeat are written, with a 30 s budget (`cleanup_budget_s`), and saves
+progress after every archive. Any backlog carries over to the next tick. The previous design
+wedged for ~25 h: 101 failed OAuth runs piled up, a 500-entry cap made crq forget the oldest
+runs, every tick took ~330 s, and none persisted. A tick that finds the previous completed tick
+more than 36 min old (`stale_alarm_min`) messages the chancellor.
+
+**Watchdog.** `ops/crq-watchdog.py` runs with no agent, from the LaunchAgent
+`ops/com.crq.watchdog.plist`, every 10 min. It is installed as copies at
+`~/Library/Application Support/crq/crq-watchdog.py` and `~/Library/LaunchAgents/`.
+- It reads only `~/Library/Application Support/crq/heartbeat.json`, which every completed tick
+  writes. macOS TCC blocks launchd-started python from reading the external volume.
+- If the heartbeat is older than 36 min, it alerts the chancellor once per outage (Paseo plus
+  a macOS notification). A Paseo schedule run that "succeeded" proves nothing.
+- Log: `~/Library/Logs/crq-watchdog.log`. After editing `ops/crq-watchdog.py`, copy it to the
+  install path again.
+
 **Why reviews must never be children of the tick (2026-10-04).** A tick agent
 runs `crq.py tick` with a 120 s Bash foreground limit. A slower tick is moved
 to the background, and the agent ends its turn. Claude Code then kills that
