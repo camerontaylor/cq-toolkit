@@ -136,6 +136,52 @@ const signalChild = (signal) => {
     // the group is gone already
   }
 };
+/** How long a SIGKILLed group may take to disappear before the lock is pinned. */
+const SWEEP_WAIT_MS = 10_000;
+/** Set when a child group outlived SIGKILL: the lock is then never released. */
+let lockPinned = false;
+/**
+ * True once no RUNNABLE process of the group led by `pid` remains. A zombie
+ * cannot run, and from the 'exit' handler our own killed leader stays an
+ * unreaped zombie (the event loop never runs again) — which kill(-pgid, 0)
+ * still reports (Linux: success; macOS: EPERM). So anything but ESRCH asks
+ * ps whether a non-zombie member is left.
+ */
+const groupGone = (pid) => {
+  try {
+    process.kill(-pid, 0);
+  } catch (error) {
+    if (error.code === 'ESRCH') return true;
+  }
+  const res = spawnSync('ps', ['-A', '-o', 'pgid=,stat='], { encoding: 'utf8' });
+  if (res.status !== 0) return false;
+  return !res.stdout.split('\n').some((line) => {
+    const [pgid, stat] = line.trim().split(/\s+/);
+    return Number(pgid) === pid && stat !== undefined && !stat.startsWith('Z');
+  });
+};
+/**
+ * SIGKILL the child's whole group and wait — bounded, synchronously (it also
+ * runs from the 'exit' handler) — until it is gone: SIGKILL is asynchronous,
+ * and the lock must not free while a member still runs. A group that outlives
+ * the wait pins the lock: its record stays for the next waiter to judge.
+ */
+const sweepChild = () => {
+  if (child === null || childDone || child.pid === undefined) return;
+  signalChild('SIGKILL');
+  if (!POSIX) return; // taskkill /T /F has already ended the tree
+  const tick = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + SWEEP_WAIT_MS;
+  while (!groupGone(child.pid)) {
+    if (Date.now() >= deadline) {
+      say(`process group ${child.pid} outlived SIGKILL; leaving the host lock held`);
+      lockPinned = true;
+      releaseLock = () => {};
+      return;
+    }
+    Atomics.wait(tick, 0, 0, 25);
+  }
+};
 const finish = (fields) => {
   Object.assign(summary, fields);
   if (!printed) {
@@ -150,7 +196,7 @@ const finish = (fields) => {
 // lock, in that order: the lock is never free while a child runs. An
 // unplanned exit is never a success, even when the event loop just drained.
 process.on('exit', (code) => {
-  signalChild('SIGKILL');
+  sweepChild();
   if (!printed) {
     printed = true;
     const exit = code || 1;
@@ -308,8 +354,8 @@ if (files.length === 0) {
  * Run one child in its own process group, recorded in the lock (pgid and
  * leader start time) before anything waits on it, so a runner killed
  * mid-child leaves a group the next waiter can verify and kill, or wait
- * out. Resolves once it exits and its group is swept; after that the pgid is
- * never signalled again (it could be reused).
+ * out. Resolves once it exits and its group is gone (sweepChild); after that
+ * the pgid is never signalled again (it could be reused).
  */
 const runGroup = (command, args, { label, timeoutMs, ...options }) =>
   new Promise((done) => {
@@ -326,7 +372,7 @@ const runGroup = (command, args, { label, timeoutMs, ...options }) =>
     timer.unref();
     const settle = (outcome) => {
       clearTimeout(timer);
-      signalChild('SIGKILL'); // whatever the child left behind in its group
+      sweepChild(); // whatever the child left behind in its group, until gone
       childDone = true;
       done({ ...outcome, timedOut });
     };
@@ -345,6 +391,13 @@ if (!distIsFresh()) {
     env: scrubbedBuildEnv(process.env), // live suites' credentials stay out of the build
     shell: !POSIX, // pnpm is a .cmd shim on win32
   });
+  if (lockPinned) {
+    finish({
+      result: 'error',
+      exit: 1,
+      reason: 'the dist build left processes that outlived SIGKILL',
+    });
+  }
   lock.annotate({ childPgid: null });
   if (interruptedBy !== null) {
     finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
