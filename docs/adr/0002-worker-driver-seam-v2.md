@@ -1,6 +1,6 @@
 # ADR 0002 — Worker/driver seam v2
 
-> Publication note (W7.2): copied from `toolkit-research` branch `research/g1-adr-reconciliation` at `bf5f540`. The status above records the later owner G1 decision. References below to pending G1 approval or draft status describe the source text at its drafting date; accepted preconditions and residuals remain binding.
+> Publication note (W7.2): copied from `toolkit-research` branch `research/g1-adr-reconciliation` at `bf5f540`. The status below records the later owner G1 decision. References below to pending G1 approval or draft status describe the source text at its drafting date; accepted preconditions and residuals remain binding.
 
 Status: **accepted** (owner G1 sign-off, 2026-09-26; binding work-item preconditions and residuals retained)
 Critic round 1 findings and their dispositions are not published in this repository (they live in the private
