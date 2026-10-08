@@ -126,8 +126,9 @@ The gate logs the `override` prefix in its run summary.
 `ctaylor@ceres` without a password, and ctaylor holds NOPASSWD sudo and root-equivalent
 `docker` access on ceres. A root-capable agent can reach the PEM and mint an override or
 another trusted status. The accepted inability to be agent-proof remains until owner D10
-hardens both neptune and ceres, restricts owner authentication to credentials agents cannot
-use, and D4 supplies a dedicated restricted forced-command spool key. A physical-touch
+hardens BOTH neptune and ceres, including all agent-accessible privilege paths, restricts
+owner authentication to credentials agents cannot use, and D4 supplies a dedicated
+restricted forced-command spool key. A physical-touch
 credential alone does not close existing agent-reachable root or general-shell paths.
 The terminal procedure above is conditional; it is not a claim of agent-proof isolation.
 
@@ -135,11 +136,14 @@ I4 still applies: an override skips the review, never the required checks.
 
 ## When the signer is offline
 
-Nothing posts a review while ceres is down, so nothing promotes. **Promotion waits; nothing
-fails red.** A gate run woken by sync's dispatch or by hand ends green with "awaiting promotion
-review". When the host returns, crq picks up from the last promotion: it cuts a batch if a
-trigger has fired. The override needs the same host (`crq-override` runs on ceres under `crq`
-from the owner's own ssh), so while the host is down there is no remote override path either.
+If ceres — or the ssh path from crq (neptune) to the spool — is down, nothing posts a review,
+so nothing promotes. crq treats ssh failure as **unknown**: no new request, no withdrawal, no
+false "signer down"; after 30 minutes it alerts "ceres unreachable" (distinct from the
+signer-down alert) and keeps triage. **Promotion waits; nothing fails red.** Gate runs woken
+meanwhile end green with "awaiting promotion review". When ceres returns, crq re-issues the
+request and the signer-down timer restarts from recovery. The override needs the same host
+(`crq-override` runs on ceres under `crq` from the owner's own ssh), so while the host is
+unreachable there is no remote override path either.
 
 ## What a red gate run means
 
@@ -158,19 +162,20 @@ runs.
 
 ## The crq interface
 
-Signer mode, which this change arms: every request is a full `base_sha..batch_sha` review —
-there are no delta items and no agent-judged success. The delta-item mechanics in the next three
-bullets describe the interim user mode and are rewritten when the policy doc is (PR-D).
+Signer mode: every request is a full `base_sha..batch_sha` review — there are no delta items in
+the spool and no agent-judged success. The spool contract (`signer/README.md` in the crq repo)
+is normative; this section is the policy-level summary.
 
-- **Item kind:** `promotion`, carrying `batch_sha` (40-hex), `base_sha` (`main` at cut time), and
-  for a delta item, `reviewed_sha` (the previously reviewed tip, an ancestor of `batch_sha`).
-- **Priority:** a `promotion` item takes the next start slot ahead of everything else, and so does
-  its delta re-review. It never pre-empts a running review. At most one promotion is open at a
-  time.
-- **Review:** the CodeRabbit CLI over `base_sha..batch_sha`, or `reviewed_sha..batch_sha` for a
-  delta item, run in a detached checkout at `batch_sha`. The run counts only when the CLI exits
-  successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
-  posts nothing new (or `error`) and is retried. It is never reported as `success`.
+- **Item kind:** `promotion`, carrying `batch_sha` (40-hex) and `base_sha` (`main` at cut
+  time), written to the spool on ceres over ssh. At most one promotion is open at a time.
+- **Priority:** a `promotion` item takes the signer's next start slot ahead of everything
+  else. It never pre-empts a running review.
+- **Review:** the CodeRabbit CLI over `base_sha..batch_sha`, run by the signer in its own
+  detached clone and worktree at `batch_sha` on ceres, with review configuration restored from
+  `base_sha` (a head-side file cannot suppress findings) and the diff secret-scanned before any
+  upload. The run counts only when the CLI exits successfully with a terminal, non-skipped
+  completion. A failed, rate-limited or auth-failed run posts nothing new (or `error`) and is
+  retried. It is never reported as `success`.
 - **Coverage (PR-A contract):** success requires signer-recorded clean full coverage or
   clean internal deltas extending it, only absent dirty taint. A completed dirty review
   (any critical/major finding) invalidates clean coverage and stays sticky for that batch.
