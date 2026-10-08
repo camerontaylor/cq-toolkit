@@ -234,7 +234,7 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       // directory: POSIX rename, unlike mkdir, could replace that directory.
       fs.mkdirSync(path);
     } catch (error) {
-      if (error.code === 'EEXIST') return false;
+      if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') return false;
       throw error;
     }
     // If paused before recording identity, the empty directory could already

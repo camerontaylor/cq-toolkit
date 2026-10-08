@@ -210,7 +210,7 @@ describe('planRun', () => {
 describe('summaryLine', () => {
   it('prints every key in a fixed order with dashes for absent values', () => {
     expect(summaryLine({ result: 'refused', exit: 2, reason: 'say "no"' })).toBe(
-      'test:narrow result=refused exit=2 files=- projects=- tests=- failed=- skipped=- ' +
+      'test:narrow result="refused" exit=2 files=- projects=- tests=- failed=- skipped=- ' +
         'wait=- duration=- nice=- load=- uptime=- source=- ran=- reason="say \\"no\\""',
     );
   });
@@ -232,9 +232,9 @@ describe('summaryLine', () => {
         ran: ['test/a.test.ts', 'test/b.test.ts'],
       }),
     ).toBe(
-      'test:narrow result=pass exit=0 files=2 projects=pure,process tests=6/7 failed=0 ' +
-        'skipped=1 wait=1.2s duration=5.0s nice=5 load=3.2 uptime=86400s ' +
-        'source=base:origin/merge-queue@0123456789 ran=test/a.test.ts,test/b.test.ts',
+      'test:narrow result="pass" exit=0 files=2 projects="pure,process" tests=6/7 failed=0 ' +
+        'skipped=1 wait=1.2s duration=5.0s nice=5 load="3.2" uptime=86400s ' +
+        'source="base:origin/merge-queue@0123456789" ran="test/a.test.ts,test/b.test.ts"',
     );
   });
 });
@@ -447,6 +447,8 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
       invalidateBuild();
       expect(existsSync(join(root, 'dist/.build-complete'))).toBe(false);
       expect(existsSync(join(root, marker))).toBe(false);
+      put('dist/index.js', 2_000);
+      put('dist/ops/ratchet/checkRatchet.js', 2_000);
       markBuildComplete();
       expect(distIsFresh()).toBe(true);
       expect(readdirSync(join(root, 'dist'))).toEqual(packedFiles);
@@ -483,7 +485,7 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
   );
 
   it('reuses prebuilt dist without sources or root configs; absent inputs impose nothing', async () => {
-    const { root, distIsFresh } = await fixture();
+    const { root, distIsFresh, markBuildComplete } = await fixture();
     try {
       // Fixture trees (ratchet-propose's) carry a prebuilt dist and no
       // sources or root configs: nothing there can be newer than dist.
@@ -491,6 +493,9 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
       for (const input of inputs.filter((file) => !file.startsWith('src/'))) {
         rmSync(join(root, input));
       }
+      // Rebuild the external marker for this exact source-free inventory and
+      // the fixture's own dist tree after removing the source build inputs.
+      markBuildComplete();
       expect(distIsFresh()).toBe(true);
       rmSync(join(root, 'dist/index.js'));
       expect(distIsFresh()).toBe(false);
