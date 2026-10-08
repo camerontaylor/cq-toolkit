@@ -3,7 +3,16 @@
 // summary line, and the build-freshness test it relies on (ratchet-lib's
 // distIsFresh, over a copied fixture tree). Pure: no spawns, no git, no
 // vitest invocation.
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -346,7 +355,8 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     'package.json',
     'scripts/copy-prompt-assets.mjs',
   ];
-  const outputs = ['dist/index.js', 'dist/ops/ratchet/checkRatchet.js', 'dist/.build-complete'];
+  const marker = '.cq/build-complete';
+  const outputs = ['dist/index.js', 'dist/ops/ratchet/checkRatchet.js', marker];
   /** A fixture tree with ratchet-lib copied in (its ROOT is its own parent). */
   const fixture = async () => {
     const root = mkdtempSync(join(tmpdir(), 'dist-fresh-'));
@@ -363,6 +373,8 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
       invalidateBuild: () => void;
       markBuildComplete: () => void;
     };
+    mod.markBuildComplete();
+    utimesSync(join(root, marker), 2_000, 2_000);
     return { root, put, ...mod };
   };
 
@@ -379,6 +391,20 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     }
   });
 
+  it.each(inputs.filter((file) => !file.startsWith('src/')))(
+    'requires build input %s when src/ exists',
+    async (input) => {
+      const { root, distIsFresh } = await fixture();
+      try {
+        expect(distIsFresh()).toBe(true);
+        rmSync(join(root, input));
+        expect(distIsFresh()).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('stays stale after an interrupted build refreshes the compiled outputs', async () => {
     const { root, put, distIsFresh, invalidateBuild, markBuildComplete } = await fixture();
     try {
@@ -390,14 +416,14 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
       expect(distIsFresh()).toBe(false); // asset step has not completed
       markBuildComplete();
       expect(distIsFresh()).toBe(true);
-      put('dist/.build-complete', 500); // an old success cannot certify newer inputs
+      utimesSync(join(root, marker), 500, 500); // an old success cannot certify newer inputs
       expect(distIsFresh()).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('requires every dist output, including the completion marker', async () => {
+  it('requires every dist output and the external completion marker', async () => {
     for (const output of outputs) {
       const { root, distIsFresh } = await fixture();
       try {
@@ -408,6 +434,51 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
       }
     }
   });
+
+  it('keeps completion metadata outside dist and removes the legacy packed marker', async () => {
+    const { root, put, invalidateBuild, markBuildComplete, distIsFresh } = await fixture();
+    try {
+      const packedFiles = readdirSync(join(root, 'dist'));
+      expect(existsSync(join(root, marker))).toBe(true);
+      expect(packedFiles).not.toContain('.build-complete');
+      put('dist/.build-complete', 2_000); // an existing checkout from the old build protocol
+      invalidateBuild();
+      expect(existsSync(join(root, 'dist/.build-complete'))).toBe(false);
+      expect(existsSync(join(root, marker))).toBe(false);
+      markBuildComplete();
+      expect(distIsFresh()).toBe(true);
+      expect(readdirSync(join(root, 'dist'))).toEqual(packedFiles);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a marker copied from another dist tree', async () => {
+    const first = await fixture();
+    const second = await fixture();
+    try {
+      copyFileSync(join(first.root, marker), join(second.root, marker));
+      expect(second.distIsFresh()).toBe(false);
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+      rmSync(second.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(outputs.filter((file) => file.startsWith('dist/')))(
+    'requires a new completion marker after %s changes',
+    async (output) => {
+      const { root, put, distIsFresh, markBuildComplete } = await fixture();
+      try {
+        put(output, 3_000);
+        expect(distIsFresh()).toBe(false);
+        markBuildComplete();
+        expect(distIsFresh()).toBe(true);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('reuses prebuilt dist without sources or root configs; absent inputs impose nothing', async () => {
     const { root, distIsFresh } = await fixture();

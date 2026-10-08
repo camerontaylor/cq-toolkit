@@ -16,7 +16,16 @@
 // below echo the tool output so the failure is debuggable, not silent.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -59,11 +68,19 @@ const ROOT_BUILD_INPUTS = [
 /**
  * Newest mtime across every build input — src/ (recursive) plus
  * ROOT_BUILD_INPUTS — the freshness baseline for the ensureDist reuse
- * heuristic. An ABSENT input imposes nothing (fixture trees carry a prebuilt
- * dist and no sources or root configs); any other stat fault degrades to
+ * heuristic. Only source-free fixture trees may omit inputs. With src/
+ * present, every required input must exist; any fault degrades to
  * "never fresh" (Infinity), i.e. rebuild.
  */
 function newestBuildInputMtimeMs() {
+  let hasSources;
+  try {
+    if (!statSync(join(ROOT, 'src')).isDirectory()) return Infinity;
+    hasSources = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return Infinity;
+    hasSources = false;
+  }
   let newest = 0;
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -77,10 +94,10 @@ function newestBuildInputMtimeMs() {
       read();
       return true;
     } catch (error) {
-      return error?.code === 'ENOENT';
+      return !hasSources && error?.code === 'ENOENT';
     }
   };
-  if (!measure(() => walk(join(ROOT, 'src')))) return Infinity;
+  if (hasSources && !measure(() => walk(join(ROOT, 'src')))) return Infinity;
   for (const input of ROOT_BUILD_INPUTS) {
     const abs = join(ROOT, input);
     if (!measure(() => (newest = Math.max(newest, statSync(abs).mtimeMs)))) return Infinity;
@@ -88,14 +105,28 @@ function newestBuildInputMtimeMs() {
   return newest;
 }
 
+/** Worktree-local runtime state, ignored by git and outside the package allowlist. */
+const BUILD_MARKER = join(ROOT, '.cq', 'build-complete');
+/** Bind a marker to its actual dist tree and compiled entrypoints (including symlinked fixtures). */
+const buildIdentity = () =>
+  JSON.stringify({
+    dist: realpathSync(join(ROOT, 'dist')),
+    index: statSync(join(ROOT, 'dist', 'index.js')).mtimeMs,
+    engine: statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js')).mtimeMs,
+  });
+
 /** Invalidate prior success before the compiler or asset step can change dist. */
 export function invalidateBuild() {
+  rmSync(BUILD_MARKER, { force: true });
+  // Upgrade an existing checkout without letting the old marker ship in a pack.
   rmSync(join(ROOT, 'dist', '.build-complete'), { force: true });
 }
 
 /** Called only by the final successful step of the package build command. */
 export function markBuildComplete() {
-  writeFileSync(join(ROOT, 'dist', '.build-complete'), `${new Date().toISOString()}\n`);
+  const identity = buildIdentity();
+  mkdirSync(dirname(BUILD_MARKER), { recursive: true });
+  writeFileSync(BUILD_MARKER, identity);
 }
 
 /**
@@ -107,12 +138,13 @@ export function markBuildComplete() {
  */
 export function distIsFresh() {
   try {
-    const marker = statSync(join(ROOT, 'dist', '.build-complete'));
+    const marker = statSync(BUILD_MARKER);
     const index = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
     const newestInput = newestBuildInputMtimeMs();
     return (
       marker.isFile() &&
+      readFileSync(BUILD_MARKER, 'utf8') === buildIdentity() &&
       index.isFile() &&
       engineEntry.isFile() &&
       marker.mtimeMs >= newestInput &&
