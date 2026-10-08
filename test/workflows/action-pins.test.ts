@@ -197,6 +197,29 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     }
   });
 
+  it('the self-review-loop instantiation carries the peak-aware window (D11a)', () => {
+    // OWNER-MANDATED WINDOW: any time EXCEPT the Z.ai GLM peak —
+    // 06:00–10:00 UTC Mon–Fri. Two complement crons at the unchanged
+    // 15-minute cadence (weekday off-peak hours + all weekend), and the
+    // retired 15:00–01:00 UTC window fully gone from the file.
+    const text = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
+    expect(text).toContain("cron: '*/15 0-5,10-23 * * 1-5'");
+    expect(text).toContain("cron: '*/15 * * * 0,6'");
+    expect(text).not.toContain('15-23');
+    expect(text).not.toContain('0,15,30,45');
+    expect(text).not.toContain('15:00–01:00');
+    // The peak guard: the weekday read (%u, 1–7) plus the 06:00 inclusive /
+    // 10:00 exclusive bounds — a delayed fire inside the peak exits 0.
+    expect(text).toContain('date -u +%u');
+    expect(text).toContain('-ge 600');
+    expect(text).toContain('-lt 1000');
+    // D11b: the usage-report wiring — the entry's artifact path and the
+    // always() upload (an over-budget run is exactly the tuning evidence).
+    expect(text).toContain('SWEEP_USAGE_OUT');
+    expect(text).toContain('Upload the sweep token-usage report');
+    expect(text).toMatch(/if: always\(\)\n\s*with:\n\s*name: self-review-usage-/);
+  });
+
   it('the self-host driver-key env NAME is consistent within and across template/instantiation', () => {
     // Batch-gate finding (VB4K #1): the templates declared env
     // `Z_AI_API_KEY:` while their own guard asserted `$ZAI_API_KEY` (the name

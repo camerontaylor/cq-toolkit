@@ -70,7 +70,12 @@ import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 import type { SelfReviewLoopCfg, SelfReviewLoopDeps } from '../../src/selfhost/self-review-loop.js';
-import { runSelfReviewLoop } from '../../src/selfhost/self-review-loop.js';
+import {
+  buildSweepUsage,
+  runSelfReviewLoop,
+  sweepUsageMarkdown,
+} from '../../src/selfhost/self-review-loop.js';
+import type { SweepUsagePrRow } from '../../src/selfhost/self-review-loop.js';
 import type { runReviewLoop } from '../../src/plans/review-loop.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
 
@@ -543,6 +548,18 @@ describe('runSelfReviewLoop — real run', () => {
     expect(calls.every((call) => call.opts.runOptions?.maxUsd === undefined)).toBe(true);
     expect(summary.results.map((row) => row.pr)).toEqual([7, 8]);
     expect(summary.excluded).toEqual([{ pr: 9, reason: 'sweep budget exhausted (I9)' }]);
+    // D11b: the reported usage mirrors the gating budget exactly — the rows
+    // were recorded where the carry-forward was decremented.
+    expect(summary.usage).toEqual({
+      capTokens: 1000,
+      totalTokensUsed: 1200,
+      perPrTokens: [
+        { pr: 7, tokens: 600 },
+        { pr: 8, tokens: 600 },
+      ],
+      remainingTokens: -200,
+      exhausted: true,
+    });
   });
 
   test('a thrown loop deducts its propagated TOKEN spend from the sweep budget', async () => {
@@ -570,6 +587,15 @@ describe('runSelfReviewLoop — real run', () => {
           'injected loop boom after token spend — accounted spend 0 and 300 tokens deducted from the sweep budget',
       },
     ]);
+    // D11b: the thrown loop's PROPAGATED spend is the recorded row, and the
+    // sibling whose report carries no finite rollup records 0 — every
+    // looped PR appears exactly once.
+    expect(summary.usage.perPrTokens).toEqual([
+      { pr: 7, tokens: 300 },
+      { pr: 8, tokens: 0 },
+    ]);
+    expect(summary.usage.remainingTokens).toBe(700);
+    expect(summary.usage.exhausted).toBe(false);
   });
 
   test('the sweep cap carries forward: each loop gets the remaining budget, not a fresh cap', async () => {
@@ -791,6 +817,16 @@ describe('runSelfReviewLoop — dry run', () => {
     // Dry-run mode carries NO excluded rows — the exclusions ride the
     // wouldRun lines (the real run's shape, mirrored below).
     expect(summary.excluded).toBeUndefined();
+    // D11b: a dry run dispatches no fix worker, so its usage report is the
+    // zeroed bookkeeping at the full (default) cap — honest zeros, not an
+    // omission.
+    expect(summary.usage).toEqual({
+      capTokens: SelfhostDefaults.maxTokens,
+      totalTokensUsed: 0,
+      perPrTokens: [],
+      remainingTokens: SelfhostDefaults.maxTokens,
+      exhausted: false,
+    });
     expect(summary.wouldRun).toEqual([
       '#7 would-run head=pr-7 threads=0 reviews=0 issueComments=0 truncated=false',
       '#9 excluded draft',
@@ -827,5 +863,65 @@ describe('runSelfReviewLoop — listing failures', () => {
       ),
     ).rejects.toThrow(/injected listing failure/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('sweep token-usage summary (D11b)', () => {
+  test('buildSweepUsage totals the rows and derives remaining/exhausted from them', () => {
+    expect(
+      buildSweepUsage(2_000_000, [
+        { pr: 7, tokens: 600_000 },
+        { pr: 8, tokens: 300 },
+      ]),
+    ).toEqual({
+      capTokens: 2_000_000,
+      totalTokensUsed: 600_300,
+      perPrTokens: [
+        { pr: 7, tokens: 600_000 },
+        { pr: 8, tokens: 300 },
+      ],
+      remainingTokens: 1_399_700,
+      exhausted: false,
+    });
+  });
+
+  test('buildSweepUsage flags exhausted exactly AT zero remaining, not only past it', () => {
+    expect(buildSweepUsage(1000, [{ pr: 7, tokens: 1000 }]).exhausted).toBe(true);
+    expect(buildSweepUsage(1000, [{ pr: 7, tokens: 1001 }]).exhausted).toBe(true);
+    expect(buildSweepUsage(1000, [{ pr: 7, tokens: 999 }]).exhausted).toBe(false);
+    expect(buildSweepUsage(1000, []).remainingTokens).toBe(1000);
+    expect(buildSweepUsage(1000, []).exhausted).toBe(false);
+  });
+
+  test('buildSweepUsage copies the rows — the caller array cannot poison the report', () => {
+    const rows: SweepUsagePrRow[] = [{ pr: 7, tokens: 5 }];
+    const usage = buildSweepUsage(10, rows);
+    rows.push({ pr: 8, tokens: 100 });
+    expect(usage.perPrTokens).toEqual([{ pr: 7, tokens: 5 }]);
+    expect(usage.totalTokensUsed).toBe(5);
+    expect(usage.remainingTokens).toBe(5);
+  });
+
+  test('sweepUsageMarkdown renders the headline table with the yes/no exhausted flag and per-PR rows', () => {
+    const markdown = sweepUsageMarkdown(
+      buildSweepUsage(1000, [
+        { pr: 7, tokens: 600 },
+        { pr: 8, tokens: 500 },
+      ]),
+    );
+    expect(markdown).toContain(
+      '| cap (tokens) | consumed (tokens) | remaining (tokens) | exhausted |',
+    );
+    expect(markdown).toContain('| 1000 | 1100 | -100 | yes |');
+    expect(markdown).toContain('| PR | tokens (accounted) |');
+    expect(markdown).toContain('| #7 | 600 |');
+    expect(markdown).toContain('| #8 | 500 |');
+  });
+
+  test('sweepUsageMarkdown omits the per-PR table when no PR looped (a dry run)', () => {
+    const markdown = sweepUsageMarkdown(buildSweepUsage(2_000_000, []));
+    expect(markdown).toContain('| 2000000 | 0 | 2000000 | no |');
+    expect(markdown).not.toContain('| #');
+    expect(markdown.endsWith('\n')).toBe(true);
   });
 });

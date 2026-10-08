@@ -41,10 +41,14 @@ node dist/selfhost/self-merge-prs.js --repo <owner/name> [--max-usd <n>] [--dry-
 
 `--responder-login` is the review loop's OWN identity — in CI, the token's
 user (the workflow resolves it at runtime with `gh api user -q .login`).
-Both entries print one compact JSON summary on stdout (the workflows tee it
-to the run summary) and exit 0 with honest outcomes — per-PR failures and
+Both entries print their compact JSON summary on stdout (the workflows tee
+it to the run summary) and exit 0 with honest outcomes — per-PR failures and
 needs-human rows are results, not crashes; only a whole-run throw (bad args,
-a failed listing) exits 1.
+a failed listing) exits 1. The review-loop entry additionally reports its
+sweep token usage (see "Budget caps" below): a `sweepUsage` JSON line on
+stdout, a small markdown table appended to `$GITHUB_STEP_SUMMARY` when set,
+and the same JSON written to `$SWEEP_USAGE_OUT` for the workflow's artifact
+upload.
 
 I2 acceptance normally requires a non-author review. When author and reviewer
 agents must share one GitHub account, set repository variable
@@ -90,17 +94,22 @@ adopter owns it by hand.
 
 ### The cron window
 
-- Rule: schedule automation only inside your model provider's off-peak
-  window, keep the two-cron shape — one cron for the window's full hours,
-  one for its final partial hour — and keep the last fire strictly BEFORE
-  the window's end: the window end is a hard stop and no operation may be
-  initiated at or after it.
-- Why: this repo's instantiation uses 15:00–01:00 UTC (23:00–09:00
-  Asia/Singapore), which idles across the Z.AI GLM peak-hour window
-  (14:00–18:00 Asia/Singapore), where quota consumption multiplies ~3x.
+- Rule: schedule automation only OUTSIDE your model provider's peak window —
+  express the off-peak COMPLEMENT as cron lines (this repo's shape: one cron
+  for the weekday off-peak hours, one for the weekend complement when the
+  peak is weekday-only), and keep the run step's fail-closed guard refusing
+  to initiate operations inside the peak, exiting 0 as an honest no-op for a
+  delayed fire.
+- Why: this repo's review-loop instantiation schedules any time except
+  06:00–10:00 UTC Monday–Friday (14:00–18:00 Asia/Singapore), the Z.AI GLM
+  peak-hour window where quota consumption multiplies ~3x. Its
+  merge-dispatch sibling still carries the older, narrower 15:00–01:00 UTC
+  instantiation of the same off-peak rule.
 - Enforcement: the two literal cron expressions committed in each workflow
-  (this repo's instantiations). Hand-replacing the window for an adopting
-  provider is the adopter's own act and nothing checks it — `manual:`.
+  (this repo's instantiations), plus — for a delayed fire that lands inside
+  the peak anyway — the peak guard in the review-loop run step (exit 0, the
+  honest no-op). Hand-replacing the window for an adopting provider is the
+  adopter's own act and nothing checks it — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 
@@ -117,13 +126,20 @@ adopter owns it by hand.
   conflict-agent or fix-worker job is escalated instead of stalling the
   scheduled slot forever.
 - Why: an uncapped scheduled dispatch spends without bound (I9), and a
-  wedged job would eat the slot (review-debt #137's arming).
+  wedged job would eat the slot (review-debt #137's arming). The
+  2,000,000-token default is a PLACEHOLDER pending real soak data: every
+  review-loop run therefore reports its token bookkeeping — cap, per-PR
+  consumption, remaining, exhausted yes/no — as a `sweepUsage` JSON line on
+  stdout, a step-summary table, and a workflow artifact, so the cap can be
+  tuned from evidence instead of guesses.
 - Enforcement: the governor armed inside the entry modules —
   `src/selfhost/self-merge-prs.ts`'s `new BudgetGovernor(governorConfig(...))`
   construction over `runSelfMergePrs`'s runOptions (`buildRunInput` only
   prepares the plan input); the review loop's `runOptions` — from the frozen
   constants in `src/selfhost/config.ts`
-  (`SelfhostDefaults.maxTokens`, `SelfhostDefaults.perJobWallClockMs`).
+  (`SelfhostDefaults.maxTokens`, `SelfhostDefaults.perJobWallClockMs`); and
+  the usage report the review-loop entry emits and its workflow uploads as
+  the `self-review-usage-<run id>` artifact.
 
 ### One ≤20-minute slot per schedule fire
 
