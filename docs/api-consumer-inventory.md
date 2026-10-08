@@ -16,7 +16,7 @@ Three commits on top of `dd247ca`, no other files touched:
 | File                       | What it provides                                                                                                                                                                                                                                                           |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `scripts/api-report.mjs`   | `--draft` report over `package.json` `exports` + reachable declaration graph (SHA-256 per file), fail-closed on symlinks/escapes; baseline-compare mode fails when `baselines/api-report.json` is absent. Node builtins only — no npm dependency added, no lockfile touch. |
-| `test/api-report.test.mjs` | `node:test` (not Vitest) coverage for determinism, graph scoping, unsafe-target refusal, draft markers.                                                                                                                                                                    |
+| `test/api-report.test.mjs` | Vitest coverage for determinism, graph scoping, unsafe-target refusal, draft markers.                                                                                                                                                                                      |
 | `docs/api-report.md`       | Draft-state contract: `"draft": true`, `"baselineStatus": "not-established"`; baseline deferred until S/J/INV/P/CFG/FG integrations land.                                                                                                                                  |
 
 Tooling inputs and their current state on this branch:
@@ -26,7 +26,7 @@ Tooling inputs and their current state on this branch:
   (`ee05478`) lives on the release preparation branch, not on the queue.
   Never reconcile by mixing branches: the package/lock/0.2 metadata
   reconciliation happens at the API handoff on the release candidate.
-- Build outputs: the report requires `npm run build` first; `dist/` was not
+- Build outputs: the report requires `pnpm run build` first; `dist/` was not
   built in this engagement.
 - Declaration reachability: the graph walks `.d.ts`/`.d.mts`/`.d.cts`
   relative imports only; external package imports are out of scope by
@@ -63,7 +63,7 @@ none is started here, by design:
    empty consumer, exercise the root and every declared subpath plus both
    bins, with the optional peer absent and present.
 4. **CI report-drift wiring** — the compare mode joins CI only after the
-   baseline exists; a package script (`npm run api:report` or equivalent)
+   baseline exists; a package script (`pnpm run api:report` or equivalent)
    is also still unwired deliberately.
 5. **Final baseline generation** — last, on the promoted release candidate,
    after every source change below is landed, then reviewed in a separate

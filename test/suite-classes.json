@@ -1,4 +1,5 @@
 {
+  "test/api-report.test.mjs": "process",
   "test/cli/conformance.test.ts": "process",
   "test/cli/i1.test.ts": "process",
   "test/cli/parity.test.ts": "process",

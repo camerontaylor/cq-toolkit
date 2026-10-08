@@ -2,7 +2,7 @@
 
 `node scripts/api-report.mjs --draft` reads the built package exports and
 their declaration files, then writes a deterministic JSON report to stdout.
-Run `npm run build` first. The report lists every declared export target,
+Run `pnpm run build` first. The report lists every declared export target,
 its condition path and exact export mapping, plus the reachable relative
 declaration graph and a SHA-256 digest for each file. The export map scopes
 the report to public package entrypoints, while the graph includes their
@@ -31,7 +31,7 @@ against the packed tarball.
 Direct tooling tests can be run without the repository's full test suite:
 
 ```sh
-npx vitest run test/api-report.test.mjs
+pnpm exec vitest run test/api-report.test.mjs
 ```
 
 Wildcard (`*`) export targets and array targets are rejected explicitly rather

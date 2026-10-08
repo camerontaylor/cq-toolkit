@@ -33,7 +33,6 @@ function parseArgs(args) {
 // A `types` sibling (string or condition map) supplies the declaration for every runtime
 // branch of the same conditional object, so those branches need no colocated `.d.ts`.
 // `null` targets are Node's explicit "blocked" marker and contribute no targets.
-const IMPORT_CONDITIONS = new Set(['types', 'import', 'require', 'node', 'default']);
 
 function collectTargets(value, conditions = [], targets = [], typesContext = undefined) {
   if (value === null) return targets;
@@ -92,6 +91,8 @@ function hasParentSegment(relativePath) {
 }
 
 function declarationPath(target) {
+  // A directly exported JSON file is its own leaf: nothing to map, hashed like any declaration.
+  if (target.endsWith('.json')) return target;
   if (/\.d\.(?:ts|mts|cts)$/.test(target)) return target;
   if (target.endsWith('.mjs')) return target.replace(/\.mjs$/, '.d.mts');
   if (target.endsWith('.cjs')) return target.replace(/\.cjs$/, '.d.cts');
@@ -239,15 +240,32 @@ async function resolveInside(root, candidate, label) {
   return actual;
 }
 
+// Conditions that apply to a `#` import written in a given declaration file: `types`,
+// `node` and `default` always, plus `import` for ESM declarations (`.d.mts`, or `.d.ts`
+// under `"type": "module"`) or `require` for CommonJS ones (`.d.cts`, other `.d.ts`).
+function importConditions(containingFile, packageType) {
+  const esm =
+    containingFile.endsWith('.d.mts') ||
+    (!containingFile.endsWith('.d.cts') && packageType === 'module');
+  return new Set(['types', 'node', 'default', esm ? 'import' : 'require']);
+}
+
+// Node's PATTERN_KEY_COMPARE: the longer prefix before `*` wins, then the longer key.
+function comparePatternKeys(a, b) {
+  const baseA = a.indexOf('*') + 1;
+  const baseB = b.indexOf('*') + 1;
+  return baseB - baseA || b.length - a.length;
+}
+
 // Resolve a package-local `#` specifier through package.json#imports (exact keys and
 // single-`*` patterns). Returns a package-relative path, or undefined when the alias
 // maps outside the package (an external dependency) and so is not part of the graph.
-function resolveImportAlias(imports, specifier) {
+function resolveImportAlias(imports, specifier, conditions) {
   if (!imports || typeof imports !== 'object') return undefined;
   const select = (value) => {
     let node = value;
     while (node && typeof node === 'object' && !Array.isArray(node)) {
-      const key = Object.keys(node).find((candidate) => IMPORT_CONDITIONS.has(candidate));
+      const key = Object.keys(node).find((candidate) => conditions.has(candidate));
       node = key === undefined ? undefined : node[key];
     }
     return typeof node === 'string' ? node : undefined;
@@ -255,33 +273,38 @@ function resolveImportAlias(imports, specifier) {
   let mapped;
   if (Object.hasOwn(imports, specifier)) mapped = select(imports[specifier]);
   else {
-    for (const [key, value] of Object.entries(imports)) {
-      const star = key.indexOf('*');
-      if (star === -1) continue;
-      const prefix = key.slice(0, star);
-      const suffix = key.slice(star + 1);
-      if (
-        specifier.length >= key.length - 1 &&
-        specifier.startsWith(prefix) &&
-        specifier.endsWith(suffix)
-      ) {
-        const target = select(value);
-        mapped = target?.replaceAll(
-          '*',
-          specifier.slice(prefix.length, specifier.length - suffix.length),
+    const matches = Object.keys(imports)
+      .filter((key) => {
+        const star = key.indexOf('*');
+        return (
+          star !== -1 &&
+          specifier.length >= key.length - 1 &&
+          specifier.startsWith(key.slice(0, star)) &&
+          specifier.endsWith(key.slice(star + 1))
         );
-        break;
-      }
+      })
+      .sort(comparePatternKeys);
+    if (matches.length > 0) {
+      const key = matches[0];
+      const star = key.indexOf('*');
+      mapped = select(imports[key])?.replaceAll(
+        '*',
+        specifier.slice(star, specifier.length - (key.length - star - 1)),
+      );
     }
   }
   if (mapped === undefined) throw new Error(`cannot resolve package import ${specifier}`);
   return mapped.startsWith('./') ? mapped : undefined;
 }
 
-async function resolveDeclaration(root, containingFile, specifier, imports) {
+async function resolveDeclaration(root, containingFile, specifier, pkg) {
   let unresolved;
   if (specifier.startsWith('#')) {
-    const mapped = resolveImportAlias(imports, specifier);
+    const mapped = resolveImportAlias(
+      pkg.imports,
+      specifier,
+      importConditions(containingFile, pkg.type),
+    );
     if (mapped === undefined) return undefined;
     if (hasParentSegment(mapped))
       throw new Error(`package import escapes package root: ${specifier}`);
@@ -299,7 +322,7 @@ async function resolveDeclaration(root, containingFile, specifier, imports) {
   throw new Error(`cannot resolve package declaration import ${specifier}`);
 }
 
-async function declarationGraph(root, entry, imports) {
+async function declarationGraph(root, entry, pkg) {
   const pending = [entry];
   const seen = new Set();
   const graph = [];
@@ -317,7 +340,7 @@ async function declarationGraph(root, entry, imports) {
     const source = bytes.toString('utf8');
     for (const reference of declarationReferences(source)) {
       if (!reference.startsWith('.') && !reference.startsWith('#')) continue;
-      const resolved = await resolveDeclaration(root, actual, reference, imports);
+      const resolved = await resolveDeclaration(root, actual, reference, pkg);
       if (resolved) pending.push(resolved);
     }
   }
@@ -385,7 +408,7 @@ async function makeReport(root = ROOT) {
         conditions,
         target,
         declaration,
-        declarationGraph: await declarationGraph(root, declarationFile, pkg.imports),
+        declarationGraph: await declarationGraph(root, declarationFile, pkg),
       });
     }
     if (targets.length === 0 && !isBlockedExport(exportValue))
