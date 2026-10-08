@@ -7,7 +7,7 @@ import {
   providerKeysFor,
 } from './registry.js';
 import { LANE_IDS } from '../driver/served-model.js';
-import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
+import { posix as pathPosix, win32 as pathWin32 } from 'node:path';
 
 export type ConfigProfile = 'conservative' | 'solo-maintainer';
 export type ConfigLayer = 'default' | 'profile' | 'env' | 'call';
@@ -47,6 +47,8 @@ export interface ResolveConfigOptions {
   readonly verifiedRealpaths?: Readonly<
     Record<string, { readonly input: string; readonly realpath: string }>
   >;
+  /** Host platform semantics for environment names and paths; defaults to process.platform. */
+  readonly platform?: 'posix' | 'win32';
 }
 
 const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
@@ -106,8 +108,9 @@ function nonblank(value: string | undefined): string | undefined {
   return value === undefined || value.trim() === '' ? undefined : value.trim();
 }
 
-function isSecret(name: string): boolean {
-  return secretSuffixes.some((suffix) => name.endsWith(suffix));
+function isSecret(name: string, platform: 'posix' | 'win32' = 'posix'): boolean {
+  const classifiedName = platform === 'win32' ? name.toUpperCase() : name;
+  return secretSuffixes.some((suffix) => classifiedName.endsWith(suffix));
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -120,6 +123,33 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+/** Caller-owned records are read for own properties only; inherited ones are not configuration. */
+function ownEntries<V>(record: Readonly<Record<string, V>>): Record<string, V> {
+  // The copy keeps a null prototype: an ordinary object would let a polluted
+  // Object.prototype property be read back as configuration on a direct lookup.
+  const copy: Record<string, V> = Object.create(null) as Record<string, V>;
+  for (const [name, value] of Object.entries(record)) copy[name] = value;
+  return copy;
+}
+
+function ownVerifiedRealpaths(
+  record: NonNullable<ResolveConfigOptions['verifiedRealpaths']>,
+): NonNullable<ResolveConfigOptions['verifiedRealpaths']> {
+  type VerifiedRealpath = { readonly input: string; readonly realpath: string };
+  const copy: Record<string, VerifiedRealpath> = Object.create(null) as Record<
+    string,
+    VerifiedRealpath
+  >;
+  for (const [name, evidence] of Object.entries(record)) {
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) continue;
+    const input = Object.hasOwn(evidence, 'input') ? evidence.input : undefined;
+    const realpath = Object.hasOwn(evidence, 'realpath') ? evidence.realpath : undefined;
+    if (typeof input !== 'string' || typeof realpath !== 'string') continue;
+    copy[name] = { input, realpath };
+  }
+  return copy;
 }
 
 function validForeignBaseUrl(value: string): boolean {
@@ -139,9 +169,13 @@ function validForeignBaseUrl(value: string): boolean {
 }
 
 function credentialUrl(raw: string | undefined): boolean {
-  // URL consumers commonly trim, so screen the trimmed form.
+  // URL consumers commonly trim, and the parser admits special schemes with
+  // missing slashes, so screen every scheme-shaped value. A Windows drive
+  // path (`C:\cache#v1`) is a filename whose `#` is not a URL fragment.
+  // A query marker is never a Windows filename character: screen it as a URL.
   const value = raw?.trim();
-  if (!value || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+  if (!value || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;
   try {
     const parsed = new URL(value);
     return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
@@ -150,9 +184,37 @@ function credentialUrl(raw: string | undefined): boolean {
   }
 }
 
+/**
+ * Windows environment names are case-insensitive, but a copied process.env
+ * snapshot is not. Use this lookup for every resolver environment read.
+ */
+function envValue(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+  platform: 'posix' | 'win32',
+): string | undefined {
+  if (platform !== 'win32') return env[name];
+  const upper = name.toUpperCase();
+  for (const key of Object.keys(env)) if (key.toUpperCase() === upper) return env[key];
+  return undefined;
+}
+
+/**
+ * A Windows root-relative path (`\bin\gh.exe`) is win32-absolute yet resolves
+ * against the current drive, so only drive-qualified or full UNC paths count.
+ */
+function isConfigAbsolute(value: string, platform: 'posix' | 'win32'): boolean {
+  if (platform !== 'win32') return pathPosix.isAbsolute(value);
+  return (
+    pathWin32.isAbsolute(value) &&
+    (/^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value))
+  );
+}
+
 function unsafePassthrough(
   name: string,
   env: Readonly<Record<string, string | undefined>>,
+  platform: 'posix' | 'win32',
 ): boolean {
   const upper = name.toUpperCase();
   return (
@@ -165,7 +227,7 @@ function unsafePassthrough(
     upper.startsWith('GOOGLE_') ||
     upper.startsWith('GCP_') ||
     isSecret(upper) ||
-    credentialUrl(env[name])
+    credentialUrl(envValue(env, name, platform))
   );
 }
 
@@ -175,6 +237,7 @@ function expandPath(
   value: string,
   env: Readonly<Record<string, string | undefined>>,
   key: ConfigKey,
+  platform: 'posix' | 'win32',
 ): string {
   // `$NAME` and `${NAME}` are separate complete forms; any other `$` or brace
   // syntax (`${A:-b}`, `${A`, `$A}`) is rejected rather than partially expanded.
@@ -183,45 +246,51 @@ function expandPath(
   const expanded = value.replace(
     pathVariable,
     (_match, braced: string | undefined, bare: string | undefined) => {
-      const replacement = nonblank(env[(braced ?? bare)!]);
-      if (!replacement || !isAbsolute(replacement))
+      const replacement = nonblank(envValue(env, (braced ?? bare)!, platform));
+      if (!replacement || !isConfigAbsolute(replacement, platform))
         throw new Error(`${key.env}: unresolved absolute path variable`);
       return replacement;
     },
   );
-  if (expanded.includes('$') || !isAbsolute(expanded))
+  if (expanded.includes('$') || !isConfigAbsolute(expanded, platform))
     throw new Error(`${key.env}: expected an expanded absolute path`);
-  return resolvePath(expanded);
+  return (platform === 'win32' ? pathWin32 : pathPosix).resolve(expanded);
 }
 
 function assertOutsideWorkspace(
   key: ConfigKey,
   input: string,
   options: ResolveConfigOptions,
+  platform: 'posix' | 'win32',
 ): string | undefined {
   if (!key.outsideWorkspace) return undefined;
   const root = options.workspaceRootRealpath;
   const evidence = options.verifiedRealpaths?.[key.env];
   if (
-    !root ||
-    !isAbsolute(root) ||
+    typeof root !== 'string' ||
+    !isConfigAbsolute(root, platform) ||
     !evidence ||
+    typeof evidence !== 'object' ||
+    Array.isArray(evidence) ||
+    !Object.hasOwn(evidence, 'input') ||
+    typeof evidence.input !== 'string' ||
     evidence.input !== input ||
-    !isAbsolute(evidence.realpath)
+    !Object.hasOwn(evidence, 'realpath') ||
+    typeof evidence.realpath !== 'string' ||
+    !isConfigAbsolute(evidence.realpath, platform)
   )
     throw new Error(`${key.env}: verified workspace path evidence required`);
-  const rel = relative(resolvePath(root), resolvePath(evidence.realpath));
-  if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)))
+  const paths = platform === 'win32' ? pathWin32 : pathPosix;
+  const rel = paths.relative(paths.resolve(root), paths.resolve(evidence.realpath));
+  if (rel === '' || (rel !== '..' && !rel.startsWith(`..${paths.sep}`) && !paths.isAbsolute(rel)))
     throw new Error(`${key.env}: path must resolve outside the workspace`);
-  return resolvePath(evidence.realpath);
+  return paths.resolve(evidence.realpath);
 }
 
 function parseListItems(label: string, raw: unknown): string[] {
-  const parts = isStringArray(raw)
-    ? [...raw]
-    : String(raw)
-        .split(',')
-        .map((part) => part.trim());
+  if (typeof raw !== 'string' && !isStringArray(raw))
+    throw new Error(`${label}: expected a string or string list`);
+  const parts = isStringArray(raw) ? [...raw] : raw.split(',').map((part) => part.trim());
   if (parts.some((part) => part.length === 0)) throw new Error(`${label}: empty list item`);
   if (parts.includes('none') && parts.length !== 1)
     throw new Error(`${label}: 'none' must be the only item`);
@@ -233,6 +302,7 @@ function parseListItems(label: string, raw: unknown): string[] {
 function parse(
   key: ConfigKey,
   raw: string | boolean | number | readonly string[] | Readonly<Record<string, string>> | null,
+  platform: 'posix' | 'win32',
 ): ConfigValue {
   if (raw === null) return null;
   if (key.type === 'list') {
@@ -247,17 +317,21 @@ function parse(
       throw new Error(`${key.env}: expected bot logins ending in [bot]`);
     if (
       key.id === 'merge.trustedBots' &&
+      // Login identity is case-insensitive, so compare case-folded.
       unique.some((value) =>
         [
           'github-actions[bot]',
           'cq-verdict[bot]',
           'cq-promoter[bot]',
           'cq-automation[bot]',
-        ].includes(value),
+        ].includes(value.toLowerCase()),
       )
     )
       throw new Error(`${key.env}: structurally excluded bot identity`);
-    if (key.id === 'run.envPassthrough' && unique.some((name) => unsafePassthrough(name, {})))
+    if (
+      key.id === 'run.envPassthrough' &&
+      unique.some((name) => unsafePassthrough(name, {}, platform))
+    )
       throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
     if (
       key.id === 'driver.acp.envNames' &&
@@ -323,7 +397,7 @@ function parse(
       if (
         parts.length !== 3 ||
         parts.some((part) => !part) ||
-        !/^[a-z0-9-]+$/.test(parts[0]!) ||
+        !(LANE_IDS as readonly string[]).includes(parts[0]!) ||
         !/^[a-z0-9-]+$/.test(parts[1]!) ||
         !served ||
         /[=,|]/.test(served)
@@ -395,6 +469,14 @@ function parse(
         throw new Error(`${key.env}: host must match the bundled provider usage endpoint`);
     }
   }
+  // A separator-bearing or drive-prefixed gh path is relative somewhere, and
+  // consumers resolve such paths against different working directories.
+  if (
+    key.env === 'CQ_GH_BIN' &&
+    /[\\/]|^[A-Za-z]:/.test(value) &&
+    !isConfigAbsolute(value, platform)
+  )
+    throw new Error(`${key.env}: expected a bare executable name or an absolute path`);
   if (key.type === 'argv') {
     let argv: unknown;
     try {
@@ -407,7 +489,9 @@ function parse(
       argv.length === 0 ||
       argv.some((part) => typeof part !== 'string' || part.length === 0) ||
       // A drive prefix (`C:claude.exe`) is drive-relative on Windows, so it is path-like too.
-      (typeof argv[0] === 'string' && /[\\/]|^[A-Za-z]:/.test(argv[0]) && !isAbsolute(argv[0]))
+      (typeof argv[0] === 'string' &&
+        /[\\/]|^[A-Za-z]:/.test(argv[0]) &&
+        !isConfigAbsolute(argv[0], platform))
     )
       throw new Error(`${key.env}: expected non-empty string argv`);
     return argv as string[];
@@ -428,18 +512,20 @@ function resolveValue(
   key: ConfigKey,
   raw: string | boolean | number | readonly string[] | Readonly<Record<string, string>> | null,
   env: Readonly<Record<string, string | undefined>>,
+  platform: 'posix' | 'win32',
   allowDefaultSentinel = false,
 ): ConfigValue {
   if (allowDefaultSentinel && isDefaultSentinel(key, raw)) return raw;
-  const value = parse(key, raw);
+  const value = parse(key, raw, platform);
   if (
     key.outsideWorkspace &&
     key.type === 'string' &&
     typeof value === 'string' &&
     value.startsWith('custom:')
   )
-    return `custom:${expandPath(value.slice('custom:'.length), env, key)}`;
-  if (key.type === 'path' && typeof value === 'string') return expandPath(value, env, key);
+    return `custom:${expandPath(value.slice('custom:'.length), env, key, platform)}`;
+  if (key.type === 'path' && typeof value === 'string')
+    return expandPath(value, env, key, platform);
   return value;
 }
 
@@ -448,13 +534,14 @@ function verifyWorkspacePath(
   key: ConfigKey,
   value: ConfigValue,
   options: ResolveConfigOptions,
+  platform: 'posix' | 'win32',
 ): ConfigValue {
   if (!key.outsideWorkspace || typeof value !== 'string' || isDefaultSentinel(key, value))
     return value;
-  if (key.type === 'path') return assertOutsideWorkspace(key, value, options) ?? value;
+  if (key.type === 'path') return assertOutsideWorkspace(key, value, options, platform) ?? value;
   if (key.type === 'string' && value.startsWith('custom:')) {
     const path = value.slice('custom:'.length);
-    return `custom:${assertOutsideWorkspace(key, path, options) ?? path}`;
+    return `custom:${assertOutsideWorkspace(key, path, options, platform) ?? path}`;
   }
   return value;
 }
@@ -595,8 +682,22 @@ function parseOptIns(optIns: readonly string[]): {
 }
 
 /** Resolve config exactly once from a caller-owned env snapshot. */
-export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfig {
-  const env = options.env ?? {};
+export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig {
+  // Caller records are read for own properties only, and the copies keep a
+  // null prototype: an inherited property — from the caller's record or from a
+  // polluted Object.prototype — never passed the own-key validation below, so
+  // it is not configuration.
+  const ownInput = Object.assign(Object.create(null) as ResolveConfigOptions, input);
+  const options: ResolveConfigOptions = Object.assign(Object.create(null) as ResolveConfigOptions, {
+    ...ownInput,
+    ...(ownInput.env ? { env: ownEntries(ownInput.env) } : {}),
+    ...(ownInput.values ? { values: ownEntries(ownInput.values) } : {}),
+    ...(ownInput.verifiedRealpaths
+      ? { verifiedRealpaths: ownVerifiedRealpaths(ownInput.verifiedRealpaths) }
+      : {}),
+  });
+  const platform = options.platform ?? (process.platform === 'win32' ? 'win32' : 'posix');
+  const env = options.env ?? ownEntries<string | undefined>({});
   const customProviderIds = Object.keys(env)
     .filter(
       (name) =>
@@ -611,9 +712,9 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     .filter(
       (id) =>
         /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id) &&
-        nonblank(env[`CQ_PROVIDER_${id.toUpperCase().replaceAll('-', '_')}_PROFILE`])?.startsWith(
-          'custom:',
-        ),
+        nonblank(
+          envValue(env, `CQ_PROVIDER_${id.toUpperCase().replaceAll('-', '_')}_PROFILE`, platform),
+        )?.startsWith('custom:'),
     );
   const registry = [...CONFIG_REGISTRY, ...providerKeysFor(customProviderIds)];
   const registryByEnv = new Map(registry.map((key) => [key.env, key]));
@@ -622,8 +723,12 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
   const foreign: Record<string, string> = {};
   const unknownNames: string[] = [];
   for (const name of Object.keys(env)) {
+    // Windows environment lookups are case-insensitive, so a noncanonical CQ_*
+    // spelling would silently alias its canonical variable; fail closed instead.
+    if (/^cq_/i.test(name) && !name.startsWith('CQ_'))
+      throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
-    if (isSecret(name) && nonblank(env[name]) !== undefined) {
+    if (isSecret(name, platform) && nonblank(envValue(env, name, platform)) !== undefined) {
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
       else credentials[name] = 'set';
     }
@@ -641,7 +746,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     );
   }
   for (const name of FOREIGN_ENV_NAMES) {
-    const value = env[name];
+    const value = envValue(env, name, platform);
     if (nonblank(value) === undefined) continue;
     if (isSecret(name)) credentials[name] = 'set';
     else foreign[name] = value!;
@@ -652,11 +757,11 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     'DEEPSEEK_ANTHROPIC_BASE_URL',
     'ANTHROPIC_BASE_URL',
   ]) {
-    const value = nonblank(env[name]);
+    const value = nonblank(envValue(env, name, platform));
     if (value && !validForeignBaseUrl(value))
       throw new Error(`${name}: expected HTTPS URL without userinfo or query`);
   }
-  const profileRaw = nonblank(env.CQ_PROFILE);
+  const profileRaw = nonblank(envValue(env, 'CQ_PROFILE', platform));
   if (
     profileRaw !== undefined &&
     profileRaw !== 'conservative' &&
@@ -665,11 +770,12 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     throw new Error(`CQ_PROFILE: unsupported profile '${profileRaw}'`);
   }
   const profile: ConfigProfile = profileRaw === 'solo-maintainer' ? profileRaw : 'conservative';
-  const eventName = options.eventName ?? env.GITHUB_EVENT_NAME;
+  const eventName = options.eventName ?? envValue(env, 'GITHUB_EVENT_NAME', platform);
   if (
     eventName === 'pull_request' &&
     Object.keys(env).some(
-      (name) => name.startsWith('CQ_APPROVAL_') && nonblank(env[name]) !== undefined,
+      (name) =>
+        name.startsWith('CQ_APPROVAL_') && nonblank(envValue(env, name, platform)) !== undefined,
     )
   ) {
     throw new Error('CQ_APPROVAL_* is trusted-only and cannot be set by a pull_request workflow');
@@ -684,13 +790,17 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     if (typed === undefined) continue;
     const key = byId.get(id);
     // Compare parsed values so typed records and reordered lists match their string form.
-    if (key ? !equal(parse(key, typed), parse(key, value)) : !callOnlyEqual(id, typed, value))
+    if (
+      key
+        ? !equal(parse(key, typed, platform), parse(key, value, platform))
+        : !callOnlyEqual(id, typed, value)
+    )
       throw new Error(`${id}: opt-in value disagrees with typed value`);
   }
 
   const entries: Record<string, ResolvedConfigEntry> = {};
   for (const key of registry) {
-    const raw = nonblank(env[key.env]);
+    const raw = nonblank(envValue(env, key.env, platform));
     const callRaw =
       options.values?.[key.id] ??
       optInValues.get(key.id) ??
@@ -709,7 +819,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
             : null;
     } else {
       try {
-        defaultValue = resolveValue(key, key.blank, env, true);
+        defaultValue = resolveValue(key, key.blank, env, platform, true);
       } catch (error) {
         // A path default whose variable (XDG_STATE_HOME, TMPDIR) is unset only
         // matters when it is the effective value; an override replaces it.
@@ -719,14 +829,15 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     }
     const seeded =
       profile === 'solo-maintainer' && key.solo !== undefined
-        ? resolveValue(key, key.solo, env)
+        ? resolveValue(key, key.solo, env, platform)
         : undefined;
     let current = seeded === undefined ? defaultValue : overlay(key, defaultValue, seeded);
     let layer: ConfigLayer = seeded === undefined ? 'default' : 'profile';
     let sourceEnv: string | undefined = seeded === undefined ? undefined : 'CQ_PROFILE';
     if (raw !== undefined) {
       if (key.reserved) throw new Error(`${key.env}: reserved; not yet honoured`);
-      const projectValue = key.id === 'automation.token' ? null : resolveValue(key, raw, env);
+      const projectValue =
+        key.id === 'automation.token' ? null : resolveValue(key, raw, env, platform);
       if (key.id === 'merge.trustedAssociations' && !isSubset(projectValue, defaultValue))
         throw new Error(`${key.env}: project values may only narrow the fixed association set`);
       if (key.order === 'union' && !isSubset(defaultValue, projectValue)) {
@@ -735,7 +846,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       if (
         key.id === 'run.envPassthrough' &&
         isStringArray(projectValue) &&
-        projectValue.some((name) => unsafePassthrough(name, env))
+        projectValue.some((name) => unsafePassthrough(name, env, platform))
       ) {
         throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
       }
@@ -745,11 +856,11 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     }
     if (callRaw !== undefined) {
       if (!key.perCall) throw new Error(`${key.id}: has no per-call layer`);
-      const next = resolveValue(key, callRaw, env);
+      const next = resolveValue(key, callRaw, env, platform);
       if (
         key.id === 'run.envPassthrough' &&
         isStringArray(next) &&
-        next.some((name) => unsafePassthrough(name, env))
+        next.some((name) => unsafePassthrough(name, env, platform))
       )
         throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
       // Maps merge by entry, so judge the merged result rather than the partial call value.
@@ -762,7 +873,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     }
     const relaxed = !tighter(key, current, defaultValue);
     entries[key.id] = Object.freeze({
-      value: deepFreeze(verifyWorkspacePath(key, current, options)),
+      value: deepFreeze(verifyWorkspacePath(key, current, options, platform)),
       layer,
       ...(sourceEnv ? { env: sourceEnv } : {}),
       relaxed,
@@ -789,7 +900,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         throw new Error(`${id}: expected boolean value`);
       value = raw === true || raw === 'true';
     } else if (spec.type === 'list') {
-      value = parseListItems(id, isStringArray(raw) ? raw : String(raw));
+      value = parseListItems(id, raw);
     } else {
       value = String(raw);
       if ('values' in spec && !spec.values.some((supported: string) => supported === value))
@@ -811,7 +922,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     registryVersion: 1,
     profile,
     entries: Object.freeze(entries),
-    secrets: Object.freeze(secrets),
+    secrets: deepFreeze(secrets),
     credentials: Object.freeze(credentials),
     foreign: Object.freeze(foreign),
   });

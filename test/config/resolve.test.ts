@@ -8,7 +8,18 @@ const state = '/tmp';
 const sessions = '/tmp/cq-harness/sessions';
 const baselineEnv = { XDG_STATE_HOME: '/tmp', TMPDIR: '/tmp' };
 function resolve(input: Parameters<typeof resolveConfig>[0] = {}) {
-  const env = { ...baselineEnv, ...input.env };
+  const platform = input.platform ?? 'posix';
+  const fixtureRoot = platform === 'win32' ? 'C:\\workspace' : root;
+  const fixtureState = platform === 'win32' ? 'C:\\tmp' : state;
+  const separator = platform === 'win32' ? '\\' : '/';
+  const fixtureLedger = `${fixtureState}${separator}cq${separator}approvals.ndjson`;
+  const fixtureSessions = `${fixtureState}${separator}cq-harness${separator}sessions`;
+  const env = {
+    ...(platform === 'win32'
+      ? { XDG_STATE_HOME: fixtureState, TMPDIR: fixtureState }
+      : baselineEnv),
+    ...input.env,
+  };
   const customProfiles = Object.fromEntries(
     Object.entries(env)
       .filter(
@@ -26,13 +37,13 @@ function resolve(input: Parameters<typeof resolveConfig>[0] = {}) {
   return resolveConfig({
     ...input,
     env,
-    workspaceRootRealpath: root,
+    workspaceRootRealpath: fixtureRoot,
     verifiedRealpaths: {
       CQ_APPROVAL_LEDGER: {
-        input: `${state}/cq/approvals.ndjson`,
-        realpath: `${state}/cq/approvals.ndjson`,
+        input: fixtureLedger,
+        realpath: fixtureLedger,
       },
-      CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+      CQ_DRIVER_SESSIONS_DIR: { input: fixtureSessions, realpath: fixtureSessions },
       ...customProfiles,
       ...(input.verifiedRealpaths ?? {}),
     },
@@ -128,6 +139,18 @@ describe('pure configuration resolution', () => {
     });
     expect(config.credentials).toEqual({ ZAI_API_KEY: 'set' });
     expect(JSON.stringify(config)).not.toContain('private');
+  });
+
+  it('classifies Windows secret suffixes case-insensitively by presence only', () => {
+    for (const name of ['VENDOR_API_KEY', 'vendor_api_key', 'Vendor_Api_Key']) {
+      const marker = `private-${name}`;
+      const config = resolve({ env: { [name]: marker }, platform: 'win32' });
+
+      expect(config.credentials).toEqual({ [name]: 'set' });
+      expect(JSON.stringify(config)).not.toContain(marker);
+    }
+
+    expect(resolve({ env: { vendor_api_key: 'private' } }).credentials).toEqual({});
   });
 
   it('accepts the RS-15 call-only governance inputs without env mirrors', () => {
@@ -433,10 +456,10 @@ describe('pure configuration resolution', () => {
     it('accepts typed served-alias records and order-insensitive call-only opt-ins', () => {
       const config = resolve({
         optIn: ['driver.servedAliases'],
-        values: { 'driver.servedAliases': { 'lane/provider/requested': 'served' } },
+        values: { 'driver.servedAliases': { 'ai-sdk/provider/requested': 'served' } },
       });
       expect(entryValue('driver.servedAliases', config)).toEqual({
-        'lane/provider/requested': 'served',
+        'ai-sdk/provider/requested': 'served',
       });
       expect(() =>
         resolve({
@@ -568,6 +591,286 @@ describe('pure configuration resolution', () => {
       expect(() => resolve({ env: { CQ_DRIVER_BINDINGS: '*/zai:ai-skd' } })).toThrow(
         /invalid map token/,
       );
+    });
+  });
+
+  describe('post-merge #256 follow-up: P2 review findings', () => {
+    it('rejects noncanonical CQ_* spellings that Windows lookups would alias', () => {
+      for (const name of ['cq_approval_max_ttl_ms', 'Cq_Profile', 'cQ_SANDBOX']) {
+        expect(() => resolve({ env: { [name]: 'x' } })).toThrow(
+          /expected canonical CQ_\* spelling/,
+        );
+      }
+    });
+
+    it('screens slashless URL-standard credential forms in passthrough values', () => {
+      for (const value of ['https:user:pass@example.test', 'https:/user:pass@example.test']) {
+        expect(() =>
+          resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value } }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
+
+    it('requires the standalone gh executable to be a bare name or an absolute path', () => {
+      expect(entryValue('gh.bin', resolve())).toBe('gh');
+      expect(entryValue('gh.bin', resolve({ env: { CQ_GH_BIN: '/usr/local/bin/gh' } }))).toBe(
+        '/usr/local/bin/gh',
+      );
+      for (const value of ['bin/gh', '.\\bin\\gh.exe', 'C:gh.exe']) {
+        expect(() => resolve({ env: { CQ_GH_BIN: value } })).toThrow(/bare executable name/);
+      }
+    });
+
+    it('validates served-alias lanes against the shipped lane set', () => {
+      expect(() =>
+        resolve({ env: { CQ_DRIVER_SERVED_ALIASES: 'ai-skd/provider/requested=served' } }),
+      ).toThrow(/invalid served-alias entry/);
+      expect(
+        entryValue(
+          'driver.servedAliases',
+          resolve({ env: { CQ_DRIVER_SERVED_ALIASES: 'acp/provider/requested=served' } }),
+        ),
+      ).toEqual({ 'acp/provider/requested': 'served' });
+    });
+
+    it('reads caller records for own properties only', () => {
+      const inheritedEnv = Object.assign(Object.create({ CQ_PROFILE: 'solo-maintainer' }), {
+        XDG_STATE_HOME: '/tmp',
+        TMPDIR: '/tmp',
+      }) as Record<string, string | undefined>;
+      const config = resolveConfig({
+        env: inheritedEnv,
+        workspaceRootRealpath: root,
+        verifiedRealpaths: {
+          CQ_APPROVAL_LEDGER: {
+            input: `${state}/cq/approvals.ndjson`,
+            realpath: `${state}/cq/approvals.ndjson`,
+          },
+          CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+        },
+      });
+      expect(config.profile).toBe('conservative');
+      const inheritedValues = Object.create({ sandbox: 'off' }) as Exclude<
+        NonNullable<Parameters<typeof resolveConfig>[0]>['values'],
+        undefined
+      >;
+      expect(() =>
+        resolveConfig({
+          env: { ...baselineEnv },
+          values: inheritedValues,
+          workspaceRootRealpath: root,
+          verifiedRealpaths: {
+            CQ_APPROVAL_LEDGER: {
+              input: `${state}/cq/approvals.ndjson`,
+              realpath: `${state}/cq/approvals.ndjson`,
+            },
+            CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it('rejects non-string scalars for list settings', () => {
+      expect(() =>
+        resolve({ values: { 'run.envPassthrough': true }, optIn: ['run.envPassthrough'] }),
+      ).toThrow(/expected a string or string list/);
+      expect(() =>
+        resolve({
+          values: { 'budget.releaseQuarantine': 42 },
+          optIn: ['budget.releaseQuarantine'],
+        }),
+      ).toThrow(/expected a string or string list/);
+    });
+
+    it('case-folds structurally excluded bot logins', () => {
+      for (const login of ['GitHub-Actions[bot]', 'CQ-Promoter[bot]']) {
+        expect(() => resolve({ env: { CQ_MERGE_TRUSTED_BOTS: login } })).toThrow(
+          /structurally excluded/,
+        );
+      }
+    });
+
+    it('deep-freezes secret presence records', () => {
+      const config = resolve({ env: { CQ_AUTOMATION_TOKEN: 'private' } });
+      expect(config.secrets.CQ_AUTOMATION_TOKEN).toEqual({ layer: 'env', set: true });
+      expect(Object.isFrozen(config.secrets.CQ_AUTOMATION_TOKEN)).toBe(true);
+    });
+  });
+
+  describe('post-merge #285 review findings', () => {
+    it('requires own properties for verified path evidence fields', () => {
+      const canonical = '/var/tmp/canonical-sessions';
+      const inheritedInput = Object.assign(Object.create({ input: sessions }), {
+        realpath: canonical,
+      }) as { input: string; realpath: string };
+      const inheritedRealpath = Object.assign(Object.create({ realpath: canonical }), {
+        input: sessions,
+      }) as { input: string; realpath: string };
+      const inheritedFunction = function evidence() {};
+      Object.setPrototypeOf(inheritedFunction, {
+        input: sessions,
+        realpath: canonical,
+      });
+      const malformedArray = Object.assign([], { input: sessions, realpath: canonical });
+
+      const malformedEvidence: unknown[] = [
+        inheritedInput,
+        inheritedRealpath,
+        inheritedFunction,
+        malformedArray,
+        null,
+        'invalid-evidence',
+      ];
+      for (const evidence of malformedEvidence) {
+        expect(() =>
+          resolve({
+            env: { CQ_DRIVER_SESSIONS_DIR: sessions },
+            verifiedRealpaths: {
+              CQ_DRIVER_SESSIONS_DIR: evidence,
+            } as unknown as NonNullable<
+              NonNullable<Parameters<typeof resolveConfig>[0]>['verifiedRealpaths']
+            >,
+          }),
+        ).toThrow(/verified workspace path evidence required/);
+      }
+
+      const config = resolve({
+        env: { CQ_DRIVER_SESSIONS_DIR: sessions },
+        verifiedRealpaths: {
+          CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: canonical },
+        },
+      });
+      expect(entryValue('driver.sessionsDir', config)).toBe(canonical);
+    });
+
+    // MAJOR (PRRT_kwDOUY73E86qLJRX): Object.fromEntries reintroduces
+    // Object.prototype, so a polluted inherited name could be read back as
+    // configuration on a direct lookup such as env.CQ_PROFILE.
+    it('ignores Object.prototype pollution in caller records', () => {
+      const proto = Object.prototype as Record<string, unknown>;
+      proto.CQ_PROFILE = 'solo-maintainer';
+      proto.CQ_APPROVAL_LEDGER = {
+        input: `${state}/cq/approvals.ndjson`,
+        realpath: `${state}/cq/approvals.ndjson`,
+      };
+      proto['run.envPassthrough'] = 'PATH';
+      try {
+        // The registry's path defaults need the state/tmp variables, so every
+        // direct call here supplies them; the polluted names stay absent from
+        // each record's own properties.
+        const baseEnv = { XDG_STATE_HOME: '/tmp', TMPDIR: '/tmp' };
+        const workspaceEvidence = {
+          workspaceRootRealpath: root,
+          verifiedRealpaths: {
+            CQ_APPROVAL_LEDGER: {
+              input: `${state}/cq/approvals.ndjson`,
+              realpath: `${state}/cq/approvals.ndjson`,
+            },
+            CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+          },
+        };
+        expect(resolveConfig({ env: { ...baseEnv }, ...workspaceEvidence }).profile).toBe(
+          'conservative',
+        );
+        expect(resolveConfig({ env: baseEnv, values: {}, ...workspaceEvidence }).profile).toBe(
+          'conservative',
+        );
+        expect(() => resolve({ values: {} })).not.toThrow();
+        expect(() =>
+          resolveConfig({
+            env: {
+              ...baseEnv,
+              CQ_APPROVAL_LEDGER: `${state}/cq/approvals.ndjson`,
+            },
+            workspaceRootRealpath: root,
+            verifiedRealpaths: {
+              CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+            },
+          }),
+        ).toThrow(/verified workspace path evidence required/);
+      } finally {
+        delete proto.CQ_PROFILE;
+        delete proto.CQ_APPROVAL_LEDGER;
+        delete proto['run.envPassthrough'];
+      }
+    });
+
+    // MAJOR (PRRT_kwDOUY73E86qLJRe): a copied Windows process.env snapshot has
+    // no case-insensitive lookup, so a passthrough name must be screened
+    // against the case-variant value it resolves to downstream.
+    it('screens Windows passthrough names against case-variant values', () => {
+      const credential = 'https://user:pass@example.test';
+      expect(() =>
+        resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'gh_token', GH_TOKEN: credential } }),
+      ).toThrow(/cannot be passed through/);
+      expect(() =>
+        resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'safe_endpoint', SAFE_ENDPOINT: credential } }),
+      ).not.toThrow();
+      expect(() =>
+        resolve({
+          env: { CQ_RUN_ENV_PASSTHROUGH: 'safe_endpoint', SAFE_ENDPOINT: credential },
+          platform: 'win32',
+        }),
+      ).toThrow(/cannot be passed through/);
+    });
+
+    // MINOR (PRRT_kwDOUY73E86qLJRf): a Windows drive path is a filename even
+    // when it contains a colon and a '#'.
+    it('does not treat drive-prefixed paths as credential URLs', () => {
+      for (const value of ['C:\\cache#v1', 'C:/cache#v1']) {
+        expect(
+          entryValue(
+            'run.envPassthrough',
+            resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_CACHE', SAFE_CACHE: value } }),
+          ),
+        ).toEqual(['SAFE_CACHE']);
+      }
+      expect(() =>
+        resolve({
+          env: {
+            CQ_RUN_ENV_PASSTHROUGH: 'SAFE_CACHE',
+            SAFE_CACHE: 'https://user:pass@example.test',
+          },
+        }),
+      ).toThrow(/cannot be passed through/);
+    });
+
+    // MINOR (PRRT_kwDOUY73E86qLJJy): path.win32 accepts root-relative paths,
+    // which resolve against the current drive; a Windows executable location
+    // must be drive-qualified, a full UNC path, or a bare name.
+    it('requires a drive-qualified or UNC absolute executable path on Windows', () => {
+      expect(
+        entryValue(
+          'gh.bin',
+          resolve({ env: { CQ_GH_BIN: 'C:\\tools\\gh.exe' }, platform: 'win32' }),
+        ),
+      ).toBe('C:\\tools\\gh.exe');
+      expect(
+        entryValue(
+          'gh.bin',
+          resolve({ env: { CQ_GH_BIN: '\\\\server\\share\\gh.exe' }, platform: 'win32' }),
+        ),
+      ).toBe('\\\\server\\share\\gh.exe');
+      for (const value of ['/usr/local/bin/gh', '\\bin\\gh.exe', 'C:bin\\gh.exe']) {
+        expect(() => resolve({ env: { CQ_GH_BIN: value }, platform: 'win32' })).toThrow(
+          /bare executable name/,
+        );
+      }
+      expect(() =>
+        resolve({
+          env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["/bin/claude.exe"]' },
+          platform: 'win32',
+        }),
+      ).toThrow(/argv/);
+      expect(
+        entryValue(
+          'driver.subprocess.command',
+          resolve({
+            env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["C:\\\\bin\\\\claude.exe"]' },
+            platform: 'win32',
+          }),
+        ),
+      ).toEqual(['C:\\bin\\claude.exe']);
     });
   });
 });
