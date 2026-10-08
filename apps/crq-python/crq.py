@@ -1249,15 +1249,20 @@ class SpoolUnreachable(Exception):
 
 class Spool:
     """Request/result spool of contract v1. The signer runs on queue-host, so the spool
-    lives there (/var/lib/crq-spool) and crq pushes/reads over `ssh -o
-    BatchMode=yes` (queue-host stays outbound-only: no listener, no companion
-    service). `host: null` = a local directory (simulations). Remote commands
-    are built ONLY from constant sub-paths plus ids that already passed
-    SIGNER_ID, and every path is shlex-quoted regardless."""
+    lives there (/var/lib/crq-spool) and crq pushes/reads over ssh (queue-host stays
+    outbound-only). The ssh key is DEDICATED (owner decision D4): on queue-host it
+    is pinned in authorized_keys to the forced command /opt/cq-reviewer/spool-shell,
+    which allows only the verbs below (put / snapshot / withdraw / read / exist).
+    Without a dedicated key crq refuses to talk to the spool (fail closed), unless
+    `legacy_shell: true` explicitly opts into plain-shell scripts. `host: null`
+    means a local directory (simulations). Every id passes SIGNER_ID before any
+    command is built."""
 
     def __init__(self, cfg: Dict[str, Any]):
-        self.host = cfg.get("host")
+        self.key = cfg.get("ssh_key") or cfg.get("key")  # the signer runbook calls it `.key`
+        self.host = cfg.get("ssh_alias") or cfg.get("host")
         self.dir = cfg.get("dir") or "/var/lib/crq-spool"
+        self.legacy = bool(cfg.get("legacy_shell")) and not self.key
 
     @staticmethod
     def _id(iid: str) -> str:
@@ -1268,93 +1273,114 @@ class Spool:
     def _path(self, rel: str) -> Path:
         return Path(self.dir) / rel
 
-    def _ssh(self, script: str, data: Optional[bytes] = None) -> str:
-        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
-               "-o", "ServerAliveCountMax=2", self.host, script]
+    def _ssh(self, remote: str, data: Optional[bytes] = None) -> str:
+        if self.key:
+            auth = ["-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
+        elif self.legacy:
+            auth = []
+        else:
+            raise SpoolUnreachable("no dedicated spool key configured (promotion.signer.spool.ssh_key) — refusing "
+                                   "to use a general-purpose ssh identity")
+        cmd = ["ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
+               "-o", "ServerAliveCountMax=2", self.host, remote]
         try:
-            p = subprocess.run(cmd, input=data, capture_output=True, timeout=45)
+            p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=45)
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise SpoolUnreachable(f"ssh {self.host}: {exc}"[:200])
         if p.returncode != 0:
             raise SpoolUnreachable(f"ssh {self.host} exit {p.returncode}: {p.stderr.decode(errors='replace').strip()[:200]}")
         return p.stdout.decode(errors="replace")
 
-    def _cd(self) -> str:
-        return f"cd {shlex.quote(self.dir)} || {{ echo 'spool dir missing' >&2; exit 3; }}; "
+    def _remote(self, verb: str, *args: str, data: Optional[bytes] = None) -> str:
+        """Dedicated key: `<verb> <args>` is SSH_ORIGINAL_COMMAND for spool-shell
+        (word-split there, never eval). Legacy: the equivalent POSIX script."""
+        if not self.legacy:
+            return self._ssh(" ".join([verb, *args]), data)
+        d, a = self.dir, args
+        sq = shlex.quote
+        scripts = {
+            "put": lambda: f"cd {sq(d + '/requests')} && cat > {sq('.' + a[0] + '.json.tmp')} && "
+                           f"mv -f {sq('.' + a[0] + '.json.tmp')} {sq(a[0] + '.json')} && echo PUT {a[0]}",
+            "snapshot": lambda: (f"cd {sq(d)} || exit 2; test -e {sq('results/' + a[0] + '.claimed')} && echo 'claimed 1' "
+                                 f"|| echo 'claimed 0'; test -e {sq('requests/' + a[0] + '.json')} && echo 'request 1' "
+                                 f"|| echo 'request 0'; if test -f {sq('results/' + a[0] + '.json')}; then echo 'result begin';"
+                                 f" cat {sq('results/' + a[0] + '.json')}; echo 'result end'; else echo 'result -'; fi"),
+            "withdraw": lambda: (f"p={sq(d + '/requests/' + a[0] + '.json')}; if rm -- \"$p\" 2>/dev/null; then echo RM; "
+                                 f"elif test -e \"$p\"; then exit 2; else echo ENOENT; fi"),
+            "read": lambda: f"cat {sq(d + ('/ledger/backoff.json' if a[0] == 'backoff' else '/results/' + a[1] + '.json'))} "
+                            f"2>/dev/null || true",
+            "exist": lambda: "; ".join(f"if test -e {sq(d + '/results/' + x + '.json')}; then echo '{x} 1'; else echo '{x} 0'; fi"
+                                       for x in a),
+        }
+        return self._ssh(scripts[verb](), data)
 
     def snapshot(self, iid: str) -> Dict[str, Any]:
         """One round trip: {claimed, request, result: text|None} for one id."""
         iid = self._id(iid)
-        res, claim, req = f"results/{iid}.json", f"results/{iid}.claimed", f"requests/{iid}.json"
         if not self.host:
-            r = self._path(res)
-            return {"claimed": self._path(claim).exists(), "request": self._path(req).exists(),
-                    "result": r.read_text() if r.exists() else None}
-        out = self._ssh(self._cd() + f"test -e {shlex.quote(claim)} && echo C=1 || echo C=0; "
-                        f"test -e {shlex.quote(req)} && echo R=1 || echo R=0; "
-                        f"if test -e {shlex.quote(res)}; then echo RES=1; cat {shlex.quote(res)}; else echo RES=0; fi")
-        head = out.split("\n", 3)
-        if len(head) < 3 or head[0] not in ("C=0", "C=1") or head[1] not in ("R=0", "R=1") or head[2] not in ("RES=0", "RES=1"):
+            r = self._path(f"results/{iid}.json")
+            return {"claimed": self._path(f"results/{iid}.claimed").exists(),
+                    "request": self._path(f"requests/{iid}.json").exists(), "result": r.read_text() if r.exists() else None}
+        out = self._remote("snapshot", iid)
+        lines = out.split("\n", 2)
+        if len(lines) < 3 or lines[0] not in ("claimed 0", "claimed 1") or lines[1] not in ("request 0", "request 1"):
             raise SpoolUnreachable(f"unexpected snapshot reply from {self.host}: {out[:80]!r}")
-        return {"claimed": head[0] == "C=1", "request": head[1] == "R=1",
-                "result": (head[3] if len(head) > 3 else "") if head[2] == "RES=1" else None}
+        rest, result = lines[2], None
+        if rest.startswith("result begin\n") and rest.endswith("result end\n"):
+            result = rest[len("result begin\n"):-len("result end\n")]  # file may lack a final newline: "}result end"
+        elif rest != "result -\n":
+            raise SpoolUnreachable(f"unexpected snapshot result framing from {self.host}: {rest[:80]!r}")
+        return {"claimed": lines[0] == "claimed 1", "request": lines[1] == "request 1", "result": result}
 
     def read(self, rel: str) -> Optional[str]:
-        """Constant relative paths only (ledger/backoff.json) or results/<valid id>.json."""
-        if not (rel == "ledger/backoff.json" or (rel.startswith("results/") and rel.endswith(".json")
-                                                  and self._id(rel[8:-5]))):
+        """Only ledger/backoff.json or results/<valid id>.json. Empty = absent."""
+        if rel == "ledger/backoff.json":
+            target = ("backoff", "-")
+        elif rel.startswith("results/") and rel.endswith(".json"):
+            target = ("result", self._id(rel[8:-5]))
+        else:
             raise ValueError(f"refusing spool read {rel!r}")
         if not self.host:
             f = self._path(rel)
             return f.read_text() if f.exists() else None
-        out = self._ssh(self._cd() + f"if test -e {shlex.quote(rel)}; then echo Y; cat {shlex.quote(rel)}; else echo N; fi")
-        if out.startswith("Y\n"):
-            return out[2:]
-        if out.strip() == "N":
-            return None
-        raise SpoolUnreachable(f"unexpected read reply from {self.host}: {out[:80]!r}")
+        out = self._remote("read", *target)
+        return out or None
 
     def results_exist(self, ids: List[str]) -> set:
         ids = [self._id(i) for i in ids]
         if not self.host:
             return {i for i in ids if self._path(f"results/{i}.json").exists()}
-        out = self._ssh(self._cd() + "; ".join(f"test -e {shlex.quote(f'results/{i}.json')} && echo {shlex.quote(i)}"
-                                               for i in ids) + "; echo END")
-        if not out.rstrip().endswith("END"):
-            raise SpoolUnreachable(f"unexpected exists reply from {self.host}")
-        return {line for line in out.split() if line in ids}
+        rows = dict(line.rsplit(" ", 1) for line in self._remote("exist", *ids).splitlines() if " " in line)
+        if set(rows) != set(ids) or not set(rows.values()) <= {"0", "1"}:
+            raise SpoolUnreachable(f"unexpected exist reply from {self.host}")
+        return {i for i in ids if rows[i] == "1"}
 
     def write_request(self, iid: str, body: bytes) -> None:
         """tmp + rename inside requests/ (atomic on the spool's filesystem)."""
         iid = self._id(iid)
-        tmp, final = f".{iid}.json.tmp", f"{iid}.json"
         if not self.host:
             d = self._path("requests")
-            (d / tmp).write_bytes(body)
-            (d / tmp).replace(d / final)
+            (d / f".{iid}.json.tmp").write_bytes(body)
+            (d / f".{iid}.json.tmp").replace(d / f"{iid}.json")
             return
-        self._ssh(f"cd {shlex.quote(self.dir + '/requests')} || exit 3; cat > {shlex.quote(tmp)} && "
-                  f"mv -f {shlex.quote(tmp)} {shlex.quote(final)}", data=body)
+        out = self._remote("put", iid, data=body).strip()
+        if out != f"PUT {iid}":
+            raise SpoolUnreachable(f"unexpected put reply from {self.host}: {out[:80]!r}")
 
     def withdraw(self, iid: str) -> bool:
         """Unlink crq's own unclaimed request: True = removed, False = ENOENT (the
         signer renamed it before claiming: it is the signer's now)."""
         iid = self._id(iid)
-        rel = f"requests/{iid}.json"
         if not self.host:
             try:
-                self._path(rel).unlink()
+                self._path(f"requests/{iid}.json").unlink()
                 return True
             except FileNotFoundError:
                 return False
-        q_ = shlex.quote(rel)
-        out = self._ssh(self._cd() + f"if rm -- {q_} 2>/dev/null; then echo RM; elif test -e {q_}; then echo ERR; "
-                                     f"else echo ENOENT; fi").strip()
-        if out == "RM":
-            return True
-        if out == "ENOENT":
-            return False
-        raise SpoolUnreachable(f"withdraw of {iid} on {self.host} failed: {out[:80]!r}")
+        out = self._remote("withdraw", iid).strip()
+        if out in ("RM", "ENOENT"):
+            return out == "RM"
+        raise SpoolUnreachable(f"unexpected withdraw reply from {self.host}: {out[:80]!r}")
 
 
 SPOOL = Spool(SIGNER.get("spool") or {"host": None, "dir": SIGNER.get("spool_dir")})

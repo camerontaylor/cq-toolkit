@@ -46,8 +46,11 @@
       "reviewer_bot_id": null,
       "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
       "spool": {
-        "host": "queue-host",
-        "dir": "/var/lib/crq-spool"
+        "dir": "/var/lib/crq-spool",
+        "ssh_alias": "queue-host",
+        "ssh_key": null,
+        "legacy_shell": false,
+        "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; set ssh_key at the flip"
       }
     },
     "signer_stall_min": 90,

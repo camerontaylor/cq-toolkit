@@ -178,10 +178,18 @@ In signer mode the signer runs the CodeRabbit CLI. It is a systemd unit running 
 secret scan, and posts every status. crq judges nothing and posts nothing:
 
 - **Transport**: the spool is `queue-host:/var/lib/crq-spool` (`promotion.signer.spool`).
-  - crq runs on worker-host and pushes and reads over `ssh -o BatchMode=yes`. queue-host stays
-    outbound-only.
-  - Remote commands are built only from constant sub-paths plus ids that already match
-    `^promo-[0-9a-f]{10}\+{0,9}$`, and every path is quoted.
+  - crq runs on worker-host and talks to it over ssh. queue-host stays outbound-only.
+  - **Dedicated key only (owner decision D4)**: the invocation is `ssh -i <spool.ssh_key>
+    -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes <spool.ssh_alias>
+    '<verb> <args>'`.
+  - On queue-host that key is pinned in operator's `authorized_keys` to the forced command
+    `/opt/cq-reviewer/spool-shell` (no-pty, no forwarding, restrict). It can run only these
+    verbs: `put <id>` (body on stdin), `snapshot <id>`, `withdraw <id>`, `read backoff -`,
+    `read result <id>`, `exist <id>…`.
+  - With no key configured crq refuses to talk to the spool (fail closed).
+    `legacy_shell: true` is an explicit plain-shell fallback, pending the owner's D4 call.
+  - Keep the private key outside this repo (e.g. `~/.ssh/crq-spool-ed25519`).
+  - Ids must match `^promo-[0-9a-f]{10}\+{0,9}$` before any command is built.
   - A per-item snapshot (claimed / request / result) costs one round trip per tick.
   - **ssh or spool failure means the state is unknown**: no new request, no withdrawal, never
     counted as signer-down. After 30 min a distinct "queue-host unreachable" alert fires once.
