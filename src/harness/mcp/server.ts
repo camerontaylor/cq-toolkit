@@ -59,7 +59,7 @@ export const LATEST_PROTOCOL_VERSION = '2026-07-28';
  * `package.json` `version` (the same convention as the acp lane's client
  * version).
  */
-export const SERVER_VERSION = '0.2.0';
+export const SERVER_VERSION = '1.0.1';
 
 /** The inbound line cap: 1 MiB. */
 export const DEFAULT_MAX_LINE_BYTES = 1_048_576;

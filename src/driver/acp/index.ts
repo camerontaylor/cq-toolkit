@@ -338,7 +338,7 @@ export const NARRATION_TOOL = 'acp-narration';
  * lockstep with the root `package.json` `version`. Deriving it from the
  * manifest at runtime remains a separate improvement.
  */
-const CLIENT_VERSION = '0.2.0';
+const CLIENT_VERSION = '1.0.1';
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AcpDriverOptions {
