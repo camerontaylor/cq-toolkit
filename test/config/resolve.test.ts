@@ -706,7 +706,8 @@ describe('pure configuration resolution', () => {
       const inheritedRealpath = Object.assign(Object.create({ realpath: canonical }), {
         input: sessions,
       }) as { input: string; realpath: string };
-      const inheritedFunction = Object.setPrototypeOf(function evidence() {}, {
+      const inheritedFunction = function evidence() {};
+      Object.setPrototypeOf(inheritedFunction, {
         input: sessions,
         realpath: canonical,
       });
