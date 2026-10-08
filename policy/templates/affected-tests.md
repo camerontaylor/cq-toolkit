@@ -1,8 +1,12 @@
 # The affected-tests pattern
 
-Pattern: available for instantiation from phase 1; this repo currently runs
-the full suite everywhere (the suite is seconds-sized, so selection buys
-nothing yet).
+Pattern: available for instantiation from phase 1. In this repo, the
+unfiltered push/pull_request CI workflow's static job is the current test
+enforcer and runs the `test:unit` and `test:e2e` lanes on every PR and
+push (except the machine-written `cq-state` ledger branch); the `merge-queue-gate` workflow runs no tests. Affected-test
+selection remains a proposal for a later policy decision. The measured
+suite is minutes-sized on the recorded host, so selection is useful as an
+advisory developer optimization.
 
 ## The idea
 
@@ -47,6 +51,9 @@ see the I4 interplay above):
     # it ever becomes required, pair it with an unfiltered fallback that
     # reports on every PR.
     runs-on: {{RUNNER}}
+    env:
+      # Conventional per-project node_modules in CI (no shared-store hook).
+      PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
     steps:
       - name: Check out the repo (full history)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -54,11 +61,14 @@ see the I4 interplay above):
           # Runs repo code, so the checkout token must not survive checkout.
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node {{NODE_VERSION}}
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
       # Context values reach scripts via env: indirection — never a textual
@@ -86,12 +96,14 @@ see the I4 interplay above):
             while IFS= read -r -d '' path || [ -n "${path}" ]; do
               changed+=("${path}")
             done < "${RUNNER_TEMP}/changed.txt"
-            npx vitest related --run "${changed[@]}"
+            pnpm exec vitest related --run "${changed[@]}"
           else
             echo "no changed files selected — falling back to the full suite"
-            npm run test
+            pnpm run test
           fi
 ```
 
-On merge-queue pushes, the same repo runs the full suite unconditionally —
-that job (not this one) is the safety net the blind spot section requires.
+On merge-queue pushes, the unfiltered push/pull_request CI static job remains
+the test enforcer and the safety net the blind spot section requires; the
+`merge-queue-gate` workflow itself runs no tests. Any future full-suite
+fallback must be added there deliberately, not assumed from this template.

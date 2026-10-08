@@ -6,10 +6,10 @@
 // Checks the TWO live ratchets through the BUILT engine and exits 0 only if
 // BOTH pass (exit 1 otherwise, reasons printed — the engine's verdicts are
 // data, so the driver just narrates them):
-//   (a) typecheck-count — a real `npm run typecheck` run, raw output fed to
+//   (a) typecheck-count — a real `pnpm run typecheck` run, raw output fed to
 //       the typecheckCount adapter (see ratchet-typecheck.mjs / ratchet-lib
 //       for the I5 status/evidence rules);
-//   (b) coverage — a real `npx vitest run --coverage`, the parsed
+//   (b) coverage — a real `pnpm exec vitest run --coverage`, the parsed
 //       coverage/coverage-summary.json fed to the coverage adapter
 //       (total.lines.pct NORMALIZED TO ONE DECIMAL PLACE by
 //       runCoverageRaw/normalizeCoverageSummary — 2-decimal float noise
@@ -127,7 +127,7 @@ if (covRun.error || covRun.status !== 0) {
     path: COVERAGE_SUMMARY_PATH,
     verdict: 'fail',
     reason:
-      `ratchet: cannot run coverage (npx vitest run --coverage): ${
+      `ratchet: cannot run coverage (pnpm exec vitest run --coverage): ${
         covRun.error ? covRun.error.message : `exit ${covRun.status}`
       } — a red or crashed suite certifies no coverage — output tail:\n` +
       `${`${covRun.stdout}${covRun.stderr}`.slice(-4000).trim()}`,

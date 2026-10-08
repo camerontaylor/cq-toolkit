@@ -2,7 +2,7 @@
 // test/scripts/ratchet-baseline.test.ts — never picked up by vitest
 // discovery): imports the REAL scripts/ratchet-lib.mjs and walks the exact
 // wiring the runner scripts use —
-//   loadEngine()            → npm run build, then import dist/ops/ratchet/*
+//   loadEngine()            → pnpm run build, then import dist/ops/ratchet/*
 //   registerAdapter(...)    → the registry is runtime-only composition wiring
 //   adapters' extract       → the MetricReading each metric reads
 //   typecheckEvidence(...)  → the status → evidence classification (I5)

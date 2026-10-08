@@ -174,8 +174,10 @@ function ensureBuiltCli(): void {
   const newestInput = Math.max(...BUILD_INPUTS.map(newestMtimeMs));
   if (distMtime > 0 && distMtime >= newestInput) return;
   try {
-    execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
+    execFileSync('pnpm', ['run', 'build'], {
       cwd: ROOT,
+      // pnpm is a .cmd shim on win32, which Node only spawns through a shell.
+      shell: process.platform === 'win32',
       stdio: 'pipe',
       timeout: BUILD_TIMEOUT_MS,
     });
@@ -183,7 +185,7 @@ function ensureBuiltCli(): void {
     const e = err as { stdout?: string | Buffer; stderr?: string | Buffer };
     throw new Error(
       `plans.smoke: could not build dist/ (the built CLI is the point) — ` +
-        `run \`npm run build\`\n${String(e.stdout ?? '')}${String(e.stderr ?? '')}`,
+        `run \`pnpm run build\`\n${String(e.stdout ?? '')}${String(e.stderr ?? '')}`,
     );
   }
 }

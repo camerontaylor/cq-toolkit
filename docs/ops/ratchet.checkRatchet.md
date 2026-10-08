@@ -1,7 +1,7 @@
 # `ratchet.checkRatchet`
 
 Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-op-docs.mjs).
-Do not edit by hand — run `npm run gen:op-docs`.
+Do not edit by hand — run `pnpm run gen:op-docs`.
 
 - **Family:** `ratchet`
 - **CLI:** `cq ratchet.checkRatchet [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.checkRatchet --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))

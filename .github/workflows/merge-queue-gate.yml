@@ -1,18 +1,47 @@
 # instantiated from policy/templates/merge-queue-gate.yml — edit the template, not this file
-# Template: merge-queue-gate — promotes checked merge-queue commits to main
-# by pure fast-forward (I3). Runs on every push to merge-queue; waits until
-# every required check on the gate's wait list has SUCCEEDED on the gated
-# commit (never promotes unchecked, never promotes a failure), then
-# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). See
-# policy/templates/README.md for the token table and the entitlement facts.
+# Template: merge-queue-gate — the BATCH PROMOTER (docs/promotion-policy.md):
+# fast-forwards main (I3) to a merge-queue commit that carries a promotion
+# review, never merely because the queue went green. It promotes a gated
+# sha only when ALL hold:
+#   - REVIEW: the newest `crq/promotion-review` commit status on the sha
+#     that an ALLOWED reviewer posted is `success`, and its description
+#     binds the reviewed range as `main=<40-hex>` (that base must be main
+#     or an ancestor of main, so main..sha was reviewed). Allowed reviewers
+#     are USER accounts named in `vars.CQ_PROMOTION_REVIEWERS` (comma list;
+#     blank = the repository owner). A status posted by GITHUB_TOKEN or any
+#     App is a Bot and is ignored, so a PR head's workflow cannot forge it.
+#     A description starting `override` is the owner's override, logged.
+#     The review is re-read immediately before the push: unless that same
+#     review is still the newest allowed one (and `success`), the gate
+#     promotes nothing.
+#   - I4: every required check on the gate's wait list SUCCEEDED on the sha
+#     (a skipped, cancelled or missing required check is never a pass).
+#   - GUARDS: the sha is on merge-queue's first-parent line (its tip or an
+#     earlier queue state), main is an ancestor of the sha, and it is not
+#     already in main.
+# The REVIEWED sha is what promotes, not whatever the queue tip is now.
 #
-# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): during C1 this gate runs
-# ALONGSIDE cq-gate (gate.yml, the P1 promotion job); the two are the only
-# components that advance main, and both promote with an atomic
-# compare-and-swap push, so running both is race-safe (RS-4 T-20). It reads
-# the repository-level PROMOTE_SECRET: once the owner moves that secret into
-# environment `promote`, this gate fails closed and cq-gate carries every
-# promotion. C2 deletes this file.
+# Carriers: `status` (crq posting the review wakes the gate; the job runs
+# only for a `success` `crq/promotion-review` payload and then re-reads the
+# status from the API — the payload is only a lookup key) and
+# `workflow_dispatch` with an optional sha (default: the merge-queue tip),
+# honoured only on the default ref. GitHub runs the default branch's copy
+# for both. No push trigger: a green queue push alone never promotes.
+#
+# Signal hygiene: WAITING IS NOT FAILING. A sha with no promotion review,
+# or whose review is pending or blocked (crq posts `failure` while a
+# critical/major finding is unaddressed), ends green with an "awaiting
+# promotion review" summary and promotes nothing; so does a sha already in
+# main. A red run means a human must act: a review status from a
+# non-allowed creator, a reviewed sha whose required checks failed, were
+# skipped or cancelled, or never reported in time, a reviewed sha off the
+# queue, a review base main does not contain, or a diverged main.
+#
+# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): while the batch policy holds,
+# cq-gate (gate.yml) runs REPORT-ONLY, so this gate is the one component
+# that advances main. C2 must first teach cq-gate the promotion-review
+# signal. It reads the repository-level PROMOTE_SECRET: once the owner
+# moves that secret into environment `promote`, this gate fails closed.
 #
 # Instantiate (each token below is written in double braces in the body):
 #   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with
@@ -32,57 +61,149 @@
 name: merge-queue-gate
 
 on:
-  push:
-    branches: [merge-queue]
+  status:
   workflow_dispatch:
     inputs:
       sha:
-        description: merge-queue commit to gate and promote (defaults to the branch head)
+        description: reviewed merge-queue commit to promote (defaults to the merge-queue tip)
         required: false
         default: ''
 
 permissions:
   contents: read
-
-# Promotions serialize; only the latest matters, but a running promotion is
-# never cancelled mid-push.
-concurrency:
-  group: merge-queue-gate
-  cancel-in-progress: false
+  statuses: read
 
 jobs:
   gate:
-    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
-    # dispatch on any other ref would run that ref's copy of this file —
-    # with the promote credential one job lower. Push events only ever fire
-    # this file from `merge-queue` (the trigger's branch filter), so the
-    # guard admits them regardless of the ref expression.
+    # Two carriers. `status`: only a success crq/promotion-review payload
+    # admits the job (every other status — e.g. a review bot's on a PR
+    # head — skips it, which is not a failure). Dispatch: admitted only on
+    # the default ref (D-A.1): a dispatch on any other ref would run that
+    # ref's copy of this file — with the promote credential one job lower.
+    # `status` events always run the default branch's copy.
     if: >-
-      github.event_name == 'push' ||
+      (github.event_name == 'status' &&
+      github.event.context == 'crq/promotion-review' &&
+      github.event.state == 'success') ||
+      (github.event_name != 'status' &&
       github.ref ==
-      format('refs/heads/{0}', github.event.repository.default_branch)
+      format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
+    # Promotions of one TARGET serialize; a running promotion is never
+    # cancelled mid-push. The group is keyed by the target — the status's
+    # sha, the dispatched sha, or `merge-queue-tip` for a tip dispatch —
+    # because a group keeps only ONE pending run: a single shared group let
+    # sync's tip dispatch displace a queued promotion of a reviewed sha,
+    # and nothing retried that sha. Runs for different targets may overlap
+    # safely: the push is fast-forward-only and the guards re-check
+    # ancestry, so an older target that main has passed ends a no-op.
+    # Job-level, so the skipped runs of unrelated statuses never enter (or
+    # displace a pending promotion from) a group.
+    concurrency:
+      group: merge-queue-gate-${{ github.event.sha || inputs.sha || 'merge-queue-tip' }}
+      cancel-in-progress: false
+    env:
+      # The review read, shared by the review step and the pre-push re-read
+      # so both apply the SAME trust filter. Input: the slurped pages of
+      # the sha's statuses; $allowed: the reviewer list. Every
+      # crq/promotion-review status; the newest one an allowed USER posted
+      # is the review (a later failure — a blocking finding — overrides an
+      # earlier success).
+      REVIEW_JQ: |
+        add // [] | map(select(.context == "crq/promotion-review")
+          | {id, state, description, created_at,
+             login: .creator.login, type: .creator.type})
+        | ($allowed | split(",") | map(gsub("^\\s+|\\s+$"; ""))
+          | map(select(length > 0))) as $ok
+        | def trusted: .type == "User" and (.login as $l | any($ok[]; . == $l));
+        {review: (map(select(trusted)) | max_by([.created_at, .id])),
+         others: (map(select(trusted | not)) | length)}
     steps:
       # The gated sha reaches the script via env: indirection — never a
-      # textual ${{ }} interpolation. Push events gate the pushed head
-      # (GITHUB_SHA); dispatch with an explicit sha gates that sha; dispatch
-      # without one resolves the merge-queue tip from the API.
-      - name: Resolve the gated sha (no checkout needed)
+      # textual ${{ }} interpolation. A status event gates the status's sha
+      # (a lookup key: the review is re-read from the API below); dispatch
+      # with an explicit sha gates that sha; dispatch without one resolves
+      # the merge-queue tip from the API.
+      - name: Resolve the gated sha and verify its promotion review (API only)
+        id: review
         env:
           SHA_INPUT: ${{ inputs.sha || '' }}
-          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          STATUS_SHA: ${{ github.event.sha || '' }}
+          REVIEWERS_VAR: ${{ vars.CQ_PROMOTION_REVIEWERS }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -n "${SHA_INPUT}" ]; then
             sha="${SHA_INPUT}"
-          elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            sha="${GITHUB_SHA}"
+          elif [ "${GITHUB_EVENT_NAME}" = "status" ]; then
+            sha="${STATUS_SHA}"
           else
             sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/merge-queue" --jq .object.sha)"
           fi
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusing: gated sha '${sha}' is not 40 lowercase hex"; exit 1; }
           echo "gating ${sha}"
           echo "SHA=${sha}" >> "$GITHUB_ENV"
+          await() {
+            echo "awaiting promotion review: $1 — ${sha} not promoted (docs/promotion-policy.md)"
+            {
+              echo '## merge-queue-gate: awaiting promotion review'
+              echo
+              echo "\`${sha}\`: $1. Not promoted."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          # Already in main (a later batch promoted past it): nothing to do.
+          state="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${sha}" --jq .status)"
+          case "${state}" in
+            identical|behind)
+              echo "no-op: ${sha} is already in main"
+              echo "## merge-queue-gate: \`${sha}\` is already in main" >> "$GITHUB_STEP_SUMMARY"
+              exit 0;;
+          esac
+          reviewers="${REVIEWERS_VAR:-${OWNER}}"
+          # Every page of the sha's statuses through the job's REVIEW_JQ.
+          rows="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" |
+            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
+          others="$(jq -r '.others' <<<"${rows}")"
+          if jq -e '.review == null' <<<"${rows}" >/dev/null; then
+            if [ "${GITHUB_EVENT_NAME}" = status ] || [ "${others}" -gt 0 ]; then
+              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from an allowed reviewer (${reviewers})"
+              exit 1
+            fi
+            await "no crq/promotion-review status"
+          fi
+          review_state="$(jq -r '.review.state' <<<"${rows}")"
+          description="$(jq -r '.review.description // ""' <<<"${rows}")"
+          login="$(jq -r '.review.login' <<<"${rows}")"
+          echo "review: ${review_state} by ${login}: ${description}"
+          [ "${others}" -eq 0 ] ||
+            echo "note: ${others} crq/promotion-review status(es) from non-allowed creators ignored"
+          if [ "${review_state}" != success ]; then
+            await "the newest review is ${review_state} (${description})"
+          fi
+          base="$(sed -nE 's/^(.*[[:space:]])?main=([0-9a-f]{40})([[:space:]].*)?$/\2/p' <<<"${description}")"
+          [[ "${base}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusing: the review on ${sha} binds no reviewed base (description needs main=<40-hex>)"
+            exit 1; }
+          review_id="$(jq -r '.review.id' <<<"${rows}")"
+          [[ "${review_id}" =~ ^[0-9]+$ ]] || {
+            echo "refusing: review status id '${review_id}'"; exit 1; }
+          kind=review
+          case "${description}" in override*) kind=override;; esac
+          echo "REVIEW_BASE=${base}" >> "$GITHUB_ENV"
+          # The promotion step re-reads the review and requires this one.
+          echo "REVIEW_ID=${review_id}" >> "$GITHUB_ENV"
+          {
+            echo "## merge-queue-gate: promoting \`${sha}\`"
+            echo
+            echo "${kind} by ${login}: reviewed range \`${base}..${sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "promote=true" >> "$GITHUB_OUTPUT"
       - name: Wait for required checks on the gated sha (API only)
+        if: steps.review.outputs.promote == 'true'
         env:
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
         run: |
@@ -168,27 +289,34 @@ jobs:
             fi
             sleep 30
           done
-      # The wait above is API-only and may refuse or time out — a refusing
-      # run must not have paid for a clone at all. Full history is needed
-      # only by the guards and the push below; the token input re-keys the
-      # origin remote to the promote PAT so the ff-push authenticates
-      # with it.
+      # The review and the wait above are API-only and may end awaiting,
+      # refuse or time out — none of those runs may pay for a clone. Full
+      # history is needed only by the guards and the push below; the token
+      # input re-keys the origin remote to the promote PAT so the ff-push
+      # authenticates with it.
       # Pinned to an immutable commit SHA; persist-credentials deliberately
       # stays ON here: this job pushes with the promote PAT and runs no repo
       # code that could exfiltrate it.
       - name: Check out the merge-queue head (full history, promote-token remote)
+        if: steps.review.outputs.promote == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           ref: merge-queue
           fetch-depth: 0
           token: ${{ secrets.PROMOTE_TOKEN }}
       - name: Validate the gated sha
+        if: steps.review.outputs.promote == 'true'
         run: |
           set -euo pipefail
           # SHA is SHA_INPUT verbatim when dispatch supplied one — verify it
           # names a real commit in the fetched history before any use.
           git rev-parse --verify "${SHA}^{commit}"
       - name: Fast-forward promote the gated sha to main (guarded)
+        if: steps.review.outputs.promote == 'true'
+        env:
+          REVIEWERS_VAR: ${{ vars.CQ_PROMOTION_REVIEWERS }}
+          OWNER: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git fetch origin main merge-queue
@@ -196,25 +324,62 @@ jobs:
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
             exit 0
           fi
-          # Tip guard: the gate promotes ONLY the current merge-queue tip.
-          # A manual dispatch (or a race with a newer queue push) must never
-          # promote an off-queue or stale commit; the tip's own gate run
-          # supersedes it, so refusing here loses no promotion.
+          # Queue guard: the gate promotes only a commit ON merge-queue's
+          # FIRST-PARENT line (the tip or an earlier queue state — the
+          # REVIEWED batch tip, which newer merges may already have passed).
+          # Plain ancestry is not enough: a PR-branch commit reachable only
+          # through a merge's second parent was never a queue state. A
+          # manual dispatch must never promote an off-queue commit. Full
+          # history (fetch-depth 0), so the line is complete; to a file, so
+          # an early grep exit cannot fail the pipeline.
           queue_tip="$(git rev-parse origin/merge-queue)"
-          if [ "${SHA}" != "${queue_tip}" ]; then
-            echo "refusing: ${SHA} is not the current merge-queue tip (${queue_tip}) — promotion advances main to the tip only"
+          git rev-list --first-parent "${queue_tip}" > "${RUNNER_TEMP}/queue-line"
+          if ! grep -qx "${SHA}" "${RUNNER_TEMP}/queue-line"; then
+            echo "refusing: ${SHA} is not on merge-queue (not on the first-parent line of the merge-queue tip ${queue_tip}) — promotion advances main along the queue only"
             exit 1
           fi
           if ! git merge-base --is-ancestor origin/main "${SHA}"; then
             echo "refusing: main has diverged from merge-queue (origin/main is not an ancestor of ${SHA}) — merge main into merge-queue and let the gate re-run"
             exit 1
           fi
-          # Atomic compare-and-swap: the second refspec updates merge-queue
-          # to the gated SHA — an up-to-date no-op in the normal case — so a
-          # CONCURRENT queue advance turns it into a rewind the server
-          # rejects, and --atomic rejects the whole push: main only ever
-          # advances to a commit that is still the queue tip at push time.
-          # (A value-changing second refspec is impossible on success: that
-          # direction is a rewind, which is exactly the rejection.)
-          git push --atomic origin "${SHA}:refs/heads/main" "${SHA}:refs/heads/merge-queue"
-          echo "promoted ${SHA} to main by pure fast-forward (atomic tip CAS)"
+          # Review binding: the reviewed range is REVIEW_BASE..SHA, so it
+          # covers main..SHA only when REVIEW_BASE is main or an ancestor.
+          if ! git cat-file -e "${REVIEW_BASE}^{commit}" 2>/dev/null ||
+            ! git merge-base --is-ancestor "${REVIEW_BASE}" origin/main; then
+            echo "refusing: the review's base ${REVIEW_BASE} is not in main, so main..${SHA} holds unreviewed commits — re-review from main"
+            exit 1
+          fi
+          # Re-read the review IMMEDIATELY before the push, with the same
+          # trust filter (REVIEW_JQ): the check wait above can last the
+          # whole timeout, and a crq `failure` (a blocking finding) posted
+          # meanwhile must stop this promotion. Only the very review
+          # verified above, still the newest trusted one, may promote; a
+          # newer success review wakes its own gate run.
+          reviewers="${REVIEWERS_VAR:-${OWNER}}"
+          rows="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
+            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
+          now_id="$(jq -r '.review.id // "none"' <<<"${rows}")"
+          now_state="$(jq -r '.review.state // "none"' <<<"${rows}")"
+          if [ "${now_id}" != "${REVIEW_ID}" ] || [ "${now_state}" != success ]; then
+            msg="the review changed while the gate waited (newest trusted review: status ${now_id}, ${now_state})"
+            echo "awaiting promotion review: ${msg} — ${SHA} not promoted (docs/promotion-policy.md)"
+            {
+              echo '## merge-queue-gate: awaiting promotion review'
+              echo
+              echo "\`${SHA}\`: ${msg}. Not promoted."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Fast-forward only: no --force, so the server rejects any update
+          # that is not a fast-forward of main (a concurrent promotion).
+          if ! git push origin "${SHA}:refs/heads/main"; then
+            git fetch origin main
+            if git merge-base --is-ancestor "${SHA}" origin/main; then
+              echo "no-op: main reached ${SHA} during the push (already promoted)"
+              exit 0
+            fi
+            echo "refusing: the fast-forward push of ${SHA} was rejected"
+            exit 1
+          fi
+          echo "promoted ${SHA} to main by pure fast-forward (reviewed range ${REVIEW_BASE}..${SHA})"

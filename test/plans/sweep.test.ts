@@ -19,7 +19,7 @@
 //   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
 //      binding (default `workspace-write`, caller-overridable) lands
 //      verbatim in the Driver's OpInvocation.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -533,7 +533,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
       try {
         const repo = join(root, 'repo');
-        await generateScratchRepo(repo);
+        const worktree = join(repo, 'worktrees', 'fix', 'alpha');
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(worktree, { recursive: true });
         const captured: OpInvocation[] = [];
         // A capturing fake driver: records the invocation, then stops the
         // pipeline. S4b-B2 (ADR-0002 §2.9): an unclassified driver throw is
@@ -551,6 +553,18 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           runPrefix: 'cq/unit-bind',
           base: 'main',
           adapter: 'tsc-lines' as const,
+          worktreeEffects: {
+            listWorktrees: async () => [{ path: worktree, branch: 'cq/unit-bind/fix/alpha' }],
+            listBranches: async () => [],
+            listRemoteBranches: async () => [],
+            pathExists: async () => false,
+            trackedFilesUnder: async () => [],
+            isStrictClean: async () => true,
+            revParse: async () => '0'.repeat(40),
+            worktreeAdd: async () => undefined,
+            worktreePrune: async () => undefined,
+            rmDir: async () => undefined,
+          },
           // A clean probe — no subprocess needed for this pin.
           runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
           checkCommand: (unit: WorkUnit, worktreePath: string) => ({
