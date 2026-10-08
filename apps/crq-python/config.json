@@ -11,8 +11,8 @@
   "error_backoff_min": 30,
   "max_item_failures": 3,
   "spawn_addressing": true,
-  "address_provider": "claude/claude-sonnet-5-5",
-  "address_mode": "bypassPermissions",
+  "address_provider": "codex/gpt-6.1-sol",
+  "address_mode": "full-access",
   "address_timeout_min": 180,
   "address_severities": [
     "critical",
