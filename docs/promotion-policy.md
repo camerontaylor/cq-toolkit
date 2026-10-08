@@ -20,7 +20,9 @@ checks to finish. The **base** is `main` at cut time. Only one promotion is open
 
 ## What gets reviewed
 
-One CodeRabbit CLI review of `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Promotion review covers `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Clean coverage comes from a clean full review or signer-recorded clean internal deltas
+extending clean full coverage, only while no dirty taint exists. See the coverage rule below.
 crq gives a `promotion` item **absolute priority for the next start slot** (crq allows at most 5
 starts per hour). It does not pre-empt a running review.
 
@@ -33,10 +35,11 @@ the owner's registration record, `app-registration-session-20261004.md` @ `408c8
 
 - A critical or major finding blocks. The signer posts `failure` and the batch waits.
 - **Minor** findings go to the crq ledger and never block.
-- A blocking finding is cleared only by a fix landing in `merge-queue` followed by a clean **full
-  signer review** of `main..<new tip>`: success always means a clean signer-recorded review
-  covering the whole range, never a judgment that findings were "addressed". Rejecting a false
-  positive is a human decision and goes through an owner override.
+- A dirty batch cannot be cleared by a same-byte rerun, even a clean full rerun. A blocking
+  finding requires a fix landing in `merge-queue`, a post-fix new batch, and a fresh clean
+  **full signer review** of `main..<new tip>` completed after the latest dirty result.
+  Clean internal deltas cannot clear dirty taint. Rejecting a false positive is a human
+  decision and goes through an owner override.
 
 ## What promotes
 
@@ -74,21 +77,22 @@ waits for its own review.
 
 ## Accepted limit
 
-Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
-for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
+Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269. The gate
+now filters the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
 `cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
 `408c87f` (the gate refuses fail-closed while unpinned).
 
-- A `crq/promotion-review` status now proves the signer ran the review: its private key lives
-  only in the dedicated `crq` account's home on ceres (the headless CachyOS signer host, per
-  the registration record §Host) — outside an unprivileged agent's reach (see the residuals
-  below) — and every promotion outcome is re-derived there. An agent holding the owner's token
-  can no longer post a promotion-review success that the gate trusts.
-- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo on neptune, and
-  on ceres removing `ctaylor` from `docker`/`wheel` and closing sshd password auth — record
-  §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
-  overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
-  is what makes the repository as a whole, not just the signal, agent-proof.
+- The gate accepts only the pinned creator identity; the owner's token alone cannot post a
+  trusted review status. The App key lives in the dedicated `crq` account's home on ceres,
+  the headless CachyOS signer host (registration record §Host). This identity filter does
+  not prove exclusive signer custody while agents can obtain root on either host.
+- Owner D10 owns the infrastructure hardening. Until the owner hardens both neptune and
+  ceres, root-capable agents can reach the key. This includes removing agent-reachable
+  passwordless sudo, ceres's root-equivalent `docker` access, and revisiting sshd password
+  authentication, plus restricting the owner's credentials to interactive use. D4 also
+  requires a dedicated restricted forced-command spool key; the spool transport must not
+  grant an agent a general shell or access to the signer key. These are outstanding
+  conditions, not evidence of owner approval or completed hardening.
 - The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
   authorized by a trusted bot success bound to the previous main, and corroborates it against its
   own spool records; anything else raises a loud alert. Only the newest of several promotions
@@ -97,31 +101,27 @@ for the review signal by the pinned reviewer-bot identity — creator type `Bot`
 ## Owner override
 
 The owner runs the `crq-override` tool — installed beside the signer in root-owned
-`/opt/cq-reviewer/` on ceres — from a terminal no agent can reach: from the owner's OWN machine,
+`/opt/cq-reviewer/` on ceres — from the owner's own machine,
 `ssh ceres`, then `sudo -u crq`. ceres is headless, so the macOS plan's login-window design
-became this: the invariant that survives is that the issuing terminal is unreachable from
-neptune's agents, and the session is never routed through neptune. The tool verifies the target
-sha is a queue state beyond `main`, computes `main` itself, posts the status as
+became this intended procedure: the issuing session must not be routed through neptune.
+Its isolation remains conditional on the outstanding owner hardening below. The tool verifies
+the target sha is a queue state beyond `main`, computes `main` itself, posts the status as
 `cq-promotion-reviewer[bot]`, and logs the override to the signer's audit log:
 
 ```sh
 sudo -u crq /opt/cq-reviewer/crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
 ```
 
-An agent cannot produce this status through the documented paths: the key exists only in the
-`crq` account's home on ceres — out of an unprivileged agent's reach, though a root-capable
-agent could reach it until P0 lands (see the accepted limit). The gate logs the `override`
-prefix in its run summary.
+The gate logs the `override` prefix in its run summary.
 
-**Accepted limit (the override is not agent-proof today).** The procedure above holds only
-while ceres's ssh and sudo are closed. Today neptune agents reach `ctaylor@ceres` without a
-password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on ceres — so a
-root-capable agent can become root there, reach the PEM, and mint an override or any other
-status. Same shape as #269's accepted forgeable-status limit: accepted for the rollout, and
-closed only when BOTH (1) ceres P0 removes ctaylor's NOPASSWD and `docker` membership and
-closes sshd password auth, and (2) the owner's ceres credential is one agents cannot use
-(e.g. a FIDO `sk-ssh-ed25519` key requiring physical touch, never a copyable plain key).
-Until then the override — like every path in this policy — is T1-grade, not T2-grade.
+**Accepted limit (the override is not agent-proof today).** Neptune agents can reach
+`ctaylor@ceres` without a password, and ctaylor holds NOPASSWD sudo and root-equivalent
+`docker` access on ceres. A root-capable agent can reach the PEM and mint an override or
+another trusted status. The accepted inability to be agent-proof remains until owner D10
+hardens BOTH neptune and ceres, including all agent-accessible privilege paths, restricts
+owner authentication to credentials agents cannot use, and D4 supplies a dedicated restricted forced-command spool key. A physical-touch
+credential alone does not close existing agent-reachable root or general-shell paths.
+The terminal procedure above is conditional; it is not a claim of agent-proof isolation.
 
 I4 still applies: an override skips the review, never the required checks.
 
@@ -167,20 +167,21 @@ is normative; this section is the policy-level summary.
   upload. The run counts only when the CLI exits successfully with a terminal, non-skipped
   completion. A failed, rate-limited or auth-failed run posts nothing new (or `error`) and is
   retried. It is never reported as `success`.
-- **Coverage:** success comes only from the signer's own recorded clean reviews covering the
-  whole range — a full `base_sha..batch_sha` run, optionally a full run the signer extends with
-  its own clean internal deltas; a dirty run voids the same range's clean record. The steward
-  never sees, requests or judges coverage.
+- **Coverage (PR-A contract):** success requires signer-recorded clean full coverage or
+  clean internal deltas extending it, only absent dirty taint. A completed dirty review
+  (any critical/major finding) invalidates clean coverage and stays sticky for that batch.
+  A same-byte rerun cannot clear it. After a fix, a new batch requires a fresh clean full
+  review covering the whole range after the latest dirty result; internal deltas cannot
+  satisfy this recovery requirement. Failed, skipped or incomplete runs cannot clear taint.
+  Coverage is determined by signer records, never an agent's judgment of addressed findings.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
   key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `408c87f`):
   - `context`: `crq/promotion-review`
-  - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
-    (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
-    extends with its own clean internal deltas) covered the whole range with zero critical/major
-    findings; `failure` when a completed review found any; `error` for a skipped, oversized,
-    secret-scan-blocked or otherwise failed run (the batch is re-cut or escalated, never
-    promoted)
+  - `state`: `pending` while reviewing; `success` only with clean whole-range coverage
+    under the sticky coverage rule above; `failure` when a completed review found any
+    critical/major finding; `error` for a skipped, oversized, secret-scan-blocked or otherwise
+    failed run (the batch is re-cut or escalated, never promoted)
   - `description` (140 characters at most) always carries `main=<base_sha>`, for example
     `reviewed main=<base_sha> crq#<id>`,
     `blocked: 1 critical/2 major main=<base_sha> crq#<id>`, or
