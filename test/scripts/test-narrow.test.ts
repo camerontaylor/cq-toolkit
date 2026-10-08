@@ -376,15 +376,18 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     }
   });
 
-  it('is never fresh when an input or the dist marker cannot be read', async () => {
-    for (const missing of ['tsconfig.build.json', 'dist/index.js']) {
-      const { root, distIsFresh } = await fixture();
-      try {
-        rmSync(join(root, missing));
-        expect(distIsFresh()).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
+  it('is never fresh without the dist marker; an absent input imposes nothing', async () => {
+    const { root, distIsFresh } = await fixture();
+    try {
+      // Fixture trees (ratchet-propose's) carry a prebuilt dist and no
+      // sources or root configs: nothing there can be newer than dist.
+      rmSync(join(root, 'src'), { recursive: true });
+      rmSync(join(root, 'tsconfig.build.json'));
+      expect(distIsFresh()).toBe(true);
+      rmSync(join(root, 'dist/index.js'));
+      expect(distIsFresh()).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

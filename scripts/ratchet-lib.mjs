@@ -59,8 +59,9 @@ const ROOT_BUILD_INPUTS = [
 /**
  * Newest mtime across every build input — src/ (recursive) plus
  * ROOT_BUILD_INPUTS — the freshness baseline for the ensureDist reuse
- * heuristic. Any stat fault degrades to "never fresh" (Infinity), i.e.
- * rebuild.
+ * heuristic. An ABSENT input imposes nothing (fixture trees carry a prebuilt
+ * dist and no sources or root configs); any other stat fault degrades to
+ * "never fresh" (Infinity), i.e. rebuild.
  */
 function newestBuildInputMtimeMs() {
   let newest = 0;
@@ -71,13 +72,18 @@ function newestBuildInputMtimeMs() {
       else newest = Math.max(newest, statSync(abs).mtimeMs);
     }
   };
-  try {
-    walk(join(ROOT, 'src'));
-    for (const input of ROOT_BUILD_INPUTS) {
-      newest = Math.max(newest, statSync(join(ROOT, input)).mtimeMs);
+  const measure = (read) => {
+    try {
+      read();
+      return true;
+    } catch (error) {
+      return error?.code === 'ENOENT';
     }
-  } catch {
-    return Infinity;
+  };
+  if (!measure(() => walk(join(ROOT, 'src')))) return Infinity;
+  for (const input of ROOT_BUILD_INPUTS) {
+    const abs = join(ROOT, input);
+    if (!measure(() => (newest = Math.max(newest, statSync(abs).mtimeMs)))) return Infinity;
   }
   return newest;
 }
