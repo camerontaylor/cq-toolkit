@@ -295,7 +295,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
   }
 
   function propose(
-    ctx: ReturnType<typeof setup>,
+    ctx: Awaited<ReturnType<typeof setup>>,
     metrics: Record<string, number>,
     measuredSha?: string,
   ) {
