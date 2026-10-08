@@ -951,6 +951,38 @@ export type ApprovedMutation<T> =
   | { readonly status: 'needs-human'; readonly reason: string };
 
 /**
+ * The verdict of {@link withApprovedMutation}'s optional `preflight`: the
+ * caller's read-only check of the work it is ABOUT to request, or why it
+ * refuses.
+ *
+ * WHY THIS EXISTS (the #258 owner ruling, option D). A caller whose real
+ * pre-spend work happens inside the write — the playbook dispatch's engine
+ * scan, whose faults (a malformed rule, an unreadable target, a collision, a
+ * splice fault) were discovered only AFTER the nonce had been consumed —
+ * burned a single-use approval on a dispatch that never wrote a byte. Passing
+ * that check as `preflight` runs it INSIDE the mutation lock, after
+ * admission, BEFORE {@link ApprovalAuthority.exercise} consumes the nonce, so
+ * a refusal — or a throw — costs nothing: the token stays spendable and a
+ * retry with the SAME token is possible once the check passes.
+ *
+ * THE CONTRACT, in both directions:
+ *  - the preflight must be READ-ONLY (it runs under the workspace mutation
+ *    lock, but before the approval is exercised — nothing it observes
+ *    authorizes a byte);
+ *  - it receives NO {@link ExercisedScope}, deliberately: a scope asserts
+ *    that an approval was already consumed, which is FALSE at preflight
+ *    time — it is minted for, and handed only to, the write callback.
+ *
+ * The exercise's state re-check still runs AFTER the preflight and
+ * immediately before the spend, so the §7 TOCTOU guarantee is exactly where
+ * it was: a workspace that moves between admission and the spend is refused
+ * with the nonce unspent, preflight or no preflight.
+ */
+export type ApprovalPreflight =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+/**
  * The mutation seam an op calls INSTEAD of writing: admit (nothing spent),
  * then — under the workspace mutation lock — exercise (state re-check plus
  * the atomic nonce spend) and the write, with the lock held THROUGH the
@@ -962,6 +994,16 @@ export type ApprovedMutation<T> =
  * This is the ONLY caller shape that can produce a write: there is no path
  * from a plan JSON `approved: true` to a byte on disk that does not pass a
  * check-and-spend under the lock first.
+ *
+ * THE OPTIONAL `preflight` (the #258 owner ruling, option D): a caller
+ * callback — typically the read-only scan of the work the write would do —
+ * that runs INSIDE the mutation lock, after admission, BEFORE `exercise`
+ * consumes the nonce. So the scan and the mutation it gates share one lock
+ * hold with no gap between them (no approved-writer TOCTOU between check and
+ * spend), and a preflight that refuses — or THROWS — returns a
+ * `needs-human` refusal with the token UNSPENT, never a burn and never a
+ * rejection. The write callback then runs after the spend exactly as before;
+ * restore-on-failure and every ordering guarantee are untouched.
  */
 /**
  * The capability ADR-0003 §6 defines for NESTED mutations: an approval
@@ -1071,6 +1113,7 @@ export async function withApprovedMutation<T>(
   authority: ApprovalAuthority,
   subject: ApprovalSubject,
   write: (scope: ExercisedScope) => Promise<T>,
+  preflight?: () => ApprovalPreflight | Promise<ApprovalPreflight>,
 ): Promise<ApprovedMutation<T>> {
   const admitted = await authority.admit(subject);
   if (!admitted.granted) return { status: 'needs-human', reason: admitted.reason };
@@ -1086,6 +1129,31 @@ export async function withApprovedMutation<T>(
     locks,
     subject.workspace,
     async (scope): Promise<ApprovedMutation<T>> => {
+      // THE PREFLIGHT, when the caller brought one: inside the lock, after
+      // admission, BEFORE the exercise spends the nonce — so a refused or
+      // faulting check leaves the token spendable (the #258 defect: a scan
+      // fault after the spend burned a single-use approval on a no-write
+      // dispatch). A throw is a REFUSAL here, not a rejection: the check
+      // faulted before any byte moved and before any lock release, so there
+      // is no write state to report and failing closed as needs-human is
+      // strictly more informative to the caller than an exception.
+      if (preflight !== undefined) {
+        let verdict: ApprovalPreflight;
+        try {
+          verdict = await preflight();
+        } catch (err) {
+          return {
+            status: 'needs-human',
+            reason: `approval refused: the preflight faulted before the nonce was spent — ${messageOf(err)}; nothing was written and the token is UNSPENT (the preflight runs inside the mutation lock before exercise precisely so a faulting check cannot burn the approval)`,
+          };
+        }
+        if (!verdict.ok) {
+          return {
+            status: 'needs-human',
+            reason: `approval refused: the preflight refused before the nonce was spent — ${verdict.reason}; nothing was written and the token is UNSPENT (the preflight runs inside the mutation lock before exercise precisely so a refused check cannot burn the approval; a retry with the SAME token is possible once the check passes)`,
+          };
+        }
+      }
       const exercised = await authority.exercise(admitted.grant, subject);
       if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
       return { status: 'ok', value: await write(scope) };
