@@ -687,8 +687,12 @@ describe('pure configuration resolution', () => {
       };
       proto['run.envPassthrough'] = 'PATH';
       try {
-        expect(resolveConfig({ env: {} }).profile).toBe('conservative');
-        expect(resolveConfig().profile).toBe('conservative');
+        // The registry's path defaults need the state/tmp variables, so every
+        // direct call here supplies them; the polluted names stay absent from
+        // each record's own properties.
+        const baseEnv = { XDG_STATE_HOME: '/tmp', TMPDIR: '/tmp' };
+        expect(resolveConfig({ env: { ...baseEnv } }).profile).toBe('conservative');
+        expect(resolveConfig({ env: baseEnv, values: {} }).profile).toBe('conservative');
         expect(() => resolve({ values: {} })).not.toThrow();
         expect(() =>
           resolve({
