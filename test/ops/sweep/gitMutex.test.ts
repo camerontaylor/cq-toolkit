@@ -145,13 +145,23 @@ describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {
       onEvent: (event) => events.push(event),
     });
     const timeline: string[] = [];
+    // Event gate, not start order: the contender starts only once the holder
+    // is INSIDE its critical section. Starting both together let the
+    // contender win the first acquire on a loaded runner (macos-venue).
+    let signalHeld!: () => void;
+    const holderHasLock = new Promise<void>((resolve) => {
+      signalHeld = resolve;
+    });
+    const holding = holderMutex.withLock(async () => {
+      timeline.push('holder-start');
+      signalHeld();
+      await sleep(120);
+      timeline.push('holder-end');
+      return 'held';
+    });
+    await Promise.race([holderHasLock, holding]);
     const [held, quick] = await Promise.all([
-      holderMutex.withLock(async () => {
-        timeline.push('holder-start');
-        await sleep(120);
-        timeline.push('holder-end');
-        return 'held';
-      }),
+      holding,
       contender.withLock(() => {
         timeline.push('contender-run');
         return 'quick';

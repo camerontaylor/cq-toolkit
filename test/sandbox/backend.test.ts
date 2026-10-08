@@ -787,15 +787,18 @@ describe('launcher hardening (PR review)', () => {
           mode: 0o755,
         },
       );
-      // The direct child exits 0 at once; its grandchild calls setsid() —
-      // leaving the swept process group — and keeps the stdio pipes open.
+      // The direct child exits 0 as soon as its grandchild has called
+      // setsid() — leaving the swept process group — and the grandchild
+      // keeps the stdio pipes open. The gate pipe orders the two: exiting
+      // before setsid() let the exit-time group sweep kill the grandchild
+      // first on a loaded runner, so nothing escaped (macos-venue).
       const started = Date.now();
       const result = await landlockAdapter({ helperPath: helper }).launch({
         workspace: dir,
         argv: [
           '/usr/bin/perl',
           '-e',
-          `use POSIX; if (fork) { exit 0 } setsid(); open my $f, '>', '${pidFile}'; print $f $$; close $f; sleep 120`,
+          `use POSIX; pipe(my $r, my $w) or die; if (fork) { close $w; <$r>; exit 0 } close $r; setsid(); open my $f, '>', '${pidFile}'; print $f $$; close $f; close $w; sleep 120`,
         ],
         network: 'model-only',
         timeoutMs: 3_000,
