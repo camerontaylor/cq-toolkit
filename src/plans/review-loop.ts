@@ -70,7 +70,7 @@
 // comes from a registry so the governed runner dispatches it exactly like
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
-import type { Budget, ModelSpec } from '../driver/types.js';
+import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { createGovernor, governorConfig } from '../kernel/governor.js';
@@ -292,12 +292,14 @@ export interface ReviewLoopOpts {
   worktreeRoot?: string;
   /**
    * Called after the governed fix run with the run's ACCOUNTED spend
-   * (`governor.usdSpent`), even when the fix run throws (a `finally`
+   * (`governor.usdSpent`, plus the token rollup total as the second
+   * argument — USD is 0 for an unpriced model, so tokens are what a sweep
+   * carries forward), even when the fix run throws (a `finally`
    * report) — the propagated-spend channel a sweep uses to carry budget
    * forward without a dispatch-log proxy (review-debt #186). Absent → no
    * reporting.
    */
-  onSpend?: (usd: number) => void;
+  onSpend?: (usd: number, tokens?: number) => void;
 }
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
@@ -353,6 +355,14 @@ export interface EnrichedFixItem {
   source: EnrichedSource;
   item: FixableReviewItem;
 }
+
+/**
+ * Σ of the frozen Usage fields — the governor's token-rollup fold (DD-9
+ * totalTokensOf), so a sweep decrements its token budget by exactly what the
+ * governor counted against the cap. Absent usage is 0.
+ */
+export const totalTokens = (usage: Usage | undefined): number =>
+  usage === undefined ? 0 : usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 
 /**
  * Correlate one ClassifiedItem against the fetched state and build the
@@ -877,7 +887,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     } finally {
       // A throwing observer must never mask the fix run's own outcome.
       try {
-        opts.onSpend?.(governor.usdSpent);
+        opts.onSpend?.(governor.usdSpent, totalTokens(governor.usage));
       } catch {
         // Observers are advisory; swallow and let the original result/throw
         // propagate untouched.

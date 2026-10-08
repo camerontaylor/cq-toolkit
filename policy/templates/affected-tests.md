@@ -22,10 +22,10 @@ Selection is only as good as the map from changed files to tests. Runtime
 dependencies that are invisible to the module graph — dynamic imports,
 fixture coupling, global setup, behavior fixed by config or data files —
 mean a change can break a test that no file-graph mapping would select.
-That is why the full suite on merge-queue pushes is the safety net: by the
-time a commit reaches the queue branch, everything runs against it before
-promotion. Reduced selection is a per-PR convenience; the queue is where
-completeness lives.
+That is why the unfiltered push/pull_request CI static job is the safety net:
+it runs the full suite on merge-queue pushes (and on every PR head), and it,
+not the reduced-selection job, enforces completeness. The `merge-queue-gate`
+workflow runs no tests. Reduced selection is a per-PR convenience.
 
 ## The I4 interplay
 

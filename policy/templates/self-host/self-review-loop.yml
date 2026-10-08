@@ -54,7 +54,7 @@ on:
   workflow_dispatch:
     inputs:
       max_usd:
-        description: USD cap override for this run ('' = config default, SelfhostDefaults.maxUsd)
+        description: Optional USD cap for this run ('' = no USD cap; the default is the token cap, SelfhostDefaults.maxTokens)
         required: false
         default: ''
         type: string

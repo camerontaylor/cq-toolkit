@@ -30,6 +30,13 @@ export const COVERAGE_SUMMARY_PATH = join(ROOT, 'coverage', 'coverage-summary.js
 /** Compiler/vitest output can be megabytes on a red run — never truncate evidence. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+/**
+ * Deadline for the engine build. Mirrors BUILD_TIMEOUT_MS in test/global-setup.ts
+ * so the two build paths share one budget: a wedged tsc must fail the run as
+ * evidence, never block the ratchet runners indefinitely.
+ */
+const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** Loud, uniform driver failure: narration to stderr, exit 1. */
 export function fail(message) {
   console.error(`ratchet: ${message}`);
@@ -100,12 +107,21 @@ export function ensureDist() {
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
-  if (res.error || res.status !== 0) {
+  if (res.error || res.signal || res.status !== 0) {
+    // spawnSync reports a timeout as res.error (ETIMEDOUT) with res.signal set;
+    // a build killed from outside has a signal and a null status.
+    const reason = res.error
+      ? res.error.code === 'ETIMEDOUT'
+        ? `timed out after ${BUILD_TIMEOUT_MS}ms`
+        : res.error.message
+      : res.signal
+        ? `killed by signal ${res.signal}`
+        : `exit ${res.status}`;
     fail(
-      `cannot build the ratchet engine (pnpm run build): ${
-        res.error ? res.error.message : `exit ${res.status}`
-      }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
+      `cannot build the ratchet engine (pnpm run build): ${reason}\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
   }
   distPrepared = true;
