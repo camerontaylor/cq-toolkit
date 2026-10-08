@@ -14,6 +14,7 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | `merge-queue-gate.yml`        | BATCH PROMOTER (retires at C2; docs/promotion-policy.md): on a `crq/promotion-review` status or a dispatch, verifies the review and I4 on the reviewed sha, then fast-forwards `main` to it behind queue, base and review guards |
 | `gate.yml`                    | `cq-gate`, the P1 promotion job (ADR-0004 D-K): `wake` verifies the trigger, `decide` (env `promote`, group `promote`) runs `promote-gate` from the trust ref; REPORT-ONLY (no `--push`) under the batch promotion policy        |
 | `sync-merge-queue.yml`        | on push to `main`: API-only triage (zero clone) that opens or reuses a `main → merge-queue` sync PR when `main` has commits the queue lacks, and dispatches both gates on `main` when the queue is ahead (env `automation`)      |
+| `adversarial-suite.yml`       | dispatch-only §7 live probes against the dedicated `cq-scratch-v11-adversarial` repository; requires two distinct test identities in environment `adversarial-scratch` and runs both trust profiles                              |
 | `live-merge.yml`              | dispatch-only live drill: runs the F5 merge-prs integration test against a fresh private scratch repo on github.com (records its runs in `docs/drills/2026-09-f5.md`; env `drill`)                                               |
 | `required-check.md`           | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                                                                       |
 | `affected-tests.md`           | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                                                                       |
@@ -30,6 +31,8 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | `ratchet-propose.yml`         | `workflow_run` proposer: opens baseline-tightening PRs against `merge-queue` from the measure artifact, token behind `environment: automation`                                                                                   |
 | `self-host/`                  | the stage-2 self-hosting automation (scheduled review-loop + merge-prs run from source) as adoptable workflows — `self-host/README.md` carries its files, tokens, and wiring guide                                               |
 | `README.md`                   | this guide                                                                                                                                                                                                                       |
+
+The adversarial workflow serializes its two profile jobs because live profile setup may change scratch repository variables or rulesets. Live setup for both profiles remains unverified until the separate identity credentials, policy controls and verdict probe are provisioned and a dispatch completes.
 
 ## Placeholder tokens
 
@@ -127,7 +130,8 @@ default-branch ref, never from the PR head. Concretely, in this repo: `.github/w
 is `required-check.md` instantiated, the four queue workflows are the four
 queue `.yml` templates instantiated (`init-merge-queue`, `merge-queue-gate`,
 `gate`, `sync-merge-queue`), the live-merge drill workflow is
-`live-merge.yml` instantiated, the five ratchet workflows (`ratchet`,
+`live-merge.yml` instantiated, the dispatch-only adversarial suite is
+`adversarial-suite.yml` instantiated, the five ratchet workflows (`ratchet`,
 `cq-measure`, `cq-verify`, `ratchet-propose-measure`, `ratchet-propose`) are their matching
 `.yml` templates instantiated, the two D11 policy workflows (`cq-signal`,
 `cq-policy`), the acceptance verifier (`cq-accept`) and the drift check
