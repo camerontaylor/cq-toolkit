@@ -1,12 +1,16 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scrubbedBuildEnv } from '../scripts/lib/build-env.mjs';
+
+// The credential scrub is shared with the narrow runner's build.
+export { scrubbedBuildEnv };
 
 // Build-once global setup: one `pnpm run build` per Vitest invocation, before
 // collection, so no test pays a hidden build and every test sees the same dist.
 //
 // Contract with the narrow-test runner (`pnpm test:narrow`): when
 // CQ_DIST_PREPARED is exactly `1`, the caller has already made dist fresh
-// (scripts/ratchet-lib.mjs ensureDist) and this setup returns without
+// (scripts/test-narrow.mjs, under ratchet-lib's distIsFresh) and this setup returns without
 // building or checking freshness. Any other value — unset, `0`, ... — builds.
 // Keep the name and the exact-`1` semantics stable.
 
@@ -23,19 +27,6 @@ const MAX_OUTPUT = 64 * 1024 * 1024;
  */
 const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** Names that carry credentials; the build needs none of them. */
-const CREDENTIAL_NAME = /token|secret|password|passwd|credential|api_?key|private_?key|auth/i;
-
-/**
- * Connection-string names (DATABASE_URL, REDIS_URL, SENTRY_DSN, ...) usually
- * embed a password or key inside the value, so the name filter above misses
- * them; the build needs none of them either.
- */
-const CONNECTION_NAME = /(?:^|_)(?:database|db|redis|mongo(?:db)?|amqp|broker|dsn)(?:_|$)/i;
-
-/** A URL whose userinfo carries a password (`scheme://user:pass@host`), whatever the variable is named. */
-const URL_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]+@/i;
-
 /**
  * Projects inheriting the root config (`extends: true`) may each run this
  * setup, possibly from separate module instances, but always in the one main
@@ -43,21 +34,6 @@ const URL_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]+@/i;
  * at most once.
  */
 const BUILD_KEY = Symbol.for('cq-toolkit.vitest.global-build');
-
-/**
- * The parent environment minus credential-bearing variables. Live workflows
- * scope tokens to the live test; the build must not inherit them.
- */
-export function scrubbedBuildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(env).filter(
-      ([name, value]) =>
-        !CREDENTIAL_NAME.test(name) &&
-        !CONNECTION_NAME.test(name) &&
-        !(value !== undefined && URL_WITH_PASSWORD.test(value)),
-    ),
-  );
-}
 
 /** True only when the caller has declared dist fresh (`CQ_DIST_PREPARED=1`). */
 export function distPrepared(env: NodeJS.ProcessEnv): boolean {

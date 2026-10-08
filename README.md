@@ -119,8 +119,8 @@ out with `PNPM_CONFIG_VIRTUAL_STORE_TYPE=project`.
 Run `pnpm run check:static` for the TS7 compiler ratchet and typed Oxlint.
 `pnpm run lint` and `pnpm run typecheck` are compatibility aliases; run only one.
 Formatting is `pnpm run format:check`, the tests you need are the ones your diff
-affects (`pnpm exec vitest run <affected test files>`). **The full suite and the
-build are not local gates**: `pnpm run build` (checked declaration emit) and
+affects (`pnpm test:narrow`, the only local test command). **The full suite and
+the build are not local gates**: `pnpm run build` (checked declaration emit) and
 `pnpm run test` / `test:unit` run in CI, and green required CI on the exact candidate SHA is the
 sole full-gate authority — see
 [docs/focused-checks-contract.md](docs/focused-checks-contract.md). See
@@ -131,8 +131,7 @@ for tool pins, architecture conformance and the integrated-checker fallback.
 
 `pnpm run check` is a composite of the whole-tree obligations (format check,
 static gate, the full suite, Knip). **It is not a local verification route** —
-its full-suite leg is CI's obligation — and it runs only inside the
-coordinator-owned diagnostic and rollback exceptions. For ordinary local work use
+its full-suite leg is CI's obligation, so it is CI-only. For local work use
 the focused set in [docs/focused-checks-contract.md](docs/focused-checks-contract.md).
 `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.

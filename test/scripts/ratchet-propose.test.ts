@@ -240,7 +240,11 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       join(repo, 'scripts', 'ratchet-lib.mjs'),
     );
     symlinkSync(join(ROOT, 'dist'), join(repo, 'dist'));
-    writeFileSync(join(repo, '.gitignore'), 'dist\n');
+    // Carry the completion identity alongside the shared prebuilt dist.
+    // This fixture has no src/ or root build configs and must never build.
+    mkdirSync(join(repo, '.cq'));
+    copyFileSync(join(ROOT, '.cq', 'build-complete'), join(repo, '.cq', 'build-complete'));
+    writeFileSync(join(repo, '.gitignore'), 'dist\n.cq/\n');
     // main (the trust ref) carries a STRICTER baseline than merge-queue: a
     // proposal can only happen if the comparison reads the merge-queue tip.
     writeFileSync(join(repo, COVERAGE_BASELINE), baseline(99));

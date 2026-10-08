@@ -134,13 +134,16 @@ adds or changes an import (a new package or unresolvable specifier), or
 removes or rewires the last import of a file or package, and skip it
 otherwise — canonical condition in
 [focused-checks-contract.md](focused-checks-contract.md) §1), the tests affected
-by the diff (`pnpm exec vitest run <affected test files>`), and the three
+by the diff (`pnpm test:narrow --base "$BASE"`; quote its `test:narrow result=…` line), and the three
 whitespace/conflict-marker checks below. The **full suite is not a local
 gate**: `pnpm run test` / `test:unit` runs in CI on every push/PR, and green
 required CI on the exact candidate SHA is the sole full-gate authority. The
 three checkpoints are the cadence itself, not review-triggered work — a clean
 review adds nothing beyond them. Use the immutable `BASE` from §3 and stage
-your own new files before these checks so they are covered:
+your own new files before these checks so they are covered. Pass the recorded
+SHA to `test:narrow` at all three checkpoints; never recompute it from a moving
+target. For a direct-to-main PR, `BASE` must be the pin against `origin/main`
+from §3 rather than the runner's default `origin/merge-queue`:
 
 ```bash
 git diff --check "$BASE" HEAD  # committed PR changes
@@ -209,8 +212,8 @@ its actual exits in the PR body:
 
 - `pnpm run check:static` (once — `lint` and `typecheck` are its aliases)
 - `pnpm run format:check`
-- `pnpm exec vitest run <affected test files>` (the diff's tests, not the suite — the
-  full suite is CI's; see [focused-checks-contract.md](focused-checks-contract.md))
+- `pnpm test:narrow --base "$BASE"` (the diff's tests, not the suite — quote its `test:narrow result=…`
+  line; the full suite is CI's; see [focused-checks-contract.md](focused-checks-contract.md))
 - `pnpm run knip` (when the diff touches entrypoints, exports, dependencies or
   configuration, adds a file, adds or changes an import, or removes or rewires the last
   import — same

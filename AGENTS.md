@@ -19,8 +19,8 @@ Your local duty, on a coherent change:
 - `pnpm run check:static` — TS7 compiler ratchet plus typed Oxlint;
   `pnpm run lint` and `pnpm run typecheck` are aliases (run only one)
 - `pnpm run format:check`
-- `pnpm exec vitest run <affected test files>` — the tests your diff affects, not
-  the suite
+- `pnpm test:narrow` — the tests your diff affects, never the suite; the only
+  local test command (see Local testing)
 - `pnpm run knip` — whole-project, not file-scoped: run it when the diff
   touches entrypoints, exports, dependencies or configuration, adds a file,
   adds or changes an import (a new package or unresolvable specifier), or
@@ -37,8 +37,9 @@ ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
 promotion gate resolves) is the sole full-gate authority. A green PR head is
 not candidate evidence, because required status checks are not strict here
 (mechanism, the four required-set declarations and the one sanctioned CI skip:
-contract §1). Local full runs remain legal as coordinator-owned diagnostics or
-rollback evidence, recorded as such.
+contract §1). No local full run exists any more, for workers or coordinators:
+a CI failure is reproduced with `pnpm test:narrow <failing test files>`, or by
+re-running the CI job.
 
 Escalate a shared interface, dependency/tooling or config change — and any
 impact you cannot classify — to the coordinator with the reason, rather than
@@ -58,12 +59,35 @@ validates its list through `scripts/lib/owned-files.mjs` before any tool runs
 leaf tools directly or without a file list.
 
 `pnpm run check` is a composite of formatting checks, the static gate once,
-the full suite and Knip; it is **not a local verification route** and runs only
-inside the coordinator-owned diagnostic and rollback exceptions (contract §1).
+the full suite and Knip; it is **not a local verification route** — it is
+CI-only, like the suite (contract §1).
 
 Any local timing cited as evidence carries a load stamp (host uptime + load
 average at measurement time), and no protocol or record cites `--maxWorkers`
 (mechanism, and the caveat that a later slice may change it: contract §5).
+
+## Local testing
+
+The only permitted local test command is `pnpm test:narrow …`. The full
+suite (`pnpm run test`, `test:unit`, `test:e2e`, `check`, bare `vitest` or
+`pnpm exec vitest`) is CI-only. Do not choose test files, vitest flags or
+concurrency yourself (contract §2 is the selection it automates):
+
+- `pnpm test:narrow` — the tests for your changes since the merge-base with
+  `origin/merge-queue`, plus the working tree.
+- `pnpm test:narrow <file...>` — named test files, or source files mapped to
+  their tests. `--range <a>..<b>` selects a commit range; `--dry-run` prints
+  the plan and runs nothing; `--help` lists the rest.
+
+It re-execs under `nice -n 5`, waits (bounded, visibly) for the host-wide
+lock, so there is one run per host, rebuilds dist only when stale, and runs
+one serial vitest invocation. It refuses more than 10 files, selections that
+fall back to every test, `integration`/`live` suites without
+`--include-integration`/`--include-live`, `--watch`, `--coverage` and every
+other vitest flag. A refusal is the answer: name a narrower set of files,
+never work around it. Quote the final `test:narrow result=…` line as
+evidence. Exit 75 means the lock stayed busy or ownership was lost before a child spawn:
+retry later, never bypass.
 
 ## GLM peak-hour blackout
 
