@@ -6,17 +6,6 @@ import { buildSandboxLauncherEnv, harnessRunGate } from '../../src/sandbox/index
 import { isProtectedPolicyPath } from '../../src/ops/gates/protectedPaths.js';
 
 describe('§7 worker and protected-path attacks', () => {
-  test('A5 ratchet target rename and extra baseline cannot escape human review', () => {
-    for (const path of [
-      'policy/templates/ratchet.yml',
-      '.github/workflows/ratchet.yml',
-      'baselines/ratchets.json',
-      'baselines/new-target--typecheck--0123456789ab.json',
-    ]) {
-      expect(isProtectedPolicyPath(path), path).toBe(true);
-    }
-  });
-
   test('A6 coverage exclusions change protected measurement configuration', () => {
     for (const path of ['vitest.config.ts', 'package.json', 'policy/templates/ci.yml']) {
       expect(isProtectedPolicyPath(path), path).toBe(true);

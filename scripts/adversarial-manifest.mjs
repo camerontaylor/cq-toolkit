@@ -59,7 +59,7 @@ const regression = {
   A2: 'test/adversarial/trust-rows.test.ts',
   A3: 'test/adversarial/trust-rows.test.ts',
   A4: 'test/adversarial/a4-empty-commit-real-git.test.ts',
-  A5: 'test/adversarial/boundary-rows.test.ts',
+  A5: 'test/adversarial/a5-ratchet-rename-real-git.test.ts',
   A6: 'test/adversarial/boundary-rows.test.ts',
   A10: 'test/adversarial/boundary-rows.test.ts',
   A11: 'test/adversarial/boundary-rows.test.ts',

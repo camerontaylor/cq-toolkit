@@ -112,7 +112,7 @@ const CI = wf(
   '  static:',
   '    runs-on: ubuntu-latest',
   '    steps:',
-  '      - run: npm run lint',
+  '      - run: pnpm run lint',
 );
 
 /** The promotion gate, shaped like policy/templates/gate.yml: it holds PROMOTE_TOKEN. */

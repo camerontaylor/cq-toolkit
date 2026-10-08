@@ -1,4 +1,10 @@
 {
+  "test/adversarial/a14-privileged-workflow.test.ts": "process",
+  "test/adversarial/a4-empty-commit-real-git.test.ts": "process",
+  "test/adversarial/a5-ratchet-rename-real-git.test.ts": "process",
+  "test/adversarial/boundary-rows.test.ts": "pure",
+  "test/adversarial/empty-commit-thread.test.ts": "pure",
+  "test/adversarial/trust-rows.test.ts": "pure",
   "test/api-report.test.mjs": "process",
   "test/cli/conformance.test.ts": "process",
   "test/cli/i1.test.ts": "process",
@@ -133,6 +139,7 @@
   "test/plans/sweep.test.ts": "process",
   "test/sandbox/config.test.ts": "pure",
   "test/sandbox/launcher.test.ts": "process",
+  "test/scripts/adversarial-suite.test.ts": "process",
   "test/scripts/demo-eval-axes.test.ts": "process",
   "test/scripts/github-settings.test.ts": "process",
   "test/scripts/knip.test.ts": "process",
