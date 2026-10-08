@@ -457,6 +457,14 @@ describe('pending child and signal identity', () => {
     );
   });
 
+  it('times the pending-child grace from the spawn, even for an expired owner', () => {
+    const oldOwner = { ...holder, startedAt: new Date(now - MAX_HOLD_MS - 1).toISOString() };
+    expect(judgeHolder(oldOwner, now, deps).reason).toBeNull();
+    expect(judgeHolder(oldOwner, now, { ...deps, now: now + MAX_HOLD_MS + 1 }).reason).toBe(
+      'held past MAX_HOLD_MS',
+    );
+  });
+
   it('signals only a living group with a gone or matching leader', () => {
     const record = { childPgid: 9, childStartedAt: new Date(now).toISOString() };
     const alive = {

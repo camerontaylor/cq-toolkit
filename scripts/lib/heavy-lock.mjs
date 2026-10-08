@@ -143,7 +143,9 @@ export function judgeHolder(holder, dirMtimeMs, deps) {
   const expired = Number.isFinite(started) && now - started > MAX_HOLD_MS;
   if (alive(holder.pid, holder.startedAt)) return { reason: null };
   const pgid = holder.childPgid;
-  if (holder.childPending && typeof pgid !== 'number' && !expired) {
+  const pendingAt = Date.parse(holder.childPendingAt);
+  const pendingExpired = Number.isFinite(pendingAt) && now - pendingAt > MAX_HOLD_MS;
+  if (holder.childPending && typeof pgid !== 'number' && !pendingExpired) {
     return {
       reason: null,
       note: 'owner is gone with an unrecorded pending child; the lock stays busy until MAX_HOLD_MS',
