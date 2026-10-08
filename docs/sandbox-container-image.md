@@ -30,7 +30,12 @@ node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d
   canary (`src/sandbox/probe.ts`) executes `/usr/bin/touch`, `/bin/cat`,
   `/bin/bash --norc -c`, `/usr/bin/true`, and `/usr/bin/printenv` — all
   present in the Debian slim base — and the image carries `node` plus
-  `corepack`, so a project-pinned pnpm runs via `corepack pnpm <args>`.
+  `corepack`. The image does **not** pre-cache any pnpm version, and
+  corepack downloads a project-pinned pnpm on first use, which fails under
+  the `model-only` launch (`--network none`). A workload that needs pnpm
+  inside the container must use an override image that pre-caches it
+  ([corepack offline workflow](https://github.com/nodejs/corepack/blob/main/README.md#offline-workflow)),
+  or run under `network: 'allow'`.
   `git` is deliberately absent: git operations run on the host (coordinator
   side), outside the model-directed child.
 
