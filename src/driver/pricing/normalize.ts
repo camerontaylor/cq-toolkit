@@ -179,11 +179,21 @@ export function resolvePricedModel(args: {
     const rest = normalise(alias).slice(base.length);
     return normalise(alias).startsWith(base) && /^\d{8}$/.test(rest);
   };
+  // The exact/unobserved lookup prices the requested id under the LANE's
+  // normalised form — the same key `servedAliasIds` reads the policy by and the
+  // seam used to admit the observation. A request the seam classified `exact`
+  // (`builtin:bigmodel\GLM-5.3-FLASH` served as `glm-5.3-flash`) must not miss
+  // its own price row because its raw spelling is case- or namespace-qualified.
+  // Declared alias members keep their DECLARED spelling in the alias branch —
+  // the same raw-values/normalised-key split `servedAliasIds` uses.
+  const requestedPriceKey = normalise(requested);
   const rates =
     via === 'alias' && matchedAlias !== undefined
       ? (priceOf({ ...args.modelSpec, model: matchedAlias }) ??
-        (isDatedSnapshot(matchedAlias) ? priceOf(args.modelSpec) : undefined))
-      : priceOf(args.modelSpec);
+        (isDatedSnapshot(matchedAlias)
+          ? priceOf({ ...args.modelSpec, model: requestedPriceKey })
+          : undefined))
+      : priceOf({ ...args.modelSpec, model: requestedPriceKey });
   return {
     canonicalModel: requested,
     ...(rates === undefined ? {} : { rates }),
@@ -222,10 +232,14 @@ export function worstCaseRates(
   readonly candidates: readonly string[];
 } {
   const candidates = pricedCandidates(modelSpec, aliases, lane);
+  // The requested candidate prices under the lane-normalised key, exactly as in
+  // `resolvePricedModel`; declared alias members price at their declared
+  // spelling. Reporting (`candidates`, `unpricedCandidates`) stays raw.
+  const requestedKey = normaliseModelId(lane as LaneId, modelSpec.model);
   const unpricedCandidates: string[] = [];
   const perCandidate: PerMillionRates[] = [];
   for (const candidate of candidates) {
-    const rates = lookup(candidate);
+    const rates = lookup(candidate === modelSpec.model ? requestedKey : candidate);
     if (rates === undefined) unpricedCandidates.push(candidate);
     else perCandidate.push(rates);
   }

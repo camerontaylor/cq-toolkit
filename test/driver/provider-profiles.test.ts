@@ -1069,6 +1069,32 @@ describe('admissionVerdict', () => {
     expect(verdict.deferUntilMs).toBeUndefined();
   });
 
+  // Post-merge #248 review: a non-quota RULE must never derive a release time
+  // from the quota observations. `observedReleaseMs` reads quota-window resets,
+  // and a throttle that inherited one would park a transient retry on a
+  // balance/window boundary — possibly weeks away — while `deferUntilMs` is
+  // contractually a QUOTA retry time (`ProviderSignalVerdict`). A throttle's
+  // release evidence is the vendor's Retry-After, which stays with the caller.
+  test('deepseek: a 429 throttle never inherits an endpoint resetsAt', () => {
+    const verdict = classifyProviderSignal(
+      'deepseek',
+      { httpStatus: 429 },
+      { resetsAt: '2026-10-01T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('rate-limit');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
+  test('claude-subscription: the status-only 429 also stays reset-free', () => {
+    const verdict = classifyProviderSignal(
+      'claude-subscription',
+      { httpStatus: 429 },
+      { resetsAt: '2026-10-01T00:00:00Z' },
+    );
+    expect(verdict.errorClass).toBe('rate-limit');
+    expect(verdict.deferUntilMs).toBeUndefined();
+  });
+
   test('an unknown provider is ADVISORY, never treated as unmetered', () => {
     expect(admissionVerdict('acme-cloud')).toEqual({
       verdict: 'advisory',

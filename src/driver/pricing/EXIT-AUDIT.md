@@ -10,8 +10,9 @@ This is an audit note, not a code change. It reads `src/driver/**` only; it edit
 no lane, no seam type, no runner.
 
 Audited tree: `cq-toolkit` `cq02/provider-pricing` at `dd247ca` (the base this
-lane started from) plus this lane's own commits. Read-only audit; no lane was
-modified to produce it.
+lane started from) plus this lane's own commits. The §1 code anchors were
+refreshed to `merge-queue` at `98f9e47` (2026-10-08). Read-only audit; no lane
+was modified to produce it.
 
 ## 1. How a lane reports cost today (the shared finding)
 
@@ -20,10 +21,10 @@ lookup on the **raw observed served id**:
 
 | Lane           | Code                                       | Behaviour on non-complete exits                                                                                                                                                         |
 | -------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subprocess`   | `src/driver/subprocess/index.ts:874,890`   | `costField(this.costUSDOf, pricedModel, usage)`; unmeasured abort/spawn-failure verdicts carry NO `costUSD`                                                                             |
-| `ai-sdk`       | `src/driver/ai-sdk/index.ts:511,544`       | success path derives cost over `{...modelSpec, model: servedModel ?? modelSpec.model}`; the mid-run catch keeps `usage` (folded per completed step) and deliberately claims **no** cost |
-| `claude-agent` | `src/driver/claude-agent/index.ts:745,760` | cost only when a real usage measurement exists; priced on the observed served id, falling back to the requested id                                                                      |
-| `acp`          | `src/driver/acp/index.ts:1684,1687`        | cost only when BOTH measured usage AND an observed served model exist; otherwise absent, which trips the governor's unpriced-usage check (DD-9)                                         |
+| `subprocess`   | `src/driver/subprocess/index.ts:986,993`   | `costField(this.costUSDOf, pricedModel, usage)`; unmeasured abort/spawn-failure verdicts carry NO `costUSD`                                                                             |
+| `ai-sdk`       | `src/driver/ai-sdk/index.ts:642`           | success path derives cost over `{...modelSpec, model: servedModel ?? modelSpec.model}`; the mid-run catch keeps `usage` (folded per completed step) and deliberately claims **no** cost |
+| `claude-agent` | `src/driver/claude-agent/index.ts:886,893` | cost only when a real usage measurement exists; priced on the observed served id, falling back to the requested id                                                                      |
+| `acp`          | `src/driver/acp/index.ts:1800,1807`        | cost only when BOTH measured usage AND an observed served model exist; otherwise absent, which trips the governor's unpriced-usage check (DD-9)                                         |
 
 **Consequence for W3.5 (the W2 blocker).** A wire that serves an id outside the
 price table — the dated Anthropic id `claude-haiku-4-5-20251001`, or a wire alias

@@ -171,6 +171,29 @@ describe('resolvePricedModel', () => {
     ).toEqual([]);
   });
 
+  test('an exact acp match prices the requested id under the lane-normalised key', () => {
+    // The seam admits `builtin:bigmodel\glm-5.3-flash` as an EXACT match for a
+    // `GLM-5.3-FLASH` request (both normalise to `glm-5.3-flash`); the price
+    // lookup must read the same normalised key, or an exact observation prices
+    // as unknown. The raw requested id stays in `canonicalModel` for reporting.
+    const resolved = resolvePricedModel({
+      lane: 'acp',
+      modelSpec: { provider: 'zai', model: 'GLM-5.3-FLASH' },
+      servedModel: 'builtin:bigmodel\\glm-5.3-flash',
+    });
+    expect(resolved.via).toBe('exact');
+    expect(resolved.canonicalModel).toBe('GLM-5.3-FLASH');
+    expect(resolved.rates).toEqual(priceOf({ provider: 'zai', model: 'glm-5.3-flash' }));
+  });
+
+  test('worstCaseRates prices the requested candidate under the lane-normalised key', () => {
+    const worst = worstCaseRates({ provider: 'zai', model: 'GLM-5.3-FLASH' }, undefined, 'acp');
+    expect(worst.complete).toBe(true);
+    expect(worst.unpricedCandidates).toEqual([]);
+    expect(worst.candidates).toEqual(['GLM-5.3-FLASH']);
+    expect(worst.rates).toEqual({ input: 0.15, output: 0.5, cacheRead: 0.03 });
+  });
+
   test('an UNDECLARED served id resolves to no price and never to zero', () => {
     const resolved = resolvePricedModel({
       lane: 'subprocess',
