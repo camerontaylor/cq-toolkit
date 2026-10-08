@@ -61,10 +61,18 @@
 // routing on argv (candidates.test.ts's fixture style) — no spawned process
 // anywhere, and the REAL listOpenPrs/fetchReviewState parse the fake's wire
 // payloads.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { RunReport } from '../../src/kernel/types.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -72,6 +80,7 @@ import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../src/plans/review-l
 import type { SelfReviewLoopCfg, SelfReviewLoopDeps } from '../../src/selfhost/self-review-loop.js';
 import {
   buildSweepUsage,
+  main,
   runSelfReviewLoop,
   sweepUsageMarkdown,
 } from '../../src/selfhost/self-review-loop.js';
@@ -923,5 +932,98 @@ describe('sweep token-usage summary (D11b)', () => {
     expect(markdown).toContain('| 2000000 | 0 | 2000000 | no |');
     expect(markdown).not.toContain('| #');
     expect(markdown.endsWith('\n')).toBe(true);
+  });
+});
+
+describe('main — usage reporting', () => {
+  const originalArgv = process.argv;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    process.argv = originalArgv;
+  });
+
+  const setup = () => {
+    const root = tempJournalRoot();
+    const out = join(root, 'fresh', 'nested', 'sweep-usage.json');
+    const stepSummary = join(root, 'summary.md');
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
+    vi.stubEnv('SWEEP_USAGE_OUT', out);
+    vi.stubEnv('GITHUB_STEP_SUMMARY', stepSummary);
+    return { out, stepSummary };
+  };
+
+  test('a listing failure writes zero usage and an error before rejecting', async () => {
+    const { out } = setup();
+    await expect(
+      main(
+        baseDeps(
+          fakeGh([], { failListing: true }),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+      ),
+    ).rejects.toThrow();
+    const report = JSON.parse(readFileSync(out, 'utf8')) as { sweepUsage: unknown; error: string };
+    expect(report.sweepUsage).toEqual(buildSweepUsage(SelfhostDefaults.maxTokens, []));
+    expect(report.error).toContain('injected listing failure');
+  });
+
+  test('a fresh dry run creates the artifact directory and waits for stdout before appending', async () => {
+    const { out, stepSummary } = setup();
+    let finishWrite: ((error?: Error | null) => void) | undefined;
+    const stdout = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(
+        (
+          _chunk: string | Uint8Array,
+          encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+          callback?: (error?: Error | null) => void,
+        ) => {
+          const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+          finishWrite = done;
+          return false;
+        },
+      );
+    const pending = main(
+      baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+    );
+    await vi.waitFor(() => expect(stdout).toHaveBeenCalledOnce());
+    expect(existsSync(stepSummary)).toBe(false);
+    expect(existsSync(out)).toBe(false);
+    finishWrite?.();
+    await pending;
+    const usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({ sweepUsage: usage });
+    expect(readFileSync(stepSummary, 'utf8')).toBe(sweepUsageMarkdown(usage));
+  });
+
+  test('a stdout error still writes the available usage and propagates the error', async () => {
+    const { out } = setup();
+    vi.spyOn(process.stdout, 'write').mockImplementation(
+      (
+        _chunk: string | Uint8Array,
+        encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+        callback?: (error?: Error | null) => void,
+      ) => {
+        const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+        done?.(new Error('stdout failed'));
+        return false;
+      },
+    );
+    await expect(
+      main(
+        baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+      ),
+    ).rejects.toThrow('stdout failed');
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual({
+      sweepUsage: buildSweepUsage(SelfhostDefaults.maxTokens, []),
+      error: 'stdout failed',
+    });
   });
 });

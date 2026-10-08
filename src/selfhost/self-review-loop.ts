@@ -67,7 +67,7 @@
 // workflow) for the artifact upload. The 2,000,000-token placeholder cap
 // (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
 import { GhError, ghJson } from '../ops/review/gh.js';
@@ -714,10 +714,18 @@ const appendStepSummaryTable = (stepSummary: string | undefined, usage: SweepTok
  * provides. Best-effort, same contract as the table; absent or empty path
  * (a local run) writes nothing.
  */
-const writeSweepUsageFile = (outPath: string | undefined, usage: SweepTokenUsage): void => {
+const writeSweepUsageFile = (
+  outPath: string | undefined,
+  usage: SweepTokenUsage,
+  error?: string,
+): void => {
   if (outPath === undefined || outPath === '') return;
   try {
-    writeFileSync(outPath, `${JSON.stringify({ sweepUsage: usage })}\n`);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(
+      outPath,
+      `${JSON.stringify({ sweepUsage: usage, ...(error !== undefined ? { error } : {}) })}\n`,
+    );
   } catch (error) {
     process.stderr.write(
       `sweep-usage: could not write ${outPath}: ${
@@ -729,7 +737,7 @@ const writeSweepUsageFile = (outPath: string | undefined, usage: SweepTokenUsage
 
 /**
  * The CLI entry: parse args, resolve the repository (the --repo flag wins
- * over the GH_REPOSITORY env; absent from both → throw before any effect),
+ * over the GH_REPOSITORY env; absent from both → throw before running),
  * build the real runners, run, and print the compact JSON summary payload
  * to stdout followed by ONE `sweepUsage` JSON line — the sweep token
  * bookkeeping (D11b), also appended as a markdown table to
@@ -739,27 +747,34 @@ const writeSweepUsageFile = (outPath: string | undefined, usage: SweepTokenUsage
  * the workflow log); only a whole-run throw (bad args, a failed listing)
  * exits 1.
  */
-async function main(): Promise<void> {
-  const parsed = parseSelfhostArgs(process.argv.slice(2));
-  const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
-  const parts = repoSpec.split('/');
-  const owner = parts[0];
-  const repo = parts[1];
-  if (
-    parts.length !== 2 ||
-    owner === undefined ||
-    owner === '' ||
-    repo === undefined ||
-    repo === ''
-  ) {
-    throw new Error(
-      `selfhost-review-loop: no repository — pass --repo <owner/name> or set GH_REPOSITORY (got ${JSON.stringify(repoSpec)})`,
-    );
-  }
-  const repoRoot = process.cwd();
-  const summary = await runSelfReviewLoop(
-    { gh: makeGhRunner(), git: makeGhRunner({ bin: 'git' }), nowMs: () => Date.now() },
-    {
+export async function main(
+  deps: SelfReviewLoopDeps = {
+    gh: makeGhRunner(),
+    git: makeGhRunner({ bin: 'git' }),
+    nowMs: () => Date.now(),
+  },
+): Promise<void> {
+  let usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
+  let runError: string | undefined;
+  try {
+    const parsed = parseSelfhostArgs(process.argv.slice(2));
+    const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
+    const parts = repoSpec.split('/');
+    const owner = parts[0];
+    const repo = parts[1];
+    if (
+      parts.length !== 2 ||
+      owner === undefined ||
+      owner === '' ||
+      repo === undefined ||
+      repo === ''
+    ) {
+      throw new Error(
+        `selfhost-review-loop: no repository — pass --repo <owner/name> or set GH_REPOSITORY (got ${JSON.stringify(repoSpec)})`,
+      );
+    }
+    const repoRoot = process.cwd();
+    const summary = await runSelfReviewLoop(deps, {
       owner,
       repo,
       repoRoot,
@@ -767,35 +782,48 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
-    },
-  );
-  const payload = {
-    ...(summary.dryRun === true ? { dryRun: true, wouldRun: summary.wouldRun } : {}),
-    results: summary.results.map((row) => ({
-      pr: row.pr,
-      status: row.outcome.status,
-      actionsPosted: row.outcome.actionsPosted,
-      reasons: row.outcome.reasons,
-    })),
-    failures: summary.failures,
-    // The real run's pre-loop exclusions (fork/draft/no-number/protected-
-    // branch/sweep-budget), same reason strings the dry run names in
-    // wouldRun ([] in dry-run mode, whose exclusions ride the wouldRun
-    // lines).
-    excluded: summary.excluded ?? [],
-  };
-  process.stdout.write(`${JSON.stringify(payload)}\n`);
-  // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
-  // write precedes the step-summary append — the workflow tees stdout onto
-  // that same file with a plain-offset handle, so a stdout write after the
-  // append would clobber the table from tee's stale offset.
-  process.stdout.write(`${JSON.stringify({ sweepUsage: summary.usage })}\n`);
-  appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
-  writeSweepUsageFile(process.env['SWEEP_USAGE_OUT'], summary.usage);
-  // Prominent, not buried: every failure is echoed as its own stderr line —
-  // a human scanning the workflow log must not parse JSON to find them.
-  for (const failure of summary.failures) {
-    process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+    });
+    usage = summary.usage;
+    const payload = {
+      ...(summary.dryRun === true ? { dryRun: true, wouldRun: summary.wouldRun } : {}),
+      results: summary.results.map((row) => ({
+        pr: row.pr,
+        status: row.outcome.status,
+        actionsPosted: row.outcome.actionsPosted,
+        reasons: row.outcome.reasons,
+      })),
+      failures: summary.failures,
+      // The real run's pre-loop exclusions (fork/draft/no-number/protected-
+      // branch/sweep-budget), same reason strings the dry run names in
+      // wouldRun ([] in dry-run mode, whose exclusions ride the wouldRun
+      // lines).
+      excluded: summary.excluded ?? [],
+    };
+
+    // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
+    // write callback completes before the step-summary append. This drains
+    // Node's buffered output; a downstream tee must still finish separately
+    // before its own writes to the same summary file are known to be complete.
+    await new Promise<void>((resolve, reject) => {
+      process.stdout.write(
+        `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`,
+        (error) => {
+          if (error !== null && error !== undefined) reject(error);
+          else resolve();
+        },
+      );
+    });
+    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    // Prominent, not buried: every failure is echoed as its own stderr line —
+    // a human scanning the workflow log must not parse JSON to find them.
+    for (const failure of summary.failures) {
+      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+    }
+  } catch (error) {
+    runError = oneLine(error instanceof Error ? error.message : String(error));
+    throw error;
+  } finally {
+    writeSweepUsageFile(process.env['SWEEP_USAGE_OUT'], usage, runError);
   }
 }
 
