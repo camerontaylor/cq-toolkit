@@ -1,8 +1,10 @@
 # Release evidence — v1.0.0
 
-The 0.2-era evidence (preserved metadata, accepted-ADR copy reconciliation,
-release-branch integration record) lives in
-[`0.2-evidence.md`](0.2-evidence.md). Everything below is the historical
+The 0.2 release evidence is recorded at the release cut, on the promoted
+release candidate, per the
+[0.2 runbook preflight](../0.2-release-runbook.md#preflight-record). The
+accepted ADR copies and their research sources are listed in
+[`docs/adr/README.md`](../adr/README.md). Everything below is the historical
 v1.0.0 record, retained unpublished.
 
 Raw logs captured by the T5.1 publication checklist (plan §6). They are the
