@@ -917,6 +917,10 @@ export function containerAdapter(options: ContainerAdapterOptions = {}): Sandbox
       options.image ?? DEFAULT_SANDBOX_IMAGE,
       options.allowUnpinnedImage === true,
     ),
+    // The allowance rides the snapshot: launch re-validates the frozen image
+    // through containerArgv, and it must see the SAME policy construction
+    // accepted, not a re-derived stricter one.
+    allowUnpinnedImage: options.allowUnpinnedImage === true,
     user: validatedContainerUser(options.user),
   });
   // The CLI binary is fixed at construction (final-head review): a bare name
