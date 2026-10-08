@@ -675,10 +675,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
     (rdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
-    # Double fork via sh: the review is reparented to launchd before this tick
-    # returns. A tick agent whose session ends while the tick is still running
-    # has its background task tree-killed by ppid walk; setsid alone does not
-    # escape that (20 merged-tier runs died ~2 min in, at tick-agent end).
+    # Reparent via sh to escape descendant-tree cleanup. The child also calls
+    # setsid to escape Codex's process-group cleanup when the tick command exits.
+    # launchctl submit cannot read this repo's external volume under macOS TCC.
     child = " ".join(shlex.quote(a) for a in (sys.executable, str(Path(__file__).resolve()), "_review", run_id))
     p = run(["/bin/sh", "-c", f"{child} </dev/null >>{shlex.quote(str(rdir / 'runner.log'))} 2>&1 & echo $!"],
             cwd=ROOT, timeout=30)
@@ -693,16 +692,18 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
 
 def cmd_review_child(run_id: str) -> int:
     """Detached child: run the CLI once, record exit status. Never retries."""
+    os.setsid()
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
     tmo = CONFIG["review_timeout_min"]
     cmd = ["gtimeout", "--kill-after=60", f"{tmo}m", *meta["cmd"]]
     pidfile = rdir / "review.pid"
-    pidfile.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid()}) + "\n")
+    identity = {"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}
+    pidfile.write_text(json.dumps(identity) + "\n")
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
-        pidfile.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid(), "cli_pid": proc.pid}) + "\n")
+        pidfile.write_text(json.dumps({**identity, "cli_pid": proc.pid}) + "\n")
         rc = proc.wait()
     (rdir / "exit.json").write_text(json.dumps({"exit": rc, "ended_at": iso(), "timed_out": rc == 124}) + "\n")
     return 0

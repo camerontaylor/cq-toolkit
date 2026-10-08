@@ -81,8 +81,9 @@ touches the main checkout or any agent's PR worktree.
    blocks the item. Matched content is never written down.
 7. Launch `coderabbit review --agent --base-commit <pin>` (`gtimeout 75m`)
    through a double fork (`sh -c '… & echo $!'`). The runner is reparented to
-   launchd before the tick returns. The runner writes `review.pid` (its pid and
-   the CLI pid). A later tick harvests the run.
+   launchd before the tick returns and calls `os.setsid()` before starting the CLI,
+   giving it a separate session and process group. The runner writes `review.pid`
+   (its pid, pgid, session id and the CLI wrapper pid). A later tick harvests the run.
 
 ## Findings
 
@@ -314,7 +315,7 @@ python3 crq.py start <item> [--ignore-quiet]   # one targeted tick (still capped
 python3 crq.py measure                    # recompute supersession for merged PRs
 ```
 
-Tick agents are Paseo `claude/claude-haiku-4-5` runs that only execute
+Tick agents are Paseo `codex/gpt-6.1-sol` runs that only execute
 `crq.py tick`. The runner archives each finished tick agent and its workspace
 once, keeping the last 3. It tracks them in `queue.json` `archived_tick_runs`.
 
@@ -342,8 +343,31 @@ task's whole descendant tree by ppid, which `setsid` does not escape. Re-archivi
 all ~117 past tick agents each tick made every tick about 6 min long, so every
 review still running about 2 min after launch was killed. That was 20 of 28
 merged-tier runs, logged as "interrupted: no exit status recorded" at the next
-tick. Two changes fix it: the double fork above (a review survives any tick or
-agent) and archive-once (a tick takes about 20 s).
+tick. The double fork and archive-once fixed the Claude descendant-tree cleanup.
+
+**Codex process groups (2026-10-08).** Codex kills the shell command's process
+group when that command exits. The double fork alone leaves the review runner
+in the tick's group, so it dies immediately; `gtimeout` can keep the CLI alive
+in another group, but nobody writes `exit.json` when it finishes. The next tick
+then reports an interruption. The runner now calls `os.setsid()` before spawning
+`gtimeout`, preserving the double fork for descendant-tree cleanup and isolating
+both runner and CLI from the tick's session. Liveness still checks the recorded
+runner and CLI wrapper pids with matching commands; it does not depend on their
+parent or process group. A `launchctl submit` probe was denied access to `crq.py`
+on the external volume by macOS TCC, so reviews cannot use that launch path here.
+
+Verification on 2026-10-08: the unfixed runner for `pr239-20261008T022425Z`
+had PPID 1 but shared tick PGID/SID 85718, and disappeared with the tick at
+02:24:34Z (before the agent ended at 02:24:38Z). A controlled inherited-group
+child exited on SIGKILL (`-9`) when its Codex shell command returned; its
+separate-session supervisor survived. Process snapshots are in
+`state/process-evidence.jsonl`, with the signal probe in `state/kill-probe.jsonl`.
+The fixed `promo-51613e7253-20261008T022601Z` runner had PID/PGID/SID 2371 and
+survived two manually triggered Codex schedule ticks, ending at 02:27:21Z and
+02:27:57Z. Both ticks enforced the 5/hour cap, and the cron cadence stayed
+unchanged. The CLI exited 0 at 02:32:15Z; the regular 02:36 tick harvested it
+as `completed` (94 files, one major and two minor findings), blocking promotion
+on the major finding. The original unfixed PR #239 run was still interrupted.
 
 **Workspaces.** Paseo 0.11 schedules cannot target a workspace, so each tick
 agent gets its own throwaway workspace, which is archived as above.
