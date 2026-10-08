@@ -27,10 +27,12 @@
 #                              workers' driver through the ai-sdk route).
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
-#                              carries THIS repo's two literal crons
-#                              (15:00–01:00 UTC); an adopter replaces them
-#                              BY HAND with their model provider's off-peak
-#                              window. No placeholder text is substituted.
+#                              carries THIS repo's three literal crons
+#                              (exclude the Z.ai GLM peak, 06:00–10:00 UTC
+#                              Mon–Fri, plus 20 minutes of start headroom);
+#                              an adopter replaces them BY HAND with THEIR
+#                              provider's peak exclusion and run headroom. No
+#                              placeholder text is substituted.
 # ENVIRONMENT (W1.10 Decision 8): the privileged job runs in environment
 # `automation` (main-only branch policy), which holds both secrets; the
 # unprivileged worker holds none and needs no environment.
@@ -42,16 +44,18 @@ name: self-review-loop
 
 on:
   schedule:
-    # OWNER-MANDATED WINDOW (the window rule is binding): 15:00–01:00 UTC =
-    # 23:00–09:00 Asia/Singapore — automation idles across Z.AI's GLM
-    # peak-hour window (14:00–18:00 SGT), where quota consumption
-    # multiplies (~3×). 01:00 UTC is deliberately EXCLUDED: 09:00 SGT is
-    # the hard stop — no operation is initiated at or after it (the second
-    # cron's last fire is 00:45 UTC = 08:45 SGT). HAND-REPLACED for an
-    # adopter: substitute YOUR provider's off-peak window, keeping the
-    # two-cron shape (a main window plus its final partial hour).
-    - cron: '*/15 15-23 * * *'
-    - cron: '0,15,30,45 0 * * *'
+    # OWNER-MANDATED WINDOW: exclude the Z.ai GLM peak, 06:00–10:00
+    # UTC Mon–Fri (14:00–18:00 Asia/Singapore, ~3× quota consumption).
+    # Reserve the documented ≤20-minute run BEFORE the peak: no weekday
+    # start from 05:40 inclusive to 10:00 exclusive. Three cron lines keep
+    # the 15-minute cadence outside that interval: 00:00–05:30 and
+    # 10:00–23:45 on weekdays, all day on weekends. The run-step guard
+    # enforces the same bounds for delayed fires and manual dispatches.
+    # HAND-REPLACED for adopters: align provider peak, run headroom,
+    # cron expressions, and guard together.
+    - cron: '*/15 0-4,10-23 * * 1-5'
+    - cron: '0,15,30 5 * * 1-5'
+    - cron: '*/15 * * * 0,6'
   workflow_dispatch:
     inputs:
       max_usd:
@@ -214,19 +218,33 @@ jobs:
           # never as interpolated text. Both are '' on schedule events.
           MAX_USD: ${{ inputs.max_usd }}
           DRY_RUN: ${{ inputs.dry_run }}
+          # Where the entry writes the machine-readable sweep token-usage
+          # JSON (D11b) — plain deployment wiring, not a secret; the upload
+          # step below publishes it as the SelfhostDefaults.maxTokens
+          # cap-tuning evidence. A visible runner-temp path avoids the
+          # upload action's default exclusion of dot-prefixed directories.
+          SWEEP_USAGE_OUT: ${{ runner.temp }}/sweep-usage.json
         run: |
-          # main()'s contract (src/selfhost/self-review-loop.ts): ONE
-          # compact JSON summary on stdout; exit 0 even with per-PR
-          # failures — needs-human outcomes and recorded failures are
-          # HONEST results (mirrored to stderr for the workflow log), never
-          # a crash that orphans the remaining PRs; only a whole-run throw
-          # (bad args, a failed listing) exits 1. pipefail below turns that
-          # throw into a red step despite tee.
+          # main()'s contract (src/selfhost/self-review-loop.ts): the JSON
+          # summary payload plus one sweep-usage JSON line on stdout;
+          # exit 0 even with per-PR failures — needs-human outcomes and
+          # recorded failures are HONEST results (mirrored to stderr for
+          # the workflow log), never a crash that orphans the remaining
+          # PRs; only a whole-run throw (bad args, a failed listing) exits
+          # 1. pipefail below turns that throw into a red step despite tee.
           set -euo pipefail
-          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the secret asserts: a delayed fire with rotated/absent secrets is a scheduling fact (honest no-op), not a credential failure.
+          # Peak-window fail-closed guard: reserve the documented
+          # ≤20-minute run before the 06:00–10:00 UTC Mon–Fri GLM peak.
+          # Refuse starts from 05:40 inclusive to 10:00 exclusive, including
+          # delayed fires and manual dispatches; exit 0 is an honest no-op.
+          # Runs BEFORE secret asserts so rotated/absent secrets during the
+          # exclusion are a scheduling fact, not a credential failure.
+          # Adopters must align provider peak, run headroom, and cron.
+          # %u is weekday 1–7 (Mon–Sun); %H%M is the UTC start time.
+          DOW=$(date -u +%u)
           HM=$(date -u +%H%M)
-          if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
-            echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
+          if [ "$DOW" -le 5 ] && [ "$((10#$HM))" -ge 540 ] && [ "$((10#$HM))" -lt 1000 ]; then
+            echo 'outside the scheduled automation window (Z.ai GLM peak plus 20-minute headroom: starts 05:40–10:00 UTC Mon–Fri excluded); refusing to initiate operations' >&2
             exit 0
           fi
           # Self-host automation is optional. A repository without its automation token
@@ -257,3 +275,19 @@ jobs:
         with:
           path: .selfhost/journal
           key: self-review-loop-state-${{ github.run_id }}-${{ github.run_attempt }}
+      # The sweep token-usage report (D11b): the per-run evidence the
+      # 2,000,000-token placeholder cap (SelfhostDefaults.maxTokens) is to
+      # be tuned from, so it publishes even when the loop step went red —
+      # an over-budget run is exactly the data point the tuning needs. The
+      # entry attempts the file even on a whole-run throw, with usage and
+      # an error field. A guard no-op or earlier setup failure may still
+      # leave no file; warn makes that absence visible. Retention stays
+      # the default on purpose: unlike the
+      # ephemeral dist handoff above, usage history is the point.
+      - name: Upload the sweep token-usage report (cap-tuning evidence)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (immutable commit pin; repo policy)
+        if: always()
+        with:
+          name: self-review-usage-${{ github.run_id }}
+          path: ${{ runner.temp }}/sweep-usage.json
+          if-no-files-found: warn

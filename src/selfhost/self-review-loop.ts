@@ -55,10 +55,19 @@
 // propagates and the process exits 1.
 //
 // NO SECRETS: the summary carries structural facts only — PR numbers,
-// statuses, action counts, reason lines, logins at most — never tokens,
-// env, or stderr dumps beyond the loop's own capped reason lines.
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+// statuses, action counts, reason lines, token counts, logins at most —
+// never tokens-as-credentials, env, or stderr dumps beyond the loop's own
+// capped reason lines.
+//
+// TOKEN USAGE REPORTING (D11b): the sweep's token bookkeeping rides the
+// summary (`usage`) and the entry emits it three ways — a `sweepUsage` JSON
+// line on stdout (machine-readable, jq-able alongside the payload line), a
+// small markdown table appended to $GITHUB_STEP_SUMMARY when the workflow
+// provides it, and the same JSON written to $SWEEP_USAGE_OUT (set by the
+// workflow) for the artifact upload. The 2,000,000-token placeholder cap
+// (`SelfhostDefaults.maxTokens`) exists to be tuned from this evidence.
+import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
 import { GhError, ghJson } from '../ops/review/gh.js';
@@ -262,7 +271,85 @@ export interface SelfReviewLoopSummary {
   dryRun?: true;
   wouldRun?: string[];
   excluded?: Array<{ pr: number; reason: string }>;
+  /** The sweep's token bookkeeping (D11b) — zeros for a dry run, which spends nothing. */
+  usage: SweepTokenUsage;
 }
+
+/** One looped PR's accounted token consumption: what the sweep deducted for
+ * it — the fix-run token rollup on the success path, the loop's propagated
+ * accounted spend on the thrown path, 0 when the loop consumed nothing the
+ * entry can account for. Every LOOPED PR gets a row; excluded and
+ * failed-revalidation PRs never ran, so they never do. */
+export interface SweepUsagePrRow {
+  pr: number;
+  tokens: number;
+}
+
+/**
+ * The sweep's token bookkeeping (D11b): the machine-readable evidence the
+ * 2,000,000-token placeholder cap (`SelfhostDefaults.maxTokens`) is to be
+ * tuned from. `remainingTokens` is the carry-forward at sweep end;
+ * `exhausted` is the honest-stop fact (I9) — the sweep finished at or below
+ * zero remaining.
+ */
+export interface SweepTokenUsage {
+  /** The sweep-level token cap the run started with. */
+  capTokens: number;
+  /** Sum of every per-PR accounted consumption. */
+  totalTokensUsed: number;
+  /** Per-PR accounted consumption, in loop order. */
+  perPrTokens: SweepUsagePrRow[];
+  /** `capTokens - totalTokensUsed` — the carry-forward at sweep end. */
+  remainingTokens: number;
+  /** Whether the sweep ran to or past its cap (`remainingTokens <= 0`). */
+  exhausted: boolean;
+}
+
+/**
+ * Build the usage summary from the cap and the per-PR rows. The rows ARE
+ * the accounting — each was recorded at the exact point the carry-forward
+ * (`remainingTokens`) was decremented — so the totals derive from them and
+ * can never disagree with the budget the sweep actually gated on.
+ */
+export const buildSweepUsage = (
+  capTokens: number,
+  perPrTokens: ReadonlyArray<SweepUsagePrRow>,
+): SweepTokenUsage => {
+  const totalTokensUsed = perPrTokens.reduce((sum, row) => sum + row.tokens, 0);
+  const remainingTokens = capTokens - totalTokensUsed;
+  return {
+    capTokens,
+    totalTokensUsed,
+    perPrTokens: perPrTokens.map((row) => ({ pr: row.pr, tokens: row.tokens })),
+    remainingTokens,
+    exhausted: remainingTokens <= 0,
+  };
+};
+
+/**
+ * The step-summary rendering of a usage summary: one small headline table
+ * (cap / consumed / remaining / exhausted as literal yes/no) plus a per-PR
+ * table only when rows exist — a dry run or an all-excluded sweep has
+ * none, and an empty table would be a stub, not a fact.
+ */
+export const sweepUsageMarkdown = (usage: SweepTokenUsage): string => {
+  const lines = [
+    '### Sweep token usage',
+    '',
+    '| cap (tokens) | consumed (tokens) | remaining (tokens) | exhausted |',
+    '| --- | --- | --- | --- |',
+    `| ${String(usage.capTokens)} | ${String(usage.totalTokensUsed)} | ${String(usage.remainingTokens)} | ${usage.exhausted ? 'yes' : 'no'} |`,
+    '',
+  ];
+  if (usage.perPrTokens.length > 0) {
+    lines.push('| PR | tokens (accounted) |', '| --- | --- |');
+    for (const row of usage.perPrTokens) {
+      lines.push(`| #${String(row.pr)} | ${String(row.tokens)} |`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+};
 
 /** The no-number exclusion reason (shared verbatim by both run modes). */
 const EXCLUDE_NO_NUMBER = 'fetch-failed: listing row without a PR number';
@@ -392,7 +479,15 @@ export async function runSelfReviewLoop(
         );
       }
     }
-    return { results: [], failures: [], dryRun: true, wouldRun };
+    return {
+      results: [],
+      failures: [],
+      dryRun: true,
+      wouldRun,
+      // A dry run dispatches no fix worker, so it consumes nothing — the
+      // zeroed bookkeeping is the honest report, not an omission.
+      usage: buildSweepUsage(cfg.maxTokens ?? SelfhostDefaults.maxTokens, []),
+    };
   }
 
   const stamp = deps.nowMs();
@@ -412,6 +507,11 @@ export async function runSelfReviewLoop(
   let remainingTokens = cfg.maxTokens ?? SelfhostDefaults.maxTokens;
   // USD is opt-in: undefined = no USD cap and no USD bookkeeping.
   let remainingUsd: number | undefined = cfg.maxUsd;
+  // D11b: each looped PR's accounted consumption, recorded at the exact
+  // point the carry-forward above is decremented — buildSweepUsage derives
+  // the reported totals from these rows, so report and gating budget agree
+  // by construction.
+  const perPrTokens: SweepUsagePrRow[] = [];
   const results: Array<{ pr: number; outcome: ReviewLoopOutcome }> = [];
   const failures: Array<{ pr: number; error: string }> = [];
   const excluded: Array<{ pr: number; reason: string }> = [];
@@ -549,6 +649,10 @@ export async function runSelfReviewLoop(
       if (Number.isFinite(tokens)) {
         remainingTokens -= tokens;
       }
+      // The row records exactly what was deducted (0 when the report
+      // carried no finite rollup) — the reported per-PR fact mirrors the
+      // budget math, never a parallel estimate.
+      perPrTokens.push({ pr: row.pr, tokens: Number.isFinite(tokens) ? tokens : 0 });
     } catch (error) {
       // FAIL-CLOSED SWEEP BUDGET, PROPAGATED SPEND (review-debt #186): the
       // loop reports its accounted spend out of the loop even on throw, so
@@ -563,6 +667,7 @@ export async function runSelfReviewLoop(
       if (accountedTokensThisPr > 0) {
         remainingTokens -= accountedTokensThisPr;
       }
+      perPrTokens.push({ pr: row.pr, tokens: accountedTokensThisPr });
       failures.push({
         pr: row.pr,
         error:
@@ -576,38 +681,104 @@ export async function runSelfReviewLoop(
   // under journalRoot, so drop all but the newest per-run audit dirs before
   // this run's state is saved (the flat dispatch logs ride untouched).
   pruneAuditDirs(journalRoot);
-  return { results, failures, excluded };
+  return {
+    results,
+    failures,
+    excluded,
+    usage: buildSweepUsage(cfg.maxTokens ?? SelfhostDefaults.maxTokens, perPrTokens),
+  };
 }
 
 /**
- * The CLI entry: parse args, resolve the repository (the --repo flag wins
- * over the GH_REPOSITORY env; absent from both → throw before any effect),
- * build the real runners, run, and print ONE compact JSON summary to stdout.
- * Exit 0 even with failures — honest outcomes are the contract (they are
- * mirrored to stderr, prominently, for the workflow log); only a whole-run
- * throw (bad args, a failed listing) exits 1.
+ * Append the usage markdown table to the GitHub step summary. Best-effort
+ * by contract: the run's real effects (replies, pushes, journal) are
+ * already committed when this runs, so a summary write failure degrades to
+ * a stderr line — it must not red a run whose work succeeded. Absent or
+ * empty path (not running under Actions) appends nothing.
  */
-async function main(): Promise<void> {
-  const parsed = parseSelfhostArgs(process.argv.slice(2));
-  const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
-  const parts = repoSpec.split('/');
-  const owner = parts[0];
-  const repo = parts[1];
-  if (
-    parts.length !== 2 ||
-    owner === undefined ||
-    owner === '' ||
-    repo === undefined ||
-    repo === ''
-  ) {
-    throw new Error(
-      `selfhost-review-loop: no repository — pass --repo <owner/name> or set GH_REPOSITORY (got ${JSON.stringify(repoSpec)})`,
+const appendStepSummaryTable = (stepSummary: string | undefined, usage: SweepTokenUsage): void => {
+  if (stepSummary === undefined || stepSummary === '') return;
+  try {
+    appendFileSync(stepSummary, sweepUsageMarkdown(usage));
+  } catch (error) {
+    process.stderr.write(
+      `sweep-usage: could not append the step-summary table: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
     );
   }
-  const repoRoot = process.cwd();
-  const summary = await runSelfReviewLoop(
-    { gh: makeGhRunner(), git: makeGhRunner({ bin: 'git' }), nowMs: () => Date.now() },
-    {
+};
+
+/**
+ * Write the machine-readable usage JSON to the artifact path the workflow
+ * provides. Best-effort, same contract as the table; absent or empty path
+ * (a local run) writes nothing.
+ */
+const writeSweepUsageFile = (
+  outPath: string | undefined,
+  usage: SweepTokenUsage,
+  error?: string,
+): void => {
+  if (outPath === undefined || outPath === '') return;
+  try {
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(
+      outPath,
+      `${JSON.stringify({ sweepUsage: usage, ...(error !== undefined ? { error } : {}) })}\n`,
+    );
+  } catch (error) {
+    try {
+      process.stderr.write(
+        `sweep-usage: could not write ${outPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    } catch {
+      // Best-effort diagnostics must not mask the original whole-run error.
+    }
+  }
+};
+
+/**
+ * The CLI entry: parse args, resolve the repository (the --repo flag wins
+ * over the GH_REPOSITORY env; absent from both → throw before running),
+ * build the real runners, run, and print the compact JSON summary payload
+ * to stdout followed by ONE `sweepUsage` JSON line — the sweep token
+ * bookkeeping (D11b), also appended as a markdown table to
+ * $GITHUB_STEP_SUMMARY and written to $SWEEP_USAGE_OUT for the workflow's
+ * artifact upload, both best-effort. Exit 0 even with failures — honest
+ * outcomes are the contract (they are mirrored to stderr, prominently, for
+ * the workflow log); only a whole-run throw (bad args, a failed listing)
+ * exits 1.
+ */
+export async function main(
+  deps: SelfReviewLoopDeps = {
+    gh: makeGhRunner(),
+    git: makeGhRunner({ bin: 'git' }),
+    nowMs: () => Date.now(),
+  },
+): Promise<void> {
+  let usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
+  let runError: string | undefined;
+  try {
+    const parsed = parseSelfhostArgs(process.argv.slice(2));
+    const repoSpec = parsed.repo ?? process.env['GH_REPOSITORY'] ?? '';
+    const parts = repoSpec.split('/');
+    const owner = parts[0];
+    const repo = parts[1];
+    if (
+      parts.length !== 2 ||
+      owner === undefined ||
+      owner === '' ||
+      repo === undefined ||
+      repo === ''
+    ) {
+      throw new Error(
+        `selfhost-review-loop: no repository — pass --repo <owner/name> or set GH_REPOSITORY (got ${JSON.stringify(repoSpec)})`,
+      );
+    }
+    const repoRoot = process.cwd();
+    const summary = await runSelfReviewLoop(deps, {
       owner,
       repo,
       repoRoot,
@@ -615,28 +786,48 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
-    },
-  );
-  const payload = {
-    ...(summary.dryRun === true ? { dryRun: true, wouldRun: summary.wouldRun } : {}),
-    results: summary.results.map((row) => ({
-      pr: row.pr,
-      status: row.outcome.status,
-      actionsPosted: row.outcome.actionsPosted,
-      reasons: row.outcome.reasons,
-    })),
-    failures: summary.failures,
-    // The real run's pre-loop exclusions (fork/draft/no-number/protected-
-    // branch/sweep-budget), same reason strings the dry run names in
-    // wouldRun ([] in dry-run mode, whose exclusions ride the wouldRun
-    // lines).
-    excluded: summary.excluded ?? [],
-  };
-  process.stdout.write(`${JSON.stringify(payload)}\n`);
-  // Prominent, not buried: every failure is echoed as its own stderr line —
-  // a human scanning the workflow log must not parse JSON to find them.
-  for (const failure of summary.failures) {
-    process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+    });
+    usage = summary.usage;
+    const payload = {
+      ...(summary.dryRun === true ? { dryRun: true, wouldRun: summary.wouldRun } : {}),
+      results: summary.results.map((row) => ({
+        pr: row.pr,
+        status: row.outcome.status,
+        actionsPosted: row.outcome.actionsPosted,
+        reasons: row.outcome.reasons,
+      })),
+      failures: summary.failures,
+      // The real run's pre-loop exclusions (fork/draft/no-number/protected-
+      // branch/sweep-budget), same reason strings the dry run names in
+      // wouldRun ([] in dry-run mode, whose exclusions ride the wouldRun
+      // lines).
+      excluded: summary.excluded ?? [],
+    };
+
+    // The sweep token-usage emission (D11b). ORDER MATTERS: every stdout
+    // write callback completes before the step-summary append. This drains
+    // Node's buffered output; a downstream tee must still finish separately
+    // before its own writes to the same summary file are known to be complete.
+    await new Promise<void>((resolve, reject) => {
+      process.stdout.write(
+        `${JSON.stringify(payload)}\n${JSON.stringify({ sweepUsage: usage })}\n`,
+        (error) => {
+          if (error !== null && error !== undefined) reject(error);
+          else resolve();
+        },
+      );
+    });
+    appendStepSummaryTable(process.env['GITHUB_STEP_SUMMARY'], summary.usage);
+    // Prominent, not buried: every failure is echoed as its own stderr line —
+    // a human scanning the workflow log must not parse JSON to find them.
+    for (const failure of summary.failures) {
+      process.stderr.write(`pr ${String(failure.pr)}: ${failure.error}\n`);
+    }
+  } catch (error) {
+    runError = oneLine(error instanceof Error ? error.message : String(error));
+    throw error;
+  } finally {
+    writeSweepUsageFile(process.env['SWEEP_USAGE_OUT'], usage, runError);
   }
 }
 

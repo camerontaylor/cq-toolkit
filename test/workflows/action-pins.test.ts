@@ -197,6 +197,45 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     }
   });
 
+  it('the self-review-loop instantiation carries the peak-aware window (D11a)', () => {
+    // OWNER-MANDATED WINDOW: any time EXCEPT the Z.ai GLM peak —
+    // 06:00–10:00 UTC Mon–Fri plus 20-minute headroom. Three crons keep
+    // the 15-minute cadence outside the start exclusion, and the
+    // retired 15:00–01:00 UTC window fully gone from the file.
+    const text = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
+    expect(text).toContain("cron: '*/15 0-4,10-23 * * 1-5'");
+    expect(text).toContain("cron: '0,15,30 5 * * 1-5'");
+    expect(text).toContain("cron: '*/15 * * * 0,6'");
+    expect(text).not.toContain('15-23');
+    expect(text).not.toContain("cron: '0,15,30,45 5 * * 1-5'");
+    expect(text).not.toContain('15:00–01:00');
+    // The peak guard: weekday read plus 05:40 inclusive / 10:00 exclusive
+    // bounds reserve the documented 20-minute maximum run before peak.
+    expect(text).toContain('date -u +%u');
+    expect(text).toContain('-ge 540');
+    expect(text).toContain('-lt 1000');
+    // D11b: the usage-report wiring — the entry's artifact path and the
+    // always() upload (an over-budget run is exactly the tuning evidence).
+    expect(text).toContain('SWEEP_USAGE_OUT');
+    expect(text).toContain('Upload the sweep token-usage report');
+    expect(text).toMatch(/if: always\(\)\n\s*with:\n\s*name: self-review-usage-/);
+  });
+
+  it('review-loop usage upload uses the same visible runner-temp path as the writer', () => {
+    for (const file of [
+      'policy/templates/self-host/self-review-loop.yml',
+      '.github/workflows/self-review-loop.yml',
+    ]) {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      expect(text).toContain('SWEEP_USAGE_OUT: ${{ runner.temp }}/sweep-usage.json');
+      const upload = text.slice(text.indexOf('- name: Upload the sweep token-usage report'));
+      expect(upload).toContain('path: ${{ runner.temp }}/sweep-usage.json');
+      expect(upload).toContain('if: always()');
+      expect(upload).toContain('if-no-files-found: warn');
+      expect(upload).not.toContain('if-no-files-found: ignore');
+    }
+  });
+
   it('the self-host driver-key env NAME is consistent within and across template/instantiation', () => {
     // Batch-gate finding (VB4K #1): the templates declared env
     // `Z_AI_API_KEY:` while their own guard asserted `$ZAI_API_KEY` (the name
