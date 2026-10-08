@@ -84,7 +84,6 @@ import {
 import {
   gitFirstParentRange,
   gitIsAncestor,
-  gitLsRemoteRef,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
@@ -107,6 +106,17 @@ export const MAIN_BRANCH = 'main';
 
 /** The queue branch whose tip is promoted. */
 export const QUEUE_BRANCH = 'merge-queue';
+
+/** The promotion-review status context the gate trusts (PR-C). */
+export const PROMOTION_REVIEW_CONTEXT = 'crq/promotion-review';
+
+/**
+ * Banned reviewer identities (PR-B's provenance incident): the stranger's
+ * public App that once sat in the pin. A paste of either into the gate
+ * config fails closed — never pinned, trusted or excluded.
+ */
+export const BANNED_REVIEWER_LOGINS: readonly string[] = ['cq-reviewer[bot]'];
+export const BANNED_REVIEWER_IDS: readonly number[] = [202921479];
 
 /** The verdict check the gate requires on the tip. */
 export const VERDICT_CHECK = 'cq/ratchet';
@@ -535,6 +545,93 @@ export function checkVerifiedRun(
   };
 }
 
+// -- the promotion review (pure, PR-C) -------------------------------------------
+
+export interface ReviewerWant {
+  /** The pinned reviewer bot's login (creator.login, a `[bot]` user). */
+  login: string;
+  /** The pinned reviewer bot's numeric user id (creator.id, numeric compare). */
+  id: number;
+}
+
+export interface PromotionReviewSelection {
+  /** A trusted success without a usable `main=` binding is a `failure`. */
+  state: 'success' | 'failure' | 'pending' | 'missing';
+  /** The winning status's id, when one was selected. */
+  winner: number | null;
+  /** The `main=<40-hex>` base the success's description binds (success only). */
+  base: string | null;
+  /** Promotion-review statuses from creators other than the pinned reviewer. */
+  others: number;
+  lines: string[];
+}
+
+const REVIEW_BASE_RE = /(^|\s)main=([0-9a-f]{40})(\s|$)/;
+
+/**
+ * Select the newest trusted `crq/promotion-review` status from commit-status
+ * rows — the same rules the merge-queue gate's REVIEW_JQ applies. Trusted is
+ * creator.type "Bot" AND creator.login AND creator.id, a numeric compare: a
+ * commit status carries no app id, so the bot user is the identity, and any
+ * other creator (the owner's User login, GITHUB_TOKEN, every App) is
+ * untrusted. The newest trusted row by (created_at, id) wins; a success must
+ * bind the reviewed base as `main=<40-hex>` in its description — the caller
+ * checks that base into main. `others` counts untrusted promotion-review
+ * statuses; the caller turns others-without-a-selected-review on the gated
+ * sha into a red refusal. Pure.
+ */
+export function selectPromotionReview(
+  statuses: readonly unknown[],
+  want: ReviewerWant,
+): PromotionReviewSelection {
+  const lines: string[] = [];
+  let others = 0;
+  const trusted: Rec[] = [];
+  for (const raw of statuses) {
+    const row = asRecord(raw);
+    if (asString(row['context']) !== PROMOTION_REVIEW_CONTEXT) continue;
+    const creator = asRecord(row['creator']);
+    const ok =
+      creator['type'] === 'Bot' &&
+      creator['login'] === want.login &&
+      asInt(creator['id']) === want.id;
+    if (ok) trusted.push(row);
+    else others += 1;
+  }
+  const winner = [...trusted].sort(newestFirst('created_at'))[0];
+  if (winner === undefined) {
+    lines.push(
+      `no promotion-review status from the pinned reviewer (${want.login}/${String(want.id)})`,
+    );
+    if (others > 0) {
+      lines.push(`${String(others)} promotion-review status(es) from other creators`);
+    }
+    return { state: 'missing', winner: null, base: null, others, lines };
+  }
+  const id = asInt(winner['id']);
+  const state = asString(winner['state']);
+  const description = asString(winner['description']);
+  if (state !== 'success') {
+    lines.push(`review ${String(id)}: ${clean(state) || '(no state)'} — ${clean(description)}`);
+    return {
+      state: state === 'pending' ? 'pending' : 'failure',
+      winner: id,
+      base: null,
+      others,
+      lines,
+    };
+  }
+  const base = REVIEW_BASE_RE.exec(description)?.[2] ?? null;
+  if (base === null) {
+    lines.push(
+      `review ${String(id)}: success without a main=<sha> binding — refusing as malformed`,
+    );
+    return { state: 'failure', winner: id, base: null, others, lines };
+  }
+  lines.push(`review ${String(id)}: success, base ${base} — ${clean(description)}`);
+  return { state: 'success', winner: id, base, others, lines };
+}
+
 // -- the orchestrator ------------------------------------------------------------
 
 /** The hardened git helpers the gate uses (injected so tests can fake them). */
@@ -545,7 +642,6 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
-  lsRemoteRef(repo: string, url: string, ref: string, token: string): Promise<string | null>;
   pushAtomic(
     repo: string,
     url: string,
@@ -562,7 +658,6 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
-  lsRemoteRef: gitLsRemoteRef,
   pushAtomic: gitPushAtomic,
 };
 
@@ -589,6 +684,8 @@ export interface GateConfig {
   defaultBranch: string;
   verdictAppId: number | null;
   verifiedWorkflows: readonly string[];
+  /** The pinned promotion reviewer (PR-C): creator type Bot + login + id. */
+  reviewer: ReviewerWant;
   timeoutMin: number;
   /** Promote for real; otherwise the verdict is `would-promote`. */
   push: boolean;
@@ -599,8 +696,11 @@ export interface GateConfig {
 }
 
 export interface GateResult {
-  verdict: 'promoted' | 'would-promote' | 'noop' | 'refused';
+  verdict: 'promoted' | 'would-promote' | 'noop' | 'awaiting' | 'refused';
+  /** The queue tip as read from the API (the walk's starting point). */
   tip: string | null;
+  /** The reviewed sha the gate judged and would promote (PR-C). */
+  subject: string | null;
   main: string | null;
   report: string[];
 }
@@ -627,6 +727,7 @@ function pagesOf(payload: unknown, key: string, path: string): unknown[] {
 export async function runGate(deps: GateDeps, cfg: GateConfig): Promise<GateResult> {
   const report: string[] = [];
   let tip: string | null = null;
+  let subject: string | null = null;
   let main: string | null = null;
   const refuse = (why: string): never => {
     throw new Refusal(why);
@@ -636,17 +737,18 @@ export async function runGate(deps: GateDeps, cfg: GateConfig): Promise<GateResu
       deps,
       cfg,
       report,
-      (t, m) => {
+      (t, m, s) => {
         tip = t;
         main = m;
+        subject = s;
       },
       refuse,
     );
-    return { ...result, tip, main, report };
+    return { ...result, tip, subject, main, report };
   } catch (error) {
     const why = error instanceof Refusal ? error.message : `gate error: ${describeError(error)}`;
     report.push(`refused: ${why}`);
-    return { verdict: 'refused', tip, main, report };
+    return { verdict: 'refused', tip, subject, main, report };
   }
 }
 
@@ -654,7 +756,7 @@ async function gateBody(
   deps: GateDeps,
   cfg: GateConfig,
   report: string[],
-  setSubject: (tip: string, main: string) => void,
+  setSubject: (tip: string, main: string, subject: string | null) => void,
   refuse: (why: string) => never,
 ): Promise<{ verdict: GateResult['verdict'] }> {
   const { gh, git } = deps;
@@ -675,7 +777,7 @@ async function gateBody(
   };
   const tip = await refSha(QUEUE_BRANCH);
   const main = await refSha(MAIN_BRANCH);
-  setSubject(tip, main);
+  setSubject(tip, main, null);
   report.push(`subject: tip ${tip} (${QUEUE_BRANCH}), main ${main} (API)`);
   for (const [sha, what] of [
     [tip, 'tip'],
@@ -713,10 +815,65 @@ async function gateBody(
   }
   report.push('ancestry: main is an ancestor of the tip (fast-forward)');
 
-  // 3. Closure over main..tip.
-  const commits = await git.rangeCommits(cfg.repo, main, tip);
-  const firstParent = await git.firstParentRange(cfg.repo, main, tip);
-  if (firstParent[0] !== tip) refuse('closure: the first-parent chain does not start at the tip');
+  // 2b. Subject: the newest queue commit whose newest trusted promotion
+  //     review is a success bound into main (PR-C). Walk the first-parent
+  //     line main..tip newest-first; everything below judges and promotes
+  //     the SUBJECT, not the tip — a tip ahead of the reviewed sha simply
+  //     waits for its own review. Untrusted promotion-review statuses on
+  //     the TIP with no selected review refuse (a foreign or forged
+  //     signal); on older commits they are history and inert, because the
+  //     subject — never the tip — is what promotes.
+  const walk = await git.firstParentRange(cfg.repo, main, tip);
+  if (walk[0] !== tip) refuse('subject: the first-parent chain does not start at the tip');
+  let subject: string | null = null;
+  let subjectBase: string | null = null;
+  let othersOnTip = 0;
+  for (const sha of walk) {
+    const statusesPath = `${repoPath}/commits/${sha}/statuses?per_page=100`;
+    const review = selectPromotionReview(
+      slurpedComments(await getSlurp(statusesPath), statusesPath).flat(),
+      cfg.reviewer,
+    );
+    if (sha === tip) othersOnTip = review.others;
+    if (review.state !== 'success' || review.base === null) {
+      report.push(`  review walk ${sha}: ${review.state}`, ...review.lines.map((l) => `  ${l}`));
+      continue;
+    }
+    const baseInMain = review.base === main || (await git.isAncestor(cfg.repo, review.base, main));
+    if (!baseInMain) {
+      report.push(
+        `  review walk ${sha}: success base ${review.base} is not contained in main`,
+        ...review.lines.map((l) => `  ${l}`),
+      );
+      continue;
+    }
+    subject = sha;
+    subjectBase = review.base;
+    report.push(`  review walk ${sha}: SELECTED`, ...review.lines.map((l) => `  ${l}`));
+    break;
+  }
+  if (subject === null) {
+    if (othersOnTip > 0) {
+      refuse(
+        `promotion review: the tip carries ${String(othersOnTip)} crq/promotion-review status(es) from creators other than the pinned reviewer (${cfg.reviewer.login}/${String(cfg.reviewer.id)})`,
+      );
+    }
+    report.push('awaiting promotion review: no reviewed commit on the queue');
+    return { verdict: 'awaiting' };
+  }
+  setSubject(tip, main, subject);
+  report.push(
+    `subject: reviewed sha ${subject} (base ${subjectBase} in main)${
+      subject === tip ? ' — the queue tip itself' : ` — queue tip ${tip} waits for its own review`
+    }`,
+  );
+
+  // 3. Closure over main..subject.
+  const commits = await git.rangeCommits(cfg.repo, main, subject);
+  const firstParent = await git.firstParentRange(cfg.repo, main, subject);
+  if (firstParent[0] !== subject) {
+    refuse('closure: the first-parent chain does not start at the subject');
+  }
   const prs = new Map<string, MergedPr[]>();
   const bySha = new Map(commits.map((c) => [c.sha, c]));
   for (const sha of firstParent) {
@@ -771,11 +928,11 @@ async function gateBody(
     );
   }
 
-  // 6. Policy recompute over main..tip (push subject).
+  // 6. Policy recompute over main..subject (push subject).
   const policy = await deps.policyDiff({
     repo: cfg.repo,
     trustRef: cfg.trustRef,
-    subject: tip,
+    subject,
     subjectKind: 'push',
     base: `refs/remotes/origin/${MAIN_BRANCH}`,
   });
@@ -803,8 +960,9 @@ async function gateBody(
   await logOverrides(deps, cfg, closure.admitted, report);
   if (policyRefusal !== null) refuse(policyRefusal);
 
-  // 8–9. Verdicts and verified runs, waited for within one deadline.
-  await awaitVerdicts(deps, cfg, tip, main, report, refuse);
+  // 8–9. Verdicts and verified runs on the SUBJECT, waited for within one
+  //      deadline.
+  await awaitVerdicts(deps, cfg, subject, main, report, refuse);
 
   // 10a. I2 evidence again, now that the waits are over: the wait can take up
   //      to timeoutMin, and a change in acceptance moves no ref.
@@ -818,7 +976,7 @@ async function gateBody(
   // 10b. Verdicts and verified runs once more, without waiting: pass 2 can
   //      itself take minutes, and a failed rerun or a newly posted verdict
   //      moves no ref. One poll; anything short of green refuses.
-  await awaitVerdicts(deps, cfg, tip, main, report, refuse, 'recheck');
+  await awaitVerdicts(deps, cfg, subject, main, report, refuse, 'recheck');
 
   // 10. Promote.
   if (!cfg.push) {
@@ -827,31 +985,24 @@ async function gateBody(
   }
   const pushToken = cfg.pushToken;
   if (pushToken === null) refuse('push: no push credential');
-  // The main lease is the step-1 read: main must still be `main`. The last
-  // pre-push observation, on the same transport the push uses, is the queue
-  // ref as the remote serves it NOW. Still the tip — the normal case, which
-  // step 1 pinned the local mirror to — ONLY main is sent (D-K.6 by
-  // construction, not by git's equal-OID skip). Moved — an advance, or a
-  // break-glass rewind to an ancestor — the merge-queue refspec rides along
-  // as a pure lease: leased at the tip it can never land, and --atomic
-  // refuses main with it, so a rewound queue is never re-promoted and an
-  // advanced one makes the next sweep retry from fresh reads.
-  const queueNow = await git.lsRemoteRef(cfg.repo, cfg.remoteUrl, QUEUE_BRANCH, pushToken);
-  const updates: LeasedUpdate[] = [{ refspec: `${tip}:refs/heads/${MAIN_BRANCH}`, expected: main }];
-  if (queueNow !== tip) {
-    updates.push({
-      refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`,
-      expected: tip,
-    });
-  }
+  // The main lease is the step-1 read: main must still be `main`. The
+  // SUBJECT is what promotes (PR-C): a queue that advanced past it is fine —
+  // those commits simply wait for their own review — so unlike the old
+  // tip-keyed push there is no queue CAS to lose a race against, and only
+  // main is ever sent. A break-glass rewound queue cannot be re-promoted:
+  // the reviewed sha's base must be contained in the MAIN THE GATE READ, so
+  // a rewound main makes the base check (and the lease) refuse.
+  const updates: LeasedUpdate[] = [
+    { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
+  ];
   const pushed = await git.pushAtomic(cfg.repo, cfg.remoteUrl, updates, pushToken);
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
     refuse(
-      'push: the atomic leased push was rejected (main or the queue moved since the read); next sweep retries',
+      'push: the atomic leased push was rejected (main moved since the read); next sweep retries',
     );
   }
-  report.push(`push: main at ${tip} (${QUEUE_BRANCH} was read at ${tip})`);
+  report.push(`push: main at ${subject} (reviewed sha, base ${subjectBase})`);
   return { verdict: 'promoted' };
 }
 
@@ -933,14 +1084,14 @@ async function logOverrides(
 }
 
 /**
- * Steps 8–9: poll until the verdict and every verified run are green, or
- * refuse. In `recheck` mode (step 10b) it reads once, never dispatches, and
- * refuses anything short of green.
+ * Steps 8–9: poll until the verdict and every verified run are green ON THE
+ * SUBJECT, or refuse. In `recheck` mode (step 10b) it reads once, never
+ * dispatches, and refuses anything short of green.
  */
 async function awaitVerdicts(
   deps: GateDeps,
   cfg: GateConfig,
-  tip: string,
+  subject: string,
   main: string,
   report: string[],
   refuse: (why: string) => never,
@@ -960,7 +1111,7 @@ async function awaitVerdicts(
     const lines: string[] = recheck ? ['recheck before push:'] : [];
 
     // 8. The verdict.
-    const checksPath = `${repoPath}/commits/${tip}/check-runs?check_name=${encodeURIComponent(VERDICT_CHECK)}&filter=all&per_page=100`;
+    const checksPath = `${repoPath}/commits/${subject}/check-runs?check_name=${encodeURIComponent(VERDICT_CHECK)}&filter=all&per_page=100`;
     const rows = pagesOf(await getSlurp(checksPath), 'check_runs', checksPath);
     if (cfg.verdictAppId === null && verifierRun === null) {
       // Interim: did the default-branch verifier run at trust sha `main`?
@@ -978,7 +1129,7 @@ async function awaitVerdicts(
       }
     }
     const verdict = selectVerdict(rows, {
-      tip,
+      tip: subject,
       main,
       verdictAppId: cfg.verdictAppId,
       verifierRan: verifierRun !== null,
@@ -986,10 +1137,10 @@ async function awaitVerdicts(
     lines.push(`verdict ${VERDICT_CHECK}: ${verdict.state}`, ...verdict.lines.map((l) => `  ${l}`));
     if (verdict.state === 'failure') {
       report.push(...lines);
-      refuse(`verdict: the newest valid ${VERDICT_CHECK} verdict on the tip is not success`);
+      refuse(`verdict: the newest valid ${VERDICT_CHECK} verdict on the subject is not success`);
     }
     if (verdict.state === 'missing' && !dispatched && !recheck) {
-      const outcome = await dispatchVerify(deps, cfg, tip);
+      const outcome = await dispatchVerify(deps, cfg, subject);
       if (outcome.dispatched) dispatched = true;
       report.push(`dispatch ${VERIFY_WORKFLOW}: ${outcome.line}`);
     }
@@ -997,12 +1148,12 @@ async function awaitVerdicts(
     // 9. Verified head-defined runs.
     let allGreen = verdict.state === 'success';
     for (const file of cfg.verifiedWorkflows) {
-      const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${tip}&event=push&branch=${QUEUE_BRANCH}&per_page=100`;
+      const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${subject}&event=push&branch=${QUEUE_BRANCH}&per_page=100`;
       const runs = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
       const newest = [...runs].sort(newestFirst('created_at'))[0] ?? null;
       let check = checkVerifiedRun(newest, null, {
         file,
-        tip,
+        tip: subject,
         repositoryId: cfg.repositoryId,
       });
       if (check.state === 'pending' && newest !== null && newest['status'] === 'completed') {
@@ -1011,7 +1162,7 @@ async function awaitVerdicts(
         const jobs = pagesOf(await getSlurp(jobsPath), 'jobs', jobsPath);
         check = checkVerifiedRun(newest, jobs, {
           file,
-          tip,
+          tip: subject,
           repositoryId: cfg.repositoryId,
         });
       }
@@ -1041,19 +1192,19 @@ async function awaitVerdicts(
 }
 
 /**
- * Dispatch cq-verify on the default ref for the tip's completed cq-measure
- * push run (ADR-0004 D-K.5, R2-5). Never throws; `dispatched` is true only
- * when the dispatch call succeeded (a tip with no completed measure run yet
- * is retried on the next poll).
+ * Dispatch cq-verify on the default ref for the SUBJECT's completed
+ * cq-measure push run (ADR-0004 D-K.5, R2-5). Never throws; `dispatched` is
+ * true only when the dispatch call succeeded (a subject with no completed
+ * measure run yet is retried on the next poll).
  */
 async function dispatchVerify(
   deps: GateDeps,
   cfg: GateConfig,
-  tip: string,
+  subject: string,
 ): Promise<{ dispatched: boolean; line: string }> {
   const repoPath = `repos/${cfg.owner}/${cfg.name}`;
   try {
-    const path = `${repoPath}/actions/workflows/${MEASURE_WORKFLOW}/runs?head_sha=${tip}&event=push&per_page=100`;
+    const path = `${repoPath}/actions/workflows/${MEASURE_WORKFLOW}/runs?head_sha=${subject}&event=push&per_page=100`;
     const runs = pagesOf(
       await ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']),
       'workflow_runs',
@@ -1064,7 +1215,7 @@ async function dispatchVerify(
         (r) =>
           r['path'] === `${WORKFLOWS_DIR}/${MEASURE_WORKFLOW}` &&
           r['event'] === 'push' &&
-          r['head_sha'] === tip &&
+          r['head_sha'] === subject &&
           asInt(asRecord(r['head_repository'])['id']) === cfg.repositoryId &&
           r['status'] === 'completed',
       )
@@ -1073,7 +1224,7 @@ async function dispatchVerify(
     if (measureId === null)
       return {
         dispatched: false,
-        line: 'waiting (no completed cq-measure push run on tip)',
+        line: 'waiting (no completed cq-measure push run on subject)',
       };
     const res = await deps.gh([
       'api',
@@ -1112,6 +1263,8 @@ export interface GateArgs {
   defaultBranch: string;
   verdictAppId: number | null;
   verifiedWorkflows: string[];
+  /** The pinned promotion reviewer bot (PR-C), from the registration record. */
+  reviewer: ReviewerWant;
   timeoutMin: number;
   push: boolean;
 }
@@ -1124,8 +1277,12 @@ const VALUE_FLAGS: readonly string[] = [
   'defaultBranch',
   'verdictAppId',
   'verifiedWorkflows',
+  'reviewerBotLogin',
+  'reviewerBotId',
   'timeoutMin',
 ];
+
+const BOT_LOGIN_RE = /^[A-Za-z0-9-]+\[bot\]$/;
 
 const positiveInt = (raw: string, flag: string): number => {
   const n = /^[1-9][0-9]*$/.test(raw) ? Number(raw) : Number.NaN;
@@ -1196,6 +1353,19 @@ export function parseGateArgs(argv: readonly string[]): GateArgs {
   const timeoutRaw = values.get('timeoutMin');
   const timeoutMin =
     timeoutRaw === undefined ? DEFAULT_TIMEOUT_MIN : positiveInt(timeoutRaw, 'timeoutMin');
+  // The pinned reviewer (PR-C): required, well-formed, and never a banned
+  // identity — an UNSET or malformed pin refuses before any read (fail
+  // closed), the same posture as the merge-queue gate's UNSET guard.
+  const login = required('reviewerBotLogin');
+  if (!BOT_LOGIN_RE.test(login) || BANNED_REVIEWER_LOGINS.includes(login)) {
+    throw new Error(
+      `--reviewerBotLogin is not a pinnable bot login — got ${JSON.stringify(login)}`,
+    );
+  }
+  const id = positiveInt(required('reviewerBotId'), 'reviewerBotId');
+  if (BANNED_REVIEWER_IDS.includes(id)) {
+    throw new Error(`--reviewerBotId ${String(id)} is a banned identity — refusing`);
+  }
   return {
     repo,
     owner,
@@ -1205,6 +1375,7 @@ export function parseGateArgs(argv: readonly string[]): GateArgs {
     defaultBranch,
     verdictAppId,
     verifiedWorkflows,
+    reviewer: { login, id },
     timeoutMin,
     push,
   };

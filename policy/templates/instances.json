@@ -36,7 +36,9 @@
       "template": "gate.yml",
       "tokens": {
         "GATE_WORKFLOWS": "ci.yml,denylist.yml",
-        "GATE_TIMEOUT_MIN": "20"
+        "GATE_TIMEOUT_MIN": "20",
+        "REVIEWER_BOT_LOGIN": "cq-promotion-reviewer[bot]",
+        "REVIEWER_BOT_ID": "339373542"
       }
     },
     {
