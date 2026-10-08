@@ -17,20 +17,30 @@
 //      engine accepts as text) runs through `makeAstGrepCodemod` over the
 //      injected runner and store: scan → collision check → freshness
 //      anchor → apply, with per-file results and the engine's best-effort
-//      rollback. The engine's `approved: true` is NO LONGER the
-//      authorization: since W4.3 it is only the primitive's INTRA-OP
-//      freshness anchor (ADR-0003 §2/§6 keeps that boolean for exactly
-//      this), and the authorization is an approval GRANT exercised and
-//      consumed around this call under the workspace mutation lock. The
+//      rollback. The engine runs TWICE inside the approved mutation, both
+//      halves under ONE lock hold (the #258 owner ruling, option D): a
+//      DRY-RUN as the mutation's PREFLIGHT — after admission, BEFORE the
+//      nonce is exercised — so a malformed rule, an unreadable target, a
+//      collision or a splice fault refuses the dispatch `failed` with the
+//      approval token UNSPENT (a refused op must not burn a human's
+//      approval, and a retry with the SAME token is possible once the scan
+//      passes); then the real apply AFTER the spend, which re-scans and
+//      re-verifies freshness itself, so every plan it writes was computed
+//      against bytes it read inside the same hold. The cost is a second
+//      scan, accepted by the ruling. The engine's `approved: true` is NO
+//      LONGER the authorization: since W4.3 it is only the primitive's
+//      INTRA-OP freshness anchor (ADR-0003 §2/§6 keeps that boolean for
+//      exactly this), and the authorization is an approval GRANT exercised
+//      and consumed around this call under the workspace mutation lock. The
 //      pre-apply bytes of every target are captured FIRST, so a
 //      non-passing verdict can be rolled back (step 5). A dispatch with no
-//      grant bound is refused `needs-human` before the engine runs. Any
-//      engine fault (scan parse, collision, write/rollback) is a `failed`
-//      dispatch with nothing verified and NO quarantine — the playbook did
-//      not fail its verifier; the machinery failed before one could run.
-//      The approval token is spent by then, which is ADR-0003 §4c's crash
-//      analysis: burning a token on a failed mutation is safe, replaying it
-//      is not.
+//      grant bound is refused `needs-human` before the engine runs. An
+//      engine fault AFTER the spend (freshness drift between the two scans,
+//      a write/rollback fault) is still a `failed` dispatch with the token
+//      SPENT — ADR-0003 §4c's crash analysis: burning a token on a failed
+//      mutation is safe, replaying it is not — and there is NO quarantine
+//      either way: the playbook did not fail its verifier; the machinery
+//      failed before one could run.
 //   4. THE VERIFIER — the playbook's command runs through the injected
 //      verifier (playbooks/verifier.ts) and the verdict decides the
 //      dispatch outcome AND the playbook's quarantine state:
@@ -517,6 +527,20 @@ export function makePlaybookDispatchOp(
     // `approved: true` is the intra-op freshness anchor, not the
     // authorization — the plan-JSON-shaped boolean cannot reach a byte on
     // disk through this path (A16).
+    //
+    // THE PREFLIGHT (the #258 owner ruling, option D): the engine's scan
+    // runs as the approved mutation's `preflight` — INSIDE the lock, after
+    // admission, BEFORE the nonce is exercised — as a DRY-RUN, so every
+    // pre-spend refusal (a malformed rule, an unreadable target, a
+    // collision, a splice fault) fails the dispatch with the token UNSPENT
+    // instead of burning it. The apply after the spend re-scans and
+    // re-verifies freshness itself inside the same hold, so the plan it
+    // writes is always computed against bytes it read under the lock; the
+    // scan and the mutation share one hold with no gap between them.
+    // Set when the preflight refused (or faulted): the dispatch outcome is
+    // then the engine-fault shape (`failed` — the playbook did not fail its
+    // verifier), never an approval refusal, and the nonce is UNSPENT.
+    let preflightRefusal: string | undefined;
     const subject = {
       op: 'analyze.playbookDispatch',
       workspace: input.dir,
@@ -596,6 +620,41 @@ export function makePlaybookDispatchOp(
           }
           return { engine, applied: written };
         },
+        // THE PREFLIGHT CALLBACK (option D): the SAME engine, DRY-RUN —
+        // scan, collision check, freshness anchor and diff/splice
+        // computation, all read-only — over the exact inputs the apply
+        // would use. `ok` (including the honest zero-edit dry-run) lets the
+        // exercise proceed; anything else is captured as the dispatch's
+        // `failed` refusal and returned as the preflight verdict that keeps
+        // the nonce unspent. No scope is passed here, and none is needed: a
+        // scope asserts an approval already consumed, which is false at
+        // preflight time, and a dry-run writes nothing.
+        async () => {
+          const plan = await makeAstGrepCodemod(
+            deps.run,
+            () => store,
+          )({
+            dir: input.dir,
+            rule: JSON.stringify(playbook.rule),
+            files: targets,
+            dryRun: true,
+            ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+          });
+          if (plan.status === 'ok') return { ok: true as const };
+          // A dry-run answers ok/failed in practice (no approval gate on a
+          // dry-run, no write phase), but the frozen OpResult taxonomy
+          // allows the other statuses, so each contributes the reason it
+          // actually carries — never an invented one.
+          preflightRefusal =
+            plan.status === 'failed'
+              ? plan.error
+              : plan.status === 'needs-human'
+                ? plan.reason
+                : plan.status === 'indeterminate'
+                  ? plan.detail
+                  : 'the engine returned no plan (budget exhausted)';
+          return { ok: false as const, reason: preflightRefusal };
+        },
       );
     } catch (err) {
       // A post-apply read fault lands here: the apply DID happen, and the
@@ -621,6 +680,18 @@ export function makePlaybookDispatchOp(
       };
     }
     if (approved.status === 'needs-human') {
+      // A PREFLIGHT REFUSAL rode the needs-human shape out of the approved
+      // mutation (that is its contract), but at this op boundary it is an
+      // ENGINE fault, not an approval refusal: the playbook did not fail
+      // its verifier, the machinery failed before one could run — and, the
+      // whole point of the preflight, the machinery failed WITHOUT burning
+      // the single-use approval.
+      if (preflightRefusal !== undefined) {
+        return {
+          status: 'failed',
+          error: `playbook dispatch: the preflight scan refused the approved apply of playbook '${playbook.id}' before the approval token was spent — ${preflightRefusal} — nothing was written, the nonce is UNSPENT (a retry with the SAME token is possible once the scan passes), and NO verifier or rollback ran; the playbook did not fail its verifier: the machinery failed before one could run`,
+        };
+      }
       return {
         status: 'needs-human',
         reason: `${approved.reason}; playbook '${playbook.id}' was not dispatched and no target of '${targets.length}' was read for modification — re-approve against the current workspace state to dispatch it`,

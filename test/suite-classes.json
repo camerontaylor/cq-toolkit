@@ -60,6 +60,7 @@
   "test/kernel/runner.test.ts": "process",
   "test/kernel/types.test.ts": "pure",
   "test/ops/analyze/agenticRemediation.test.ts": "pure",
+  "test/ops/analyze/applyRemediation.real-git.test.ts": "process",
   "test/ops/analyze/applyRemediation.test.ts": "pure",
   "test/ops/analyze/clusterErrors.test.ts": "pure",
   "test/ops/analyze/codemod/astGrep.test.ts": "pure",
