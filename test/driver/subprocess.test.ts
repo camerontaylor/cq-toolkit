@@ -22,19 +22,37 @@
 // 'conformance-priced' endpoint extension of the default table) so no test
 // needs a real provider key; the remap test alone uses the DEFAULT table to
 // pin the DeepSeek footgun to the shipped config.
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, onTestFinished, test } from 'vitest';
+import { describe, expect, onTestFinished, test, vi } from 'vitest';
 import { z } from 'zod';
 import {
+  HARNESS_ERROR_PREFIX,
+  HARNESS_MCP_CONFIG_FILE,
   SubprocessDriver,
   buildArgs,
+  handleStdoutLine,
   stopReasonOf,
   usageFromCli,
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
+import type { ManagedChild, SpawnOptions } from '../../src/driver/subprocess/process.js';
+import { fakeManagedSpawn } from '../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import {
   RoutingTableSchema,
@@ -42,14 +60,55 @@ import {
   routeFor,
 } from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
-import { DEFAULT_MAX_RETAINED_BYTES, spawnManaged } from '../../src/driver/subprocess/process.js';
-import { runDriverConformance } from './conformance.js';
-import type { ConformanceSpec, ModelDirective } from './conformance.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
+import {
+  DEFAULT_CHILD_ENV_ALLOWLIST,
+  DEFAULT_MAX_RETAINED_BYTES,
+  buildChildEnv,
+  spawnManaged,
+  terminateActiveChildrenOnExit,
+} from '../../src/driver/subprocess/process.js';
+import type { ProcessClose } from '../../src/driver/subprocess/process.js';
+import { runDriverConformance } from '../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
+import {
+  SESSIONS_DIR,
+  CONFORMANCE_PROVIDER,
+  CONFORMANCE_MODEL,
+} from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { realClock, runLadder } from '../../src/kernel/governor.js';
-import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
+import { WorkerResultSchema } from '../../src/kernel/schema.js';
+import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
+
+// The harness MCP server runs from TypeScript SOURCE in these process-level
+// runs (no build): the launch spec is mocked onto `node --import <the test
+// TS loader> src/harness/mcp/bin.ts` — the real server, the real shared core.
+// `launchControl.extraArgs` lets one test append a stray argument so the
+// REAL server refuses its argv at startup (exit 78 → status 'failed').
+const launchControl = vi.hoisted(() => ({ extraArgs: [] as string[] }));
+vi.mock('../../src/harness/mcp/launch.js', () => {
+  const fromHere = (rel: string): string =>
+    decodeURIComponent(new URL(rel, import.meta.url).pathname);
+  return {
+    harnessServerLaunch: () => ({
+      command: process.execPath,
+      args: [
+        '--import',
+        fromHere('../helpers/ts-source-loader.mjs'),
+        fromHere('../../src/harness/mcp/bin.ts'),
+        ...launchControl.extraArgs,
+      ],
+    }),
+  };
+});
+
+// Every run spawns TWO node processes (the fake CLI + the source-loaded MCP
+// server); on a loaded machine that outgrows vitest's 5s default.
+vi.setConfig({ testTimeout: 30_000 });
 
 // The fake CLI: node + the fixture script, spawned through the driver's
 // argv template `binary` option (shell:false — argv is element-built).
@@ -91,38 +150,17 @@ function conformanceRoutingTable(): RoutingTable {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Directive → FAKE_AGENT_* env (the conformance script contract, scripted
-// into the fixture). The spawn override injects these per driver instance —
-// process.env is never mutated per-run (vitest runs tests concurrently
-// within a file's worker; per-driver env keeps runs isolated).
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_AGENT_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_AGENT_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_AGENT_MODE: 'tool-then-reply',
-        FAKE_AGENT_TOOL: directive.tool,
-        FAKE_AGENT_INPUT: JSON.stringify(directive.input),
-        FAKE_AGENT_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: directive.text };
-    case undefined:
-    default:
-      return { FAKE_AGENT_MODE: 'ok' };
-  }
-}
-
 /** The --allowedTools value of a built argv (the fixture's permission gate). */
 function allowedToolsArg(args: readonly string[]): string {
   const index = args.indexOf('--allowedTools');
   return index !== -1 && index + 1 < args.length ? (args[index + 1] as string) : '';
+}
+
+/** The parsed --json-schema value of a built argv (the CLI's structured-output contract). */
+function jsonSchemaArgOf(args: readonly string[]): Record<string, unknown> {
+  const index = args.indexOf('--json-schema');
+  if (index === -1 || index + 1 >= args.length) throw new Error('--json-schema missing from argv');
+  return JSON.parse(args[index + 1] as string) as Record<string, unknown>;
 }
 
 /** One recorded spawn call: the exact argv + env the driver handed over. */
@@ -161,17 +199,168 @@ function baseOptions(
     binary: ['node', FAKE_CLI],
     routingTable: conformanceRoutingTable(),
     sessionsDir: join(scratchDir, SESSIONS_DIR),
-    harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
+    harnessConfig: conformanceHarnessConfig(scratchDir),
     spawn: recordingSpawn(calls, extraEnv),
   };
 }
 
-/** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
+/**
+ * The harness config every fake-CLI run uses: workspaces inside scratchDir,
+ * and the conformance isolation write (`echo … > note.txt`) permitted via an
+ * anchored re: pattern (token patterns deny redirects by design) — the same
+ * config the ai-sdk and claude-agent instantiations use, because in harness
+ * mode the REAL harness (served over MCP) executes the tool.
+ */
+function conformanceHarnessConfig(
+  scratchDir: string,
+): NonNullable<SubprocessDriverOptions['harnessConfig']> {
+  return {
+    ...defaultHarnessConfig,
+    workspaceRoot: join(scratchDir, 'workspaces'),
+    tools: {
+      ...defaultHarnessConfig.tools,
+      run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^echo .* > note\\.txt$'] },
+    },
+  };
+}
+
+let fakeManagedSessionCounter = 0;
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tool-leg directive → FAKE_AGENT_* env for the REAL fixture CLI. Tool legs keep the
+ * real process: in harness mode the harness MCP server the fixture spawns
+ * executes the tool and records the session, a boundary an in-process fake
+ * cannot honestly stand in for.
+ */
+function toolLegEnv(
+  directive: Extract<ModelDirective, { kind: 'tool-then-reply' }>,
+): Record<string, string> {
+  return {
+    FAKE_AGENT_MODE: 'tool-then-reply',
+    FAKE_AGENT_TOOL: directive.tool,
+    FAKE_AGENT_INPUT: JSON.stringify(directive.input),
+    FAKE_AGENT_REPLY: directive.reply,
+  };
+}
+
+/**
+ * In-process stand-in for the stream-json CLI on the non-tool conformance
+ * legs. It reports the init surface the fail-closed assertion demands:
+ * exactly the driver's `--allowedTools` plus `StructuredOutput` under
+ * `--json-schema`, and the `cq-harness` server connected when configured.
+ */
+function fakeManagedScript(
+  opts: { cwd: string; args: readonly string[] },
+  directive: ModelDirective | undefined,
+): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
+  const modelIndex = opts.args.indexOf('--model');
+  const model =
+    modelIndex === -1 ? 'conformance-1' : (opts.args[modelIndex + 1] ?? 'conformance-1');
+  const allowedIndex = opts.args.indexOf('--allowedTools');
+  const allowed = (allowedIndex === -1 ? '' : (opts.args[allowedIndex + 1] ?? ''))
+    .split(' ')
+    .filter(Boolean);
+  const harnessMode = opts.args.includes('--tools');
+  const hasSchema = opts.args.includes('--json-schema');
+  const sessionId = `fake-cli-${fakeManagedSessionCounter++}`;
+  const usage = {
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 3,
+  };
+  return (frame, peer) => {
+    if (frame['method'] !== 'stdin') return;
+    if (directive?.kind === 'block-until-abort') return;
+    if (directive?.kind === 'fail') {
+      // The fixture CLI's fail persona: the vendor quota-with-reset stderr
+      // (conformance leg s classifies it `quota` and extracts resetAt).
+      peer.stderr("You've hit your use limit · resets 1h30m");
+      peer.finish(1);
+      return;
+    }
+    peer.send({
+      type: 'system',
+      subtype: 'init',
+      session_id: sessionId,
+      model,
+      ...(harnessMode
+        ? {
+            tools: [...(hasSchema ? ['StructuredOutput'] : []), ...allowed],
+            mcp_servers: opts.args.includes('--mcp-config')
+              ? [{ name: 'cq-harness', status: 'connected', source: 'dynamic' }]
+              : [],
+          }
+        : {}),
+    });
+    const text =
+      directive?.kind === 'reply'
+        ? directive.text
+        : directive?.kind === 'reply-invalid-json'
+          ? 'this reply is prose, not the required JSON object'
+          : 'ok';
+    peer.send({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    // A schema'd run answers through the CLI's StructuredOutput tool with the
+    // scripted reply's JSON; a non-JSON reply offers none, so the driver
+    // reports output-invalid.
+    const structured = hasSchema ? parseJson(text) : undefined;
+    if (structured !== undefined) {
+      peer.send({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'fake-structured',
+              name: 'StructuredOutput',
+              input: structured,
+            },
+          ],
+        },
+      });
+      peer.send({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'fake-structured',
+              is_error: false,
+              content: 'Structured output provided successfully',
+            },
+          ],
+        },
+      });
+    }
+    peer.send({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: sessionId,
+      model,
+      usage,
+      ...(harnessMode ? { permission_denials: [] } : {}),
+      ...(structured !== undefined ? { structured_output: structured } : {}),
+    });
+    peer.finish();
+  };
+}
+
+/** Fresh SubprocessDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
-  const calls: SpawnCall[] = [];
+  const directive = spec.directive;
+  const toolLeg = directive?.kind === 'tool-then-reply';
   return new SubprocessDriver({
-    ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
+    ...baseOptions(spec.scratchDir, toolLeg ? toolLegEnv(directive) : {}, []),
+    ...(toolLeg ? {} : { spawn: fakeManagedSpawn((opts) => fakeManagedScript(opts, directive)) }),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -189,7 +378,12 @@ function makeDriver(spec: ConformanceSpec): Driver {
 // 1. The conformance suite, fake-CLI-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'subprocess driver (fake agent CLI)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'subprocess driver (fake agent CLI)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific tests
@@ -227,6 +421,24 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
   return entry === undefined ? [] : (JSON.parse(entry.content) as string[]);
 }
 
+/** Parse the env-probe line a spawned worker wrote (issue #183 test). */
+function probeEnvOf(narration: readonly string[]): Record<string, string> {
+  const line = narration.find((entry) => entry.startsWith('CQ_ENV_PROBE:'));
+  if (line === undefined) throw new Error('env probe line missing from narration');
+  return JSON.parse(line.slice('CQ_ENV_PROBE:'.length)) as Record<string, string>;
+}
+
+/** The conformance route as buildArgs sees it (argv-shape tests). */
+const TEST_ROUTE = {
+  endpoint: 'conformance',
+  baseUrl: 'http://127.0.0.1:1/anthropic',
+  env: {
+    ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
+    ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
+  },
+  model: 'conformance-1',
+};
+
 describe('subprocess driver specifics (fake agent CLI)', () => {
   test('routeFor rejects prototype keys — constructor/toString are not providers (mirror of the claude-agent guard)', () => {
     expect(() =>
@@ -237,19 +449,11 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     ).toThrow(/unknown provider 'toString'/);
   });
 
-  test('buildArgs: the exact headless argv — undocumented flags removed (#19-8)', () => {
-    const route = {
-      endpoint: 'conformance',
-      baseUrl: 'http://127.0.0.1:1/anthropic',
-      env: {
-        ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
-        ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
-      },
-      model: 'conformance-1',
-    };
+  test('buildArgs: the exact CLOSED-surface headless argv (harness default) — undocumented flags removed (#19-8, W1.4)', () => {
     const args = buildArgs({
-      route,
-      allowedToolNames: ['read', 'edit'],
+      route: TEST_ROUTE,
+      allowedToolNames: ['mcp__cq-harness__read', 'mcp__cq-harness__edit'],
+      mcpConfigPath: '/sessions/s-1.cq-harness-mcp.json',
       outputJsonSchema: '{"type":"object"}',
       resumeCliSessionId: 'cli-9',
     });
@@ -260,6 +464,91 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--verbose', // the real CLI refuses stream-json print mode without it (found live, T1.6)
       '--json-schema',
       '{"type":"object"}',
+      '--tools', // every builtin ABSENT (not merely denied)
+      '',
+      '--setting-sources', // no ambient settings
+      '',
+      '--strict-mcp-config', // no ambient MCP servers
+      '--mcp-config',
+      '/sessions/s-1.cq-harness-mcp.json',
+      '--allowedTools',
+      'mcp__cq-harness__read mcp__cq-harness__edit', // ONE element, SPACE-joined
+      '--model',
+      'conformance-1',
+      '--resume',
+      'cli-9',
+    ]);
+    // The allowlist is never comma-joined: a comma list silently pre-approves
+    // only its first entry (RS-1b b9/b10).
+    expect(args.some((arg) => arg.includes(','))).toBe(false);
+    // Without --json-schema the flag pair is simply absent.
+    const noSchema = buildArgs({
+      route: TEST_ROUTE,
+      allowedToolNames: ['mcp__cq-harness__read'],
+      mcpConfigPath: '/sessions/s-1.cq-harness-mcp.json',
+      outputJsonSchema: undefined,
+      resumeCliSessionId: undefined,
+    });
+    expect(noSchema).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--tools',
+      '',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--mcp-config',
+      '/sessions/s-1.cq-harness-mcp.json',
+      '--allowedTools',
+      'mcp__cq-harness__read',
+      '--model',
+      'conformance-1',
+    ]);
+    // Empty selection (ToolPolicy mode 'none'): NO --mcp-config, and
+    // --allowedTools ALWAYS present with an EMPTY value as ONE element.
+    const none = buildArgs({
+      route: TEST_ROUTE,
+      allowedToolNames: [],
+      outputJsonSchema: undefined,
+      resumeCliSessionId: undefined,
+    });
+    expect(none).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--tools',
+      '',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--allowedTools',
+      '',
+      '--model',
+      'conformance-1',
+    ]);
+    expect(none).not.toContain('--mcp-config');
+    expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
+    expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
+  });
+
+  test('buildArgs STOCK surface: the legacy argv byte-exact — no closed-surface flags, raw harness names (D6)', () => {
+    const args = buildArgs({
+      route: TEST_ROUTE,
+      toolSurface: 'stock',
+      allowedToolNames: ['read', 'edit'],
+      outputJsonSchema: '{"type":"object"}',
+      resumeCliSessionId: 'cli-9',
+    });
+    expect(args).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--json-schema',
+      '{"type":"object"}',
       '--allowedTools',
       'read edit',
       '--model',
@@ -267,12 +556,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--resume',
       'cli-9',
     ]);
-    // ToolPolicy mode 'none' shape: --allowedTools ALWAYS present with an
-    // EMPTY value (nothing pre-approved; headless -p cannot prompt, so a
-    // tool outside the list is CLI-DENIED — the WorkerResult.denials source).
     const none = buildArgs({
-      route,
+      route: TEST_ROUTE,
+      toolSurface: 'stock',
       allowedToolNames: [],
+      // Ignored on the stock surface: the config only exists in harness mode.
+      mcpConfigPath: '/sessions/ignored.json',
       outputJsonSchema: undefined,
       resumeCliSessionId: undefined,
     });
@@ -286,57 +575,52 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--model',
       'conformance-1',
     ]);
-    expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
-    expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
   });
 
-  test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
+  test('THE REMAP DEFENCE IS POST-DISPATCH (§2.6): unknown provider still refuses pre-dispatch; an unknown MODEL now dispatches and the served id is observed', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      // DEFAULT table — the shipped deepseek endpoint config, no overrides.
-      const driver = new SubprocessDriver({
-        sessionsDir: join(scratchDir, SESSIONS_DIR),
-        harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
-        spawn: recordingSpawn(calls),
+      // The deepseek endpoint reads its key value at run() time. Stubbed
+      // (not written): a host DEEPSEEK_API_KEY stays untouched and the
+      // afterEach unstub restores the unset state.
+      vi.stubEnv('DEEPSEEK_API_KEY', 'offline-remap-key');
+      onTestFinished(() => {
+        vi.unstubAllEnvs();
       });
-      // DeepSeek-style gateways silently serve their default model for ANY
-      // model name; the driver refuses to dispatch an unknown name instead.
-      await expect(
-        driver.run(invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } })),
-      ).rejects.toThrow(
-        /not on the deepseek allowlist .* silently remap unknown model names; refusing to dispatch/,
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'deepseek-default-served' },
+          calls,
+        ),
       );
-      // The same rule is table-wide: unknown names on ANY endpoint refuse.
-      await expect(
-        driver.run(invocation({ modelSpec: { provider: 'zai', model: 'gpt-9-imaginary' } })),
-      ).rejects.toThrow(/silently remap unknown model names; refusing to dispatch/);
-      await expect(
+      // UNKNOWN PROVIDER — still a pre-dispatch config throw (routing is
+      // config, not a model outcome). Zero spawns, no sessions dir.
+      const providerErr = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'whatever' } })),
-      ).rejects.toThrow(/unknown provider 'nope'/);
-      // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
-      // never even created (store.create would have mkdir'd it).
+      );
+      expect(providerErr).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(providerErr)).toBe('config'); // seam v2: pre-dispatch class
+      expect((providerErr as Error).message).toMatch(/unknown provider 'nope'/);
       expect(calls).toEqual([]);
       await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
         code: 'ENOENT',
       });
 
-      // The routeFor throw is only the OUTER guard; a gateway can still remap
-      // an ALLOWED name server-side. The driver therefore surfaces the model
-      // the endpoint actually served — the fact the shared conformance suite's
-      // observed-model check (leg m) keys on — and a remapped run fails that
-      // check loudly.
-      const remapping = new SubprocessDriver(
-        baseOptions(
-          scratchDir,
-          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' },
-          [],
-        ),
+      // UNKNOWN MODEL — the pre-dispatch model allowlist is RETIRED
+      // (ADR-0002 §2.6): the name routes through and the run DISPATCHES (a
+      // DeepSeek-style gateway would silently serve its default here). The
+      // defence is the observable fact: WorkerResult.model carries the id
+      // the endpoint actually served, and the shared served-model assertion
+      // (ADR-0002 §2.6 — the factory applies it to every resolved driver;
+      // see served-model.test.ts / factory.test.ts) fails the mismatch
+      // post-hoc with errorClass 'served-model-mismatch'.
+      const remapped = await driver.run(
+        invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } }),
       );
-      const remapped = await remapping.run(
-        invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL } }),
-      );
-      expect(remapped.model).toBe('actually-served-model'); // the honest observation
-      expect(remapped.model).not.toBe(CONFORMANCE_MODEL); // the suite's leg m fails this run loudly
+      expect(calls).toHaveLength(1); // dispatched — the pre-dispatch model throw is gone
+      expect(remapped.model).toBe('deepseek-default-served'); // the honest observation
+      expect(remapped.model).not.toBe('gpt-9-imaginary'); // the wrapper fails this run loudly
     });
   });
 
@@ -363,7 +647,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         killGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'stubborn run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'stubborn run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
         {
@@ -411,7 +695,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         termGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'slow run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'slow run' }), { signal: ctx.signal }),
         // > node startup: the abort must land after the driver attached the
         // ladder (an abort before the spawn path returns the early-aborted
         // verdict with no narration)
@@ -421,6 +705,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
       expect(outcome.value.stopReason).toBe('aborted');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(outcome.value.error).toBeUndefined();
       const narration = await narrationOf(store, outcome.value.sessionId as string);
       const rungs = narration
         .filter((line) => line.includes('"termination-rung"'))
@@ -508,58 +794,126 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect((await readFile(sidecarPath, 'utf8')).trim()).toBe(cliId);
       await noSidecarInWorkspace();
     });
-  });
+    // Real CLI resume argv plus the sidecar filesystem contract; this budget
+    // covers two child process startups, not an in-process decision.
+  }, 15_000);
 
-  test('deny-tool: the CLI tool_result denial maps to the frozen {tool, reason} shape', async () => {
+  test('deny-tool: the CLI permission denial maps to the frozen {tool, reason} shape under the HARNESS name', async () => {
     await withScratch(async (scratchDir) => {
       const driver = new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'denial run' }));
+      // The CLI's permission gate refused mcp__cq-harness__edit (frame +
+      // its own text); the denial speaks OUR vocabulary — the harness name.
       expect(result.denials).toEqual([
-        { tool: 'edit', reason: 'permission denied: edit is not allowed' },
+        {
+          tool: 'edit',
+          reason:
+            "Claude requested permissions to use mcp__cq-harness__edit, but you haven't granted it yet.",
+        },
       ]);
       // result.is_error:true → an error verdict even though the stream closed cleanly.
       expect(result.stopReason).toBe('error');
+      // A failed result frame is a provider-side outcome (ADR-0002 §2.2).
+      expect(result.errorClass).toBe('provider-error');
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
+    });
+  });
+
+  test('result-event error path: the error verdict names the result cause and stays bounded (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'result error run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      // The failed result frame (is_error:true, subtype error_during_execution)
+      // is what the journal must show — not a bare "no cause".
+      expect(error).toContain('result event error');
+      expect(error).toContain('error_during_execution');
+      expect(result.errorClass).toBe('provider-error');
+      // boundedErrorText contract: ≤500 chars, or the truncation marker.
+      expect(/… \[truncated\]$/.test(error) || error.length <= 513).toBe(true);
+    });
+  });
+
+  test('result-event cause precedence: result string wins over errors over subtype (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const resultString = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-result' }, []),
+      ).run(invocation({ prompt: 'result-string run' }));
+      // The `result` string outranks the `errors` entries and the subtype.
+      expect(resultString.error).toContain('result-string-cause');
+      expect(resultString.error).not.toContain('errors-entry-cause');
+      expect(resultString.errorClass).toBe('provider-error');
+
+      const errorsOnly = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-errors' }, []),
+      ).run(invocation({ prompt: 'errors run' }));
+      // No `result` string → the joined `errors` entries are the cause.
+      expect(errorsOnly.error).toContain('errors-entry-cause');
+      expect(errorsOnly.error).not.toContain('error_during_execution');
+      expect(errorsOnly.errorClass).toBe('provider-error');
     });
   });
 
   test('structured output: --json-schema + the fixture structured_output land in the result', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, []),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'structured run' }));
+      const calls: SpawnCall[] = [];
+      const schema = z.object({ answer: z.string() }).strict();
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'structured run',
+          outputSchema: toOutputSchema('test/structured/v1', schema),
+        }),
+      );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // The serialized --json-schema arg carries NO draft-2020-12 meta key —
+      // the CLI rejects that URI before the model runs (#209).
+      const arg = jsonSchemaArgOf(calls[0]?.args ?? []);
+      expect(arg['$schema']).toBeUndefined();
+      expect(arg).toEqual(toOutputSchema('test/structured/v1', schema).schema);
     });
   });
 
-  test('structured output: a schema-violating payload is dropped to narration, never trusted', async () => {
-    await withScratch(async (scratchDir, store) => {
+  test('structured output: a schema-violating payload is the output-invalid verdict, never trusted (S3)', async () => {
+    await withScratch(async (scratchDir) => {
       // The fixture emits the raw payload verbatim (a lying CLI — no fixture
       // schema checking), so the driver's own settle-time validation is what
       // stands between the vendor field and the seam.
-      const driver = new SubprocessDriver({
-        ...baseOptions(
+      const driver = new SubprocessDriver(
+        baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
           [],
         ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'lying CLI run' }));
-      // The run itself succeeded; only the unrepresentable payload is gone.
-      expect(result.stopReason).toBe('complete');
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'lying CLI run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
+      // The §2.3 miss verdict (S3): the payload failed the schema, so the
+      // run is an error/'output-invalid' — NOT a complete with a dropped
+      // payload (the old behaviour is deleted), and the rejection is named.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
       expect(result.structuredOutput).toBeUndefined();
-      // The rejection is evidence, not silence: a plain-JSON narration
-      // marker carrying the zod issue count and paths.
-      const narration = await narrationOf(store, result.sessionId as string);
-      const rejected = narration.find((line) => line.includes('"structured-output-rejected"'));
-      expect(rejected !== undefined && rejected.includes('"issues":1')).toBe(true);
-      expect(rejected !== undefined && rejected.includes('"paths":["answer"]')).toBe(true);
+      expect(result.error).toContain('structured output invalid');
+      expect(result.error).toContain("schema 'test/structured/v1'");
+      // A real measurement keeps its usage evidence on the miss verdict.
+      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
     });
   });
 
@@ -568,6 +922,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
       const result = await driver.run(invocation({ prompt: 'usage run' }));
       expect(result.stopReason).toBe('complete');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
       expect(typeof result.sessionId).toBe('string');
       const record = await store.load(result.sessionId as string);
@@ -604,6 +960,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         invocation({ prompt: 'budget run', budget: { maxTokens: 1000 } }),
       );
       expect(result.stopReason).toBe('budget');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage.input).toBe(120_000);
     });
   });
@@ -617,6 +975,61 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // no cost claim without a measurement
+      // #208: the verdict POPULATES WorkerResult.error — the nonzero exit code
+      // plus the CLI's stderr text — instead of an unexplained "no cause".
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toMatch(/exited with code 1/);
+      expect(error).toContain('fake-agent-cli');
+      expect(error).toContain('not served by this endpoint');
+      // A non-zero exit with no result event is a local (harness) failure.
+      expect(result.errorClass).toBe('harness');
+    });
+  });
+
+  test('error-cause text is bounded and never echoes an environment secret (#208)', async () => {
+    const secret = 'cq-test-secret-value-9f3a';
+    process.env.CQ_TEST_API_KEY = secret;
+    onTestFinished(() => {
+      delete process.env.CQ_TEST_API_KEY;
+    });
+    await withScratch(async (scratchDir) => {
+      // POSITIVE redaction + bound exercise: a spawn failure whose message
+      // carries the secret value and overshoots the 500-char bound, so the
+      // persisted cause must contain the redaction marker AND the truncation
+      // marker (the shared boundedErrorText contract).
+      const throwingSpawn: SpawnFn = () => {
+        throw new Error(`spawn blew up with ${secret}: ${'x'.repeat(600)}`);
+      };
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: throwingSpawn,
+      });
+      const result = await driver.run(invocation({ prompt: 'secret run' }));
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).not.toContain(secret);
+      expect(error).toContain('[redacted]');
+      expect(error.length).toBeLessThanOrEqual(513);
+      expect(error.endsWith('… [truncated]')).toBe(true);
+    });
+  });
+
+  test('a signal death with no result event names the signal in error (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'self-kill' }, []),
+      );
+      // NOT a governed run: no governor signal fires, so this cannot settle
+      // 'aborted' — the child dies by its own real SIGKILL and the error
+      // cause must name the signal.
+      const result = await driver.run(invocation({ prompt: 'signal run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toContain('killed by signal');
+      expect(error).toContain('SIGKILL');
+      expect(result.errorClass).toBe('harness');
     });
   });
 
@@ -723,6 +1136,78 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     expect(() => new SubprocessDriver({ binary: ['node', FAKE_CLI] })).not.toThrow();
   });
 
+  test.each([
+    { aborted: true, harnessFailure: true, oversizedLine: true, expected: 'aborted' },
+    { aborted: false, harnessFailure: true, oversizedLine: true, expected: 'error' },
+    { aborted: false, harnessFailure: true, oversizedLine: false, expected: 'error' },
+    { aborted: false, harnessFailure: false, oversizedLine: true, expected: 'error' },
+    { aborted: false, harnessFailure: false, oversizedLine: false, expected: 'budget' },
+  ])('stop reason precedence over budget: %j', ({ expected, ...flags }) => {
+    expect(
+      stopReasonOf({
+        ...flags,
+        maxTokens: 1,
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+        resultStatus: 'success',
+      }),
+    ).toBe(expected);
+  });
+
+  test.each(['harness', 'stock'] as const)(
+    '%s: harness failure precedes oversized-line cause; both precede budget',
+    async (toolSurface) => {
+      await withScratch(async (scratchDir, store) => {
+        // No init + a success frame creates the unverified-surface failure
+        // only in harness mode. Both runs really exceed the line bound and
+        // token budget, so stock is the oversized-line control.
+        const frame = JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          structured_output: { answer: 'must be voided on harness failure' },
+        });
+        let childClose: Promise<ProcessClose> | undefined;
+        const driver = new SubprocessDriver({
+          ...baseOptions(scratchDir, {}, []),
+          toolSurface,
+          spawn: (options) => {
+            const child = spawnManaged({
+              ...options,
+              command: process.execPath,
+              args: [
+                '-e',
+                `process.stdin.resume(); process.stdout.write('x'.repeat(2048) + '\\n' + ${JSON.stringify(frame)} + '\\n');`,
+              ],
+              maxRetainedBytes: 1024,
+            });
+            childClose = child.close;
+            return child;
+          },
+        });
+        const result = await driver.run(
+          invocation({ toolPolicy: { allow: [], mode: 'none' }, budget: { maxTokens: 1 } }),
+        );
+        if (childClose === undefined) throw new Error('expected the driver to spawn a child');
+        expect((await childClose).oversizedLine).toBe(true);
+        expect(result.stopReason).toBe('error');
+        expect(result.usage.input).toBe(10);
+        if (toolSurface === 'harness') {
+          expect(result.error).toMatch(/^subprocess driver: harness failure/);
+          expect(result.error).toContain('never reported its init surface');
+          expect(result.error).not.toContain('oversized');
+          expect(result.errorClass).toBe('harness');
+          expect(result.structuredOutput).toBeUndefined();
+          expect(
+            await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
+          ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
+        } else {
+          expect(result.error).toContain('oversized stdout/stderr line');
+          expect(result.errorClass).toBe('harness'); // an oversized line is a protocol break
+        }
+      });
+    },
+  );
+
   test('a SYNCHRONOUS spawn failure is an error verdict, not a rejection (#19-5)', async () => {
     await withScratch(async (scratchDir, store) => {
       const throwingSpawn: SpawnFn = () => {
@@ -738,6 +1223,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // nothing was measured — no cost claim
+      // #208: the spawn cause reaches WorkerResult.error too, not just narration.
+      expect(result.error).toContain('spawn failed');
+      expect(result.error).toContain('spawn args must be strings');
+      expect(result.errorClass).toBe('harness');
       // The failure is narrated best-effort (same swallow rule as persistence).
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"spawn-failed"'));
@@ -776,7 +1265,29 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"sandbox-level-unenforced"'));
       expect(marker).toBeDefined();
-      expect(marker).toContain('"level":"workspace-write"');
+      // Harness mode: the harness enforces the TOOL-level sandbox mapping on
+      // this lane, so the marker narrows to OS confinement.
+      expect(JSON.parse(marker as string)).toEqual({
+        cq: 'sandbox-level-unenforced',
+        level: 'workspace-write',
+        layer: 'os',
+      });
+
+      // Stock mode (null-hypothesis evals): nothing the harness enforces
+      // applies — the LEGACY marker, no layer.
+      const stockDriver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        toolSurface: 'stock',
+      });
+      const stockResult = await stockDriver.run(invocation({ prompt: 'stock sandbox marker run' }));
+      expect(stockResult.stopReason).toBe('complete');
+      const stockMarker = (await narrationOf(store, stockResult.sessionId as string)).find((line) =>
+        line.includes('"sandbox-level-unenforced"'),
+      );
+      expect(JSON.parse(stockMarker as string)).toEqual({
+        cq: 'sandbox-level-unenforced',
+        level: 'workspace-write',
+      });
 
       // level 'none' asks for nothing extra → no marker…
       const noneDriver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
@@ -807,16 +1318,58 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The binary template carries the fixture-only probe flag: the CLI
       // spawns a sleeping grandchild in ITS process group and records the
       // pid, then ignores SIGTERM (forcing the SIGKILL rung).
+      // Readiness-gated deadline: the governed abort fires only once the
+      // grandchild pid is on disk (the harness-mode CLI connects its MCP
+      // server before init, so a fixed wall clock would race node startup).
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('pid-file-gated deadline');
+      const firePidReady = async (): Promise<void> => {
+        for (let i = 0; i < 1_000; i++) {
+          try {
+            await stat(pidFile);
+            deadline?.();
+            return;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        }
+      };
+      const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
       const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ignore-sigterm' }, calls),
+        ...baseOptions(scratchDir, {}, calls),
         binary: ['node', FAKE_CLI, '--spawn-grandchild', pidFile],
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((line) => {
+            if (line.includes('"subtype":"init"')) firePidReady().catch(() => undefined);
+          });
+          return child;
+        },
         termGraceMs: 200,
         killGraceMs: 200,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'group kill run' })),
+        async (ctx) => driver.run(invocation({ prompt: 'group kill run' }), { signal: ctx.signal }),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-group', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
@@ -838,6 +1391,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       }
       expect(dead).toBe(true);
     });
+    // Structural OS-signal-ladder budget: SIGTERM grace, then SIGKILL, then
+    // descendant teardown are each subject to host-load swings beyond the
+    // five-second process-death poll above, after a PID-readiness poll of
+    // up to 20s: the budget stays above both sequential windows.
   }, 30_000);
 
   test('stdout retention is a bounded TAIL: droppedBytes counted, every line still observed (#19-10)', async () => {
@@ -924,6 +1481,275 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('oversized lines fail loudly while retention stays bounded', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('x'.repeat(256) + '\\n');`],
+        cwd: scratchDir,
+        maxRetainedBytes: 32,
+      });
+      const close = await child.close;
+      expect(close.oversizedLine).toBe(true);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(32);
+      expect(close.droppedBytes).toBeGreaterThan(0);
+    });
+  });
+
+  test('the exit hook terminates an active detached child', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', 'setInterval(() => {}, 1000)'],
+        cwd: scratchDir,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      terminateActiveChildrenOnExit();
+      const close = await child.close;
+      expect(close.signal).toBe('SIGTERM');
+    });
+  });
+
+  test.each([
+    [1, '🦄', ''],
+    [2, '🦄', ''],
+    [3, '🦄', ''],
+    [4, '🦄', '🦄'],
+    [5, '🦄🦄', '🦄'],
+    [3, 'x�', '�'],
+    [4, 'x�!', '�!'],
+  ])('UTF-8 retention cap %i preserves complete code points in %s', async (cap, text, expected) => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(text)}); process.stderr.write(${JSON.stringify(text)});`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const out: string[] = [];
+      const err: string[] = [];
+      child.onStdoutLine((line) => out.push(line));
+      child.onStderrLine((line) => err.push(line));
+      const close = await child.close;
+      expect(close.stdout).toBe(expected);
+      expect(close.stderr).toBe(expected);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(Buffer.byteLength(close.stderr)).toBeLessThanOrEqual(cap);
+      expect(close.droppedBytes).toBe(2 * (Buffer.byteLength(text) - Buffer.byteLength(expected)));
+      expect(out).toEqual(expected === '' ? [] : [expected]);
+      expect(err).toEqual(expected === '' ? [] : [expected]);
+    });
+  });
+
+  test('importing driver and runCli does not install signal handlers', async () => {
+    await withScratch(async (scratchDir) => {
+      const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+      const cliUrl = new URL('../../src/cli/main.ts', import.meta.url).href;
+      const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '--experimental-transform-types',
+          '--import',
+          loader,
+          '--input-type=module',
+          '-e',
+          `
+          const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+          const before = signals.map(s => process.listenerCount(s));
+          await import(${JSON.stringify(processUrl)});
+          await import(${JSON.stringify(cliUrl)});
+          console.log(JSON.stringify({before, after: signals.map(s => process.listenerCount(s))}));
+        `,
+        ],
+        cwd: scratchDir,
+      });
+      const close = await child.close;
+      expect(close.code, close.stderr).toBe(0);
+      const counts = JSON.parse(close.stdout) as { before: number[]; after: number[] };
+      expect(counts.after).toEqual(counts.before);
+    });
+  });
+
+  test.skipIf(process.platform === 'win32').each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    'CLI parent %s cleans detached workers and descendants from driver and in-process run',
+    async (signal) => {
+      await withScratch(async (scratchDir) => {
+        const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+        const bin = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
+        const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+        const runUrl = new URL('../../src/harness/run.ts', import.meta.url).href;
+        const preload = join(scratchDir, 'owned-child.mjs');
+        const runWorker = join(scratchDir, 'run-worker.cjs');
+        const runPidFile = join(scratchDir, 'run-pids.json');
+        const descendantCode =
+          "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)";
+        const workerCode = `
+          const { spawn } = require('node:child_process');
+          process.on('SIGTERM', () => console.log('term'));
+          const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio: ['ignore', 'pipe', 'inherit']});
+          descendant.stdout.once('data', () => console.log(JSON.stringify([process.pid, descendant.pid])));
+          setInterval(() => {}, 1000);
+        `;
+        await writeFile(
+          runWorker,
+          workerCode.replace(
+            'console.log(JSON.stringify([process.pid, descendant.pid]))',
+            `require('node:fs').writeFileSync(${JSON.stringify(runPidFile)}, JSON.stringify([process.pid, descendant.pid]))`,
+          ),
+        );
+        const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+        const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
+        // Ignoring TERM is inherited across exec by sleep. Redirect all its
+        // pipes so each short-lived leader really closes before the final sweep.
+        const lateRunCommand = "trap '' TERM; sleep 60 </dev/null >/dev/null 2>&1 & echo $!";
+        await writeFile(
+          preload,
+          `
+          import { spawnManaged, buildChildEnv } from ${JSON.stringify(processUrl)};
+          import { runShellCommand } from ${JSON.stringify(runUrl)};
+          import childProcess from 'node:child_process';
+          import { syncBuiltinESMExports } from 'node:module';
+          // Observe the real OS pid at dispatch; the child may be killed before
+          // its first instruction during the parent's final cleanup sweep.
+          const realSpawn = childProcess.spawn;
+          childProcess.spawn = (file, ...args) => {
+            const spawned = realSpawn(file, ...args);
+            if (file === ${JSON.stringify(lateRunCommand)}) console.log(JSON.stringify({lateRun: spawned.pid}));
+            return spawned;
+          };
+          syncBuiltinESMExports();
+          void runShellCommand(${JSON.stringify(runCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
+          const child = spawnManaged({ command: process.execPath, args: ['-e', ${JSON.stringify(workerCode)}], cwd: ${JSON.stringify(scratchDir)} });
+          let lateStarted = false;
+          child.onStdoutLine(line => {
+            if (line === 'term' && !lateStarted) {
+              lateStarted = true;
+              const late = spawnManaged({command: '/bin/sh', args: ['-c', ${JSON.stringify(lateRunCommand)}], cwd: ${JSON.stringify(scratchDir)}});
+              late.onStdoutLine(line => console.log(JSON.stringify({lateDescendant: Number(line)})));
+              void late.close.then(close => console.log(JSON.stringify({lateClosed: close.code})));
+              console.log(JSON.stringify({late: late.pid}));
+              void runShellCommand(${JSON.stringify(lateRunCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000}).then(outcome => {
+                if (outcome.kind === 'exit') console.log(JSON.stringify({lateRunClosed: outcome.code, lateRunDescendant: Number(outcome.stdout)}));
+              });
+            } else process.stdout.write(line + '\\n');
+          });
+        `,
+        );
+        const parent = spawn(
+          process.execPath,
+          ['--experimental-transform-types', '--import', loader, '--import', preload, bin],
+          {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let out = '';
+        let err = '';
+        parent.stdout.on('data', (chunk: Buffer) => {
+          out += chunk.toString();
+        });
+        parent.stderr.on('data', (chunk: Buffer) => {
+          err += chunk.toString();
+        });
+        const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve) => {
+            parent.on('close', (code, endedSignal) => resolve({ code, signal: endedSignal }));
+          },
+        );
+        let pids: number[] = [];
+        let runPids: number[] = [];
+        const alive = (pid: number): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+          }
+        };
+        try {
+          await vi.waitFor(
+            async () => {
+              expect(err).toContain('missing subcommand'); // actual CLI installed its handlers
+              expect(out).toContain('\n'); // managed descendant installed its TERM trap
+              runPids = JSON.parse(await readFile(runPidFile, 'utf8')) as number[];
+              expect(runPids).toHaveLength(2); // run descendant installed its TERM trap
+            },
+            { timeout: 10_000 },
+          );
+          pids = [...(JSON.parse(out.trim()) as number[]), ...runPids];
+          expect(pids).toHaveLength(4);
+          expect(pids.every(alive)).toBe(true);
+          parent.kill(signal);
+          expect(await closed).toEqual({ code: null, signal });
+          await vi.waitFor(() => expect(pids.some(alive)).toBe(false), { timeout: 3_000 });
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          expect(late).toBeDefined(); // signal handling actually dispatched new work
+          const lateDriverPid = (JSON.parse(late!) as { late: number }).late;
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          expect(lateRun).toBeDefined();
+          const lateRunPid = (JSON.parse(lateRun!) as { lateRun: number }).lateRun;
+          expect(lateRunPid).toBeGreaterThan(0);
+          expect(out).toContain('{"lateClosed":0}');
+          const lateDescendant = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateDescendant":'));
+          expect(lateDescendant).toBeDefined();
+          const lateDescendantPid = (JSON.parse(lateDescendant!) as { lateDescendant: number })
+            .lateDescendant;
+          const lateRunClosed = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateRunClosed":'));
+          expect(lateRunClosed).toBeDefined();
+          const lateRunResult = JSON.parse(lateRunClosed!) as {
+            lateRunClosed: number;
+            lateRunDescendant: number;
+          };
+          expect(lateRunResult.lateRunClosed).toBe(0);
+          expect(lateDescendantPid).toBeGreaterThan(0);
+          expect(lateRunResult.lateRunDescendant).toBeGreaterThan(0);
+          await vi.waitFor(
+            () =>
+              expect(
+                [
+                  lateDriverPid,
+                  lateRunPid,
+                  lateDescendantPid,
+                  lateRunResult.lateRunDescendant,
+                ].some(alive),
+              ).toBe(false),
+            {
+              timeout: 3_000,
+            },
+          );
+        } finally {
+          // Recover late ownership even when a mutation failed an earlier assertion.
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          const lateDriverPid =
+            late === undefined ? undefined : (JSON.parse(late) as { late: number }).late;
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          const lateRunPid =
+            lateRun === undefined
+              ? undefined
+              : (JSON.parse(lateRun) as { lateRun: number }).lateRun;
+          for (const groupLeader of [pids[0], runPids[0], lateDriverPid, lateRunPid]) {
+            if (groupLeader === undefined) continue;
+            try {
+              process.kill(-groupLeader, 'SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          parent.kill('SIGKILL');
+          await closed;
+        }
+      });
+    },
+    20_000,
+  );
+
   test('astral characters past the cap: byte-exact trim, no lone surrogate at the head (review 9-1)', async () => {
     await withScratch(async (scratchDir) => {
       const cap = 64 * 1024;
@@ -946,4 +1772,1562 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(close.stdout.codePointAt(0)).toBe(0x1f984); // 🦄
     });
   }, 20_000);
+
+  // -------------------------------------------------------------------------
+  // Child env is default-deny (issue #183)
+  // -------------------------------------------------------------------------
+
+  test('buildChildEnv: CQ_RUN_ENV_PASSTHROUGH copies only validated, configured names', () => {
+    const parent = { FOO: 'foo', BAR: 'bar', MISSING: undefined, GH_TOKEN: 'must-not-copy' };
+    const child = buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'FOO BAR,MISSING' });
+    expect(child['FOO']).toBe('foo');
+    expect(child['BAR']).toBe('bar');
+    expect(child['MISSING']).toBeUndefined();
+    expect(child['GH_TOKEN']).toBeUndefined();
+    expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'A=1' })).toThrow(
+      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'BAD.NAME' })).toThrow(
+      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+    );
+  });
+
+  test('buildChildEnv: allowlisted basics + explicit route values pass, credential-shaped parent names are withheld (#183)', () => {
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/worker',
+      TERM: 'xterm-256color',
+      LANG: 'en_US.UTF-8',
+      PWD: '/parent/dir',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
+      HTTPS_PROXY: 'http://proxy.example:8080',
+      https_proxy: 'http://proxy.example:8080',
+      GH_TOKEN: 'ghp_marker_secret',
+      CQ_ENV_LEAK_MARKER: 'do-not-leak',
+      AWS_SECRET_ACCESS_KEY: 'aws-marker',
+      NPM_TOKEN: 'npm-marker',
+      SSH_AUTH_SOCK: '/tmp/agent.sock',
+      NODE_OPTIONS: '--require=/tmp/evil.cjs',
+      NODE_PATH: '/tmp/evil-modules',
+    };
+    const child = buildChildEnv(parent, { ANTHROPIC_API_KEY: 'route-key-value' });
+    // Allowlisted basics are inherited…
+    expect(child['PATH']).toBe('/usr/bin');
+    expect(child['HOME']).toBe('/home/worker');
+    expect(child['TERM']).toBe('xterm-256color');
+    expect(child['LANG']).toBe('en_US.UTF-8');
+    // …including network-egress/TLS config a routed CLI needs (r1)…
+    expect(child['NODE_EXTRA_CA_CERTS']).toBe('/etc/ssl/corp.pem');
+    expect(child['HTTPS_PROXY']).toBe('http://proxy.example:8080');
+    // …both proxy spellings: curl ignores uppercase HTTP_PROXY and honors
+    // only lowercase (r2).
+    expect(child['https_proxy']).toBe('http://proxy.example:8080');
+    // …the explicit route value passes (it is composed deliberately, so the
+    // allowlist must never filter it)…
+    expect(child['ANTHROPIC_API_KEY']).toBe('route-key-value');
+    // …and every credential-shaped parent name is withheld.
+    expect(child['GH_TOKEN']).toBeUndefined();
+    expect(child['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+    expect(child['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    expect(child['NPM_TOKEN']).toBeUndefined();
+    expect(child['SSH_AUTH_SOCK']).toBeUndefined();
+    expect(child['NODE_OPTIONS']).toBeUndefined(); // code-execution vector, deliberately excluded
+    expect(child['NODE_PATH']).toBeUndefined(); // module-resolution vector
+    // PWD is NOT inherited: spawn does not rewrite it for cwd, so a copied
+    // PWD would be the parent's stale directory (CodeRabbit r1).
+    expect(child['PWD']).toBeUndefined();
+    // The override layer ALWAYS wins over a copied allowlist value (r1).
+    expect(buildChildEnv(parent, { PATH: '/route/bin' })['PATH']).toBe('/route/bin');
+    // The shipped allowlist itself must not carry credential-shaped names —
+    // an explicit deny-set (the regex alone misses AWS_PROFILE,
+    // GOOGLE_APPLICATION_CREDENTIALS, SSH_AUTH_SOCK, …) plus a shape guard.
+    for (const name of [
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'NPM_TOKEN',
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'SSH_AUTH_SOCK',
+      'KRB5CCNAME',
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'ZAI_API_KEY',
+      'NODE_OPTIONS',
+      'NODE_PATH',
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+    ]) {
+      expect(DEFAULT_CHILD_ENV_ALLOWLIST).not.toContain(name);
+    }
+    expect(
+      DEFAULT_CHILD_ENV_ALLOWLIST.some((name) => /TOKEN|SECRET|KEY|PASSWORD/i.test(name)),
+    ).toBe(false);
+    // FROZEN (r1): an in-process push cannot weaken default-deny for later spawns.
+    expect(Object.isFrozen(DEFAULT_CHILD_ENV_ALLOWLIST)).toBe(true);
+    // The explicit extra allowlist is the only route for a non-default name.
+    const extended = buildChildEnv(parent, undefined, ['CQ_ENV_LEAK_MARKER']);
+    expect(extended['CQ_ENV_LEAK_MARKER']).toBe('do-not-leak');
+    expect(extended['GH_TOKEN']).toBeUndefined();
+    // A malformed extra name is rejected at the seam, not silently no-oped (r1/r2).
+    expect(() => buildChildEnv(parent, undefined, [''])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv(parent, undefined, ['A=B'])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv(parent, undefined, ['BAD NAME'])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    // A null-prototype child carries a `__proto__` override as an OWN property
+    // instead of silently dropping it through the inherited setter (r2).
+    const protoOverride = Object.create(null) as Record<string, string>;
+    protoOverride['__proto__'] = 'carried';
+    const protoChild = buildChildEnv(parent, protoOverride);
+    expect(Object.prototype.hasOwnProperty.call(protoChild, '__proto__')).toBe(true);
+    expect(protoChild['__proto__']).toBe('carried');
+    // The parent env object is never mutated.
+    expect(parent.GH_TOKEN).toBe('ghp_marker_secret');
+  });
+
+  test('a REAL spawned worker cannot see a marker secret in the entry env, while route env still reaches it; envAllowlist opts a name back in (#183)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // A probe worker: dumps its OWN process.env as a narration line (the
+      // driver folds non-JSON lines into the session record) and then emits
+      // the minimal stream-json run so the invocation completes.
+      // The probe is a CLI of its own (no MCP client), so it runs over the
+      // EMPTY harness surface (ToolPolicy mode 'none': no server, no tools)
+      // and reports exactly that init surface — the closed-surface assertion
+      // still runs and passes.
+      const EMPTY_SURFACE = { allow: [] as string[], mode: 'none' as const };
+      const probePath = join(scratchDir, 'env-probe.mjs');
+      await writeFile(
+        probePath,
+        [
+          'const env = { ...process.env };',
+          "process.stdout.write('CQ_ENV_PROBE:' + JSON.stringify(env) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'env-probe', model: 'conformance-1', tools: [], mcp_servers: [] }) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'env-probe', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, model: 'conformance-1' }) + '\\n');",
+        ].join('\n'),
+        'utf8',
+      );
+      const marker = 'cq-env-leak-marker-7f3a';
+      const savedMarker = process.env.CQ_ENV_LEAK_MARKER;
+      const savedGh = process.env.GH_TOKEN;
+      // GLOBAL process.env mutation, deliberately: the real spawnManaged path
+      // reads the LIVE parent env, so withholding can only be proven against
+      // it. Restored in finally; this file's tests run sequentially (no
+      // vitest .concurrent), so no concurrent test observes the markers.
+      process.env.CQ_ENV_LEAK_MARKER = marker;
+      process.env.GH_TOKEN = 'ghp_marker_secret';
+      const probeOptions: SubprocessDriverOptions = {
+        binary: ['node', probePath],
+        routingTable: conformanceRoutingTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          workspaceRoot: join(scratchDir, 'workspaces'),
+        },
+      };
+      try {
+        // NO spawn override: this is the production spawnManaged path.
+        const denied = await new SubprocessDriver(probeOptions).run(
+          invocation({ prompt: 'env probe run', toolPolicy: EMPTY_SURFACE }),
+        );
+        expect(denied.stopReason).toBe('complete');
+        const deniedEnv = probeEnvOf(await narrationOf(store, denied.sessionId as string));
+        // The marker secret never reaches the worker…
+        expect(deniedEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+        expect(deniedEnv['GH_TOKEN']).toBeUndefined();
+        expect(JSON.stringify(deniedEnv)).not.toContain(marker);
+        // …while terminal basics and the configured route env do. Derive the
+        // expected values from the live env so an ambient CONFORMANCE_* var
+        // cannot flip this test (r2).
+        const expectedBaseUrl = process.env.CONFORMANCE_BASE_URL ?? 'http://127.0.0.1:1/anthropic';
+        expect(typeof deniedEnv['PATH']).toBe('string');
+        expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe(expectedBaseUrl);
+        // Diagnostics are redacted before persistence, so the route key is
+        // observable as present but never recoverable from the session log.
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe('[redacted]');
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe('[redacted]');
+
+        // The documented escape hatch is real end-to-end (r1): naming the
+        // marker in envAllowlist copies ONLY that parent name back in.
+        const allowed = await new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: ['CQ_ENV_LEAK_MARKER'],
+        }).run(invocation({ prompt: 'allowlist probe run', toolPolicy: EMPTY_SURFACE }));
+        expect(allowed.stopReason).toBe('complete');
+        const allowedEnv = probeEnvOf(await narrationOf(store, allowed.sessionId as string));
+        expect(allowedEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(allowedEnv['GH_TOKEN']).toBeUndefined(); // only the named extra is added
+
+        // The per-instance list is a FROZEN COPY (r2): mutating the caller's
+        // array after construction cannot weaken later spawns.
+        const mutableAllowlist = ['CQ_ENV_LEAK_MARKER'];
+        const frozenDriver = new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: mutableAllowlist,
+        });
+        mutableAllowlist.push('GH_TOKEN');
+        const frozen = await frozenDriver.run(
+          invocation({ prompt: 'frozen allowlist probe run', toolPolicy: EMPTY_SURFACE }),
+        );
+        const frozenEnv = probeEnvOf(await narrationOf(store, frozen.sessionId as string));
+        expect(frozenEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(frozenEnv['GH_TOKEN']).toBeUndefined(); // pushed AFTER construction — not honored
+      } finally {
+        if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
+        else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
+        if (savedGh === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = savedGh;
+      }
+    });
+  }, 20_000);
+
+  test('envAllowlist validation: malformed names throw at construction (#183)', () => {
+    expect(() => new SubprocessDriver({ envAllowlist: [''] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['A=B'] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['BAD NAME'] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. The CLOSED tool surface (W1.4): the real cq-harness MCP server behind the
+//    fake CLI's MCP client, the per-run config lifecycle, and the fail-closed
+//    init-surface / is_error classification.
+// ---------------------------------------------------------------------------
+
+/** The --mcp-config value of a recorded argv (undefined when absent). */
+function mcpConfigArgOf(args: readonly string[]): string | undefined {
+  const index = args.indexOf('--mcp-config');
+  return index === -1 ? undefined : args[index + 1];
+}
+
+/** The parsed narration markers with a given `cq` tag. */
+async function markersOf(
+  store: SessionStore,
+  sessionId: string,
+  cq: string,
+): Promise<Array<Record<string, unknown>>> {
+  return (await narrationOf(store, sessionId))
+    .filter((line) => line.startsWith('{') && line.includes(`"cq":"${cq}"`))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The fixture's FAKE_AGENT_CONFIG_PROBE record. */
+interface ConfigProbe {
+  path: string | null;
+  atStart: { present: boolean; mode?: number; symlink?: boolean };
+  afterInit: { present: boolean };
+}
+
+async function readProbe(path: string): Promise<ConfigProbe> {
+  return JSON.parse(await readFile(path, 'utf8')) as ConfigProbe;
+}
+
+/** Poll until `pid` is gone (ESRCH); false if it outlives ~5s. */
+async function processGone(pid: number): Promise<boolean> {
+  for (let i = 0; i < 200; i++) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A hand-built observation for the exported stdout fold (harness mode). */
+type Observation = Parameters<typeof handleStdoutLine>[0];
+function harnessObservation(tools: string[]): Observation {
+  return {
+    cliSessionId: undefined,
+    servedModel: undefined,
+    transcript: [],
+    narration: [],
+    stderr: [],
+    assistantUsage: undefined,
+    result: undefined,
+    close: undefined,
+    toolUseNameById: new Map(),
+    toolUses: [],
+    toolResults: [],
+    deniedToolUseIds: new Set(),
+    denials: [],
+    expectedSurface: { harness: true, tools },
+    initSeen: false,
+    harnessConnected: false,
+    permissionDeniedIds: new Set(),
+    harnessFailure: undefined,
+  };
+}
+
+const line = (event: unknown): string => JSON.stringify(event);
+const initLine = (tools: string[]): string =>
+  line({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'cli-1',
+    model: 'conformance-1',
+    tools,
+    mcp_servers: [{ name: 'cq-harness', status: 'connected', source: 'dynamic' }],
+  });
+const toolUseLine = (id: string, name: string): string =>
+  line({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id, name, input: { path: 'x' } }] },
+  });
+const toolResultLine = (id: string, content: unknown): string =>
+  line({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content }] },
+  });
+
+describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
+  test('toolSurface validation: anything but harness/stock throws at construction', () => {
+    expect(() => new SubprocessDriver({ toolSurface: 'builtin' as unknown as 'harness' })).toThrow(
+      /toolSurface must be 'harness' or 'stock'/,
+    );
+    expect(() => new SubprocessDriver({ toolSurface: 'harness' })).not.toThrow();
+    expect(() => new SubprocessDriver({ toolSurface: 'stock' })).not.toThrow();
+  });
+
+  test('a real run: byte-exact closed argv; the 0600 config lives in sessionsDir, is deleted once init reports connected, and is gone after settle', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls: SpawnCall[] = [];
+      const probe = join(scratchDir, 'config-probe.json');
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probe }, calls),
+      );
+      const result = await driver.run(invocation({ prompt: 'closed surface run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.error).toBeUndefined();
+      const sessionId = result.sessionId as string;
+      const sessionsDir = join(scratchDir, SESSIONS_DIR);
+      expect(calls).toHaveLength(1);
+      const configArg = calls[0]?.args.indexOf('--mcp-config') ?? -1;
+      const configPath = calls[0]?.args[configArg + 1] as string;
+      // Unique per run: <sessionId>.<uuid>.cq-harness-mcp.json.
+      expect(configPath.slice(sessionsDir.length + 1)).toMatch(
+        new RegExp(`^${sessionId}\\.[0-9a-f-]{36}\\.cq-harness-mcp\\.json$`),
+      );
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--tools',
+        '',
+        '--setting-sources',
+        '',
+        '--strict-mcp-config',
+        '--mcp-config',
+        configPath,
+        '--allowedTools',
+        'mcp__cq-harness__read mcp__cq-harness__edit mcp__cq-harness__run',
+        '--model',
+        'conformance-1',
+      ]);
+      // Beside the session records — never in the model-visible workspace.
+      const workspace = (await store.load(sessionId))?.workspace as string;
+      expect(dirname(configPath)).toBe(sessionsDir);
+      expect(configPath.startsWith(workspace)).toBe(false);
+      const recorded = await readProbe(probe);
+      expect(recorded.path).toBe(configPath);
+      // It existed as a REGULAR 0600 file when the CLI started…
+      expect(recorded.atStart).toEqual({ present: true, mode: 0o600, symlink: false });
+      // …was deleted as soon as init reported the harness connected, while
+      // the run was still live…
+      expect(recorded.afterInit).toEqual({ present: false });
+      // …and is gone after settle.
+      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await readdir(workspace)).some((f) => f.endsWith(HARNESS_MCP_CONFIG_FILE))).toBe(
+        false,
+      );
+      expect((await readdir(sessionsDir)).some((f) => f.endsWith(HARNESS_MCP_CONFIG_FILE))).toBe(
+        false,
+      );
+    });
+  });
+
+  test('empty selection (mode none): no --mcp-config, --allowedTools "" as ONE element, no config file, init [] passes', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({ prompt: 'empty surface run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--tools',
+        '',
+        '--setting-sources',
+        '',
+        '--strict-mcp-config',
+        '--allowedTools',
+        '',
+        '--model',
+        'conformance-1',
+      ]);
+      expect(
+        (await readdir(join(scratchDir, SESSIONS_DIR))).some((f) =>
+          f.endsWith(HARNESS_MCP_CONFIG_FILE),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  test("per-run config names: concurrent runs on ONE session never share, replace or delete each other's binding; files at other names are never touched", async () => {
+    await withScratch(async (scratchDir) => {
+      const seed = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, []),
+      ).run(invocation({ prompt: 'seed run' }));
+      const sessionId = seed.sessionId as string;
+      const sessionsDir = join(scratchDir, SESSIONS_DIR);
+      // A file and a planted symlink at the legacy fixed name are inert:
+      // never followed, never written, never deleted.
+      const legacyPath = join(sessionsDir, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
+      await writeFile(legacyPath, 'foreign — not ours', { mode: 0o644 });
+      const victim = join(scratchDir, 'victim.json');
+      await writeFile(victim, 'victim-content', 'utf8');
+      const linkPath = join(sessionsDir, `${sessionId}.planted${HARNESS_MCP_CONFIG_FILE}`);
+      await symlink(victim, linkPath);
+      // Two runs on the SAME session at once, with different sandbox levels.
+      const callsA: SpawnCall[] = [];
+      const callsB: SpawnCall[] = [];
+      const probeA = join(scratchDir, 'probe-a.json');
+      const probeB = join(scratchDir, 'probe-b.json');
+      const [a, b] = await Promise.all([
+        new SubprocessDriver(
+          baseOptions(
+            scratchDir,
+            { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeA },
+            callsA,
+          ),
+        ).run(
+          invocation({
+            prompt: 'run A',
+            sessionRef: sessionId,
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        ),
+        new SubprocessDriver(
+          baseOptions(
+            scratchDir,
+            { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeB },
+            callsB,
+          ),
+        ).run(invocation({ prompt: 'run B', sessionRef: sessionId })),
+      ]);
+      expect(a.stopReason).toBe('complete');
+      expect(b.stopReason).toBe('complete');
+      const pathOf = (calls: SpawnCall[]): string => {
+        const args = calls[0]?.args ?? [];
+        return args[args.indexOf('--mcp-config') + 1] as string;
+      };
+      const pathA = pathOf(callsA);
+      const pathB = pathOf(callsB);
+      expect(pathA).not.toBe(pathB);
+      // Each CLI saw its OWN regular 0600 file at start.
+      expect((await readProbe(probeA)).atStart).toEqual({
+        present: true,
+        mode: 0o600,
+        symlink: false,
+      });
+      expect((await readProbe(probeB)).atStart).toEqual({
+        present: true,
+        mode: 0o600,
+        symlink: false,
+      });
+      // Both per-run files are gone; the foreign files are untouched.
+      await expect(lstat(pathA)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(lstat(pathB)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(legacyPath, 'utf8')).toBe('foreign — not ours');
+      expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+      expect(await readFile(victim, 'utf8')).toBe('victim-content');
+    });
+  });
+
+  test('init mismatch: an unstripped builtin in init.tools → error, harness prefix, surface-mismatch marker', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_TOOL: 'Bash' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'leaky builtin run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('init surface mismatch');
+      expect(result.error).toContain('Bash');
+      const [marker, ...rest] = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(rest).toEqual([]);
+      expect(marker).toMatchObject({ cq: 'harness-surface-mismatch', errorClass: 'harness' });
+      expect(JSON.stringify(marker?.['observed'])).toContain('Bash');
+    });
+  });
+
+  test('init mismatch: an extra connected MCP server → error with the harness prefix', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_SERVER: 'ambient-connector' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'leaky server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('ambient-connector');
+      const markers = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(markers).toHaveLength(1);
+      expect(markers[0]?.['errorClass']).toBe('harness');
+    });
+  });
+
+  test('the REAL server refusing its argv at startup (exit 78) → init reports failed → error/harness', async () => {
+    launchControl.extraArgs = ['stray-argument']; // bin.ts demands exactly one argument
+    onTestFinished(() => {
+      launchControl.extraArgs = [];
+    });
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'tool-then-reply', FAKE_AGENT_TOOL: 'read' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'refused server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.denials).toEqual([]); // no tool ever ran
+      const [marker] = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(marker?.['observed']).toEqual({
+        mcp_servers: [{ name: 'cq-harness', status: 'failed' }],
+        tools: [],
+      });
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(false);
+    });
+  });
+
+  test('no init event at all in harness mode → harness-surface-unverified error, never a model outcome', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_NO_INIT: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'silent init run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('never reported its init surface');
+      expect(
+        await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
+      ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
+    });
+  });
+
+  test('a harness failure voids structured output: an unverified run never exposes the payload (review r1)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_NO_INIT: '1' }, []),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'unverified structured run',
+          outputSchema: toOutputSchema(
+            'test/unverified/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.structuredOutput).toBeUndefined();
+    });
+  });
+
+  test('a RELATIVE sessionsDir still yields an absolute --mcp-config the CLI (cwd = workspace) can open (review r1)', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
+        sessionsDir: relative(process.cwd(), join(scratchDir, SESSIONS_DIR)),
+      });
+      const result = await driver.run(invocation({ prompt: 'relative sessionsDir run' }));
+      expect(result.stopReason).toBe('complete');
+      const args = calls[0]?.args ?? [];
+      expect(isAbsolute(args[args.indexOf('--mcp-config') + 1] as string)).toBe(true);
+    });
+  });
+
+  test('the server dying mid-run → transport failure: error/harness, NOT a denial', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_AGENT_KILL_SERVER: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'dead server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.denials).toEqual([]);
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('transport failure');
+      expect(result.error).toContain('MCP error -32000: Connection closed');
+      expect(
+        await markersOf(store, result.sessionId as string, 'harness-transport-failure'),
+      ).toEqual([
+        {
+          cq: 'harness-transport-failure',
+          errorClass: 'harness',
+          tool: 'read',
+          text: 'MCP error -32000: Connection closed',
+        },
+      ]);
+    });
+  });
+
+  test('a REAL harness denial (path escape) is a denial under the harness name; the run completes', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: '../../outside-secret.txt' }),
+            FAKE_AGENT_REPLY: 'noted the refusal',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'escape run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.error).toBeUndefined();
+      expect(result.denials).toHaveLength(1);
+      expect(result.denials[0]?.tool).toBe('read');
+      expect(result.denials[0]?.reason.startsWith('path escape:')).toBe(true);
+      // The session record speaks harness names, never the qualified spelling.
+      const record = await store.load(result.sessionId as string);
+      const toolMessages = record?.messages.filter(
+        (m) => m.role === 'tool' && m.toolName !== 'cli-narration',
+      );
+      expect(toolMessages?.map((m) => m.toolName)).toEqual(['read']);
+      const folded = JSON.parse(toolMessages?.[0]?.content ?? '{}') as { ok: boolean };
+      expect(folded.ok).toBe(false);
+    });
+  });
+
+  test('a harness-served tool that SUCCEEDS lands as a role-tool message with the server text', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'run',
+            FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo served-marker > note.txt' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'served run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.denials).toEqual([]);
+      const record = await store.load(result.sessionId as string);
+      expect(await readFile(join(record?.workspace as string, 'note.txt'), 'utf8')).toBe(
+        'served-marker\n',
+      );
+      const message = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
+      expect(JSON.parse(message?.content ?? '{}')).toMatchObject({
+        input: { command: 'echo served-marker > note.txt' },
+        ok: true,
+      });
+    });
+  });
+
+  test('stdout fold: a CLI permission denial (frame or CLI text) is a denial; unknown is_error text is a transport failure', () => {
+    const read = 'mcp__cq-harness__read';
+    const edit = 'mcp__cq-harness__edit';
+
+    // (a) The permission_denied FRAME names the tool_use: whatever the text,
+    // the errored result is a permission denial.
+    const framed = harnessObservation(['read', 'edit']);
+    handleStdoutLine(framed, initLine([read, edit]));
+    expect(framed.harnessConnected).toBe(true);
+    expect(framed.harnessFailure).toBeUndefined();
+    handleStdoutLine(framed, toolUseLine('t1', edit));
+    handleStdoutLine(
+      framed,
+      line({ type: 'system', subtype: 'permission_denied', tool_name: edit, tool_use_id: 't1' }),
+    );
+    handleStdoutLine(framed, toolResultLine('t1', 'denied by policy'));
+    expect(framed.denials).toEqual([{ tool: 'edit', reason: 'denied by policy' }]);
+    expect(framed.harnessFailure).toBeUndefined();
+
+    // (b) No frame, but the CLI's own permission text → a denial too.
+    const texted = harnessObservation(['read', 'edit']);
+    handleStdoutLine(texted, initLine([read, edit]));
+    handleStdoutLine(texted, toolUseLine('t2', edit));
+    const cliText = `Claude requested permissions to use ${edit}, but you haven't granted it yet.`;
+    handleStdoutLine(texted, toolResultLine('t2', cliText));
+    expect(texted.denials).toEqual([{ tool: 'edit', reason: cliText }]);
+    expect(texted.harnessFailure).toBeUndefined();
+
+    // (c) A stable harness denial prefix (text-block form) → a denial.
+    const harnessDenied = harnessObservation(['read']);
+    handleStdoutLine(harnessDenied, initLine([read]));
+    handleStdoutLine(harnessDenied, toolUseLine('t3', read));
+    handleStdoutLine(
+      harnessDenied,
+      toolResultLine('t3', [{ type: 'text', text: "file not found: 'x'" }]),
+    );
+    expect(harnessDenied.denials).toEqual([{ tool: 'read', reason: "file not found: 'x'" }]);
+    expect(harnessDenied.harnessFailure).toBeUndefined();
+
+    // (d) Anything else on a harness tool → transport failure, never a denial.
+    const broken = harnessObservation(['read']);
+    handleStdoutLine(broken, initLine([read]));
+    handleStdoutLine(broken, toolUseLine('t4', read));
+    handleStdoutLine(broken, toolResultLine('t4', 'MCP error -32001: Request timed out'));
+    expect(broken.denials).toEqual([]);
+    expect(broken.harnessFailure).toEqual({
+      cq: 'harness-transport-failure',
+      errorClass: 'harness',
+      tool: 'read',
+      text: 'MCP error -32001: Request timed out',
+    });
+
+    // (e) Only the FIRST init is asserted, and an extra builtin fails it.
+    const leaky = harnessObservation(['read']);
+    handleStdoutLine(leaky, initLine([read, 'Bash']));
+    handleStdoutLine(leaky, initLine([read]));
+    expect(leaky.harnessConnected).toBe(false);
+    expect(leaky.harnessFailure?.cq).toBe('harness-surface-mismatch');
+  });
+
+  test('governed abort in harness mode → aborted (not a harness error), and no server process survives', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const pidFile = join(scratchDir, 'server.pid');
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('init-gated deadline');
+      const spawn = recordingSpawn([], {
+        FAKE_AGENT_MODE: 'block-until-abort',
+        FAKE_AGENT_SERVER_PID_FILE: pidFile,
+      });
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((l) => {
+            if (l.includes('"subtype":"init"')) queueMicrotask(() => deadline?.());
+          });
+          return child;
+        },
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
+      const outcome = await runLadder(
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'governed harness run' }), { signal: ctx.signal }),
+        { wallClockMs: 1000 },
+        { op: 'subprocess', jobKey: 'subprocess-harness-abort', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.error).toBeUndefined();
+      const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((l) => l.includes('"errorClass":"harness"'))).toBe(false);
+      const pids = (await readFile(pidFile, 'utf8'))
+        .split('\n')
+        .filter((l) => l !== '')
+        .map(Number);
+      expect(pids).toHaveLength(1);
+      for (const pid of pids) expect(await processGone(pid)).toBe(true);
+      // The config is gone even though the run never completed.
+      expect(
+        (await readdir(join(scratchDir, SESSIONS_DIR))).some((f) =>
+          f.endsWith(HARNESS_MCP_CONFIG_FILE),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  test('STOCK surface run: the legacy argv and the legacy in-process tool path (raw names, no MCP)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: 'missing.txt' }),
+          },
+          calls,
+        ),
+        toolSurface: 'stock',
+      });
+      const result = await driver.run(invocation({ prompt: 'stock run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--allowedTools',
+        'read edit run',
+        '--model',
+        'conformance-1',
+      ]);
+      expect(mcpConfigArgOf(calls[0]?.args ?? [])).toBeUndefined();
+      expect(result.denials).toEqual([{ tool: 'read', reason: "file not found: 'missing.txt'" }]);
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
+      // No init surface is asserted on the stock surface.
+      expect(
+        (await narrationOf(store, result.sessionId as string)).some((l) =>
+          l.includes('"errorClass":"harness"'),
+        ),
+      ).toBe(false);
+
+      // The legacy deny-tool shape still maps on the stock surface.
+      const denied = await new SubprocessDriver({
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
+        toolSurface: 'stock',
+      }).run(invocation({ prompt: 'stock denial run' }));
+      expect(denied.denials).toEqual([
+        { tool: 'edit', reason: 'permission denied: edit is not allowed' },
+      ]);
+      expect(denied.stopReason).toBe('error');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 (ADR-0002 §2.1/§2.4) — RunOptions.signal + the workspace binding
+// ---------------------------------------------------------------------------
+
+/** A run that is expected to THROW — resolves with the thrown value (errorClassOf fodder). */
+async function thrownBy(run: Promise<unknown>): Promise<unknown> {
+  try {
+    await run;
+    return undefined;
+  } catch (err) {
+    return err;
+  }
+}
+
+describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () => {
+  test('a PRE-ABORTED options.signal never dispatches: aborted, zero usage, no session state', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'subdrv-s2-'));
+    try {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: 'must never run' },
+          calls,
+        ),
+      );
+      const controller = new AbortController();
+      controller.abort();
+      const result = await driver.run(invocation(), { signal: controller.signal });
+      expect(result.stopReason).toBe('aborted');
+      // ZERO usage, no denials, and NO sessionId: no record was created for
+      // a run that never dispatched.
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+      expect(calls).toEqual([]); // the CLI was never spawned
+      // No session state either — the store directory was never created.
+      await expect(
+        readdir(join(scratchDir, SESSIONS_DIR)).catch((err: NodeJS.ErrnoException) => err),
+      ).resolves.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('an options.signal fired MID-RUN settles aborted — no governor in the loop', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'subdrv-s2-'));
+    try {
+      // No runLadder: the ambient governed context is UNDEFINED here, so the
+      // only cancellation source is options.signal — the seam-v2 wiring. The
+      // delay lands AFTER the abort listener attaches (synchronously after
+      // the spawn) and while the block-until-abort fixture is still alive.
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'block-until-abort' }, calls),
+      );
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 100);
+      const result = await driver.run(invocation(), { signal: controller.signal });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.error).toBeUndefined(); // the cancellation is not a failure
+      // Usage observed so far: no result event arrived before the SIGTERM → zeros.
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(calls).toHaveLength(1); // dispatched exactly once, then terminated
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('workspace binding: the tool write lands in workspace.path; the record stays in sessionsDir recording the realpath', async () => {
+    // realpath the scratch parent so the bound dir IS its own realpath
+    // (macOS /var → /private/var) — the assertions then read literally.
+    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    try {
+      const workspaceDir = join(scratchDir, 'ws');
+      await mkdir(workspaceDir);
+      const spawnedCwds: string[] = [];
+      const extraEnv = {
+        FAKE_AGENT_MODE: 'tool-then-reply',
+        FAKE_AGENT_TOOL: 'run',
+        FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo conformance-marker > note.txt' }),
+        FAKE_AGENT_REPLY: 'wrote note.txt',
+      };
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, extraEnv, []),
+        // Record the spawn cwd (the base recordingSpawn records argv/env
+        // only); the directive env merge is repeated here because THIS
+        // override replaces recordingSpawn. Harness mode needs no
+        // FAKE_AGENT_ALLOWED forwarding (the fixture reads --allowedTools).
+        spawn: (opts) => {
+          spawnedCwds.push(opts.cwd);
+          return spawnManaged({ ...opts, env: { ...opts.env, ...extraEnv } });
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          toolPolicy: { allow: ['run'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'workspace-write' },
+          workspace: { path: workspaceDir },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.denials).toEqual([]);
+      // The CLI was dispatched with cwd = the bound workspace (its realpath).
+      expect(spawnedCwds).toEqual([workspaceDir]);
+      // The run tool really executed INSIDE the bound workspace.
+      await expect(readFile(join(workspaceDir, 'note.txt'), 'utf8')).resolves.toContain(
+        'conformance-marker',
+      );
+      // The record was created in the LANE's sessionsDir — never in the
+      // workspace — and records the bound REALPATH as its workspace.
+      const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(
+        result.sessionId as string,
+      );
+      expect(record?.workspace).toBe(workspaceDir);
+      expect(
+        (await readdir(workspaceDir)).filter((f) => f.endsWith('.jsonl') || f.includes('cq-cli')),
+      ).toEqual([]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('workspace + sessionRef: the same realpath resumes; a different one throws config PRE-DISPATCH', async () => {
+    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    try {
+      const workspaceDir = join(scratchDir, 'ws');
+      const otherDir = join(scratchDir, 'other');
+      await mkdir(workspaceDir);
+      await mkdir(otherDir);
+      const calls: SpawnCall[] = [];
+      const freshDriver = (): SubprocessDriver =>
+        new SubprocessDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
+      const run1 = await freshDriver().run(invocation({ workspace: { path: workspaceDir } }));
+      expect(run1.stopReason).toBe('complete');
+      expect(calls).toHaveLength(1);
+
+      // The SAME workspace for its OWN session: resumes bound to the same dir.
+      const run2 = await freshDriver().run(
+        invocation({ workspace: { path: workspaceDir }, sessionRef: run1.sessionId as string }),
+      );
+      expect(run2.stopReason).toBe('complete');
+      expect(run2.sessionId).toBe(run1.sessionId);
+      expect(calls).toHaveLength(2);
+
+      // A DIFFERENT workspace for the same session: a caller bug — a
+      // pre-dispatch config throw; the CLI was never spawned for it.
+      const err = await thrownBy(
+        freshDriver().run(
+          invocation({ workspace: { path: otherDir }, sessionRef: run1.sessionId as string }),
+        ),
+      );
+      expect(err).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(err)).toBe('config');
+      expect(calls).toHaveLength(2); // unchanged — never dispatched
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('workspace.path that is relative or not an existing directory → DispatchError config, never dispatched', async () => {
+    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'subdrv-s2-')));
+    try {
+      const aFile = join(scratchDir, 'plain-file.txt');
+      await writeFile(aFile, 'not a directory', 'utf8');
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
+      );
+      for (const badPath of ['relative/workspace', join(scratchDir, 'absent'), aFile]) {
+        const err = await thrownBy(driver.run(invocation({ workspace: { path: badPath } })));
+        expect(errorClassOf(err), `workspace.path '${badPath}'`).toBe('config');
+      }
+      expect(calls).toEqual([]); // the CLI was never spawned
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 §2.3 (S3) — invocation outputSchema, the uniform output-invalid
+// verdict, the §2.2 CLI classifier rows, and providerSignals
+// ---------------------------------------------------------------------------
+
+/** The invocation schema the §2.3 tests carry: `{answer: string}`, closed. */
+const S3_ANSWER_SCHEMA: OutputSchema = {
+  name: 'test.answer/v1',
+  schema: {
+    type: 'object',
+    properties: { answer: { type: 'string' } },
+    required: ['answer'],
+    additionalProperties: false,
+  },
+};
+
+/** The S3_USAGE the scripted streams report (the fixture's fixed numbers). */
+const S3_USAGE = {
+  input_tokens: 10,
+  output_tokens: 5,
+  cache_read_input_tokens: 2,
+  cache_creation_input_tokens: 3,
+};
+
+/** A harness-mode init line matching the expected surface (mode 'none'). */
+const s3InitLine = (tools: readonly string[]): string =>
+  JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'cli-s3',
+    model: CONFORMANCE_MODEL,
+    tools: [...tools],
+    mcp_servers: [],
+  });
+
+/** A failed result event line with the given overrides. */
+const s3ErrorResultLine = (overrides: Record<string, unknown>): string =>
+  JSON.stringify({
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    session_id: 'cli-s3',
+    model: CONFORMANCE_MODEL,
+    usage: S3_USAGE,
+    ...overrides,
+  });
+
+/** A spawn override that runs `node -e` emitting the given JSON lines. */
+function s3Child(lines: readonly string[], exitCode = 0): SpawnFn {
+  return (opts) =>
+    spawnManaged({
+      ...opts,
+      command: process.execPath,
+      args: [
+        '-e',
+        `process.stdin.resume(); for (const l of ${JSON.stringify(lines)}) process.stdout.write(l + '\\n');` +
+          (exitCode === 0 ? '' : ` process.exitCode = ${String(exitCode)};`),
+      ],
+    });
+}
+
+/** The S3 driver over a scripted stream (mode 'none' policy: no MCP server). */
+function s3Driver(
+  scratchDir: string,
+  lines: readonly string[],
+  opts: {
+    binary?: SubprocessDriverOptions['binary'];
+    exitCode?: number;
+  } = {},
+): SubprocessDriver {
+  return new SubprocessDriver({
+    ...baseOptions(scratchDir, {}, []),
+    ...(opts.binary === undefined ? {} : { binary: opts.binary }),
+    spawn: s3Child(lines, opts.exitCode ?? 0),
+  });
+}
+
+describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
+  test('round-trip: an invocation outputSchema rides --json-schema and the validated payload completes', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // PRODUCER RULE: no class (and no error) on a non-error verdict.
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      // The transport carries the EXACT invocation document, meta-URI
+      // stripped; the same document is what the validator judged over.
+      const sent = jsonSchemaArgOf(calls[0]?.args ?? []);
+      expect(sent).toEqual(S3_ANSWER_SCHEMA.schema);
+      expect(sent['$schema']).toBeUndefined();
+    });
+  });
+
+  test('no schema requested: structuredOutput is ABSENT and no --json-schema is sent', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: '{"answer":"ok"}' },
+          calls,
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'no schema run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.errorClass).toBeUndefined();
+      expect(calls[0]?.args).not.toContain('--json-schema');
+    });
+  });
+
+  test('carve-outs: a token cap that fires with a schema in force is budget; a pre-aborted run is aborted', async () => {
+    await withScratch(async (scratchDir) => {
+      // A success frame with NO structured_output (a miss) whose usage trips
+      // the cap: the missing object is the cap's consequence — budget, no
+      // error, no class.
+      const capped = s3Driver(scratchDir, [
+        s3InitLine(['StructuredOutput']),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          usage: {
+            input_tokens: 120_000,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        }),
+      ]);
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          toolPolicy: { allow: [], mode: 'none' },
+          budget: { maxTokens: 1000 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.error).toBeUndefined();
+      expect(cappedResult.errorClass).toBeUndefined();
+      expect(cappedResult.structuredOutput).toBeUndefined();
+
+      // An already-fired signal never dispatches: 'aborted', no class.
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = s3Driver(scratchDir, [s3InitLine(['StructuredOutput'])]);
+      const abortedResult = await aborted.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, toolPolicy: { allow: [], mode: 'none' } }),
+        { signal: dead.signal },
+      );
+      expect(abortedResult.stopReason).toBe('aborted');
+      expect(abortedResult.errorClass).toBeUndefined();
+    });
+  });
+
+  test('a PARSED payload on a budget verdict stays absent (the served-model check judges completes)', async () => {
+    await withScratch(async (scratchDir) => {
+      // The cap fired AFTER the CLI produced a valid object: the payload is
+      // still not a consumable outcome — withServedModelAssertion judges
+      // only completes, so a payload riding a budget verdict would bypass
+      // the observed-model check (parity with the ai-sdk lane; PR #238
+      // review).
+      const capped = s3Driver(scratchDir, [
+        s3InitLine(['StructuredOutput']),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          structured_output: { answer: 'ok' },
+          usage: {
+            input_tokens: 120_000,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        }),
+      ]);
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          toolPolicy: { allow: [], mode: 'none' },
+          budget: { maxTokens: 1000 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.structuredOutput).toBeUndefined();
+      expect(cappedResult.usage).toBeDefined();
+    });
+  });
+
+  test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any spawn (PR #238 review round 2)', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, calls));
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+      );
+      // The uniform schema-miss verdict, compiled locally — the same shape
+      // the settle-time miss flow produces, never a provider/harness
+      // failure from a request-setup rejection. Nothing was spawned and no
+      // session state exists.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
+      expect(result.error).toContain('test.broken/v1');
+      expect(result.error).toContain('could not be compiled');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+      expect(calls).toEqual([]); // the CLI never ran
+    });
+  });
+
+  test('classifier rows through the lane: quota (claude limit text, spend limit, opencode funds) and rate-limit rows', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = (): string => join(scratchDir, `run-${(runCount += 1)}`);
+
+      // The claude CLI's usage-limit result → quota WITH the window reset.
+      const limited = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your session limit · resets 3pm (Asia/Singapore)",
+        }),
+      ]);
+      const limitedResult = await limited.run(
+        invocation({ prompt: 'limited run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(limitedResult.stopReason).toBe('error');
+      expect(limitedResult.errorClass).toBe('quota');
+      const resetAt = limitedResult.providerSignals?.windows?.[0]?.resetAt;
+      expect(resetAt).toBeDefined();
+      const instant = Date.parse(resetAt as string);
+      expect(instant).toBeGreaterThan(Date.now() - 60_000);
+      expect(instant).toBeLessThan(Date.now() + 36 * 3_600_000);
+      expect(limitedResult.providerSignals?.windows?.[0]?.id).toBe('5h');
+
+      // The weekly window is named '7d'.
+      const weekly = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your weekly limit · resets 2026-12-31 3pm (Asia/Singapore)",
+        }),
+      ]);
+      const weeklyResult = await weekly.run(
+        invocation({ prompt: 'weekly run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(weeklyResult.errorClass).toBe('quota');
+      expect(weeklyResult.providerSignals?.windows?.[0]?.id).toBe('7d');
+
+      // Gateway funded-allowance prose → quota.
+      const spend = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ result: 'gateway upstream: spend limit reached for this account' }),
+      ]);
+      const spendResult = await spend.run(
+        invocation({ prompt: 'spend run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(spendResult.errorClass).toBe('quota');
+
+      // The opencode funded-balance row → quota.
+      const funds = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ errors: ['HTTP 402: Insufficient account funds'] }),
+      ]);
+      const fundsResult = await funds.run(
+        invocation({ prompt: 'funds run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(fundsResult.errorClass).toBe('quota');
+
+      // The throttle rows → rate-limit (result-frame text AND stderr).
+      const throttled = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({ result: 'Server is temporarily limiting requests' }),
+      ]);
+      const throttledResult = await throttled.run(
+        invocation({ prompt: 'throttled run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(throttledResult.errorClass).toBe('rate-limit');
+
+      // "Request rejected (429)" arrives on STDERR with a non-zero exit —
+      // the throttle row still outranks the close-cause branch.
+      const rejectedViaStderr = new SubprocessDriver({
+        ...baseOptions(fresh(), {}, []),
+        spawn: (opts) =>
+          spawnManaged({
+            ...opts,
+            command: process.execPath,
+            args: [
+              '-e',
+              `process.stdin.resume(); process.stderr.write('Request rejected (429)\\n'); process.exitCode = 1;`,
+            ],
+          }),
+      });
+      const rejectedResult = await rejectedViaStderr.run(
+        invocation({ prompt: 'rejected run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(rejectedResult.stopReason).toBe('error');
+      expect(rejectedResult.errorClass).toBe('rate-limit');
+    });
+  });
+
+  test('the codex row: non-zero exit with folded usage and no result event → provider-error', async () => {
+    await withScratch(async (scratchDir) => {
+      const usageThenExit = (opts: SpawnOptions): ManagedChild =>
+        spawnManaged({
+          ...opts,
+          command: process.execPath,
+          args: [
+            '-e',
+            `process.stdin.resume();
+             process.stdout.write(${JSON.stringify(s3InitLine([]))} + '\\n');
+             process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'partial work' }], usage: S3_USAGE_FIXTURE } }) + '\\n');
+             process.exitCode = 1;`.replaceAll('S3_USAGE_FIXTURE', JSON.stringify(S3_USAGE)),
+          ],
+        });
+      // A codex CLI: the provider's failure surfaced through the CLI.
+      const codex = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        binary: ['/opt/vendor/codex'],
+        spawn: usageThenExit,
+      });
+      const codexResult = await codex.run(
+        invocation({ prompt: 'codex run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(codexResult.stopReason).toBe('error');
+      expect(codexResult.errorClass).toBe('provider-error');
+      expect(codexResult.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
+
+      // CONTROL: the same stream from a non-codex binary stays 'harness'
+      // (the exit is the CLI's own crash, not a provider classification).
+      const plain = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: usageThenExit,
+      });
+      const plainResult = await plain.run(
+        invocation({ prompt: 'plain run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(plainResult.stopReason).toBe('error');
+      expect(plainResult.errorClass).toBe('harness');
+    });
+  });
+
+  test('a missing route key env throws DispatchError config before any spawn', async () => {
+    await withScratch(async (scratchDir) => {
+      const keyName = 'CQ_TEST_SUBPROCESS_MISSING_KEY';
+      const saved = process.env[keyName];
+      delete process.env[keyName];
+      try {
+        const driver = new SubprocessDriver({
+          ...baseOptions(scratchDir, {}, []),
+          routingTable: RoutingTableSchema.parse({
+            endpoints: {
+              conformance: {
+                baseUrlEnv: 'CONFORMANCE_BASE_URL',
+                baseUrlDefault: 'http://127.0.0.1:1/anthropic',
+                keyEnv: keyName,
+                models: ['conformance-1'],
+                notes: 'key-less endpoint for the missing-key pre-dispatch test',
+              },
+            },
+          }),
+        });
+        const err = await thrownBy(driver.run(invocation()));
+        expect(err).toBeInstanceOf(DispatchError);
+        expect(errorClassOf(err)).toBe('config');
+        expect((err as Error).message).toMatch(new RegExp(keyName));
+      } finally {
+        if (saved !== undefined) process.env[keyName] = saved;
+      }
+    });
+  });
+
+  test('producer rule: errorClass rides every error verdict and NO non-error verdict; the mirror still parses them', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = (): string => join(scratchDir, `run-${(runCount += 1)}`);
+      const runs: Array<{ label: string; result: WorkerResult }> = [];
+
+      // 1. exit 1 with no result event → error/'harness'.
+      const fail = s3Driver(fresh(), [s3InitLine([])], { exitCode: 1 });
+      runs.push({
+        label: 'fail',
+        result: await fail.run(
+          invocation({ prompt: 'producer fail run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 2. a structured-output miss → error/'output-invalid'.
+      const miss = new SubprocessDriver(
+        baseOptions(
+          fresh(),
+          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
+          [],
+        ),
+      );
+      runs.push({
+        label: 'output-invalid',
+        result: await miss.run(
+          invocation({
+            prompt: 'producer miss run',
+            toolPolicy: { allow: [], mode: 'none' },
+            outputSchema: toOutputSchema(
+              'test/producer-miss/v1',
+              z.object({ answer: z.string() }).strict(),
+            ),
+          }),
+        ),
+      });
+
+      // 3. the CLI usage-limit result → error/'quota' with the window.
+      const quota = s3Driver(fresh(), [
+        s3InitLine([]),
+        s3ErrorResultLine({
+          result: "You've hit your session limit · resets 3pm (Asia/Singapore)",
+        }),
+      ]);
+      runs.push({
+        label: 'quota',
+        result: await quota.run(
+          invocation({ prompt: 'producer quota run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 4. complete → NO class.
+      const ok = s3Driver(fresh(), [
+        s3InitLine([]),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'cli-s3',
+          model: CONFORMANCE_MODEL,
+          usage: S3_USAGE,
+        }),
+      ]);
+      runs.push({
+        label: 'complete',
+        result: await ok.run(
+          invocation({ prompt: 'producer ok run', toolPolicy: { allow: [], mode: 'none' } }),
+        ),
+      });
+
+      // 5. pre-aborted → 'aborted', NO class (a cancellation is not a failure).
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = s3Driver(fresh(), [s3InitLine([])]);
+      runs.push({
+        label: 'aborted',
+        result: await aborted.run(
+          invocation({ prompt: 'producer aborted run', toolPolicy: { allow: [], mode: 'none' } }),
+          { signal: dead.signal },
+        ),
+      });
+
+      for (const { label, result } of runs) {
+        if (result.stopReason === 'error') {
+          expect(result.errorClass, `${label}: error verdicts carry a class`).toBeDefined();
+        } else {
+          expect(result.errorClass, `${label}: non-error verdicts carry none`).toBeUndefined();
+        }
+        // The strict v2 mirror parses every verdict (errorClass is
+        // one-directional: present ⇒ error).
+        const reparsed = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(reparsed.stopReason).toBe(result.stopReason);
+      }
+      expect(runs.map((r) => r.result.stopReason)).toEqual([
+        'error',
+        'error',
+        'error',
+        'complete',
+        'aborted',
+      ]);
+    });
+  });
 });

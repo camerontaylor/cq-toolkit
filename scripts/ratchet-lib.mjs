@@ -30,13 +30,20 @@ export const COVERAGE_SUMMARY_PATH = join(ROOT, 'coverage', 'coverage-summary.js
 /** Compiler/vitest output can be megabytes on a red run — never truncate evidence. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+/**
+ * Deadline for the engine build. Mirrors BUILD_TIMEOUT_MS in test/global-setup.ts
+ * so the two build paths share one budget: a wedged tsc must fail the run as
+ * evidence, never block the ratchet runners indefinitely.
+ */
+const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** Loud, uniform driver failure: narration to stderr, exit 1. */
 export function fail(message) {
   console.error(`ratchet: ${message}`);
   process.exit(1);
 }
 
-// npm/npx are .cmd shims on win32; since Node's CVE-2024-27980 fix a .cmd
+// pnpm is a .cmd shim on win32; since Node's CVE-2024-27980 fix a .cmd
 // must be spawned through a shell. Package JS entrypoints run directly with
 // Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
@@ -63,6 +70,9 @@ function newestSrcMtimeMs() {
   return newest;
 }
 
+/** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
+let distPrepared = false;
+
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
@@ -79,28 +89,42 @@ function newestSrcMtimeMs() {
  * error fails loudly here, never downstream.
  */
 export function ensureDist() {
+  // Build-once per process: every consumer in one invocation reuses the first
+  // preparation instead of re-walking src/ or re-running `pnpm run build`.
+  if (distPrepared) return;
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
     if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
+      distPrepared = true;
       return; // dist exists and is newer than every src file — reuse it
     }
   } catch {
     // no dist yet (CI cold checkout) or unreadable — fall through to build
   }
-  const res = spawnSync('npm', ['run', 'build'], {
+  const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
-  if (res.error || res.status !== 0) {
+  if (res.error || res.signal || res.status !== 0) {
+    // spawnSync reports a timeout as res.error (ETIMEDOUT) with res.signal set;
+    // a build killed from outside has a signal and a null status.
+    const reason = res.error
+      ? res.error.code === 'ETIMEDOUT'
+        ? `timed out after ${BUILD_TIMEOUT_MS}ms`
+        : res.error.message
+      : res.signal
+        ? `killed by signal ${res.signal}`
+        : `exit ${res.status}`;
     fail(
-      `cannot build the ratchet engine (npm run build): ${
-        res.error ? res.error.message : `exit ${res.status}`
-      }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
+      `cannot build the ratchet engine (pnpm run build): ${reason}\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
   }
+  distPrepared = true;
 }
 
 /**
@@ -149,25 +173,28 @@ export async function withGitAskpass(token, fn) {
 
 /**
  * Build (ensureDist) then import the BUILT engine. Returns the op factories,
- * the adapter registry, the format helpers, the diff monotonic guard, the
- * baseline-proposal factory, and the first-party adapters this lane's
- * runners register (registration is the caller's job — registerAdapter
- * throws on a duplicate id, and the registry is per-process runtime wiring,
- * exactly as the engine's own docs require).
+ * the adapter registry, the format helpers (including the shared diff-side
+ * coverage re-basis normalizer `normalizeBaselineDiffValues` and the
+ * coverage granularity law `roundCoveragePct` this file mirrors), the diff
+ * monotonic guard, the baseline-proposal factory, and the first-party
+ * adapters this lane's runners register (registration is the caller's job —
+ * registerAdapter throws on a duplicate id, and the registry is per-process
+ * runtime wiring, exactly as the engine's own docs require).
  */
 export async function loadEngine() {
   ensureDist();
   const imp = (rel) => import(pathToFileURL(join(ROOT, 'dist', 'ops', 'ratchet', rel)).href);
-  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter] =
+  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter, git] =
     await Promise.all([
       imp('checkRatchet.js'),
       imp('captureBaseline.js'),
-      imp('registry.js'),
+      imp('metricRegistry.js'),
       imp('format.js'),
       imp('monotonicGuard.js'),
       imp('proposeBaselineUpdate.js'),
       imp('adapters/typecheckCount.js'),
       imp('adapters/coverage.js'),
+      imp('git.js'),
     ]);
   return {
     createCheckRatchet: check.createCheckRatchet,
@@ -179,9 +206,18 @@ export async function loadEngine() {
     parseBaseline: format.parseBaseline,
     renderBaseline: format.renderBaseline,
     tightens: format.tightens,
+    normalizeBaselineDiffValues: format.normalizeBaselineDiffValues,
+    roundCoveragePct: format.roundCoveragePct,
     checkDiffMonotonicity: guard.checkDiffMonotonicity,
     formatViolations: guard.formatViolations,
     createProposeBaselineUpdate: propose.createProposeBaselineUpdate,
+    // The verifier's hardened git argv, reused (NOT re-spelled) by the
+    // runner scripts so a local guard diff can never drift from the trusted
+    // one — composition F7: an inline copy that omitted `--no-color` /
+    // `--no-relative` made `checkDiffMonotonicity` pass vacuously under
+    // `color.diff=always`.
+    GIT_HARDEN: git.GIT_HARDEN,
+    HARDENED_DIFF_FLAGS: git.HARDENED_DIFF_FLAGS,
     adapters: { typecheckCount: tcAdapter.typecheckCount, coverage: covAdapter.coverage },
   };
 }
@@ -248,27 +284,45 @@ export function typecheckEvidence(typecheckCountAdapter, run) {
 }
 
 /**
- * Integer-percent normalization of a coverage summary — THE one shared
- * rounding point (ratchet-check, ratchet-propose, and the baseline capture
- * all read through runCoverageRaw, so all three apply it identically).
+ * LOCAL MIRROR of the engine's `roundCoveragePct`
+ * (src/ops/ratchet/format.ts — the source of truth): half-up to ONE decimal
+ * with a fixed absolute 1e-9 epsilon on the ×10 scale, so a decimal half
+ * that lands a hair below itself in binary still rounds up (1.05 → 1.1).
+ * Mirrored rather than imported because normalizeCoverageSummary is SYNC
+ * and runs inside runCoverageRaw, independent of the async loadEngine build;
+ * test/fixtures/ratchet-lib-selfhost.mjs asserts the two agree on a table
+ * of values, so they can never drift silently.
+ */
+function roundCoveragePct(pct) {
+  if (!Number.isFinite(pct)) return pct;
+  return Math.floor(pct * 10 + 0.5 + 1e-9) / 10;
+}
+
+/**
+ * One-decimal normalization of a coverage summary — the driver-side
+ * application of the shared granularity law (ratchet-check,
+ * ratchet-propose, and the baseline capture all read through
+ * runCoverageRaw, so all three apply it identically, and the engine's
+ * `coverage-json` source applies the same rounding).
  *
  * Rationale: the ratcheted quantity is total.lines.pct, and v8's 2-decimal
  * figure is NOT stable across environments — the same tree measured 93.46
  * locally and 93.38 in CI (provider/instrumentation noise), which failed a
  * 93.46 baseline as a spurious 0.08 "loosening". Granularity is the fix: the
- * reading is rounded to INTEGER percent (Math.round), in place, before any
- * adapter sees it. A ratchet step smaller than 1% is noise anyway — real
- * coverage work moves whole percentages — so 93.46 and 93.38 are both simply
- * 93, and cross-runner float noise can never turn into a ratchet verdict.
- * A hostile/missing shape is left untouched: the adapter rules it unusable
- * (I5), never a fabricated reading.
+ * reading is rounded half-up to ONE DECIMAL (roundCoveragePct above), in
+ * place, before any adapter sees it — the hundredths digit is noise, while
+ * the tenths digit keeps a small real coverage gain ratchetable (93.46 →
+ * 93.5, 93.44 → 93.4). A hostile/missing shape is left untouched: the
+ * adapter rules it unusable (I5), never a fabricated reading.
  */
 export function normalizeCoverageSummary(summary) {
   if (typeof summary !== 'object' || summary === null) return summary;
   try {
     const pct = summary?.total?.lines?.pct;
-    if (typeof pct === 'number' && Number.isFinite(pct)) {
-      summary.total.lines.pct = Math.round(pct);
+    // Preserve out-of-range evidence for the adapter to reject (I5):
+    // 100.04 → 100.0 or -0.04 → 0.0 would fabricate a valid reading.
+    if (typeof pct === 'number' && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+      summary.total.lines.pct = roundCoveragePct(pct);
     }
   } catch {
     // Getter/hostile shape: leave as-is — the adapter's containment rules
@@ -277,111 +331,11 @@ export function normalizeCoverageSummary(summary) {
   return summary;
 }
 
-// The diff-side twin of normalizeCoverageSummary's granularity law — and it
-// applies to COVERAGE baselines ONLY: integer-pct is the coverage reading's
-// granularity (normalizeCoverageSummary rounds the live reading the same
-// way), so only a fractional COVERAGE baseline is normalized on the diff
-// side. A fractional NON-coverage metric (complexity avg-cx lives at 2
-// decimals) must pass through untouched — normalizing it would round
-// `2.40 → 2.49` into an equal no-op and MASK a real loosening; complexity's
-// meaningful step is far below 1. The value-token shape mirrors the engine
-// guard's own VALUE_RE (monotonicGuard) exactly — strict JSON number,
-// terminator lookahead — so normalization can only ever rewrite a token the
-// guard would read.
-const DIFF_VALUE_TOKEN =
-  /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
-const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
-const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
-
-/** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
-function diffHeaderPath(line) {
-  const raw = line.slice(4);
-  if (raw.startsWith('/dev/null')) return null;
-  const path = raw.split('\t')[0];
-  for (const prefix of DIFF_PATH_PREFIXES) {
-    if (path.startsWith(prefix)) return path.slice(prefix.length);
-  }
-  return path;
-}
-
-/**
- * Uniform comparison basis for the diff-mode guard — COVERAGE baselines
- * only: rewrite every `"value": <non-integer>` token to the SAME integer
- * normalization the live coverage readings use (Math.round), on every
- * `-`/`+`/context line inside baselines/coverage* sections only.
- *
- * Rationale: a baseline and a reading must be compared in the SAME
- * granularity, and integer-pct is the COVERAGE reading's granularity
- * (normalizeCoverageSummary) — a fractional committed coverage baseline
- * would be judged against a differently-scaled number. The re-basis hunk
- * `93.46 → 93` must read as the no-op it is (both sides normalize to 93:
- * equal passes), while a TRUE loosening (`93 → 92`) still fails and a
- * genuine tighten in fractional clothing (`92.4 → 93`, old side normalizes
- * to 92) still passes as a tighten.
- *
- * SCOPE IS DELIBERATELY NARROW (PR-105 round-2 finding 4): other metrics'
- * granularity is their own — complexity avg-cx lives at 2 decimals, where
- * `2.40 → 2.49` is a REAL change, not noise — so their sections pass through
- * byte-identical and the guard judges them at full precision. Normalizing
- * them would round the loosening into an equal no-op and mask it.
- *
- * This is a symmetric COMPARISON-BASIS normalization applied to both diff
- * sides alike — never a guard exception: it cannot flip a loosening into a
- * pass, only remove sub-granularity float noise from both sides. The engine
- * (monotonicGuard) is untouched; the rewritten text is what it judges.
- * Sections are attributed by their `---`/`+++` file headers (before the
- * first `@@` — after it, `---`-prefixed lines are removed CONTENT and are
- * normalized like any other content line); every other file's diff passes
- * through byte-identical, so a `"value": 1.5` in a source-file hunk is
- * never touched.
- */
-export function normalizeBaselineDiffValues(diff, exactCoverageBaselinePath) {
-  const out = [];
-  let isCoverageSection = false;
-  let inHunk = false;
-  for (const line of String(diff).split('\n')) {
-    if (line.startsWith('diff --git ')) {
-      isCoverageSection = false; // re-resolved by this section's own headers
-      inHunk = false;
-      out.push(line);
-      continue;
-    }
-    if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
-      const path = diffHeaderPath(line);
-      // Assigned PER HEADER, never only-if-matches: a sibling file's header
-      // must RESET the flag, so a non-coverage section following a coverage
-      // one can never inherit its normalization. Keyed on the EXACT
-      // coverage-baseline path when the caller provides it (review-debt
-      // #120: a path-prefix regex would also catch an unrelated baseline
-      // whose target merely starts with 'coverage' — exact identity, not
-      // similarity); the prefix remains the fallback for callers without
-      // an engine at hand.
-      isCoverageSection =
-        path !== null &&
-        (exactCoverageBaselinePath !== undefined
-          ? path === exactCoverageBaselinePath
-          : COVERAGE_BASELINE_SECTION.test(path));
-      out.push(line);
-      continue;
-    }
-    if (line.startsWith('@@')) {
-      inHunk = true; // from here on, `---`-prefixed lines are removed content
-      out.push(line);
-      continue;
-    }
-    if (
-      isCoverageSection &&
-      (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))
-    ) {
-      out.push(
-        line.replace(DIFF_VALUE_TOKEN, (_, head, num) => head + String(Math.round(Number(num)))),
-      );
-      continue;
-    }
-    out.push(line);
-  }
-  return out.join('\n');
-}
+// The diff-side coverage re-basis normalizer now lives ONCE in the engine
+// (dist/ops/ratchet/format.js: normalizeBaselineDiffValues) and is surfaced
+// through loadEngine above, so the required-workflow CLI op
+// (ratchet.monotonicGuard) and this local driver share one implementation
+// (review finding 1).
 
 /**
  * Edit-then-create recovery for the proposal upsert (PR-105 round-2 finding
@@ -412,7 +366,7 @@ export async function upsertProposalPr({ existing, edit, create }) {
  * Run the suite under the v8 coverage provider, then read the emitted
  * coverage/coverage-summary.json. Returns {status, stdout, stderr, error,
  * summary} where summary is the PARSED summary object, normalized to
- * INTEGER percent by normalizeCoverageSummary (the coverage adapter reads
+ * ONE-DECIMAL percent by normalizeCoverageSummary (the coverage adapter reads
  * total.lines.pct from it), or null when the file is absent or unparsable —
  * the engine rules a null reading non-passing evidence (I5). A stale summary
  * is removed BEFORE the run so a failed or crashed vitest can never leave
@@ -420,9 +374,13 @@ export async function upsertProposalPr({ existing, edit, create }) {
  */
 export function runCoverageRaw() {
   rmSync(COVERAGE_SUMMARY_PATH, { force: true });
-  const res = spawnSync('npx', ['vitest', 'run', '--coverage'], {
+  // dist is made fresh here (a no-op once loadEngine has run), so Vitest's
+  // build-once global setup is told to skip its own rebuild.
+  ensureDist();
+  const res = spawnSync('pnpm', ['exec', 'vitest', 'run', '--coverage'], {
     cwd: ROOT,
     encoding: 'utf8',
+    env: { ...process.env, CQ_DIST_PREPARED: '1' },
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
   });
@@ -440,4 +398,70 @@ export function runCoverageRaw() {
     error: res.error,
     summary,
   };
+}
+
+/** Byte cap on the ratchet-propose measurement artifact (numbers only — tiny). */
+export const PROPOSE_MEASUREMENT_MAX_BYTES = 64 * 1024;
+
+/** The metric keys a propose measurement may carry, each with its value law. */
+const PROPOSE_METRIC_CHECKS = {
+  coverage: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100,
+  'typecheck-count': (v) => Number.isSafeInteger(v) && v >= 0,
+};
+
+/**
+ * Validate the ratchet-propose measurement artifact as UNTRUSTED DATA (W1.7).
+ * The artifact is produced by the credential-free measure leg, which ran the
+ * suite; the privileged proposer consumes it only through this function.
+ * `size` is the byte length the caller observed (fstat/read); over
+ * PROPOSE_MEASUREMENT_MAX_BYTES is refused before parsing. The shape is
+ * strict — exactly `{schemaVersion: 1, metrics: {...}}`, metric keys limited
+ * to `coverage` (finite, [0,100]) and `typecheck-count` (non-negative safe
+ * integer). An UNKNOWN metric key is refused, never ignored: the proposer
+ * must not act on a shape it does not know. Returns a null-prototype
+ * `{ coverage?, 'typecheck-count'? }`; an absent metric is simply absent (the
+ * caller notes it and proposes nothing from it — I5). Throws an Error with a
+ * clear message on any violation.
+ */
+export function parseProposeMeasurement(text, size) {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`measurement size is not a byte count: ${String(size)}`);
+  }
+  if (size > PROPOSE_MEASUREMENT_MAX_BYTES) {
+    throw new Error(
+      `measurement is ${size} bytes — over the ${PROPOSE_MEASUREMENT_MAX_BYTES}-byte cap`,
+    );
+  }
+  if (typeof text !== 'string') throw new Error('measurement text is not a string');
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`measurement is not valid JSON — ${err?.message ?? err}`);
+  }
+  const isPlainObject = (v) => typeof v === 'object' && v !== null && Array.isArray(v) === false;
+  if (!isPlainObject(doc)) throw new Error('measurement must be a JSON object');
+  const topKeys = Object.keys(doc).sort();
+  if (topKeys.length !== 2 || topKeys[0] !== 'metrics' || topKeys[1] !== 'schemaVersion') {
+    throw new Error(
+      `measurement must have exactly the keys schemaVersion and metrics (got: ${JSON.stringify(topKeys)})`,
+    );
+  }
+  if (doc.schemaVersion !== 1) {
+    throw new Error(`unsupported measurement schemaVersion ${JSON.stringify(doc.schemaVersion)}`);
+  }
+  if (!isPlainObject(doc.metrics)) throw new Error('measurement.metrics must be a JSON object');
+  const out = Object.create(null);
+  for (const key of Object.keys(doc.metrics)) {
+    const check = Object.hasOwn(PROPOSE_METRIC_CHECKS, key) ? PROPOSE_METRIC_CHECKS[key] : null;
+    if (check === null) {
+      throw new Error(`measurement carries unknown metric ${JSON.stringify(key)} — refusing`);
+    }
+    const value = doc.metrics[key];
+    if (!check(value)) {
+      throw new Error(`measurement metric '${key}' has an invalid value ${JSON.stringify(value)}`);
+    }
+    out[key] = value;
+  }
+  return out;
 }

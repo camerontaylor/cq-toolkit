@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "ratchets": [
+    {
+      "target": "typecheck",
+      "metric": "typecheck-count",
+      "direction": "lower-is-better",
+      "unit": "errors",
+      "evidence": "recompute"
+    },
+    {
+      "target": "coverage",
+      "metric": "coverage",
+      "direction": "higher-is-better",
+      "unit": "pct",
+      "evidence": "measurement"
+    }
+  ],
+  "definitionSet": [
+    "^\\.github/",
+    "(?:^|/)vitest\\.config\\.[^/]+$",
+    "(?:^|/)vite\\.config\\.[^/]+$",
+    "(?:^|/)vitest\\.workspace\\.[^/]+$",
+    "(?:^|/)tsconfig[^/]*\\.json$",
+    "(?:^|/)package\\.json$",
+    "(?:^|/)package-lock\\.json$",
+    "(?:^|/)npm-shrinkwrap\\.json$",
+    "(?:^|/)pnpm-lock\\.yaml$",
+    "(?:^|/)pnpm-workspace\\.yaml$",
+    "(?:^|/)\\.pnpmfile\\.[cm]?js$",
+    "(?:^|/)\\.npmrc$",
+    "(?:^|/)\\.nvmrc$",
+    "(?:^|/)\\.node-version$",
+    "(?:^|/)\\.gitattributes$",
+    "^\\.cq/tool/",
+    "^baselines/",
+    "^src/ops/gates/protectedPaths\\.ts$",
+    "^scripts/denylist-scan$",
+    "^policy/protected-paths\\.json$",
+    "^policy/attestations/",
+    "(?:^|/)\\.oxlintrc\\.json$",
+    "(?:^|/)\\.oxfmtrc\\.json$",
+    "^knip\\.json$",
+    "^lint/",
+    "^scripts/ratchet-[^/]+\\.mjs$",
+    "^scripts/gen-op-docs\\.mjs$",
+    "^scripts/copy-prompt-assets\\.mjs$",
+    "^policy/denylist/"
+  ]
+}

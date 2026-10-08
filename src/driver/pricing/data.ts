@@ -41,6 +41,13 @@
 // attribution are. Numbers are plausible snapshot values for the eval-matrix
 // models, transcribed from the provider pages above.
 //
+// FETCHED: 2026-09-21 — the eval-matrix entries `deepseek-flash` (released
+// 2026-09-10) and `glm-5.3-flash` (released 2026-08-26) were transcribed
+// from models.dev on that date. Both keep costBasis 'modeled': the glm lane
+// is routed through a coding-plan subscription and is never billed per
+// token, so the figure is api-equivalent (list price for the tokens
+// consumed), never an invoice.
+//
 // REFRESH CADENCE: re-verify on (a) the DD-8 six-week staleness cycle,
 // (b) any eval-matrix model change, or (c) any driver work that depends on a
 // price for admission/governance decisions. Refresh = re-transcribe the
@@ -79,14 +86,19 @@ export const PRICE_TABLE: PriceTable = {
   zai: {
     'glm-4.5-air': { input: 0.2, output: 1.1, cacheRead: 0.03 },
     'glm-4.6': { input: 0.6, output: 2.2, cacheRead: 0.11 },
+    // Fetched from models.dev 2026-09-21; released 2026-08-26. costBasis
+    // stays 'modeled' — the lane is routed through a coding-plan
+    // subscription and never billed per token (api-equivalent, never an
+    // invoice).
+    'glm-5.3-flash': { input: 0.15, output: 0.5, cacheRead: 0.03 },
   },
   // https://models.dev/deepseek — chat/reasoner unified pricing; no cache-write fee.
-  // NOT listed (no published rates as of 2026-09-15): `deepseek-flash` — the
-  // id the DeepSeek wire SERVES for `deepseek-chat` requests (observed live,
-  // docs/eval-axes-demo.md). Unpriced = costUSD stays absent for it
-  // (never fabricate); the DD-8 refresh owns adding it when published.
   deepseek: {
     'deepseek-chat': { input: 0.28, output: 0.42, cacheRead: 0.028 },
     'deepseek-reasoner': { input: 0.28, output: 0.42, cacheRead: 0.028 },
+    // The id the DeepSeek wire SERVES for `deepseek-chat` requests (observed
+    // live, docs/eval-axes-demo.md). Fetched from models.dev 2026-09-21;
+    // released 2026-09-10.
+    'deepseek-flash': { input: 0.15, output: 0.6, cacheRead: 0.003 },
   },
 };

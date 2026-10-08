@@ -21,25 +21,21 @@
 //   fold to honest ok values (classify/plan round-trip, verify's exact
 //   "NO PROGRESS" literal); the gh-consuming adapters are resolved but
 //   never CALLED (that would spawn the real gh CLI); the fixItem adapter
-//   IS called twice — once through the full registry wiring (the inner
-//   driver refuses the unknown test model pre-dispatch, so nothing spawns)
-//   and once through the adapter itself with an injected session dir (the
-//   round-2 workspace pin). The push transport (round-2 finding 4) is
+//   IS called once through the full registry wiring — the factory refuses
+//   the unknown test provider pre-dispatch ('config', a 'needs-human'
+//   reason), so nothing spawns. The push transport (round-2 finding 4) is
 //   exercised against a REAL tiny git repo in tmpdir: `rev-parse HEAD`
 //   succeeds under git semantics and fails under a gh binary.
 //
 // Hermetic otherwise: no network, no real worker runs; writes stay under
 // os.tmpdir().
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { defaultHarnessConfig } from '../../../src/harness/config.js';
-import { SessionStore } from '../../../src/harness/session.js';
 import { makeGhRunner } from '../../../src/ops/review/gh.js';
 import { registry } from '../../../src/ops/review/registry.js';
-import { worktreeFixDriver } from '../../../src/ops/review/fixReviewItem.js';
 
 /** The op result shape the adapters fold to (loose, for assertions). */
 interface LooseResult {
@@ -271,62 +267,27 @@ describe('pure review adapters execute over minimal inputs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Round-2 — the dispatched fix worker runs in the PR worktree (finding 1)
-// and the push transport speaks GIT (finding 4)
+// Round-2 — the dispatched fix worker resolves through the DRIVER FACTORY
+// (ADR-0002 §2.5) and the push transport speaks GIT (finding 4)
 // ---------------------------------------------------------------------------
 
-describe('review.fixItem dispatched worktree (round-2 finding 1)', () => {
-  test('through the full registry wiring, the op refuses the unknown test model pre-dispatch (nothing spawns)', async () => {
+describe('review.fixItem dispatched through the driver factory (ADR-0002 §2.5)', () => {
+  test('through the full registry wiring, the op refuses the unknown test provider pre-dispatch (nothing spawns)', async () => {
     const entry = entryByName('review.fixItem');
     const op = await entry.importer();
     const input = minimalInput('review.fixItem');
-    // The inner SubprocessDriver refuses the unknown model BEFORE any spawn
-    // (routeFor is pre-dispatch); the op adapter folds that into an
-    // indeterminate detail naming the routing — the proof the wiring ran
-    // through the adapter's session store into the real inner driver.
-    const result = (await (op as (i: unknown) => Promise<{ status: string; detail?: string }>)(
+    // The bound factory's conservative default binding resolves role
+    // 'fixer' on the DEFAULT providers only — provider 'p' is neither a
+    // default provider nor bound, so resolve throws 'config' PRE-dispatch;
+    // the op adapter folds that into a needs-human reason naming the
+    // binding gap (a dispatch-environment gap is the human's to arrange —
+    // review-debt #186) — the proof the wiring ran through the factory,
+    // with no lane class constructed or spawned here.
+    const result = (await (op as (i: unknown) => Promise<{ status: string; reason?: string }>)(
       input,
-    )) as { status: string; detail?: string };
-    expect(result.status).toBe('indeterminate');
-    expect(result.detail).toContain('unknown provider');
-  });
-
-  test('the perHarness binding produces an adapter whose session record workspace IS the input worktree', async () => {
-    const scratch = await mkdtemp(join(tmpdir(), 'cq-registry-wfd-'));
-    try {
-      const worktreePath = join(scratch, 'wt');
-      await mkdir(worktreePath, { recursive: true });
-      const sessionsDir = join(scratch, 'sessions');
-      // The importer's EXACT binding expression, with an injectable session
-      // dir so the record is observable (the default inner driver refuses
-      // the unknown test model pre-dispatch — nothing spawns). retainSessions
-      // keeps the record readable after the run (round-3 item 14 default is
-      // removal; retention doesn't alter the workspace semantics pinned here).
-      const driver = worktreeFixDriver({
-        harnessConfig: defaultHarnessConfig,
-        worktreePath,
-        sessionsDir,
-        retainSessions: true,
-      });
-      await expect(
-        driver.run({
-          prompt: 'p',
-          modelSpec: { model: 'test-model', provider: 'test-provider' },
-          toolPolicy: { mode: 'allowlist', allow: ['read'] },
-          sandboxPolicy: { level: 'workspace-write' },
-          budget: {},
-        }),
-      ).rejects.toThrow();
-      // Exactly one fresh session record, and its workspace IS the worktree.
-      const files = await readdir(sessionsDir);
-      expect(files).toHaveLength(1);
-      const sessionId = (files[0] ?? '').replace(/\.jsonl$/, '');
-      const record = await new SessionStore(sessionsDir).load(sessionId);
-      expect(record?.workspace).toBe(worktreePath);
-      expect(record?.messages).toEqual([]);
-    } finally {
-      await rm(scratch, { recursive: true, force: true });
-    }
+    )) as { status: string; reason?: string };
+    expect(result.status).toBe('needs-human');
+    expect(result.reason).toContain("no lane binding for role 'fixer' on provider 'p'");
   });
 });
 

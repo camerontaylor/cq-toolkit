@@ -117,7 +117,22 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
   if (contradiction !== null) {
     return { verdict: 'indeterminate', reason: contradiction };
   }
-  return { verdict: 'parsed', set: { tool: 'vitest', failures, exitCode: raw.exitCode } };
+  return {
+    verdict: 'parsed',
+    set: {
+      tool: 'vitest',
+      failures,
+      exitCode: raw.exitCode,
+      numTotalTests: report.numTotalTests,
+      ...(typeof report.numPassedTests === 'number'
+        ? { numPassedTests: report.numPassedTests, numPassed: report.numPassedTests }
+        : {}),
+      ...(typeof report.numPendingTests === 'number'
+        ? { numSkippedTests: report.numPendingTests, numPendingTests: report.numPendingTests }
+        : {}),
+      ...(typeof report.numTodoTests === 'number' ? { numTodoTests: report.numTodoTests } : {}),
+    },
+  };
 }
 
 /**

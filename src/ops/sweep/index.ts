@@ -12,6 +12,7 @@
 // barrel (src/ops/README.md), so no generic `list`/`get`-class names leave
 // this family.
 export type {
+  ChangedFile,
   PlanSweepBaseline,
   PlanSweepDeps,
   PlanSweepInput,
@@ -26,7 +27,7 @@ export {
   ledgerSignature,
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
-  parseNullDelimitedPaths,
+  parseNullDelimitedChangedFiles,
 } from './planSweep.js';
 export type { GitMutex, GitMutexConfig, GitMutexEvent } from './gitMutex.js';
 export {
@@ -71,6 +72,8 @@ export type {
 export {
   RETRYABLE_FAULT_CLASSES,
   bindingsFromDispatch,
+  compileStagePathPatterns,
+  DEFAULT_PROTECTED_STAGE_PATTERNS,
   DEFAULT_UNIT_GIT_TIMEOUT_MS,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
@@ -78,6 +81,7 @@ export {
   readCommittedMarkers,
   SWEEP_RUN_STATE_BASELINE_DIR,
   SWEEP_RUN_STATE_COMMITTED_DIR,
+  SWEEP_RUN_STATE_SCANNED_DIR,
   sweepRunStateDir,
   sweepUnitFaultClass,
   sweepUnitSegments,

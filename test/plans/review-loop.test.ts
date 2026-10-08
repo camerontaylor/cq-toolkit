@@ -35,7 +35,7 @@
 // every argv (no network, no spawned processes, no real clocks); the fix
 // workers run through the REAL makeFixReviewItem op over a scripted Driver;
 // the only filesystem writes are the test's own mkdtemp scratch dirs.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -44,7 +44,7 @@ import { currentJobContext } from '../../src/kernel/governor.js';
 import { exitCodeForOpResult } from '../../src/cli/exit.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
-import type { OpRegistryEntry } from '../../src/kernel/types.js';
+import type { GovernanceOptIn, OpRegistryEntry } from '../../src/kernel/types.js';
 import type { Plan } from '../../src/kernel/types.js';
 import type { ClassifiedItem } from '../../src/ops/review/classifyThreads.js';
 import type { FetchedReviewState } from '../../src/ops/review/fetchReviewState.js';
@@ -159,6 +159,8 @@ interface LoopWorld {
   revListByBase?: Record<string, string[]>;
   /** Shas whose `<sha>..HEAD` ancestry the fake git REFUSES (drives the not-ancestor stage). */
   ancestorFails?: string[];
+  /** `git diff --quiet <sha>^..<sha>`: 0 empty, 1 non-empty, other unreadable. */
+  diffCode?: number;
   /**
    * Worktree-path `rev-parse HEAD` reads after this count FAIL (round 3:
    * the loop's post-run read is read 3 — read 1 is resolvePrWorktree's
@@ -410,6 +412,9 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         : [];
       return ok(`${shas.join('\n')}${shas.length > 0 ? '\n' : ''}`);
     }
+    if (rest[0] === 'diff' && rest[1] === '--quiet') {
+      return { code: world.diffCode ?? 1, stdout: '', stderr: '' };
+    }
     if (rest[0] === 'log' && rest[1] === '-1') {
       // Per-item attribution (round-3 finding 3): the commit message the
       // world carries for this sha.
@@ -489,6 +494,7 @@ const completeWorker = (line: string, extra?: Partial<WorkerResult>): WorkerResu
   usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
   denials: [],
   stopReason: 'complete',
+  model: 'test-model',
   ...extra,
 });
 
@@ -523,8 +529,14 @@ const runLoop = async (
     promptOverride?: string;
     /** Governor LIMITS half riding the loop opts (the review-path #137 arming). */
     limits?: { perJobWallClockMs?: number };
+    /** RunOptions overlay for the fix run (journalDir is the ledger dir). */
+    runOptions?: { journalDir?: string; maxUsd?: number; maxTokens?: number };
+    /** Governance opt-ins for the fix run (the ledger-refusal resolutions). */
+    governanceOptIn?: GovernanceOptIn[];
     /** Full driver.run override (the wall-clock test's cooperating wedge). */
     driverRun?: Driver['run'];
+    /** Propagated-spend observer (review-debt #186). */
+    onSpend?: (usd: number) => void;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -550,14 +562,20 @@ const runLoop = async (
       }),
   };
   // The fix op dispatches through a registry view whose review.fixItem binds
-  // the scripted Driver — the same governed runPlan seam the CLI uses.
+  // a factory resolving to the scripted Driver (ADR-0002 §2.5) — the same
+  // governed runPlan seam the CLI uses.
   const view: OpRegistryView = {
     get: (name) =>
       name === 'review.fixItem'
         ? ({
             name: 'review.fixItem',
             inputSchema: FixReviewItemInputSchema,
-            importer: async () => makeFixReviewItem({ driver }),
+            importer: async () =>
+              makeFixReviewItem({
+                drivers: {
+                  resolve: (req) => ({ driver, lane: 'ai-sdk', modelSpec: req.modelSpec }),
+                },
+              }),
           } as unknown as OpRegistryEntry<never, never>)
         : undefined,
   };
@@ -573,11 +591,19 @@ const runLoop = async (
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
+    // The A12c escape is EXPLICIT and defaults OFF (r1 M4): these tests
+    // exercise dispatched fix runs, so they opt in — the shipped sweep does
+    // the same (unattended by design), and the journal records
+    // allowAdvisoryProvenance: 'product'.
+    allowAdvisoryBudget: true,
     nowMs: NOW,
     dispatchLogPath: o.dispatchLogPath ?? join(scratch, 'dispatch.jsonl'),
     worktreeRoot: scratch,
     ...(o.promptOverride !== undefined ? { promptOverride: o.promptOverride } : {}),
     ...(o.limits !== undefined ? { limits: o.limits } : {}),
+    ...(o.runOptions !== undefined ? { runOptions: o.runOptions } : {}),
+    ...(o.governanceOptIn !== undefined ? { governanceOptIn: o.governanceOptIn } : {}),
+    ...(o.onSpend !== undefined ? { onSpend: o.onSpend } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
@@ -687,6 +713,62 @@ describe('review-loop happy path', () => {
     // And the worker actually received that payload.
     expect(invocations[0]?.prompt).toContain('Fix src/a.ts at 3.');
     expect(invocations[0]?.prompt).toContain('See the timeout path too.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fix run over an existing v1 journal — the governed ledger gate (W2.2)
+// ---------------------------------------------------------------------------
+
+describe('the fix run over an existing v1 journal (W2.2)', () => {
+  test('v1 dispatch history refuses the always-governed fix run; governanceOptIn legacyJournal=reset upgrades it', async () => {
+    // A pre-existing v1 journal for the loop's plan id with a dispatch: v1
+    // carries no spend, so the ALWAYS-governed fix run refuses without the
+    // opt-in and the loop surfaces the kernel refusal verbatim (the kernel
+    // throw propagates out of runReviewLoop).
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-loop-v1-'));
+    scratchDirs.push(scratch);
+    const journalDir = join(scratch, 'ledger');
+    await mkdir(journalDir, { recursive: true });
+    const v1RunId = 'review-loop--legacy--dd';
+    await writeFile(
+      join(journalDir, `${v1RunId}.ndjson`),
+      [
+        {
+          type: 'run-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          planId: 'review-loop',
+        },
+        {
+          type: 'job-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          jobId: 'fix-1',
+          op: 'review.fixItem',
+          attempt: 1,
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n') + '\n',
+    );
+
+    await expect(
+      runLoop(defaultWorld(), {
+        driverResults: [completeWorker(fixLine(true, 'Done.', [NEW_SHA]))],
+        runOptions: { journalDir },
+      }),
+    ).rejects.toThrow(/unaccounted dispatches/);
+
+    // With the reset opt-in the SAME history is "charged 0" (annex §4): the
+    // fix run proceeds and the loop completes its happy path.
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 'Done.', [NEW_SHA]))],
+      runOptions: { journalDir },
+      governanceOptIn: ['budget.legacyJournal=reset'],
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.fixReport?.counts.done).toBe(1);
   });
 });
 
@@ -1736,7 +1818,7 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
   const gate = async (git: GhFn, sha: string, itemId: string) =>
     commitVerificationFailure(git, '/wt', sha, BEFORE_SHA, itemId);
 
-  test('all four stages are named, in gate order', async () => {
+  test('all six stages are named, in gate order', async () => {
     // notAncestorGit: NEW_SHA resolves and descends but its HEAD-ancestry is
     // refused; attributedGit: NEW_SHA's message names T1.
     const notAncestorGit = fakeGit(
@@ -1757,6 +1839,19 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
     expect(await gate(notAncestorGit, BEEF_SHA, 'T1')).toBe('not-descendant');
     // not-ancestor — resolvable + descendant, but refused against HEAD.
     expect(await gate(notAncestorGit, NEW_SHA, 'T1')).toBe('not-ancestor');
+    // empty-diff — a valid descendant commit with no file changes is rejected.
+    const emptyGit = fakeGit(
+      { ...defaultWorld(), knownShas: [SHA, NEW_SHA], diffCode: 0 },
+      [],
+      '/wt',
+    );
+    expect(await gate(emptyGit, NEW_SHA, 'T1')).toBe('empty-diff');
+    const unreadableGit = fakeGit(
+      { ...defaultWorld(), knownShas: [SHA, NEW_SHA], diffCode: 2 },
+      [],
+      '/wt',
+    );
+    expect(await gate(unreadableGit, NEW_SHA, 'T1')).toBe('diff-unreadable');
     // attribution-missing — the message must name THIS item.
     expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
     expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
@@ -2118,5 +2213,41 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
       'fix job fix-1 ended indeterminate: fixReviewItem: driver crashed: wall-clock: the fixer hit the rung-1 signal',
     );
     expect(outcome.actionsPosted).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Propagated accounted spend (review-debt #186)
+// ---------------------------------------------------------------------------
+
+describe('review-loop propagated spend (onSpend)', () => {
+  test('the governed fix run reports its accounted spend (governor usdSpent) through opts.onSpend', async () => {
+    const spent: number[] = [];
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [
+        completeWorker(fixLine(true, 'Guarded the abort path.', [NEW_SHA]), { costUSD: 0.07 }),
+      ],
+      onSpend: (usd) => spent.push(usd),
+    });
+    expect(outcome.status).toBe('ok');
+    // The fix op streams the driver's costUSD through the job context, so the
+    // governor's USD rollup (which the governed runner annotates onto
+    // fixReport.costUSD) is what the sweep receives — no dispatch-log proxy.
+    expect(spent.length).toBeGreaterThan(0);
+    expect(spent[spent.length - 1]).toBeCloseTo(0.07);
+    expect(outcome.fixReport?.costUSD).toBeCloseTo(0.07);
+  });
+
+  test("a THROWING onSpend observer never masks the fix run's outcome (#186 review r2)", async () => {
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort path.', [NEW_SHA]))],
+      onSpend: () => {
+        throw new Error('observer boom');
+      },
+    });
+    // The observer is advisory: its throw is swallowed, and the loop's own
+    // outcome (and any original throw) propagates untouched.
+    expect(outcome.status).toBe('ok');
+    expect(outcome.fixReport?.counts.done).toBe(1);
   });
 });

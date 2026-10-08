@@ -1,0 +1,50 @@
+# cq-signal — the WAKE-UP for the default-branch verifiers (ADR-0004 D-B;
+# W1.9).
+#
+# This workflow is head-defined: a pull request can edit this file. So it
+# carries nothing and decides nothing. Its only effect is that it RUNS, and
+# its completion fires `workflow_run` in the default-branch verifiers
+# (`cq-policy.yml` now; W1.10's `cq-accept` reuses it). Those verifiers
+# re-read everything they judge from the API and from git objects, keyed by
+# the run's `head_sha`, so nothing this run produces is trusted — and it
+# produces nothing:
+#   - `permissions: {}` at the top and on the job, no `secrets.*`, no
+#     `environment:`, no checkout, one no-op step;
+#   - the trigger set is every event that can change a D11 verdict: new or
+#     rewritten heads (opened, synchronize, reopened, ready_for_review),
+#     base/body edits (edited), `cq-override` label records (labeled,
+#     unlabeled — the record is re-evaluated on every label event), reviews
+#     and review comments (W1.10's acceptance), and merge-queue pushes.
+#
+# Not a required check: its runs carry no verdict. `cq/policy`, posted by the
+# verifier, is the check.
+name: cq-signal
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+      - ready_for_review
+      - edited
+  pull_request_review:
+  pull_request_review_comment:
+  push:
+    branches:
+      - merge-queue
+
+permissions: {}
+
+jobs:
+  signal:
+    name: signal
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Wake the default-branch verifiers (this body is empty)
+        # Deliberately a no-op: the verifiers read everything by head_sha.
+        run: 'true'

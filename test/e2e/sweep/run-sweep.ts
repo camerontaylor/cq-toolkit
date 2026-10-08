@@ -7,12 +7,14 @@
 //   phase B  buildSweepPlan(config, report) → runPlan through the CENTRAL
 //            registry: 'sweep.unit' dispatches through its REGISTERED entry
 //            (bindingsFromDispatch → real subprocess worktree effects, the
-//            REAL subprocess driver over the input's driver section — the
-//            fake agent CLI fixture IS that driver's binary — real probes,
-//            the real git push against the scratch repo's LOCAL bare
-//            origin), and `pr.assemblePrs` is the ONE override (the injected
-//            fake gh — no forge is contacted; tracker-branch creation on a
-//            real forge is the deferred WS-K surface, review-debt #173).
+//            DRIVER FACTORY's resolution of the input's driver section — the
+//            fake agent CLI fixture is bound as the factory's subprocess
+//            lane, ADR-0002 §2.5: plan data names no executable — real
+//            probes, the real git push against the scratch repo's LOCAL
+//            bare origin), and `pr.assemblePrs` is the ONE forge override
+//            (the injected fake gh — no forge is contacted; tracker-branch
+//            creation on a real forge is the deferred WS-K surface,
+//            review-debt #173).
 //
 // Every git leg (worktrees, check.js probes, diffs, commits, pushes) is
 // real, in tmpdirs. The journal is the runner's own NDJSON (one file per run
@@ -23,7 +25,8 @@
 // LATEST run of the plan id, derives each UNIT's SalvageEntry journal tail
 // (one entry per unit tree; lastStep = the LAST job-finished event in
 // journal order), and runs the REAL salvage op over the inventory.
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import type { DriverFactory } from '../../../src/driver/factory.js';
 import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
 import type {
   JournalEvent,
@@ -61,6 +64,8 @@ import {
 import type { PlanSweepReport, WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import {
   RETRYABLE_FAULT_CLASSES,
+  bindingsFromDispatch,
+  makeSweepUnitOp,
   sweepUnitFaultClass,
   sweepUnitSegments,
 } from '../../../src/ops/sweep/unit.js';
@@ -69,6 +74,7 @@ import type {
   SweepUnitDispatchInput,
   SweepUnitDriverConfig,
 } from '../../../src/ops/sweep/unit.js';
+import { SweepUnitDispatchInputSchema } from '../../../src/ops/sweep/registry.js';
 import { readCommittedMarkers } from '../../../src/ops/sweep/unit.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import type { SalvageEntry, SalvagePlan } from '../../../src/ops/sweep/salvage.js';
@@ -88,8 +94,13 @@ export interface FakeGh {
   bodies: Map<number, string>;
 }
 
-/** An in-memory forge: search by head+base, create, body read/edit, record everything. */
-export function makeFakeGh(): FakeGh {
+/**
+ * An in-memory forge: search by head+base, create, body read/edit, record
+ * everything. `headExists` is the forge-SIMULATING check (review-debt #173):
+ * when supplied, `createPr` refuses a head that is not on the real remote —
+ * so a tracker PR can never be recorded for an unpushed branch.
+ */
+export function makeFakeGh(opts?: { headExists?: (head: string) => Promise<boolean> }): FakeGh {
   const calls: string[] = [];
   const created: FakeGh['created'] = [];
   const bodies = new Map<number, string>();
@@ -102,6 +113,11 @@ export function makeFakeGh(): FakeGh {
   };
   const createPr = async (request: PrCreateRequest): Promise<PrCreateResult> => {
     calls.push(`createPr ${request.head} -> ${request.base}`);
+    if (opts?.headExists !== undefined && !(await opts.headExists(request.head))) {
+      throw new Error(
+        `the fake forge refuses to open a PR for head '${request.head}' — the branch does not exist on the origin`,
+      );
+    }
     const number = created.length + 1;
     created.push({
       number,
@@ -154,8 +170,17 @@ export interface RunSweepOpts {
   journalDir: string;
   /** The injected forge (makeFakeGh) — no real gh is ever spawned. */
   gh: PrEffects;
-  /** The JSON driver binding (the fake agent CLI + fake endpoint), per unit job. */
+  /** The JSON driver binding ({provider, model} — the factory's resolution input), per unit job. */
   driver: SweepUnitDriverConfig;
+  /**
+   * The DRIVER FACTORY bound to the scenario's fake agent (ADR-0002 §2.5):
+   * the deployment-config seam — the factory binds role 'fixer' for the
+   * scenario's provider to its subprocess lane over the fake agent CLI and
+   * owns the served-model assertion. The sweep.unit dispatch override below
+   * hands it to bindingsFromDispatch (the central registry's importer binds
+   * the DEFAULT factory, which no fake provider can resolve on).
+   */
+  drivers: DriverFactory;
   /** The JSON probe binding (the scratch check.js command template), per unit job. */
   check: SweepUnitCheckConfig;
   /** The per-unit fixer prompt TEMPLATE — the scenario steering (faults ride here). */
@@ -164,8 +189,21 @@ export interface RunSweepOpts {
   push?: boolean;
   /** Optional staged-path allowlist overlay (the test-fix scope pin). */
   stagePathAllowlist?: { patterns: string[] };
-  /** Build through the shipped test-fix factory, including its protected allowlist. */
+  /** Propose-only overlay used by the test-fix contract. */
+  proposeOnly?: boolean;
+  /**
+   * Build through the SHIPPED test-fix factory (buildTestFixPlan) instead of
+   * buildSweepPlan: the plan id is TEST_FIX_PLAN_ID and the factory owns its
+   * own overlay (propose-only), so stagePathAllowlist/proposeOnly are refused.
+   */
   testFixPlan?: boolean;
+  /**
+   * The explicit run-state dir every unit job carries (review-debt #174's
+   * trust vouch). Default `<repoRoot>/cq-run-state`. `null` OMITS the field
+   * entirely — the derived (driver-reachable) location — so the strand-retry
+   * refuses (the no-vouch refusal branch under test).
+   */
+  runStateDir?: string | null;
   /** The units dispatch's concurrency; default 1 (the e2e's serial default). */
   concurrency?: number;
 }
@@ -204,13 +242,24 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // ASSEMBLE job is REMOVED from this plan: it is dispatched separately
   // below, composed from the units' committed markers (jTPa8 — the static
   // Job cannot know which units committed until they have run).
-  if (opts.testFixPlan && opts.stagePathAllowlist !== undefined) {
+  if (
+    opts.testFixPlan &&
+    (opts.stagePathAllowlist !== undefined || opts.proposeOnly !== undefined)
+  ) {
     throw new Error(
-      'e2e setup: testFixPlan pins the shipped allowlist; stagePathAllowlist would be ignored',
+      'e2e setup: testFixPlan pins the shipped test-fix overlay; stagePathAllowlist/proposeOnly would be ignored',
     );
   }
   const fullPlan = opts.testFixPlan
-    ? buildTestFixPlan(opts.config, planner)
+    ? // The public factory under its own id: the execution bindings ride the
+      // config's unitDispatch seam (the factory layers only its own overlay).
+      buildTestFixPlan(
+        {
+          ...opts.config,
+          unitDispatch: { ...opts.config.unitDispatch, driver: opts.driver, check: opts.check },
+        },
+        planner,
+      )
     : buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
         driver: opts.driver,
         check: opts.check,
@@ -218,30 +267,57 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
         ...(opts.stagePathAllowlist !== undefined
           ? { stagePathAllowlist: opts.stagePathAllowlist }
           : {}),
+        ...(opts.proposeOnly !== undefined ? { proposeOnly: opts.proposeOnly } : {}),
       });
   const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
+  const trackerBranchTemplate = fullPlan.jobs.find(
+    (job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch,
+  );
+  // BOTH the declared tracker-branch leg and the declared assembler are
+  // removed here: the reference wiring recomposes the ACTUAL assemble leg
+  // post-run from the committed markers (jTPa8), so the tracker branch is
+  // pushed only when a non-empty fleet actually assembles (review-debt
+  // #173) — never for an all-no-op fleet.
   const plan = {
     ...fullPlan,
-    jobs: fullPlan.jobs.filter((job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble),
+    jobs: fullPlan.jobs.filter(
+      (job) =>
+        job.id !== SWEEP_PLAN_JOB_IDS.assemble && job.id !== SWEEP_PLAN_JOB_IDS.trackerBranch,
+    ),
   };
   for (const job of plan.jobs) {
-    if (job.op !== SWEEP_UNIT_OP) continue;
-    const input = job.input as SweepUnitDispatchInput;
-    if (opts.promptTemplate !== undefined) {
-      input.promptTemplate = opts.promptTemplate(job.input as WorkUnit);
+    if (job.op !== SWEEP_UNIT_OP) {
+      continue;
+    }
+    // The #174 trust vouch: the harness supplies the run-state dir EXPLICITLY
+    // (outside the worktrees dir) so the strand-retry's scanned-commit record
+    // is trustworthy — the same decision the phase-4 runner must make. A
+    // `runStateDir: null` OMITS it (the no-vouch refusal branch).
+    if (opts.runStateDir === null) {
+      delete (job.input as SweepUnitDispatchInput).runStateDir;
+    } else {
+      (job.input as SweepUnitDispatchInput).runStateDir =
+        opts.runStateDir ?? join(opts.config.repoRoot, 'cq-run-state');
     }
     if (opts.testFixPlan) {
-      // The public test-fix factory pins scope itself; only supply the
-      // execution bindings that the standard sweep builder normally layers.
-      input.driver = opts.driver;
-      input.check = opts.check;
-      input.push = opts.push ?? true;
+      // unitDispatch carries no push knob; mirror the sweep overlay's default.
+      (job.input as SweepUnitDispatchInput).push = opts.push ?? true;
+    }
+    if (opts.promptTemplate !== undefined) {
+      (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
+        job.input as WorkUnit,
+      );
     }
   }
 
   // The dispatch view: the CENTRAL registry (sweep.planSweep AND the
   // registered sweep.unit — the e2e exercises the real dispatch path), with
-  // the ONE injected seam: pr.assemblePrs over the fake forge.
+  // TWO injected seams: pr.assemblePrs over the fake forge, and sweep.unit
+  // re-bound over the SCENARIO's factory (the central importer binds the
+  // default createDriverFactory(), whose conservative bindings cannot
+  // resolve the fake provider — the scenario's factory binds its subprocess
+  // lane to the fake agent CLI, exactly like a deployment's factory config
+  // would).
   const central = new Map((await list()).map((entry) => [entry.name, entry] as const));
   if (!central.has('sweep.unit')) throw new Error('e2e setup: sweep.unit is not registered');
   if (!central.has('pr.assemblePrs'))
@@ -257,6 +333,22 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
             unknown,
             unknown
           >,
+      },
+    ],
+    [
+      'sweep.unit',
+      {
+        name: 'sweep.unit',
+        inputSchema: SweepUnitDispatchInputSchema,
+        importer: async () =>
+          (async (input: SweepUnitDispatchInput) => {
+            const unitOp = makeSweepUnitOp(bindingsFromDispatch(input, opts.drivers));
+            return await unitOp({
+              package: input.package,
+              fixer: input.fixer,
+              files: input.files,
+            });
+          }) as Op<unknown, unknown>,
       },
     ],
   ]);
@@ -317,6 +409,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       let lastError = error;
       for (let attempt = 2; attempt <= 1 + rescueBudget; attempt += 1) {
         const rescuePlan = {
+          // The selected plan's id: a test-fix rescue journals as test-fix.
           id: fullPlan.id,
           label: `sweep: rescue re-dispatch (attempt ${attempt} of ${1 + rescueBudget})`,
           jobs: [
@@ -362,11 +455,19 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     return unitStatusAfterRescue.get(job.id) === 'ok';
   });
   let assembleRun: RunReport | undefined;
-  if (fleetOk && planner.units.length > 0 && assembleTemplate !== undefined) {
+  if (
+    fleetOk &&
+    planner.units.length > 0 &&
+    assembleTemplate !== undefined &&
+    trackerBranchTemplate !== undefined
+  ) {
     const markers = await readCommittedMarkers(
       opts.config.repoRoot,
       opts.config.worktreesDir,
       opts.config.runPrefix,
+      opts.runStateDir === null
+        ? undefined
+        : (opts.runStateDir ?? join(opts.config.repoRoot, 'cq-run-state')),
     );
     const templateInput = assembleTemplate.input as AssemblePrsInput;
     const assembleInput: AssemblePrsInput = {
@@ -376,10 +477,30 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       ),
     };
     if (assembleInput.packages.length > 0) {
+      // The tracker-branch leg FIRST (review-debt #173): the tracker-first
+      // assembler needs the tracker head on the remote before it opens the
+      // PR. Its declared unit dependencies are dropped (the units are not
+      // jobs of this composed run) — the fleet gate above already proved
+      // every unit succeeded.
       const assemblePlan = {
+        // The selected plan's id (sweep or test-fix), so the assemble run
+        // journals under the same plan as the units and rescues it composes.
         id: fullPlan.id,
-        label: 'sweep: marker-filtered fleet assembly (the committed units only)',
-        jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
+        label:
+          'sweep: tracker-branch push + marker-filtered fleet assembly (the committed units only)',
+        jobs: [
+          {
+            id: SWEEP_PLAN_JOB_IDS.trackerBranch,
+            op: 'pr.ensureTrackerBranch',
+            input: trackerBranchTemplate.input,
+          },
+          {
+            id: SWEEP_PLAN_JOB_IDS.assemble,
+            op: 'pr.assemblePrs',
+            input: assembleInput,
+            dependsOn: [SWEEP_PLAN_JOB_IDS.trackerBranch],
+          },
+        ],
       };
       assembleRun = await runPlan(
         assemblePlan,

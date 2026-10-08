@@ -10,9 +10,14 @@
 //       bad flag syntax, duplicate flag, positional tokens, schema-invalid
 //       input). 2 is NEVER derived from a taxonomy value — no function here
 //       returns it.
-//   3 — needs-human / budget: the run stopped for a human decision, or a
-//       budget bound was hit (including transitively, via withBudgetStop's
-//       re-marked rows or the honest-stop annotation).
+//   3 — needs-human / budget / signal: the run stopped for a human decision,
+//       a budget bound was hit (including transitively, via the governed
+//       runner's re-marked rows and the honest-stop claim), or the run was
+//       CANCELLED. The run-report contract widens in v1.1 (ADR-0003 §2.9):
+//       `earlyStopReason: 'signal'` — the governed runner's cancel stop —
+//       maps like a needs-human stop → 3 today, and the shell-convention
+//       130/143 (SIGINT/SIGTERM) arrive with the CLI's OS-signal wiring
+//       (W2.5, a separate slice).
 //
 // A thrown uncaught exception mapping to 1 is decided by the CALLER
 // (main.ts's catches), not by these functions — they only map the frozen
@@ -48,22 +53,26 @@ export function exitCodeForOpResult(r: OpResult<unknown>): 0 | 1 | 3 {
 /**
  * Map a run report to the process exit code, mechanically over its rows:
  * if any job row's result status is 'needs-human' or 'budget-exhausted',
- * OR (r.stoppedEarly && r.earlyStopReason === 'budget') → 3; else if any row
- * is 'failed' or 'indeterminate' → 1; else 0.
+ * OR (r.stoppedEarly && the earlyStopReason is a stop-class reason —
+ * 'budget' or, since the v1.1 widening, the governed runner's cancel
+ * 'signal') → 3; else if any row is 'failed' or 'indeterminate' → 1; else 0.
  *
- * The row scan is the PRIMARY evidence: rows come from runPlan +
- * withBudgetStop, and withBudgetStop re-marks transitively budget-caused
- * rows as budget-exhausted, so a budget stop shows up in the rows
- * themselves. The earlyStopReason check is the belt: a stop annotated
- * honest-stop can only be a budget stop (the frozen RunEarlyStopReason's
- * only value), and 3 dominates 1 so a budget stop is never misreported as a
+ * The row scan is the PRIMARY evidence: rows come from runPlan, and the
+ * governed runner re-marks transitively budget-caused rows as
+ * budget-exhausted, so a budget stop shows up in the rows themselves. The
+ * earlyStopReason check is the belt: a claimed stop is a needs-human-class
+ * verdict for the process (a budget bound or a cancel — the two stop kinds
+ * the runner claims), and 3 dominates 1 so a stop is never misreported as a
  * mere failure even if some row kept a real failed verdict.
  */
 export function exitCodeForRunReport(r: RunReport): 0 | 1 | 3 {
   const needsHumanRow = r.jobs.some(
     (row) => row.result.status === 'needs-human' || row.result.status === 'budget-exhausted',
   );
-  if (needsHumanRow || (r.stoppedEarly && r.earlyStopReason === 'budget')) {
+  if (
+    needsHumanRow ||
+    (r.stoppedEarly && (r.earlyStopReason === 'budget' || r.earlyStopReason === 'signal'))
+  ) {
     return EXIT_CODES.needsHuman;
   }
   const failedRow = r.jobs.some(

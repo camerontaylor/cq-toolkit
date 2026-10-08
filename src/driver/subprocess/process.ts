@@ -4,7 +4,7 @@
 // primitives — the driver-hygiene scan exempts exactly this path,
 // src/driver/subprocess/process.ts): the SIGTERM→SIGKILL grace ladder lives
 // here because here the kernel has ALREADY DECIDED to kill (the governed
-// signal from currentJobContext() fired — I8: the governor decides WHEN to
+// RunOptions.signal fired — I8: the governor decides WHEN to
 // abort, the driver only obeys) and this helper only EXECUTES that decision
 // against a real OS process. It never decides to start a termination on its
 // own: `terminateGracefully` is called by the driver purely as a reaction
@@ -16,9 +16,16 @@
 //
 // NO SHELL: `spawnManaged` uses node:child_process spawn with `shell:false`
 // — the driver builds argv element-by-element, so nothing the caller wrote
-// is ever re-interpreted by a shell. Env injection is an explicit override
-// map merged over process.env (the CLI needs PATH/HOME etc. to function);
-// per-Route vars (endpoint base URL, auth token) ride that override map.
+// is ever re-interpreted by a shell. CHILD ENV IS DEFAULT-DENY (issue #183):
+// the child receives ONLY the names on DEFAULT_CHILD_ENV_ALLOWLIST (PATH/
+// HOME/terminal basics + documented driver-needed names) copied from the
+// parent env, plus the caller's explicit override map. Per-Route vars
+// (endpoint base URL, auth token) are composed deliberately and always ride
+// that override map, so they reach the child regardless of the allowlist. A
+// GH_TOKEN or repo secret in the entry process env is NOT inherited unless a
+// Route or an explicit `envAllowlist` entry names it. The parent
+// `CQ_RUN_ENV_PASSTHROUGH` variable may add validated names to the copied set;
+// blank/unset leaves the default-deny behavior unchanged.
 //
 // PROCESS GROUPS (issue #19): on POSIX the child is spawned `detached` —
 // it becomes the leader of its OWN process group, so a kill can take the
@@ -30,6 +37,10 @@
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
+import {
+  processSignalCleanupStarted,
+  registerProcessSignalCleanup,
+} from '../../shared/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
@@ -44,9 +55,184 @@ const POSIX = process.platform !== 'win32';
  */
 export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
 
+const activeChildren = new Set<ChildProcessWithoutNullStreams>();
+
+/** Terminate every child still owned by this process during an exit hook. */
+export function terminateActiveChildrenOnExit(): void {
+  for (const child of activeChildren) {
+    if (POSIX && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    } else {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+process.once('exit', terminateActiveChildrenOnExit);
+
+// Registration alone does not install signal listeners in an embedding host.
+registerProcessSignalCleanup(() => {
+  const children = [...activeChildren];
+  if (children.length === 0) return undefined;
+  terminateActiveChildrenOnExit();
+  // Capture original groups: a leader may exit before a TERM-ignoring
+  // descendant, removing the leader from activeChildren during the grace.
+  return () => {
+    for (const child of children) {
+      try {
+        if (POSIX && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        // The original group is already gone.
+      }
+    }
+  };
+});
+
 // ---------------------------------------------------------------------------
 // spawnManaged — the managed child
 // ---------------------------------------------------------------------------
+
+/**
+ * The default-deny child-env allowlist (issue #183): the ONLY names copied
+ * from the parent process env into a spawned worker. Deliberately EXCLUDES
+ * credential-shaped names (`GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`,
+ * `NPM_TOKEN`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, …) and
+ * `NODE_OPTIONS`/`NODE_PATH` (code-execution vectors). A per-Route auth var
+ * reaches the child through `SpawnOptions.env` — an explicit VALUE the driver
+ * composed — not through this list. FROZEN: a mutable export would let any
+ * in-process consumer push a credential name and weaken default-deny for
+ * every later spawn (issue #183 r1).
+ */
+export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
+  // Executable resolution, home, identity, temp dirs — a CLI cannot run
+  // without these. PWD is deliberately ABSENT: node's spawn does not rewrite
+  // it for `cwd`, so an inherited PWD would be the PARENT's directory — a
+  // stale, misleading value that leaks the entry process's path.
+  'PATH',
+  'HOME',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  // Terminal/locale basics: output formatting, encoding, timezone.
+  'TERM',
+  'COLORTERM',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
+  'LANG',
+  'LANGUAGE',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LC_MESSAGES',
+  'TZ',
+  // XDG base dirs: CLI config/cache/state discovery on POSIX.
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+  // Network egress + TLS trust config (issue #183 r1): a routed CLI on a
+  // proxied or TLS-inspecting host cannot reach its endpoint without these.
+  // The CA vars are non-secret paths. NOTE the proxy vars MAY embed egress
+  // credentials — a worker can then read them; an operator who must not
+  // expose those clears them in the entry env. Anything else a deployment
+  // needs (e.g. SSH_AUTH_SOCK, NPM_CONFIG_*) is added explicitly through
+  // `envAllowlist`, never inherited by default.
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'NO_PROXY',
+  'no_proxy',
+  // Windows equivalents: a spawned CLI on win32 needs these to run at all.
+  // Both `PATH` and `Path` are listed because Windows conventionally stores
+  // the executable-search path as `Path` (r2); node's process.env lookup is
+  // case-insensitive on win32, so either spelling reads the same value.
+  'PATH',
+  'Path',
+  'SystemRoot',
+  'windir',
+  'COMSPEC',
+  'PATHEXT',
+  'USERPROFILE',
+  'USERNAME',
+  'USERDOMAIN',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'ProgramFiles',
+  'ProgramData',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+]);
+
+/** The POSIX/Windows-standard environment variable NAME shape (r2). */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
+
+/**
+ * Compose a child environment with default-deny semantics (issue #183):
+ * copy ONLY the allowlisted names actually set in `parentEnv`, then apply
+ * the caller's explicit `overrides` — which ALWAYS win, because a Route
+ * value is composed deliberately and the allowlist must never filter it.
+ * `extraAllowlist` and the comma/space-separated `CQ_RUN_ENV_PASSTHROUGH`
+ * parent variable extend the copied names for a deployment without weakening
+ * the default; an entry that is not a well-formed env var name is
+ * rejected at the seam (r1/r2) so a direct `spawnManaged` consumer cannot
+ * bypass the constructor's validation. The result is a fresh NULL-PROTOTYPE
+ * object (r2) so an override named `__proto__` lands as an own property
+ * instead of hitting the inherited setter; the parent env is never mutated.
+ */
+export function buildChildEnv(
+  parentEnv: Readonly<Record<string, string | undefined>>,
+  overrides?: Readonly<Record<string, string>>,
+  extraAllowlist: readonly string[] = [],
+): Record<string, string> {
+  for (const name of extraAllowlist) {
+    if (!ENV_NAME.test(name)) {
+      throw new Error(
+        `envAllowlist entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+      );
+    }
+  }
+  const child = Object.create(null) as Record<string, string>;
+  const configuredAllowlist = (parentEnv[ENV_PASSTHROUGH] ?? '')
+    .split(/[,\s]+/)
+    .filter((name) => name.length > 0);
+  for (const name of configuredAllowlist) {
+    if (!ENV_NAME.test(name)) {
+      throw new Error(
+        `${ENV_PASSTHROUGH} entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+      );
+    }
+  }
+  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist, ...configuredAllowlist]) {
+    const value = parentEnv[name];
+    if (value !== undefined) child[name] = value;
+  }
+  if (overrides !== undefined) {
+    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+  }
+  return child;
+}
 
 /** How to spawn one CLI run. All plain data. */
 export interface SpawnOptions {
@@ -56,8 +242,20 @@ export interface SpawnOptions {
   args: readonly string[];
   /** Working directory: the invocation's workspace (I6 isolation boundary). */
   cwd: string;
-  /** Env overrides merged over process.env (per-Route endpoint + auth vars). */
+  /**
+   * Explicit child env values (per-Route endpoint + auth vars). Applied on
+   * top of the allowlisted parent env (issue #183) and always win — the
+   * caller composed these, so they are trusted by construction.
+   */
   env?: Readonly<Record<string, string>>;
+  /**
+   * Extra parent-env NAMES copied into the child on top of
+   * DEFAULT_CHILD_ENV_ALLOWLIST (issue #183). Default-deny is unchanged:
+   * only names listed here or on the default allowlist are inherited. Use
+   * for deployment-specific driver config (e.g. a CLI config-dir var),
+   * never for secrets a Route can inject explicitly.
+   */
+  envAllowlist?: readonly string[];
   /** When set, written to the child's stdin and the pipe closed (prompt piping). */
   stdin?: string;
   /**
@@ -83,6 +281,8 @@ export interface ProcessClose {
   stderr: string;
   /** Total bytes dropped off the two streams' heads by the retention cap. */
   droppedBytes: number;
+  /** A complete or pending line exceeded the configured line bound. */
+  oversizedLine?: boolean;
 }
 
 /**
@@ -119,6 +319,7 @@ interface StreamCollector {
   readonly text: string;
   /** Bytes dropped off the HEAD once the retention cap was hit. */
   readonly droppedBytes: number;
+  readonly oversizedLine: boolean;
 }
 
 /**
@@ -138,6 +339,7 @@ function createCollector(
   const tailBuf = { text: '', bytes: 0 };
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
+  let oversizedLine = false;
   // Trim a buffer back under the cap, cutting whole CODE POINTS off the
   // head (a cut between the halves of an astral pair would leave a lone
   // surrogate — corruption at the head of retained evidence) and measuring
@@ -149,16 +351,16 @@ function createCollector(
   // tail's trim drops anyway — counting both would inflate.
   const trimToCap = (buf: { text: string; bytes: number }): void => {
     if (buf.bytes <= maxRetainedBytes) return;
-    let cut = 0;
-    let cutBytes = 0;
-    while (cut < buf.text.length && buf.bytes - cutBytes > maxRetainedBytes) {
-      const width = (buf.text.codePointAt(cut) ?? 0) > 0xffff ? 2 : 1;
-      cutBytes += Buffer.byteLength(buf.text.slice(cut, cut + width));
-      cut += width;
-    }
-    if (buf === tailBuf) droppedBytes += cutBytes;
-    buf.text = buf.text.slice(cut);
-    buf.bytes -= cutBytes;
+    // Trim from the byte representation once per bounded buffer update. This
+    // avoids rebuilding an Array of code points on every chunk (the old
+    // repeated full-string scan was quadratic under noisy output).
+    const bytes = Buffer.from(buf.text, 'utf8');
+    let start = Math.max(0, bytes.length - maxRetainedBytes);
+    while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
+    const kept = bytes.subarray(start).toString('utf8');
+    if (buf === tailBuf) droppedBytes += buf.bytes - Buffer.byteLength(kept);
+    buf.text = kept;
+    buf.bytes = Buffer.byteLength(kept);
   };
   return {
     onChunk(chunk: string): void {
@@ -171,6 +373,7 @@ function createCollector(
       let index = restBuf.text.indexOf('\n');
       while (index !== -1) {
         const line = restBuf.text.slice(0, index);
+        if (Buffer.byteLength(line) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = restBuf.text.slice(index + 1);
         restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
         for (const listener of listeners) listener(line);
@@ -179,6 +382,7 @@ function createCollector(
       // Bound the PENDING line — a single unterminated line must not grow
       // `rest` unbounded; past the cap its head is dropped (its drops are a
       // subset of the tail's, see trimToCap) and flush emits the tail.
+      if (Buffer.byteLength(restBuf.text) > maxRetainedBytes) oversizedLine = true;
       trimToCap(restBuf);
       tailBuf.text += chunk;
       tailBuf.bytes += chunkBytes;
@@ -193,6 +397,7 @@ function createCollector(
         // is untouched (review thread: no double retention, no phantom
         // drops).
         const finalLine = restBuf.text;
+        if (Buffer.byteLength(finalLine) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = '';
         restBuf.bytes = 0;
         for (const listener of listeners) listener(finalLine);
@@ -203,6 +408,9 @@ function createCollector(
     },
     get droppedBytes(): number {
       return droppedBytes;
+    },
+    get oversizedLine(): boolean {
+      return oversizedLine;
     },
   };
 }
@@ -233,9 +441,12 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // kill below reaches agent-spawned descendants too. Windows: not set —
     // no Job Object in v1, descendants can survive (header).
     ...(POSIX ? { detached: true } : {}),
-    ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
+    // DEFAULT-DENY child env (issue #183): only the allowlisted parent names
+    // are inherited; the explicit per-Route overrides always ride on top.
+    env: buildChildEnv(process.env, opts.env, opts.envAllowlist),
   });
 
+  activeChildren.add(child);
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => stdout.onChunk(chunk));
   child.stderr.setEncoding('utf8');
@@ -253,6 +464,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
   });
   child.on('close', (code, signal) => {
     exited = true;
+    // A late leader can exit during signal grace while its background children
+    // survive. Keep its process-group identity for the executable's final sweep.
+    if (!processSignalCleanupStarted()) activeChildren.delete(child);
     stdout.flush();
     stderr.flush();
     settleClose({
@@ -262,6 +476,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       stdout: stdout.text,
       stderr: stderr.text,
       droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
+      ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
     });
   });
 

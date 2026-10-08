@@ -26,6 +26,7 @@
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { AssemblePrsInput } from './assemblePrs.js';
+import type { EnsureTrackerBranchInput } from './ensureTrackerBranch.js';
 import type { RunReportInput } from './runReport.js';
 
 /**
@@ -61,6 +62,20 @@ export const AssemblePrsInputSchema: z.ZodType<AssemblePrsInput> = z
       "every packages[].branch must start with '<runPrefix>/' — the fleet's per-package PR branches live under the run prefix",
   });
 
+export const EnsureTrackerBranchInputSchema: z.ZodType<EnsureTrackerBranchInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    runPrefix: z.string().min(1),
+    base: z.string().min(1),
+    branch: z.string().min(1),
+    push: z.boolean().exactOptional(),
+  })
+  .strict()
+  .refine((input) => input.branch.startsWith(`${input.runPrefix}/`), {
+    message:
+      "branch must start with '<runPrefix>/' — the tracker branch lives under the run prefix (UC row 22: one tracker per run, in the run's namespace)",
+  });
+
 export const RunReportInputSchema: z.ZodType<RunReportInput> = z
   .object({
     repoRoot: z.string().min(1),
@@ -74,6 +89,22 @@ export const RunReportInputSchema: z.ZodType<RunReportInput> = z
 
 /** PR family op registry (D3: tracker-first assembly + the fleet run report). */
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'pr.ensureTrackerBranch',
+    inputSchema: EnsureTrackerBranchInputSchema,
+    // The tracker-branch leg binds the REAL git subprocess effects from the
+    // dispatched input's plain-JSON repoRoot (the assemblePrs importer
+    // precedent): resolution is inert (closure-only; git spawns only when an
+    // effect is called).
+    importer: () =>
+      import('./ensureTrackerBranch.js').then(
+        (m) =>
+          (async (input: EnsureTrackerBranchInput) =>
+            m.makeEnsureTrackerBranch(m.makeSubprocessTrackerBranchEffects(input.repoRoot))(
+              input,
+            )) as Op<unknown, unknown>,
+      ),
+  },
   {
     name: 'pr.assemblePrs',
     inputSchema: AssemblePrsInputSchema,

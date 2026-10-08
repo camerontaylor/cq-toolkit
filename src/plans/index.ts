@@ -12,12 +12,7 @@ export * from './review-loop.js';
 // (ESM would silently drop two of the three at runtime).
 export { SWEEP_PLAN_ID, SWEEP_PLAN_JOB_IDS, buildSweepPlan, sweepPlannerInput } from './sweep.js';
 export type { SweepPlanConfig, SweepUnitJobOverlay } from './sweep.js';
-export {
-  TEST_FIX_FIXER,
-  TEST_FIX_PLAN_ID,
-  TEST_FIX_STAGE_PATH_ALLOWLIST,
-  buildTestFixPlan,
-} from './test-fix.js';
+export { TEST_FIX_FIXER, TEST_FIX_PLAN_ID, buildTestFixPlan } from './test-fix.js';
 export type { TestFixPlanConfig } from './test-fix.js';
 // The branch-segment derivation is part of the sweep plan's contract (the
 // assembler input shares it with the unit op); it lives with the executor

@@ -17,7 +17,8 @@
 // The discovered filename is imported AS-IS: under vitest a `.ts` import
 // transforms fine, and in dist the only siblings present are `.js`. A
 // sibling without a `plan` export is simply not a plan module; a malformed
-// `plan` export or a duplicate plan name throws immediately.
+// `plan` export, a duplicate plan name, or a name the CLI dispatcher cannot
+// address (`run-plan`, a leading `-`, or whitespace) throws immediately.
 //
 // Results are cached per resolved plans root (as a promise), so repeated
 // listPlans()/getPlan() calls do not rescan or re-import.
@@ -143,6 +144,19 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     }
     if (typeof p.name !== 'string' || p.name === '') {
       throw new Error(`plan module '${file}': plan.name must be a non-empty string`);
+    }
+    // Dispatcher-colliding names are malformed entries — the same guard the
+    // op registry applies (src/registry/index.ts): 'run-plan' is the built-in
+    // plan-file subcommand (main.ts dispatches it before the plan registry is
+    // consulted), a leading '-' reads as a flag token, and whitespace
+    // corrupts the plain-text help surface. None can ever reach
+    // get()/dispatch, so accepting one would ship a dead (or
+    // help-corrupting) plan.
+    if (p.name === 'run-plan' || p.name.startsWith('-') || /\s/.test(p.name)) {
+      throw new Error(
+        `plan module '${file}': plan name '${p.name}' is reserved by the CLI dispatcher ` +
+          `('run-plan' is the built-in subcommand; a leading '-' parses as a flag; whitespace corrupts the help surface)`,
+      );
     }
     if (typeof p.importer !== 'function') {
       throw new Error(

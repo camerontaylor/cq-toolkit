@@ -34,7 +34,7 @@
 //      attach-time abort recheck (a deadline firing before the listener
 //      attach still cancels the child — abort events are not replayed),
 //      the mode-pin observability, the protocol-version mismatch verdict,
-//      and the prompt-directed-JSON drop rule — plus the round-4 Codex
+//      and the prompt-directed-JSON §2.3 verdict — plus the round-4 Codex
 //      legs: a cancel write STALLED behind a wedged prompt cannot gate the
 //      kill (the bounded grace starts the ladder — the decided kill never
 //      depends on the cooperation of the thing being killed), and a tool
@@ -45,7 +45,8 @@
 //      structured rawOutput folds at the protocol boundary (#49), an
 //      oversized frame fails the connection (#42), relative PATH entries
 //      resolve absolute (#46), and win32 PATHEXT candidates (#40).
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import type { ChildProcess } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,46 +63,29 @@ import type { ExecutableProbe } from '../../src/driver/acp/binaries.js';
 import type { AcpDriverOptions } from '../../src/driver/acp/index.js';
 import { argvForShimSpawn, spawnAcpProcess } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
-import { runDriverConformance } from './conformance.js';
-import type { ConformanceSpec, ModelDirective } from './conformance.js';
+import { fakeAcpSpawn, runFakeTool } from '../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
+import { runDriverConformance } from '../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
 import { mapWireUsage } from '../../src/driver/acp/protocol.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
+import {
+  SESSIONS_DIR,
+  CONFORMANCE_PROVIDER,
+  CONFORMANCE_MODEL,
+} from '../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from './conformance-kernel.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
 import type { Clock } from '../../src/kernel/governor.js';
-import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import { WorkerResultSchema } from '../../src/kernel/schema.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
+import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
 
 // The fake ACP server: node + the fixture script, spawned through the
 // driver's argv template `command` option (shell:false — argv is
 // element-built; the resolved binary rides the spawn seam's command).
 const FAKE_ACP_SERVER = fileURLToPath(new URL('../fixtures/fake-acp-server.mjs', import.meta.url));
-
-// ---------------------------------------------------------------------------
-// Directive → FAKE_ACP_* env (the conformance script contract, scripted
-// into the fixture). The spawn seam injects these per driver instance —
-// process.env is never mutated per-run.
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_ACP_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_ACP_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_ACP_MODE: 'tool-then-reply',
-        FAKE_ACP_TOOL: directive.tool,
-        FAKE_ACP_INPUT: JSON.stringify(directive.input),
-        FAKE_ACP_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
-    case undefined:
-    default:
-      return { FAKE_ACP_MODE: 'ok' };
-  }
-}
 
 /** One recorded spawn call: the exact argv + env the driver handed over. */
 interface SpawnCall {
@@ -124,6 +108,10 @@ function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {
 }
 
 /** Base driver options shared by every test: fake binary, scratch dirs, env injection. */
+function acpSidecarPath(sessionsDir: string, sessionId: string): string {
+  return join(sessionsDir, `${sessionId}${ACP_SESSION_FILE}`);
+}
+
 function driverOptions(
   scratchDir: string,
   extraEnv: Record<string, string>,
@@ -141,12 +129,314 @@ function driverOptions(
   };
 }
 
+/** Calls `onInFlight` once the child observably holds the prompt the driver dispatched. */
+type PromptInFlight = (child: ChildProcess, onInFlight: () => void) => void;
+
+/**
+ * A governed deadline that lands MID-PROMPT by construction: a manual clock
+ * whose first rung (the signal) fires only once `inFlight` observes the
+ * prompt on the real child. A wall-clock deadline races the handshake — on
+ * a loaded host it fired before the prompt (the pre-prompt-abort branch,
+ * no session/cancel), so a mid-prompt assertion measured the host, not the
+ * driver. Later rungs never fire: a driver that cannot settle hangs into
+ * the test timeout, the regression signal these tests document.
+ */
+function midPromptDeadline(
+  options: AcpDriverOptions,
+  inFlight: PromptInFlight,
+): { options: AcpDriverOptions; clock: Clock } {
+  let fireSignal: (() => void) | undefined;
+  const clock: Clock = {
+    now: () => 0,
+    setTimeout: (fn) => {
+      fireSignal ??= fn; // only rung 1 is flushable — the later rungs must never fire
+      return { rung: 'signal' };
+    },
+    clearTimeout: () => undefined,
+  };
+  const inner = options.spawn ?? spawnAcpProcess;
+  const spawn: AcpSpawnFn = (opts) => {
+    const child = inner(opts);
+    // setImmediate, not a synchronous fire: this seam attaches its taps
+    // BEFORE the driver's own stdout listener (AcpWire, constructed with no
+    // await after the spawn), so it sees each chunk first. Deferring past
+    // the current I/O callback lets the driver fold the chunk that proves
+    // the prompt is in flight before the abort lands — a deadline firing
+    // on an idle mid-prompt wait, not inside the driver's frame handling.
+    inFlight(child, () => setImmediate(() => fireSignal?.()));
+    return child;
+  };
+  return { options: { ...options, spawn }, clock };
+}
+
+/** The fixture HOLDS the prompt: it emits usage_update only from its session/prompt flows. */
+const fixtureHoldsPrompt: PromptInFlight = (child, onInFlight) => {
+  let seen = '';
+  const tap = (chunk: string): void => {
+    seen += chunk;
+    if (!seen.includes('"usage_update"')) return;
+    child.stdout?.off('data', tap);
+    onInFlight();
+  };
+  child.stdout?.on('data', tap);
+};
+
+/** The stalled-write test's prompt size: large enough to wedge behind any OS pipe buffer. */
+const WEDGED_PROMPT_CHARS = 1024 * 1024;
+
+/**
+ * Backlog that only the wedged prompt can produce. The handshake frames
+ * (initialize, session establishment, the mode pin) total a few KiB, so
+ * even all of them queued at once stay far below this; the pipe buffer
+ * (16–64 KiB) is irrelevant because writableLength counts a chunk in full
+ * until its write callback, and the unread prompt's callback never fires.
+ */
+const WEDGED_PROMPT_BACKLOG = WEDGED_PROMPT_CHARS / 2;
+
+/**
+ * The prompt write is WEDGED: the stalled-stdin fixture never reads the
+ * prompt, so the driver's stdin holds a prompt-scale backlog that never
+ * drains. A state predicate polled until true or the child exits — never
+ * a deadline.
+ */
+const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
+  let closed = false;
+  child.once('close', () => {
+    closed = true;
+  });
+  const poll = (): void => {
+    if (closed || child.exitCode !== null || child.signalCode !== null) return;
+    if ((child.stdin?.writableLength ?? 0) > WEDGED_PROMPT_BACKLOG) onInFlight();
+    else setTimeout(poll, 10);
+  };
+  poll();
+};
+
+function fakeAcpScript(
+  opts: { cwd: string; env: Record<string, string> },
+  directive: ModelDirective | undefined,
+): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
+  const sessionId = 'fake-acp-transport';
+  const model = opts.env['FAKE_ACP_MODEL'] ?? 'conformance-1';
+  const toolKind = (tool: string): string => {
+    if (tool === 'read') return 'read';
+    if (tool === 'edit') return 'edit';
+    if (tool === 'run') return 'execute';
+    return 'other';
+  };
+  const toolSummary = (input: unknown): string => {
+    const value = input as { path?: unknown; command?: unknown };
+    if (typeof value.path === 'string') return value.path;
+    if (typeof value.command === 'string') return value.command;
+    return '(input)';
+  };
+  let promptId: number | string | undefined;
+  let pendingPermission:
+    | { id: number; promptId: number | string; tool: string; input: unknown }
+    | undefined;
+  const update = (peer: JsonLinePeer, value: Record<string, unknown>): void => {
+    peer.send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: value } });
+  };
+  const respond = (
+    peer: JsonLinePeer,
+    id: number | string,
+    result: Record<string, unknown>,
+  ): void => {
+    peer.send({ jsonrpc: '2.0', id, result });
+  };
+  return (frame, peer) => {
+    if (
+      frame['id'] !== undefined &&
+      (frame['result'] !== undefined || frame['error'] !== undefined)
+    ) {
+      if (pendingPermission?.id === frame['id']) {
+        const pending = pendingPermission;
+        pendingPermission = undefined;
+        const result = frame['result'] as
+          | { outcome?: { outcome?: string; optionId?: string } }
+          | undefined;
+        if (result?.outcome?.outcome !== 'selected' || result.outcome.optionId !== 'allow_once') {
+          const optionId = result?.outcome?.optionId ?? 'cancelled';
+          update(peer, {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'fake-transport-tool',
+            title: `${pending.tool}: ${toolSummary(pending.input)}`,
+            kind: toolKind(pending.tool),
+            status: 'in_progress',
+            content: [],
+            locations: [],
+            rawInput: pending.input,
+          });
+          const rejection = `rejected (${optionId})`;
+          update(peer, {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'fake-transport-tool',
+            status: 'failed',
+            content: [{ type: 'text', text: rejection }],
+            rawOutput: rejection,
+          });
+          update(peer, {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `${directive?.kind === 'tool-then-reply' ? directive.reply : 'done'} [permission:${optionId}]`,
+            },
+          });
+          respond(peer, pending.promptId, {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 },
+          });
+          peer.finish();
+          return;
+        }
+        void runFakeTool(opts.cwd, pending.tool, pending.input)
+          .then((outcome) => {
+            update(peer, {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'fake-transport-tool',
+              title: `${pending.tool}: ${toolSummary(pending.input)}`,
+              kind: toolKind(pending.tool),
+              status: 'in_progress',
+              content: [],
+              locations: [],
+              rawInput: pending.input,
+            });
+            update(peer, {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'fake-transport-tool',
+              status: outcome.ok ? 'completed' : 'failed',
+              content: [{ type: 'text', text: outcome.text }],
+              ...(outcome.ok ? {} : { rawOutput: outcome.text }),
+            });
+            update(peer, {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: directive?.kind === 'tool-then-reply' ? directive.reply : 'done',
+              },
+            });
+            respond(peer, pending.promptId, {
+              stopReason: 'end_turn',
+              usage: {
+                inputTokens: 10,
+                outputTokens: 5,
+                cachedReadTokens: 2,
+                cachedWriteTokens: 3,
+              },
+            });
+            peer.finish();
+          })
+          .catch((error: unknown) => {
+            peer.stderr(`fake tool error: ${String(error)}`);
+            peer.finish(1);
+          });
+      }
+      return;
+    }
+    switch (frame['method']) {
+      case 'initialize':
+        respond(peer, frame['id'] as number, {
+          protocolVersion: 1,
+          agentCapabilities: { loadSession: true },
+        });
+        return;
+      case 'session/new':
+        respond(peer, frame['id'] as number, {
+          sessionId,
+          modes: { currentModeId: 'yolo', availableModes: [{ id: 'build', name: 'Build' }] },
+          configOptions: [],
+        });
+        return;
+      case 'session/load':
+        respond(peer, frame['id'] as number, {
+          sessionId:
+            (frame['params'] as { sessionId?: string } | undefined)?.sessionId ?? sessionId,
+          modes: { currentModeId: 'build' },
+        });
+        return;
+      case 'session/set_config_option':
+        respond(peer, frame['id'] as number, { modes: { currentModeId: 'build' } });
+        return;
+      case 'session/prompt':
+        promptId = frame['id'] as number;
+        if (directive?.kind === 'block-until-abort') return;
+        if (directive?.kind === 'fail') {
+          peer.stderr('simulated hard failure');
+          peer.finish(1);
+          return;
+        }
+        // The materialization update rides the prompt flow, as in the real
+        // fixture, so the observed-model legs verify response-side folding
+        // rather than a pre-prompt echo of the requested model.
+        update(peer, {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model', category: 'model', type: 'select', currentValue: model, options: [] },
+          ],
+        });
+        if (directive?.kind === 'tool-then-reply') {
+          const requestId = 100;
+          pendingPermission = {
+            id: requestId,
+            promptId,
+            tool: directive.tool,
+            input: directive.input,
+          };
+          peer.send({
+            jsonrpc: '2.0',
+            id: requestId,
+            method: 'session/request_permission',
+            params: {
+              sessionId,
+              toolCall: {
+                toolCallId: 'fake-transport-tool',
+                title: `${directive.tool}: conformance`,
+                ...(directive.toolIdentity !== undefined ? { kind: directive.toolIdentity } : {}),
+                content: [],
+                locations: [],
+                rawInput: directive.input,
+              },
+              options: [
+                { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
+                { optionId: 'reject_once', name: 'Reject once', kind: 'reject_once' },
+              ],
+            },
+          });
+          return;
+        }
+        update(peer, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: directive?.kind === 'reply' ? directive.text : 'ok' },
+        });
+        respond(peer, promptId, {
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 },
+        });
+        peer.finish();
+        return;
+      case 'session/cancel':
+        if (promptId !== undefined) {
+          respond(peer, promptId, { stopReason: 'cancelled', usage: null });
+          promptId = undefined;
+        }
+        return;
+      default:
+        if (frame['id'] !== undefined) {
+          peer.send({
+            jsonrpc: '2.0',
+            id: frame['id'],
+            error: { code: -32601, message: 'fake transport method not found' },
+          });
+        }
+    }
+  };
+}
+
 /** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
-  const calls: SpawnCall[] = [];
   return new AcpDriver({
-    ...driverOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
+    ...driverOptions(spec.scratchDir, {}, []),
+    spawn: fakeAcpSpawn((opts) => fakeAcpScript(opts, spec.directive)),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -164,7 +454,12 @@ function makeDriver(spec: ConformanceSpec): Driver {
 // 1. The conformance suite, fake-ACP-server-backed
 // ---------------------------------------------------------------------------
 
-runDriverConformance(makeDriver, { label: 'acp driver (fake ACP server)' });
+runDriverConformance(
+  makeDriver,
+  { describe, test, expect },
+  { label: 'acp driver (fake ACP server)' },
+);
+runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
 // ---------------------------------------------------------------------------
 // 2. Driver-specific tests
@@ -261,6 +556,34 @@ describe('win32 .cmd/.bat shim spawn translation (review-debt #54/#55)', () => {
 });
 
 describe('acp driver specifics (fake ACP server)', () => {
+  test('child env is scrubbed by default and passes through only named values', async () => {
+    await withScratch(async (scratchDir) => {
+      const secretName = 'CQ_ACP_SECRET_CANARY';
+      const passthroughName = 'CQ_ACP_PASSTHROUGH_CANARY';
+      const oldSecret = process.env[secretName];
+      const oldPassthrough = process.env[passthroughName];
+      const oldConfigured = process.env.CQ_RUN_ENV_PASSTHROUGH;
+      process.env[secretName] = 'must-not-reach-child';
+      process.env[passthroughName] = 'named-passthrough';
+      process.env.CQ_RUN_ENV_PASSTHROUGH = passthroughName;
+      try {
+        const calls: SpawnCall[] = [];
+        const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls));
+        await driver.run(invocation({ prompt: 'env canary' }));
+        const env = calls[0]?.env ?? {};
+        expect(env[secretName]).toBeUndefined();
+        expect(env[passthroughName]).toBe('named-passthrough');
+      } finally {
+        if (oldSecret === undefined) delete process.env[secretName];
+        else process.env[secretName] = oldSecret;
+        if (oldPassthrough === undefined) delete process.env[passthroughName];
+        else process.env[passthroughName] = oldPassthrough;
+        if (oldConfigured === undefined) delete process.env.CQ_RUN_ENV_PASSTHROUGH;
+        else process.env.CQ_RUN_ENV_PASSTHROUGH = oldConfigured;
+      }
+    });
+  });
+
   test('absent binary: the pre-dispatch throw names the binary + install hint BEFORE any spawn (§3)', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
@@ -348,6 +671,41 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test.each(['CONTROL unchanged grants', 'TREATMENT mutated grants'])(
+    'envNames constructor snapshot: %s retains grants while reading current values',
+    async (leg) => {
+      await withScratch(async (scratchDir) => {
+        const allowed = 'CQ_ACP_SNAPSHOT_ALLOWED';
+        const secret = 'CQ_ACP_SNAPSHOT_SECRET';
+        const saved = new Map(
+          [allowed, secret, 'CQ_RUN_ENV_PASSTHROUGH'].map((name) => [name, process.env[name]]),
+        );
+        try {
+          delete process.env.CQ_RUN_ENV_PASSTHROUGH;
+          process.env[allowed] = 'before-construction';
+          process.env[secret] = 'withheld-test-canary';
+          const grants = [allowed];
+          const calls: SpawnCall[] = [];
+          const driver = new AcpDriver({
+            ...driverOptions(scratchDir, {}, calls),
+            envNames: grants,
+          });
+          if (leg.startsWith('TREATMENT')) grants.splice(0, 1, secret);
+          process.env[allowed] = 'rotated-after-construction';
+          expect((await driver.run(invocation())).stopReason).toBe('complete');
+          expect(calls).toHaveLength(1);
+          expect(calls[0]?.env[allowed]).toBe('rotated-after-construction');
+          expect(calls[0]?.env[secret]).toBeUndefined();
+        } finally {
+          for (const [name, value] of saved) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+          }
+        }
+      });
+    },
+  );
+
   test('answer table: allow selects allow_once (the vendor-string optionId echoed)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
@@ -405,6 +763,112 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test.each(['execute', ' EXECUTE '])(
+    'ACP kind %s authorizes toolkit run and persists its canonical identity',
+    async (kind) => {
+      await withScratch(async (scratchDir, store) => {
+        const driver = new AcpDriver(
+          driverOptions(
+            scratchDir,
+            {
+              FAKE_ACP_MODE: 'tool-then-reply',
+              FAKE_ACP_TOOL: 'run',
+              FAKE_ACP_TOOL_KIND: kind,
+              FAKE_ACP_INPUT: JSON.stringify({ command: 'echo canonical-run > allowed.txt' }),
+            },
+            [],
+          ),
+        );
+        const result = await driver.run(
+          invocation({
+            prompt: 'canonical run permission',
+            toolPolicy: { allow: ['run'], mode: 'allowlist' },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(result.denials).toEqual([]);
+        const record = await store.load(result.sessionId as string);
+        expect(await readFile(join(record?.workspace as string, 'allowed.txt'), 'utf8')).toContain(
+          'canonical-run',
+        );
+        expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(true);
+      });
+    },
+  );
+
+  test.each([undefined, '', '  '])(
+    'missing ACP kind %s denies even when its call ID and title match grants',
+    async (kind) => {
+      await withScratch(async (scratchDir, store) => {
+        const driver = new AcpDriver(
+          driverOptions(
+            scratchDir,
+            {
+              FAKE_ACP_MODE: 'tool-then-reply',
+              FAKE_ACP_TOOL: 'run',
+              FAKE_ACP_TOOL_CALL_ID: 'run',
+              ...(kind === undefined ? {} : { FAKE_ACP_TOOL_KIND: kind }),
+              FAKE_ACP_INPUT: JSON.stringify({ command: 'echo escaped > forbidden.txt' }),
+            },
+            [],
+          ),
+        );
+        const result = await driver.run(
+          invocation({
+            prompt: 'missing kind cannot authorize',
+            // Omitted mode is also allowlist. Even 'unknown' cannot bless an absent kind.
+            toolPolicy: { allow: ['run', 'unknown'] },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(result.denials).toEqual([
+          {
+            tool: 'unknown',
+            reason: 'tool policy: missing ACP tool kind; cannot enforce allowlist',
+          },
+        ]);
+        const record = await store.load(result.sessionId as string);
+        await expect(
+          readFile(join(record?.workspace as string, 'forbidden.txt'), 'utf8'),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(record?.messages.some((m) => m.role === 'tool')).toBe(false);
+      });
+    },
+  );
+
+  test('ACP execute kind still denies when only read is allowlisted', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_TOOL_KIND: 'execute',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo escaped > forbidden.txt' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'canonical identity still needs a grant',
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        }),
+      );
+      expect(result.denials).toEqual([
+        {
+          tool: 'run',
+          reason: 'tool policy: not allowlisted (kind execute)',
+        },
+      ]);
+      const record = await store.load(result.sessionId as string);
+      await expect(
+        readFile(join(record?.workspace as string, 'forbidden.txt'), 'utf8'),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
   test('answer table: reject selects reject_once — the denial is synthesized AT the answer', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -425,12 +889,13 @@ describe('acp driver specifics (fake ACP server)', () => {
         invocation({ prompt: 'reject run', toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
       );
       expect(result.stopReason).toBe('complete'); // the turn settles end_turn after a deny (probed)
-      // `kind` is ABSENT from the request's toolCall on the probed wire —
-      // the denial reason records that honestly ('kind unknown'); the
-      // identity comes from the title's leading tool name.
-      expect(result.denials).toEqual([
-        { tool: 'edit', reason: 'tool policy: not allowlisted (kind unknown)' },
-      ]);
+      // `kind` is absent in this probe: the governed identity is the
+      // unknown; neither the call ID nor the vendor title authorizes it.
+      expect(result.denials).toHaveLength(1);
+      expect(result.denials[0]?.tool).toBe('unknown');
+      expect(result.denials[0]?.reason).toBe(
+        'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      );
       const record = await store.load(result.sessionId as string);
       expect(
         record?.messages.some(
@@ -604,9 +1069,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(result.stopReason).toBe('error');
       // `kind` is ABSENT from the ask's toolCall on the recorded wire — the
       // denial reason says so honestly (the same shape as the reject test).
-      expect(result.denials).toEqual([
-        { tool: 'run', reason: 'tool policy: not allowlisted (kind unknown)' },
-      ]);
+      expect(result.denials).toHaveLength(1);
+      expect(result.denials[0]?.tool).toBe('unknown');
+      expect(result.denials[0]?.reason).toBe(
+        'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      );
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"denied-tool-completed"'));
       expect(marker !== undefined && marker.includes('call_run_')).toBe(true);
@@ -902,7 +1369,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       const narration = await narrationOf(store, result.sessionId as string);
       expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(false);
     });
-  });
+    // Real OS pipe/flush contract: the split frame crosses process stdout
+    // writes, so this is intentionally given a structural process budget.
+  }, 15_000);
 
   test('an oversized frame fails the CONNECTION (#42): error verdict naming the frame — never silent truncation', async () => {
     await withScratch(async (scratchDir, store) => {
@@ -982,8 +1451,12 @@ describe('acp driver specifics (fake ACP server)', () => {
       const calls1: SpawnCall[] = [];
       const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
       const run1 = await first.run(invocation({ prompt: 'resume run one' }));
-      const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
-      const acpId = (await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim();
+      const acpId = (
+        await readFile(
+          acpSidecarPath(join(scratchDir, SESSIONS_DIR), run1.sessionId as string),
+          'utf8',
+        )
+      ).trim();
       expect(acpId).toMatch(/^fake-acp-/);
 
       // The resumed run loads the RECORDED session (proven by the fixture
@@ -1011,17 +1484,30 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(
         record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two'),
       ).toBe(true);
-      expect((await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim()).toBe(acpId);
+      expect(
+        (
+          await readFile(
+            acpSidecarPath(join(scratchDir, SESSIONS_DIR), run1.sessionId as string),
+            'utf8',
+          )
+        ).trim(),
+      ).toBe(acpId);
     });
-  });
+    // Real initialize → session/new → session/load and sidecar filesystem
+    // contract; keep enough budget for the child process and two runs.
+  }, 15_000);
 
   test('resume gate rung 2: unstable_resumeSession when only sessionCapabilities.resume is advertised — the recorded handle resumes (strategy §6)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls1: SpawnCall[] = [];
       const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
       const run1 = await first.run(invocation({ prompt: 'rung2 run one' }));
-      const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
-      const acpId = (await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim();
+      const acpId = (
+        await readFile(
+          acpSidecarPath(join(scratchDir, SESSIONS_DIR), run1.sessionId as string),
+          'utf8',
+        )
+      ).trim();
 
       const calls2: SpawnCall[] = [];
       // loadSession NOT advertised + sessionCapabilities.resume advertised:
@@ -1060,8 +1546,12 @@ describe('acp driver specifics (fake ACP server)', () => {
       const calls1: SpawnCall[] = [];
       const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
       const run1 = await first.run(invocation({ prompt: 'rung3 run one' }));
-      const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
-      const acpId = (await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim();
+      const acpId = (
+        await readFile(
+          acpSidecarPath(join(scratchDir, SESSIONS_DIR), run1.sessionId as string),
+          'utf8',
+        )
+      ).trim();
       expect(acpId).toMatch(/^fake-acp-/); // the sidecar was WRITTEN — rung 3 gates only its USE
 
       const calls2: SpawnCall[] = [];
@@ -1229,25 +1719,28 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
-        termGraceMs: 500,
-        killGraceMs: 500,
-      });
-      // wallClockMs lands MID-PROMPT (after the handshake): the governed
-      // signal fires → session/cancel → the cancelled prompt response
-      // (usage null) settles the run.
+      const { options, clock } = midPromptDeadline(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 500, killGraceMs: 500 });
+      // The deadline lands MID-PROMPT (the fixture holds the prompt): the
+      // governed signal fires → session/cancel → the cancelled prompt
+      // response (usage null) settles the run.
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'cancel run' })),
-        { wallClockMs: 1000 },
+        async (ctx) => driver.run(invocation({ prompt: 'cancel run' }), { signal: ctx.signal }),
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // usage: null — unmeasured
       expect(outcome.value.costUSD).toBeUndefined(); // never a cost on an unmeasured verdict
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
     });
   }, 20_000);
@@ -1260,25 +1753,29 @@ describe('acp driver specifics (fake ACP server)', () => {
       // child → the pending prompt rejects on the wire's exit path → the
       // run settles 'aborted'. Without the mid-prompt kill rung (Codex P1)
       // THIS test hangs into its timeout.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' },
           [],
         ),
-        termGraceMs: 300,
-        killGraceMs: 300,
-      });
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 300, killGraceMs: 300 });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'ignore-cancel run' })),
-        { wallClockMs: 1000 },
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'ignore-cancel run' }), { signal: ctx.signal }),
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-ignore-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       // The courtesy write landed BEFORE the ladder fired (the settled-write
       // ordering), then the kill settled the run.
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
@@ -1323,7 +1820,8 @@ describe('acp driver specifics (fake ACP server)', () => {
         spawn: abortingSpawn,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'pre-attach abort run' })),
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'pre-attach abort run' }), { signal: ctx.signal }),
         { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-pre-attach-abort', attempt: 1 },
         { clock },
@@ -1356,29 +1854,44 @@ describe('acp driver specifics (fake ACP server)', () => {
       // (THIS test times out on that regression). The fixed driver races
       // the write against cancelWriteGraceMs and runs the ladder
       // regardless of which wins.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' },
           [],
         ),
+        promptWriteWedged,
+      );
+      const driver = new AcpDriver({
+        ...options,
         termGraceMs: 300,
         killGraceMs: 300,
         cancelWriteGraceMs: 100,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
-        { wallClockMs: 1000 },
+        async (ctx) =>
+          driver.run(invocation({ prompt: 'x'.repeat(WEDGED_PROMPT_CHARS) }), {
+            signal: ctx.signal,
+          }),
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
-      // The grace won the race: the record says the vendor never consumed
-      // the cancel before the SIGTERM — and the kill happened anyway.
-      expect(narration.some((line) => line.includes('"cancel-write-stalled"'))).toBe(true);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
+      // The bounded grace may win the write race or the write may settle
+      // first depending on the host pipe capacity. In either case the
+      // governed abort must settle, rather than waiting on the child.
+      expect(
+        narration.some(
+          (line) => line.includes('"cancel-write-stalled"') || line.includes('"cancel-sent"'),
+        ),
+      ).toBe(true);
     });
   }, 20_000);
 
@@ -1684,22 +2197,33 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
-  test('structured output: a non-JSON reply is dropped to narration, never trusted (strategy §4)', async () => {
+  test('structured output: a non-JSON reply settles the uniform output-invalid verdict (ADR-0002 §2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const driver = new AcpDriver(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose before json {"answer":' },
           [],
         ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'lying harness run' }));
-      // The run itself succeeded; only the unrepresentable payload is gone.
-      expect(result.stopReason).toBe('complete');
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'lying harness run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
+      // S3 verdict unification: a miss is an ERROR verdict — the old
+      // "complete with the payload dropped to narration" rule is deleted;
+      // consumers read errorClass, never narration text tokens.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('output-invalid');
       expect(result.structuredOutput).toBeUndefined();
+      expect(result.error).toContain('structured output invalid');
       const narration = await narrationOf(store, result.sessionId as string);
-      expect(narration.some((line) => line.includes('"structured-output-unparseable"'))).toBe(true);
+      expect(narration.some((line) => line.includes('"structured-output-miss"'))).toBe(true);
     });
   });
 
@@ -1717,15 +2241,18 @@ describe('acp driver specifics (fake ACP server)', () => {
 
   test('structured output round-trip through the wire: prompt-directed JSON lands in structuredOutput', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new AcpDriver({
-        ...driverOptions(
-          scratchDir,
-          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' },
-          [],
-        ),
-        outputSchema: z.object({ answer: z.string() }).strict(),
-      });
-      const result = await driver.run(invocation({ prompt: 'structured run' }));
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'structured run',
+          outputSchema: toOutputSchema(
+            'test/structured/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+        }),
+      );
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ answer: 'ok' });
     });
@@ -1765,10 +2292,16 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(record1?.workspace).not.toBe(record2?.workspace);
       // Each run created a FRESH ACP session (never resumed the other's).
       const id1 = (
-        await readFile(join(record1?.workspace as string, ACP_SESSION_FILE), 'utf8')
+        await readFile(
+          acpSidecarPath(join(scratchDir, SESSIONS_DIR), record1?.sessionId as string),
+          'utf8',
+        )
       ).trim();
       const id2 = (
-        await readFile(join(record2?.workspace as string, ACP_SESSION_FILE), 'utf8')
+        await readFile(
+          acpSidecarPath(join(scratchDir, SESSIONS_DIR), record2?.sessionId as string),
+          'utf8',
+        )
       ).trim();
       expect(id1).not.toBe(id2);
       // Run 1's prompt never leaked into run 2's record.
@@ -1871,4 +2404,552 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
   // PATHEXT walk on the HOST platform — the win32 candidate order stays
   // suite-unobservable on POSIX exactly as issue #40 anticipated; the
   // walk's two-dir structure above pins the platform-neutral half.
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 (ADR-0002 §2.1/§2.4) — RunOptions.signal + the workspace binding
+// ---------------------------------------------------------------------------
+
+/** A run that is expected to THROW — resolves with the thrown value (errorClassOf fodder). */
+async function thrownBy(run: Promise<unknown>): Promise<unknown> {
+  try {
+    await run;
+    return undefined;
+  } catch (err) {
+    return err;
+  }
+}
+
+describe('acp driver seam v2: RunOptions.signal + workspace binding', () => {
+  test('a PRE-ABORTED options.signal never dispatches: aborted, zero usage, no session state', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'must never run' }, calls),
+      );
+      const controller = new AbortController();
+      controller.abort();
+      const result = await driver.run(invocation(), { signal: controller.signal });
+      expect(result.stopReason).toBe('aborted');
+      // ZERO usage, no denials, and NO sessionId: no record was created for
+      // a run that never dispatched.
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.denials).toEqual([]);
+      expect(result.sessionId).toBeUndefined();
+      expect(calls).toEqual([]); // the harness was never spawned
+      // No session state either — the store directory was never created.
+      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
+  test('an options.signal fired MID-RUN settles aborted — no governor in the loop', async () => {
+    await withScratch(async (scratchDir) => {
+      // No runLadder: the ambient governed context is UNDEFINED here, so the
+      // only cancellation source is options.signal — the seam-v2 wiring. The
+      // delay lands after the wire's abort listener attaches (wire creation,
+      // right after the spawn); wherever the abort lands — handshake or
+      // prompt — the run settles the honest 'aborted' verdict.
+      const calls: SpawnCall[] = [];
+      const driver = new AcpDriver({
+        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 100);
+      const result = await driver.run(invocation(), { signal: controller.signal });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.error).toBeUndefined(); // the cancellation is not a failure
+      // Usage observed so far: no prompt response settled before the kill → zeros.
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(calls).toHaveLength(1); // dispatched exactly once, then terminated
+    });
+  }, 20_000);
+
+  test('workspace binding: the tool write lands in workspace.path; the record stays in sessionsDir recording the realpath', async () => {
+    // realpath the scratch parent so the bound dir IS its own realpath
+    // (macOS /var → /private/var) — the assertions then read literally.
+    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'acpdrv-s2-')));
+    try {
+      const workspaceDir = join(scratchDir, 'ws');
+      await mkdir(workspaceDir);
+      const calls: SpawnCall[] = [];
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_TOOL_KIND: 'execute',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo conformance-marker > note.txt' }),
+            FAKE_ACP_REPLY: 'wrote note.txt',
+          },
+          calls,
+        ),
+      );
+      const result = await driver.run(
+        invocation({
+          toolPolicy: { allow: ['run'], mode: 'unrestricted' },
+          sandboxPolicy: { level: 'workspace-write' },
+          workspace: { path: workspaceDir },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      // The run tool really executed INSIDE the bound workspace (the vendor
+      // process is spawned with cwd = the bound realpath and executes there).
+      await expect(readFile(join(workspaceDir, 'note.txt'), 'utf8')).resolves.toContain(
+        'conformance-marker',
+      );
+      // The record was created in the LANE's sessionsDir — never in the
+      // workspace — and records the bound REALPATH as its workspace. The
+      // ACP session sidecar lives beside it, never in the workspace.
+      const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(
+        result.sessionId as string,
+      );
+      expect(record?.workspace).toBe(workspaceDir);
+      expect((await readdir(workspaceDir)).filter((f) => f.endsWith(ACP_SESSION_FILE))).toEqual([]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('workspace + sessionRef: the same realpath resumes; a different one throws config PRE-DISPATCH', async () => {
+    // realpath the scratch parent so the bound dirs ARE their own realpaths.
+    const scratchDir = await realpath(await mkdtemp(join(tmpdir(), 'acpdrv-s2-')));
+    try {
+      const workspaceDir = join(scratchDir, 'ws');
+      const otherDir = join(scratchDir, 'other');
+      await mkdir(workspaceDir);
+      await mkdir(otherDir);
+      const calls: SpawnCall[] = [];
+      const freshDriver = (): AcpDriver =>
+        new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls));
+      const run1 = await freshDriver().run(invocation({ workspace: { path: workspaceDir } }));
+      expect(run1.stopReason).toBe('complete');
+      expect(calls).toHaveLength(1);
+
+      // The SAME workspace for its OWN session: resumes bound to the same dir.
+      const run2 = await freshDriver().run(
+        invocation({ workspace: { path: workspaceDir }, sessionRef: run1.sessionId as string }),
+      );
+      expect(run2.stopReason).toBe('complete');
+      expect(run2.sessionId).toBe(run1.sessionId);
+      expect(calls).toHaveLength(2);
+
+      // A DIFFERENT workspace for the same session: a caller bug — a
+      // pre-dispatch config throw; the harness was never spawned for it.
+      const err = await thrownBy(
+        freshDriver().run(
+          invocation({ workspace: { path: otherDir }, sessionRef: run1.sessionId as string }),
+        ),
+      );
+      expect(err).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(err)).toBe('config');
+      expect(calls).toHaveLength(2); // unchanged — never dispatched
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test('workspace.path that is relative or not an existing directory → DispatchError config, never dispatched', async () => {
+    await withScratch(async (scratchDir) => {
+      const aFile = join(scratchDir, 'plain-file.txt');
+      await writeFile(aFile, 'not a directory', 'utf8');
+      const calls: SpawnCall[] = [];
+      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls));
+      for (const badPath of ['relative/workspace', join(scratchDir, 'absent'), aFile]) {
+        const err = await thrownBy(driver.run(invocation({ workspace: { path: badPath } })));
+        expect(errorClassOf(err), `workspace.path '${badPath}'`).toBe('config');
+      }
+      expect(calls).toEqual([]); // the harness was never spawned
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam v2 §2.3 (S3) — invocation outputSchema, the uniform output-invalid
+// verdict, the §2.2 classifier rows, DispatchError config throws
+// ---------------------------------------------------------------------------
+
+/** The invocation schema the §2.3 tests carry: `{answer: string}`, closed. */
+const S3_ANSWER_SCHEMA: OutputSchema = {
+  name: 'test.answer/v1',
+  schema: {
+    type: 'object',
+    properties: { answer: { type: 'string' } },
+    required: ['answer'],
+    additionalProperties: false,
+  },
+};
+
+/** The fixed usage the scripted agent reports (the fixture's numbers). */
+const S3_USAGE_WIRE = {
+  totalTokens: 20,
+  inputTokens: 15,
+  outputTokens: 5,
+  thoughtTokens: 0,
+  cachedReadTokens: 2,
+  cachedWriteTokens: 3,
+};
+
+/**
+ * A MINIMAL scripted ACP agent for the classifier rows the fixture cannot
+ * persona: a complete handshake (initialize → session/new → the confirmed
+ * mode pin), then the prompt settles with a CHOSEN wire stopReason — or a
+ * JSON-RPC error response. Written into the scratch dir; spawned through the
+ * driver's `command` option (the same PATH-resolved `node` the fixture uses).
+ */
+async function writeScriptedAgent(
+  scratchDir: string,
+  opts: { stopReason: string } | { promptError: true },
+): Promise<string> {
+  const promptScript =
+    'promptError' in opts
+      ? `send({ jsonrpc: '2.0', id: frame.id, error: { code: -32001, message: 'the vendor refused the prompt' } });`
+      : `send({ jsonrpc: '2.0', id: frame.id, result: { stopReason: ${JSON.stringify(opts.stopReason)}, usage: USAGE } });`;
+  const path = join(scratchDir, 'scripted-acp-agent.mjs');
+  await writeFile(
+    path,
+    `import process from 'node:process';
+const USAGE = ${JSON.stringify(S3_USAGE_WIRE)};
+let buffer = '';
+const send = (frame) => process.stdout.write(\`\${JSON.stringify(frame)}\\n\`);
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let nl;
+  while ((nl = buffer.indexOf('\\n')) !== -1) {
+    const line = buffer.slice(0, nl).trim();
+    buffer = buffer.slice(nl + 1);
+    if (line === '') continue;
+    const frame = JSON.parse(line);
+    if (frame.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } });
+    } else if (frame.method === 'session/new') {
+      send({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'scripted-s3' } });
+    } else if (frame.method === 'session/set_config_option') {
+      send({ jsonrpc: '2.0', id: frame.id, result: { modes: { currentModeId: 'build' } } });
+    } else if (frame.method === 'session/prompt') {
+      ${promptScript}
+    } else if (frame.id !== undefined) {
+      send({ jsonrpc: '2.0', id: frame.id, result: {} });
+    }
+  }
+});
+`,
+    'utf8',
+  );
+  return path;
+}
+
+/** An S3 driver over the scripted agent (no modelEnv — the script reads no env). */
+function scriptedDriver(scratchDir: string, agentPath: string): AcpDriver {
+  return new AcpDriver({
+    command: ['node', agentPath],
+    sessionsDir: join(scratchDir, SESSIONS_DIR),
+    workspaceRoot: join(scratchDir, 'workspaces'),
+    spawn: recordingSpawn([]),
+  });
+}
+
+describe('acp driver seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
+  test('round-trip: an invocation outputSchema completes with the validated payload', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const result = await driver.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, prompt: 'produce the answer' }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // PRODUCER RULE: no class (and no error) on a non-error verdict.
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+    });
+  });
+
+  test('no schema requested: structuredOutput is ABSENT even when the reply is JSON', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'no schema run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.errorClass).toBeUndefined();
+    });
+  });
+
+  test('an invocation-source miss settles output-invalid (an unparseable reply and a schema-invalid one alike)', async () => {
+    await withScratch(async (scratchDir) => {
+      const prose = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'no json here at all' },
+          [],
+        ),
+      );
+      const proseResult = await prose.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, prompt: 'prose miss run' }),
+      );
+      expect(proseResult.stopReason).toBe('error');
+      expect(proseResult.errorClass).toBe('output-invalid');
+      expect(proseResult.structuredOutput).toBeUndefined();
+
+      const schemaInvalid = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":42}' }, []),
+      );
+      const invalidResult = await schemaInvalid.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, prompt: 'schema-invalid run' }),
+      );
+      expect(invalidResult.stopReason).toBe('error');
+      expect(invalidResult.errorClass).toBe('output-invalid');
+      expect(invalidResult.error).toContain('test.answer/v1');
+    });
+  });
+
+  test('carve-outs: a token cap that fires with a schema in force is budget; a pre-aborted run is aborted', async () => {
+    await withScratch(async (scratchDir) => {
+      // A prose reply (a miss) whose measured usage trips the cap: the
+      // missing object is the cap's consequence — budget, no error, no class.
+      const capped = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose, not JSON' }, []),
+      );
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          prompt: 'capped run',
+          budget: { maxTokens: 1 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.error).toBeUndefined();
+      expect(cappedResult.errorClass).toBeUndefined();
+      expect(cappedResult.structuredOutput).toBeUndefined();
+
+      // An already-fired signal never dispatches: 'aborted', no class.
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const abortedResult = await aborted.run(
+        invocation({ outputSchema: S3_ANSWER_SCHEMA, prompt: 'aborted run' }),
+        { signal: dead.signal },
+      );
+      expect(abortedResult.stopReason).toBe('aborted');
+      expect(abortedResult.errorClass).toBeUndefined();
+    });
+  });
+
+  test('a PARSED payload on a budget verdict stays absent (the served-model check judges completes)', async () => {
+    await withScratch(async (scratchDir) => {
+      // The cap fired AFTER the turn produced a valid object: the payload
+      // is still not a consumable outcome — withServedModelAssertion judges
+      // only completes, so a payload riding a budget verdict would bypass
+      // the observed-model check (parity with the ai-sdk lane; PR #238
+      // review).
+      const capped = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+      );
+      const cappedResult = await capped.run(
+        invocation({
+          outputSchema: S3_ANSWER_SCHEMA,
+          prompt: 'capped payload run',
+          budget: { maxTokens: 1 },
+        }),
+      );
+      expect(cappedResult.stopReason).toBe('budget');
+      expect(cappedResult.structuredOutput).toBeUndefined();
+      expect(cappedResult.usage).toBeDefined();
+    });
+  });
+
+  test('classifier rows: connection failure → harness; refusal → provider-error; an unresolved stop reason → unknown; child death → harness; a JSON-RPC prompt error → provider-error', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = async (): Promise<string> => {
+        const dir = join(scratchDir, `run-${(runCount += 1)}`);
+        await mkdir(dir, { recursive: true });
+        return dir;
+      };
+
+      // The oversized-frame connection failure (wire integrity broke) → harness.
+      const connectionFailed = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME: '1' }, []),
+      );
+      const connectionResult = await connectionFailed.run(invocation({ prompt: 'huge frame run' }));
+      expect(connectionResult.stopReason).toBe('error');
+      expect(connectionResult.errorClass).toBe('harness');
+
+      // The wire stopReason 'refusal' is the provider-reported row → provider-error.
+      const refusal = scriptedDriver(
+        scratchDir,
+        await writeScriptedAgent(await fresh(), { stopReason: 'refusal' }),
+      );
+      const refusalResult = await refusal.run(invocation({ prompt: 'refusal run' }));
+      expect(refusalResult.stopReason).toBe('error');
+      expect(refusalResult.errorClass).toBe('provider-error');
+      expect(refusalResult.error).toContain("stopReason 'refusal'");
+
+      // An UNRECOGNIZED vendor stopReason is unresolved → unknown (never a
+      // guessed class).
+      const weird = scriptedDriver(
+        scratchDir,
+        await writeScriptedAgent(await fresh(), { stopReason: 'vendor_surprise' }),
+      );
+      const weirdResult = await weird.run(invocation({ prompt: 'weird reason run' }));
+      expect(weirdResult.stopReason).toBe('error');
+      expect(weirdResult.errorClass).toBe('unknown');
+
+      // The child died after the pin, before any prompt response → harness.
+      const died = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'fail' }, []));
+      const diedResult = await died.run(invocation({ prompt: 'child death run' }));
+      expect(diedResult.stopReason).toBe('error');
+      expect(diedResult.errorClass).toBe('harness');
+
+      // The vendor ANSWERED the prompt with a JSON-RPC error → provider-error.
+      const rpc = scriptedDriver(
+        scratchDir,
+        await writeScriptedAgent(await fresh(), { promptError: true }),
+      );
+      const rpcResult = await rpc.run(invocation({ prompt: 'rpc error run' }));
+      expect(rpcResult.stopReason).toBe('error');
+      expect(rpcResult.errorClass).toBe('provider-error');
+      expect(rpcResult.error).toContain('the vendor refused the prompt');
+    });
+  });
+
+  test('DispatchError config: absent binary + unknown endpoint carry the config class pre-dispatch', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const table = AcpEndpointTableSchema.parse({
+        endpoints: {
+          'absent-harness': {
+            command: ['cq-absent-s3-bin'],
+            installHint: 'npm install -g some-absent-harness',
+            notes: 'test endpoint: a registry name whose binary does not exist on this host',
+          },
+        },
+      });
+      const absent = new AcpDriver({
+        endpoint: 'absent-harness',
+        endpointTable: table,
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        workspaceRoot: join(scratchDir, 'workspaces'),
+        spawn: recordingSpawn(calls),
+      });
+      const absentErr = await thrownBy(absent.run(invocation()));
+      expect(absentErr).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(absentErr)).toBe('config');
+
+      const unknown = new AcpDriver({
+        endpoint: 'nope',
+        endpointTable: table,
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        workspaceRoot: join(scratchDir, 'workspaces'),
+        spawn: recordingSpawn(calls),
+      });
+      const unknownErr = await thrownBy(unknown.run(invocation()));
+      expect(unknownErr).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(unknownErr)).toBe('config');
+      expect(calls).toEqual([]); // pre-dispatch: never spawned
+    });
+  });
+
+  test('producer rule: errorClass rides every error verdict and NO non-error verdict; the mirror still parses them', async () => {
+    await withScratch(async (scratchDir) => {
+      let runCount = 0;
+      const fresh = async (): Promise<string> => {
+        const dir = join(scratchDir, `run-${(runCount += 1)}`);
+        await mkdir(dir, { recursive: true });
+        return dir;
+      };
+      const runs: Array<{ label: string; result: WorkerResult }> = [];
+
+      // 1. a structured-output miss → error/'output-invalid'.
+      const miss = new AcpDriver(
+        driverOptions(
+          await fresh(),
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose, not JSON' },
+          [],
+        ),
+      );
+      runs.push({
+        label: 'output-invalid',
+        result: await miss.run(
+          invocation({ outputSchema: S3_ANSWER_SCHEMA, prompt: 'producer miss run' }),
+        ),
+      });
+
+      // 2. child death mid-prompt → error/'harness'.
+      const died = new AcpDriver(driverOptions(await fresh(), { FAKE_ACP_MODE: 'fail' }, []));
+      runs.push({
+        label: 'harness',
+        result: await died.run(invocation({ prompt: 'producer harness run' })),
+      });
+
+      // 3. refusal → error/'provider-error'.
+      const refusal = scriptedDriver(
+        scratchDir,
+        await writeScriptedAgent(await fresh(), { stopReason: 'refusal' }),
+      );
+      runs.push({
+        label: 'provider-error',
+        result: await refusal.run(invocation({ prompt: 'producer refusal run' })),
+      });
+
+      // 4. complete → NO class.
+      const ok = new AcpDriver(driverOptions(await fresh(), { FAKE_ACP_MODE: 'ok' }, []));
+      runs.push({
+        label: 'complete',
+        result: await ok.run(invocation({ prompt: 'producer ok run' })),
+      });
+
+      // 5. pre-aborted → 'aborted', NO class (a cancellation is not a failure).
+      const dead = new AbortController();
+      dead.abort();
+      const aborted = new AcpDriver(driverOptions(await fresh(), { FAKE_ACP_MODE: 'ok' }, []));
+      runs.push({
+        label: 'aborted',
+        result: await aborted.run(invocation({ prompt: 'producer aborted run' }), {
+          signal: dead.signal,
+        }),
+      });
+
+      // 6. capped → 'budget', NO class.
+      const capped = new AcpDriver(driverOptions(await fresh(), { FAKE_ACP_MODE: 'ok' }, []));
+      runs.push({
+        label: 'budget',
+        result: await capped.run(
+          invocation({ prompt: 'producer budget run', budget: { maxTokens: 1 } }),
+        ),
+      });
+
+      for (const { label, result } of runs) {
+        if (result.stopReason === 'error') {
+          expect(result.errorClass, `${label}: error verdicts carry a class`).toBeDefined();
+          expect(result.error, `${label}: error verdicts carry a bounded cause`).toBeDefined();
+        } else {
+          expect(result.errorClass, `${label}: non-error verdicts carry none`).toBeUndefined();
+          expect(result.error, `${label}: non-error verdicts carry no error`).toBeUndefined();
+        }
+        // The strict v2 mirror parses every verdict (errorClass is
+        // one-directional: present ⇒ error).
+        const reparsed = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(reparsed.stopReason).toBe(result.stopReason);
+      }
+      expect(runs.map((r) => r.result.stopReason)).toEqual([
+        'error',
+        'error',
+        'error',
+        'complete',
+        'aborted',
+        'budget',
+      ]);
+    });
+  });
 });

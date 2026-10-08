@@ -14,17 +14,20 @@
 //     the loop's pushes under its stale name — renamed heads and failed
 //     revalidation reads are recorded rows, never dispatches;
 //   - each qualifying PR runs the SHIPPED runReviewLoop with the frozen
-//     SelfhostDefaults (driver model, maxUsd default) and the loop's own
+//     SelfhostDefaults (driver model, maxTokens default) and the loop's own
 //     defaults UNCHANGED — in particular classifyConfig is never overridden,
 //     so defaultLoopClassifyConfig's bot-authored-thread suppression stays
 //     ON (the skipResponderAuthoredThreads:false flip was the live drills'
 //     single-identity deviation, never a deployment setting);
-//   - the maxUsd cap is SWEEP-LEVEL: the configured (or default) cap is
-//     carried forward across the PRs in listing order — each PR's loop gets
-//     the REMAINING budget, each loop's fix-run cost rollup (DD-9,
-//     fixReport.costUSD) decrements it, and a PR reached at ≤ 0 remaining is
-//     recorded `sweep budget exhausted (I9)` instead of silently skipping or
-//     silently multiplying the advertised cap by the PR count;
+//   - the TOKEN cap is SWEEP-LEVEL: SelfhostDefaults.maxTokens (the served
+//     model is unpriced, so a default USD cap would trip the governor's DD-9
+//     unpriced-usage fail-loud) is carried forward across the PRs in listing
+//     order — each PR's loop gets the REMAINING budget, each loop's fix-run
+//     token rollup (fixReport.usage) decrements it, and a PR reached at ≤ 0
+//     remaining is recorded `sweep budget exhausted (I9)` instead of
+//     silently skipping or silently multiplying the advertised cap by the
+//     PR count. An explicit USD cap (--max-usd, for a priced model) rides
+//     the same carry-forward alongside it; there is no USD default;
 //   - responderLogin rides cfg (the token's user in CI, passed by the
 //     workflow as --responder-login) — the round-3 deployment requirement:
 //     the loop's own identity drives the thread last-word suppression, and
@@ -40,22 +43,21 @@
 // needs-human outcome or a recorded failure is an HONEST result the
 // workflow logs (exit 0), never a fabricated green and never a crash that
 // orphans the remaining PRs. One exception to "siblings continue": a thrown
-// loop WITH SPEND EVIDENCE may carry UNACCOUNTED spend, so the throw burns
-// the sweep budget (remaining zeroed, fail-closed) and the PRs after it are
-// recorded `sweep budget exhausted` instead of re-spending an allowance the
-// entry can no longer vouch for. The burn is SPEND-EVIDENCE-GATED: the
-// evidence is the PR's dispatch log gaining at least one line (the loop's
-// own first dispatch write) — a loop that threw BEFORE any dispatch (a
-// worktree or registry fault) spent nothing and its budget carries forward,
-// so one always-throwing early PR cannot starve every later PR forever.
-// The LISTING call is the exception (candidates'
+// loop may carry spend the entry can no longer read from a report, so the
+// loop PROPAGATES its accounted spend through ReviewLoopOpts.onSpend (a
+// finally report of governor.usdSpent) and the entry deducts exactly that
+// known amount from the sweep budget (review-debt #186 — no whole-sweep
+// burn, no dispatch-log proxy). A loop that threw BEFORE any spend (a
+// worktree or registry fault) deducts nothing and its budget carries
+// forward, so one always-throwing early PR cannot starve every later PR
+// forever. The LISTING call is the exception (candidates'
 // contract): when it fails there is nothing to isolate — the throw
 // propagates and the process exits 1.
 //
 // NO SECRETS: the summary carries structural facts only — PR numbers,
 // statuses, action counts, reason lines, logins at most — never tokens,
 // env, or stderr dumps beyond the loop's own capped reason lines.
-import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
@@ -64,7 +66,7 @@ import type { GhFn } from '../ops/review/gh.js';
 import { makeGhRunner } from '../ops/review/gh.js';
 import { fileWorktreeRegistry } from '../ops/review/prWorktree.js';
 import { fetchReviewState } from '../ops/review/fetchReviewState.js';
-import { runReviewLoop } from '../plans/review-loop.js';
+import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
 import { listOpenPrs } from './candidates.js';
 import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
@@ -93,22 +95,13 @@ const oneLineError = (error: unknown): string =>
     : oneLine(error instanceof Error ? error.message : String(error));
 
 /**
- * Spend evidence for a THROWN loop (the spend-evidence-gated budget burn):
- * the LOOP itself writes the PR's dispatch log's lines, so a log carrying at
- * least one line proves the loop got far enough to dispatch — spend may have
- * begun and the sweep budget burns (fail-closed). A loop that threw BEFORE
- * its first dispatch (a worktree or registry fault) leaves no lines and
- * spent nothing: its budget carries forward unchanged.
+ * Spend evidence for a THROWN loop (review-debt #186): the loop propagates
+ * its ACCOUNTED spend through `ReviewLoopOpts.onSpend` even when the fix run
+ * throws, so a throw after spend is no longer unaccountable. The old
+ * dispatch-log proxy is gone: the log persists across runs and appends only
+ * at reply/resolve time, so historical lines over-burned and a post-fixer
+ * pre-reply throw under-burned.
  */
-const dispatchLogHasLines = (dispatchLogPath: string): boolean => {
-  try {
-    return readFileSync(dispatchLogPath, 'utf8')
-      .split('\n')
-      .some((line) => line.trim() !== '');
-  } catch {
-    return false; // no log file (or unreadable) — nothing was dispatched
-  }
-};
 
 /**
  * Structural read of the single-PR payload's `head.ref` — `''` when the
@@ -222,15 +215,29 @@ export interface SelfReviewLoopCfg {
    * Null = author-blind verify — the documented fallback, never a guess.
    */
   responderLogin: string | null;
-  /** USD-cap override; default SelfhostDefaults.maxUsd (I9). SWEEP-LEVEL:
-   * the cap is carried forward across the run's PRs (each loop gets the
-   * remaining budget, decremented by each fix run's cost rollup), never the
-   * full cap re-granted per PR. */
+  /** OPTIONAL USD cap (I9); absent → no USD cap (the default cap is the
+   * token cap — the served model is unpriced). SWEEP-LEVEL: carried forward
+   * across the run's PRs (each loop gets the remaining budget, decremented
+   * by each fix run's cost rollup), never the full cap re-granted per PR. */
   maxUsd?: number;
+  /** Token-cap override; default SelfhostDefaults.maxTokens (I9). SWEEP-LEVEL
+   * exactly like maxUsd: the remaining tokens are carried forward, each fix
+   * run's token rollup decrementing them. Programmatic only — no CLI flag. */
+  maxTokens?: number;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
   dryRun?: boolean;
+  /**
+   * The A12c ADVISORY escape for each loop's fix run, defaulting OFF at the
+   * loop's own option (r1 M4). The sweep passes true EXPLICITLY — the
+   * recorded unattended-by-design posture (comp 8): every lane is ADVISORY
+   * at v1.1, so withholding it would refuse every fixer dispatch, and the
+   * journal stamps `allowAdvisoryProvenance: 'product'` either way. The
+   * shipped CLI takes no flag for it: flipping the product posture is a
+   * code change, not a runtime accident.
+   */
+  allowAdvisoryBudget?: boolean;
 }
 
 /**
@@ -293,12 +300,15 @@ const EXCLUDE_CLOSED_AFTER_LISTING = 'closed after listing';
 const EXCLUDE_DRAFTED_AFTER_LISTING = 'converted to draft after listing';
 
 /**
- * The fail-closed suffix appended to a THROWN loop's failure row (KyI): the
- * thrown loop's spend cannot be read from a report that never resolved, so
- * the sweep is burned and the row records WHY the later PRs read exhausted.
+ * The suffix appended to a THROWN loop's failure row when propagated spend
+ * was deducted (review-debt #186): the loop reports its accounted spend out
+ * of the loop even on throw, so the sweep carries forward the REMAINDER
+ * instead of burning the whole budget on a guessed ceiling.
  */
-const EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED =
-  'sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)';
+const sweepSpendDeducted = (usd: number, tokens: number): string =>
+  `accounted spend ${String(Number(usd.toPrecision(6)))}${
+    tokens > 0 ? ` and ${String(tokens)} tokens` : ''
+  } deducted from the sweep budget`;
 
 /**
  * The pre-loop exclusion reason for a listing row, or null when the row is
@@ -399,7 +409,9 @@ export async function runSelfReviewLoop(
   // The SWEEP-LEVEL cap (I9): one budget for the whole run, carried forward
   // in listing order — re-granting the full cap per PR would multiply the
   // advertised cap by the PR count.
-  let remaining = cfg.maxUsd ?? SelfhostDefaults.maxUsd;
+  let remainingTokens = cfg.maxTokens ?? SelfhostDefaults.maxTokens;
+  // USD is opt-in: undefined = no USD cap and no USD bookkeeping.
+  let remainingUsd: number | undefined = cfg.maxUsd;
   const results: Array<{ pr: number; outcome: ReviewLoopOutcome }> = [];
   const failures: Array<{ pr: number; error: string }> = [];
   const excluded: Array<{ pr: number; reason: string }> = [];
@@ -417,7 +429,7 @@ export async function runSelfReviewLoop(
     // The sweep cap gates before any worktree or dispatch: a PR reached at
     // ≤ 0 remaining is a recorded row, never a silent skip and never a
     // loop under a spent budget (I9 — honest stop, honest bookkeeping).
-    if (remaining <= 0) {
+    if (remainingTokens <= 0 || (remainingUsd !== undefined && remainingUsd <= 0)) {
       excluded.push({ pr: row.pr, reason: EXCLUDE_SWEEP_BUDGET });
       continue;
     }
@@ -469,6 +481,14 @@ export async function runSelfReviewLoop(
       });
       continue;
     }
+    // PROPAGATED ACCOUNTED SPEND (review-debt #186): the loop reports its
+    // governor USD rollup through opts.onSpend even when its fix run throws,
+    // so a thrown loop's spend is no longer unaccounted. Deduct exactly what
+    // was accounted; a loop that threw BEFORE any spend deducts nothing and
+    // its budget carries forward unchanged (the old dispatch-log proxy is
+    // gone — it persisted across runs and mis-timed appends).
+    let accountedThisPr = 0;
+    let accountedTokensThisPr = 0;
     const opts: ReviewLoopOpts = {
       owner: cfg.owner,
       repo: cfg.repo,
@@ -485,7 +505,8 @@ export async function runSelfReviewLoop(
       nowMs: deps.nowMs(),
       runOptions: {
         journalDir: join(journalRoot, `${String(row.pr)}-${String(stamp)}`),
-        maxUsd: remaining,
+        maxTokens: remainingTokens,
+        ...(remainingUsd !== undefined ? { maxUsd: remainingUsd } : {}),
       },
       // The wall-clock ladder's LIMITS half (I8/I9; review-debt #137's arming
       // for the REVIEW path — the merge path arms it in self-merge-prs.ts):
@@ -494,8 +515,18 @@ export async function runSelfReviewLoop(
       // workflow timeout. Default-only by design — no cfg override, no CLI
       // flag (the entry invents no number and offers no knob).
       limits: { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs },
+      // The A12c escape, EXPLICIT (r1 M4): the loop's own option defaults
+      // OFF; the sweep turns it on for its fix runs (unattended by design,
+      // comp 8) — the journal records the 'product' provenance.
+      allowAdvisoryBudget: cfg.allowAdvisoryBudget ?? true,
       dispatchLogPath: join(journalRoot, `dispatch-${String(row.pr)}.ndjson`),
       worktreeRoot,
+      // Propagated spend (review-debt #186): recorded per PR, used on the
+      // thrown path below.
+      onSpend: (usd, tokens = 0) => {
+        accountedThisPr = usd;
+        accountedTokensThisPr = tokens;
+      },
       // Tests-only injection: absent → runReviewLoop builds its own default
       // view (the central registry, the run-plan path).
       ...(deps.driverRegistryView !== undefined
@@ -511,33 +542,33 @@ export async function runSelfReviewLoop(
       // rollup consumed nothing this entry can account for: decrement only
       // on a present, finite number, never on absence.
       const cost = outcome.fixReport?.costUSD;
-      if (typeof cost === 'number' && Number.isFinite(cost)) {
-        remaining -= cost;
+      if (remainingUsd !== undefined && typeof cost === 'number' && Number.isFinite(cost)) {
+        remainingUsd -= cost;
+      }
+      const tokens = totalTokens(outcome.fixReport?.usage);
+      if (Number.isFinite(tokens)) {
+        remainingTokens -= tokens;
       }
     } catch (error) {
-      // FAIL-CLOSED SWEEP BUDGET, SPEND-EVIDENCE-GATED (CodeRabbit round 2,
-      // KyI): a loop that spent and THEN threw leaves its fix-run cost
-      // unaccounted — the carry-forward above only subtracts on resolve.
-      // Carrying the old remaining forward would let every later PR re-spend
-      // the same allowance, so a throw WITH spend evidence BURNS the sweep:
-      // remaining is zeroed and the failure row says so, honestly, instead
-      // of pretending the budget survives an unaccounted spend. The evidence
-      // gate: the loop itself writes the PR's dispatch log's first line at
-      // its first dispatch, so a log WITHOUT lines proves the loop threw
-      // BEFORE any dispatch (a worktree or registry fault) and spent
-      // nothing — the budget then carries forward unchanged, and one
-      // always-throwing early PR cannot starve every later PR forever.
+      // FAIL-CLOSED SWEEP BUDGET, PROPAGATED SPEND (review-debt #186): the
+      // loop reports its accounted spend out of the loop even on throw, so
+      // the sweep deducts the KNOWN spend and carries the remainder — no
+      // whole-sweep burn, no dispatch-log proxy. A throw before any spend
+      // (accountedThisPr 0 — a worktree/registry fault) deducts nothing and
+      // the budget carries forward unchanged.
       const message = oneLine(error instanceof Error ? error.message : String(error));
-      const burned = dispatchLogHasLines(opts.dispatchLogPath);
-      if (burned) {
-        remaining = 0;
+      if (remainingUsd !== undefined && accountedThisPr > 0) {
+        remainingUsd -= accountedThisPr;
+      }
+      if (accountedTokensThisPr > 0) {
+        remainingTokens -= accountedTokensThisPr;
       }
       failures.push({
         pr: row.pr,
-        // The fail-closed suffix rides only a BURNED budget — it records why
-        // the later PRs read exhausted, so it must not claim a burn that did
-        // not happen.
-        error: burned ? `${message} — ${EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED}` : message,
+        error:
+          accountedThisPr > 0 || accountedTokensThisPr > 0
+            ? `${message} — ${sweepSpendDeducted(accountedThisPr, accountedTokensThisPr)}`
+            : message,
       });
     }
   }

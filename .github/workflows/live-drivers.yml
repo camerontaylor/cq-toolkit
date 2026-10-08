@@ -14,14 +14,19 @@
 #   3. The DD-1 abort spike's ai-sdk lane (scripts/dd1-abort-spike.mjs
 #      --lane ai-sdk — the measured abort-vs-spend evidence run).
 #
-# SECRETS: this file carries NAMES only. The values arrive as repo Actions
-# secrets (Z_AI_API_KEY, DEEPSEEK_API_KEY — the scripts map/rename in-process
-# and never print a value). As of 2026-09-15 the repo has none of these
+# SECRETS: this file carries NAMES only. The values arrive as `drill`
+# environment secrets (Z_AI_API_KEY, DEEPSEEK_API_KEY — the scripts
+# map/rename in-process and never print a value). As of 2026-09-15 the repo has none of these
 # configured yet; until they land, a dispatch fails at the scripts' own
 # credential gates (`… refusing to run`) — fail LOUDLY by design, never a
 # silent skip. Spend discipline: every leg caps itself (Budget.maxUsd 2 /
 # maxTokens, MAX_ATTEMPTS, the governed wall clock); the demo and spike are
 # the same bounded scripts the executor ran locally per the T1.6 keys rule.
+#
+# ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
+# `drill` (main-only branch policy, owner review allowed), which holds the
+# provider keys. A dispatch from any other ref fails at job admission, before
+# any key is exposed.
 name: live-drivers
 
 on:
@@ -38,31 +43,46 @@ concurrency:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   live-drivers:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: drill
     env:
-      # Names only — the values live in the repo's Actions secrets.
+      # Names only — the values live in the `drill` environment's secrets.
       Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # The demo and the spike import the BUILT barrel (dist/index.js).
       - name: Build
-        run: npm run build
+        run: pnpm run build
       # The live describe's legs are (anthropic, deepseek). The ANTHROPIC leg
       # needs a native ANTHROPIC_API_KEY — a key the operating regime
       # deliberately does not hold (owner's keys rule, 2026-09-14: Claude
@@ -75,7 +95,7 @@ jobs:
       - name: Live ai-sdk vitest leg (deepseek)
         env:
           LIVE_DRIVERS: '1'
-        run: npm test -- test/driver/ai-sdk.test.ts -t deepseek
+        run: pnpm test test/driver/ai-sdk.test.ts -t deepseek
       - name: Eval-axes demo — the ai-sdk cells (zai + deepseek)
         run: node scripts/demo-eval-axes.mjs --only ai-sdk
       - name: DD-1 abort spike — the ai-sdk lane

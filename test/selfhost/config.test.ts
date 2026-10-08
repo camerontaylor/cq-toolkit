@@ -5,7 +5,8 @@
 //   1. IMMUTABILITY BY CONSTRUCTION: SelfhostDefaults is deep-frozen — a
 //      root OR nested write throws (the deepFreeze contract: a mutation
 //      must fail loudly, never silently poison the shared default).
-//   2. The recorded VALUES: the I9 scheduled-run cap (maxUsd 1), the merge
+//   2. The recorded VALUES: the I9 scheduled-run cap (maxTokens 2_000_000;
+//      no USD default — the served model is unpriced), the merge
 //      path's wall-clock ladder arming (perJobWallClockMs 300000 =
 //      5 min/job, review-debt #137), and the SERVED model id
 //      (ai-sdk/glm-5.3-flash — the conductor decision; anything else trips
@@ -20,7 +21,7 @@ describe('SelfhostDefaults', () => {
   test('deep-frozen: a root write throws', () => {
     expect(Object.isFrozen(SelfhostDefaults)).toBe(true);
     expect(() => {
-      SelfhostDefaults.maxUsd = 999;
+      SelfhostDefaults.maxTokens = 999;
     }).toThrow();
   });
 
@@ -35,13 +36,18 @@ describe('SelfhostDefaults', () => {
   });
 
   test('the recorded values: I9 cap, wall-clock ladder, served model id, branches', () => {
-    // I9 — the scheduled runs' honest-stop USD cap (the --max-usd default).
-    expect(SelfhostDefaults.maxUsd).toBe(1);
+    // I9 — the scheduled runs' honest-stop TOKEN cap. The served model is
+    // unpriced, so a USD default would trip the governor's DD-9
+    // unpriced-usage fail-loud; --max-usd stays an explicit opt-in.
+    expect(SelfhostDefaults.maxTokens).toBe(2_000_000);
+    expect('maxUsd' in SelfhostDefaults).toBe(false);
     // The governor wall-clock ladder on the merge dispatch paths (#137).
     expect(SelfhostDefaults.perJobWallClockMs).toBe(300_000);
     // The SERVED id per the recorded conductor decision — requesting any
-    // other id is rejected by the served-model-mismatch guard.
-    expect(SelfhostDefaults.driver).toEqual({ provider: 'ai-sdk', model: 'glm-5.3-flash' });
+    // other id is rejected by the served-model-mismatch guard. The provider
+    // handle is the normalised 'zai' (the deprecated 'ai-sdk' alias stays
+    // out of shipped config).
+    expect(SelfhostDefaults.driver).toEqual({ provider: 'zai', model: 'glm-5.3-flash' });
     // The repo's own merge conventions.
     expect(SelfhostDefaults.baseBranch).toBe('merge-queue');
     expect(SelfhostDefaults.protectedBranch).toBe('main');
@@ -69,6 +75,6 @@ describe('parseSelfhostArgs overrides', () => {
 
   test('parsing never mutates the frozen defaults', () => {
     parseSelfhostArgs(['--max-usd', '2']);
-    expect(SelfhostDefaults.maxUsd).toBe(1);
+    expect(SelfhostDefaults.maxTokens).toBe(2_000_000);
   });
 });

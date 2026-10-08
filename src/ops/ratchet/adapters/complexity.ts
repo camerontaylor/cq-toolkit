@@ -11,7 +11,7 @@
 // feeding the array ratio). Empty arrays, records without a finite
 // non-negative Complexity, negative or overflow values → null: non-passing
 // evidence (I5), never a fabricated pass.
-import type { MetricAdapter, MetricReading } from '../registry.js';
+import type { MetricAdapter, MetricReading } from '../metricRegistry.js';
 
 /**
  * Half-up rounding of a positive scaled ratio with a fixed ABSOLUTE

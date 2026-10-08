@@ -17,7 +17,10 @@
 //      non-boolean draft, and other field faults are `failed` results
 //      naming the field, before any gh call.
 //   6. The report is plain JSON (round trip) and the draft default is true.
-import { describe, expect, test } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, test } from 'vitest';
 import {
   makeAssemblePrs,
   MANIFEST_SECTION_MARKER,
@@ -125,9 +128,16 @@ const TRACKER_BRANCH = 'cq/09-16a/tracker';
 const PKG_CORE = 'cq/09-16a/fix/core';
 const PKG_UTIL = 'cq/09-16a/fix/util';
 
+// The default tracker-body lock is repo-rooted (review-debt #171), so the op
+// needs a real, writable repo root; a tmpdir keeps the suite hermetic.
+const REPO_ROOT = mkdtempSync(join(tmpdir(), 'pr-assemble-lock-'));
+afterAll(() => {
+  rmSync(REPO_ROOT, { recursive: true, force: true });
+});
+
 function inputOf(overrides: Partial<AssemblePrsInput> = {}): AssemblePrsInput {
   return {
-    repoRoot: '/repo',
+    repoRoot: REPO_ROOT,
     runPrefix: 'cq/09-16a',
     base: 'origin/merge-queue',
     tracker: { title: 'Fleet run cq/09-16a', branch: TRACKER_BRANCH },

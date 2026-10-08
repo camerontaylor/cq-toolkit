@@ -44,19 +44,20 @@ debt like any other: it ships reviewed or it does not ship.
   `maxTokens` with the same exceeds-cap semantics as the USD cap (the trip
   fires when the fold EXCEEDS the cap; a fold at the cap does not).
 - `BudgetGovernor.observeResult(jobKey, result)` — the canonical fold for
-  ONE driver result at the folding point (INTENDED caller: a phase-2
-  registry layer, per `WorkerResult` — today there is NO production folding
-  path: the drivers never report usage or cost, the `observeUsage`/
-  `observeCost` streaming hooks are exercised only by custom/test ops, and
-  `observeResult` has no production caller; the driver→governor bridge is
-  tracked as review-debt #14). Fold rules:
+  ONE driver result at the folding point. Production wiring (v1.1, W2.2):
+  the GOVERNED RUNNER folds a returned WorkerResult-shaped op value at
+  completion and exposes `JobGovernance.reportResult({usage, costUSD})` for
+  ops whose own value shape hides the driver evidence — e.g.
+  `review.fixItem` and `merge.resolveConflict`). A lying
+  NaN/Infinity/negative measurement is sanitized to zero evidence rather
+  than throwing. Fold rules:
   real usage (any nonzero token count) rolls the token cap; a present
   `costUSD` rolls the USD cap; real usage with NO `costUSD` under a
   configured `maxUsd` TRIPS the budget (see §4); a zero-usage result folds
   nothing (nothing was measured — I9).
 - Tripping gates admission exactly as before: refused dispatches return
-  `{ status: 'budget-exhausted' }`, and `withBudgetStop` marks the
-  never-run rows honestly (I9).
+  `{ status: 'budget-exhausted' }`, and the governed runner re-marks the
+  never-run rows honestly (I9) — its own return IS the final report.
 - The seeded resume path honors BOTH caps: `seedFromJournal` checks the
   journaled token rollup against `maxTokens` at seed time, right beside the
   seeded-USD check — a prior run's usage that already overruns either cap
@@ -122,9 +123,10 @@ rollup + api-equivalent USD` — six cases:
      trips; the at-cap boundary fold does not trip — exceeds semantics).
   2. THE d02a107 acceptance check, full-run shape: three jobs reporting
      real usage and no cost under `maxTokens: 150` — the run stops at the
-     cap (`stoppedEarly: true`, `earlyStopReason: 'budget'` via
-     `withBudgetStop`), remaining jobs `budget-exhausted`, done rows keep
-     real results, and the budget-tripped event carries the token reason.
+     cap (`stoppedEarly: true`, `earlyStopReason: 'budget'` via the
+     governed runner's honest stop), remaining jobs `budget-exhausted`,
+     done rows keep real results, and the budget-tripped event carries the
+     token reason.
   3. `maxUsd` stays PRIMARY and trips on MODELED cost (the
      subscription-shaped run that previously failed open).
   4. Unpriced usage under a USD cap trips loud; the same fold without a

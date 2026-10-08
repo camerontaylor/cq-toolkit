@@ -7,10 +7,10 @@
 // decision op, the report-pair publisher bound to the containment-checked
 // path store, and the playbook lane composed over its SHARED
 // registry/ledger singletons).
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
 import { FailureSetSchema } from '../../../src/ops/gates/registry.js';
 import {
@@ -27,10 +27,66 @@ import {
   PlaybookRegisterInputSchema,
   RenderAnalysisReportInputSchema,
   registry,
+  setAnalyzeApprovalAuthority,
 } from '../../../src/ops/analyze/registry.js';
+import type { ApprovalAuthority, ApprovalState } from '../../../src/ops/analyze/approval.js';
+import {
+  makeApprovalAuthority,
+  makeInMemoryNonceLedger,
+  makeProcessLocalMutationLocks,
+} from '../../../src/ops/analyze/approval.js';
 
 /** A minimal valid FailureSet (the gates registry test's idiom). */
 const EMPTY_FAILURE_SET = { tool: 'eslint', failures: [], exitCode: 0 };
+
+// The authority binding is PROCESS-WIDE module state (the same reason the
+// playbook registry and quarantine ledger are shared), so every test must
+// hand it back. Without this, one test binding an authority would silently
+// authorize writes in the next — the exact failure the deny-all default
+// exists to prevent.
+afterEach(() => {
+  setAnalyzeApprovalAuthority(undefined);
+});
+
+/**
+ * A REAL approval authority over a real (in-memory) nonce ledger and the real
+ * mutation lock, standing in for the kernel's verified-approval producer.
+ *
+ * No such producer exists in the tree yet (there is no approval module in
+ * src/kernel), which is exactly why this is injected: the registry's
+ * contract is that it authorizes writes ONLY through an authority the kernel
+ * verified, and this exercises that contract end to end — real registry
+ * resolution, real subprocess verifier, real quarantine — without pretending
+ * the kernel half exists.
+ */
+function trustedAuthorityFor(workspace: string): ApprovalAuthority {
+  const state: ApprovalState = { workspace, headSha: 'registry-test-head', treeClean: true };
+  return makeApprovalAuthority({
+    approvals: {
+      verifiedFor: (subject) =>
+        Promise.resolve({ nonce: `registry-${subject.inputDigest.slice(0, 12)}`, state }),
+    },
+    ledger: makeInMemoryNonceLedger(),
+    locks: makeProcessLocalMutationLocks(),
+    readState: { read: () => Promise.resolve(state) },
+  });
+}
+
+/** The dispatch evidence a non-ok verifier verdict carries as serialized JSON. */
+function dispatchEvidence(text: string): {
+  outcome: string;
+  quarantined: boolean;
+  restore: { restored: string[]; stranded: unknown[] };
+} {
+  const marker = 'Dispatch evidence: ';
+  const at = text.indexOf(marker);
+  expect(at).toBeGreaterThanOrEqual(0);
+  return JSON.parse(text.slice(at + marker.length)) as {
+    outcome: string;
+    quarantined: boolean;
+    restore: { restored: string[]; stranded: unknown[] };
+  };
+}
 
 describe('analyze registry: the lane entries', () => {
   test('the registry names the lane ops in order', () => {
@@ -511,8 +567,12 @@ describe('the agentic importer resolves (the subprocess floor lane, composed at 
     });
     // The real driver runs (no binary/spawn succeeds in the sandbox) — the
     // op must surface that honestly, never as an ok with a fabricated
-    // WorkerResult and never as a throw across the seam.
-    expect(['failed', 'indeterminate']).toContain(result.status);
+    // WorkerResult and never as a throw across the seam. The unroutable
+    // model is a PRE-DISPATCH DispatchError('config'), which the §2.9 throw
+    // mapping settles as `needs-human` (a misconfiguration is the human's
+    // to fix — `failed` would claim a definitive worker outcome the op
+    // never observed, and a bare `indeterminate` would hide the class).
+    expect(result.status).toBe('needs-human');
   }, 20_000);
 });
 
@@ -673,6 +733,74 @@ describe('the G3 playbook entries (boundary mirrors + the shared-singleton MUST)
     expect(ghost.error ?? '').not.toContain('(none)');
   });
 
+  // The other half of the contract, and the reason the MUST above needs an
+  // injected authority at all: with NO authority bound, the same registry
+  // path authorizes NOTHING. A forged `approved: true` in the op input is not
+  // a substitute, so this proves the refusal is the authority's doing.
+  test.runIf(process.platform !== 'win32')(
+    'deny-all: with no approval authority bound, the registry path refuses the write and quarantines nothing',
+    async () => {
+      const fixture = await mkdtemp(join(tmpdir(), 'pb-denyall-'));
+      const shimDir = await mkdtemp(join(tmpdir(), 'pb-denyall-shim-'));
+      const oldPath = process.env.PATH;
+      try {
+        await mkdir(join(fixture, 'src'), { recursive: true });
+        await writeFile(join(fixture, 'src', 'a.ts'), 'export const x = 1;\n', 'utf8');
+        await writeFile(
+          join(shimDir, 'ast-grep'),
+          '#!/usr/bin/env node\nprocess.stdout.write("[]");\n',
+          { mode: 0o755 },
+        );
+        process.env.PATH = `${shimDir}:${oldPath ?? ''}`;
+        const playbook = {
+          schemaVersion: 1,
+          id: 'pb-deny-all',
+          description: 'a forged approved:true must not authorize a write',
+          rule: { id: 'r', language: 'ts', rule: { pattern: 'zzz_never' } },
+          verifier: { command: { command: process.execPath, args: ['-e', 'process.exit(1)'] } },
+        };
+        const opOf = async (name: string) => {
+          const entry = registry.find((candidate) => candidate.name === name);
+          if (entry === undefined) throw new Error(`${name} missing`);
+          return entry.importer();
+        };
+        // No setAnalyzeApprovalAuthority call: this is the shipped default.
+        const register = await opOf('analyze.playbookRegister');
+        await register({ playbook });
+        const dispatch = await opOf('analyze.playbookDispatch');
+        // The op input carries an explicit approval-shaped surface, and the
+        // registry still refuses — the flag is a declared intent, never a
+        // proof (ADR-0003).
+        const refused = (await dispatch({
+          playbookId: playbook.id,
+          dir: fixture,
+          targets: ['src/a.ts'],
+          approved: true,
+        } as unknown as { playbookId: string; dir: string; targets: string[] })) as {
+          status: string;
+          reason?: string;
+        };
+        expect(refused.status).toBe('needs-human');
+        expect(refused.reason ?? '').toContain('DECLARED INTENT');
+        // The verifier never ran (the refusal precedes the engine), so
+        // nothing was quarantined and the workspace is untouched.
+        const list = await opOf('analyze.playbookQuarantineList');
+        const listed = (await list({})) as {
+          status: string;
+          value?: { records?: Array<{ playbookId: string }> };
+        };
+        expect(listed.status).toBe('ok');
+        expect(listed.value?.records ?? []).toEqual([]);
+        expect(await readFile(join(fixture, 'src', 'a.ts'), 'utf8')).toBe('export const x = 1;\n');
+      } finally {
+        process.env.PATH = oldPath;
+        await rm(fixture, { recursive: true, force: true });
+        await rm(shimDir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
   // The codemod engine scans through the REAL subprocess runner, so this
   // registry-path flow needs an executable 'ast-grep' on PATH; a POSIX
   // shim (shebang script) provides a deterministic empty plan without the
@@ -708,6 +836,10 @@ describe('the G3 playbook entries (boundary mirrors + the shared-singleton MUST)
           if (entry === undefined) throw new Error(`${name} missing`);
           return entry.importer();
         };
+        // The registry authorizes this dispatch's write ONLY because a real
+        // authority is bound here — never because the input says so. Binding
+        // it is what makes the fail-close MUST below reachable at all.
+        setAnalyzeApprovalAuthority(trustedAuthorityFor(fixture));
         const register = await opOf('analyze.playbookRegister');
         const registered = (await register({ playbook })) as {
           status: string;
@@ -723,10 +855,19 @@ describe('the G3 playbook entries (boundary mirrors + the shared-singleton MUST)
           playbookId: playbook.id,
           dir: fixture,
           targets: ['src/a.ts'],
-        })) as { status: string; value?: { outcome?: string; quarantined?: boolean } };
-        expect(first.status).toBe('ok');
-        expect(first.value?.outcome).toBe('verifier-failed');
-        expect(first.value?.quarantined).toBe(true);
+        })) as { status: string; error?: string };
+        // W4.3: an observed verifier failure is a FAILED dispatch, not an
+        // `ok` carrying a bad outcome — the rollback restores the workspace
+        // first, so there is no applied state left to report as success. The
+        // MUST this test pins is unchanged and still exercised: the verifier
+        // ran for real and its failure quarantined the playbook.
+        expect(first.status).toBe('failed');
+        const evidence = dispatchEvidence(first.error ?? '');
+        expect(evidence.outcome).toBe('verifier-failed');
+        expect(evidence.quarantined).toBe(true);
+        // And the failed remediation was rolled back, so the workspace is
+        // exactly as it started.
+        expect(evidence.restore.stranded).toEqual([]);
         // The list entry — ANOTHER fresh resolution — sees the record (one
         // shared ledger).
         const list = await opOf('analyze.playbookQuarantineList');

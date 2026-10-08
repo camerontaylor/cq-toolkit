@@ -52,6 +52,40 @@ export type {
   RemediationFileDiff,
 } from './applyRemediation.js';
 export { makeApplyRemediation } from './applyRemediation.js';
+// The ADR-0003 approval authority. The mutating factories default to
+// deny-all, so the construction and binding surface must be public too:
+// without it an installed-package consumer has no way to enable an apply
+// (`withApprovedMutation` reaches the authority's locks through a
+// module-private symbol, so a structural stand-in cannot work).
+export type {
+  ApprovalAdmission,
+  ApprovalAuthority,
+  ApprovalAuthorityConfig,
+  ApprovalExercise,
+  ApprovalGrant,
+  ApprovalState,
+  ApprovalStateReader,
+  ApprovalSubject,
+  ApprovedMutation,
+  ExercisedScope,
+  FileNonceLedgerConfig,
+  InspectableNonceLedger,
+  MutationLock,
+  MutationLocks,
+  NonceLedger,
+  VerifiedApproval,
+  VerifiedApprovals,
+} from './approval.js';
+export {
+  approvalInputDigest,
+  DENY_ALL_APPROVALS,
+  makeApprovalAuthority,
+  makeFileNonceLedger,
+  makeGitApprovalStateReader,
+  makeInMemoryNonceLedger,
+  makeLedgerBesideMutationLocks,
+  makeProcessLocalMutationLocks,
+} from './approval.js';
 export type {
   AstGrepCodemodInput,
   AstGrepScanRequest,
@@ -83,6 +117,7 @@ export {
   CollectFailuresInputSchema,
   LedgerViewSchema,
   RenderAnalysisReportInputSchema,
+  setAnalyzeApprovalAuthority,
 } from './registry.js';
 export type { AnalyzeFileStore } from './analysisStore.js';
 export { AnalysisStoreError, pathAnalysisFileStore } from './analysisStore.js';

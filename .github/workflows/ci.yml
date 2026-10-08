@@ -3,8 +3,12 @@ name: ci
 
 # Invariant I4: required checks never get paths-ignore — nor any path, branch,
 # or tag filter at all. This workflow triggers on every push and on every
-# pull_request, without exception. Skips, if ever needed, belong in job-level
-# `if:` conditions only; no `if:` is needed here.
+# pull_request, without exception. Skips belong in job-level `if:` conditions
+# only; the one sanctioned skip below is the `cq-state` settle-ledger branch
+# (review-debt #226): a machine-written ledger push carries no reviewable
+# change, so running the suite on it only burns runners. The trigger surface
+# itself stays unfiltered — a skipped job on an unprotected branch has no
+# merge consequence.
 on:
   push:
   pull_request:
@@ -12,37 +16,43 @@ on:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   static:
     runs-on: ubuntu-latest
+    # The `cq-state` settle ledger is machine-written (selfhost settle-state);
+    # its pushes are not reviewable changes (review-debt #226). Job-level,
+    # never a trigger filter — I4 keeps the trigger surface intact.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
-      # One compiler ratchet plus typed lint; aliases must not duplicate it.
-      - name: Static gate
-        run: npm run check:static
-      - name: Check formatting
-        run: npm run format:check
-      - name: Test
-        run: npm run test
-      - name: Check unused files and dependencies
-        run: npm run knip
-      # Emit gate: the ratchet step above is the typecheck gate; this step
-      # emits dist/ and recompiles (checked emit, no --noCheck) — the
-      # deliberate, boring-safe choice.
-      - name: Build
-        run: npm run build
+        run: pnpm install --frozen-lockfile
+      # The hand-replaced COMMANDS slot: the static gate's seven command
+      # steps live in ONE repo-owned composite action, shared with the
+      # macOS venue's static-macos mirror (macos-venue.yml), so the two run
+      # one step list. Checkout, toolchain and install stay above: a local
+      # action is read from the checked-out workspace.
+      - name: Static gate steps (.github/actions/static-gate)
+        uses: ./.github/actions/static-gate
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
@@ -55,24 +65,30 @@ jobs:
   # so this job's presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: ubuntu-latest
+    # Same cq-state skip as the static job (review-debt #226): the ledger
+    # push is not a reviewable change.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false).
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
       # is the from-source point, so build runs unconditionally here (the
       # static job's build above is its own job's emit gate).
       - name: Build
-        run: npm run build
+        run: pnpm run build
       - name: From-source smoke (real governed plan through dist/)
         run: node scripts/smoke-run-plan.mjs

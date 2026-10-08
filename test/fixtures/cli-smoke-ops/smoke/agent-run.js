@@ -11,8 +11,10 @@
 // (scripts/smoke-run-plan.mjs used to wire SubprocessDriver + this op +
 // governor + runPlan + emitReport by hand). What the CLI now owns, this
 // module must NOT do: no runPlan, no emitReport, no governor — the built
-// CLI's run-plan composes runPlan through governRegistry (I9), and the
-// usage fold's evidence lives in the guards below (see the smoke header).
+// CLI's run-plan runs the plan GOVERNED (a governor handle on runPlan's
+// Governance), and the governed dispatch executes this op inside the
+// governor's job context; the usage fold's evidence lives in the guards
+// below (see the smoke header).
 //
 // Path depth (verified against the actual layout):
 //   this file    = <repo>/test/fixtures/cli-smoke-ops/smoke/agent-run.js
@@ -82,23 +84,24 @@ const driver = new SubprocessDriver({
 /**
  * The governed smoke op: delegate to the driver on the frozen seam, fold the
  * WorkerResult into the op-result taxonomy, report usage through the governed
- * job context. The served model id is the op's value — the remap-detection
- * fact. DEFAULT export (the family convention's op-module shape).
+ * job context (reportResult — the ONE streaming channel). The served model id
+ * is the op's value — the remap-detection fact. DEFAULT export (the family
+ * convention's op-module shape).
  */
 export default async function agentRun(raw) {
   const { jobId } = InputSchema.parse(raw);
   const ctx = currentJobContext();
   // The CLI-boundary replacement for the old smoke's governor-rollup
-  // assertion: run-plan composes runPlan through governRegistry, so a
-  // dispatched op ALWAYS has a governed job context. `undefined` here means
-  // the governRegistry wiring was dropped — refuse loudly (both jobs fail,
-  // the parent sees exit 1) instead of silently skipping the reportUsage
-  // fold: an ungoverned run must never look green.
+  // assertion: a capped run-plan executes this op inside the governor's job
+  // context. `undefined` here means the governed dispatch was dropped —
+  // refuse loudly (both jobs fail, the parent sees exit 1) instead of
+  // silently skipping the reportResult fold: an ungoverned run must never
+  // look green.
   if (ctx === undefined) {
     return {
       status: 'failed',
       error:
-        'ungoverned: run-plan must compose runPlan through governRegistry — the usage fold has no observer',
+        'ungoverned: run-plan must run the plan governed (a governor handle) — the usage fold has no observer',
     };
   }
   let result;
@@ -115,8 +118,10 @@ export default async function agentRun(raw) {
   }
   // The fixture contract guarantees usage on every result (fixed numbers): a
   // driver result WITHOUT it is exactly the regression this smoke must
-  // catch, so it fails the job — never a silent skip of the reportUsage
-  // fold.
+  // catch, so it fails the job — never a silent skip of the reportResult
+  // fold. The fold streams usage ONLY (the fixture's model is unpriced): a
+  // caller that pairs it with a --max-usd cap would trip the DD-9 unpriced
+  // rule, so the smoke arms governance with token caps alone.
   if (result.usage === undefined) {
     return {
       status: 'failed',
@@ -124,7 +129,7 @@ export default async function agentRun(raw) {
         'driver result carries no usage — WorkerResult.usage reporting regressed (the fixture always reports fixed usage)',
     };
   }
-  ctx.reportUsage(result.usage);
+  ctx.reportResult({ usage: result.usage });
   if (result.stopReason === 'complete')
     return { status: 'ok', value: result.model ?? 'unreported' };
   return { status: 'failed', error: `agent run stopped: ${result.stopReason}` };

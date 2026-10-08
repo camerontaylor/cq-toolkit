@@ -7,6 +7,20 @@
 // own SDK tool format. Driver-agnostic by construction: NO vendor imports
 // in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
 //
+// THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
+// the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
+// surface — reaches the same decision through `buildTools(..., gate)`. The
+// default gate is `harnessRunGate()` (src/sandbox), which withholds `run`
+// entirely whenever the environment expresses a CQ_SANDBOX policy and no
+// certified launcher backs it, so a driver choice cannot bypass the policy.
+// A withheld run tool is OMITTED, not denied: an unreachable tool never
+// reaches child_process.
+//
+// THE LAUNCHER ENV SCRUB: an allowed command's child gets a default-deny
+// environment (src/sandbox `buildSandboxLauncherEnv`): a small launcher
+// allowlist plus the names the gate's policy passed through, and never a
+// `CQ_*` knob — a model-directed child cannot reconfigure its own boundary.
+//
 // DENIAL FLOW — executors never throw. Every refusal (sandbox, bad input,
 // path escape (lexical or via symlink), allowlist miss, shell metacharacters
 // under a token pattern, missing file, missing target text, failed command
@@ -15,12 +29,16 @@
 // WorkerResult.denials verbatim. Denial reasons are human-readable strings
 // with stable PREFIXES (the conformance suite asserts on these):
 //   'sandbox: …' | 'invalid input: …' | 'path escape: …'
+//   'path not allowed: … is inside a .git directory (toolkit invariant)'
 //   'path not allowed by harness config allowlist: …'
 //   'command not allowed by harness config allowlist: …'
+//   'command allowlist: git diff is closed-form — …'
+//   'command allowlist: git log is closed-form — …'
 //   'command allowlist: shell metacharacters not permitted with token
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
 //   'edit failed: …' | 'run failed: …'
+//   'cancelled: …' (surface.ts: a queued call cancelled before it ran)
 //
 // ENFORCEMENT ORDER per call: sandbox gate → input schema → workspace
 // containment (lexical, then symlink realpath re-check) → config allowlist →
@@ -71,7 +89,11 @@
 //     plain prefixes: a re: match allows OUTRIGHT (including commands with
 //     shell metacharacters), so a re: pattern MUST be authored anchored
 //     (e.g. 're:^npm test.*$') — an unanchored re: is author error
-//     (recorded finding; documentation-covered, not code-repaired).
+//     (recorded finding; documentation-covered, not code-repaired). Broad
+//     regexes can also authorize disguised git verbs (git "diff"): the
+//     closed-form lock covers literal diff/log prefixes, not shell aliases.
+//     Leading literal diff/log words are locked even with attached shell
+//     operators or substitutions, including backticks and $(...).
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
@@ -83,27 +105,42 @@
 //     'npm test $(rm -rf ~)'); such a command denies with the distinct
 //     'command allowlist: shell metacharacters …' reason pointing at
 //     anchored re: patterns as the deliberate escape hatch.
-// Invalid regexes and empty/whitespace-only patterns throw at `buildTools`
+// Token patterns must contain plain shell words; git requires a literal
+// subcommand (never bare git, global options, wrapped git or a path to git).
+// Invalid patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
-// `run` executes through the SHELL (node:child_process exec, cwd =
-// workspace) so pipelines work; the allowlist is the gate over the whole
-// command string. Config timeoutMs maps onto exec's own timeout (child
-// killed by signal → exitCode null + killed flag); captured output is
-// head-truncated to maxOutputChars with `truncated: true`. read/edit have no
+// Closed-form git diff/log select constant argv and spawn with shell:false.
+// Other `run` commands use the platform shell so pipelines work; the
+// allowlist is the gate over the whole command string. Each command runs in
+// its OWN PROCESS GROUP (POSIX `detached`), so a timeout, an abort
+// (`execute(input, { signal })`) or a harness shutdown kills the whole group
+// with SIGKILL — `npm test → node` grandchildren included, which `exec`
+// (killing only `/bin/sh`) could not reach. A kill reports exitCode null +
+// the killed flag. Captured output is retained up to a byte bound per
+// stream and head-truncated to maxOutputChars with `truncated: true` — a
+// noisy command is truncated, never denied. read/edit have no
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { exec } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
+import { buildChildEnv } from '../driver/subprocess/process.js';
+import { runArgvCommand, runShellCommand } from './run.js';
+import type { RunCommandOptions, RunOutcome } from './run.js';
+import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
+import type { HarnessRunGate } from '../sandbox/index.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
-const execAsync = promisify(exec);
+/**
+ * Per-stream retention bound for `run` when the config sets no output cap:
+ * "uncapped" means no truncation of the result text up to this bound, never
+ * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
+ */
+const UNCAPPED_RETENTION_BYTES = 1_048_576;
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
@@ -151,6 +188,15 @@ export type ToolkitToolResult =
   | { ok: false; denial: ToolDenial };
 
 /**
+ * Per-call execution options (additive). `signal` cancels an in-flight
+ * call: `run` kills the command's whole process group; read/edit are
+ * local fs ops that finish on their own and ignore it.
+ */
+export interface ToolExecuteOptions {
+  signal?: AbortSignal | undefined;
+}
+
+/**
  * One harness tool, SELF-CONTAINED plain data: name, description, input
  * schema (zod), and an executor bound to the workspace the tools were built
  * for. `execute` accepts `unknown` (adapters may pass unparsed payloads) and
@@ -161,19 +207,19 @@ export type ToolkitTool =
       name: 'read';
       description: string;
       inputSchema: typeof ReadToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'edit';
       description: string;
       inputSchema: typeof EditToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'run';
       description: string;
       inputSchema: typeof RunToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
 
 // ---------------------------------------------------------------------------
@@ -225,7 +271,7 @@ type CommandPattern = { kind: 'regex'; re: RegExp } | { kind: 'tokens'; tokens: 
 
 /**
  * Compile the run allowlist. THROWS on an invalid `re:` regex or an
- * empty/whitespace-only pattern — config corruption is loud (an empty
+ * empty, non-plain-word, wrapped-git or git-global token pattern — corruption is loud (an empty
  * pattern would otherwise silently allow every command).
  */
 export function compileCommandPatterns(patterns: readonly string[]): CommandPattern[] {
@@ -242,6 +288,22 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
         `harness: empty run command pattern '${raw}' (empty patterns would allow every command)`,
       );
     }
+    if (tokens.some((token) => !/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(token))) {
+      throw new Error(`harness: run token pattern must contain only plain shell words: '${raw}'`);
+    }
+    if (
+      tokens.some(
+        (token, index) =>
+          /(?:^|\/)git(?:\.(?:exe|cmd|bat|com))?$/i.test(token) && (index !== 0 || token !== 'git'),
+      )
+    ) {
+      throw new Error(
+        `harness: git token pattern must begin with literal git, without wrappers or paths; use an anchored re: grant for other spellings: '${raw}'`,
+      );
+    }
+    if (tokens[0] === 'git' && !/^[a-z][a-z0-9-]*$/.test(tokens[1] ?? '')) {
+      throw new Error(`harness: git token pattern requires a literal subcommand: '${raw}'`);
+    }
     return { kind: 'tokens', tokens };
   });
 }
@@ -257,6 +319,39 @@ const SHELL_METACHARACTERS = /[;&|$`()<>\n\r]/;
 type CommandVerdict =
   | { allowed: true; via: 'regex' | 'tokens' }
   | { allowed: false; metacharacters: boolean };
+
+// Each key selects harness-owned argv. No input token is ever forwarded to git.
+const GIT_HEADER = [
+  '--no-pager',
+  '--literal-pathspecs',
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.quotePath=true',
+];
+const GIT_DIFF = [
+  ...GIT_HEADER,
+  'diff',
+  '--no-ext-diff',
+  '--no-textconv',
+  '--no-color',
+  '--src-prefix=a/',
+  '--dst-prefix=b/',
+];
+const CLOSED_GIT_DIFF = new Map<string, readonly string[]>([
+  ['git diff', [...GIT_DIFF, '--']],
+  ['git diff --stat', [...GIT_DIFF, '--stat', '--']],
+  ['git diff --name-only', [...GIT_DIFF, '--name-only', '--']],
+  ['git diff --cached', [...GIT_DIFF, '--cached', '--']],
+  ['git diff --cached --stat', [...GIT_DIFF, '--cached', '--stat', '--']],
+  ['git diff --cached --name-only', [...GIT_DIFF, '--cached', '--name-only', '--']],
+]);
+const GIT_LOG = [...GIT_HEADER, 'log', '--no-ext-diff', '--no-textconv', '--no-color'];
+const CLOSED_GIT_LOG = new Map<string, readonly string[]>([
+  ['git log --oneline -n 20', [...GIT_LOG, '--oneline', '-n', '20', '--']],
+  ['git log -n 1', [...GIT_LOG, '-n', '1', '--']],
+  ['git log -n 1 --stat', [...GIT_LOG, '-n', '1', '--stat', '--']],
+]);
 
 /**
  * Match the compiled command allowlist: a re: match allows OUTRIGHT (the
@@ -337,6 +432,7 @@ export function buildTools(
   config: HarnessConfig,
   workspace: string,
   sandbox: SandboxLevel = 'workspace-write',
+  gate: HarnessRunGate = harnessRunGate(),
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
@@ -390,6 +486,31 @@ export function buildTools(
   };
 
   const relOf = (abs: string): string => relative(workspaceAbs, abs).split(sep).join('/');
+
+  /**
+   * TOOLKIT-OWNED INVARIANT (W1.4 composition review F1): read/edit never
+   * touch a `.git` path, whatever `pathPatterns` say (`**` + `*` match
+   * dot-segments). Editing `.git` steers git itself: repointing a linked
+   * worktree's `.git` gitfile redirects allowlisted `git add/commit` into
+   * another repository, and `.git/config` (`core.fsmonitor`,
+   * `diff.external`, hooks paths…) makes an allowlisted `git status/diff`
+   * run an arbitrary command, bypassing commandPatterns. Checked on the
+   * LEXICAL path and on the REALPATH (a symlink into `.git` is caught when
+   * it exists), relative to the workspace root, case-insensitively (macOS
+   * and Windows filesystems resolve `.GIT` to `.git`), with Windows'
+   * trailing-dot/space aliases (`.git.`) folded in.
+   */
+  const touchesGit = async (abs: string, effective: string): Promise<boolean> => {
+    const hasGitSegment = (rel: string): boolean =>
+      rel.split(/[\\/]/).some((segment) => /^\.git[. ]*$/i.test(segment));
+    if (hasGitSegment(relative(workspaceAbs, abs))) return true;
+    const root = await workspaceRealRoot();
+    return (
+      root !== undefined && isInside(effective, root) && hasGitSegment(relative(root, effective))
+    );
+  };
+  const gitDenial = (tool: ToolkitToolName, abs: string): ToolkitToolResult =>
+    deny(tool, `path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`);
 
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
     compilePathPatterns(patterns).some((re) => re.test(relOf(abs)));
@@ -451,6 +572,7 @@ export function buildTools(
             `path escape: '${parsed.data.path}' escapes the workspace through a symlink`,
           );
         }
+        if (await touchesGit(abs, effective)) return gitDenial('read', abs);
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
@@ -494,6 +616,7 @@ export function buildTools(
         if (effective === undefined) {
           return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
         }
+        if (await touchesGit(abs, effective)) return gitDenial('edit', abs);
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
@@ -529,7 +652,11 @@ export function buildTools(
   }
 
   // --- run --------------------------------------------------------------------
-  if (cfg.tools.run.enabled) {
+  if (cfg.tools.run.enabled && gate.enabled) {
+    // Validate the complete launcher environment before exposing an executor.
+    // A malformed or policy-bearing passthrough must fail during tool
+    // construction, never later inside a model-directed command.
+    buildSandboxLauncherEnv({}, gate);
     const runCfg = cfg.tools.run;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
@@ -543,6 +670,26 @@ export function buildTools(
       if (stderr !== '') parts.push(`--- stderr ---\n${stderr}`);
       return parts.join('\n');
     };
+    const settle = (outcome: RunOutcome): ToolkitToolResult => {
+      // Normal exits (including nonzero) and kills remain tool results.
+      // Only spawn-level failures are denials.
+      if (outcome.kind === 'spawn-error') {
+        return deny('run', `run failed: ${messageOf(outcome.error)}`);
+      }
+      const killed = outcome.kind === 'killed';
+      const exitCode = killed ? null : outcome.code;
+      const capped = capOutput(
+        formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
+        runCfg.maxOutputChars,
+      );
+      return {
+        ok: true,
+        exitCode,
+        killed,
+        output: capped.output,
+        truncated: capped.truncated || outcome.overflowed,
+      };
+    };
     tools.push({
       name: 'run',
       description: capDescription(
@@ -554,11 +701,51 @@ export function buildTools(
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: RunToolInputSchema,
-      execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
+      execute: async (rawInput: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult> => {
         if (sandbox === 'read-only') return deny('run', 'sandbox: read-only');
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
+        let env: Record<string, string>;
+        try {
+          // Scrub at the shared core on every transport; never depend on an
+          // MCP launcher having already filtered the parent environment. The
+          // sandbox launcher scrub runs first, so its stricter defaults and
+          // policy-knob refusal also cover closed-form git execution.
+          env = buildChildEnv(buildSandboxLauncherEnv(process.env, gate), undefined, [
+            ...gate.envPassthrough,
+            ...(gate.declaredEnvNames ?? []),
+          ]);
+        } catch (error) {
+          return deny('run', `run failed: ${messageOf(error)}`);
+        }
+        const executionOptions: RunCommandOptions = {
+          cwd: workspaceAbs,
+          env,
+          // Retain UTF-8 and wrapper slack above the configured character cap.
+          maxBytes:
+            runCfg.maxOutputChars !== undefined
+              ? runCfg.maxOutputChars * 4 + 65_536
+              : UNCAPPED_RETENTION_BYTES,
+          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
+          ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        };
+        const raw = command.trim().split(/\s+/);
+        // An attached shell operator (git diff; …) must not bypass the lock
+        // under a regex grant. Quoted/disguised verbs remain author-owned.
+        const verb = raw[1]?.match(/^[a-z-]*/)?.[0];
+        if (raw[0] === 'git' && (verb === 'diff' || verb === 'log')) {
+          const forms = verb === 'diff' ? CLOSED_GIT_DIFF : CLOSED_GIT_LOG;
+          const key = raw.join(' ');
+          const argv = forms.get(key);
+          if (argv === undefined || !commandVerdict(patterns, key).allowed) {
+            return deny(
+              'run',
+              `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
+            );
+          }
+          return settle(await runArgvCommand('git', argv, executionOptions));
+        }
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
           return deny(
@@ -568,52 +755,7 @@ export function buildTools(
               : `command not allowed by harness config allowlist: '${command}'`,
           );
         }
-        try {
-          const { stdout, stderr } = await execAsync(command, {
-            cwd: workspaceAbs,
-            // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
-            // comfortably above the cap so capOutput does the truncating
-            // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
-            // exit/stdout wrapper): at exec's 1 MiB default a noisy command
-            // rejects with a string-code error BEFORE the cap truncates —
-            // a 'run failed' denial instead of a truncated result (issue #18).
-            ...(runCfg.maxOutputChars !== undefined
-              ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-              : {}),
-            ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-          });
-          const capped = capOutput(formatOutcome(0, false, stdout, stderr), runCfg.maxOutputChars);
-          return { ok: true, exitCode: 0, killed: false, ...capped };
-        } catch (err) {
-          // promisify(exec) rejects on nonzero exit / signal kill with the
-          // captured streams attached; a spawn failure (e.g. no shell) has a
-          // STRING code. Nonzero exits are REAL tool results (the model must
-          // see them), not denials — only spawn-level failures deny.
-          const e = err as Error & {
-            code?: string | number | null;
-            killed?: boolean;
-            signal?: string | null;
-            stdout?: string;
-            stderr?: string;
-          };
-          const stdout = e.stdout ?? '';
-          const stderr = e.stderr ?? '';
-          if (typeof e.code === 'number') {
-            const capped = capOutput(
-              formatOutcome(e.code, false, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: e.code, killed: false, ...capped };
-          }
-          if (e.killed === true) {
-            const capped = capOutput(
-              formatOutcome(null, true, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: null, killed: true, ...capped };
-          }
-          return deny('run', `run failed: ${messageOf(err)}`);
-        }
+        return settle(await runShellCommand(command, executionOptions));
       },
     });
   }

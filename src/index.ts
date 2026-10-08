@@ -5,44 +5,77 @@
 // governor + rescue lane.
 export type {
   Budget,
+  // Aliased (seam v2, lane decision O-1 treatment): the kernel governor's
+  // `BudgetReservation` keeps the root-barrel name (explicit export above);
+  // the driver seam's plain-data reservation rides under `DriverBudgetReservation`.
+  BudgetReservation as DriverBudgetReservation,
   Driver,
+  // Aliased (seam v2, lane decision O-1): the kernel plan-run `RunOptions`
+  // keeps the root-barrel name (explicit export above); the seam's
+  // runtime-only per-call options ride under `DriverRunOptions`. An explicit
+  // export beats the driver star-export at the barrel tail, so both are
+  // deliberate, non-shadowed surface.
+  RunOptions as DriverRunOptions,
   DriverStopReason,
+  JsonSchema,
   ModelSpec,
   OpInvocation,
+  OutputSchema,
+  ProviderSignals,
   SandboxLevel,
   SandboxPolicy,
   ToolDenial,
   ToolPolicy,
   ToolPolicyMode,
   Usage,
+  WorkerErrorClass,
   WorkerResult,
+  WorkspaceBinding,
 } from './driver/types.js';
+// Driver seam values + pre-dispatch errors (seam v2) — re-export only.
+export { SEAM_VERSION } from './driver/types.js';
+export { DispatchError, errorClassOf } from './driver/errors.js';
+export type { DispatchErrorClass } from './driver/errors.js';
 export type {
   Job,
   JobFinishedJournalEvent,
   JobOutcome,
+  JobQuarantinedJournalEvent,
   JobStartedJournalEvent,
   JobState,
   JobStatus,
   JournalEvent,
+  GovernanceOptIn,
+  GovernanceRecord,
   Limits,
   Op,
   OpRegistryEntry,
   OpResult,
   Plan,
   PlanRegistryEntry,
+  QuarantineReleasedJournalEvent,
+  ReservationChargeBasis,
+  ReservationClass,
+  ReservationOpenedJournalEvent,
+  ReservationRefusedJournalEvent,
+  ReservationRefusalReason,
+  ReservationSettledJournalEvent,
   RunCounts,
   RunEarlyStopReason,
   RunFinishedJournalEvent,
   RunOptions,
   RunReport,
   RunStartedJournalEvent,
+  BudgetTrippedJournalEvent,
 } from './kernel/types.js';
 export {
   BudgetSchema,
+  BudgetTrippedJournalEventSchema,
   DriverStopReasonSchema,
+  GovernanceRecordSchema,
   JobFinishedJournalEventSchema,
   JobOutcomeSchema,
+  JobQuarantinedJournalEventSchema,
   JobSchema,
   JobStartedJournalEventSchema,
   JobStateSchema,
@@ -52,7 +85,13 @@ export {
   ModelSpecSchema,
   OpInvocationSchema,
   OpResultSchema,
+  OutputSchemaSchema,
   PlanSchema,
+  ProviderSignalsSchema,
+  QuarantineReleasedJournalEventSchema,
+  ReservationOpenedJournalEventSchema,
+  ReservationRefusedJournalEventSchema,
+  ReservationSettledJournalEventSchema,
   RunCountsSchema,
   RunEarlyStopReasonSchema,
   RunFinishedJournalEventSchema,
@@ -65,7 +104,9 @@ export {
   ToolPolicyModeSchema,
   ToolPolicySchema,
   UsageSchema,
+  WorkerErrorClassSchema,
   WorkerResultSchema,
+  WorkspaceBindingSchema,
   opResultSchema,
 } from './kernel/schema.js';
 // Kernel runtime surface (T1.2) — re-export only, no logic: the plan runner,
@@ -79,12 +120,15 @@ export { deriveJobStatuses, openRunLog } from './kernel/journal.js';
 export { runPlan } from './kernel/runner.js';
 export { emitReport, narrate, renderHuman } from './kernel/output.js';
 // Budget governor + rescue lane (T1.3) — re-export only, no logic: the
-// governed-registry seam, the escalation ladder, the honest-stop marker, and
-// the rescue policy table + decision engine. Pure types ride along as
-// `export type`.
+// per-run enforcer behind `runPlan`'s Governance handle, the escalation
+// ladder, and the rescue policy table + decision engine. Pure types ride
+// along as `export type`.
 export type {
   AdmissionDecision,
+  BudgetReservation,
   Clock,
+  Governance,
+  Governor,
   GovernorConfig,
   GovernorEvent,
   JobCancelPort,
@@ -93,19 +137,23 @@ export type {
   LadderRung,
   LadderRungMarker,
   LadderSpec,
+  ReserveOutcome,
+  TripKind,
 } from './kernel/governor.js';
 export {
   BudgetGovernor,
+  createGovernor,
   currentJobContext,
   DEFAULT_ABORT_GRACE_MS,
   DEFAULT_KILL_GRACE_MS,
-  governRegistry,
   governorConfig,
   realClock,
   runLadder,
-  seedFromRunLog,
-  withBudgetStop,
+  validSpendEvidence,
 } from './kernel/governor.js';
+// Per-lane budget classification (W2.3, ADR-0003 §2.4) — re-export only.
+export { classifyDispatch, LANE_CLASSIFICATION } from './kernel/lanes.js';
+export type { BudgetClass, LaneClassificationRow } from './kernel/lanes.js';
 export type {
   RescueAction,
   RescueDecision,
@@ -145,6 +193,7 @@ export type {
   EditToolInput,
   ReadToolInput,
   RunToolInput,
+  ToolExecuteOptions,
   ToolkitTool,
   ToolkitToolName,
   ToolkitToolResult,
@@ -157,6 +206,37 @@ export {
   ReadToolInputSchema,
   RunToolInputSchema,
 } from './harness/tools.js';
+// The shared harness tool-surface core (W1.4, ADR-0002 Annex A.1) —
+// re-export only: naming, selection, the driver-authored manifest, the
+// bound serialized surface, the stable denial classifier and the
+// init-surface comparator both driver lanes (and third-party MCP hosts of
+// the `cq-harness-mcp` bin) share.
+export type {
+  ExpectedInitSurface,
+  HarnessCallOutcome,
+  HarnessManifest,
+  HarnessSurface,
+  HarnessSurfaceTool,
+  InitSurfaceVerdict,
+  ManifestInputs,
+  McpCallToolResult,
+  ServerStatus,
+} from './harness/surface.js';
+export {
+  buildManifest,
+  compareInitSurface,
+  createHarnessSurface,
+  HARNESS_DENIAL_PREFIXES,
+  HARNESS_MCP_SERVER_NAME,
+  HarnessManifestSchema,
+  harnessToolName,
+  isHarnessDenial,
+  isQualifiedHarnessTool,
+  qualifiedToolName,
+  selectHarnessSurface,
+  selectToolNames,
+  toCallToolResult,
+} from './harness/surface.js';
 export type {
   SessionHeaderLine,
   SessionLine,
@@ -174,6 +254,27 @@ export {
   SessionStore,
   tempWorkspace,
 } from './harness/session.js';
+// W1.11 sandbox policy: conservative configuration resolution, certified
+// backend selection, the mandatory launcher environment scrub, and the
+// shared run gate every harness surface applies.
+export type {
+  HarnessRunGate,
+  ResolveSandboxOptions,
+  SandboxBackend,
+  SandboxConfig,
+  SandboxMode,
+  SandboxNetwork,
+  SandboxOptIn,
+  SandboxPlatform,
+} from './sandbox/index.js';
+export {
+  assertRunToolAvailable,
+  buildSandboxLauncherEnv,
+  certifiedAutoOrder,
+  harnessRunGate,
+  resolveSandboxConfig,
+  runToolAvailable,
+} from './sandbox/index.js';
 // First-party driver + price map (T1.4) — re-export only, no logic: the
 // in-process ai-sdk driver on the frozen seam, and the models.dev-derived
 // price map behind the derived-only costUSD rule.
@@ -195,11 +296,15 @@ export type {
   SpawnFn,
   StopReasonInputs,
   SubprocessDriverOptions,
+  SubprocessToolSurface,
 } from './driver/subprocess/index.js';
 export {
   allowedToolNames,
   buildArgs,
   CLI_SESSION_FILE,
+  CLI_STRUCTURED_OUTPUT_TOOL,
+  HARNESS_ERROR_PREFIX,
+  HARNESS_MCP_CONFIG_FILE,
   NARRATION_TOOL,
   resultStatusOf,
   stopReasonOf,

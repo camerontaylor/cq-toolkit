@@ -1,0 +1,7 @@
+diff --git a/.gitattributes b/.gitattributes
+index 1111111..2222222 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,1 +1,1 @@
+-*.txt text
++fixture.dat diff.external=hostile

@@ -70,17 +70,13 @@
 // comes from a registry so the governed runner dispatches it exactly like
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
-import type { Budget, ModelSpec } from '../driver/types.js';
+import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
-import {
-  BudgetGovernor,
-  governRegistry,
-  governorConfig,
-  withBudgetStop,
-} from '../kernel/governor.js';
+import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type {
+  GovernanceOptIn,
   Job,
   OpRegistryEntry,
   Plan,
@@ -256,6 +252,26 @@ export interface ReviewLoopOpts {
    */
   runOptions?: { journalDir?: string; maxUsd?: number; maxTokens?: number };
   /**
+   * Governance opt-ins for the fix run (ADR-0003 §2.5), by explicit key —
+   * the resolution surface for the ledger refusals an ALWAYS-governed fix
+   * run can hit over an existing journal dir (e.g. `budget.legacyJournal=reset`
+   * upgrades a dir holding this plan's v1 history; `budget.raiseCap` raises
+   * the last governed cap). Absent → no opt-ins (refusals stand).
+   */
+  governanceOptIn?: readonly GovernanceOptIn[];
+  /**
+   * The ADVISORY escape for the fix run (W2.3, A12c), EXPLICIT and
+   * defaulting OFF (review r1 M4): absent/false refuses every fixer
+   * dispatch on an unattended run (every lane is ADVISORY at v1.1). The
+   * shipped sweep (self-review-loop) sets it true — unattended by design —
+   * and the journal records `allowAdvisoryProvenance: 'product'`, so the
+   * escape is attributable and an embedder can withhold it. A future HARD
+   * row puts allowAdvisory admissions OUTSIDE the C_max bound (ADR-0003
+   * §2.3) — that attribution is why this is an option, never a hardcoded
+   * `true`.
+   */
+  allowAdvisoryBudget?: boolean;
+  /**
    * The governor's LIMITS half for the fix run — the second
    * `governorConfig(runOptions, limits)` argument (`runOptions` above stays
    * the RunOptions half). Plain data; review-debt #137's arming surface for
@@ -274,6 +290,16 @@ export interface ReviewLoopOpts {
   dispatchLogPath: string;
   /** Root for the PR worktree (default: resolvePrWorktree's own). */
   worktreeRoot?: string;
+  /**
+   * Called after the governed fix run with the run's ACCOUNTED spend
+   * (`governor.usdSpent`, plus the token rollup total as the second
+   * argument — USD is 0 for an unpriced model, so tokens are what a sweep
+   * carries forward), even when the fix run throws (a `finally`
+   * report) — the propagated-spend channel a sweep uses to carry budget
+   * forward without a dispatch-log proxy (review-debt #186). Absent → no
+   * reporting.
+   */
+  onSpend?: (usd: number, tokens?: number) => void;
 }
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
@@ -329,6 +355,14 @@ export interface EnrichedFixItem {
   source: EnrichedSource;
   item: FixableReviewItem;
 }
+
+/**
+ * Σ of the frozen Usage fields — the governor's token-rollup fold (DD-9
+ * totalTokensOf), so a sweep decrements its token budget by exactly what the
+ * governor counted against the cap. Absent usage is 0.
+ */
+export const totalTokens = (usage: Usage | undefined): number =>
+  usage === undefined ? 0 : usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 
 /**
  * Correlate one ClassifiedItem against the fetched state and build the
@@ -520,12 +554,15 @@ const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
  * rejected before any git call), 'not-descendant' (the sha does not resolve
  * to a commit, is the before-head itself, or is not a STRICT descendant of
  * the before-head), 'not-ancestor' (not an ancestor of the pushed worktree
- * HEAD), 'attribution-missing' (the commit message does not name the item).
+ * HEAD), 'empty-diff' (the claimed commit changes no files), 'diff-unreadable'
+ * (git could not classify the diff), and 'attribution-missing' (the commit message does not name the item).
  */
 type CommitVerificationFailure =
   | 'not-40-hex'
   | 'not-descendant'
   | 'not-ancestor'
+  | 'empty-diff'
+  | 'diff-unreadable'
   | 'attribution-missing';
 
 /**
@@ -541,6 +578,8 @@ type CommitVerificationFailure =
  *     the pre-existing base commit is not a fix ('not-descendant');
  *   - `merge-base --is-ancestor <sha> HEAD` must exit 0 (the worktree HEAD
  *     is the exact tree the stage-5 publish pushed) ('not-ancestor');
+ *   - `git diff --quiet <sha>^..<sha>` must exit 1 for a non-empty change
+ *     (exit 0 is 'empty-diff'; an unexpected git failure is 'diff-unreadable');
  *   - PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
  *     worktree, so a sibling's strict-new commit would otherwise satisfy
  *     this item's gate — the commit MESSAGE must name THIS item's id at a
@@ -576,6 +615,13 @@ export const commitVerificationFailure = async (
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
   if (ancestor.code !== 0) {
     return 'not-ancestor';
+  }
+  const changed = await git(['-C', worktreePath, 'diff', '--quiet', `${sha}^..${sha}`]);
+  if (changed.code === 0) {
+    return 'empty-diff';
+  }
+  if (changed.code !== 1) {
+    return 'diff-unreadable';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this
@@ -808,16 +854,46 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   };
   // The LIMITS half rides opts.limits (review-debt #137): the review path's
   // arming surface for the wall-clock ladder — absent opts.limits keeps the
-  // historical no-ladder behavior ({}, the empty Limits half).
-  const governor = new BudgetGovernor(governorConfig(runOptions, opts.limits ?? {}));
+  // historical no-ladder behavior ({}, the empty Limits half). The ladder
+  // arms through the governor config: runPlan's governed dispatch reads
+  // governor.ladderSpec.
+  const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
-  const fixReport = withBudgetStop(
-    await runPlan(plan, runOptions, governRegistry(view, governor)),
-    plan,
-    governor,
-  );
+  const fixReport = await (async (): Promise<RunReport> => {
+    // Propagated accounted spend (review-debt #186): report the governor's
+    // observed USD rollup OUT of the loop even when the fix run throws, so a
+    // sweep can carry spend forward without a dispatch-log proxy.
+    try {
+      // ALWAYS governed: runPlan's governed dispatch owns admission, the
+      // ladder, the evidence folds, and the honest stop — its return IS the
+      // fix report. The operator's opt-ins ride the handle by explicit key
+      // (P7) — absent opts.governanceOptIn, refusals stand. The ADVISORY
+      // escape (A12c) rides opts.allowAdvisoryBudget — EXPLICIT and
+      // defaulting OFF (r1 M4): the shipped sweep passes true (unattended
+      // by design, every lane ADVISORY at v1.1), the journal records the
+      // 'product' provenance, and a caller that withholds the option
+      // refuses every fixer dispatch while its budgets stay enforced
+      // through the evidence folds and (W2.3) reservation capacity.
+      return await runPlan(plan, runOptions, view, {
+        governor,
+        allowAdvisory: opts.allowAdvisoryBudget === true,
+        ...(opts.allowAdvisoryBudget === true
+          ? { allowAdvisoryProvenance: 'product' as const }
+          : {}),
+        ...(opts.governanceOptIn !== undefined ? { optIn: opts.governanceOptIn } : {}),
+      });
+    } finally {
+      // A throwing observer must never mask the fix run's own outcome.
+      try {
+        opts.onSpend?.(governor.usdSpent, totalTokens(governor.usage));
+      } catch {
+        // Observers are advisory; swallow and let the original result/throw
+        // propagate untouched.
+      }
+    }
+  })();
   const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const headMoved =
     headBefore.code === 0 &&

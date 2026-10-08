@@ -24,6 +24,9 @@ truth; drivers never report trusted USD).
 
 - Values in `data.ts` are a snapshot **as-of 2026-09**, USD per million
   tokens, for the eval-matrix models (claude, gpt, glm, deepseek families).
+- The eval-matrix entries `deepseek-flash` and `glm-5.3-flash` were
+  transcribed from models.dev on **2026-09-21** (the fetch date is recorded
+  literally in `data.ts`'s `FETCHED:` line).
 - Refresh cadence (DD-8, the six-week staleness rule): re-verify on (a) the
   DD-8 cycle, (b) any eval-matrix model change, or (c) any work that depends
   on a price for admission/governance decisions. Refresh = re-transcribe the

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createCaptureBaseline } from '../../../src/ops/ratchet/captureBaseline.js';
 import type { SourceCatalog } from '../../../src/ops/ratchet/captureBaseline.js';
-import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
+import { registerAdapter } from '../../../src/ops/ratchet/metricRegistry.js';
 
 // Hoisted holders: the mock factory runs before module-scope declarations,
 // so the spies live here (vi.hoisted lifts this above the vi.mock call).

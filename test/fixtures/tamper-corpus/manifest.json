@@ -1,0 +1,318 @@
+{
+  "version": 1,
+  "modes": ["default-deny", "base-owned"],
+  "fixtures": [
+    {
+      "id": "inherited-01",
+      "path": "g1-binary-attribute.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-02",
+      "path": "g2-no-diff-attribute.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-03",
+      "path": "g3-textconv-attribute.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-04",
+      "path": "g4-rename-hides-delete.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-05",
+      "path": "g5-mnemonic-prefix.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-06",
+      "path": "inherited-06.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-07",
+      "path": "inherited-07.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-08",
+      "path": "inherited-08.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-09",
+      "path": "inherited-09.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "inherited-10",
+      "path": "inherited-10.diff",
+      "class": "git-plumbing",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s01-skip",
+      "path": "s01-skip.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s02-only",
+      "path": "s02-only.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s03-todo",
+      "path": "s03-todo.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s04-fails",
+      "path": "s04-fails.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s05-concurrent",
+      "path": "s05-concurrent.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s06-skip-if",
+      "path": "s06-skip-if.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s07-run-if",
+      "path": "s07-run-if.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s08-xit",
+      "path": "s08-xit.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s09-xdescribe",
+      "path": "s09-xdescribe.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s10-fit",
+      "path": "s10-fit.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s11-fdescribe",
+      "path": "s11-fdescribe.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s12-node-option",
+      "path": "s12-node-option.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s13-ts-nocheck",
+      "path": "s13-ts-nocheck.diff",
+      "class": "suppression",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s14-biome-ignore",
+      "path": "s14-biome-ignore.diff",
+      "class": "suppression",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s15-tautology",
+      "path": "s15-tautology.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s16-removed-it",
+      "path": "s16-removed-it.diff",
+      "class": "removed",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s17-removed-describe",
+      "path": "s17-removed-describe.diff",
+      "class": "removed",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s18-config-exclude",
+      "path": "s18-config-exclude.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s19-snapshot",
+      "path": "s19-snapshot.diff",
+      "class": "path",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s20-pass-with-no-tests",
+      "path": "s20-pass-with-no-tests.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s21-lint-disable",
+      "path": "s21-lint-disable.diff",
+      "class": "suppression",
+      "defaultDeny": "needs-human",
+      "baseOwned": "tamper",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s22-title-mangle",
+      "path": "s22-title-mangle.diff",
+      "class": "static",
+      "defaultDeny": "needs-human",
+      "baseOwned": "clean",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s23-jest-config",
+      "path": "s23-jest-config.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s24-vitest-config",
+      "path": "s24-vitest-config.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s25-tsconfig",
+      "path": "s25-tsconfig.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s26-gitattributes",
+      "path": "s26-gitattributes.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s27-package-script",
+      "path": "s27-package-script.diff",
+      "class": "config",
+      "defaultDeny": "needs-human",
+      "baseOwned": "needs-human",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s28-skipped-rise",
+      "path": "s28-skipped-rise.diff",
+      "class": "totals",
+      "defaultDeny": "needs-human",
+      "baseOwned": "regression",
+      "modes": ["default-deny", "base-owned"]
+    },
+    {
+      "id": "s29-count-drop",
+      "path": "s29-count-drop.diff",
+      "class": "totals",
+      "defaultDeny": "needs-human",
+      "baseOwned": "regression",
+      "modes": ["default-deny", "base-owned"]
+    }
+  ]
+}

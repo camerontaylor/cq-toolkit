@@ -10,15 +10,20 @@
 # workflows; this repo's other CI workflows — ci.yml, denylist.yml,
 # pack-audit.yml, install-matrix.yml — are likewise repo-owned).
 #
-# SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
-# secret with repo scope on the dispatching user's account (it creates
-# cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
+# SECRETS: this file carries NAMES only. GH_TOKEN must be a `drill`
+# environment secret with repo scope on the dispatching user's account (it
+# creates cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
 # scoped to the scratch repo(s) only — not the full account token: the drill
 # needs create/push/comment on one scratch repo and nothing else (the
 # names-only rule is unchanged; this line is about the secret's SCOPE).
 # The scratch repo is LEFT
 # BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
 # run_id per drill so the seeded fixtures are unambiguous.
+#
+# ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
+# `drill` (main-only branch policy, owner review allowed), which holds
+# GH_TOKEN, the drill PAT (RS-11 matrix row 6). A dispatch from any other
+# ref fails at job admission, before the secret is exposed.
 #
 # The vitest leg runs from source (no build): the live describe skips
 # cleanly unless LIVE_GH=1, and the precondition step below asserts the gate
@@ -44,14 +49,26 @@ concurrency:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   live-review:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: drill
     env:
       # Names only. GH_TOKEN is deliberately NOT here: it is scoped to the
-      # vitest step's env below, so npm ci's lifecycle scripts never see it
-      # (round-3 fix).
+      # vitest step's env below, so pnpm install's lifecycle scripts never
+      # see it (round-3 fix).
       LIVE_GH: '1'
       E5_RUN_ID: ${{ inputs.run_id }}
     steps:
@@ -64,17 +81,20 @@ jobs:
           # drill validates branches LOCALLY pre-merge; dispatch always runs
           # main's trusted code.
           ref: main
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false); gh rides
           # GH_TOKEN, not the checkout credential.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       # A misconfigured dispatch would otherwise be a green-skipped run (the
       # live describe skips without LIVE_GH) — refuse loudly before any live
       # call. GH_TOKEN's presence is asserted in the vitest step — the only
@@ -85,9 +105,9 @@ jobs:
       - name: Live review-loop e2e (test/e2e/review/live.test.ts)
         env:
           # Names only — scoped to THIS step on purpose (round-3 fix): the
-          # token must not reach npm ci's lifecycle scripts. Prefer the
+          # token must not reach pnpm install's lifecycle scripts. Prefer the
           # fine-grained, scratch-repo-scoped PAT from the header note.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
-          npx vitest run test/e2e/review/live.test.ts
+          pnpm exec vitest run test/e2e/review/live.test.ts

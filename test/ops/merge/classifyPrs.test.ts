@@ -60,9 +60,20 @@ import {
   REVIEW_ACCEPT_SETTLE_MS,
   defaultClassifyPrConfig,
 } from '../../../src/ops/merge/classify.config.js';
+import type { ClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../../../src/ops/review/threads.js';
+
+const agentMarker = (verdict: 'PASS' | 'HOLD' | 'RETRACT', headSha = 'a'.repeat(40)): string =>
+  `<!-- cq-agent-review: ${JSON.stringify({
+    version: 1,
+    reviewerAgentId: 'reviewer-agent',
+    authorAgentId: 'author-agent',
+    headSha,
+    verdict,
+    independent: true,
+  })} -->`;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -134,6 +145,93 @@ const candidate = (extra?: Partial<PrCandidate>): PrCandidate => ({
 /** A candidate past every blocking row: looked at, quiet, conflicts nowhere. */
 const settleCandidate = (extra?: Partial<PrCandidate>): PrCandidate =>
   candidate({ reviews: [approved()], ...extra });
+
+describe('same-account independent-agent acceptance', () => {
+  const authorReview = (body: string, extra?: Partial<ReviewSummary>): ReviewSummary => ({
+    id: 'PRR_author',
+    authorLogin: 'pr-author',
+    authorType: 'User',
+    authorAssociation: 'MEMBER',
+    state: 'COMMENTED',
+    body,
+    submittedAt: AFTER_COMMIT,
+    commitOid: 'a'.repeat(40),
+    ...extra,
+  });
+  const enabled: ClassifyPrConfig = {
+    ...defaultClassifyPrConfig,
+    allowSameAccountAgentReview: true,
+  };
+  const reviewed = (reviews: ReviewSummary[], config = enabled) =>
+    classifyPr(
+      candidate({ authorLogin: 'pr-author', headRefOid: 'a'.repeat(40), reviews }),
+      PENDING_MS,
+      config,
+    );
+
+  test('valid author-account PASS is accepted only with explicit opt-in', () => {
+    const review = authorReview(agentMarker('PASS'));
+    expect(reviewed([review]).reason).toBe('settle_window_pending');
+    expect(reviewed([review], defaultClassifyPrConfig).reason).toBe('no_acceptable_review');
+  });
+
+  test('plain author comments, stale heads, retractions, and explicit exclusions do not accept', () => {
+    expect(reviewed([authorReview('I reviewed this separately.')]).reason).toBe(
+      'no_acceptable_review',
+    );
+    expect(reviewed([authorReview(agentMarker('PASS', 'b'.repeat(40)))]).reason).toBe(
+      'no_acceptable_review',
+    );
+    expect(
+      reviewed([
+        authorReview(agentMarker('PASS'), { submittedAt: AFTER_COMMIT }),
+        authorReview(agentMarker('RETRACT'), { submittedAt: '2026-01-01T00:00:01Z' }),
+      ]).reason,
+    ).toBe('no_acceptable_review');
+    expect(
+      reviewed([authorReview(agentMarker('PASS'))], {
+        ...enabled,
+        excludedLogins: ['pr-author'],
+        automationLogin: 'pr-author',
+      }).reason,
+    ).toBe('no_acceptable_review');
+  });
+
+  test('attestations normalize bot suffixes for structural and explicit exclusions', () => {
+    const automationReview = authorReview(agentMarker('PASS'), { authorLogin: 'cq-automation' });
+    expect(
+      classifyPr(
+        candidate({
+          authorLogin: 'cq-automation',
+          headRefOid: 'a'.repeat(40),
+          reviews: [automationReview],
+        }),
+        PENDING_MS,
+        enabled,
+      ).reason,
+    ).toBe('no_acceptable_review');
+
+    expect(
+      reviewed([authorReview(agentMarker('PASS'))], {
+        ...enabled,
+        excludedLogins: ['PR-AUTHOR[bot]'],
+      }).reason,
+    ).toBe('no_acceptable_review');
+    expect(reviewed([authorReview(agentMarker('PASS'))]).reason).toBe('settle_window_pending');
+  });
+
+  test('a later same-login non-User reserved marker retracts an earlier PASS', () => {
+    expect(
+      reviewed([
+        authorReview(agentMarker('PASS')),
+        authorReview(agentMarker('PASS'), {
+          authorType: 'Bot',
+          submittedAt: '2026-01-01T00:00:01Z',
+        }),
+      ]).reason,
+    ).toBe('no_acceptable_review');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // The decision table, row by row (first match wins)
@@ -416,6 +514,24 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     );
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('settle_window_pending');
+  });
+
+  test('DISMISSED is void even when a hostile runtime config admits it (review r3)', () => {
+    // The dispatch boundary refuses DISMISSED in acceptReviewStates, and
+    // the TS union omits it — but classifyPr is a pure function any
+    // non-typechecked caller can invoke. stateCounts holds the doctrine
+    // directly: a retracted review is never acceptance evidence, whatever
+    // set reaches it. Row 7 fails on the only review → no_acceptable_review.
+    const result = classifyPr(
+      settleCandidate({ reviews: [approved({ id: 'PRR_2', state: 'DISMISSED' })] }),
+      SETTLED_MS,
+      {
+        ...defaultClassifyPrConfig,
+        acceptReviewStates: ['DISMISSED'],
+      } as unknown as ClassifyPrConfig,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
   });
 
   test('a CHANGES_REQUESTED review with an "LGTM" body never reaches the all-clear row — the objection row fires first', () => {

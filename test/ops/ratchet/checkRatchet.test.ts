@@ -47,8 +47,8 @@ import type { CheckRatchetInput } from '../../../src/ops/ratchet/checkRatchet.js
 import type { SourceCatalog } from '../../../src/ops/ratchet/captureBaseline.js';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
-import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
-import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/registry.js';
+import { registerAdapter } from '../../../src/ops/ratchet/metricRegistry.js';
+import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/metricRegistry.js';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
 const TARGET = 'typecheck';

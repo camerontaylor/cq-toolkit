@@ -2,9 +2,31 @@
 # the merge-queue branch at origin/main HEAD. See policy/templates/README.md
 # for the token table and the entitlement facts behind the queue design.
 #
-# Instantiate: replace {{PROMOTE_SECRET}} with the NAME of the repo secret
-# holding a PAT with contents:write (creating a branch is a write), then drop
-# the result into .github/workflows/ and run it once from the Actions tab.
+# The job runs in environment `automation` (main-only branch policy, W1.10
+# Decision 8), so a dispatch from any other ref fails at job admission,
+# before the credential is exposed.
+#
+# Interim fallback (W1.10 fix round): the automation credential is REQUIRED.
+# `{{INTERIM_SECRET}}` is used only while the explicit opt-in variable
+# `{{INTERIM_FALLBACK}}` is non-empty — an unset automation secret alone
+# never silently promotes the interim PAT into the automation identity.
+# Without a usable credential the checkout falls back to this job's read-only
+# GITHUB_TOKEN and the bootstrap push below fails loudly (a red run, no
+# branch created).
+#
+# Instantiate (each token below is written in double braces in the body):
+#   AUTOMATION_SECRET -> NAME of the secret holding the automation
+#                        credential with Contents write (creating a branch
+#                        is a write), e.g. CQ_AUTOMATION_TOKEN.
+#   INTERIM_SECRET    -> NAME of the secret used when AUTOMATION_SECRET is
+#                        empty AND the opt-in below is set (the interim
+#                        fallback), e.g. PROMOTE_TOKEN; the same name as
+#                        AUTOMATION_SECRET for none.
+#   INTERIM_FALLBACK  -> NAME of the repo VARIABLE that arms the interim
+#                        fallback when non-empty, e.g.
+#                        CQ_AUTOMATION_INTERIM_FALLBACK.
+# Then drop the result into .github/workflows/ and run it once from the
+# Actions tab.
 # The first bootstrap can equally be a plain
 #   git push origin origin/main:refs/heads/merge-queue
 # by an admin — this workflow exists so the bootstrap is repeatable and
@@ -19,21 +41,28 @@ permissions:
 
 jobs:
   init:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: automation
     steps:
-      # The checkout remote carries the promote PAT, so the branch-creating
+      # The checkout remote carries the automation credential, so the branch-creating
       # push below authenticates with it (a write needs more than
       # GITHUB_TOKEN's default contents:read grant here). Shallow is
       # enough: the only git work here is ls-remote, resolving main's tip,
       # and one ref push of a commit the server already has.
       # Pinned to an immutable commit SHA; persist-credentials deliberately
-      # stays ON here: this job pushes with the promote PAT and runs no repo
-      # code that could exfiltrate it.
-      - name: Check out the repo (tip only, promote-token remote)
+      # stays ON here: this job pushes with the automation credential and
+      # runs no repo code that could exfiltrate it.
+      - name: Check out the repo (tip only, automation-credential remote)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           fetch-depth: 1
-          token: ${{ secrets.{{PROMOTE_SECRET}} }}
+          token: ${{ secrets.{{AUTOMATION_SECRET}} || (vars.{{INTERIM_FALLBACK}} != '' && secrets.{{INTERIM_SECRET}} || '') }}
       - name: Bootstrap merge-queue at origin/main HEAD (idempotent)
         run: |
           set -euo pipefail

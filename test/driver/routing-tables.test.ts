@@ -3,8 +3,9 @@
 // The two agent lanes ship DUPLICATED endpoint data: the subprocess lane's
 // `defaultRoutingTable()` and the claude-agent lane's
 // `defaultEndpointTable()` both carry the zai / deepseek / anthropic
-// endpoints as plain serializable config (the subprocess table adds the
-// per-endpoint model allowlist its routeFor enforces; the claude-agent
+// endpoints as plain serializable config (the subprocess table keeps the
+// historical per-endpoint `models` rows as accepted-but-unenforced data —
+// the model allowlist check is retired, ADR-0002 §2.6, and the claude-agent
 // table is provider-only by the no-allowlist owner override). The tables
 // share no code, so nothing stopped a future rename — a new base URL, a
 // moved key env — from drifting ONE lane silently. This pin asserts the

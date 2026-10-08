@@ -1,0 +1,378 @@
+// T4.2 I1 conformance suite — test/cli/conformance.test.ts.
+//
+// The deliverable's sample: a PURE op, an AGENTIC-class op and a PLAN, each
+// through the REAL dispatcher (runCli over the repo's own registry), plus the
+// full result-taxonomy → exit-code matrix over the hermetic fixture family.
+// Pinned for every invocation:
+//   - stdout parses as JSON (the ONE artifact per invocation);
+//   - human narration touches stderr only (stdout never carries a `cq:` line);
+//   - `--json` keeps stderr EMPTY (machine mode);
+//   - each frozen taxonomy value maps to its exit code
+//     (ok→0; failed/indeterminate→1; needs-human/budget-exhausted→3), and an
+//     invalid op result (a status outside the frozen five) is exit 1 with an
+//     EMPTY stdout (no artifact ever existed).
+//
+// Hermetic throughout: the AGENTIC sample is `sweep.unit` with no driver/check
+// config — the binding refusal fires BEFORE any spawn — and the plan runs two
+// fixture ops (test/fixtures/cli-ops) through the governed kernel, so no
+// network, model, or real filesystem target is touched. Deterministic: tmp
+// dirs only, cleaned up.
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, test } from 'vitest';
+import { runCli } from '../../src/cli/main.js';
+import type { CliIo } from '../../src/cli/output.js';
+import { RunReportSchema } from '../../src/kernel/schema.js';
+import { stripComments } from '../helpers/strip-comments.js';
+
+const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
+const OPS_SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src/ops');
+
+/**
+ * The factory rule's static half (ADR-0002 §2.5), checked on the live tree:
+ * NO file under src/ops may import a lane module — statically or via an
+ * import() expression. Ops resolve drivers through the DriverFactory; a
+ * direct lane import would bypass the served-model wrapper and the
+ * plan-data-never-names-an-executable bound.
+ */
+async function laneImports(directory: string, root = directory): Promise<string[]> {
+  const hits: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      hits.push(...(await laneImports(path, root)));
+    } else if (entry.name.endsWith('.ts')) {
+      // Tokenize before matching (a JSDoc mention of a lane module is
+      // prose, not an import edge). The single-pass scanner keeps literal
+      // contents VERBATIM — erasing them would erase the quoted specifiers
+      // this scan matches on — while dropping both comment forms. The
+      // specifier class covers single/double quotes AND constant
+      // template literals (a backtick import is still an import edge).
+      const source = stripComments(await readFile(path, 'utf8'));
+      if (
+        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
+          source,
+        )
+      ) {
+        // Relative to the scan root (kept through the recursion), so a
+        // fixture scan names its files exactly like the live tree names.
+        hits.push(path.slice(root.length + 1));
+      }
+    }
+  }
+  return hits.sort();
+}
+
+interface CapturedRun {
+  code: number;
+  out: string;
+  err: string;
+}
+
+/** Run the CLI over argv with a fake CliIo, returning {code, out, err}. */
+async function capture(argv: string[], opts?: { opsRoot?: string }): Promise<CapturedRun> {
+  const outChunks: string[] = [];
+  const errChunks: string[] = [];
+  const io: CliIo = {
+    stdout: (chunk) => outChunks.push(chunk),
+    stderr: (chunk) => errChunks.push(chunk),
+  };
+  const code = await runCli(argv, io, opts);
+  return { code, out: outChunks.join(''), err: errChunks.join('') };
+}
+
+const tmpDirs: string[] = [];
+afterEach(async () => {
+  while (tmpDirs.length > 0) {
+    const dir = tmpDirs.pop();
+    if (dir !== undefined) await rm(dir, { recursive: true, force: true });
+  }
+});
+
+describe('taxonomy → exit code + I1 streams (fixture family)', () => {
+  const cases = [
+    { argv: ['echo', '--msg=hi'], status: 'ok', code: 0 },
+    { argv: ['boom'], status: 'failed', code: 1 },
+    { argv: ['indet'], status: 'indeterminate', code: 1 },
+    { argv: ['needshuman'], status: 'needs-human', code: 3 },
+    { argv: ['budget'], status: 'budget-exhausted', code: 3 },
+  ] as const;
+
+  test.each(cases)('$status → exit $code', async ({ argv, status, code }) => {
+    const { code: actual, out, err } = await capture([...argv], { opsRoot: fixtureOps });
+    expect(actual).toBe(code);
+    const parsed: unknown = JSON.parse(out);
+    expect(parsed).toMatchObject({ status });
+    // Narration is stderr-only and failures-only.
+    if (status !== 'ok') {
+      expect(err).toContain(`cq: ${argv[0]}: ${status}`);
+    } else {
+      expect(err).toBe('');
+    }
+    expect(out).not.toContain('cq:');
+  });
+
+  test('an invalid op result never reaches stdout: exit 1, empty stdout', async () => {
+    const { code, out, err } = await capture(['garbage'], { opsRoot: fixtureOps });
+    expect(code).toBe(1);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid result/);
+  });
+
+  test('--json suppresses narration (stderr empty) while keeping the artifact', async () => {
+    const { code, out, err } = await capture(['boom', '--json'], { opsRoot: fixtureOps });
+    expect(code).toBe(1);
+    expect(err).toBe('');
+    expect(JSON.parse(out)).toMatchObject({ status: 'failed' });
+  });
+
+  test('usage errors are exit 2 with EMPTY stdout (unknown subcommand and schema-invalid input)', async () => {
+    const unknown = await capture(['no-such-op'], { opsRoot: fixtureOps });
+    expect(unknown.code).toBe(2);
+    expect(unknown.out).toBe('');
+    expect(unknown.err).toMatch(/unknown subcommand/);
+
+    // Schema-invalid input (missing required field) → exit 2, no op ran.
+    const missing = await capture(['echo'], { opsRoot: fixtureOps });
+    expect(missing.code).toBe(2);
+    expect(missing.out).toBe('');
+    expect(missing.err).toMatch(/invalid input for 'echo'/);
+
+    // The REAL registry's strict schema: an object-typed field handed a
+    // non-object fails the same way (exit 2, empty stdout).
+    const real = await capture(['gates.regressionGate', '--base=not-an-object']);
+    expect(real.code).toBe(2);
+    expect(real.out).toBe('');
+    expect(real.err).toMatch(/invalid input for 'gates.regressionGate'/);
+  });
+});
+
+describe('sample: pure op through the real registry', () => {
+  test('gates.regressionGate: JSON stdout, silent stderr, exit 0', async () => {
+    const empty = '{"tool":"tsc","failures":[],"exitCode":0}';
+    const { code, out, err } = await capture([
+      'gates.regressionGate',
+      `--base=${empty}`,
+      `--final=${empty}`,
+    ]);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toMatchObject({
+      status: 'ok',
+      value: { verdict: 'no-regression' },
+    });
+    expect(err).toBe(''); // ok rows are silent in human mode
+  });
+
+  test('an indeterminate pure result narrates on stderr and exits 1', async () => {
+    // An unobservable exit code (null) is I5 non-passing evidence → indeterminate.
+    const { code, out, err } = await capture([
+      'gates.regressionGate',
+      '--base={"tool":"tsc","failures":[],"exitCode":null}',
+      '--final={"tool":"tsc","failures":[],"exitCode":0}',
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(out)).toMatchObject({ status: 'indeterminate' });
+    expect(err).toContain('cq: gates.regressionGate: indeterminate');
+  });
+});
+
+describe('sample: agentic-class op through the real registry', () => {
+  test('no src/ops module imports a lane module — static or dynamic (the factory rule)', async () => {
+    expect(await laneImports(OPS_SRC)).toEqual([]);
+  });
+
+  test('the scan also catches a constant template-literal specifier (PR #238 review round 2)', async () => {
+    // A backtick import is still an import edge: the matcher accepts
+    // single-quoted, double-quoted AND constant template-literal
+    // specifiers, so ``await import(`…driver/acp/…`)`` cannot bypass the
+    // ops-to-lane guard.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-lane-import-tick-'));
+    try {
+      await writeFile(
+        join(scratch, 'backtick.ts'),
+        'const mod = await import(`../../driver/acp/index.js`);\nexport default mod;\n',
+      );
+      await writeFile(
+        join(scratch, 'quoted.ts'),
+        "import x from '../../driver/subprocess/index.js';\nexport default x;\n",
+      );
+      // A nested hit is named relative to the SCAN ROOT (the root threads
+      // through the recursion), matching the live tree's naming.
+      await mkdir(join(scratch, 'nested'), { recursive: true });
+      await writeFile(
+        join(scratch, 'nested', 'deep.ts'),
+        'const mod = await import(`../../driver/ai-sdk/index.js`);\nexport default mod;\n',
+      );
+      expect(await laneImports(scratch)).toEqual([
+        'backtick.ts',
+        join('nested', 'deep.ts'),
+        'quoted.ts',
+      ]);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('sweep.unit without a driver config fails honestly before any spawn', async () => {
+    const { code, out, err } = await capture([
+      'sweep.unit',
+      '--repoRoot=/nonexistent/conformance-repo',
+      '--worktreesDir=/nonexistent/conformance-wt',
+      '--runPrefix=cq/conformance',
+      '--base=origin/main',
+      '--package=pkg',
+      '--fixer=fixer',
+      '--files=["a.ts"]',
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(out)).toMatchObject({ status: 'failed' });
+    expect(err).toContain('cq: sweep.unit: failed');
+    expect(out).not.toContain('cq:');
+  });
+});
+
+describe('sample: plan through the governed kernel', () => {
+  test('run-plan over the fixture ops yields a RunReport artifact + stderr narration', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-plan-'));
+    tmpDirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    await writeFile(
+      planPath,
+      JSON.stringify({
+        id: 'conformance-plan',
+        jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+      }),
+      'utf8',
+    );
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${fixtureOps}`,
+    ]);
+    expect(code).toBe(0);
+    const report = JSON.parse(out) as { runId: string; stoppedEarly: boolean; jobs: unknown[] };
+    // The kernel decorates the plan id into a unique run id — assert the
+    // prefix, not the volatile suffix.
+    expect(report.runId.startsWith('conformance-plan')).toBe(true);
+    expect(report.stoppedEarly).toBe(false);
+    expect(report).toHaveProperty('jobs.0.result.status', 'ok');
+    // The counts summary always reaches stderr (failures-only rows + summary).
+    expect(err).toContain('cq: done 1');
+  });
+
+  test('run-plan --json keeps stderr empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-plan-json-'));
+    tmpDirs.push(dir);
+    const planPath = join(dir, 'plan.json');
+    await writeFile(
+      planPath,
+      JSON.stringify({
+        id: 'conformance-plan-json',
+        jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+      }),
+      'utf8',
+    );
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${fixtureOps}`,
+      '--json',
+    ]);
+    expect(code).toBe(0);
+    expect(err).toBe('');
+    expect(JSON.parse(out)).toHaveProperty('jobs.0.result.status', 'ok');
+  });
+});
+
+describe('sample: plan subcommands through the governed kernel (T4.3)', () => {
+  test("review-loop's empty floor yields one RunReport artifact, exit 0", async () => {
+    const { code, out, err } = await capture(['review-loop', '--json']);
+    expect(code).toBe(0);
+    // Machine mode: narration is suppressed entirely.
+    expect(err).toBe('');
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.jobs).toEqual([]);
+    expect(report.runId.startsWith('review-loop--')).toBe(true);
+  });
+
+  test('a plan subcommand is resolved only after the op registry misses', async () => {
+    // 'no-such-plan' is neither an op nor a discovered plan → the documented
+    // unknown-subcommand usage path (exit 2, NO stdout artifact).
+    const { code, out, err } = await capture(['no-such-plan'], { opsRoot: fixtureOps });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/unknown subcommand/);
+  });
+
+  test('a plan subcommand rejects --plan (its plan comes from the registry)', async () => {
+    const { code, out, err } = await capture(['sweep', '--plan=x.json'], { opsRoot: fixtureOps });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'sweep'/);
+  });
+
+  test('a plan subcommand rejects the run-plan-reserved --ops-root', async () => {
+    // --ops-root is a run-plan flag (the repo's CLI rule): the plan surface
+    // does not own it, so it is a usage error, never a silently accepted flag.
+    const { code, out, err } = await capture(['sweep', '--ops-root=/tmp/x']);
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/--ops-root is a run-plan flag/);
+  });
+});
+
+describe('plan-registry defects degrade help, never break it (T4.3)', () => {
+  test('global --help stays exit 0 (op-only) and narrates a broken plan registry', async () => {
+    // A broken plan module must not turn pure help into a failure: the help
+    // surface degrades to the op subcommands and the skip is narrated.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-badplans-'));
+    tmpDirs.push(dir);
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
+    await writeFile(join(dir, 'broken.js'), "throw new Error('broken plan module');\n");
+    const outChunks: string[] = [];
+    const errChunks: string[] = [];
+    const io: CliIo = {
+      stdout: (chunk) => outChunks.push(chunk),
+      stderr: (chunk) => errChunks.push(chunk),
+    };
+    const code = await runCli(['--help'], io, { plansRoot: dir });
+    expect(code).toBe(0);
+    expect(outChunks.join('')).toContain('run-plan');
+    expect(errChunks.join('')).toMatch(/plan registry scan failed/);
+  });
+
+  test('a malformed registry floor is a usage error (exit 2), not a kernel throw', async () => {
+    // The floor is validated with the same PlanSchema run-plan applies to a
+    // plan FILE, so malformed plan data exits 2 with no artifact — it never
+    // reaches the kernel as an opaque throw.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-badfloor-'));
+    tmpDirs.push(dir);
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
+    await writeFile(
+      join(dir, 'badfloor.js'),
+      "export const plan = { name: 'badfloor', importer: async () => ({ id: 'badfloor' }) };\n",
+    );
+    // Machine mode: exit 2, EMPTY stdout and stderr (narration suppressed).
+    const jsonOut: string[] = [];
+    const jsonErr: string[] = [];
+    const jsonIo: CliIo = {
+      stdout: (chunk) => jsonOut.push(chunk),
+      stderr: (chunk) => jsonErr.push(chunk),
+    };
+    expect(await runCli(['badfloor', '--json'], jsonIo, { plansRoot: dir })).toBe(2);
+    expect(jsonOut.join('')).toBe('');
+    expect(jsonErr.join('')).toBe('');
+    // Human mode narrates the input-class reason.
+    const humanOut: string[] = [];
+    const humanErr: string[] = [];
+    const humanIo: CliIo = {
+      stdout: (chunk) => humanOut.push(chunk),
+      stderr: (chunk) => humanErr.push(chunk),
+    };
+    expect(await runCli(['badfloor'], humanIo, { plansRoot: dir })).toBe(2);
+    expect(humanOut.join('')).toBe('');
+    expect(humanErr.join('')).toMatch(/registry floor is not a valid plan/);
+  });
+});

@@ -7,7 +7,7 @@
 //
 //   LIVE_GH=1  +  GH_TOKEN in the environment
 //
-// Plain `npm run test` SKIPS the whole suite (describe.skip); the skip is
+// Plain `pnpm run test` SKIPS the whole suite (describe.skip); the skip is
 // the default gate's contract. One top-level test runs the drill as a
 // sequenced log (every step asserts and logs via console.error so the
 // output reads as a drill log), with a generous per-test timeout.
@@ -123,14 +123,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
+import { createDriverFactory } from '../../../src/driver/factory.js';
 import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
 import { realMergeEffects } from '../../../src/ops/merge/effects.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
-import {
-  MergeConflictDecisionSchema,
-  makeResolveConflictOp,
-} from '../../../src/ops/merge/resolveConflict.js';
+import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
 import { runMergePrs } from '../../../src/ops/merge/runPrs.js';
 import type { MergePrsCandidate } from '../../../src/ops/merge/runPrs.js';
 import type { ReviewSummary } from '../../../src/ops/review/threads.js';
@@ -452,7 +449,7 @@ const reportSummary = (report: ExecutionReport): string =>
     let scratchDir: string | undefined;
 
     // Env vars this suite mutates, snapshotted for the afterAll restore:
-    // under LIVE_GH=1 npm run test the SAME vitest worker runs the rest of
+    // under LIVE_GH=1 pnpm run test the SAME vitest worker runs the rest of
     // the suite — a leaked GH_REPO would silently aim every later test's gh
     // spawn at the long-gone scratch repo (r2 review).
     let savedEnv: Record<string, string | undefined>;
@@ -715,14 +712,24 @@ const reportSummary = (report: ExecutionReport): string =>
         await chmod(agentPath, 0o755);
         const sessionsDir = join(scratchDir, 'sessions');
         await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
-        const driver = new SubprocessDriver({
-          binary: agentPath,
-          outputSchema: MergeConflictDecisionSchema,
-          sessionsDir,
-          routingTable: FAKE_ROUTING_TABLE,
+        // The DRIVER FACTORY binds the fixture's fake route (ADR-0002
+        // §2.5): role 'conflict-resolver' + provider 'f5fake' → the
+        // subprocess lane over the scripted agent binary. The decision
+        // schema rides the invocation's outputSchema (the op renders it),
+        // so the lane config carries only its transport knobs; the factory
+        // owns the served-model assertion.
+        const drivers = createDriverFactory({
+          bindings: { 'conflict-resolver': { f5fake: 'subprocess' } },
+          lanes: {
+            subprocess: {
+              binary: agentPath,
+              sessionsDir,
+              routingTable: FAKE_ROUTING_TABLE,
+            },
+          },
         });
-        const resolveOp = makeResolveConflictOp({ driver, sessionsDir });
-        log('step 5 scripted conflict agent + SubprocessDriver wired (fake f5fake route)');
+        const resolveOp = makeResolveConflictOp({ drivers });
+        log('step 5 scripted conflict agent bound through the driver factory (fake f5fake route)');
 
         // --- STEP 6: RUN THE PLAN TO CONVERGENCE --------------------------------
         const allThreeMerged = async (): Promise<boolean> => {
@@ -753,7 +760,6 @@ const reportSummary = (report: ExecutionReport): string =>
               resolveConcurrency: 2,
               nowMs: Date.now(),
               modelSpec: { model: 'f5fake-model', provider: 'f5fake' },
-              sessionsDir,
             },
             {
               effects: realMergeEffects({ repoRoot: cloneDir }),

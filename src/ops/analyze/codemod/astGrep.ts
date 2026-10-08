@@ -59,6 +59,19 @@ import { resolve } from 'node:path';
 import type { Op } from '../../../kernel/types.js';
 import type { RawCheckOutput, RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
+import type {
+  ApprovalAuthority,
+  ApprovalSubject,
+  ApprovedMutation,
+  ExercisedScope,
+} from '../approval.js';
+import {
+  approvalInputDigest,
+  canonicalWorkspace,
+  DENY_ALL_APPROVALS,
+  isExercisedScope,
+  withApprovedMutation,
+} from '../approval.js';
 import { contentDigest } from '../renderAnalysisReport.js';
 
 /**
@@ -419,6 +432,66 @@ function diffSegments(currentBytes: Uint8Array, edits: readonly PlannedEdit[]): 
       blocks.push({ startLine, endLine, edits: [edit] });
     }
   }
+  // NEWLINE-JOIN EXTENSION (review-debt #159): a plan that deletes or
+  // replaces ONLY a block's trailing newline JOINS the block's last line
+  // with the next one — rendered as a one-line block, the join is invisible
+  // (the joined neighbor appears as unchanged context and the resulting
+  // line is never shown). When the spliced block bytes lose the trailing
+  // newline their old bytes had and a next line exists, extend the block
+  // over the joined line — the edits' relative offsets stay valid (they
+  // sit inside the old block, a subset of the extended range) — then
+  // re-merge blocks the extension made to touch. Display-only cost: the
+  // segments walk below re-splices each block (the write path splices the
+  // whole file once, independently of this renderer).
+  for (const block of blocks) {
+    const delEnd = Math.min(block.endLine, oldLines.length);
+    const lastLine = oldLines[delEnd - 1];
+    if (lastLine === undefined || !lastLine.endsWithNewline || delEnd >= oldLines.length) {
+      continue;
+    }
+    const blockStart = lineStarts[block.startLine] as number;
+    const blockEnd =
+      (lineStarts[delEnd - 1] as number) +
+      Buffer.byteLength(lastLine.text, 'utf8') +
+      (lastLine.endsWithNewline ? 1 : 0);
+    const spliced = applyEditsToBytes(
+      currentBytes.subarray(blockStart, blockEnd),
+      block.edits.map((edit) => ({
+        ...edit,
+        startByte: edit.startByte - blockStart,
+        endByte: edit.endByte - blockStart,
+      })),
+    );
+    // Zero-width boundary-insertion blocks (the defensive branch above)
+    // also pass through here, and the extension is what makes them render
+    // at all: an insertion BETWEEN newline-terminated lines probes an EMPTY
+    // window (blockStart == blockEnd at the boundary), so the spliced text
+    // is the bare insertion — non-empty, newline-less — and the block
+    // extends over the FOLLOWING line, rendering `-line` / `+Xline` (which
+    // fixes the old invisible-prepend rendering). An EOF insertion into a
+    // file NOT ending in a newline never reaches the extension (the
+    // `!lastLine.endsWithNewline` guard skips it — the rewrite there comes
+    // from the pre-existing EOF clamp).
+    // Extend ONLY on a true JOIN: the spliced content must be non-empty
+    // (a block whose bytes were deleted outright — a full-line deletion —
+    // joins nothing; the next line merely moves up and must stay context)
+    // and must have lost the trailing newline (the newline the old block
+    // carried is what glued it to the next line).
+    const splicedText = Buffer.from(spliced).toString('utf8');
+    if (splicedText !== '' && !splicedText.endsWith('\n')) block.endLine += 1;
+  }
+  const merged: typeof blocks = [];
+  for (const block of blocks) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && block.startLine <= last.endLine) {
+      last.endLine = Math.max(last.endLine, block.endLine);
+      last.edits.push(...block.edits);
+    } else {
+      merged.push(block);
+    }
+  }
+  blocks.length = 0;
+  blocks.push(...merged);
   const segments: DiffLine[] = [];
   let oldLine = 0;
   for (const block of blocks) {
@@ -610,6 +683,31 @@ export type CodemodReport =
 export function makeAstGrepCodemod(
   run: RunCheck,
   storeFor: (input: AstGrepCodemodInput) => AnalyzeFileStore,
+  /**
+   * The ADR-0003 authority this op's WRITE is authorized by. Defaults to the
+   * DENY-ALL authority: with nothing bound, an apply is refused
+   * `needs-human` at the mutation and `approved: true` writes nothing. That
+   * default is the whole point of the third parameter — this op is a
+   * REGISTRY ENTRY, so untrusted plan JSON can name it, and before the
+   * authority existed its `approved` boolean was sufficient on its own. The
+   * flag is now necessary-but-not-sufficient, exactly as it is in
+   * `applyRemediation`; nothing derives an authority from the input.
+   */
+  approval: ApprovalAuthority = DENY_ALL_APPROVALS,
+  /**
+   * NESTED composition only (ADR-0003 §6): a scope from an OUTER approved
+   * mutation — the playbook dispatch, which drives this primitive to apply a
+   * playbook's rule. Passing it means "an approval for this workspace is
+   * already consumed and its lock is already held", so this write proceeds
+   * under that lock WITHOUT exercising a second approval. Omit it when
+   * driving the op directly; then this op must exercise its own approval,
+   * which a default-deny authority refuses.
+   *
+   * A forged value cannot pass {@link isExercisedScope} — the brand is only
+   * minted inside a live critical section — and a scope is not
+   * serializable, so plan JSON cannot carry one.
+   */
+  inherited?: ExercisedScope,
 ): Op<AstGrepCodemodInput, CodemodReport> {
   return async (input) => {
     // The approval gate is FIRST — before the store resolves, before any
@@ -618,7 +716,7 @@ export function makeAstGrepCodemod(
       return {
         status: 'needs-human',
         reason:
-          'codemod apply requires an explicit approval flag — remediation is never auto-applied; pass { approved: true } (or dryRun: true to preview the diffs)',
+          'codemod apply requires an explicit approval flag — remediation is never auto-applied; pass { approved: true } (or dryRun: true to preview the diffs). That flag is necessary but NOT sufficient: the write is additionally authorized by an approval token exercised at the mutation (ADR-0003)',
       };
     }
     // The 'at least one file' rule is enforced HERE too, not only at the
@@ -724,6 +822,25 @@ export function makeAstGrepCodemod(
         },
       };
     }
+    // NOTHING TO APPROVE (the honest empty apply): a plan with zero edits
+    // writes no byte, so demanding — and spending — an approval token for it
+    // would refuse a no-op (`needs-human`) that nothing on disk contradicts,
+    // and would burn a token an operator can never re-use for the real run.
+    // This is the same rule applyRemediation states for its empty plan. The
+    // A16/deny-all boundary is untouched: it guards MUTATIONS, and an empty
+    // plan is not one.
+    if (plannedEdits.length === 0) {
+      return {
+        status: 'ok',
+        value: {
+          mode: 'applied',
+          plannedEdits: 0,
+          unfixedMatches: scan.outcome.unfixedMatches,
+          files: [],
+          ...(note === undefined ? {} : { note }),
+        },
+      };
+    }
     // SPLICING IS PREFLIGHTED (the applyRemediation treatment, Y1/Y2):
     // every target's remediated bytes (and diffs) are computed — pure, no
     // writes — before the write phase begins, so a splice/render fault
@@ -750,76 +867,179 @@ export function makeAstGrepCodemod(
       }
     }
     const appliedFiles: CodemodFileApplied[] = [];
-    for (const item of pending) {
-      const file = item.file;
-      try {
-        await store.writeBytes(file, item.after);
-      } catch (err) {
-        // BEST-EFFORT ROLLBACK, and ONLY for write-phase faults (a splice
-        // fault can never land here — the preflight above caught it with
-        // nothing written). The faulted file itself may hold a PARTIAL
-        // write (writeFileSync is not atomic) and every already-written
-        // file's ORIGINAL bytes are still in `current` (freshness-verified
-        // pre-scan), so both are restored newest-first through the same
-        // store before faulting. When a rollback restore faults, the
-        // already-written wording survives, the restore failure is named,
-        // and STRANDED is the exact disjoint complement — applied minus
-        // restored (a restored file is listed ONLY under restored; Y1) —
-        // so the caller always knows the exact on-disk state.
-        const rolledBack: string[] = [];
-        const rollbackFaults: string[] = [];
-        let faultedFileRestoreFailed = '';
+    // THE WRITE, as ONE unit, factored so the same body serves both callers:
+    // an outer approved mutation (which hands us an inherited scope and is
+    // already inside the workspace lock) and a direct apply (which must
+    // exercise this op's own approval first).
+    const writePhase = async (): Promise<CodemodFileApplied[]> => {
+      for (const item of pending) {
+        const file = item.file;
         try {
-          await store.writeBytes(file, current.get(file) as Uint8Array);
-        } catch (restoreErr) {
-          faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
-        }
-        for (const applied of [...appliedFiles].reverse()) {
+          await store.writeBytes(file, item.after);
+        } catch (err) {
+          // BEST-EFFORT ROLLBACK, and ONLY for write-phase faults (a splice
+          // fault can never land here — the preflight above caught it with
+          // nothing written). The faulted file itself may hold a PARTIAL
+          // write (writeFileSync is not atomic) and every already-written
+          // file's ORIGINAL bytes are still in `current` (freshness-verified
+          // pre-scan), so both are restored newest-first through the same
+          // store before faulting. When a rollback restore faults, the
+          // already-written wording survives, the restore failure is named,
+          // and STRANDED is the exact disjoint complement — applied minus
+          // restored (a restored file is listed ONLY under restored; Y1) —
+          // so the caller always knows the exact on-disk state.
+          const rolledBack: string[] = [];
+          const rollbackFaults: string[] = [];
+          let faultedFileRestoreFailed = '';
           try {
-            await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
-            rolledBack.push(applied.file);
-          } catch (rollbackErr) {
-            rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+            await store.writeBytes(file, current.get(file) as Uint8Array);
+          } catch (restoreErr) {
+            faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
           }
+          for (const applied of [...appliedFiles].reverse()) {
+            try {
+              await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
+              rolledBack.push(applied.file);
+            } catch (rollbackErr) {
+              rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+            }
+          }
+          if (rollbackFaults.length === 0) {
+            const rolledBackNote =
+              rolledBack.length === 0
+                ? 'no earlier files to roll back'
+                : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
+            throw new CodemodWriteFault(
+              `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
+            );
+          }
+          const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
+          const stranded = appliedFiles
+            .map((applied) => applied.file)
+            .filter((written) => !rolledBack.includes(written));
+          throw new CodemodWriteFault(
+            `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+          );
         }
-        if (rollbackFaults.length === 0) {
-          const rolledBackNote =
-            rolledBack.length === 0
-              ? 'no earlier files to roll back'
-              : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
-          return {
-            status: 'failed',
-            error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
-          };
-        }
-        const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
-        const stranded = appliedFiles
-          .map((applied) => applied.file)
-          .filter((file) => !rolledBack.includes(file));
+        appliedFiles.push({
+          file,
+          edits: item.edits,
+          diff: item.diff,
+          digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
+        });
+      }
+      return appliedFiles;
+    };
+    // NESTED (ADR-0003 §6): an outer approval is already consumed and already
+    // holds this workspace's lock, so the write proceeds under it WITHOUT a
+    // second exercise — re-exercising would throw on at-most-once.
+    if (inherited !== undefined) {
+      if (!isExercisedScope(inherited)) {
+        // A value this module did not mint, OR one whose originating section
+        // has already settled (a retained scope). It is REFUSED, never
+        // ignored: ignoring it would fall through to authorizing the write on
+        // the input flag alone, which is the exact hole this change closes.
         return {
           status: 'failed',
-          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+          error:
+            'ast-grep codemod: the inherited approval scope is not live — it was either not minted by the approval module or its critical section has already ended; refused rather than ignored, because ignoring it would fall through to authorizing the write on the input flag alone',
         };
       }
-      appliedFiles.push({
-        file,
-        edits: item.edits,
-        diff: item.diff,
-        digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
-      });
+      // WORKSPACE IDENTITY. The scope authorizes ONE workspace; a nested
+      // op aimed at a different tree is not covered by it, whatever the
+      // caller intends. Compared canonically, so a symlinked spelling of the
+      // same tree (or /var vs /private/var) is recognized as the SAME
+      // workspace rather than diverging on the string.
+      const here = canonicalWorkspace(input.dir);
+      const covered = canonicalWorkspace(inherited.workspace);
+      if (here !== covered) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: the inherited approval covers workspace '${covered}', but this op targets '${here}' — an inherited scope authorizes exactly the workspace it was minted for; refused, and nothing was written`,
+        };
+      }
+      // TARGET CONTAINMENT. The approval covered a specific target set; a
+      // nested op reaching for ANY file outside it exceeds what was approved
+      // even though the workspace matches.
+      const approvedTargets = new Set(inherited.targets);
+      const outside = pending.map((item) => item.file).filter((file) => !approvedTargets.has(file));
+      if (outside.length > 0) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: the inherited approval covered [${inherited.targets.join(', ')}] but this op would also write [${outside.join(', ')}] — an inherited scope authorizes exactly the targets it was minted for; refused, and nothing was written`,
+        };
+      }
+      try {
+        await writePhase();
+      } catch (err) {
+        if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
+        throw err;
+      }
+      return {
+        status: 'ok',
+        value: {
+          mode: 'applied',
+          plannedEdits: plannedEdits.length,
+          unfixedMatches: scan.outcome.unfixedMatches,
+          files: appliedFiles,
+          ...(note === undefined ? {} : { note }),
+        },
+      };
     }
+    // DIRECT: exercise this op's OWN approval at the mutation. With the
+    // default deny-all authority this is where a plan-JSON `approved: true`
+    // stops — the flag is necessary but never sufficient.
+    const subject: ApprovalSubject = {
+      op: 'analyze.astGrepCodemod',
+      workspace: input.dir,
+      targets: pending.map((item) => item.file),
+      inputDigest: approvalInputDigest({
+        dir: input.dir,
+        rule: input.rule,
+        files: input.files,
+        dryRun: input.dryRun,
+        timeoutMs: input.timeoutMs,
+      }),
+    };
+    // Whether the approved WRITE was entered — the callback runs only after
+    // the exercise granted, so it separates an acquire-side fault (token
+    // UNSPENT) from a release-side one (token spent, files may have landed).
+    let writeEntered = false;
+    let written: ApprovedMutation<CodemodFileApplied[]>;
+    try {
+      written = await withApprovedMutation(approval, subject, () => {
+        writeEntered = true;
+        return writePhase();
+      });
+    } catch (err) {
+      if (err instanceof CodemodWriteFault) return { status: 'failed', error: err.message };
+      // A LOCK FAULT is a RESULT, not an escape (the applyRemediation rule):
+      // a release fault can follow a complete write, and rejecting would
+      // leave the caller with no evidence that the workspace changed.
+      const tokenFate = writeEntered
+        ? 'the approval WAS exercised, so the token is spent'
+        : 'the approval was NOT exercised (the fault hit before the write), so the token is UNSPENT';
+      return {
+        status: 'failed',
+        error: `ast-grep codemod: the workspace mutation lock faulted during the approved apply — ${messageOf(err)}. ${tokenFate}, and the write set was ${pending.map((item) => `'${item.file}'`).join(', ')} — a lock fault proves neither that any of them was written nor that none was, so inspect the workspace before re-running; this is NOT an approval refusal`,
+      };
+    }
+    if (written.status === 'needs-human') return { status: 'needs-human', reason: written.reason };
     return {
       status: 'ok',
       value: {
         mode: 'applied',
         plannedEdits: plannedEdits.length,
         unfixedMatches: scan.outcome.unfixedMatches,
-        files: appliedFiles,
+        files: written.value,
         ...(note === undefined ? {} : { note }),
       },
     };
   };
 }
+
+/** A write-phase fault (carrying its rollback evidence) thrown out of the write unit. */
+class CodemodWriteFault extends Error {}
 
 // No default export here, deliberately: like the ledger family's make*
 // ops, the registry importer COMPOSES this op from the named factory plus

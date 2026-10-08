@@ -6,9 +6,13 @@
 // schemas are registry-time mirrors of the ops' inputs and live HERE (the
 // shared spot — the gates precedent, src/ops/README.md's family-registry
 // convention) because `inputSchema` must exist eagerly while the ops may be
-// lazy. Module scope imports only zod, kernel types, and TYPES from the
-// family modules (type-only imports are erased at compile time): loading
-// the registry never loads an op module, the driver, or the gh transport.
+// lazy. Module scope imports zod, kernel types, TYPES from the family
+// modules (type-only imports are erased at compile time), and the driver
+// FACTORY (src/driver/factory.js — not a lane module): loading the registry
+// never loads an op module or the gh transport, and the lane constructors
+// the factory module pulls in are INERT (no env reads, no spawns at
+// construction), so resolving any entry never touches env, the network, or
+// the filesystem.
 //
 // ADAPTER RULE — the §5 loop ops are LIBRARY functions, not Op-shaped: they
 // take several parameters, throw their fail-loud contracts, and return
@@ -51,6 +55,7 @@
 // explicitly declares surface, per the coverage heuristic's
 // referenced-module rule.)
 import { z } from 'zod';
+import { createDriverFactory } from '../../driver/factory.js';
 import { HarnessConfigSchema } from '../../harness/config.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { ClassifyConfig } from './classify.config.js';
@@ -92,6 +97,7 @@ const awaitOp =
 const ThreadCommentSchema: z.ZodType<ThreadComment> = z
   .object({
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     // NO min(1): the mirror must accept what the family actually produces.
     body: z.string(),
     createdAt: z.string().nullable(),
@@ -104,6 +110,7 @@ const RestCommentSchema: z.ZodType<RestComment> = z
     id: z.number().int(),
     nodeId: z.string().nullable(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     body: z.string(),
     createdAt: z.string().nullable(),
     inReplyToId: z.number().int().nullable(),
@@ -126,6 +133,7 @@ const ReviewThreadSchema: z.ZodType<ReviewThread> = z
     isResolved: z.boolean(),
     isOutdated: z.boolean(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     createdAt: z.string().nullable(),
     body: z.string(),
     replies: z.array(ThreadCommentSchema),
@@ -144,6 +152,9 @@ const ReviewSummarySchema: z.ZodType<ReviewSummary> = z
     authorLogin: z.string().nullable(),
     state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']).nullable(),
     body: z.string(),
+    commitOid: z.string().nullable().optional(),
+    authorType: z.string().nullable().optional(),
+    authorAssociation: z.string().nullable().optional(),
     submittedAt: z.string().nullable(),
   })
   .strict();
@@ -166,6 +177,7 @@ const FetchedReviewStateSchema: z.ZodType<FetchedReviewState> = z
     reviews: z.array(ReviewSummarySchema),
     restReviewComments: z.array(RestCommentSchema),
     restIssueComments: z.array(RestCommentSchema),
+    claimedPaths: z.array(z.string()).optional(),
     truncated: z.boolean(),
     truncatedBecause: z.array(z.string().min(1)),
   })
@@ -286,6 +298,10 @@ const ClassifyThreadsConfigDataSchema = z
     skipResponderAuthoredThreads: z.boolean(),
     skipDismissedReviews: z.boolean(),
     skipApprovalReviews: z.boolean(),
+    trustedAuthors: z.array(z.string()).optional(),
+    automationLogin: z.string().nullable().optional(),
+    excludedLogins: z.array(z.string()).optional(),
+    claimedPaths: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -304,6 +320,7 @@ export const FetchReviewStateOpInputSchema = z
     owner: z.string().min(1),
     repo: z.string().min(1),
     pr: z.number().int().positive(),
+    claimedPaths: z.array(z.string()).optional(),
     caps: z
       .object({
         reviewThreadPages: z.number().int().min(0).exactOptional(),
@@ -468,28 +485,35 @@ export const registry: OpRegistryEntry[] = [
     // The dispatch seam re-validates input through inputSchema.parseAsync
     // before invoking the op, so the erased op typing is safe here (gates
     // precedent). The importer resolves the op module and binds the seam
-    // there (gates importer-binds-dependencies precedent). The DISPATCHED
-    // seam is the perHarness factory (Codex P1 + round-2 finding 1):
-    // toolPolicyFor reduces the input's harness to tool NAMES, so
-    // command/path restrictions can only reach the worker through a driver
-    // constructed with that harness, and worktreeFixDriver's session record
-    // makes the PR worktree the invocation's workspace. The SubprocessDriver
-    // class loads through the op module's own import (constructor is inert —
-    // env reads and processes are run()-time), so resolving this entry never
-    // touches env, the network, or the filesystem.
-    importer: () =>
-      import('./fixReviewItem.js').then(
-        (m) =>
-          m.makeFixReviewItem({
-            driver: {
-              perHarness: (harness, worktree) =>
-                m.worktreeFixDriver({
-                  harnessConfig: harness,
-                  worktreePath: worktree.path,
-                }),
-            },
-          }) as Op<unknown, unknown>,
-      ),
+    // there (gates importer-binds-dependencies precedent). THE DRIVER
+    // FACTORY MEDIATES CONSTRUCTION (ADR-0002 §2.5): the op resolves ONE
+    // DriverRequest per call — role 'fixer' → the factory's conservative
+    // default binding (the ai-sdk lane for zai/anthropic/openai/deepseek;
+    // any other provider is a 'config' throw, never a silent fallback),
+    // the input's harness rides the DriverRequest (toolPolicyFor reduces
+    // it to tool NAMES; command/path restrictions cannot ride the frozen
+    // OpInvocation, Codex P1), the input's worktree rides the invocation
+    // as its workspace binding, and reap-on-settle per the op's retention
+    // flag (the default). The FACTORY owns the served-model assertion —
+    // no lane class is constructed here, statically or dynamically.
+    //
+    // P1 PLAN-DATA NOTE (the composition review needs this): three
+    // binding inputs of this entry are PLAN DATA, bounded by W1.11/D14
+    // (CQ_RUN_TOOL, sandbox): input.harness selects the command/path
+    // patterns of a write-capable worker; input.worktree.path becomes the
+    // invocation's workspace.path; input.driver (ModelSpec) selects the
+    // lane through the factory.
+    importer: async (wiring) =>
+      (await import('./fixReviewItem.js')).makeFixReviewItem({
+        drivers: createDriverFactory(
+          // Dispatch wiring (PR #238 review P2): the host's alias-notice
+          // sink rides the factory config; absent (every library caller),
+          // the library default — one stderr line — is unchanged.
+          wiring?.onDeprecatedAlias !== undefined
+            ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+            : {},
+        ),
+      }) as Op<unknown, unknown>,
   },
   {
     name: 'review.fetchReviewState',
@@ -503,7 +527,12 @@ export const registry: OpRegistryEntry[] = [
         ([m, gh]) =>
           awaitOp((input: FetchReviewStateOpInput) =>
             m.fetchReviewState(
-              { owner: input.owner, repo: input.repo, pr: input.pr },
+              {
+                owner: input.owner,
+                repo: input.repo,
+                pr: input.pr,
+                ...(input.claimedPaths === undefined ? {} : { claimedPaths: input.claimedPaths }),
+              },
               input.caps,
               gh.makeGhRunner(),
             ),
@@ -536,6 +565,10 @@ export const registry: OpRegistryEntry[] = [
                     skipResponderAuthoredThreads: input.config.skipResponderAuthoredThreads,
                     skipDismissedReviews: input.config.skipDismissedReviews,
                     skipApprovalReviews: input.config.skipApprovalReviews,
+                    trustedAuthors: input.config.trustedAuthors,
+                    automationLogin: input.config.automationLogin,
+                    excludedLogins: input.config.excludedLogins,
+                    claimedPaths: input.config.claimedPaths,
                   };
             // An undefined config triggers the library's shipped default.
             return m.classifyThreads(input.state, input.nowMs, config);

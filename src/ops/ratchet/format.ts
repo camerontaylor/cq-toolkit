@@ -183,3 +183,160 @@ export function tightens(prev: number, next: number, d: Direction): boolean {
 export function loosens(prev: number, next: number, d: Direction): boolean {
   return d === 'lower-is-better' ? next > prev : next < prev;
 }
+
+// ---------------------------------------------------------------------------
+// Coverage diff re-basis — the uniform comparison basis for the diff guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Coverage granularity law — THE one shared rounding point: a coverage
+ * percentage is kept to ONE DECIMAL PLACE, rounded half-up (93.45 → 93.5,
+ * 93.44 → 93.4, 99.95 → 100). Every coverage consumer reads through this —
+ * the `coverage-json` metric source (./sources.ts), the diff-guard re-basis
+ * below, and (as a byte-identical mirror, pinned by the self-host fixture)
+ * `scripts/ratchet-lib.mjs`'s `normalizeCoverageSummary` — so a reading and
+ * a baseline are always compared in the same granularity.
+ *
+ * Why one decimal: v8's 2-decimal `total.lines.pct` is NOT stable across
+ * environments (the same tree measured 93.46 locally and 93.38 in CI), so
+ * the hundredths digit is noise; the tenths digit is kept so a real but
+ * small coverage gain still ratchets.
+ *
+ * Float-noise protection mirrors the complexity adapter's
+ * `roundRatioHalfUp2` (half-up with a fixed ABSOLUTE epsilon, here on the
+ * ×10 scale): the binary double for a decimal half can land a hair below it
+ * after scaling (1.05 must become 1.1, never 1.0), and 1e-9 rescues every
+ * true half at percentage magnitudes while genuinely-below-half values stay
+ * down. The /10 of an integer yields the double nearest the one-decimal
+ * value, so `String(n)` renders it cleanly ('93.5', '100'). Non-finite input
+ * is returned unchanged — callers rule it unusable (I5), never a reading.
+ */
+export function roundCoveragePct(pct: number): number {
+  if (!Number.isFinite(pct)) return pct;
+  return Math.floor(pct * 10 + 0.5 + 1e-9) / 10;
+}
+
+/**
+ * Strict JSON-number token with a terminator lookahead (the guard's own
+ * VALUE_RE shape, mirrored): a coverage baseline `"value"` finer than one
+ * decimal is the only thing this rewrites. Global for `replace` reuse (String.replace resets
+ * `lastIndex`), never shared across a live `exec`.
+ */
+const DIFF_VALUE_TOKEN =
+  /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
+
+/** Fallback coverage-section matcher for callers without an engine-computed exact path. */
+const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
+
+/** Every git path prefix a `+++`/`---` header may carry. */
+const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
+
+/** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
+function diffHeaderPath(line: string): string | null {
+  const raw = line.slice(4);
+  if (raw.startsWith('/dev/null')) return null;
+  const path = raw.split('\t')[0];
+  if (path === undefined) return null;
+  for (const prefix of DIFF_PATH_PREFIXES) {
+    if (path.startsWith(prefix)) return path.slice(prefix.length);
+  }
+  return path;
+}
+
+/**
+ * Uniform comparison basis for the diff-mode guard — COVERAGE baselines
+ * only: rewrite every `"value"` token whose one-decimal rounding differs from
+ * it to the SAME normalization the live coverage reading uses
+ * ({@link roundCoveragePct}), on every `-`/`+`/context line inside
+ * `baselines/coverage*` sections only. A token already at one decimal (or an
+ * integer) is left byte-identical.
+ *
+ * Rationale: a baseline and a reading must be compared in the SAME
+ * granularity, and one-decimal pct is the COVERAGE reading's granularity
+ * (the `coverage-json` source rounds `total.lines.pct` through the same
+ * helper) — a 2-decimal committed coverage baseline would be judged against
+ * a differently-scaled number. The re-basis hunk `93.46 → 93.5` must read as
+ * the no-op it is (both sides normalize to 93.5: equal passes), while a TRUE
+ * loosening (`93.4 → 93.3`) still fails and a genuine tighten in 2-decimal
+ * clothing (`92.44 → 92.5`, old side normalizes to 92.4) still passes as a
+ * tighten.
+ *
+ * SCOPE IS DELIBERATELY NARROW (PR-105 round-2 finding 4): other metrics'
+ * granularity is their own — complexity avg-cx lives at 2 decimals, where
+ * `2.40 → 2.49` is a REAL change, not noise — so their sections pass through
+ * byte-identical and the guard judges them at full precision. Normalizing
+ * them would round the loosening into an equal no-op and mask it.
+ *
+ * This is a symmetric COMPARISON-BASIS normalization applied to both diff
+ * sides alike — never a guard exception: it cannot flip a loosening into a
+ * pass, only remove sub-granularity float noise from both sides. The engine
+ * (monotonicGuard) is untouched; the rewritten text is what it judges.
+ * Sections are attributed by their `---`/`+++` file headers (before the
+ * first `@@` — after it, `---`-prefixed lines are removed CONTENT and are
+ * normalized like any other content line); every other file's diff passes
+ * through byte-identical, so a `"value": 1.5` in a source-file hunk is
+ * never touched.
+ *
+ * This is the ONE implementation shared by the `ratchet.monotonicGuard` op
+ * (the required workflow's path) and the local `scripts/ratchet-check.mjs`
+ * driver (through `loadEngine`).
+ *
+ * The second argument selects the coverage sections: a STRING matches one
+ * exact baseline path, a REGEXP matches a family of paths (the op keys it on
+ * the `coverage` METRIC id, so a coverage baseline under any (target,
+ * coverage) pair still normalizes), and `undefined` falls back to the
+ * `baselines/coverage` prefix.
+ */
+export function normalizeBaselineDiffValues(
+  diff: string,
+  coverageBaseline?: string | RegExp,
+): string {
+  const isCoveragePath = (path: string): boolean => {
+    if (coverageBaseline === undefined) return COVERAGE_BASELINE_SECTION.test(path);
+    if (typeof coverageBaseline === 'string') return path === coverageBaseline;
+    return coverageBaseline.test(path);
+  };
+  const out: string[] = [];
+  let isCoverageSection = false;
+  let inHunk = false;
+  for (const line of String(diff).split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      isCoverageSection = false; // re-resolved by this section's own headers
+      inHunk = false;
+      out.push(line);
+      continue;
+    }
+    if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
+      const path = diffHeaderPath(line);
+      // A /dev/null side has no path to classify; retain the real side's
+      // classification for a deletion (and let the following real side
+      // classify an addition). Every REAL header still resets the flag when
+      // a sibling file is not a coverage baseline.
+      if (path !== null) isCoverageSection = isCoveragePath(path);
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHunk = true; // from here on, `---`-prefixed lines are removed content
+      out.push(line);
+      continue;
+    }
+    if (
+      isCoverageSection &&
+      (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))
+    ) {
+      out.push(
+        line.replace(DIFF_VALUE_TOKEN, (token: string, head: string, num: string) => {
+          const raw = Number(num);
+          const rounded = roundCoveragePct(raw);
+          // Only a value the granularity law actually changes is rewritten:
+          // an on-granularity token keeps its exact bytes.
+          return rounded === raw ? token : head + String(rounded);
+        }),
+      );
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}

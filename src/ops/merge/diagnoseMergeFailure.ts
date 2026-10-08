@@ -5,9 +5,10 @@
 // returned and maps each not-merged bucket to ONE plain-language cause
 // (stable snake_case, safe to log, group, and assert on — the family's
 // reason discipline):
-//   stale   → `state_drift`        the PR's head moved (or vanished)
-//                                  between plan and run; nothing merged;
-//                                  re-plan to recover.
+//   stale   → `state_drift`        the PR's head moved (or vanished) OR
+//                                  the base was retargeted between plan
+//                                  and run; nothing merged; re-plan to
+//                                  recover.
 //   failed  → `merge_rejected`     the merge (or its fetch) was
 //                                  refused by the forge or the transport.
 //   blocked → `blocked_by_ancestor` not this PR's fault — a stack ancestor

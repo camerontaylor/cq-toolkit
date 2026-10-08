@@ -19,7 +19,7 @@
 //   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
 //      binding (default `none`, caller-overridable for production) lands
 //      verbatim in the Driver's OpInvocation.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -29,7 +29,10 @@ import { PlanSchema } from '../../src/kernel/schema.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';
 import { registry as prRegistry } from '../../src/ops/pr/registry.js';
-import { AssemblePrsInputSchema } from '../../src/ops/pr/registry.js';
+import {
+  AssemblePrsInputSchema,
+  EnsureTrackerBranchInputSchema,
+} from '../../src/ops/pr/registry.js';
 import {
   PlanSweepInputSchema,
   SweepUnitDispatchInputSchema,
@@ -44,12 +47,7 @@ import {
   SweepUnitJobOverlay,
   type SweepPlanConfig,
 } from '../../src/plans/sweep.js';
-import {
-  buildTestFixPlan,
-  TEST_FIX_FIXER,
-  TEST_FIX_PLAN_ID,
-  TEST_FIX_STAGE_PATH_ALLOWLIST,
-} from '../../src/plans/test-fix.js';
+import { buildTestFixPlan, TEST_FIX_FIXER, TEST_FIX_PLAN_ID } from '../../src/plans/test-fix.js';
 import { getPlan } from '../../src/plans/registry.js';
 
 /** A two-unit planner report as planSweep would have produced it. */
@@ -99,11 +97,13 @@ describe('plans barrel surface (jZ59o)', () => {
     expect(() => PlanSweepInputSchema.parse(barrelPlannerInput(CONFIG))).not.toThrow();
     const testFixPlan = barrelBuildTestFixPlan(CONFIG, twoUnitReport(TEST_FIX_FIXER));
     expect(testFixPlan.id).toBe(TEST_FIX_PLAN_ID);
-    // The naming contract + the test-fix scope constant ride the barrel too.
+    // The naming contract rides the barrel too.
     expect(sweepUnitSegments('cq/x', { package: '@scope/pkg', fixer: 'fix' }).slug).toBe(
       'scope-pkg',
     );
-    expect(TEST_FIX_STAGE_PATH_ALLOWLIST.patterns.length).toBeGreaterThan(0);
+    for (const job of testFixPlan.jobs.filter((candidate) => candidate.op === 'sweep.unit')) {
+      expect((job as { input: { proposeOnly?: boolean } }).input.proposeOnly).toBe(true);
+    }
   });
 });
 
@@ -135,7 +135,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(PlanSweepInputSchema.parse(testFixPlannerJob.input).fixers).toEqual([TEST_FIX_FIXER]);
   });
 
-  test('buildSweepPlan: planner job first, unit jobs verbatim, assemble depends on every unit', () => {
+  test('buildSweepPlan: planner job first, unit jobs verbatim, tracker branch then assemble', () => {
     const plan = buildSweepPlan(CONFIG, twoUnitReport());
     expect(plan.id).toBe(SWEEP_PLAN_ID);
     expect(() => PlanSchema.parse(plan)).not.toThrow();
@@ -143,6 +143,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       'sweep-plan',
       'sweep-alpha-fix',
       'sweep-beta-fix',
+      'sweep-tracker-branch',
       'sweep-assemble',
     ]);
     expect(plan.jobs[0]?.op).toBe('sweep.planSweep');
@@ -155,15 +156,31 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       expect(job.dependsOn).toEqual(['sweep-plan']);
       expect(() => SweepUnitDispatchInputSchema.parse(job.input)).not.toThrow();
     }
-    // The assembler: static data, derived branches, every unit a dependency.
-    const assemble = plan.jobs[3] as {
+    // The tracker-branch leg (review-debt #173): every unit a dependency, and
+    // the assembler depends on it (so the head exists before the PR opens).
+    const trackerBranch = plan.jobs[3] as {
+      id: string;
+      op: string;
+      input: unknown;
+      dependsOn: string[];
+    };
+    expect(trackerBranch.op).toBe('pr.ensureTrackerBranch');
+    expect(trackerBranch.dependsOn).toEqual(['sweep-alpha-fix', 'sweep-beta-fix']);
+    expect(EnsureTrackerBranchInputSchema.parse(trackerBranch.input)).toMatchObject({
+      repoRoot: '/repo',
+      runPrefix: 'cq/09-16a',
+      base: 'main',
+      branch: 'cq/09-16a/tracker',
+    });
+    // The assembler: static data, derived branches, the tracker-branch leg a dependency.
+    const assemble = plan.jobs[4] as {
       id: string;
       op: string;
       input: unknown;
       dependsOn: string[];
     };
     expect(assemble.op).toBe('pr.assemblePrs');
-    expect(assemble.dependsOn).toEqual(['sweep-alpha-fix', 'sweep-beta-fix']);
+    expect(assemble.dependsOn).toEqual(['sweep-tracker-branch']);
     const input = AssemblePrsInputSchema.parse(assemble.input);
     expect(input.tracker.branch).toBe('cq/09-16a/tracker');
     expect(input.packages.map((pkg) => pkg.branch)).toEqual([
@@ -183,9 +200,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(plannerInput.fixers).toEqual([TEST_FIX_FIXER]);
     // Every unit job carries the test-only fixer (the plan's identity).
     for (const job of plan.jobs.slice(1, 3)) {
-      expect(SweepUnitDispatchInputSchema.parse((job as { input: unknown }).input).fixer).toBe(
-        TEST_FIX_FIXER,
-      );
+      const input = SweepUnitDispatchInputSchema.parse((job as { input: unknown }).input);
+      expect(input.fixer).toBe(TEST_FIX_FIXER);
+      expect(input.proposeOnly).toBe(true);
     }
     // A report from a DIFFERENTLY-configured phase A is plan corruption.
     expect(() => buildTestFixPlan(CONFIG, twoUnitReport('fix'))).toThrow(
@@ -243,7 +260,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(slugs).toEqual(['scope-foo', 'scope-foo-2', 'scope-foo-2-2']);
     expect(new Set(slugs).size).toBe(3);
     // The assembler accepts all three DISTINCT branches.
-    const assemble = AssemblePrsInputSchema.parse((plan.jobs[4] as { input: unknown }).input);
+    const assemble = AssemblePrsInputSchema.parse((plan.jobs[5] as { input: unknown }).input);
     expect(assemble.packages.map((pkg) => pkg.branch)).toEqual([
       'cq/09-16a/fix/scope-foo',
       'cq/09-16a/fix/scope-foo-2',
@@ -270,14 +287,18 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
     expect(inputs.map((input) => input.kind)).toEqual(['fix', 'fix']);
     expect(inputs.map((input) => input.slug)).toEqual(['alpha', 'beta']);
+    // The local-only knob reaches the tracker-branch leg too (review-debt
+    // #173): a `push:false` fleet must not push the tracker branch.
+    const trackerBranchJob = plan.jobs.find((job) => job.id === 'sweep-tracker-branch');
+    expect(
+      EnsureTrackerBranchInputSchema.parse((trackerBranchJob as { input: unknown }).input).push,
+    ).toBe(false);
   });
 
   test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {
     const driver = {
-      binary: ['node', '/opt/agent.mjs'],
       provider: 'cq-e2e',
       model: 'sweep-fake',
-      sessionsDir: '/tmp/sweep-sessions',
     };
     const check = {
       adapter: 'tsc-lines' as const,
@@ -344,6 +365,60 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(() => buildSweepPlan(CONFIG, misaligned)).toThrow(/misaligned/);
   });
 
+  test('an ORDER-mismatched report of equal length is plan corruption (#175 item 6)', () => {
+    const units: Array<WorkUnit> = [
+      { package: 'alpha', fixer: 'fix', files: [] },
+      { package: 'beta', fixer: 'fix', files: [] },
+    ];
+    // Equal length, but job 0 embeds beta while unit 0 is alpha: the old
+    // length-only guard would attach alpha's resolved kind/slug to beta's
+    // job and mis-slug the unit.
+    const swapped: PlanSweepReport = {
+      jobs: [
+        { id: 'sweep-beta-fix', op: SWEEP_UNIT_OP, input: units[1], dependsOn: [] },
+        { id: 'sweep-alpha-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] },
+      ],
+      units,
+      suppressed: [],
+      needsHuman: [],
+    };
+    expect(() => buildSweepPlan(CONFIG, swapped)).toThrow(/misaligned at index 0/);
+  });
+
+  test('a deletion-only root package keeps a scope pin from selection evidence (r1 major)', () => {
+    const units: Array<WorkUnit> = [{ package: 'monorepo', fixer: 'fix', files: [] }];
+    const report: PlanSweepReport = {
+      jobs: [{ id: 'sweep-monorepo-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      units,
+      suppressed: [],
+      needsHuman: [],
+      selectionEvidence: { monorepo: ['old.ts'] },
+    };
+    const plan = buildSweepPlan({ ...CONFIG, packages: [{ name: 'monorepo', path: '.' }] }, report);
+    const input = SweepUnitDispatchInputSchema.parse(plan.jobs[1]?.input);
+    // Pre-fix this was `undefined` (no allowlist at all → fail open) because a
+    // '.' package's only patterns come from `files`, which the #150 deletion
+    // filter had emptied.
+    expect(input.stagePathAllowlist?.patterns).toEqual(['^old\\.ts$']);
+  });
+
+  test("a 'toString'-named package never reads an inherited selection-evidence member (r2 major)", () => {
+    const units: Array<WorkUnit> = [{ package: 'toString', fixer: 'fix', files: [] }];
+    const report: PlanSweepReport = {
+      jobs: [{ id: 'sweep-toString-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      units,
+      suppressed: [],
+      needsHuman: [],
+      // Evidence for ANOTHER package makes the map non-empty, so an
+      // unguarded `map['toString']` would return Object.prototype.toString
+      // and crash the allowlist loop.
+      selectionEvidence: { other: ['gone.ts'] },
+    };
+    const plan = buildSweepPlan({ ...CONFIG, packages: [{ name: 'toString', path: '.' }] }, report);
+    const input = SweepUnitDispatchInputSchema.parse(plan.jobs[1]?.input);
+    expect(input.stagePathAllowlist).toBeUndefined();
+  });
+
   test('slug normalization and deterministic collision disambiguation (jTPa1)', () => {
     // '@scope/pkg' normalizes to the DISPATCHABLE slug 'scope-pkg' (the old
     // fold produced '-scope-pkg', which SEGMENT_RE refuses).
@@ -375,7 +450,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       .slice(1, 3)
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
     expect(inputs.map((input) => input.slug)).toEqual(['a-b', 'a-b-2']);
-    const assemble = AssemblePrsInputSchema.parse((plan.jobs[3] as { input: unknown }).input);
+    const assemble = AssemblePrsInputSchema.parse((plan.jobs[4] as { input: unknown }).input);
     expect(assemble.packages.map((pkg) => pkg.branch)).toEqual([
       'cq/09-16a/fix/a-b',
       'cq/09-16a/fix/a-b-2',
@@ -407,11 +482,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
       try {
         const repo = join(root, 'repo');
-        await generateScratchRepo(repo);
+        const worktree = join(repo, 'worktrees', 'fix', 'alpha');
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(worktree, { recursive: true });
         const captured: OpInvocation[] = [];
         // A capturing fake driver: records the invocation, then stops the
-        // pipeline (the op folds the throw into a `failed` result — the
-        // capture is the point).
+        // pipeline. S4b-B2 (ADR-0002 §2.9): an unclassified driver throw is
+        // a pre-dispatch failure the human arranges — the op folds it into a
+        // `needs-human` result (the capture is the point).
         const driver: Driver = {
           run: async (invocation) => {
             captured.push(invocation);
@@ -424,6 +502,18 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           runPrefix: 'cq/unit-bind',
           base: 'main',
           adapter: 'tsc-lines' as const,
+          worktreeEffects: {
+            listWorktrees: async () => [{ path: worktree, branch: 'cq/unit-bind/fix/alpha' }],
+            listBranches: async () => [],
+            listRemoteBranches: async () => [],
+            pathExists: async () => false,
+            trackedFilesUnder: async () => [],
+            isStrictClean: async () => true,
+            revParse: async () => '0'.repeat(40),
+            worktreeAdd: async () => undefined,
+            worktreePrune: async () => undefined,
+            rmDir: async () => undefined,
+          },
           // A clean probe — no subprocess needed for this pin.
           runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
           checkCommand: (unit: WorkUnit, worktreePath: string) => ({
@@ -434,19 +524,94 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           }),
           driver,
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-          sessionsDir: join(root, 'sessions'),
           prompt: () => 'capture me',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };
         const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
         // DEFAULT: none (the shipped behavior, unchanged).
-        const failed = await makeSweepUnitOp(base)(unit);
-        expect(failed.status).toBe('failed'); // the capture's deliberate stop
+        const refused = await makeSweepUnitOp(base)(unit);
+        expect(refused.status).toBe('needs-human'); // the capture's deliberate stop
         expect(captured[0]?.sandboxPolicy).toEqual({ level: 'none' });
+        // WORKSPACE BINDING (ADR-0002 §2.4): the worktree rides the
+        // invocation as its workspace — no pre-created session record, no
+        // sessionRef — and the invocation carries the bindings' (resolved)
+        // modelSpec verbatim.
+        expect(captured[0]?.workspace).toBeDefined();
+        expect(captured[0]?.workspace?.path).toContain(join(repo, 'worktrees'));
+        expect(captured[0]?.sessionRef).toBeUndefined();
+        expect(captured[0]?.modelSpec).toEqual({ model: 'sweep-fake', provider: 'cq-d4-e2e' });
         // OVERRIDE: the binding rides verbatim into the OpInvocation.
         const hardened: WorkUnit = { package: 'alpha', fixer: 'hardened', files: [] };
         await makeSweepUnitOp({ ...base, sandboxPolicy: { level: 'workspace-write' } })(hardened);
         expect(captured[1]?.sandboxPolicy).toEqual({ level: 'workspace-write' });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    'a RESOLVED governed cancellation (stopReason aborted) is indeterminate, never failed (I8; PR #238 P1)',
+    { timeout: 120_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'd4-unit-abort-'));
+      try {
+        const repo = join(root, 'repo');
+        await generateScratchRepo(repo);
+        // The conforming cancellation settle: the governor's signal fired
+        // and the driver RESOLVES with stopReason 'aborted' (§2.1) — no
+        // throw for the catch's thrown-abort path to see.
+        const base = {
+          repoRoot: repo,
+          worktreesDir: 'worktrees',
+          runPrefix: 'cq/unit-abort',
+          base: 'main',
+          adapter: 'tsc-lines' as const,
+          runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+          checkCommand: (unit: WorkUnit, worktreePath: string) => ({
+            command: process.execPath,
+            args: ['scripts/check.js', unit.package],
+            cwd: worktreePath,
+            timeoutMs: 30_000,
+          }),
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'aborted' as const,
+              sessionId: 'unit-aborted-s1',
+            }),
+          },
+          modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          prompt: () => 'cancelled mid-run',
+          git: async () => ({ code: 0, stdout: '', stderr: '' }),
+        };
+        const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
+        const cancelled = await makeSweepUnitOp(base)(unit);
+        // No verdict on potentially partial work — indeterminate (the job
+        // can resume), never 'failed' (which would claim the fixer ran and
+        // broke on work it never finished).
+        expect(cancelled.status).toBe('indeterminate');
+        if (cancelled.status === 'indeterminate') {
+          expect(cancelled.detail).toContain('cancelled');
+          expect(cancelled.detail).toContain("stopReason 'aborted'");
+          expect(cancelled.detail).toContain('unit-aborted-s1');
+        }
+        // The mapping rides the stopReason exactly: a resolved provider
+        // failure still fails — the P1 never widens to every non-complete.
+        const failed = await makeSweepUnitOp({
+          ...base,
+          driver: {
+            run: async () => ({
+              usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'error' as const,
+              error: 'the vendor 500ed',
+              errorClass: 'provider-error' as const,
+            }),
+          },
+        })(unit);
+        expect(failed.status).toBe('failed');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

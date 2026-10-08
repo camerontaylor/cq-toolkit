@@ -19,13 +19,19 @@
 //      each planned head, taken in one FETCH-THEN-VALIDATE sweep before
 //      any action runs (the observable stand-in for "the sha the plan was
 //      built on" — the executor is invoked directly after planning on the
-//      same live state, and the plan itself carries no shas). The fetch
+//      same live state, and the plan MAY now thread the reviewed head SHA
+//      via entry.headSha — see (a) below; a plan without one still
+//      baselines as before). The fetch
 //      comes FIRST (CR-4): a fresh clone has no local refs/pull ref until
 //      it is fetched, so a validate-before-fetch would read every pr
 //      stale. A head that moved between the baseline and the merge — or
 //      vanished, even after its fetch — is drift between classify/plan
 //      and merge: the action is SKIPPED as `stale`, never merged, the
-//      reason recorded.
+//      reason recorded. The server-side merge is ALSO pinned: when the
+//      plan threaded the observed head SHA (the self-host fetch does),
+//      mergePr carries `--match-head-commit <sha>` so the forge itself
+//      refuses a merge whose head moved after this revalidation
+//      (review-debt #186).
 //   b. MERGE COMMITS ONLY (I3) — mergePr is called with method 'merge'
 //      exclusively; the production effects route every argv through
 //      safeArgs (./effects.js), which throws on squash/force/rebase/hard/
@@ -59,6 +65,19 @@
 //      lifecycle enters with F4's conflict resolver via
 //      withPreparedWorktree (effects.js): prepare → fn → remove-in-finally,
 //      a removal failure never masking the caller's outcome.
+//   g. FORGE BASE-REF RE-READ (review-debt #193) — the head-SHA pin (a)
+//      closes the fixer-push race, but a retarget between plan and run can
+//      still change the PR's forge base, which the head pin does not cover.
+//      Before each MERGE action's body the executor re-reads the PR's forge
+//      base ref (effects.readBaseRef) and compares it against the base the
+//      plan recorded (entry.baseRefName, defaulting to plan.baseBranch): a
+//      move means the stack premise is gone — the action is SKIPPED as
+//      `stale`, never merged into the changed base. The re-read repeats
+//      after each retryable failure's head revalidation, before any further
+//      merge attempt (a retarget can land between attempts too). A read
+//      failure is `failed` (fail closed: an unconfirmed base is not a
+//      mergeable one). Retarget-self entries merge nothing, so they do not
+//      pay the read.
 //
 // TOTALITY: every PR in plan.order lands in EXACTLY ONE of merged /
 // retargeted / stale / failed / blocked. Effect methods that REJECT
@@ -148,9 +167,12 @@ const stderrSuffix = (stderr: string): string => {
 /** The bounded-retry trigger (rule e): GitHub's base-moved refusal. */
 const RETRYABLE_MERGE_FAILURE = /base branch was modified/i;
 
+/** A full git commit sha — the only form `--match-head-commit` accepts. */
+const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
+
 /**
  * Execute the F2 plan through the injected effects. See the module doc for
- * semantics (a)–(f); the returned report is total — every plan.order pr in
+ * semantics (a)–(g); the returned report is total — every plan.order pr in
  * exactly one bucket, each bucket in plan order.
  */
 export async function executeMerges(input: ExecuteMergeInput): Promise<ExecutionReport> {
@@ -186,9 +208,10 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   // run failure (CR-2): nothing executes, every planned pr is recorded
   // `failed` with the error, and the total report returns immediately.
   // Phase 2 validates each fetched head: the executor's first observation
-  // stands in for "the sha the plan was built on" (the plan carries no
-  // shas; it was built moments before on the same live state), and null
-  // marks a head unresolvable even AFTER its fetch — genuine absence (the
+  // stands in for "the sha the plan was built on" when the plan did not
+  // thread one (review-debt #186 adds entry.headSha; it was built moments
+  // before on the same live state), and null marks a head unresolvable even
+  // AFTER its fetch — genuine absence (the
   // pr was merged or closed upstream and its ref reaped) — stale on its
   // turn without any further calls.
   // Run-scoped wholesale failure (round 2, finding 4): the MESSAGE names
@@ -228,11 +251,25 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
 
   // (e)+(b) THE MERGE, with its bounded retry. Total: never throws — a
   // rejecting mergePr is a `failed` outcome, not an escaped exception.
-  const mergeWithRetry = async (pr: number, ref: string, expectedSha: string): Promise<Outcome> => {
+  const mergeWithRetry = async (
+    pr: number,
+    ref: string,
+    expectedSha: string,
+    expectedBase: string,
+  ): Promise<Outcome> => {
     for (let attempt = 0; ; attempt += 1) {
       let result: GhResult;
       try {
-        result = await effects.mergePr(pr, { method: 'merge' });
+        result = await effects.mergePr(pr, {
+          method: 'merge',
+          // HEAD-SHA PIN (review-debt #186): the forge refuses the merge
+          // when the head is no longer `expectedSha`, closing the race
+          // between the per-action revalidation above and the server-side
+          // merge (a fixer push landing in that window). A non-sha baseline
+          // is still caught by the revalidation; there is nothing to pin
+          // against, so no flag rides.
+          ...(FULL_SHA_RE.test(expectedSha) ? { matchHeadCommit: expectedSha } : {}),
+        });
       } catch (err) {
         return { kind: 'failed', error: `mergePr for pr ${pr} threw: ${errorMessage(err)}` };
       }
@@ -274,10 +311,43 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       } catch (err) {
         return { kind: 'failed', error: `revalidation for pr ${pr} threw: ${errorMessage(err)}` };
       }
-      if (!again.ok || again.sha === undefined || again.sha !== expectedSha) {
+      if (
+        !again.ok ||
+        again.sha === undefined ||
+        again.sha.toLowerCase() !== expectedSha.toLowerCase()
+      ) {
         return {
           kind: 'stale',
           detail: `head moved while revalidating pr ${pr} before a retry (expected ${expectedSha})`,
+        };
+      }
+      // (g) re-read the forge base between attempts too (review-debt #193):
+      // a retarget landing after attempt 1 must not be merged into on the
+      // retry. A read that fails or answers an unreadable payload is
+      // fail-closed `failed`; a moved base is `stale`. Never a blind retry.
+      let retryBase: { ok: boolean; baseRefName?: string };
+      try {
+        retryBase = await effects.readBaseRef(pr);
+      } catch (err) {
+        return {
+          kind: 'failed',
+          error: `retry-revalidation readBaseRef for pr ${pr} threw: ${errorMessage(err)}`,
+        };
+      }
+      if (
+        !retryBase.ok ||
+        typeof retryBase.baseRefName !== 'string' ||
+        retryBase.baseRefName === ''
+      ) {
+        return {
+          kind: 'failed',
+          error: `retry revalidation: readBaseRef for pr ${pr} unavailable — cannot confirm the forge base before retrying`,
+        };
+      }
+      if (retryBase.baseRefName !== expectedBase) {
+        return {
+          kind: 'stale',
+          detail: `base moved while revalidating pr ${pr} before a retry (plan saw ${expectedBase}, forge has ${retryBase.baseRefName})`,
         };
       }
     }
@@ -368,7 +438,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(pr);
       return;
     }
-    if (live.sha !== expectedSha) {
+    if (live.sha.toLowerCase() !== expectedSha.toLowerCase()) {
       // Drift between classify/plan and merge — caught here, NOT merged.
       report.stale.push({
         pr,
@@ -379,9 +449,47 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     }
 
     // A retarget-self action is FORGE METADATA ONLY (CR1): no worktree, no
-    // ref push, no merge — retargetOnce is its whole body.
+    // ref push, no merge — retargetOnce is its whole body. It merges
+    // nothing, so it does not pay the base-ref re-read below (rule g).
     if (entry.action === 'retarget-self') {
       fileOutcome(pr, await retargetOnce(pr, plan.baseBranch));
+      return;
+    }
+
+    // (g) FORGE BASE-REF RE-READ (review-debt #193): the head-SHA pin closes
+    // the fixer-push race, but a retarget between plan and run can still
+    // change the PR's forge base. Compare the live base against the base the
+    // plan recorded (entry.baseRefName, defaulting to the plan's baseBranch);
+    // a move means the stack premise is gone — skip stale, never merge into
+    // the changed base. A read that fails or answers an unreadable payload is
+    // fail-closed `failed`: an unconfirmed base is not a mergeable one.
+    const expectedBase = entry.baseRefName ?? plan.baseBranch;
+    let forgeBase: { ok: boolean; baseRefName?: string };
+    try {
+      forgeBase = await effects.readBaseRef(pr);
+    } catch (err) {
+      report.failed.push({ pr, error: `readBaseRef for pr ${pr} threw: ${errorMessage(err)}` });
+      withheld.add(pr);
+      return;
+    }
+    if (
+      !forgeBase.ok ||
+      typeof forgeBase.baseRefName !== 'string' ||
+      forgeBase.baseRefName === ''
+    ) {
+      report.failed.push({
+        pr,
+        error: `readBaseRef for pr ${pr} unavailable — cannot confirm the forge base before merging`,
+      });
+      withheld.add(pr);
+      return;
+    }
+    if (forgeBase.baseRefName !== expectedBase) {
+      report.stale.push({
+        pr,
+        detail: `base moved between plan and run (plan saw ${expectedBase}, forge has ${forgeBase.baseRefName})`,
+      });
+      withheld.add(pr);
       return;
     }
 
@@ -390,7 +498,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     // merge is the whole body (see rule f in the module doc; worktree
     // lifecycle enters with F4's resolver via withPreparedWorktree).
     // mergeWithRetry is total (never throws), so the outcome files clean.
-    fileOutcome(pr, await mergeWithRetry(pr, ref, expectedSha));
+    fileOutcome(pr, await mergeWithRetry(pr, ref, expectedSha, expectedBase));
   };
 
   // THE LOOP — plan order, strictly sequential (rule d's determinism), with
@@ -402,8 +510,8 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(entry.pr);
       continue;
     }
-    const expectedSha = baseline.get(entry.pr);
-    if (expectedSha === undefined || expectedSha === null) {
+    const baselineSha = baseline.get(entry.pr);
+    if (baselineSha === undefined || baselineSha === null) {
       // The head was already unresolvable in the baseline sweep — drift
       // between plan and run before anything ran.
       report.stale.push({
@@ -413,6 +521,20 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(entry.pr);
       continue;
     }
+    // THE EXPECTED HEAD (review-debt #186): for a MERGE entry, the sha the
+    // PLAN observed when it carries a WELL-FORMED one (the reviewed head),
+    // else the executor's own baseline observation. A malformed/empty plan
+    // sha must not override the valid baseline and strand the PR in a false
+    // `stale` — it falls back. A retarget-self action does NOT take the
+    // PLAN-head pin (its forge base edit depends on no head content): it
+    // keeps the executor baseline, so the plan's reviewed-head pin never
+    // blocks a needed retarget (the executor's own baseline revalidation —
+    // the pre-existing drift guard — still applies; review r2).
+    const planHead =
+      entry.action === 'merge' && entry.headSha !== undefined && FULL_SHA_RE.test(entry.headSha)
+        ? entry.headSha
+        : undefined;
+    const expectedSha = planHead ?? baselineSha;
     await mutexFor(effectiveBaseKey(entry)).run(() => runAction(entry, expectedSha));
   }
 

@@ -1,8 +1,13 @@
 {
   "name": "@camerontaylor/cq-toolkit",
-  "version": "0.0.0",
+  "version": "1.0.1",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/camerontaylor/cq-toolkit.git"
+  },
   "type": "module",
+  "packageManager": "pnpm@12.8.1",
   "files": [
     "dist",
     "policy",
@@ -14,19 +19,25 @@
     ".": "./dist/index.js"
   },
   "bin": {
-    "cq": "./dist/cli.js"
+    "cq": "dist/cli.js",
+    "cq-harness-mcp": "dist/harness/mcp/bin.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs",
-    "typecheck": "npm run check:static",
-    "lint": "npm run check:static",
+    "prepack": "pnpm run build",
+    "typecheck": "pnpm run check:static",
+    "lint": "pnpm run check:static",
     "test": "vitest run",
+    "test:unit": "vitest run --project pure --project process --project live",
+    "test:e2e": "vitest run --project integration",
     "denylist": "./scripts/denylist-scan",
+    "gen:op-docs": "node scripts/gen-op-docs.mjs",
+    "gen:op-docs:check": "node scripts/gen-op-docs.mjs --check",
     "format:check": "oxfmt --check .",
     "check:static": "node scripts/ratchet-typecheck.mjs",
     "lint:fast": "node scripts/lint-fast.mjs",
     "fix": "node scripts/fix.mjs",
-    "check": "npm run format:check && npm run check:static && npm run test && npm run knip",
+    "check": "pnpm run format:check && pnpm run check:static && pnpm run test && pnpm run knip",
     "knip": "knip --no-progress"
   },
   "dependencies": {
@@ -49,13 +60,14 @@
   },
   "devDependencies": {
     "@ai-sdk/provider": "4.0.14",
+    "@modelcontextprotocol/sdk": "1.30.1",
     "@types/node": "24.13.5",
+    "@vitest/coverage-v8": "5.0.0",
     "knip": "6.35.1",
     "oxfmt": "0.68.0",
     "oxlint": "1.83.0",
     "oxlint-tsgolint": "7.0.2001",
     "typescript": "7.0.2",
-    "vitest": "5.0.0",
-    "@vitest/coverage-v8": "5.0.0"
+    "vitest": "5.0.0"
   }
 }

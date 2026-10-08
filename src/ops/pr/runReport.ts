@@ -38,12 +38,14 @@
 import type { Op } from '../../kernel/types.js';
 import {
   composeSection,
+  makeTrackerBodyLock,
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
   runPrefixFault,
   type PrChecks,
   type PrEffects,
   type PrReviewState,
+  type TrackerBodyLock,
 } from './assemblePrs.js';
 
 /** JSON-serializable input of the `pr.runReport` op. */
@@ -104,8 +106,18 @@ const CONTROL_CHARS_RE = /[\p{Cc}]/u;
  * is present the rows are rendered into the tracker manifest style and
  * written in place via editPrBody — the report never opens a PR and never
  * merges.
+ *
+ * The tracker readiness upsert (read body → compose section → edit body)
+ * runs inside a tracker-scoped {@link TrackerBodyLock} (review-debt #171),
+ * the SAME lock the assembler's manifest upsert takes, so the two writers'
+ * full-body edits cannot restore each other's stale section. The lock
+ * defaults to the repo-rooted, tracker-number-scoped artifact; a caller
+ * with its own serialization strategy injects one.
  */
-export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
+export function makeRunReport(
+  gh: PrEffects,
+  trackerLock?: TrackerBodyLock,
+): Op<RunReportInput, PrRunReport> {
   return async (input) => {
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
@@ -242,39 +254,54 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
 
     let trackerUpdated = false;
     if (input.tracker !== undefined) {
+      const trackerNumber = input.tracker.number;
       // THE LIFECYCLE GUARD (PR-165 r2#2): a stale/merged tracker number is
       // a landed record — the report refuses to rewrite it (same rule as
       // the assembler's adoption refusal), and the failure carries the
       // collected rows, since a `failed` result carries no value.
       let trackerState: string;
       try {
-        trackerState = (await gh.getPrReadiness(input.tracker.number)).meta.state;
+        trackerState = (await gh.getPrReadiness(trackerNumber)).meta.state;
       } catch (err) {
         return {
           status: 'failed',
-          error: `pr: could not read tracker PR #${String(input.tracker.number)}'s lifecycle state — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+          error: `pr: could not read tracker PR #${String(trackerNumber)}'s lifecycle state — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
         };
       }
       if (trackerState !== 'open') {
         return {
           status: 'failed',
-          error: `pr: tracker PR #${String(input.tracker.number)} is in state '${trackerState}' — refusing to write the run report into a non-open tracker; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+          error: `pr: tracker PR #${String(trackerNumber)} is in state '${trackerState}' — refusing to write the run report into a non-open tracker; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
         };
       }
       // THE COMPOSE PROTOCOL (r2#4): the report upserts ONLY its readiness
       // section into the tracker's CURRENT body — the assembler's manifest
       // section is preserved verbatim.
       try {
-        const current = await gh.getPrBody(input.tracker.number);
-        await gh.editPrBody(
-          input.tracker.number,
-          composeSection(current, reportSection(input.runPrefix, rows)),
-        );
+        const lock = trackerLock ?? makeTrackerBodyLock(input.repoRoot);
+        await lock.withLock(trackerNumber, async () => {
+          // RE-VERIFY THE LIFECYCLE INSIDE THE LOCK (r4 finding 1 / CodeRabbit
+          // App thread): the pre-check above ran before this writer could
+          // acquire the lock, so a tracker that landed while it waited must
+          // still not be rewritten — the landed-record promise is atomic with
+          // the write it guards.
+          const state = (await gh.getPrReadiness(trackerNumber)).meta.state;
+          if (state !== 'open') {
+            throw new Error(
+              `tracker PR #${String(trackerNumber)} is in state '${state}' — refusing to write the run report into a non-open tracker`,
+            );
+          }
+          const current = await gh.getPrBody(trackerNumber);
+          await gh.editPrBody(
+            trackerNumber,
+            composeSection(current, reportSection(input.runPrefix, rows)),
+          );
+        });
         trackerUpdated = true;
       } catch (err) {
         return {
           status: 'failed',
-          error: `pr: could not update tracker PR #${String(input.tracker.number)} with the run report — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+          error: `pr: could not update tracker PR #${String(trackerNumber)} with the run report — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
         };
       }
     }

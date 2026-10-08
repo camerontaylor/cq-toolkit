@@ -15,8 +15,8 @@
 //
 //   - `terminateAcpProcess` — the SIGTERM→SIGKILL grace ladder that
 //     terminates the one-per-run harness process AT SETTLE. The driver
-//     decides NOTHING about WHEN a run aborts (the governed signal from
-//     currentJobContext() decides; the cooperative path is
+//     decides NOTHING about WHEN a run aborts (the governed
+//     RunOptions.signal decides; the cooperative path is
 //     session/cancel + awaiting the prompt response); this ladder only
 //     executes the already-made decision that a settled run's child must
 //     die — the vendor's in-process session dies with the child we
@@ -48,7 +48,7 @@ export interface AcpSpawnOptions {
   args: readonly string[];
   /** Working directory: the invocation's workspace (I6 isolation boundary). */
   cwd: string;
-  /** The FULL child environment (process.env + the driver's resolved additions). */
+  /** The full child environment, already filtered and explicitly composed by the driver. */
   env: Readonly<Record<string, string>>;
 }
 

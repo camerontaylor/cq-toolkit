@@ -5,6 +5,19 @@ THE I1 CLI CONTRACT (landed):
 
 - bin = dist/cli.js — the src/cli.ts shim; all behavior lives in src/cli/.
 - One subcommand per registry entry, plus the built-in 'run-plan'.
+- One subcommand per SHIPPED PLAN, generated from the plan registry
+  (src/cli/plans.ts): every name the plan registry discovers is a
+  subcommand, so a new src/plans/<name>.ts registers itself with no CLI edit.
+  A plan subcommand takes run-plan's governed-run flags MINUS --plan AND the
+  run-plan-reserved --ops-root (RunPlanCommandSchema) and runs the registry
+  entry's discoverable floor plan through the same governed composition
+  (runPlan under a Governance handle when the operator set a cap); the floor
+  is validated with PlanSchema before
+  the run, so malformed plan data is a usage error (exit 2).
+  `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON, and
+  --ops-root remains a run-plan flag (a plan subcommand rejects it with exit
+  2; embedders inject an ops root through the runCli DI).
+  Op names win on a name collision (the op registry is consulted first).
 - stdout = exactly ONE JSON artifact per invocation (an OpResult, or a
   RunReport for run-plan); the plain-text `--help` surface is the one
   sanctioned exception.
@@ -16,7 +29,10 @@ THE I1 CLI CONTRACT (landed):
 - Flags are a thin JSON-flag mapping onto the op's input schema (values
   JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
-  --stop-on-error).
+  --stop-on-error, --opt-in — the governance opt-ins, comma-separated keys
+  from the kernel's GovernanceOptIn union; an opt-in alone constructs the
+  governance handle, so `budget.ungovernedOverGoverned` marks an uncapped
+  run ungoverned).
 - `json`, `help`, and `h` are CLI-reserved keys on every subcommand (narration
   mode / help surface): op input schemas must not declare them. VALUED
   reserved flags (`--json=x`, `--help=x`, `--h=x`) are rejected with exit 2

@@ -34,14 +34,11 @@
 //
 // Definitional rules (the data lives in ./classify.config.js; the table
 // only applies it):
-//   - "No reviewer privileged": an ACCEPTABLE review is ANY review whose
-//     author ≠ the PR author (bots count, humans count — no identity is
-//     special), whose body is not a bot skip/failure notice (skipPatterns),
-//     and whose VERDICT is APPROVED or COMMENTED — a CHANGES_REQUESTED
-//     verdict is an objection, not acceptance (the cross-family reading
-//     agrees: classifyThreads treats it as actionable); DISMISSED is
-//     void; a null/unknown verdict never counts. Author self-reviews
-//     never count.
+//   - Under a resolved policy, an ACCEPTABLE review must be from the
+//     configured trust set (bots and associations may be allowlisted), must
+//     not be authored by the PR author or automation, and must bind to the
+//     current head SHA. A trusted non-author objection is actionable;
+//     untrusted input is never acceptance evidence.
 //   - THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
 //     review is a review of the LAST COMMIT's exact head state — submitted
 //     STRICTLY AFTER the last commit. Evidence covering an earlier commit
@@ -54,7 +51,7 @@
 //     conversation comment) bypasses ONLY the settle wait — it can never
 //     stand in for the review-of-head requirement.
 //   - AN OUTSTANDING OBJECTION IS NOT SILENCE (row 6, deliberate
-//     strictness under NOTHING MERGES UNINVITED): a non-author
+//     strictness under NOTHING MERGES UNINVITED): a trusted non-author
 //     CHANGES_REQUESTED against the head state must be resolved or
 //     withdrawn before the quiet window can carry the PR — it blocks
 //     ahead of the all-clear and settle rows, no matter how long the
@@ -76,6 +73,7 @@ import { countUnresolvedThreads } from '../review/threads.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../review/threads.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { defaultClassifyPrConfig } from './classify.config.js';
+import { parseIndependentReview } from '../../shared/independent-review.js';
 
 /**
  * The frozen I2 vocabulary — the ONLY five things that can be said about a
@@ -144,6 +142,8 @@ export interface PrCandidate {
   issueComments: RestComment[];
   /** The head commit's ISO 8601 timestamp, or null when unresolvable (row 4). */
   lastCommitAt: string | null;
+  /** The exact current head SHA, when fetched. */
+  headRefOid?: string | null | undefined;
 }
 
 /**
@@ -177,6 +177,54 @@ const evalPattern = (pattern: RegExp, body: string): boolean =>
 const matchesSkipPattern = (body: string, config: ClassifyPrConfig): boolean =>
   config.skipPatterns.some((pattern) => evalPattern(pattern, body));
 
+const isTrustedReviewer = (review: ReviewSummary, ctx: ReviewContext): boolean => {
+  if (
+    ctx.config.trustedBots === undefined &&
+    ctx.config.trustedAssociations === undefined &&
+    ctx.config.automationLogin === undefined &&
+    ctx.config.excludedLogins === undefined
+  )
+    return true;
+  if (review.authorLogin === null || review.authorLogin === ctx.config.automationLogin)
+    return false;
+  if (ctx.config.excludedLogins?.includes(review.authorLogin)) return false;
+  const bots = ctx.config.trustedBots ?? [];
+  const associations = ctx.config.trustedAssociations ?? [];
+  return (
+    bots.includes(review.authorLogin) ||
+    (review.authorAssociation != null && associations.includes(review.authorAssociation))
+  );
+};
+
+const isTrustedLogin = (login: string | null, config: ClassifyPrConfig): boolean => {
+  if (
+    config.trustedBots === undefined &&
+    config.trustedAssociations === undefined &&
+    config.automationLogin === undefined &&
+    config.excludedLogins === undefined
+  )
+    return true;
+  if (login === null || login === config.automationLogin) return false;
+  if (config.excludedLogins?.includes(login)) return false;
+  return (config.trustedBots ?? []).includes(login);
+};
+
+/** Fold the complete review stream, retaining the latest submitted opinion per actor. */
+const latestReviewPerActor = (reviews: readonly ReviewSummary[]): ReviewSummary[] => {
+  const latest = new Map<string | null, ReviewSummary>();
+  for (const review of reviews) {
+    const key = review.authorLogin;
+    const prior = latest.get(key);
+    if (
+      prior === undefined ||
+      (parseMs(review.submittedAt) ?? 0) >= (parseMs(prior.submittedAt) ?? 0)
+    ) {
+      latest.set(key, review);
+    }
+  }
+  return [...latest.values()];
+};
+
 /**
  * The context the review-evidence predicates read: who the PR author is,
  * the last commit's parsed ms (null only before row 4 has failed closed),
@@ -186,23 +234,35 @@ interface ReviewContext {
   authorLogin: string | null;
   lastCommitMs: number | null;
   config: ClassifyPrConfig;
+  headRefOid?: string | null | undefined;
 }
 
 /**
  * The shared SCREEN every review must pass before its verdict can mean
  * anything to the table: a non-author (a null reviewer login is not the
  * author — external, counts, mirroring countUnresolvedThreads' exact
- * comparison), a body that is not a bot skip/failure notice
- * (matchesSkipPattern), and the TEMPORAL QUALIFIER — submitted STRICTLY
- * AFTER the last commit (evidence covering an earlier commit never
- * qualifies; a null/unparseable submittedAt never qualifies — fail
- * toward awaiting). `lastCommitMs` is typed nullable only so the
+ * comparison), membership in the resolved trust policy when one is active,
+ * a head-SHA binding when headRefOid is supplied, an automation-only skip
+ * marker under resolved policy, and the TEMPORAL QUALIFIER — submitted
+ * STRICTLY AFTER the last commit (evidence covering an earlier commit never
+ * qualifies; a null/unparseable submittedAt never qualifies — fail toward
+ * awaiting). `lastCommitMs` is typed nullable only so the
  * predicate stays total: the table has already failed closed on an
  * unknown commit by row 4, before any evidence row can call.
  */
 const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolean => {
   if (ctx.authorLogin !== null && review.authorLogin === ctx.authorLogin) return false;
-  if (matchesSkipPattern(review.body, ctx.config)) return false;
+  if (!isTrustedReviewer(review, ctx)) return false;
+  if (
+    matchesSkipPattern(review.body, ctx.config) &&
+    (ctx.config.automationLogin === undefined || review.authorLogin === ctx.config.automationLogin)
+  )
+    return false;
+  if (
+    ctx.headRefOid !== undefined &&
+    (ctx.headRefOid === null || review.commitOid !== ctx.headRefOid)
+  )
+    return false;
   const submittedMs = parseMs(review.submittedAt);
   return submittedMs !== null && ctx.lastCommitMs !== null && submittedMs > ctx.lastCommitMs;
 };
@@ -213,23 +273,101 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
  * CHANGES_REQUESTED verdict is handled by its own row (isObjection — an
  * objection, not acceptance; the cross-family reading agrees:
  * classifyThreads treats it as actionable feedback to answer). DISMISSED
- * is void; a null/unknown state never counts (fail toward awaiting).
+ * is void; a null/unknown state never counts (fail toward awaiting). The
+ * config knob cannot admit DISMISSED: the dispatch boundary rejects it
+ * (review r3, PR #222), so the doctrine holds on every surface.
  */
-const stateCounts = (state: ReviewSummary['state']): boolean =>
-  state === 'APPROVED' || state === 'COMMENTED';
+const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean => {
+  // DISMISSED is refused twice over: the dispatch boundary rejects it in
+  // the configured set, and the doctrine holds DISMISSED void outright —
+  // an explicit guard keeps a non-typechecked caller that hands the pure
+  // function a hostile set from resurrecting a retracted review.
+  if (state === null || state === 'DISMISSED') return false;
+  const accepted = config.acceptReviewStates ?? ['APPROVED', 'COMMENTED'];
+  return accepted.some((candidate) => candidate === state);
+};
 
 /**
  * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
- * carries acceptance (stateCounts). No reviewer is privileged: bots and
- * humans count identically.
+ * carries acceptance (stateCounts), with the resolved trust policy and
+ * current-head SHA applied when configured. Under the legacy surface no
+ * identity is special.
  */
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
-  isReviewableEvidence(review, ctx) && stateCounts(review.state);
+  isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
+
+const STRUCTURAL_EXCLUDED = new Set([
+  'github-actions[bot]',
+  'cq-automation[bot]',
+  'cq-verdict[bot]',
+  'cq-promoter[bot]',
+]);
+const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
+
+/** Latest marked PR-author review supersedes earlier markers before validation. */
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
+  if (ctx.config.allowSameAccountAgentReview !== true) return false;
+  const author = candidate.authorLogin?.toLowerCase();
+  const head = candidate.headRefOid?.toLowerCase();
+  if (author === undefined || author === '' || head === undefined || !/^[0-9a-f]{40}$/.test(head))
+    return false;
+  const marked = candidate.reviews.filter((review) => {
+    if (review.authorLogin?.toLowerCase() !== author) return false;
+    if (review.state === null && review.submittedAt === null) return false;
+    return parseIndependentReview(review.body).kind !== 'absent';
+  });
+  if (marked.length === 0) return false;
+  let latest: ReviewSummary | undefined;
+  let latestMs = -Infinity;
+  for (const review of marked) {
+    const submittedMs = parseMs(review.submittedAt);
+    if (submittedMs === null) return false;
+    if (latest === undefined || submittedMs >= latestMs) {
+      latest = review;
+      latestMs = submittedMs;
+    }
+  }
+  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
+    return false;
+  const parsed = parseIndependentReview(latest.body);
+  const attestation = parsed.kind === 'valid' ? parsed.attestation : null;
+  if (
+    attestation === null ||
+    attestation.verdict !== 'PASS' ||
+    attestation.headSha.toLowerCase() !== head ||
+    latest.commitOid?.toLowerCase() !== head ||
+    latestMs <= (ctx.lastCommitMs ?? Infinity)
+  )
+    return false;
+  const associations = ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR'];
+  if (
+    latest.authorAssociation === null ||
+    latest.authorAssociation === undefined ||
+    !associations.some(
+      (association) => association.toUpperCase() === latest.authorAssociation?.toUpperCase(),
+    )
+  )
+    return false;
+  if (latest.authorLogin == null) return false;
+  const login = latest.authorLogin.toLowerCase();
+  const normalizedLogin = attestationLogin(login);
+  if ([...STRUCTURAL_EXCLUDED].some((excluded) => attestationLogin(excluded) === normalizedLogin))
+    return false;
+  if (
+    ctx.config.excludedLogins?.some(
+      (excluded) => attestationLogin(excluded) === normalizedLogin,
+    ) === true
+  )
+    return false;
+  return true;
+};
 
 /**
- * An OUTSTANDING OBJECTION for row 6: reviewable evidence (non-author,
- * non-skip-notice body, postdating the last commit) whose verdict is
- * CHANGES_REQUESTED — an open objection to the head state. An objection
+ * An OUTSTANDING OBJECTION for row 6: reviewable evidence — a trusted
+ * non-author whose body is screened as a skip notice only when
+ * automation-authored under resolved policy, head-SHA-bound when a head
+ * was supplied, and postdating the last commit — whose verdict is
+ * CHANGES_REQUESTED, an open objection to the head state. An objection
  * is not silence: under NOTHING MERGES UNINVITED it must be resolved or
  * withdrawn (the verdict moves off CHANGES_REQUESTED) before the quiet
  * window can carry the PR, no matter how long the settle.
@@ -332,13 +470,39 @@ export function classifyPr(
     };
   }
   // Rows 6–9 read review evidence; they share one screening context.
-  const ctx: ReviewContext = { authorLogin: candidate.authorLogin, lastCommitMs, config };
+  const ctx: ReviewContext = {
+    authorLogin: candidate.authorLogin,
+    lastCommitMs,
+    config,
+    headRefOid: candidate.headRefOid,
+  };
+  const policyActive =
+    config.trustedBots !== undefined ||
+    config.trustedAssociations !== undefined ||
+    config.automationLogin !== undefined ||
+    config.excludedLogins !== undefined;
+  const foldInput = candidate.reviews.filter((review) => {
+    // COMMENTED/DISMISSED are transparent: they must not mask a standing
+    // verdict from the same actor.
+    if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
+    if (!policyActive) return true;
+    if (!isTrustedReviewer(review, ctx)) return false;
+    if (
+      matchesSkipPattern(review.body, config) &&
+      (config.automationLogin === undefined || review.authorLogin === config.automationLogin)
+    )
+      return false;
+    if (candidate.headRefOid !== undefined)
+      return candidate.headRefOid !== null && review.commitOid === candidate.headRefOid;
+    return true;
+  });
+  const foldedReviews = policyActive ? latestReviewPerActor(foldInput) : candidate.reviews;
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
   // CHANGES_REQUESTED against the last commit's head state, not yet
   // withdrawn (verdict moved off CHANGES_REQUESTED). An objection is not
   // silence (DOCTRINE: NOTHING MERGES UNINVITED) — it blocks ahead of the
   // all-clear and settle rows, no matter how long the settle runs.
-  if (candidate.reviews.some((review) => isObjection(review, ctx))) {
+  if (foldedReviews.some((review) => isObjection(review, ctx))) {
     return {
       verdict: 'awaiting',
       reason: 'merge_objection_outstanding',
@@ -346,12 +510,15 @@ export function classifyPr(
     };
   }
   // Row 7 — nobody has looked AT THIS CODE: no acceptable review of the
-  // last commit's exact head state exists (non-author, verdict
-  // APPROVED/COMMENTED, non-skip-notice, submitted STRICTLY AFTER the
-  // last commit). Quiet is not acceptance until someone qualified has
-  // spoken about the head state at least once — and no amount of settle
-  // time cures evidence that predates the commit.
-  const hasAcceptableReview = candidate.reviews.some((review) => isAcceptableReview(review, ctx));
+  // last commit's exact head state exists (trusted non-author under the
+  // resolved policy, current-head SHA when supplied, configured verdict
+  // state, and submitted STRICTLY AFTER the last commit). Quiet is not
+  // acceptance until someone qualified has spoken about the head state at
+  // least once — and no amount of settle time cures evidence that predates
+  // the commit.
+  const hasAcceptableReview =
+    foldedReviews.some((review) => isAcceptableReview(review, ctx)) ||
+    hasSameAccountAgentAcceptance(candidate, ctx);
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };
   }
@@ -362,13 +529,14 @@ export function classifyPr(
   // already held before we got here. An all-clear at-or-before the commit
   // speaks about earlier code and falls through.
   const allClearAfterLastCommit =
-    candidate.reviews.some(
+    foldedReviews.some(
       (review) =>
         // A review body is all-clear evidence only when its VERDICT can
         // carry evidence at all (stateCounts — a DISMISSED or
         // CHANGES_REQUESTED "LGTM" body is a retracted note or an
         // objection, not an all-clear).
-        stateCounts(review.state) &&
+        stateCounts(review.state, config) &&
+        isReviewableEvidence(review, ctx) &&
         isAllClearAfter(
           review.body,
           review.authorLogin,
@@ -383,6 +551,7 @@ export function classifyPr(
         // Only TOP-LEVEL conversation comments: a reply rides on someone
         // else's thread, it is not the commenter's own verdict on the PR.
         comment.inReplyToId === null &&
+        isTrustedLogin(comment.authorLogin, config) &&
         isAllClearAfter(
           comment.body,
           comment.authorLogin,

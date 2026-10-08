@@ -5,13 +5,13 @@
 // git/gh mutation the executor can perform lives behind ONE interface,
 // MergeEffects — and `executeMerges` takes an instance as INPUT. A test
 // therefore exercises the whole merge flow through a FakeMergeEffects that
-// implements seven async methods in memory: ZERO real git/gh processes,
+// implements eight async methods in memory: ZERO real git/gh processes,
 // zero networks, zero filesystems. The production implementation
 // (realMergeEffects) is just one more implementor of the same interface.
 //
 // I3 — MERGE COMMITS ONLY. The executor may never squash, force, rebase,
 // hard-reset, amend, or push to the protected branch, whatever calls it.
-// The guard is `safeArgs` — an ALLOWLIST (round 2): only the seven argv
+// The guard is `safeArgs` — an ALLOWLIST (round 2): only the eight argv
 // shapes this family documents may execute (see the safeArgs doc); any
 // other argv is refused as an unknown shape before any process can spawn,
 // and the push shape itself refuses force markers, bare/symbolic
@@ -86,7 +86,7 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  * THE I3 GUARD — AN ALLOWLIST (round 2): only the argv shapes this family
  * documents may execute; EVERYTHING ELSE is refused with
  * `refused: unknown argv shape`, so an undocumented mutation cannot ride
- * the guard through however innocuous its tokens look. The seven shapes
+ * the guard through however innocuous its tokens look. The eight shapes
  * (after the `-C <path>` prefix is stripped):
  *   rev-parse <flags/ref>…                    — ref resolution (≥1 arg)
  *   fetch <remote> <refspec>…                 — refspecs may carry the '+'
@@ -106,8 +106,12 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       the documented shape carries none, so `push origin --force
  *       feat:x` cannot ride a discarded-flag blind spot), and the
  *       destination must not be the protected branch
- *   gh pr merge <n> --merge                   — the ONLY merge method (I3)
+ *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
+ *       method (I3); the head-commit pin is allowed only as a 40-hex sha
+ *       (review-debt #186)
  *   gh pr edit <n> --base <base>              — the retarget
+ *   gh pr view <n> --json baseRefName         — the base-ref read
+ *       (review-debt #193; the read-only forge-metadata probe)
  * opts.protectedBranch (default 'main') names the branch pushes may never
  * land on, under either spelling.
  */
@@ -120,7 +124,7 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
   const unknown = (): UnsafeMergeArgsError =>
     new UnsafeMergeArgsError(
       args,
-      'refused: unknown argv shape — the merge family executes only its seven documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit)',
+      'refused: unknown argv shape — the merge family executes only its eight documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit, gh pr view)',
     );
   const sub = rest[0];
   switch (sub) {
@@ -216,29 +220,56 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       return args;
     }
     case 'pr': {
-      // The two gh shapes: the merge (I3's only method) and the retarget.
-      // rest[0] is 'pr' itself — the gh runner's argv starts at the
-      // subcommand (the binary is the runner), so skip it. EXACT ARITY:
-      // trailing tokens are how --admin/--squash/--delete-branch would ride
-      // an otherwise-legal shape past the guard (VB2F batch gate).
-      if (rest.length !== 4 && rest.length !== 5) throw unknown();
+      // The three gh shapes: the merge (I3's only method, optionally pinned
+      // by `--match-head-commit`), the retarget, and the base-ref read
+      // (review-debt #193). rest[0] is 'pr' itself — the
+      // gh runner's argv starts at the subcommand (the binary is the runner),
+      // so skip it. EXACT ARITY: trailing tokens are how --admin/--squash/
+      // --delete-branch would ride an otherwise-legal shape past the guard
+      // (VB2F batch gate).
       const [, verb, prNum, flag, base] = rest;
       if (
-        rest.length === 4 &&
+        (rest.length === 4 || rest.length === 6) &&
         verb === 'merge' &&
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
         flag === '--merge'
       ) {
-        return args;
+        if (rest.length === 4) {
+          return args;
+        }
+        const [, , , , , sha] = rest;
+        if (
+          rest[4] === '--match-head-commit' &&
+          typeof sha === 'string' &&
+          /^[0-9a-f]{40}$/i.test(sha)
+        ) {
+          return args;
+        }
+        throw unknown();
       }
       if (
+        rest.length === 5 &&
         verb === 'edit' &&
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
         flag === '--base' &&
         typeof base === 'string' &&
         base !== ''
+      ) {
+        return args;
+      }
+      // The base-ref READ (review-debt #193): `gh pr view <n> --json
+      // baseRefName` — EXACT arity, numeric pr, and the ONE json field this
+      // family reads. Any other field or trailing token is unknown: the
+      // read must not become a vehicle for a broader `gh pr view` surface.
+      if (
+        rest.length === 5 &&
+        verb === 'view' &&
+        typeof prNum === 'string' &&
+        /^\d+$/.test(prNum) &&
+        flag === '--json' &&
+        base === 'baseRefName'
       ) {
         return args;
       }
@@ -282,6 +313,18 @@ export interface MergeEffects {
    * Resolves with the exit code (GhResult shape); nonzero means the ref's
    * truth is unavailable. */
   fetchRef(ref: string): Promise<GhResult>;
+  /**
+   * Re-read PR `pr`'s forge base ref — the branch it currently targets
+   * (`gh pr view <pr> --json baseRefName` in the real implementation;
+   * review-debt #193). executeMerges calls it before each MERGE action and
+   * compares the answer against the base the plan was built on: a retarget
+   * between plan and run moves the base WITHOUT touching the head, so the
+   * head-SHA pin alone cannot catch it. Resolves `{ ok: true, baseRefName }`
+   * when the forge answers with a non-empty ref; `{ ok: false }` when the
+   * read failed or the payload was unreadable — never throws for a failed
+   * read (each caller decides its own fail-closed policy).
+   */
+  readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }>;
   /** Prepare a throwaway worktree for the PR's merge flow, checked out at
    * `ref`. Resolves with the worktree path; throws when the worktree cannot
    * be created (a missing tree is not a merge outcome). */
@@ -293,9 +336,12 @@ export interface MergeEffects {
   worktreeRemove(path: string): Promise<void>;
   /** Merge PR `pr` on the forge, `method: 'merge'` EXCLUSIVELY (I3 — the
    * type admits no other method and safeArgs rejects `--squash`/`--rebase`
-   * argv regardless). Resolves with the exit code; executeMerges reads
-   * `stderr` to decide bounded-retry eligibility. */
-  mergePr(pr: number, opts: { method: 'merge' }): Promise<GhResult>;
+   * argv regardless). `matchHeadCommit` (review-debt #186) pins the merge to
+   * the reviewed head SHA (`gh pr merge --match-head-commit <sha>`): the
+   * forge refuses the merge when the head moved between plan and execution,
+   * closing the fixer-push race. Resolves with the exit code; executeMerges
+   * reads `stderr` to decide bounded-retry eligibility. */
+  mergePr(pr: number, opts: { method: 'merge'; matchHeadCommit?: string }): Promise<GhResult>;
   /** Retarget PR `pr` onto `newBase` — the forge base-edit operation
    * (`gh pr edit <pr> --base <newBase>` in the real implementation). This
    * is the retarget-self action's WHOLE body: forge metadata, so it never
@@ -403,8 +449,11 @@ export interface RealMergeEffectsOpts {
  *                   worktree, so it cannot host the trees)
  *   - worktreeRemove:  `git -C <root> worktree remove <path>` (no --force —
  *                   a refusing tree stays and throws)
- *   - mergePr:      `gh pr merge <pr> --merge`
+ *   - mergePr:      `gh pr merge <pr> --merge` (plus
+ *                   `--match-head-commit <sha>` when the caller pins the head)
  *   - retargetBase: `gh pr edit <pr> --base <newBase>`
+ *   - readBaseRef:  `gh pr view <pr> --json baseRefName` (the forge
+ *                   base-ref read — review-debt #193)
  *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
  *                   refspec — round 2: bare/symbolic forms are refused)
  */
@@ -420,6 +469,15 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const ghRunnerOpts = {
     ...(opts.ghBin !== undefined ? { bin: opts.ghBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // Scope gh to the target repository (review-debt #163): git already
+    // runs via -C, but gh resolved its repo from the process cwd or GH_REPO
+    // — an SDK caller with cwd ≠ target repo could hit WRONG-repo PRs when
+    // numbers collide. The spawn cwd fixes that without touching argv
+    // shapes (safeArgs unaffected); GH_REPO is stripped from the inherited
+    // env because gh's resolution precedence (-R > GH_REPO > cwd) would
+    // otherwise defeat the cwd. The git runner keeps -C argv scoping.
+    cwd: repoRoot,
+    unsetEnv: ['GH_REPO'],
   };
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
@@ -448,6 +506,31 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
 
   const fetchRef = (ref: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'fetch', 'origin', `+${ref}:${ref}`]);
+
+  // The forge base-ref read (review-debt #193). `gh pr view --json` prints
+  // a JSON document; a nonzero exit, unparseable stdout, or an absent/empty
+  // field is `{ ok: false }` — fail closed, never a guessed base. The
+  // parsed ref is TRIMMED (a whitespace-padded value must not false-`stale`
+  // at the consumer) and an empty-after-trim value is `{ ok: false }`.
+  const readBaseRef = async (pr: number): Promise<{ ok: boolean; baseRefName?: string }> => {
+    if (!Number.isInteger(pr) || pr <= 0) return { ok: false };
+    const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName']);
+    if (result.code !== 0) return { ok: false };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      return { ok: false };
+    }
+    const raw =
+      typeof parsed === 'object' && parsed !== null
+        ? (parsed as { baseRefName?: unknown }).baseRefName
+        : undefined;
+    if (typeof raw !== 'string') return { ok: false };
+    const baseRefName = raw.trim();
+    if (baseRefName === '') return { ok: false };
+    return { ok: true, baseRefName };
+  };
 
   // The worktree root's base dir, derived LAZILY (first prepare, then
   // cached) from git's COMMON dir (round 2): a linked worktree's .git is a
@@ -497,8 +580,17 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     }
   };
 
-  const mergePr = (pr: number, method: { method: 'merge' }): Promise<GhResult> =>
-    gh(['pr', 'merge', String(pr), `--${method.method}`]);
+  const mergePr = (
+    pr: number,
+    opts: { method: 'merge'; matchHeadCommit?: string },
+  ): Promise<GhResult> =>
+    gh([
+      'pr',
+      'merge',
+      String(pr),
+      `--${opts.method}`,
+      ...(opts.matchHeadCommit !== undefined ? ['--match-head-commit', opts.matchHeadCommit] : []),
+    ]);
 
   const retargetBase = (pr: number, newBase: string): Promise<GhResult> =>
     gh(['pr', 'edit', String(pr), '--base', newBase]);
@@ -506,5 +598,14 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
     git(['-C', fromPath, 'push', 'origin', ref]);
 
-  return { validateRef, fetchRef, worktreePrepare, worktreeRemove, mergePr, retargetBase, pushRef };
+  return {
+    validateRef,
+    fetchRef,
+    readBaseRef,
+    worktreePrepare,
+    worktreeRemove,
+    mergePr,
+    retargetBase,
+    pushRef,
+  };
 }
