@@ -104,10 +104,12 @@ adopter owns it by hand.
 
 ### Budget caps and the wall-clock ladder (I9)
 
-- Rule: every scheduled run carries `--max-usd` (default
-  `SelfhostDefaults.maxUsd`, 1 USD) as an honest stop — the governor halts
-  the run when the derived cost rollup crosses it rather than pretending to
-  have finished (a one-job merge plan shows the budget-exhausted job row —
+- Rule: every scheduled run carries a token cap (default
+  `SelfhostDefaults.maxTokens`, 2,000,000 tokens; `--max-usd` is an optional
+  USD opt-in for a priced model — the default model is unpriced, and a USD
+  cap over unpriced usage fails the run loud, DD-9) as an honest stop — the
+  governor halts the run when the rollup crosses it rather than pretending
+  to have finished (a one-job merge plan shows the budget-exhausted job row —
   `stoppedEarly` stays false — and the loop path's per-PR governors surface
   the trip through the job row too); the merge path
   also arms the governor's wall-clock ladder
@@ -121,7 +123,7 @@ adopter owns it by hand.
   construction over `runSelfMergePrs`'s runOptions (`buildRunInput` only
   prepares the plan input); the review loop's `runOptions` — from the frozen
   constants in `src/selfhost/config.ts`
-  (`SelfhostDefaults.maxUsd`, `SelfhostDefaults.perJobWallClockMs`).
+  (`SelfhostDefaults.maxTokens`, `SelfhostDefaults.perJobWallClockMs`).
 
 ### One ≤20-minute slot per schedule fire
 
