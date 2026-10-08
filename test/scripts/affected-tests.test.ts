@@ -66,10 +66,13 @@ describe('selectAffected', () => {
   it('maps sources that suites read or spawn by path, with no import edge', () => {
     const suites = [
       'test/api-report.test.mjs',
+      'test/cli/i1.test.ts',
       'test/driver/harness-parity.test.ts',
       'test/driver/served-model-sites.test.ts',
       'test/driver/subprocess.test.ts',
       'test/harness/mcp-bin.test.ts',
+      'test/kernel/driver-hygiene.test.ts',
+      'test/ops/gates/policyDiff.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
       'test/workflows/default-ref-guards.test.ts',
     ];
@@ -80,13 +83,37 @@ describe('selectAffected', () => {
       'test/workflows/default-ref-guards.test.ts',
     ]);
     // The protected closure crosses directories: any source may join it.
-    expect(pick('src/kernel/types.ts')).toEqual(['test/ops/gates/protectedPaths.test.ts']);
+    expect(pick('src/shared/independent-review.ts')).toEqual([
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('src/kernel/types.ts')).toEqual([
+      'test/kernel/driver-hygiene.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('src/kernel/governor.ts')).toEqual([
+      'test/driver/harness-parity.test.ts',
+      'test/harness/mcp-bin.test.ts',
+      'test/kernel/driver-hygiene.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('src/kernel/runner.ts')).toEqual([
+      'test/driver/subprocess.test.ts',
+      'test/kernel/driver-hygiene.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    // i1's generated fixture imports the real driver factory by path.
+    expect(pick('src/sandbox/x.ts')).toEqual([
+      'test/cli/i1.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
     expect(pick('src/ops/merge/classifyPrs.ts')).toEqual([
       'test/driver/served-model-sites.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
+      'test/cli/i1.test.ts',
       'test/driver/harness-parity.test.ts',
+      'test/driver/subprocess.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
@@ -94,7 +121,12 @@ describe('selectAffected', () => {
       'test/driver/subprocess.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
-    expect(pick('scripts/api-report.mjs')).toEqual(['test/api-report.test.mjs']);
+    // The generic scripts/ row adds every test/workflows suite as well.
+    expect(pick('scripts/api-report.mjs')).toEqual([
+      'test/api-report.test.mjs',
+      'test/ops/gates/policyDiff.test.ts',
+      'test/workflows/default-ref-guards.test.ts',
+    ]);
   });
 
   it('selects nothing for inert prose edits without falling back', () => {

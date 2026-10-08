@@ -21,10 +21,19 @@ export const NON_IMPORT_MAP = [
   // fixture paths are not part of the related-source query: select every test.
   [/^test\/fixtures\//, [/^(test|lint)\//]],
   [/^test\/helpers\//, [/^(test|lint)\//]],
-  [/^scripts\//, [/^test\/scripts\//, /^test\/workflows\//]],
+  // policyDiff requires every protected-path pattern to match a tracked file.
+  [
+    /^scripts\//,
+    [/^test\/scripts\//, /^test\/workflows\//, /^test\/ops\/gates\/policyDiff\.test\.ts$/],
+  ],
   // The CLI smoke test runs `pnpm run build`, which executes this script by path.
   [/^scripts\/copy-prompt-assets\.mjs$/, [/^test\/cli\/plans\.smoke\.test\.ts$/]],
   // Source-tree scanners read src/** from disk: no import-graph edge.
+  // Deliberately NOT mapped: whole-tree consumers — plans.smoke (builds dist
+  // from all of src/) and ratchet-baseline (typechecks the real tree). Every
+  // source change would select them; what only they add, the build and the
+  // typecheck, is the mandatory local check:static gate and CI's build.
+  [/^src\/kernel\//, [/^test\/kernel\/driver-hygiene\.test\.ts$/]],
   [
     /^src\/driver\//,
     [/^test\/kernel\/driver-hygiene\.test\.ts$/, /^test\/scripts\/static-conformance\.test\.ts$/],
@@ -41,12 +50,17 @@ export const NON_IMPORT_MAP = [
   // source can join it.
   [/^src\/.*\.ts$/, [/^test\/ops\/gates\/protectedPaths\.test\.ts$/]],
   [/^src\/selfhost\/promote-gate\.ts$/, [/^test\/workflows\/default-ref-guards\.test\.ts$/]],
-  // Entry points these suites only run in a child process, by path.
+  // Entry points these suites only run in a child process (or a generated
+  // fixture) by path: their closures, less what the suites import.
   [
-    /^src\/harness\/mcp\//,
+    /^src\/(harness\/mcp\/|kernel\/governor)/,
     [/^test\/harness\/mcp-bin\.test\.ts$/, /^test\/driver\/harness-parity\.test\.ts$/],
   ],
-  [/^src\/(cli\.ts$|cli\/|harness\/run\.ts$)/, [/^test\/driver\/subprocess\.test\.ts$/]],
+  [
+    /^src\/(cli\.ts$|cli\/|harness\/|kernel\/(journal|lanes|manifest|output|runner)\.ts$|plans\/registry\.ts$|registry\/)/,
+    [/^test\/driver\/subprocess\.test\.ts$/],
+  ],
+  [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/i1\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
   [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//, /^test\/ops\/gates\//]],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
