@@ -7,6 +7,66 @@ from merged pull-request titles, grouped by the v1 workstreams of
 Links default to the
 `camerontaylor/cq-toolkit` repository; WS-J links are repo-qualified.
 
+## Unreleased
+
+Changes since the `v1.0.1` source milestone. The next release is `0.2.0`,
+the first npm publication. It waits on the remaining prepublication
+hardening, implementation of the accepted ADRs, review debt and the G2 adversarial evidence; the release cut adds
+the version header, date and version bump. See the
+[0.2 release runbook](docs/0.2-release-runbook.md). The accepted design
+decisions behind these changes are published in [docs/adr/](docs/adr/README.md).
+
+Draft change list, from merged pull-request titles through
+[#240](https://github.com/camerontaylor/cq-toolkit/pull/240). Later merges are
+not listed yet; the release cut regenerates and groups the full list.
+
+- Driver fixes after `v1.0.1`: strip the draft-2020-12 meta-schema URI
+  before the claude CLI sees the schema
+  ([#211](https://github.com/camerontaylor/cq-toolkit/pull/211)); bound the
+  ai-sdk tool loop and classify its failure causes
+  ([#212](https://github.com/camerontaylor/cq-toolkit/pull/212)); populate
+  `WorkerResult.error` on the subprocess error path
+  ([#213](https://github.com/camerontaylor/cq-toolkit/pull/213))
+- W0 self-host safety and hygiene: harden self-host automation and worker
+  environment ([#214](https://github.com/camerontaylor/cq-toolkit/pull/214));
+  split unit and e2e workflows ([#215](https://github.com/camerontaylor/cq-toolkit/pull/215))
+- W1.1–1.3 reviewer trust and merge acceptance: enforce reviewer trust and
+  path anchors ([#222](https://github.com/camerontaylor/cq-toolkit/pull/222));
+  SHA-bound merge-time acceptance and durable settle state
+  ([#223](https://github.com/camerontaylor/cq-toolkit/pull/223)); accept
+  independent agent reviews from a shared account
+  ([#237](https://github.com/camerontaylor/cq-toolkit/pull/237))
+- W1.4 harness: close the subprocess tool surface with the cq-harness MCP
+  server ([#224](https://github.com/camerontaylor/cq-toolkit/pull/224))
+- W1.5–1.6 driver boundaries: harden driver boundaries and served-model
+  assertions ([#221](https://github.com/camerontaylor/cq-toolkit/pull/221))
+- W1.7 ratchet provenance: bind verification to trusted provenance
+  ([#231](https://github.com/camerontaylor/cq-toolkit/pull/231))
+- W1.8 worker evidence: default-deny first for worker evidence
+  ([#220](https://github.com/camerontaylor/cq-toolkit/pull/220))
+- W1.9 protected-path policy: D11 protected-path policy diff check
+  ([#232](https://github.com/camerontaylor/cq-toolkit/pull/232))
+- W1.10 privileged provenance: privileged-job provenance and rulesets as
+  code (ADR-0004 C1) ([#233](https://github.com/camerontaylor/cq-toolkit/pull/233))
+- W1.11 sandbox: conservative `CQ_SANDBOX` support
+  ([#230](https://github.com/camerontaylor/cq-toolkit/pull/230))
+- Review-debt reconciliation: #153 same-pass strand, #222-r3 minors, #226
+  cq-state guards ([#234](https://github.com/camerontaylor/cq-toolkit/pull/234))
+- W2.2–2.3 governed admission: governed `runPlan` — the kernel is the one
+  governed composition (ADR-0003 §2)
+  ([#235](https://github.com/camerontaylor/cq-toolkit/pull/235));
+  reserve-then-settle admission — write-ahead reservations, quarantine on
+  unresolved (A12b), ADVISORY gate (A12c)
+  ([#236](https://github.com/camerontaylor/cq-toolkit/pull/236))
+- W3.3 seam v2 + DriverFactory (ADR-0002 S1–S6)
+  ([#238](https://github.com/camerontaylor/cq-toolkit/pull/238))
+- Test infrastructure: separate real Git fixture setup from ratchet
+  assertions ([#240](https://github.com/camerontaylor/cq-toolkit/pull/240))
+
+The dated `v1.0.0` and `v1.0.1` entries below describe historical source
+milestones; neither version was published to npm. The `v1.0.0` source tag
+is retained and will not be moved.
+
 ## v1.0.1 — 2026-09-21
 
 Post-v1.0.0 patches for the WB-1 eval-matrix lanes.
@@ -168,6 +228,7 @@ release tooling — together with the fixtures/eval repo.
 
 ### npm
 
-- `@camerontaylor/cq-toolkit@1.0.0` — publish pending owner action
-  (`AUTOPUBLISH=no`); the `0.0.0` reservation remains on the registry until
-  the owner publishes. See `RELEASE.md`.
+- `@camerontaylor/cq-toolkit@1.0.0` was prepared but not published.
+  The owner replaced that publication path with 0.2 on 2026-10-01;
+  `0.0.0` remains the reservation. See the historical `RELEASE.md` and
+  current `docs/0.2-release-runbook.md`.

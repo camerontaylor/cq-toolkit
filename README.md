@@ -4,7 +4,7 @@ The SDK is the primary interface; the CLI is a secondary interface over the same
 
 ## Install
 
-The v1 library is not published to npm yet: `@camerontaylor/cq-toolkit@0.0.0` on the registry is a name reservation whose payload is LICENSE + README only. Until v1, install and build from source:
+The first npm release is `0.2.0` (no `1.x` will be published). Until `@camerontaylor/cq-toolkit@0.2.0` is on the registry — the `0.0.0` version there is a name reservation whose payload is LICENSE + README only — install and build from source:
 
 ```sh
 git clone https://github.com/camerontaylor/cq-toolkit
@@ -13,7 +13,7 @@ pnpm install --frozen-lockfile
 pnpm run build
 ```
 
-Once v1 ships, the install is the usual one:
+Once `0.2.0` is published, the install is the usual one:
 
 ```sh
 npm install @camerontaylor/cq-toolkit

@@ -1,8 +1,7 @@
 # W1.10 methods note
 
 W1.10 implements privileged-job provenance and rulesets-as-code: plan §6 row W1.10, as
-superseded by ADR-0004 Appendix B (reconciled at G1, `bf5f540`) and RS-11's Decision
-(`d9e83ad`). The three GitHub Apps (`cq-verdict`, `cq-promoter`, `cq-automation`) are **not
+superseded by [ADR-0004](adr/0004-policy-check-trust-boundaries.md) (D-D, D-H.3, D-I, D-K) and RS-11's Decision. The three GitHub Apps (`cq-verdict`, `cq-promoter`, `cq-automation`) are **not
 installed** (owner-blocked, RS-11 B1–B6). This PR is therefore **cutover step C1** (ADR-0004
 D-H.3.1), plus the C2 and owner-setup target state written as code. Every App-dependent path is
 built but switches on only when its repository variable is set. Until then the interim PAT

@@ -1,5 +1,12 @@
 # Release v1.0.0 — `@camerontaylor/cq-toolkit`
 
+**Historical release-PR record, superseded on 2026-10-01.** The owner chose
+the first npm publication as `0.2.0` after prepublication hardening and G2.
+Neither `1.0.0` nor `1.1.0` will be published. The `v1.0.0` tag is historical
+and unpublished. Use [the 0.2 release runbook](docs/0.2-release-runbook.md)
+for the current gate and publication sequence; the owner actions below are
+retained only as an account of the earlier plan.
+
 Release-PR body for **T5.1** (`release: v1.0.0`). Instantiates the plan §6
 publication checklist and the plan §11 DoD→evidence traceability table.
 Branch `lane/p5-release`, cut at task-start `origin/main` `51c81eb` (T4.4,

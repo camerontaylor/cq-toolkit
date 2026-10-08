@@ -335,9 +335,8 @@ export const NARRATION_TOOL = 'acp-narration';
 
 /**
  * The client version advertised in the ACP `initialize` handshake. Kept in
- * lockstep with the root `package.json` `version` (the post-v1.0.0 1.0.1
- * patch PR aligns both); deriving it from the manifest at runtime is a
- * post-v1 candidate, not a release blocker.
+ * lockstep with the root `package.json` `version`. Deriving it from the
+ * manifest at runtime remains a separate improvement.
  */
 const CLIENT_VERSION = '1.0.1';
 

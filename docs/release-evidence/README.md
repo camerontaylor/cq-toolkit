@@ -1,5 +1,11 @@
 # Release evidence — v1.0.0
 
+The 0.2 release evidence is recorded at the release cut, on the promoted
+release candidate, per the
+[0.2 runbook preflight](../0.2-release-runbook.md#preflight-record). The
+accepted ADRs are indexed in [`docs/adr/README.md`](../adr/README.md). Everything below is the historical
+v1.0.0 record, retained unpublished.
+
 Raw logs captured by the T5.1 publication checklist (plan §6). They are the
 attachment form of the two local runs the checklist requires, so the release
 PR carries the artifacts rather than only describing them.

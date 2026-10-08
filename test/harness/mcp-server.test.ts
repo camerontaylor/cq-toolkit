@@ -162,6 +162,26 @@ describe('initialize + ping', () => {
     });
   });
 
+  test('the stateless 2026-07-28 revision is not advertised; server/discover is not found', async () => {
+    // 2026-07-28 drops initialize for server/discover, which this server does
+    // not implement: a client asking for it negotiates down to the newest
+    // initialize-based revision, and the discover probe gets -32601 so the
+    // client falls back to initialize.
+    expect(SUPPORTED_PROTOCOL_VERSIONS).not.toContain('2026-07-28');
+    expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
+    const io = startServer(surfaceFor());
+    io.send(request('d', 'server/discover'));
+    expect(await io.next()).toMatchObject({
+      id: 'd',
+      error: { code: JSONRPC_ERRORS.methodNotFound },
+    });
+    io.send(request('n', 'initialize', { protocolVersion: '2026-07-28' }));
+    expect(await io.next()).toMatchObject({
+      id: 'n',
+      result: { protocolVersion: '2025-11-25' },
+    });
+  });
+
   test('ping → {} and notifications/initialized is silent', async () => {
     const io = startServer(surfaceFor());
     io.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
