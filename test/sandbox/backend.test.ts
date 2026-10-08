@@ -17,6 +17,7 @@ import {
   containerAdapter,
   containerArgv,
   containerEnvFile,
+  DEFAULT_SANDBOX_IMAGE,
   landlockAdapter,
   seatbeltAdapter,
   seatbeltProfile,
@@ -175,7 +176,7 @@ describe('linux and container boundary construction', () => {
 
   test('container drops all capabilities and runs as a fixed non-root UID', () => {
     const argv = containerArgv(
-      { image: 'cq-sandbox:latest' },
+      { image: 'cq-sandbox:latest', allowUnpinnedImage: true },
       '/ws',
       'model-only',
       '/private/env/child.env',
@@ -206,7 +207,13 @@ describe('linux and container boundary construction', () => {
   test('a container argv without a command head is refused', () => {
     for (const argv of [[], [''], ['-it']]) {
       expect(() =>
-        containerArgv({ image: 'x' }, '/ws', 'model-only', '/private/env/child.env', argv),
+        containerArgv(
+          { image: 'x', allowUnpinnedImage: true },
+          '/ws',
+          'model-only',
+          '/private/env/child.env',
+          argv,
+        ),
       ).toThrow(/argv\[0\] must be a command/);
     }
   });
@@ -238,26 +245,44 @@ describe('linux and container boundary construction', () => {
     // (delta review): `00`, `000:1000` and `1000:00` are all root forms.
     for (const root of ['0', '0:0', '0:1000', '1000:0', '00', '000:1000', '1000:00']) {
       expect(() =>
-        containerArgv({ image: 'x', user: root }, '/ws', 'model-only', '/e', ['/usr/bin/true']),
+        containerArgv(
+          { image: 'x', allowUnpinnedImage: true, user: root },
+          '/ws',
+          'model-only',
+          '/e',
+          ['/usr/bin/true'],
+        ),
       ).toThrow(/non-root/);
     }
     for (const malformed of ['root', '65532:root', '-1']) {
       expect(() =>
-        containerArgv({ image: 'x', user: malformed }, '/ws', 'model-only', '/e', [
-          '/usr/bin/true',
-        ]),
+        containerArgv(
+          { image: 'x', allowUnpinnedImage: true, user: malformed },
+          '/ws',
+          'model-only',
+          '/e',
+          ['/usr/bin/true'],
+        ),
       ).toThrow(/numeric/);
     }
     // Any other fixed numeric identity is accepted verbatim.
-    const argv = containerArgv({ image: 'x', user: '1000:1000' }, '/ws', 'model-only', '/e', [
-      '/usr/bin/true',
-    ]);
+    const argv = containerArgv(
+      { image: 'x', allowUnpinnedImage: true, user: '1000:1000' },
+      '/ws',
+      'model-only',
+      '/e',
+      ['/usr/bin/true'],
+    );
     const userAt = argv.indexOf('--user');
     expect(argv.slice(userAt, userAt + 2)).toEqual(['--user', '1000:1000']);
   });
 
   test('a container CLI that cannot reach a daemon reports the exact blocker', async () => {
-    const adapter = containerAdapter({ image: 'x', command: '/nonexistent/cq-docker' });
+    const adapter = containerAdapter({
+      image: 'x',
+      allowUnpinnedImage: true,
+      command: '/nonexistent/cq-docker',
+    });
     const availability = await adapter.available();
     expect(availability.available).toBe(false);
     expect(availability.blocker).toMatch(/daemon unreachable/);
@@ -300,6 +325,7 @@ esac
     const stubB = await stubScript('docker-b', 'STUB-B');
     const options: ContainerAdapterOptions = {
       image: 'orig:latest',
+      allowUnpinnedImage: true,
       command: stubA,
       user: '1000:1000',
     };
@@ -326,6 +352,36 @@ esac
     // spawn at load ~104/6 cores; this test chains four sequential CLI
     // stub spawns.  The 60s bound is test scheduling margin only — product
     // launch timeouts are untouched.
+  }, 60_000);
+
+  test('an adapter built without an image freezes the digest-pinned default into the launch', async () => {
+    const stub = join(stubDir, 'docker-default-image');
+    await writeFile(
+      stub,
+      `#!/bin/sh
+case "$1" in
+  create) echo "$*" > '${stubDir}/created'; printf '%064d\n' 1 ;;
+  start) cat '${stubDir}/created' ;;
+  inspect) echo 'false 0' ;;
+  rm) exit 0 ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    // No image option: construction resolves DEFAULT_SANDBOX_IMAGE, and a
+    // later mutation of the caller's object cannot inject a different one.
+    const options: ContainerAdapterOptions = { command: stub };
+    const adapter = containerAdapter(options);
+    options.image = 'evil:latest';
+    const result = await adapter.launch({
+      workspace: wsDir,
+      argv: ['/usr/bin/true'],
+      network: 'model-only',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.stdout).toContain(DEFAULT_SANDBOX_IMAGE);
+    expect(result.stdout).not.toContain('evil:latest');
+    // Same measured-margin rationale as the container snapshot test above.
   }, 60_000);
 
   test('mutating landlock helperPath after construction cannot swap the helper', async () => {
@@ -363,8 +419,69 @@ describe('adapter selection per platform', () => {
   test('only seatbelt declares loopback-proxy composition for model-only', () => {
     expect(seatbeltAdapter().supportsProxyModelOnly).toBe(true);
     expect(bwrapAdapter().supportsProxyModelOnly).toBeUndefined();
-    expect(containerAdapter({ image: 'x' }).supportsProxyModelOnly).toBeUndefined();
+    expect(
+      containerAdapter({ image: 'x', allowUnpinnedImage: true }).supportsProxyModelOnly,
+    ).toBeUndefined();
     expect(landlockAdapter().supportsProxyModelOnly).toBeUndefined();
+  });
+});
+
+describe('default container image (Codex P2 on #244, owner ruling)', () => {
+  test('the shipped default is the official node slim pinned by an index digest', () => {
+    // The multi-arch INDEX digest: one immutable reference for linux/amd64
+    // and linux/arm64, not a per-arch manifest digest.
+    expect(DEFAULT_SANDBOX_IMAGE).toMatch(/^node:24-bookworm-slim@sha256:[a-f0-9]{64}$/);
+  });
+
+  test('an argv built without an image uses the default; an explicit override wins', () => {
+    const defaultArgv = containerArgv({}, '/ws', 'model-only', '/private/env/child.env', [
+      '/usr/bin/true',
+    ]);
+    expect(defaultArgv).toContain(DEFAULT_SANDBOX_IMAGE);
+    const override = 'registry.example/cq-sandbox:v1@sha256:' + 'a'.repeat(64);
+    const overridden = containerArgv(
+      { image: override },
+      '/ws',
+      'model-only',
+      '/private/env/child.env',
+      ['/usr/bin/true'],
+    );
+    expect(overridden).toContain(override);
+    expect(overridden).not.toContain(DEFAULT_SANDBOX_IMAGE);
+  });
+
+  test('an unpinned override is refused unless allowUnpinnedImage accepts it explicitly', () => {
+    const argv: readonly string[] = ['/usr/bin/true'];
+    for (const unpinned of ['cq-sandbox', 'cq-sandbox:latest', 'cq-sandbox@sha256:zz']) {
+      expect(() => containerArgv({ image: unpinned }, '/ws', 'model-only', '/e', argv)).toThrow(
+        /digest-pinned/,
+      );
+      expect(() =>
+        containerArgv(
+          { image: unpinned, allowUnpinnedImage: true },
+          '/ws',
+          'model-only',
+          '/e',
+          argv,
+        ),
+      ).not.toThrow();
+    }
+    // A reference that could ride as docker flags is refused even with the
+    // escape hatch open: the image is a bare argv position, not a flag slot.
+    for (const malformed of ['', '-p 80:80', 'a b', 'x\nEVIL=1', 'x\0y']) {
+      expect(() =>
+        containerArgv(
+          { image: malformed, allowUnpinnedImage: true },
+          '/ws',
+          'model-only',
+          '/e',
+          argv,
+        ),
+      ).toThrow(/plain reference/);
+    }
+    expect(() =>
+      containerArgv({ image: 'x@y@z', allowUnpinnedImage: true }, '/ws', 'model-only', '/e', argv),
+    ).toThrow(/more than one '@'/);
   });
 });
 
