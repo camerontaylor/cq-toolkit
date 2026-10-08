@@ -18,7 +18,8 @@
 // live. The projects below derive their file lists from that manifest, so
 // the classification is auditable and a file absent from the manifest falls
 // into `process` (conservative: real-process budgets, serial; this includes
-// the lint/rules RuleTester suites). The process-backed projects carry
+// the lint/rules RuleTester suites and plain-.mjs tooling tests such as
+// test/api-report.test.mjs). The process-backed projects carry
 // distinct `sequence.groupOrder`s (process 1, live 2, integration 3) so a
 // bare run keeps the old root-level global serialization: same-order
 // projects run concurrently, different orders run one after another.
@@ -96,7 +97,7 @@ export default defineConfig({
         test: {
           name: 'process',
           sequence: { groupOrder: 1 },
-          include: ['test/**/*.test.ts', 'lint/**/*.test.ts'],
+          include: ['test/**/*.test.{ts,mjs}', 'lint/**/*.test.ts'],
           exclude: [...configDefaults.exclude, '**/dist/**', e2eGlob, ...classified],
           testTimeout: 30_000,
           hookTimeout: 60_000,
