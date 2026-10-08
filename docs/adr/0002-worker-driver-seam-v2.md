@@ -7,6 +7,8 @@
   bump that P2 allows. Annexes: [A](0002-annex-a-mcp-harness.md) (MCP harness server) and
   [B](0002-annex-b-config.md) (configuration keys).
 
+Post-acceptance note N10 in the [ADR index](README.md#post-acceptance-notes) narrows part of this record.
+
 ## 1. Context
 
 [ADR-0001](0001-worker-driver-seam.md) froze `Driver.run(OpInvocation) → WorkerResult`. The v1 evaluation found four
@@ -270,6 +272,9 @@ When no schema is requested, `structuredOutput` MUST be absent.
   **ADVISORY**, so it is refused unattended by default (P8, `CQ_BUDGET_ALLOW_ADVISORY=false`). This is what makes
   "ignore unknown `Budget` fields" (§2.7) safe.
 
+  > Open: the package has no `./driver` subpath yet; see post-acceptance note N10 in the
+  > [ADR index](README.md#post-acceptance-notes).
+
 ### 2.6 Served-model assertion (amends ADR-0001)
 
 ```ts
@@ -347,6 +352,10 @@ This section replaces ADR-0001's served-model rule.
   `runner = { describe, test, expect }`, so `vitest` stays a devDependency) and imports nothing from the kernel (the
   ladder-abort leg b-ii needs `runLadder`, so it stays a kernel test). `makeDriver` no longer receives
   `outputSchema`. P2 allows exactly one conformance-suite bump, so this packaging is frozen surface.
+
+  > Open: the package has no `./driver` subpath yet; see post-acceptance note N10 in the
+  > [ADR index](README.md#post-acceptance-notes).
+
 - **Freeze point.** `SEAM_VERSION = 2` and conformance v2 freeze when S6, W2.2 **and W2.3** (ADR-0003's `Budget`
   fields and their enforcement legs) have all landed. W3.1's API-report baseline is generated after that point.
 - Old journals replay unchanged and parse through the v2 mirror: every addition is optional, and the `errorClass`

@@ -7,9 +7,10 @@ references are removed, and no decision has been changed.
 
 Each ADR is a historical design record. It states what was accepted and is
 not rewritten when the implementation later diverges or a later decision
-narrows it. Those changes are recorded below as
+narrows it. Known changes of that kind are recorded below as
 [post-acceptance notes](#post-acceptance-notes), and the affected section of
-each ADR points to its note.
+each ADR points to its note. The list is not exhaustive: where a note and the
+code disagree with an ADR, the code and the notes are current.
 
 | ADR                                                                               | Decides                                                                                                    |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -167,3 +168,14 @@ disabled, and every lockfile and package-manager config in the definition
 set. For this repository's own checks, read the npm names as the
 equivalent pnpm ones. D-E's adopter install (`npm ci --ignore-scripts`, then
 `npm audit signatures`) is unchanged.
+
+### N10 — ADR-0002 §2.5 and §2.8: no `./driver` subpath yet
+
+§2.5 and §2.8 ship the lane classes and `runDriverConformance` from a
+`./driver` package subpath. The package does not export that subpath yet:
+[`package.json`](../../package.json) `exports` has only `.`, so an import from
+`@camerontaylor/cq-toolkit/driver` fails. The driver barrel exists in source
+([`src/driver/index.ts`](../../src/driver/index.ts)) and is not a package
+entry point. Until the subpath is added, the root export (`.`) provides the
+four lane classes, and `runDriverConformance` is not available to package
+consumers.
