@@ -1253,16 +1253,18 @@ class Spool:
     outbound-only). The ssh key is DEDICATED (owner decision D4): on queue-host it
     is pinned in authorized_keys to the forced command /opt/cq-reviewer/spool-shell,
     which allows only the verbs below (put / snapshot / withdraw / read / exist).
-    Without a dedicated key crq refuses to talk to the spool (fail closed), unless
-    `legacy_shell: true` explicitly opts into plain-shell scripts. `host: null`
-    means a local directory (simulations). Every id passes SIGNER_ID before any
-    command is built."""
+    This is the ONLY supported transport: no plain-shell fallback exists, and
+    without the dedicated key crq refuses to talk to the spool (fail closed).
+    `host: null` means a local directory (simulations only). Every id passes
+    SIGNER_ID before any command is built."""
 
     def __init__(self, cfg: Dict[str, Any]):
         self.key = cfg.get("ssh_key") or cfg.get("key")  # the signer runbook calls it `.key`
         self.host = cfg.get("ssh_alias") or cfg.get("host")
         self.dir = cfg.get("dir") or "/var/lib/crq-spool"
-        self.legacy = bool(cfg.get("legacy_shell")) and not self.key
+        # removed (owner D4: no fallback): refuse the spool rather than ignore the key
+        self.refused = ("config promotion.signer.spool.legacy_shell is not supported: the dedicated forced-command "
+                        "key is the only transport (owner decision D4) — remove it") if "legacy_shell" in cfg else None
 
     @staticmethod
     def _id(iid: str) -> str:
@@ -1274,10 +1276,10 @@ class Spool:
         return Path(self.dir) / rel
 
     def _ssh(self, remote: str, data: Optional[bytes] = None) -> str:
+        if self.refused:
+            raise SpoolUnreachable(self.refused)
         if self.key:
             auth = ["-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
-        elif self.legacy:
-            auth = []
         else:
             raise SpoolUnreachable("no dedicated spool key configured (promotion.signer.spool.ssh_key) — refusing "
                                    "to use a general-purpose ssh identity")
@@ -1292,27 +1294,9 @@ class Spool:
         return p.stdout.decode(errors="replace")
 
     def _remote(self, verb: str, *args: str, data: Optional[bytes] = None) -> str:
-        """Dedicated key: `<verb> <args>` is SSH_ORIGINAL_COMMAND for spool-shell
-        (word-split there, never eval). Legacy: the equivalent POSIX script."""
-        if not self.legacy:
-            return self._ssh(" ".join([verb, *args]), data)
-        d, a = self.dir, args
-        sq = shlex.quote
-        scripts = {
-            "put": lambda: f"cd {sq(d + '/requests')} && cat > {sq('.' + a[0] + '.json.tmp')} && "
-                           f"mv -f {sq('.' + a[0] + '.json.tmp')} {sq(a[0] + '.json')} && echo PUT {a[0]}",
-            "snapshot": lambda: (f"cd {sq(d)} || exit 2; test -e {sq('results/' + a[0] + '.claimed')} && echo 'claimed 1' "
-                                 f"|| echo 'claimed 0'; test -e {sq('requests/' + a[0] + '.json')} && echo 'request 1' "
-                                 f"|| echo 'request 0'; if test -f {sq('results/' + a[0] + '.json')}; then echo 'result begin';"
-                                 f" cat {sq('results/' + a[0] + '.json')}; echo 'result end'; else echo 'result -'; fi"),
-            "withdraw": lambda: (f"p={sq(d + '/requests/' + a[0] + '.json')}; if rm -- \"$p\" 2>/dev/null; then echo RM; "
-                                 f"elif test -e \"$p\"; then exit 2; else echo ENOENT; fi"),
-            "read": lambda: f"cat {sq(d + ('/ledger/backoff.json' if a[0] == 'backoff' else '/results/' + a[1] + '.json'))} "
-                            f"2>/dev/null || true",
-            "exist": lambda: "; ".join(f"if test -e {sq(d + '/results/' + x + '.json')}; then echo '{x} 1'; else echo '{x} 0'; fi"
-                                       for x in a),
-        }
-        return self._ssh(scripts[verb](), data)
+        """`<verb> <args>` becomes SSH_ORIGINAL_COMMAND for spool-shell (word-split
+        there with globbing off, never eval)."""
+        return self._ssh(" ".join([verb, *args]), data)
 
     def snapshot(self, iid: str) -> Dict[str, Any]:
         """One round trip: {claimed, request, result: text|None} for one id."""
@@ -2379,6 +2363,9 @@ def cmd_selfcheck() -> int:
           f"{' (' + _MODE_WHY.get('origin/main', '') + ')' if mode == 'signer_unconfigured' else ''}")
     if bad:
         print(f"FAIL: config.json contains banned third-party identity {bad}")
+        return 1
+    if SPOOL.refused:
+        print(f"FAIL: {SPOOL.refused}")
         return 1
     if ident is None and mode == "signer":
         print("FAIL: signer mode with an unpinned identity")

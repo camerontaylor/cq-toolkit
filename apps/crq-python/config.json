@@ -49,7 +49,6 @@
         "dir": "/var/lib/crq-spool",
         "ssh_alias": "queue-host",
         "ssh_key": null,
-        "legacy_shell": false,
         "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; set ssh_key at the flip"
       }
     },

@@ -186,8 +186,9 @@ secret scan, and posts every status. crq judges nothing and posts nothing:
     `/opt/cq-reviewer/spool-shell` (no-pty, no forwarding, restrict). It can run only these
     verbs: `put <id>` (body on stdin), `snapshot <id>`, `withdraw <id>`, `read backoff -`,
     `read result <id>`, `exist <id>…`.
-  - With no key configured crq refuses to talk to the spool (fail closed).
-    `legacy_shell: true` is an explicit plain-shell fallback, pending the owner's D4 call.
+  - This is the only supported transport (owner decision D4, no fallback). With no key
+    configured crq refuses to talk to the spool (fail closed). A `legacy_shell` key in
+    config makes the spool refuse every operation, and `crq.py selfcheck` fails.
   - Keep the private key outside this repo (e.g. `~/.ssh/crq-spool-ed25519`).
   - Ids must match `^promo-[0-9a-f]{10}\+{0,9}$` before any command is built.
   - A per-item snapshot (claimed / request / result) costs one round trip per tick.
