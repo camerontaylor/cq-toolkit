@@ -7,7 +7,7 @@ import {
   providerKeysFor,
 } from './registry.js';
 import { LANE_IDS } from '../driver/served-model.js';
-import { isAbsolute, relative, resolve as resolvePath, sep, win32 as pathWin32 } from 'node:path';
+import { posix as pathPosix, win32 as pathWin32 } from 'node:path';
 
 export type ConfigProfile = 'conservative' | 'solo-maintainer';
 export type ConfigLayer = 'default' | 'profile' | 'env' | 'call';
@@ -153,9 +153,10 @@ function credentialUrl(raw: string | undefined): boolean {
   // URL consumers commonly trim, and the parser admits special schemes with
   // missing slashes, so screen every scheme-shaped value. A Windows drive
   // path (`C:\cache#v1`) is a filename whose `#` is not a URL fragment.
+  // A query marker is never a Windows filename character: screen it as a URL.
   const value = raw?.trim();
-  if (!value || /^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value))
-    return false;
+  if (!value || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;
   try {
     const parsed = new URL(value);
     return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
@@ -184,8 +185,11 @@ function envValue(
  * against the current drive, so only drive-qualified or full UNC paths count.
  */
 function isConfigAbsolute(value: string, platform: 'posix' | 'win32'): boolean {
-  if (platform !== 'win32') return isAbsolute(value);
-  return pathWin32.isAbsolute(value) && (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\'));
+  if (platform !== 'win32') return pathPosix.isAbsolute(value);
+  return (
+    pathWin32.isAbsolute(value) &&
+    (/^[A-Za-z]:[\\/]/.test(value) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value))
+  );
 }
 
 function unsafePassthrough(
@@ -224,36 +228,38 @@ function expandPath(
     pathVariable,
     (_match, braced: string | undefined, bare: string | undefined) => {
       const replacement = nonblank(envValue(env, (braced ?? bare)!, platform));
-      if (!replacement || !isAbsolute(replacement))
+      if (!replacement || !isConfigAbsolute(replacement, platform))
         throw new Error(`${key.env}: unresolved absolute path variable`);
       return replacement;
     },
   );
-  if (expanded.includes('$') || !isAbsolute(expanded))
+  if (expanded.includes('$') || !isConfigAbsolute(expanded, platform))
     throw new Error(`${key.env}: expected an expanded absolute path`);
-  return resolvePath(expanded);
+  return (platform === 'win32' ? pathWin32 : pathPosix).resolve(expanded);
 }
 
 function assertOutsideWorkspace(
   key: ConfigKey,
   input: string,
   options: ResolveConfigOptions,
+  platform: 'posix' | 'win32',
 ): string | undefined {
   if (!key.outsideWorkspace) return undefined;
   const root = options.workspaceRootRealpath;
   const evidence = options.verifiedRealpaths?.[key.env];
   if (
     !root ||
-    !isAbsolute(root) ||
+    !isConfigAbsolute(root, platform) ||
     !evidence ||
     evidence.input !== input ||
-    !isAbsolute(evidence.realpath)
+    !isConfigAbsolute(evidence.realpath, platform)
   )
     throw new Error(`${key.env}: verified workspace path evidence required`);
-  const rel = relative(resolvePath(root), resolvePath(evidence.realpath));
-  if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)))
+  const paths = platform === 'win32' ? pathWin32 : pathPosix;
+  const rel = paths.relative(paths.resolve(root), paths.resolve(evidence.realpath));
+  if (rel === '' || (rel !== '..' && !rel.startsWith(`..${paths.sep}`) && !paths.isAbsolute(rel)))
     throw new Error(`${key.env}: path must resolve outside the workspace`);
-  return resolvePath(evidence.realpath);
+  return paths.resolve(evidence.realpath);
 }
 
 function parseListItems(label: string, raw: unknown): string[] {
@@ -503,13 +509,14 @@ function verifyWorkspacePath(
   key: ConfigKey,
   value: ConfigValue,
   options: ResolveConfigOptions,
+  platform: 'posix' | 'win32',
 ): ConfigValue {
   if (!key.outsideWorkspace || typeof value !== 'string' || isDefaultSentinel(key, value))
     return value;
-  if (key.type === 'path') return assertOutsideWorkspace(key, value, options) ?? value;
+  if (key.type === 'path') return assertOutsideWorkspace(key, value, options, platform) ?? value;
   if (key.type === 'string' && value.startsWith('custom:')) {
     const path = value.slice('custom:'.length);
-    return `custom:${assertOutsideWorkspace(key, path, options) ?? path}`;
+    return `custom:${assertOutsideWorkspace(key, path, options, platform) ?? path}`;
   }
   return value;
 }
@@ -841,7 +848,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     }
     const relaxed = !tighter(key, current, defaultValue);
     entries[key.id] = Object.freeze({
-      value: deepFreeze(verifyWorkspacePath(key, current, options)),
+      value: deepFreeze(verifyWorkspacePath(key, current, options, platform)),
       layer,
       ...(sourceEnv ? { env: sourceEnv } : {}),
       relaxed,
