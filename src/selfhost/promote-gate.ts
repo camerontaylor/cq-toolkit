@@ -61,13 +61,11 @@
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
 //      not catch it; any change refuses), then one no-wait re-read of steps
-//      8–9 (pass 2 can itself take minutes), then `push --atomic` of tip
-//      onto main — leased on the (main, tip) read at step 1, never a plain
-//      force. One `ls-remote` right before the push re-reads the queue on
-//      the push's own transport: still the tip (the normal case) → only
-//      main is sent (D-K.6 by construction); moved → the merge-queue
-//      refspec rides along as a pure lease whose failure refuses the whole
-//      push, so a break-glass rewind is never re-promoted.
+//      8–9 (pass 2 can itself take minutes), then re-read the subject's
+//      newest trusted promotion review and its base binding immediately
+//      before `push --atomic` of the subject onto main, leased on main's
+//      step-1 value. Queue membership is checked at startup only: a
+//      queue-only rewind during the waits is not protected by this lease.
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
 import {
@@ -985,16 +983,28 @@ async function gateBody(
   }
   const pushToken = cfg.pushToken;
   if (pushToken === null) refuse('push: no push credential');
-  // The main lease is the step-1 read: main must still be `main`. The
-  // SUBJECT is what promotes (PR-C): a queue that advanced past it is fine —
-  // those commits simply wait for their own review — so unlike the old
-  // tip-keyed push there is no queue CAS to lose a race against, and only
-  // main is ever sent. A break-glass rewound queue cannot be re-promoted:
-  // the reviewed sha's base must be contained in the MAIN THE GATE READ, so
-  // a rewound main makes the base check (and the lease) refuse.
+  // The main lease pins the binding's current main to the step-1 read.
+  // Only main is sent, so a queue advance is allowed; this does not guard
+  // a queue-only rewind that removes the subject during the waits.
   const updates: LeasedUpdate[] = [
     { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
   ];
+  // Review statuses move no ref. Re-select the newest trusted row after
+  // every wait and check; a newer pending/failure or unusable binding must
+  // not inherit the success that originally selected this subject.
+  const statusesPath = `${repoPath}/commits/${subject}/statuses?per_page=100`;
+  const review = selectPromotionReview(
+    slurpedComments(await getSlurp(statusesPath), statusesPath).flat(),
+    cfg.reviewer,
+  );
+  report.push(...review.lines.map((line) => `  review recheck: ${line}`));
+  if (review.state !== 'success' || review.base === null) {
+    refuse(`promotion review: subject recheck is ${review.state}; next sweep retries`);
+  }
+  const reviewBase = review.base;
+  if (reviewBase !== main && !(await git.isAncestor(cfg.repo, reviewBase, main))) {
+    refuse(`promotion review: subject recheck base ${reviewBase} is not contained in main`);
+  }
   const pushed = await git.pushAtomic(cfg.repo, cfg.remoteUrl, updates, pushToken);
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
@@ -1002,7 +1012,7 @@ async function gateBody(
       'push: the atomic leased push was rejected (main moved since the read); next sweep retries',
     );
   }
-  report.push(`push: main at ${subject} (reviewed sha, base ${subjectBase})`);
+  report.push(`push: main at ${subject} (reviewed sha, base ${reviewBase})`);
   return { verdict: 'promoted' };
 }
 
