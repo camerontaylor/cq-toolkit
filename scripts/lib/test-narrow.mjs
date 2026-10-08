@@ -13,6 +13,8 @@
 //   - zero selected files means zero runs (a bare `vitest run` would be the
 //     FULL suite, which is CI-only).
 
+import { constants } from 'node:os';
+
 export const MAX_FILES = 10;
 export const NICE_INCREMENT = 5;
 export const MAX_WAIT_CEILING_S = 1800;
@@ -215,12 +217,25 @@ export function summaryLine(s) {
   return `test:narrow ${line}${s.reason ? ` reason=${JSON.stringify(s.reason)}` : ''}`;
 }
 
-/** Read the counts and executed files out of vitest's JSON report. */
+/**
+ * Read the counts, the executed files and, per file, how many tests actually
+ * executed (assertion status passed or failed; skipped, pending, todo and
+ * disabled tests did not) out of vitest's JSON report.
+ */
 export function readReport(report, toRelative) {
   if (report === null || typeof report !== 'object' || !Array.isArray(report.testResults)) {
     return null;
   }
   const num = (k) => (Number.isInteger(report[k]) ? report[k] : 0);
+  const executed = {};
+  for (const result of report.testResults) {
+    const file = toRelative(String(result.name));
+    const statuses = Array.isArray(result.assertionResults)
+      ? result.assertionResults.map((a) => a?.status)
+      : [];
+    executed[file] =
+      (executed[file] ?? 0) + statuses.filter((s) => s === 'passed' || s === 'failed').length;
+  }
   return {
     tests: {
       total: num('numTotalTests'),
@@ -228,27 +243,43 @@ export function readReport(report, toRelative) {
       failed: num('numFailedTests'),
       skipped: num('numPendingTests') + num('numTodoTests'),
     },
-    ran: report.testResults.map((r) => toRelative(String(r.name))).sort(),
+    ran: Object.keys(executed).sort(),
+    executed,
   };
 }
 
+/** The conventional exit status of a process killed by `signal`. */
+export const signalExit = (signal) => 128 + (constants.signals[signal] ?? 1);
+/** timeout(1)'s status for a run it had to stop. */
+const EXIT_TIMEOUT = 124;
+
 /**
  * The verdict on a finished vitest run. A pass must prove itself: a report,
- * every selected file in it, nothing unselected, and at least one executed
- * test — skipped and todo tests (all of them, under a `-t` that matches
- * nothing) prove nothing.
+ * every selected file in it, nothing unselected, and in EVERY selected file
+ * at least one executed test — skipped and todo tests (all of a file's,
+ * under a `-t` that matches only other files) prove nothing. A timeout or an
+ * interrupt never exits 0, even when vitest raced it to a clean exit.
  */
 export function runVerdict({ exit, report, files, timedOut, interruptedBy }) {
   const ran = report?.ran ?? [];
   const unexpected = ran.filter((f) => !files.includes(f));
   const unrun = files.filter((f) => !ran.includes(f));
   const fail = (reason) => ({ result: 'fail', exit: exit || 1, reason });
-  if (timedOut) return { result: 'timeout', exit, reason: 'RUN_TIMEOUT_MS exceeded' };
-  if (interruptedBy !== null) return { result: 'interrupted', exit, reason: interruptedBy };
+  if (timedOut) {
+    return { result: 'timeout', exit: exit || EXIT_TIMEOUT, reason: 'RUN_TIMEOUT_MS exceeded' };
+  }
+  if (interruptedBy !== null) {
+    return {
+      result: 'interrupted',
+      exit: exit || signalExit(interruptedBy),
+      reason: interruptedBy,
+    };
+  }
   if (unexpected.length > 0) return fail(`ran unselected files: ${unexpected.join(',')}`);
   if (exit !== 0) return { result: 'fail', exit };
   if (report === null) return fail('vitest wrote no JSON report');
   if (unrun.length > 0) return fail(`selected files did not run: ${unrun.join(',')}`);
-  if (report.tests.passed + report.tests.failed === 0) return fail('no tests executed');
+  const idle = files.filter((f) => (report.executed[f] ?? 0) === 0);
+  if (idle.length > 0) return fail(`no tests executed in: ${idle.join(',')}`);
   return { result: 'pass', exit };
 }

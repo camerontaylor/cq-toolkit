@@ -9,20 +9,24 @@
 //     `annotate` later adds the pid of the owner's detached child group and
 //     that group leader's start time (its identity);
 //   - the holder is LIVE while its pid runs AND that process started no later
-//     than the record (a later start time means the pid was reused), or while
-//     its recorded child process group still runs;
-//   - the lock is STALE when the holder is not live, when owner.json is still
-//     absent MISSING_OWNER_MS after the mkdir (the owner died in between), or
-//     when the record is older than MAX_HOLD_MS (last-resort ceiling;
-//     test-narrow kills its own run long before that);
-//   - an orphaned child group (owner dead, group still running) is killed
-//     before the lock is reclaimed: nobody is left to read its result. Only
-//     when its leader still has the recorded start time: a pgid can be
-//     reused, so an unverifiable group (leader gone, identity changed, or a
-//     record without one) is never signalled; the lock is reclaimed anyway;
+//     than the record (a later start time means the pid was reused);
+//   - an orphaned child group (owner dead, group still running) is VERIFIED
+//     when its leader still runs with the recorded start time. A verified
+//     orphan is killed and the lock reclaimed: nobody is left to read its
+//     result. A pgid can be reused, so an alive but UNVERIFIABLE group
+//     (leader gone while workers remain, identity changed, or a record
+//     without one) is never signalled and keeps the lock BUSY: waiting is
+//     safe, overlapping is not;
+//   - the lock is STALE when the owner is dead and no unverifiable group
+//     runs, when owner.json is still absent MISSING_OWNER_MS after the mkdir
+//     (the owner died in between), or when the record is older than
+//     MAX_HOLD_MS (last-resort ceiling; test-narrow kills its own run long
+//     before that). At the ceiling an unverifiable group is still never
+//     killed: the lock is reclaimed around it, with a loud warning;
 //   - reclaim runs under a short-lived guard directory (one reclaimer at a
-//     time) and removes the lock only if it still holds the record judged
-//     stale; a lock is never renamed or removed while it might be live;
+//     time), re-judges the record under the guard, and removes the lock only
+//     if it still holds the record judged stale; a lock is never renamed or
+//     removed while it might be live;
 //   - release removes the directory only while it still holds OUR token.
 // The path is fixed (not $TMPDIR, which differs between agent harnesses on
 // one host): every worktree and every agent of the host contends on it.
@@ -109,18 +113,48 @@ export function readOwner(dir, fs = nodeFs) {
   }
 }
 
-/** Why the current holder no longer counts, or null while it is live. */
-export function staleReason(holder, dirMtimeMs, { now, isAlive: alive, groupAlive }) {
+/** Why a recorded child group may not be signalled, or null when its leader is the recorded one. */
+function unverifiedGroup(holder, processStartMs) {
+  const recorded = Date.parse(holder.childStartedAt);
+  if (!Number.isFinite(recorded)) return 'the record has no leader start time';
+  const actual = processStartMs(holder.childPgid);
+  if (actual === null) return 'its leader is gone or unreadable';
+  return Math.abs(actual - recorded) <= START_SLACK_MS ? null : 'its leader was reused';
+}
+
+/**
+ * The verdict on a holder: `reason` why the lock is reclaimable (null while
+ * it is busy), `kill` = a verified orphan group to kill first, `warn` = a
+ * loud line for a ceiling reclaim around an unverifiable group, `note` = why
+ * a dead owner's lock is still busy.
+ */
+export function judgeHolder(holder, dirMtimeMs, deps) {
+  const { now, isAlive: alive, groupAlive, processStartMs } = deps;
   if (holder === null) {
-    return now - dirMtimeMs > MISSING_OWNER_MS ? 'no owner record' : null;
+    return { reason: now - dirMtimeMs > MISSING_OWNER_MS ? 'no owner record' : null };
   }
   const started = Date.parse(holder.startedAt);
-  if (Number.isFinite(started) && now - started > MAX_HOLD_MS) return 'held past MAX_HOLD_MS';
-  if (alive(holder.pid, holder.startedAt)) return null;
-  if (typeof holder.childPgid === 'number' && groupAlive(holder.childPgid)) {
-    return `owner pid ${holder.pid} is gone; orphaned child group ${holder.childPgid}`;
+  const expired = Number.isFinite(started) && now - started > MAX_HOLD_MS;
+  if (!expired && alive(holder.pid, holder.startedAt)) return { reason: null };
+  const pgid = holder.childPgid;
+  if (typeof pgid !== 'number' || !groupAlive(pgid)) {
+    return { reason: expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone` };
   }
-  return `owner pid ${holder.pid} is gone`;
+  const why = unverifiedGroup(holder, processStartMs);
+  if (why === null) {
+    const owner = expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone`;
+    return { reason: `${owner}; orphaned child group ${pgid}`, kill: pgid };
+  }
+  if (expired) {
+    return {
+      reason: 'held past MAX_HOLD_MS',
+      warn: `child group ${pgid} still runs and cannot be verified (${why}); reclaiming WITHOUT killing it`,
+    };
+  }
+  return {
+    reason: null,
+    note: `owner pid ${holder.pid} is gone, but its child group ${pgid} still runs and cannot be verified (${why}); never killed, the lock stays busy`,
+  };
 }
 
 export function describeHolder(holder) {
@@ -151,21 +185,16 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   const release = () => {
     if (readOwner(path, fs)?.token === token) fs.rmSync(path, { recursive: true, force: true });
   };
-  /** Record our child group, and its leader's identity, while we still hold the lock. */
+  /**
+   * Record our current child group, and its leader's identity, while we
+   * still hold the lock; `childPgid: null` clears it once the group is gone.
+   */
   const annotate = ({ childPgid }) => {
     if (readOwner(path, fs)?.token !== token) return;
-    const startMs = deps.processStartMs(childPgid);
+    const startMs = childPgid === null ? null : deps.processStartMs(childPgid);
     const childStartedAt = startMs === null ? undefined : new Date(startMs).toISOString();
-    record = { ...record, childPgid, childStartedAt };
+    record = { ...record, childPgid: childPgid ?? undefined, childStartedAt };
     writeRecord();
-  };
-  /** Why the recorded group may not be signalled, or null when its leader is verified. */
-  const unverified = (owner) => {
-    const recorded = Date.parse(owner.childStartedAt);
-    if (!Number.isFinite(recorded)) return 'the record has no leader start time';
-    const actual = deps.processStartMs(owner.childPgid);
-    if (actual === null) return 'its leader is gone or unreadable';
-    return Math.abs(actual - recorded) <= START_SLACK_MS ? null : 'its leader was reused';
   };
 
   const tryCreate = () => {
@@ -187,8 +216,8 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
     return true;
   };
 
-  /** Remove the lock iff it still holds the judged record; false = retry later. */
-  const reclaim = (judged, judgedMtimeMs, reason) => {
+  /** Remove the lock iff it still holds the judged record and is still stale. */
+  const reclaim = (judged, judgedMtimeMs) => {
     try {
       fs.mkdirSync(guard);
     } catch (error) {
@@ -215,20 +244,16 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
           ? current === null && mtimeMs === judgedMtimeMs
           : current?.token === judged.token;
       if (!same) return;
-      if (typeof judged?.childPgid === 'number' && deps.groupAlive(judged.childPgid)) {
-        const why = unverified(judged);
-        if (why === null) {
-          deps.killGroup(judged.childPgid);
-          deps.log(`heavy-lock: killed orphaned child group ${judged.childPgid}`);
-        } else {
-          deps.log(
-            `heavy-lock: not killing process group ${judged.childPgid}: ${why}; ` +
-              'treating the lock as stale',
-          );
-        }
+      // Re-judged under the guard: the group may have changed since.
+      const verdict = judgeHolder(current, mtimeMs, { ...deps, now: deps.now() });
+      if (verdict.reason === null) return;
+      if (verdict.kill !== undefined) {
+        deps.killGroup(verdict.kill);
+        deps.log(`heavy-lock: killed orphaned child group ${verdict.kill}`);
       }
+      if (verdict.warn !== undefined) deps.log(`heavy-lock: WARNING: ${verdict.warn}`);
       fs.rmSync(path, { recursive: true, force: true });
-      deps.log(`heavy-lock: reclaimed a stale lock (${reason})`);
+      deps.log(`heavy-lock: reclaimed a stale lock (${verdict.reason})`);
     } finally {
       fs.rmSync(guard, { recursive: true, force: true });
     }
@@ -245,9 +270,9 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       throw error;
     }
     const now = deps.now();
-    const reason = staleReason(holder, dirMtimeMs, { ...deps, now });
+    const { reason, note } = judgeHolder(holder, dirMtimeMs, { ...deps, now });
     if (reason !== null) {
-      reclaim(holder, dirMtimeMs, reason);
+      reclaim(holder, dirMtimeMs);
       if (!fs.existsSync(path)) continue;
     }
     const waitedMs = now - start;
@@ -258,6 +283,7 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       lastReport = now;
       deps.log(
         `heavy-lock: waiting for the host lock ${path}, held by ${describeHolder(holder)}; ` +
+          (note === undefined ? '' : `${note}; `) +
           `waited ${Math.round(waitedMs / 1000)}s of at most ${Math.round(maxWaitMs / 1000)}s`,
       );
     }

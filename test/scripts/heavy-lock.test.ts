@@ -12,8 +12,8 @@ import {
   MAX_HOLD_MS,
   MISSING_OWNER_MS,
   acquireLock,
+  judgeHolder,
   readOwner,
-  staleReason,
 } from '../../scripts/lib/heavy-lock.mjs';
 
 let dir: string;
@@ -135,23 +135,39 @@ describe('acquireLock', () => {
   });
 
   const LEADER_START = Date.parse('2026-10-08T01:02:03.000Z');
-  /** A dead owner whose child group 555 is still alive, with `extra` recorded. */
-  const orphan = async (extra: object, leaderStartMs: number | null) => {
-    holderRecord(99, 'tok-dead');
+  const leaderAt = new Date(LEADER_START).toISOString();
+  /**
+   * A dead owner whose child group 555 is alive (until `exitsAfterSleeps`
+   * polls, when given), with `extra` recorded and the leader's actual start
+   * time `leaderStartMs`. Virtual clock: the wait costs no real time.
+   */
+  const orphan = async (
+    extra: object,
+    leaderStartMs: number | null,
+    { startedAt = new Date().toISOString(), maxWaitMs = 0, exitsAfterSleeps = Infinity } = {},
+  ) => {
+    holderRecord(99, 'tok-dead', startedAt);
     const record = JSON.parse(fs.readFileSync(join(lock, 'owner.json'), 'utf8')) as object;
     fs.writeFileSync(
       join(lock, 'owner.json'),
       JSON.stringify({ ...record, childPgid: 555, ...extra }),
     );
+    const c = clock(Date.now());
+    let sleeps = 0;
     const killed: number[] = [];
     const lines: string[] = [];
     const got = await acquireLock({
       path: lock,
-      maxWaitMs: 0,
+      maxWaitMs,
       info,
       deps: {
+        now: c.now,
+        sleep: async (ms) => {
+          sleeps += 1;
+          await c.sleep(ms);
+        },
         isAlive: () => false,
-        groupAlive: (pgid) => pgid === 555 && killed.length === 0,
+        groupAlive: (pgid) => pgid === 555 && killed.length === 0 && sleeps < exitsAfterSleeps,
         killGroup: (pgid) => void killed.push(pgid),
         processStartMs: (pid) => (pid === 555 ? leaderStartMs : null),
         token: () => 'tok-h',
@@ -162,35 +178,50 @@ describe('acquireLock', () => {
   };
 
   it('kills an orphaned child group whose leader identity matches, then reclaims', async () => {
-    const childStartedAt = new Date(LEADER_START).toISOString();
-    const { got, killed, log } = await orphan({ childStartedAt }, LEADER_START);
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START);
     expect(killed).toEqual([555]);
     expect(log).toContain('killed orphaned child group 555');
     expect(got.acquired).toBe(true);
   });
 
-  it('never kills a group whose leader cannot be verified, but reclaims the lock', async () => {
-    const childStartedAt = new Date(LEADER_START).toISOString();
+  it.each([
     // The pgid was reused: its leader started after the record was written.
-    const reused = await orphan({ childStartedAt }, LEADER_START + 60_000);
-    expect(reused.killed).toEqual([]);
-    expect(reused.log).toContain('not killing process group 555: its leader was reused');
-    expect(reused.log).toContain('treating the lock as stale');
-    expect(reused.got.acquired).toBe(true);
-    fs.rmSync(lock, { recursive: true, force: true });
-
-    // The leader is gone (only other group members remain), or unreadable.
-    const gone = await orphan({ childStartedAt }, null);
-    expect(gone.killed).toEqual([]);
-    expect(gone.log).toContain('its leader is gone or unreadable');
-    expect(gone.got.acquired).toBe(true);
-    fs.rmSync(lock, { recursive: true, force: true });
-
+    ['reused', { childStartedAt: leaderAt }, LEADER_START + 60_000, 'its leader was reused'],
+    // The leader exited while its workers remain in the group (or ps failed).
+    ['gone', { childStartedAt: leaderAt }, null, 'its leader is gone or unreadable'],
     // A record from before childStartedAt existed carries no identity at all.
-    const legacy = await orphan({}, LEADER_START);
-    expect(legacy.killed).toEqual([]);
-    expect(legacy.log).toContain('the record has no leader start time');
-    expect(legacy.got.acquired).toBe(true);
+    ['legacy', {}, LEADER_START, 'the record has no leader start time'],
+  ])(
+    'keeps the lock busy, never killing, while an unverifiable group (%s) runs',
+    async (_case, extra, leaderStartMs, why) => {
+      const { got, killed, log } = await orphan(extra, leaderStartMs, { maxWaitMs: 60_000 });
+      expect(killed).toEqual([]);
+      expect(got).toMatchObject({ acquired: false, holder: { token: 'tok-dead' } });
+      expect(readOwner(lock)?.token).toBe('tok-dead');
+      expect(log).toContain(`child group 555 still runs and cannot be verified (${why})`);
+      expect(log).not.toContain('reclaimed');
+    },
+  );
+
+  it('acquires once an unverifiable group has exited by itself', async () => {
+    const { got, killed, log } = await orphan({}, null, {
+      maxWaitMs: 60_000,
+      exitsAfterSleeps: 2,
+    });
+    expect(killed).toEqual([]);
+    expect(got.acquired).toBe(true);
+    expect(log).toContain('reclaimed a stale lock (owner pid 99 is gone)');
+  });
+
+  it('reclaims around an unverifiable group at MAX_HOLD_MS, loudly and without killing', async () => {
+    const old = new Date(Date.now() - MAX_HOLD_MS - 1_000).toISOString();
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, null, {
+      startedAt: old,
+    });
+    expect(killed).toEqual([]);
+    expect(got.acquired).toBe(true);
+    expect(log).toContain('heavy-lock: WARNING: child group 555 still runs and cannot be verified');
+    expect(log).toContain('reclaiming WITHOUT killing it');
   });
 
   it('waits while another reclaimer holds a fresh guard, and clears a stale one', async () => {
@@ -237,6 +268,10 @@ describe('acquireLock', () => {
       childStartedAt: '2026-10-08T01:02:03.000Z',
       ...info,
     });
+    // Cleared once that group is gone (the build, before vitest starts).
+    got.annotate({ childPgid: null });
+    expect(readOwner(lock)).not.toHaveProperty('childPgid');
+    expect(readOwner(lock)).not.toHaveProperty('childStartedAt');
     got.release();
   });
 
@@ -254,7 +289,7 @@ describe('acquireLock', () => {
   });
 });
 
-describe('staleReason', () => {
+describe('judgeHolder', () => {
   const now = 10_000_000;
   const owner = (startedAt: string) => ({
     pid: 1,
@@ -265,45 +300,45 @@ describe('staleReason', () => {
     startedAt,
   });
   const fresh = new Date(now).toISOString();
+  const deps = {
+    now,
+    isAlive: () => true,
+    groupAlive: () => false,
+    processStartMs: () => null,
+  };
+  const reason = (...args: Parameters<typeof judgeHolder>) => judgeHolder(...args).reason;
 
   it('keeps a live, recent owner', () => {
-    expect(
-      staleReason(owner(fresh), now, { now, isAlive: () => true, groupAlive: () => false }),
-    ).toBeNull();
+    expect(reason(owner(fresh), now, deps)).toBeNull();
   });
 
   it('gives a missing record MISSING_OWNER_MS to appear', () => {
-    expect(
-      staleReason(null, now - MISSING_OWNER_MS, {
-        now,
-        isAlive: () => true,
-        groupAlive: () => false,
-      }),
-    ).toBeNull();
-    expect(
-      staleReason(null, now - MISSING_OWNER_MS - 1, {
-        now,
-        isAlive: () => true,
-        groupAlive: () => false,
-      }),
-    ).toBe('no owner record');
+    expect(reason(null, now - MISSING_OWNER_MS, deps)).toBeNull();
+    expect(reason(null, now - MISSING_OWNER_MS - 1, deps)).toBe('no owner record');
   });
 
   it('treats a dead pid or an over-long hold as stale', () => {
-    expect(
-      staleReason(owner(fresh), now, { now, isAlive: () => false, groupAlive: () => false }),
-    ).toContain('is gone');
-    expect(
-      staleReason({ ...owner(fresh), childPgid: 9 }, now, {
-        now,
-        isAlive: () => false,
-        groupAlive: (pgid) => pgid === 9,
-      }),
-    ).toContain('orphaned child group');
+    expect(reason(owner(fresh), now, { ...deps, isAlive: () => false })).toContain('is gone');
     const old = new Date(now - MAX_HOLD_MS - 1).toISOString();
-    expect(
-      staleReason(owner(old), now, { now, isAlive: () => true, groupAlive: () => false }),
-    ).toContain('MAX_HOLD_MS');
+    expect(reason(owner(old), now, deps)).toContain('MAX_HOLD_MS');
+  });
+
+  it('kills only a verified orphan group, and waits on an unverifiable one', () => {
+    const leader = now - 5_000;
+    const withGroup = {
+      ...owner(fresh),
+      childPgid: 9,
+      childStartedAt: new Date(leader).toISOString(),
+    };
+    const dead = { ...deps, isAlive: () => false, groupAlive: (pgid: number) => pgid === 9 };
+    expect(judgeHolder(withGroup, now, { ...dead, processStartMs: () => leader })).toEqual({
+      reason: 'owner pid 1 is gone; orphaned child group 9',
+      kill: 9,
+    });
+    const busy = judgeHolder(withGroup, now, { ...dead, processStartMs: () => null });
+    expect(busy.reason).toBeNull();
+    expect(busy.kill).toBeUndefined();
+    expect(busy.note).toContain('never killed, the lock stays busy');
   });
 
   it('reclaims an ownerless directory once it is old enough', async () => {

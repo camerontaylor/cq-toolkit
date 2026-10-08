@@ -30,15 +30,17 @@ export interface LockDeps {
 }
 export function isAlive(pid: number, startedAt: string): boolean;
 export function readOwner(dir: string, fs?: typeof import('node:fs')): LockOwner | null;
-export function staleReason(
+export interface JudgeDeps {
+  now: number;
+  isAlive: (pid: number, startedAt: string) => boolean;
+  groupAlive: (pgid: number) => boolean;
+  processStartMs: (pid: number) => number | null;
+}
+export function judgeHolder(
   holder: LockOwner | null,
   dirMtimeMs: number,
-  deps: {
-    now: number;
-    isAlive: (pid: number, startedAt: string) => boolean;
-    groupAlive: (pgid: number) => boolean;
-  },
-): string | null;
+  deps: JudgeDeps,
+): { reason: string | null; kill?: number; warn?: string; note?: string };
 export function describeHolder(holder: LockOwner | null): string;
 export function acquireLock(input: {
   path?: string;
@@ -50,7 +52,7 @@ export function acquireLock(input: {
       acquired: true;
       waitedMs: number;
       release: () => void;
-      annotate: (fields: { childPgid: number }) => void;
+      annotate: (fields: { childPgid: number | null }) => void;
     }
   | { acquired: false; waitedMs: number; holder: LockOwner | null }
 >;

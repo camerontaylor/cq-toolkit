@@ -12,6 +12,7 @@ import {
   projectsOf,
   readReport,
   runVerdict,
+  signalExit,
   summaryLine,
 } from '../../scripts/lib/test-narrow.mjs';
 
@@ -221,18 +222,34 @@ describe('summaryLine', () => {
 });
 
 describe('readReport', () => {
-  it('reads counts and executed files from the vitest JSON report', () => {
+  it('reads counts, executed files and per-file executed tests from the JSON report', () => {
     const report = {
-      numTotalTests: 5,
+      numTotalTests: 6,
       numPassedTests: 3,
       numFailedTests: 1,
       numPendingTests: 1,
-      numTodoTests: 0,
-      testResults: [{ name: '/repo/test/b.test.ts' }, { name: '/repo/test/a.test.ts' }],
+      numTodoTests: 1,
+      testResults: [
+        {
+          name: '/repo/test/b.test.ts',
+          assertionResults: [{ status: 'skipped' }, { status: 'todo' }],
+        },
+        {
+          name: '/repo/test/a.test.ts',
+          assertionResults: [
+            { status: 'passed' },
+            { status: 'passed' },
+            { status: 'failed' },
+            { status: 'pending' },
+          ],
+        },
+        { name: '/repo/test/c.test.ts' }, // no assertionResults: nothing executed
+      ],
     };
     expect(readReport(report, (p) => p.replace('/repo/', ''))).toEqual({
-      tests: { total: 5, passed: 3, failed: 1, skipped: 1 },
-      ran: ['test/a.test.ts', 'test/b.test.ts'],
+      tests: { total: 6, passed: 3, failed: 1, skipped: 2 },
+      ran: ['test/a.test.ts', 'test/b.test.ts', 'test/c.test.ts'],
+      executed: { 'test/a.test.ts': 3, 'test/b.test.ts': 0, 'test/c.test.ts': 0 },
     });
   });
 
@@ -243,35 +260,44 @@ describe('readReport', () => {
 });
 
 describe('runVerdict', () => {
-  const files = ['test/a.test.ts'];
-  const report = (tests: { total: number; passed: number; failed: number; skipped: number }) => ({
-    tests,
-    ran: ['test/a.test.ts'],
-  });
+  const files = ['test/a.test.ts', 'test/b.test.ts'];
+  const report = (executed: Record<string, number>) => {
+    const passed = Object.values(executed).reduce((n, k) => n + k, 0);
+    return {
+      tests: { total: passed + 1, passed, failed: 0, skipped: 1 },
+      ran: Object.keys(executed).sort(),
+      executed,
+    };
+  };
   const base = { exit: 0, files, timedOut: false, interruptedBy: null };
 
   it('passes a run that executed a test in every selected file', () => {
-    const r = report({ total: 2, passed: 1, failed: 0, skipped: 1 });
+    const r = report({ 'test/a.test.ts': 2, 'test/b.test.ts': 1 });
     expect(runVerdict({ ...base, report: r })).toEqual({ result: 'pass', exit: 0 });
   });
 
-  it('fails an all-skipped or all-todo run: no tests executed', () => {
-    // `-t` matching nothing, or describe.skipIf: total counts skipped and todo.
-    const r = report({ total: 3, passed: 0, failed: 0, skipped: 3 });
-    expect(runVerdict({ ...base, report: r })).toEqual({
+  it('fails when any selected file executed no test, naming those files', () => {
+    // `-t` matching tests in one file only: the aggregate has a pass, the
+    // other file was entirely skipped.
+    const partial = report({ 'test/a.test.ts': 2, 'test/b.test.ts': 0 });
+    expect(runVerdict({ ...base, report: partial })).toEqual({
       result: 'fail',
       exit: 1,
-      reason: 'no tests executed',
+      reason: 'no tests executed in: test/b.test.ts',
     });
+    const none = report({ 'test/a.test.ts': 0, 'test/b.test.ts': 0 });
+    expect(runVerdict({ ...base, report: none }).reason).toBe(
+      'no tests executed in: test/a.test.ts,test/b.test.ts',
+    );
   });
 
   it('fails a run without a report, with a missing file, or with an extra one', () => {
     expect(runVerdict({ ...base, report: null })).toMatchObject({ result: 'fail', exit: 1 });
-    const none = { tests: { total: 1, passed: 1, failed: 0, skipped: 0 }, ran: [] };
-    expect(runVerdict({ ...base, report: none }).reason).toBe(
-      'selected files did not run: test/a.test.ts',
+    const missing = report({ 'test/a.test.ts': 1 });
+    expect(runVerdict({ ...base, report: missing }).reason).toBe(
+      'selected files did not run: test/b.test.ts',
     );
-    const extra = { ...none, ran: ['test/a.test.ts', 'test/z.test.ts'] };
+    const extra = report({ 'test/a.test.ts': 1, 'test/b.test.ts': 1, 'test/z.test.ts': 1 });
     expect(runVerdict({ ...base, report: extra }).reason).toBe(
       'ran unselected files: test/z.test.ts',
     );
@@ -288,5 +314,18 @@ describe('runVerdict', () => {
       reason: 'SIGINT',
     });
     expect(runVerdict({ ...base, report: null, exit: 1 })).toEqual({ result: 'fail', exit: 1 });
+  });
+
+  it('never exits 0 on a timeout or interrupt that vitest raced to a clean exit', () => {
+    const r = report({ 'test/a.test.ts': 1, 'test/b.test.ts': 1 });
+    expect(runVerdict({ ...base, report: r, timedOut: true })).toMatchObject({
+      result: 'timeout',
+      exit: 124,
+    });
+    expect(runVerdict({ ...base, report: r, interruptedBy: 'SIGTERM' })).toMatchObject({
+      result: 'interrupted',
+      exit: signalExit('SIGTERM'),
+    });
+    expect(signalExit('SIGINT')).toBe(130);
   });
 });

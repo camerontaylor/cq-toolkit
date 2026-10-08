@@ -8,8 +8,9 @@
 //      to the suites that own them;
 //   3. a broad FALLBACK — every unit test file — when the impact is unknown
 //      (a changed file that is neither a test, a mapped file, an import-graph
-//      hit, nor an inert path; a DELETED source, whose importers the graph
-//      can no longer see) or the import-graph query itself failed.
+//      hit, nor an inert path; a DELETED module under src/ or scripts/, whose
+//      importers the graph can no longer see) or the import-graph query
+//      itself failed.
 // Inert paths (plain prose that no test reads) select nothing and never
 // trigger the fallback.
 
@@ -28,7 +29,25 @@ export const NON_IMPORT_MAP = [
     /^src\/driver\//,
     [/^test\/kernel\/driver-hygiene\.test\.ts$/, /^test\/scripts\/static-conformance\.test\.ts$/],
   ],
-  [/^src\/ops\//, [/^test\/cli\/(registry|conformance)\.test\.ts$/]],
+  [
+    /^src\/ops\//,
+    [
+      /^test\/cli\/(registry|conformance)\.test\.ts$/,
+      /^test\/driver\/served-model-sites\.test\.ts$/,
+    ],
+  ],
+  // protectedPaths walks the relative-import closure of the gate and
+  // acceptance entry points from disk; that closure crosses src/, so any
+  // source can join it.
+  [/^src\/.*\.ts$/, [/^test\/ops\/gates\/protectedPaths\.test\.ts$/]],
+  [/^src\/selfhost\/promote-gate\.ts$/, [/^test\/workflows\/default-ref-guards\.test\.ts$/]],
+  // Entry points these suites only run in a child process, by path.
+  [
+    /^src\/harness\/mcp\//,
+    [/^test\/harness\/mcp-bin\.test\.ts$/, /^test\/driver\/harness-parity\.test\.ts$/],
+  ],
+  [/^src\/(cli\.ts$|cli\/|harness\/run\.ts$)/, [/^test\/driver\/subprocess\.test\.ts$/]],
+  [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
   [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//, /^test\/ops\/gates\//]],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
   [/^docs\/ops\//, [/^test\/scripts\//]],
@@ -81,6 +100,9 @@ export const isTest = (path) => /^(test\/.*\.test\.(ts|mjs)|lint\/.*\.test\.ts)$
 // `related` is an aggregate answer, so a src file with no importing test
 // selects nothing rather than falling back.
 const isSource = (path) => /^src\/.*\.(ts|mts|js|mjs)$/.test(path);
+// The runner sends existing scripts/ modules through the import graph too, so
+// a deleted one loses its importers the same way a deleted source does.
+const isGraphModule = (path) => isSource(path) || /^scripts\/.*\.(ts|mts|js|mjs)$/.test(path);
 
 // Vitest reports module ids with the platform separator; every manifest entry
 // and pattern here is a repository-relative POSIX path.
@@ -96,8 +118,8 @@ const full = (allTests, reason) => ({ files: [...allTests].sort(), fallback: tru
  */
 export function selectAffected({ changed, allTests, related, missing = [] }) {
   if (related === null) return full(allTests, 'import-graph query failed');
-  const deleted = changed.find((path) => isSource(path) && missing.includes(path));
-  if (deleted !== undefined) return full(allTests, `deleted source ${deleted}`);
+  const deleted = changed.find((path) => isGraphModule(path) && missing.includes(path));
+  if (deleted !== undefined) return full(allTests, `deleted module ${deleted}`);
   const selected = new Set(related.map(toPosix).filter((test) => allTests.includes(test)));
   for (const path of changed) {
     if (isTest(path)) {

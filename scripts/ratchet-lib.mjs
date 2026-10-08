@@ -35,7 +35,7 @@ const MAX_BUFFER = 64 * 1024 * 1024;
  * so the two build paths share one budget: a wedged tsc must fail the run as
  * evidence, never block the ratchet runners indefinitely.
  */
-const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+export const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Loud, uniform driver failure: narration to stderr, exit 1. */
 export function fail(message) {
@@ -70,6 +70,22 @@ function newestSrcMtimeMs() {
   return newest;
 }
 
+/**
+ * ensureDist's reuse test: `dist/index.js` and the ratchet engine entry exist
+ * and dist is newer than every src file. False (rebuild) on any fault — no
+ * dist yet (CI cold checkout) or unreadable. test-narrow uses it to run the
+ * build itself, as a child its host lock records.
+ */
+export function distIsFresh() {
+  try {
+    const marker = statSync(join(ROOT, 'dist', 'index.js'));
+    const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
+    return marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs();
+  } catch {
+    return false;
+  }
+}
+
 /** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
 let distPrepared = false;
 
@@ -92,15 +108,9 @@ export function ensureDist() {
   // Build-once per process: every consumer in one invocation reuses the first
   // preparation instead of re-walking src/ or re-running `pnpm run build`.
   if (distPrepared) return;
-  try {
-    const marker = statSync(join(ROOT, 'dist', 'index.js'));
-    const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
-    if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
-      distPrepared = true;
-      return; // dist exists and is newer than every src file — reuse it
-    }
-  } catch {
-    // no dist yet (CI cold checkout) or unreadable — fall through to build
+  if (distIsFresh()) {
+    distPrepared = true;
+    return;
   }
   const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,

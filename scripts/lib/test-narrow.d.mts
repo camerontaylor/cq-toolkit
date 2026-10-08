@@ -55,13 +55,17 @@ export interface Summary {
   reason?: string;
 }
 export function summaryLine(summary: Summary): string;
-export function readReport(
-  report: unknown,
-  toRelative: (path: string) => string,
-): { tests: TestCounts; ran: string[] } | null;
+export function readReport(report: unknown, toRelative: (path: string) => string): RunReport | null;
+export interface RunReport {
+  tests: TestCounts;
+  ran: string[];
+  /** Per file: tests that executed (passed or failed). */
+  executed: Record<string, number>;
+}
+export function signalExit(signal: string): number;
 export function runVerdict(input: {
   exit: number;
-  report: { tests: TestCounts; ran: string[] } | null;
+  report: RunReport | null;
   files: readonly string[];
   timedOut: boolean;
   interruptedBy: string | null;

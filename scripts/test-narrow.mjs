@@ -14,13 +14,16 @@
 //      to test files by scripts/lib/affected-tests.mjs (import graph ∪
 //      reviewed non-import map); fallbacks, oversize selections and
 //      integration/live suites are refused (see planRun);
-//   5. build once: ensureDist() (#255) rebuilds dist only when stale, then
-//      the vitest child gets CQ_DIST_PREPARED=1 so the root globalSetup
+//   5. build once: dist is rebuilt only when stale (ratchet-lib's
+//      distIsFresh, #255), as a child process group recorded in the lock
+//      like vitest's (below), killed after BUILD_TIMEOUT_MS; the vitest child
+//      then gets CQ_DIST_PREPARED=1 so the root globalSetup
 //      (test/global-setup.ts, the build-once harvest) does not build again;
 //   6. ONE vitest invocation: the plan's projects, serial files, one worker,
 //      a JSON report for the counts, in its own process group (recorded in
-//      the lock, so a killed runner cannot leave an orphan that runs beside
-//      the next one), killed after RUN_TIMEOUT_MS;
+//      the lock with its leader's start time, so a killed runner cannot
+//      leave an orphan that runs beside the next one), killed after
+//      RUN_TIMEOUT_MS; load= and uptime= are sampled just before it starts;
 //   7. one stable summary line on stdout (`test:narrow result=… exit=…`),
 //      printed on every exit path.
 import { spawn, spawnSync } from 'node:child_process';
@@ -49,6 +52,7 @@ import {
   projectsOf,
   readReport,
   runVerdict,
+  signalExit,
   summaryLine,
 } from './lib/test-narrow.mjs';
 
@@ -61,7 +65,6 @@ const argv = process.argv.slice(2);
 const say = (line) => process.stderr.write(`test:narrow: ${line}\n`);
 const toPosix = (path) => path.split(sep).join('/');
 const repoRelative = (path) => toPosix(relative(ROOT, resolve(ROOT, path)));
-const signalExit = (signal) => 128 + (constants.signals[signal] ?? 1);
 /** Synchronous: stdout to a pipe is asynchronous on macOS, and we exit next. */
 const emit = (fields) => {
   const line = `${summaryLine(fields)}\n`;
@@ -110,13 +113,9 @@ if (getPriority() < NICE_INCREMENT) {
 // as INIT_CWD; explicit relative paths resolve against the caller's.
 const CALLER_CWD = process.env.INIT_CWD ?? process.cwd();
 process.chdir(ROOT);
-const summary = {
-  result: 'error',
-  exit: 1,
-  nice: getPriority(),
-  load: loadavg()[0].toFixed(1),
-  uptimeS: uptime(),
-};
+const stamp = () => ({ load: loadavg()[0].toFixed(1), uptimeS: uptime() });
+// Re-stamped just before vitest starts; this sample stands only when no run happens.
+const summary = { result: 'error', exit: 1, nice: getPriority(), ...stamp() };
 let printed = false;
 let releaseLock = () => {};
 let child = null;
@@ -124,7 +123,7 @@ let childDone = false;
 let interruptedBy = null;
 const relayed = new Set();
 
-/** Signal vitest's whole process group (its pool workers and their spawns). */
+/** Signal the current child's whole process group (vitest's pool workers, the build's tsc). */
 const signalChild = (signal) => {
   if (child === null || childDone || child.pid === undefined) return;
   try {
@@ -143,24 +142,29 @@ const finish = (fields) => {
   releaseLock();
   process.exit(summary.exit);
 };
-// Every exit path — including a library's process.exit (ensureDist's fail)
-// and an uncaught exception — stops vitest's group, prints the summary and
-// frees the lock, in that order: the lock is never free while tests run.
+// Every exit path — including a library's process.exit and an uncaught
+// exception — stops the child's group, prints the summary and frees the
+// lock, in that order: the lock is never free while a child runs. An
+// unplanned exit is never a success, even when the event loop just drained.
 process.on('exit', (code) => {
   signalChild('SIGKILL');
   if (!printed) {
     printed = true;
-    emit({ ...summary, result: 'error', exit: code, reason: summary.reason ?? 'exited early' });
+    const exit = code || 1;
+    process.exitCode = exit;
+    emit({ ...summary, result: 'error', exit, reason: summary.reason ?? 'exited early' });
   }
   releaseLock();
 });
 for (const signal of SIGNALS) {
   process.on(signal, () => {
-    if (child === null) finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+    if (child === null || childDone) {
+      finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
+    }
     interruptedBy ??= signal;
     if (relayed.has(signal)) return;
     relayed.add(signal);
-    signalChild(signal); // the child's exit handler finishes
+    signalChild(signal); // the code awaiting the child finishes
   });
 }
 
@@ -297,11 +301,61 @@ if (files.length === 0) {
   finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
 }
 
+/**
+ * Run one child in its own process group, recorded in the lock (pgid and
+ * leader start time) before anything waits on it, so a runner killed
+ * mid-child leaves a group the next waiter can verify and kill, or wait
+ * out. Resolves once it exits and its group is swept; after that the pgid is
+ * never signalled again (it could be reused).
+ */
+const runGroup = (command, args, { label, timeoutMs, ...options }) =>
+  new Promise((done) => {
+    let timedOut = false;
+    childDone = false;
+    child = spawn(command, args, { cwd: ROOT, detached: POSIX, ...options });
+    if (POSIX && child.pid !== undefined) lock.annotate({ childPgid: child.pid });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      say(`${label} exceeded ${timeoutMs / 60_000} min; terminating`);
+      signalChild('SIGTERM');
+      setTimeout(() => signalChild('SIGKILL'), 10_000).unref();
+    }, timeoutMs);
+    timer.unref();
+    const settle = (outcome) => {
+      clearTimeout(timer);
+      signalChild('SIGKILL'); // whatever the child left behind in its group
+      childDone = true;
+      done({ ...outcome, timedOut });
+    };
+    child.on('error', (error) => settle({ error }));
+    child.on('exit', (code, signal) => settle({ code, signal }));
+  });
+
 // 5. Build once --------------------------------------------------------------
-const { ensureDist } = await import('./ratchet-lib.mjs');
-summary.reason = 'dist build failed (pnpm run build)'; // ensureDist exits on failure
-ensureDist();
-delete summary.reason;
+const { BUILD_TIMEOUT_MS, distIsFresh } = await import('./ratchet-lib.mjs');
+if (!distIsFresh()) {
+  say('dist is stale: pnpm run build');
+  const build = await runGroup('pnpm', ['run', 'build'], {
+    label: 'dist build',
+    timeoutMs: BUILD_TIMEOUT_MS,
+    stdio: ['ignore', 2, 2], // stdout carries only the summary line
+    shell: !POSIX, // pnpm is a .cmd shim on win32
+  });
+  lock.annotate({ childPgid: null });
+  if (interruptedBy !== null) {
+    finish({ result: 'interrupted', exit: signalExit(interruptedBy), reason: interruptedBy });
+  }
+  if (build.error !== undefined || build.timedOut || build.code !== 0) {
+    const why =
+      build.error?.message ??
+      (build.timedOut
+        ? `timed out after ${BUILD_TIMEOUT_MS / 60_000} min`
+        : build.signal
+          ? `killed by ${build.signal}`
+          : `exit ${build.code}`);
+    finish({ result: 'error', exit: 1, reason: `dist build failed (pnpm run build): ${why}` });
+  }
+}
 
 // 6. One vitest invocation ----------------------------------------------------
 const reportDir = mkdtempSync(join(tmpdir(), 'cq-test-narrow-'));
@@ -325,41 +379,26 @@ say(
   `exec nice(${getPriority()}) node ${vitestArgs.map((a) => toPosix(relative(ROOT, a)) || a).join(' ')}`,
 );
 
+// The load stamp belongs to the timed interval: sampled at its start.
+Object.assign(summary, stamp());
 const started = Date.now();
-child = spawn(process.execPath, vitestArgs, {
-  cwd: ROOT,
+const run = await runGroup(process.execPath, vitestArgs, {
+  label: 'run',
+  timeoutMs: RUN_TIMEOUT_MS,
   stdio: 'inherit',
   env: { ...process.env, CQ_DIST_PREPARED: '1' },
-  detached: POSIX, // own process group: signalChild reaches every descendant
 });
-if (POSIX && child.pid !== undefined) lock.annotate({ childPgid: child.pid });
-let timedOut = false;
-const timer = setTimeout(() => {
-  timedOut = true;
-  say(`run exceeded ${RUN_TIMEOUT_MS / 60_000} min; terminating`);
-  signalChild('SIGTERM');
-  setTimeout(() => signalChild('SIGKILL'), 10_000).unref();
-}, RUN_TIMEOUT_MS);
-timer.unref();
-
-child.on('error', (error) => {
-  rmSync(reportDir, { recursive: true, force: true });
-  finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${error.message}` });
-});
-child.on('exit', (code, signal) => {
-  clearTimeout(timer);
-  // Sweep anything the run left behind in its group before the lock frees;
-  // after that the pgid is never signalled again (it could be reused).
-  signalChild('SIGKILL');
-  childDone = true;
-  let report = null;
-  try {
-    report = readReport(JSON.parse(readFileSync(reportPath, 'utf8')), repoRelative);
-  } catch {
-    // no report (vitest died early): counts stay '-'
-  }
-  rmSync(reportDir, { recursive: true, force: true });
-  const exit = code ?? signalExit(signal);
-  const verdict = runVerdict({ exit, report, files, timedOut, interruptedBy });
-  finish({ durationMs: Date.now() - started, ...report, ...verdict });
-});
+const durationMs = Date.now() - started;
+let report = null;
+try {
+  report = readReport(JSON.parse(readFileSync(reportPath, 'utf8')), repoRelative);
+} catch {
+  // no report (vitest died early, or never started): counts stay '-'
+}
+rmSync(reportDir, { recursive: true, force: true });
+if (run.error !== undefined) {
+  finish({ result: 'error', exit: 1, reason: `cannot start vitest: ${run.error.message}` });
+}
+const exit = run.code ?? signalExit(run.signal);
+const verdict = runVerdict({ exit, report, files, timedOut: run.timedOut, interruptedBy });
+finish({ durationMs, ...report, ...verdict });

@@ -63,6 +63,40 @@ describe('selectAffected', () => {
     ).toEqual(['test/api-report.test.mjs']);
   });
 
+  it('maps sources that suites read or spawn by path, with no import edge', () => {
+    const suites = [
+      'test/api-report.test.mjs',
+      'test/driver/harness-parity.test.ts',
+      'test/driver/served-model-sites.test.ts',
+      'test/driver/subprocess.test.ts',
+      'test/harness/mcp-bin.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+      'test/workflows/default-ref-guards.test.ts',
+    ];
+    const pick = (changed: string) =>
+      selectAffected({ changed: [changed], allTests: suites, related: [] }).files;
+    expect(pick('src/selfhost/promote-gate.ts')).toEqual([
+      'test/ops/gates/protectedPaths.test.ts',
+      'test/workflows/default-ref-guards.test.ts',
+    ]);
+    // The protected closure crosses directories: any source may join it.
+    expect(pick('src/kernel/types.ts')).toEqual(['test/ops/gates/protectedPaths.test.ts']);
+    expect(pick('src/ops/merge/classifyPrs.ts')).toEqual([
+      'test/driver/served-model-sites.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('src/harness/mcp/server.ts')).toEqual([
+      'test/driver/harness-parity.test.ts',
+      'test/harness/mcp-bin.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('src/cli/main.ts')).toEqual([
+      'test/driver/subprocess.test.ts',
+      'test/ops/gates/protectedPaths.test.ts',
+    ]);
+    expect(pick('scripts/api-report.mjs')).toEqual(['test/api-report.test.mjs']);
+  });
+
   it('selects nothing for inert prose edits without falling back', () => {
     expect(
       selectAffected({ changed: ['README.md', 'docs/guide.md'], allTests, related: [] }),
@@ -181,7 +215,22 @@ describe('selectAffected', () => {
       related: [],
       missing: ['src/kernel/gone.ts'],
     });
-    expect(result).toMatchObject({ fallback: true, reason: 'deleted source src/kernel/gone.ts' });
+    expect(result).toMatchObject({ fallback: true, reason: 'deleted module src/kernel/gone.ts' });
+  });
+
+  it('falls back when a scripts/ module was deleted: its importers are unknown too', () => {
+    // e.g. scripts/api-report.mjs, imported by test/api-report.test.mjs,
+    // which the generic scripts/ row would not select.
+    const result = selectAffected({
+      changed: ['scripts/api-report.mjs'],
+      allTests,
+      related: [],
+      missing: ['scripts/api-report.mjs'],
+    });
+    expect(result).toMatchObject({
+      fallback: true,
+      reason: 'deleted module scripts/api-report.mjs',
+    });
   });
 
   it('falls back to every test when a changed file has no mapping', () => {
