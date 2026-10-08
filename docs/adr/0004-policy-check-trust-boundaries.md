@@ -314,7 +314,7 @@ The identity split (D-D.3) rests on GitHub behaviours that were trialled only in
    - (d) a custom App **without `workflows` permission** is refused when pushing `.github/workflows/**` changes. This has been shown only for the Actions installation token, which uses the same enforcement path, so confidence is high;
    - (e) the minimal permission sets in D-D.3 suffice for each identity's jobs;
    - (f) the refusal in (d) also applies to (i) an API merge by the automation App of a PR touching `.github/workflows/**`, (ii) the conflict agent's merge-commit push carrying a base workflow delta, and (iii) a sync-PR merge after a break-glass workflow change.
-2. **App repository creation:** an App installation token can't create repositories in a user account. If so, the live-merge drill uses the second test identity (D-D.3).
+2. **App repository creation:** confirm that an App installation token can't create repositories in a user account. If it can't, the live-merge drill uses the second test identity (D-D.3).
 3. **Second test identity:** not a collaborator on cq-toolkit, so its reviews have association `NONE` and it can't apply labels. It owns the drill scratch repositories, and its PAT lives only in the default-branch-only environment `drill`.
 4. **D11 record check fields:** the timeline `labeled` event exposes `actor.id`, `actor.type` and `performed_via_github_app` for App, PAT and web-UI actors, and PAT-applied labels are indistinguishable from web-UI ones. That indistinguishability is the premise of the D-G.4 validity window.
 
