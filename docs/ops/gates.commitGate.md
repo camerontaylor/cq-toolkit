@@ -1,7 +1,7 @@
 # `gates.commitGate`
 
 Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-op-docs.mjs).
-Do not edit by hand — run `npm run gen:op-docs`.
+Do not edit by hand — run `pnpm run gen:op-docs`.
 
 - **Family:** `gates`
 - **CLI:** `cq gates.commitGate [--<schema-key>=<value> ...] [--json]`; run `cq gates.commitGate --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))

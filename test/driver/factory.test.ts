@@ -12,7 +12,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
@@ -470,7 +470,18 @@ describe('driver factory — knobs reach the constructed lane', () => {
       .driver.run(invocation());
     expect(verdict.stopReason).toBe('complete');
     const record = await new SessionStore(join(dir, 'sessions')).load(verdict.sessionId as string);
-    expect(record?.workspace.startsWith(realpathSync(workspaceRoot))).toBe(true);
+    // The record's workspace carries tempWorkspace's mkdtemp prefix — the
+    // CALLER's workspaceRoot spelling (/var/... on macOS, whose /var aliases
+    // /private/var). Containment is a realpath fact, not a spelling fact:
+    // normalize BOTH sides (the resumedRecordOrThrow discipline), never the
+    // stored spelling alone. It is a path fact, not a string-prefix fact
+    // either — a sibling root like `<root>-escape` shares the root's whole
+    // prefix — so judge by path.relative: outside the root is a '..'-climbing
+    // or absolute remainder.
+    const rel = record && relative(realpathSync(workspaceRoot), realpathSync(record.workspace));
+    expect(
+      record !== undefined && rel !== undefined && !rel.startsWith('..') && !isAbsolute(rel),
+    ).toBe(true);
   });
 
   test('the lane-specific sessionsDir overrides the factory-level one', async () => {
