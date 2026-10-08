@@ -230,7 +230,11 @@ export interface SweepRunOutcome {
 export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome> {
   // Phase A: the planner over its REAL subprocess deps (input-driven).
   const plannerOp = makePlanSweep(makeSubprocessSweepPlannerDeps(opts.config.repoRoot));
-  const planned = await plannerOp(sweepPlannerInput(opts.config));
+  const planned = await plannerOp(
+    sweepPlannerInput(
+      opts.testFixPlan ? { ...opts.config, fixers: ['test-fix'] } : opts.config,
+    ),
+  );
   if (planned.status !== 'ok') {
     throw new Error(`e2e setup: the planner failed — ${JSON.stringify(planned)}`);
   }
@@ -273,6 +277,9 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   const trackerBranchTemplate = fullPlan.jobs.find(
     (job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch,
   );
+  if (trackerBranchTemplate !== undefined) {
+    (trackerBranchTemplate.input as { push?: boolean }).push = opts.push ?? true;
+  }
   // BOTH the declared tracker-branch leg and the declared assembler are
   // removed here: the reference wiring recomposes the ACTUAL assemble leg
   // post-run from the committed markers (jTPa8), so the tracker branch is
