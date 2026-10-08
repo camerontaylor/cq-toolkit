@@ -231,9 +231,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // Phase A: the planner over its REAL subprocess deps (input-driven).
   const plannerOp = makePlanSweep(makeSubprocessSweepPlannerDeps(opts.config.repoRoot));
   const planned = await plannerOp(
-    sweepPlannerInput(
-      opts.testFixPlan ? { ...opts.config, fixers: ['test-fix'] } : opts.config,
-    ),
+    sweepPlannerInput(opts.testFixPlan ? { ...opts.config, fixers: ['test-fix'] } : opts.config),
   );
   if (planned.status !== 'ok') {
     throw new Error(`e2e setup: the planner failed — ${JSON.stringify(planned)}`);
