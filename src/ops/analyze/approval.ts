@@ -291,9 +291,10 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * rewrite history; that assumption is ADR §1's, not this function's.
  *
  * Concurrency: the read-then-append runs under a LEDGER-WIDE lock
- * (`<path>.append.lock`), so approvals for different workspaces sharing one
- * ledger cannot interleave their appends. `consume` is also still called
- * inside the per-workspace mutation lock by
+ * (`<canonical path>.append.lock`), so approvals for different workspaces
+ * sharing one ledger cannot interleave their appends, and two spellings of
+ * one ledger (a symlink and its target) share that one lock. `consume` is
+ * also still called inside the per-workspace mutation lock by
  * {@link ApprovalAuthority.exercise}, which orders it against the write.
  *
  * SHORT WRITES, and why `consume` cannot simply call `writeSync` once:
@@ -314,9 +315,16 @@ export function makeInMemoryNonceLedger(): InspectableNonceLedger {
  * 128-bit nonce look spent.
  */
 export function makeFileNonceLedger(
-  path: string,
+  ledgerPath: string,
   config: FileNonceLedgerConfig = {},
 ): InspectableNonceLedger {
+  // ONE LEDGER, ONE IDENTITY. Every file operation AND the append lock are
+  // keyed on the canonical path (symlinks resolved, a not-yet-existing file
+  // resolved through its longest existing ancestor). Two processes opening
+  // one ledger through two spellings — a symlinked state dir and its real
+  // path — would otherwise derive two append-lock artifacts, pass absorb()
+  // concurrently, and both report `consumed` for one nonce.
+  const path = realpathOrSelf(ledgerPath);
   const write = config.write ?? defaultWrite;
   const known = new Set<string>();
   // The directory entry is durable once the FILE is created; later appends
@@ -354,8 +362,9 @@ export function makeFileNonceLedger(
   // LEDGER-WIDE append lock. The per-workspace mutation lock does not
   // serialize two DIFFERENT workspaces that share one operator ledger, and a
   // short `writeSync` lets their append syscalls interleave into malformed
-  // lines. This lock is keyed on the ledger file itself, so every
-  // read-check-append sequence over one ledger is exclusive across processes.
+  // lines. This lock is keyed on the CANONICAL ledger path, so every
+  // read-check-append sequence over one ledger is exclusive across processes
+  // whatever spelling each process was handed.
   const appendLock = makeGitMutex({ lockPath: `${path}.append` });
   const consumeLocked = async (nonce: string): Promise<'consumed' | 'spent'> => {
     absorb();
@@ -551,9 +560,10 @@ export interface ApprovalStateReader {
  * The real state reader: `realpath`, `git rev-parse HEAD`, and the STRICT
  * clean predicate — `git status --porcelain=v1 --untracked-files=all
  * --ignore-submodules=none` empty, so an UNTRACKED file counts as dirty and a
- * submodule cannot opt itself out. Ignored files are out of scope,
- * which ADR-0003 §4c records as a stated residual (an ignored file can
- * still influence a codemod that reads it).
+ * submodule cannot opt itself out — plus a refusal of any index entry flagged
+ * assume-unchanged or skip-worktree, which that status would not inspect.
+ * Ignored files are out of scope, which ADR-0003 §4c records as a stated
+ * residual (an ignored file can still influence a codemod that reads it).
  *
  * Every fault THROWS; the exercise catches it and refuses `needs-human`. An
  * unreadable state is never treated as "unchanged" — that inversion is
@@ -573,9 +583,39 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
         '--untracked-files=all',
         '--ignore-submodules=none',
       ]);
+      // INDEX FLAGS CAN HIDE BYTES FROM `git status`. An entry marked
+      // `assume-unchanged` (also what `core.ignoreStat` sets on add) or
+      // `skip-worktree` (sparse checkout, or set by hand) is never compared
+      // against the working tree, so its file can be edited while the status
+      // above stays empty — a "clean" state over bytes the approver never
+      // saw. Such an entry makes the state UNREADABLE (a throw, so admission
+      // and exercise both refuse with the token unspent), never clean.
+      const hidden = indexHiddenEntries(await git(root, ['ls-files', '-v', '-z']));
+      if (hidden.length > 0) {
+        const named = hidden.slice(0, 5).map((file) => `'${file}'`);
+        if (hidden.length > 5) named.push('…');
+        throw new Error(
+          `${String(hidden.length)} index entr${hidden.length === 1 ? 'y is' : 'ies are'} flagged assume-unchanged or skip-worktree (${named.join(', ')}) — git status does not compare such files against the working tree, so a clean status cannot prove their bytes are the approved ones; clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree) and approve again`,
+        );
+      }
       return { workspace: root, headSha, treeClean: status === '' };
     },
   };
+}
+
+/**
+ * The paths of `git ls-files -v -z` entries whose index flags exempt them
+ * from the working-tree comparison: a LOWERCASE tag is assume-unchanged, and
+ * `S`/`s` is skip-worktree. Each record is `<tag> <path>`, NUL-terminated.
+ */
+function indexHiddenEntries(listing: string): string[] {
+  const hidden: string[] = [];
+  for (const record of listing.split('\0')) {
+    if (record.length < 3) continue;
+    const tag = record.charAt(0);
+    if (tag === 'S' || tag !== tag.toUpperCase()) hidden.push(record.slice(2));
+  }
+  return hidden;
 }
 
 /** Env redirections that could answer a state read from a different repository. */

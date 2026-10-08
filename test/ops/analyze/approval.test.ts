@@ -69,6 +69,8 @@ import {
   noVerifiedApprovals,
   scriptedStateReader,
 } from './approvalFixtures.js';
+import * as toolkit from '../../../src/index.js';
+import { makeGitMutex } from '../../../src/ops/sweep/gitMutex.js';
 
 const OP = 'analyze.applyRemediation';
 const WORKSPACE = '/ws';
@@ -1276,5 +1278,105 @@ describe('lock-only sections, provider faults and nested lock domains', () => {
       '1'.repeat(32),
       '2'.repeat(32),
     ]);
+  });
+});
+
+// Conductor pass (2026-10-08): the three Codex findings fixed on this head.
+describe('index-hidden edits, ledger identity, and the public binding surface', () => {
+  test.each(['--assume-unchanged', '--skip-worktree'])(
+    'an index entry flagged %s cannot hide an edit from the clean predicate',
+    async (flag) => {
+      const repo = realRepo();
+      const headSha = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+      git(repo, ['update-index', flag, 'src/a.ts']);
+      writeFileSync(join(repo, 'src/a.ts'), 'const x = 2;\n');
+      // The premise: the status the clean predicate runs is blind to the edit.
+      expect(
+        execFileSync(
+          'git',
+          [
+            '-C',
+            repo,
+            'status',
+            '--porcelain=v1',
+            '--untracked-files=all',
+            '--ignore-submodules=none',
+          ],
+          { encoding: 'utf8' },
+        ),
+      ).toBe('');
+      const reader = makeGitApprovalStateReader();
+      await expect(reader.read(repo)).rejects.toThrow(
+        /assume-unchanged or skip-worktree \('src\/a\.ts'\)/,
+      );
+      // And through the authority: refused at admission, nothing written,
+      // nothing spent — even though the kernel "signed" the clean HEAD state.
+      const ledger = makeInMemoryNonceLedger();
+      const authority = makeApprovalAuthority({
+        approvals: {
+          verifiedFor: (candidate) =>
+            Promise.resolve({
+              nonce: 'e'.repeat(32),
+              state: { workspace: candidate.workspace, headSha, treeClean: true },
+            }),
+        },
+        ledger,
+        locks: makeProcessLocalMutationLocks(),
+        readState: reader,
+      });
+      const write = writeSpy();
+      const outcome = await withApprovedMutation(
+        authority,
+        { op: OP, workspace: repo, targets: ['src/a.ts'], inputDigest: 'sha256:hidden' },
+        write.run,
+      );
+      expect(outcome.status).toBe('needs-human');
+      expect(outcome.status === 'needs-human' ? outcome.reason : '').toContain(
+        'never treated as unchanged',
+      );
+      expect(write.calls).toBe(0);
+      expect(ledger.spent()).toBe(0);
+    },
+    20_000,
+  );
+
+  test('two spellings of one ledger (a symlink and its target) share ONE append lock', async () => {
+    const real = realpathOf(mkdtempSync(join(tmpdir(), 'cq-ledger-real-')));
+    const alias = join(realpathOf(mkdtempSync(join(tmpdir(), 'cq-ledger-alias-'))), 'state');
+    symlinkSync(real, alias);
+    const canonicalPath = join(real, 'approvals.ndjson');
+    const viaAlias = makeFileNonceLedger(join(alias, 'approvals.ndjson'));
+    // Hold the lock the CANONICAL spelling derives. A consume through the
+    // alias must queue behind it; a raw-path-keyed lock would be a second,
+    // unrelated artifact and the consume would complete inside this hold.
+    const canonicalLock = makeGitMutex({ lockPath: `${canonicalPath}.append` });
+    const nonce = 'f'.repeat(32);
+    let settled = false;
+    let pending: Promise<'consumed' | 'spent'> | undefined;
+    await canonicalLock.withLock(async () => {
+      pending = viaAlias.consume(nonce).finally(() => {
+        settled = true;
+      });
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      expect(settled).toBe(false);
+      expect(existsSync(canonicalPath)).toBe(false);
+    });
+    expect(await pending).toBe('consumed');
+    expect(readFileSync(canonicalPath, 'utf8')).toBe(`${nonce}\n`);
+    expect(makeFileNonceLedger(canonicalPath).isSpent(nonce)).toBe(true);
+  }, 20_000);
+
+  test('the root barrel exports the authority construction and binding surface', () => {
+    expect(toolkit.makeApprovalAuthority).toBe(makeApprovalAuthority);
+    expect(toolkit.makeFileNonceLedger).toBe(makeFileNonceLedger);
+    expect(toolkit.makeLedgerBesideMutationLocks).toBe(makeLedgerBesideMutationLocks);
+    expect(toolkit.makeProcessLocalMutationLocks).toBe(makeProcessLocalMutationLocks);
+    expect(toolkit.makeGitApprovalStateReader).toBe(makeGitApprovalStateReader);
+    expect(toolkit.makeInMemoryNonceLedger).toBe(makeInMemoryNonceLedger);
+    expect(toolkit.approvalInputDigest).toBe(approvalInputDigest);
+    expect(toolkit.DENY_ALL_APPROVALS).toBe(DENY_ALL_APPROVALS);
+    expect(typeof toolkit.setAnalyzeApprovalAuthority).toBe('function');
   });
 });
