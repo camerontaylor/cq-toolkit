@@ -67,6 +67,7 @@ import {
   fixedStateReader,
   grantingAuthority,
   noVerifiedApprovals,
+  nonceFor,
   scriptedStateReader,
 } from './approvalFixtures.js';
 import * as toolkit from '../../../src/index.js';
@@ -184,6 +185,125 @@ describe('withApprovedMutation — admission, consumption at the mutation', () =
     });
     expect(outcome.granted).toBe(false);
     expect(fixture.ledger.spent()).toBe(0);
+  });
+});
+
+describe('the preflight — the caller’s check runs inside the lock, before the spend', () => {
+  test('a preflight REFUSAL spends nothing: the SAME token exercises successfully afterwards', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const spy = writeSpy();
+    const nonce = nonceFor(fixture.subjectOf(TARGETS));
+    const refused = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+      () => Promise.resolve({ ok: false as const, reason: 'the planned splice is out of bounds' }),
+    );
+    expect(refused.status).toBe('needs-human');
+    const reason = refused.status === 'needs-human' ? refused.reason : '';
+    expect(reason).toContain('preflight');
+    expect(reason).toContain('the planned splice is out of bounds');
+    expect(reason).toContain('UNSPENT');
+    expect(spy.calls).toBe(0);
+    // THE load-bearing assertion (the #258 finding): the refusal did not
+    // burn the single-use approval.
+    expect(fixture.ledger.spent()).toBe(0);
+    expect(fixture.ledger.isSpent(nonce)).toBe(false);
+    // ...so the SAME token — the same subject, the same nonce — admits and
+    // exercises again once the check passes.
+    const retried = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+      () => Promise.resolve({ ok: true as const }),
+    );
+    expect(retried.status).toBe('ok');
+    expect(spy.calls).toBe(1);
+    expect(fixture.ledger.spent()).toBe(1);
+  });
+
+  test('a preflight THROW spends nothing and is a refusal, never a rejection', async () => {
+    const fixture = grantingAuthority({ op: OP, workspace: WORKSPACE, targets: TARGETS });
+    const spy = writeSpy();
+    const nonce = nonceFor(fixture.subjectOf(TARGETS));
+    const refused = await withApprovedMutation(
+      fixture.authority,
+      fixture.subjectOf(TARGETS),
+      spy.run,
+      () => Promise.reject(new Error('the scan subprocess crashed')),
+    );
+    // The throw is folded into the needs-human refusal shape (nothing was
+    // written, nothing is on disk to report) — it must not escape as a
+    // rejection, which is the shape a caller reads as "the machinery broke
+    // mid-write".
+    expect(refused.status).toBe('needs-human');
+    const reason = refused.status === 'needs-human' ? refused.reason : '';
+    expect(reason).toContain('preflight');
+    expect(reason).toContain('the scan subprocess crashed');
+    expect(reason).toContain('UNSPENT');
+    expect(spy.calls).toBe(0);
+    expect(fixture.ledger.spent()).toBe(0);
+    expect(fixture.ledger.isSpent(nonce)).toBe(false);
+  });
+
+  test('the preflight runs INSIDE the mutation lock and BEFORE the nonce is consumed', async () => {
+    const log: string[] = [];
+    let depth = 0;
+    let maxDepth = 0;
+    // The instrumented provider (the concurrency test's pattern): depth is
+    // nonzero exactly inside a held critical section of the REAL
+    // process-local lock, so a callback observing depth 1 is observing the
+    // lock being held.
+    const provider = makeProcessLocalMutationLocks();
+    const instrumented: MutationLocks = {
+      forWorkspace: (workspace) => {
+        const inner = provider.forWorkspace(workspace);
+        return {
+          withLock: async <T>(fn: () => T | Promise<T>): Promise<T> =>
+            inner.withLock(async () => {
+              depth += 1;
+              maxDepth = Math.max(maxDepth, depth);
+              try {
+                return await fn();
+              } finally {
+                depth -= 1;
+              }
+            }),
+        } satisfies MutationLock;
+      },
+    };
+    const ledger = makeInMemoryNonceLedger();
+    const authority = makeApprovalAuthority({
+      approvals: {
+        verifiedFor: (candidate) =>
+          Promise.resolve({
+            nonce: `n-${candidate.inputDigest}`,
+            state: { ...CLEAN_STATE, workspace: candidate.workspace },
+          }),
+      },
+      ledger,
+      locks: instrumented,
+      readState: fixedStateReader(),
+    });
+    const outcome = await withApprovedMutation(
+      authority,
+      subject(),
+      async () => {
+        log.push(`write:depth${String(depth)}:spent${String(ledger.spent())}`);
+        return 'written';
+      },
+      async () => {
+        log.push(`preflight:depth${String(depth)}:spent${String(ledger.spent())}`);
+        return { ok: true as const };
+      },
+    );
+    expect(outcome.status).toBe('ok');
+    // The preflight ran FIRST, at lock depth 1 (the section was held), with
+    // the nonce still UNSPENT; the write followed inside the same section,
+    // after the spend.
+    expect(log).toEqual(['preflight:depth1:spent0', 'write:depth1:spent1']);
+    expect(maxDepth).toBe(1);
+    expect(ledger.spent()).toBe(1);
   });
 });
 

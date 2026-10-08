@@ -104,11 +104,12 @@ export interface CleanupEffects {
    * registrations REPO-GLOBALLY, including for worktrees OUTSIDE the run
    * prefix/dir (they are stale by definition: only registrations whose
    * dirs are already gone are dropped, so nothing reachable is touched).
-   * Locked registrations are skipped by git, so a pruned row asserts a
-   * removal git may have silently skipped — the report row's reason says
-   * so.
+   * Locked registrations are skipped by git; `unlockPath` first unlocks the
+   * one missing registration the caller revalidated (sweep locks its own
+   * worktrees), so that row is actually dropped. Other locked registrations
+   * stay skipped — the report row's reason says so.
    */
-  worktreePrune(repoRoot: string): Promise<void>;
+  worktreePrune(repoRoot: string, unlockPath?: string): Promise<void>;
   /**
    * The age basis (ms) of a BRANCH with no worktree — its tip's committer
    * date. The mandate's `modifiedTimeMs(path)` has no honest branch form
@@ -275,7 +276,7 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
           // branch-only-sweep eligible. Never a whole-op failure.
           if (!dryRun) {
             try {
-              await inGuard(() => git.worktreePrune(input.repoRoot));
+              await inGuard(() => git.worktreePrune(input.repoRoot, worktree.path));
             } catch (pruneErr) {
               return {
                 status: 'failed',
@@ -721,6 +722,14 @@ const CLEANUP_GIT_TIMEOUT_MS = 600_000;
  * non-zero exit, a spawn failure, or a run exceeding {@link timeoutMs}
  * (SIGKILL) rejects with the captured stderr text.
  */
+/** `git worktree unlock`, tolerating a registration that was never locked. */
+async function unlockWorktree(root: string, path: string, timeoutMs: number): Promise<void> {
+  await runCleanupGit(['worktree', 'unlock', path], root, timeoutMs).catch((err: unknown) => {
+    if (err instanceof Error && /not locked/.test(err.message)) return;
+    throw err;
+  });
+}
+
 function runCleanupGit(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -784,16 +793,27 @@ export function makeSubprocessCleanupEffects(
     modifiedTimeMs: async (path) => (await stat(path)).mtimeMs,
     isStrictClean: listings.isStrictClean,
     worktreeRemove: async (root, path, opts) => {
+      // Sweep locks active worktrees against Git's automatic pruning. An
+      // explicit cleanup has already revalidated this tree under the mutex.
+      await unlockWorktree(root, path, timeoutMs);
       const args =
         opts?.force === true
           ? ['worktree', 'remove', '--force', path]
           : ['worktree', 'remove', path];
-      await runCleanupGit(args, root, timeoutMs);
+      try {
+        await runCleanupGit(args, root, timeoutMs);
+      } catch (err) {
+        // Removal failed: the checkout is still registered, so restore the
+        // prune protection the unlock above dropped.
+        await runCleanupGit(['worktree', 'lock', path], root, timeoutMs).catch(() => undefined);
+        throw err;
+      }
     },
     branchDelete: async (root, branch) => {
       await runCleanupGit(['branch', '-D', branch], root, timeoutMs);
     },
-    worktreePrune: async (root) => {
+    worktreePrune: async (root, unlockPath) => {
+      if (unlockPath !== undefined) await unlockWorktree(root, unlockPath, timeoutMs);
       await runCleanupGit(['worktree', 'prune'], root, timeoutMs);
     },
     branchTimeMs: async (root, branch) => {

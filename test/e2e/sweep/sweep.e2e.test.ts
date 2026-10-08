@@ -50,9 +50,11 @@ import {
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
-import { openRunLog } from '../../../src/kernel/journal.js';
+import { fingerprintFailure } from '../../../src/ops/gates/fingerprint.js';
+import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
+import { TEST_FIX_PLAN_ID } from '../../../src/plans/test-fix.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
 import {
   SWEEP_RUN_STATE_BASELINE_DIR,
@@ -178,6 +180,7 @@ function optsFor(
     push?: boolean;
     stagePathAllowlist?: { patterns: string[] };
     proposeOnly?: boolean;
+    testFixPlan?: boolean;
     runStateDir?: string | null;
     concurrency?: number;
   },
@@ -189,6 +192,10 @@ function optsFor(
     driver: {
       provider: 'cq-d4-e2e',
       model: 'sweep-fake',
+      // The required in-flight bound, generous for loaded CI hosts, plus a
+      // landing gate the fake agent (unpriced 'sweep-fake', 20 tokens per
+      // run) stays well inside — a maxUsd gate would trip on unpriced usage.
+      budget: { wallClockMs: 600_000, maxTokens: 1_000_000 },
     } satisfies SweepUnitDriverConfig,
     // The scenario's DEPLOYMENT factory config (ADR-0002 §2.5): role
     // 'fixer' + the fake provider → the subprocess lane over the fake agent
@@ -243,6 +250,7 @@ function focusedUnitBindings(scene: Scenario, driver: Driver) {
     }),
     driver,
     modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+    budget: { wallClockMs: 600_000, maxTokens: 1_000_000 },
     prompt: () => 'focused real-git contract',
     git: makeGhRunner({ bin: 'git', timeoutMs: 30_000 }),
   };
@@ -433,6 +441,15 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       expect(alphaReport?.final?.verdict).toBe('clean');
       expect(alphaReport?.regression?.verdict).toBe('no-regression');
       expect(alphaReport?.regression?.fixedFailures).toHaveLength(1);
+      // The fixed failure IS the seeded one: it keeps the baseline failure's
+      // fingerprint (identity through the gate, not just a count).
+      const originalFailure = alphaReport?.baseline.failureSet?.failures[0];
+      const fixedFailure = alphaReport?.regression?.fixedFailures[0];
+      expect(originalFailure).toBeDefined();
+      expect(fixedFailure).toBeDefined();
+      if (originalFailure !== undefined && fixedFailure !== undefined) {
+        expect(fingerprintFailure(fixedFailure)).toBe(fingerprintFailure(originalFailure));
+      }
       expect(alphaReport?.worktree.reused).toBe(false);
       expect(alphaReport?.tamperFindings).toEqual([]);
       expect(alphaReport?.committed).toBe(true);
@@ -953,6 +970,107 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. The SHIPPED test-fix plan (buildTestFixPlan) through the real executor
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: the shipped test-fix plan through the real executor', () => {
+  test(
+    'buildTestFixPlan is propose-only: the repair and a production edit both route to human review, nothing commits',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-test-fix');
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config: { ...scene.config, fixers: ['test-fix'] } },
+          prompts(
+            { edit: ALPHA_FIX }, // the repair that would fix alpha's seeded failure
+            { write: { file: 'packages/beta/index.js', text: "export const beta = 'prod';\n" } },
+          ),
+          { testFixPlan: true },
+        ),
+      );
+
+      // The public factory's plan ran through runPlan under its OWN id.
+      expect(outcome.plan.id).toBe(TEST_FIX_PLAN_ID);
+      const unitEvents = await runEventsAt(scene.journalDir, TEST_FIX_PLAN_ID, 0);
+      expect(unitEvents[0]).toMatchObject({ type: 'run-started', planId: TEST_FIX_PLAN_ID });
+
+      // Alpha: the repair is staged for review, never probed or committed.
+      const alpha = unitRow(outcome.run, 'alpha', 'test-fix');
+      expect(alpha.status).toBe('needs-human');
+      expect(alpha.reason).toMatch(/propose-only/);
+      expect(alpha.reason).toContain(ALPHA_FIX.file);
+      expect(
+        readFileSync(resolve(scene.repo, 'worktrees', 'test-fix', 'alpha', ALPHA_FIX.file), 'utf8'),
+      ).toContain(ALPHA_FIX.newText);
+
+      // Beta: the production edit is routed the same way, naming the path.
+      const beta = unitRow(outcome.run, 'beta', 'test-fix');
+      expect(beta.status).toBe('needs-human');
+      expect(beta.reason).toMatch(/propose-only/);
+      expect(beta.reason).toContain('packages/beta/index.js');
+
+      for (const pkg of ['alpha', 'beta']) {
+        const commits = await gitOut(
+          ['rev-list', '--count', `main..cq/e2e-test-fix/test-fix/${pkg}`],
+          scene.repo,
+        );
+        expect(commits.trim()).toBe('0');
+      }
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).not.toContain('cq/e2e-test-fix/test-fix/');
+      // No fleet assembles: nothing committed, so no tracker and no PR.
+      expect(outcome.assembleRun).toBeUndefined();
+      expect(scene.gh.created).toHaveLength(0);
+    },
+  );
+
+  test(
+    'a working-tree RENAME under the test-fix plan: the production SOURCE is named alongside the destination',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-test-fix-rename');
+      // Beta-only fleet: the rename is the unit's whole staged set.
+      const config: SweepPlanConfig = {
+        ...scene.config,
+        fixers: ['test-fix'],
+        packages: [SCRATCH_PACKAGES[1] as { name: string; path: string }],
+        packageFiles: { beta: SCRATCH_PACKAGE_FILES['beta'] ?? [] },
+      };
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config },
+          prompts(
+            {},
+            {
+              // Same content at a new path + the original removed: a
+              // working-tree rename whose SOURCE is production code.
+              write: { file: 'packages/beta/generated/calculation.js', text: BETA_SOURCE },
+              delete: 'packages/beta/src/calculation.js',
+            },
+          ),
+          { testFixPlan: true },
+        ),
+      );
+
+      const beta = unitRow(outcome.run, 'beta', 'test-fix');
+      expect(beta.status).toBe('needs-human');
+      expect(beta.reason).toMatch(/propose-only/);
+      // The sweep diff flags disable rename detection, so the deleted source
+      // is a staged path in its own right — never hidden behind the new one.
+      expect(beta.reason).toContain('packages/beta/src/calculation.js');
+      expect(beta.reason).toContain('packages/beta/generated/calculation.js');
+      const commits = await gitOut(
+        ['rev-list', '--count', 'main..cq/e2e-test-fix-rename/test-fix/beta'],
+        scene.repo,
+      );
+      expect(commits.trim()).toBe('0');
+      expect(scene.gh.created).toHaveLength(0);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // 5. Assemble-empty guard and stranded-commit retry
 // ---------------------------------------------------------------------------
 
@@ -1121,6 +1239,63 @@ describe('sweep e2e: rescue lane and prep mode', () => {
       expect(outcome.assembleRun).toBeDefined();
       const assembled = assembleReport(outcome.assembleRun as RunReport);
       expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+    },
+  );
+
+  test(
+    'a test-fix rescue re-dispatch stays journaled under the test-fix plan id, never the sweep id',
+    { timeout: 180_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-test-fix-rescue');
+      const faultMarker = join(scene.root, 'alpha-faulted');
+      const outcome = await runSweepPlan(
+        optsFor(
+          {
+            ...scene,
+            config: {
+              ...scene.config,
+              fixers: ['test-fix'],
+              rescue: { maxRedispatch: 1 },
+            },
+          },
+          prompts(
+            {
+              edit: ALPHA_FIX,
+              faultOnce: { marker: faultMarker, why: 'transient crash on alpha' },
+            },
+            {},
+          ),
+          { testFixPlan: true },
+        ),
+      );
+
+      // Run 1: the transient fault fails alpha [INFRA] — retryable.
+      const alpha = unitRow(outcome.run, 'alpha', 'test-fix');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(/^\[INFRA\]/);
+      // The rescue re-dispatch runs the same test-fix unit job; under the
+      // propose-only contract its repair lands in human review.
+      expect(outcome.rescueRuns).toHaveLength(1);
+      const rescueRow = outcome.rescueRuns?.[0]?.jobs[0];
+      expect(rescueRow?.jobId).toBe('sweep-alpha-test-fix-r2');
+      expect(rescueRow?.result.status).toBe('needs-human');
+
+      // Journal: the units run and the rescue run are BOTH test-fix runs —
+      // the rescue never falls back to the generic sweep plan id.
+      const runIds = await openRunLog(scene.journalDir).runs();
+      expect(candidateRunsForPlan(runIds, TEST_FIX_PLAN_ID)).toHaveLength(2);
+      expect(candidateRunsForPlan(runIds, SWEEP_PLAN_ID)).toEqual([]);
+      const rescueEvents = await runEventsAt(scene.journalDir, TEST_FIX_PLAN_ID, 1);
+      expect(rescueEvents[0]).toMatchObject({ type: 'run-started', planId: TEST_FIX_PLAN_ID });
+      expect(
+        rescueEvents.some(
+          (event) => event.type === 'job-started' && event.jobId === 'sweep-alpha-test-fix-r2',
+        ),
+      ).toBe(true);
+
+      // Nothing committed, so no assemble leg is composed.
+      expect(outcome.assembleRun).toBeUndefined();
+      expect(scene.gh.created).toHaveLength(0);
     },
   );
 

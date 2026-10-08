@@ -222,7 +222,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     )}\n`;
   }
 
-  function setup(label: string) {
+  async function setup(label: string) {
     const dir = join(tmp, label);
     const origin = join(dir, 'origin.git');
     const repo = join(dir, 'repo');
@@ -240,7 +240,15 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       join(repo, 'scripts', 'ratchet-lib.mjs'),
     );
     symlinkSync(join(ROOT, 'dist'), join(repo, 'dist'));
-    writeFileSync(join(repo, '.gitignore'), 'dist\n');
+    // This source-free fixture intentionally reuses the shared prebuilt dist.
+    // Generate a marker for this fixture's actual input inventory and linked
+    // dist identity; the repository marker belongs to a different root.
+    mkdirSync(join(repo, '.cq'));
+    const fixtureLib = (await import(
+      pathToFileURL(join(repo, 'scripts', 'ratchet-lib.mjs')).href
+    )) as { markBuildComplete: () => void };
+    fixtureLib.markBuildComplete();
+    writeFileSync(join(repo, '.gitignore'), 'dist\n.cq/\n');
     // main (the trust ref) carries a STRICTER baseline than merge-queue: a
     // proposal can only happen if the comparison reads the merge-queue tip.
     writeFileSync(join(repo, COVERAGE_BASELINE), baseline(99));
@@ -287,7 +295,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
   }
 
   function propose(
-    ctx: ReturnType<typeof setup>,
+    ctx: Awaited<ReturnType<typeof setup>>,
     metrics: Record<string, number>,
     measuredSha?: string,
   ) {
@@ -315,8 +323,8 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
   it(
     'proposes against merge-queue, cut from and compared with the merge-queue tip',
     { timeout: 240_000 },
-    () => {
-      const ctx = setup('happy');
+    async () => {
+      const ctx = await setup('happy');
       const measuredSha = git(ctx.repo, ['rev-parse', 'HEAD']);
       const res = propose(ctx, { coverage: 95.04 }, measuredSha);
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
@@ -347,8 +355,8 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
   it(
     'a reading that does not tighten the merge-queue baseline proposes nothing',
     { timeout: 240_000 },
-    () => {
-      const ctx = setup('none');
+    async () => {
+      const ctx = await setup('none');
       const res = propose(ctx, { coverage: 89.96 }); // rounds to 90.0 — equal, not tighter
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stderr).toContain('no tightening to propose');

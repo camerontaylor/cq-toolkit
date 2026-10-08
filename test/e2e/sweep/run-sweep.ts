@@ -55,6 +55,7 @@ import {
   SWEEP_PLAN_JOB_IDS,
   type SweepPlanConfig,
 } from '../../../src/plans/sweep.js';
+import { buildTestFixPlan } from '../../../src/plans/test-fix.js';
 import {
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
@@ -191,6 +192,12 @@ export interface RunSweepOpts {
   /** Propose-only overlay used by the test-fix contract. */
   proposeOnly?: boolean;
   /**
+   * Build through the SHIPPED test-fix factory (buildTestFixPlan) instead of
+   * buildSweepPlan: the plan id is TEST_FIX_PLAN_ID and the factory owns its
+   * own overlay (propose-only), so stagePathAllowlist/proposeOnly are refused.
+   */
+  testFixPlan?: boolean;
+  /**
    * The explicit run-state dir every unit job carries (review-debt #174's
    * trust vouch). Default `<repoRoot>/cq-run-state`. `null` OMITS the field
    * entirely — the derived (driver-reachable) location — so the strand-retry
@@ -223,7 +230,9 @@ export interface SweepRunOutcome {
 export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome> {
   // Phase A: the planner over its REAL subprocess deps (input-driven).
   const plannerOp = makePlanSweep(makeSubprocessSweepPlannerDeps(opts.config.repoRoot));
-  const planned = await plannerOp(sweepPlannerInput(opts.config));
+  const planned = await plannerOp(
+    sweepPlannerInput(opts.testFixPlan ? { ...opts.config, fixers: ['test-fix'] } : opts.config),
+  );
   if (planned.status !== 'ok') {
     throw new Error(`e2e setup: the planner failed — ${JSON.stringify(planned)}`);
   }
@@ -235,19 +244,40 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // ASSEMBLE job is REMOVED from this plan: it is dispatched separately
   // below, composed from the units' committed markers (jTPa8 — the static
   // Job cannot know which units committed until they have run).
-  const fullPlan = buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
-    driver: opts.driver,
-    check: opts.check,
-    push: opts.push ?? true,
-    ...(opts.stagePathAllowlist !== undefined
-      ? { stagePathAllowlist: opts.stagePathAllowlist }
-      : {}),
-    ...(opts.proposeOnly !== undefined ? { proposeOnly: opts.proposeOnly } : {}),
-  });
+  if (
+    opts.testFixPlan &&
+    (opts.stagePathAllowlist !== undefined || opts.proposeOnly !== undefined)
+  ) {
+    throw new Error(
+      'e2e setup: testFixPlan pins the shipped test-fix overlay; stagePathAllowlist/proposeOnly would be ignored',
+    );
+  }
+  const fullPlan = opts.testFixPlan
+    ? // The public factory under its own id: the execution bindings ride the
+      // config's unitDispatch seam (the factory layers only its own overlay).
+      buildTestFixPlan(
+        {
+          ...opts.config,
+          unitDispatch: { ...opts.config.unitDispatch, driver: opts.driver, check: opts.check },
+        },
+        planner,
+      )
+    : buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
+        driver: opts.driver,
+        check: opts.check,
+        push: opts.push ?? true,
+        ...(opts.stagePathAllowlist !== undefined
+          ? { stagePathAllowlist: opts.stagePathAllowlist }
+          : {}),
+        ...(opts.proposeOnly !== undefined ? { proposeOnly: opts.proposeOnly } : {}),
+      });
   const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
   const trackerBranchTemplate = fullPlan.jobs.find(
     (job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch,
   );
+  if (trackerBranchTemplate !== undefined) {
+    (trackerBranchTemplate.input as { push?: boolean }).push = opts.push ?? true;
+  }
   // BOTH the declared tracker-branch leg and the declared assembler are
   // removed here: the reference wiring recomposes the ACTUAL assemble leg
   // post-run from the committed markers (jTPa8), so the tracker branch is
@@ -273,6 +303,10 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     } else {
       (job.input as SweepUnitDispatchInput).runStateDir =
         opts.runStateDir ?? join(opts.config.repoRoot, 'cq-run-state');
+    }
+    if (opts.testFixPlan) {
+      // unitDispatch carries no push knob; mirror the sweep overlay's default.
+      (job.input as SweepUnitDispatchInput).push = opts.push ?? true;
     }
     if (opts.promptTemplate !== undefined) {
       (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
@@ -380,7 +414,8 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       let lastError = error;
       for (let attempt = 2; attempt <= 1 + rescueBudget; attempt += 1) {
         const rescuePlan = {
-          id: SWEEP_PLAN_ID,
+          // The selected plan's id: a test-fix rescue journals as test-fix.
+          id: fullPlan.id,
           label: `sweep: rescue re-dispatch (attempt ${attempt} of ${1 + rescueBudget})`,
           jobs: [
             {
@@ -453,7 +488,9 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       // jobs of this composed run) — the fleet gate above already proved
       // every unit succeeded.
       const assemblePlan = {
-        id: SWEEP_PLAN_ID,
+        // The selected plan's id (sweep or test-fix), so the assemble run
+        // journals under the same plan as the units and rescues it composes.
+        id: fullPlan.id,
         label:
           'sweep: tracker-branch push + marker-filtered fleet assembly (the committed units only)',
         jobs: [

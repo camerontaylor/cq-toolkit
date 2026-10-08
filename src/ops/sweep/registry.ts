@@ -27,6 +27,7 @@ import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
 import type { CleanupInput } from './cleanup.js';
+import { fixerBudgetFault } from './internal/fixerBudget.js';
 import type { PlanSweepInput, WorkUnit } from './planSweep.js';
 import type { SalvageInput } from './salvage.js';
 import type { SweepUnitDispatchInput, SweepUnitReport } from './unit.js';
@@ -84,12 +85,15 @@ const PlanSweepLedgerConfigSchema = z
 /**
  * One per-package baseline signature. The signature bound mirrors the
  * ledger's committed-entry bound (1..500 — the recipe's 8-hex output is
- * well within); the op itself stays lenient on this advisory data.
+ * well within); the op itself stays lenient on this advisory data. The
+ * optional `legacySignature` (scheme-1 signature, escalation-only) carries
+ * the same bound.
  */
 const PlanSweepBaselineSchema = z
   .object({
     package: z.string().min(1),
     signature: z.string().min(1).max(500),
+    legacySignature: z.string().min(1).max(500).exactOptional(),
   })
   .strict();
 
@@ -232,7 +236,15 @@ export const CleanupInputSchema: z.ZodType<CleanupInput> = z
 export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
   .object({
     repoRoot: z.string().min(1),
-    worktreesDir: z.string().min(1),
+    worktreesDir: z.string().min(1).exactOptional(),
+    install: z
+      .object({
+        command: z.string().min(1),
+        args: z.array(z.string()),
+        timeoutMs: z.number().int().min(1).exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
     runPrefix: z.string().min(1),
     base: z.string().min(1),
     package: z.string().min(1),
@@ -264,7 +276,14 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
         provider: z.string().min(1),
         model: z.string().min(1),
         toolPolicy: ToolPolicySchema.exactOptional(),
-        budget: BudgetSchema.exactOptional(),
+        // Fail closed (PR #246 review): wallClockMs is REQUIRED — the only
+        // cap sweep.unit enforces while the fixer runs; maxTokens/maxUsd are
+        // optional post-run landing gates; maxAttempts is refused (the
+        // rescue lane owns attempts). See internal/fixerBudget.ts.
+        budget: BudgetSchema.superRefine((budget, ctx) => {
+          const fault = fixerBudgetFault(budget);
+          if (fault !== null) ctx.addIssue({ code: 'custom', message: `driver.budget: ${fault}` });
+        }),
       })
       .strict()
       .exactOptional(),

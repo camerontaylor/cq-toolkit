@@ -1350,3 +1350,36 @@ gh() {
     },
   );
 });
+
+describe('self-review-loop peak-exclusion guard (D11)', () => {
+  it('review-loop guard refuses weekday headroom and peak starts at the boundaries', () => {
+    for (const file of [
+      'policy/templates/self-host/self-review-loop.yml',
+      '.github/workflows/self-review-loop.yml',
+    ]) {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      const guard = text.match(/ {10}if \[ "\$DOW" -le 5 \].*? {10}fi/s)?.[0];
+      expect(guard).toBeDefined();
+      if (guard === undefined) throw new Error(`Missing peak guard in ${file}`);
+      for (const [dow, hm, refused] of [
+        [1, '0530', false],
+        [1, '0539', false],
+        [1, '0540', true],
+        [5, '0545', true],
+        [5, '0600', true],
+        [5, '0959', true],
+        [5, '1000', false],
+        [6, '0540', false],
+        [7, '0600', false],
+      ] as const) {
+        const result = spawnSync('bash', ['-c', `${guard}\nprintf 'START'`], {
+          env: { ...process.env, DOW: String(dow), HM: hm },
+          encoding: 'utf8',
+        });
+        expect(result.status, `${file}: day ${String(dow)}, time ${hm}`).toBe(0);
+        expect(result.stdout).toBe(refused ? '' : 'START');
+        if (refused) expect(result.stderr).toContain('refusing to initiate operations');
+      }
+    }
+  });
+});

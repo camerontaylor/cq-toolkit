@@ -65,7 +65,8 @@
 // this module itself never imports node:fs. The store's containment keeps
 // every read and write inside `dir` (default: the sidecar's directory —
 // where the render op wrote it).
-import { dirname, isAbsolute, relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import type { RunCheck } from '../gates/checkRunner.js';
 import type { ApprovalAuthority, ApprovalSubject } from './approval.js';
@@ -79,7 +80,13 @@ import {
   makeAstGrepScan,
   renderUnifiedDiff,
 } from './codemod/astGrep.js';
-import { contentDigest, parseAnalysisSidecar } from './renderAnalysisReport.js';
+import {
+  contentDigest,
+  markdownFileName,
+  parseAnalysisSidecar,
+  renderAnalysisReport,
+  sidecarFileName,
+} from './renderAnalysisReport.js';
 import type { AnalysisSidecar } from './renderAnalysisReport.js';
 
 /** JSON-serializable input of the `analyze.applyRemediation` op. */
@@ -191,8 +198,10 @@ export function makeApplyRemediation(
         ? input.sidecarPath
         : relativeSidecar;
     let sidecar: AnalysisSidecar;
+    let sidecarText: string;
     try {
-      sidecar = parseAnalysisSidecar(await store.readText(sidecarStorePath));
+      sidecarText = await store.readText(sidecarStorePath);
+      sidecar = parseAnalysisSidecar(sidecarText);
     } catch (err) {
       return {
         status: 'failed',
@@ -268,6 +277,39 @@ export function makeApplyRemediation(
           .filter((file): file is string => file !== null),
       ),
     ].sort();
+    // Keep the public render contract (the pair lands in input.dir). Only
+    // the exact canonical pair for THIS parsed sidecar gets an exception;
+    // noncanonical sidecars retain the strict clean check. Both hashes and
+    // the complete scan set are bound into the approval input digest, then
+    // verified by the real state reader at admission and under the lock.
+    const analysisReports: ApprovalSubject['analysisReports'] =
+      resolve(input.sidecarPath) === resolve(storeRoot, sidecarFileName(sidecar.reportFingerprint))
+        ? {
+            fingerprint: sidecar.reportFingerprint,
+            sidecarSha256: createHash('sha256').update(sidecarText, 'utf8').digest('hex'),
+            markdownSha256: createHash('sha256')
+              .update(renderAnalysisReport(sidecar.report).markdown, 'utf8')
+              .digest('hex'),
+            scanTargets: targets,
+          }
+        : undefined;
+    // Refuse a report selected as a target before even scanning it. The
+    // reader additionally refuses realpath aliases at admission.
+    if (
+      analysisReports !== undefined &&
+      targets.some((file) =>
+        [
+          sidecarFileName(analysisReports.fingerprint),
+          markdownFileName(analysisReports.fingerprint),
+        ].some((name) => resolve(storeRoot, file) === resolve(storeRoot, name)),
+      )
+    ) {
+      return {
+        status: 'needs-human',
+        reason:
+          'remediation: an analysis report cannot be a codemod target; NOTHING was written and the token is UNSPENT',
+      };
+    }
     // SHORT-CIRCUIT: a cluster whose members attributed NO file has nothing
     // to scan — return the honest empty result without invoking the runner
     // (the scan would be an unscoped or pointless subprocess).
@@ -426,7 +468,8 @@ export function makeApplyRemediation(
     // (TOCTOU) both deny here instead of at some later, weaker check.
     const subject: ApprovalSubject = {
       op: 'analyze.applyRemediation',
-      workspace: storeRootOf(input),
+      workspace: storeRoot,
+      ...(analysisReports === undefined ? {} : { analysisReports }),
       targets: pending.map((item) => item.file),
       inputDigest: approvalInputDigest({
         sidecarPath: input.sidecarPath,
@@ -436,6 +479,7 @@ export function makeApplyRemediation(
         rule: input.rule,
         dryRun: input.dryRun,
         timeoutMs: input.timeoutMs,
+        analysisReports,
       }),
     };
     // Whether the approved WRITE was actually entered. The exercise happens

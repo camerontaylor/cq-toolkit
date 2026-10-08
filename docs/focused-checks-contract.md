@@ -16,7 +16,8 @@ suite; they do not revisit this contract.
 
 - **Focused checks only, locally.** A worker runs the static gate
   (`pnpm run check:static`), the format check (`pnpm run format:check`) and the
-  tests **affected by the diff** (`pnpm exec vitest run <affected test files>`).
+  tests **affected by the diff** through `pnpm test:narrow` (§2), the only
+  local test command.
   `pnpm run lint` and `pnpm run typecheck` are aliases of `pnpm run check:static` —
   run one, never several.
 - **Knip's condition (canonical here; another document may restate it only
@@ -67,35 +68,65 @@ suite; they do not revisit this contract.
   (`policy/templates/github-settings.json`), so a PR head can be green while
   stale against its base. Only CI on the resolved candidate SHA counts.
 
-Local full runs survive in exactly two **coordinator-owned** roles, neither of
-which is a per-PR gate: a **diagnostic** when CI failed and the failure needs a
-reproduction, and a **rollback gate** when a classified gap (venue, exactness,
-flake) demands one. A worker _requests_ one, naming the failure it answers; it
-does not launch one. Both are recorded as coordinator obligations with a named
-owner.
+**No local full run exists (owner rule, 2026-10-04).** The full suite is
+CI-only on the shared host, for workers and coordinators alike. The two
+coordinator-owned roles that used to license one — a **diagnostic** when CI
+failed and the failure needs a reproduction, and a **rollback gate** when a
+classified gap (venue, exactness, flake) demands one — now reproduce through
+`pnpm test:narrow <failing test files>` or a CI re-run. A worker _requests_
+either, naming the failure it answers; both are recorded as coordinator
+obligations with a named owner.
 
 ## 2. Selecting affected tests
 
-1. Start from the files the diff actually touches.
+`pnpm test:narrow` (`scripts/test-narrow.mjs`) performs this selection; do not
+make it by hand. `pnpm test:narrow --dry-run` prints it without running it.
+The runner checks its ownership token immediately before each build or test
+spawn; exit 75 means a busy lock or lost ownership, and requires retrying later.
+An owner that dies with `childPending` and no recorded `childPgid` leaves the
+lock busy **indefinitely**, even beyond `MAX_HOLD_MS`: the child cannot be
+identified. The waiter reports: "owner <pid> died between spawning a child and
+recording it; the child cannot be identified, so the lock is kept". To recover
+manually, pause all `test:narrow` callers, read
+`/tmp/cq-toolkit-heavy.lock/owner.json`, and inspect the host process list
+(`ps -axo pid,ppid,pgid,command` on macOS/Linux) for stray runners, builds and
+test workers. Stop any such processes and verify they have exited. **Only
+then** explicitly run `rm -rf /tmp/cq-toolkit-heavy.lock` and resume callers.
+On Windows the directory is `<os.tmpdir()>/cq-toolkit-heavy.lock`; inspect the
+host process list and remove that directory with your shell after the same
+checks. `pnpm test:narrow --help` prints the host's actual lock path.
+
+Every process-group signal (interrupt, timeout, exit cleanup and orphan reclaim)
+requires a live leader at the recorded pgid whose start time matches
+`childStartedAt` within two seconds. A gone or reused leader makes a still-live
+group unverifiable: it is never signalled, and the lock stays busy until that
+group exits. Waiting is safe.
+
+Live drills also use this runner: export credentials first, then run
+`LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`.
+This drill is classified `integration`; suites classified `live` require
+`--include-live`. Neither class bypasses the host lock or bounded runtime.
+
+1. Start from the files the diff actually touches: by default the changes
+   since the merge-base with `origin/merge-queue` plus the working tree
+   (`--base <ref>` and `--range <a>..<b>` change the range); explicit file
+   arguments replace the range.
 2. Add the test files that statically import, or are imported by, the changed
-   source, via Vitest's static-import graph. Any command with execution intent
-   carries `--run` and keeps `related` as the subcommand
-   (`pnpm exec vitest related --run <changed source files>`); `vitest run related …`
-   treats `related` as a filename filter and a bare `vitest related …` can enter
-   watch behaviour, so neither is the documented form. List-only selection — printing the affected test files without running
-   them — is the job of `scripts/affected-tests.mjs`, which a later slice of the
-   execution-policy run delivers; until it lands, the selection is made by hand
-   and recorded in the handoff record.
+   source, via Vitest's static-import graph (the query behind
+   `vitest related`, made without running any test).
 3. Add non-import dependents that do not appear in the import graph: fixtures,
-   prompts, policy and workflow templates, generated docs, scripts.
-4. **Escalate anything you cannot classify.** Shared interfaces,
-   dependency/tooling and cross-cutting config changes — and any impact the
-   steps above leave uncertain — **escalate** to the coordinator with the
-   required check named and the reason recorded. Do not launch another owner's
-   gate.
-5. **Broad selection is the coordinator's decision, made after escalation** —
-   never a silent worker fallback. An unclassified dependency never licenses
-   skipping validation; it licenses escalation.
+   prompts, policy and workflow templates, generated docs, scripts. The
+   reviewed map is `NON_IMPORT_MAP` in `scripts/lib/affected-tests.mjs`.
+4. **Escalate anything you cannot classify.** `test:narrow` refuses (exit 2)
+   when a changed file has no mapping, a source file was deleted, the
+   import-graph query failed, or the selection exceeds its file cap. That
+   refusal is the escalation trigger: name the files you can justify
+   explicitly, or escalate shared interfaces, dependency/tooling and
+   cross-cutting config changes to the coordinator with the required check
+   named and the reason recorded. Do not launch another owner's gate.
+5. **Broad selection is the coordinator's decision, made after escalation**,
+   and broad means CI: never a silent worker fallback. An unclassified
+   dependency never licenses skipping validation; it licenses escalation.
 
 A passing focused test does not prove its dependents; that is exactly what the
 candidate run is for.
@@ -176,13 +207,18 @@ that is not a merge-readiness claim.
 
   An unstamped local duration is not evidence; a loader on the same host is a
   measurement error, not a slow suite.
+  The `test:narrow result=…` summary line carries its own stamp (`load=`, the
+  1-minute load average sampled immediately before vitest starts, so it
+  stamps `duration=`; `uptime=`, the host uptime in seconds sampled with it;
+  and `nice=`). A summary without a run carries the process-start sample.
 
-- **Never record or claim worker-count tuning.** `--maxWorkers` is a no-op under
-  `vitest.config.ts`'s `fileParallelism: false`, which forces a single worker in
-  Vitest 5. No protocol step, record or performance claim may cite it as a lever.
-  This is the mechanism home for that rule: re-derive it whenever
-  `vitest.config.ts` changes, because a later slice may enable file-level
-  parallelism and flip the answer.
+- **Never record or claim worker-count tuning.** The current
+  `vitest.config.ts` disables file parallelism, forcing serial execution in
+  Vitest 5. Worker-count options therefore have no effect and must not appear
+  in protocol steps, records or performance claims. Re-derive this mechanism
+  whenever `vitest.config.ts` changes, because a later slice may enable
+  file-level parallelism. `test:narrow` independently enforces serial files
+  and a single worker so narrow runs remain serial if the config changes.
 - **Never re-run an unchanged deterministic failure** to obtain a green result.
   Preserve the output, diagnose, change the relevant input, then run the targeted
   reproduction. An unexplained earlier failure is not erased by a later pass.

@@ -16,7 +16,16 @@
 // below echo the tool output so the failure is debuggable, not silent.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -35,7 +44,7 @@ const MAX_BUFFER = 64 * 1024 * 1024;
  * so the two build paths share one budget: a wedged tsc must fail the run as
  * evidence, never block the ratchet runners indefinitely.
  */
-const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+export const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Loud, uniform driver failure: narration to stderr, exit 1. */
 export function fail(message) {
@@ -48,26 +57,119 @@ export function fail(message) {
 // Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
 
+/** Build inputs outside src/: the build configuration and its asset step. */
+const ROOT_BUILD_INPUTS = [
+  'tsconfig.json',
+  'tsconfig.build.json',
+  'package.json',
+  'scripts/copy-prompt-assets.mjs',
+];
+
 /**
- * Newest file mtime under src/ (recursive), or 0 when unreadable — the
- * freshness baseline for the ensureDist reuse heuristic. Any stat fault
- * degrades to "never fresh", i.e. rebuild.
+ * Newest mtime across every build input — src/ (recursive) plus
+ * ROOT_BUILD_INPUTS — the freshness baseline for the ensureDist reuse
+ * heuristic. Only source-free fixture trees may omit inputs. With src/
+ * present, every required input must exist; any fault degrades to
+ * "never fresh" (Infinity), i.e. rebuild.
  */
-function newestSrcMtimeMs() {
+function newestBuildInputMtimeMs(paths = []) {
+  let hasSources;
+  try {
+    if (!statSync(join(ROOT, 'src')).isDirectory()) return Infinity;
+    hasSources = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return Infinity;
+    hasSources = false;
+  }
   let newest = 0;
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) walk(abs);
-      else newest = Math.max(newest, statSync(abs).mtimeMs);
+      else {
+        newest = Math.max(newest, statSync(abs).mtimeMs);
+        paths.push(abs);
+      }
     }
   };
-  try {
-    walk(join(ROOT, 'src'));
-  } catch {
-    return 0;
+  const measure = (read) => {
+    try {
+      read();
+      return true;
+    } catch (error) {
+      return !hasSources && error?.code === 'ENOENT';
+    }
+  };
+  if (hasSources && !measure(() => walk(join(ROOT, 'src')))) return Infinity;
+  for (const input of ROOT_BUILD_INPUTS) {
+    const abs = join(ROOT, input);
+    if (
+      !measure(() => {
+        newest = Math.max(newest, statSync(abs).mtimeMs);
+        paths.push(abs);
+      })
+    )
+      return Infinity;
   }
   return newest;
+}
+
+/** Worktree-local runtime state, ignored by git and outside the package allowlist. */
+const BUILD_MARKER = join(ROOT, '.cq', 'build-complete');
+/** Bind a marker to its actual dist tree and compiled entrypoints (including symlinked fixtures). */
+const buildIdentity = () => {
+  const inputs = [];
+  if (!Number.isFinite(newestBuildInputMtimeMs(inputs))) {
+    throw new Error('cannot inventory build inputs');
+  }
+  return JSON.stringify({
+    inputs: inputs.sort(),
+    dist: realpathSync(join(ROOT, 'dist')),
+    index: statSync(join(ROOT, 'dist', 'index.js')).mtimeMs,
+    engine: statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js')).mtimeMs,
+  });
+};
+
+/** Invalidate prior success before the compiler or asset step can change dist. */
+export function invalidateBuild() {
+  rmSync(BUILD_MARKER, { force: true });
+  // tsc does not remove outputs for deleted inputs. Every rebuild starts clean,
+  // including upgrades from markers that did not record the input path set.
+  rmSync(join(ROOT, 'dist'), { recursive: true, force: true });
+}
+
+/** Called only by the final successful step of the package build command. */
+export function markBuildComplete() {
+  const identity = buildIdentity();
+  mkdirSync(dirname(BUILD_MARKER), { recursive: true });
+  writeFileSync(BUILD_MARKER, identity);
+}
+
+/**
+ * ensureDist's reuse test: `dist/index.js` and the ratchet engine entry exist
+ * and the successful build marker binds the current input path set and dist
+ * identity, with the marker and dist newer than every build input.
+ * False (rebuild) on any output fault — no
+ * dist yet (CI cold checkout) or unreadable. test-narrow uses it to run the
+ * build itself, as a child its host lock records.
+ */
+export function distIsFresh() {
+  try {
+    const marker = statSync(BUILD_MARKER);
+    const index = statSync(join(ROOT, 'dist', 'index.js'));
+    const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
+    const newestInput = newestBuildInputMtimeMs();
+    return (
+      marker.isFile() &&
+      readFileSync(BUILD_MARKER, 'utf8') === buildIdentity() &&
+      index.isFile() &&
+      engineEntry.isFile() &&
+      marker.mtimeMs >= newestInput &&
+      index.mtimeMs >= newestInput
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
@@ -76,8 +178,10 @@ let distPrepared = false;
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
- * import) exists and is NEWER than every file under src/; anything else
- * (missing, unreadable, or any src file newer than dist) triggers a rebuild.
+ * import) exists and is NEWER than every build input (src/ and the root
+ * build configuration) and a successful build-completion marker is at least
+ * as new as those inputs; anything else (missing, unreadable, or any input
+ * newer than dist) triggers a rebuild.
  *
  * TRADEOFF, deliberate: a CI cold checkout has no dist and always builds
  * (correct and expected — ci.yml invokes the typecheck ratchet before any
@@ -92,15 +196,9 @@ export function ensureDist() {
   // Build-once per process: every consumer in one invocation reuses the first
   // preparation instead of re-walking src/ or re-running `pnpm run build`.
   if (distPrepared) return;
-  try {
-    const marker = statSync(join(ROOT, 'dist', 'index.js'));
-    const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
-    if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
-      distPrepared = true;
-      return; // dist exists and is newer than every src file — reuse it
-    }
-  } catch {
-    // no dist yet (CI cold checkout) or unreadable — fall through to build
+  if (distIsFresh()) {
+    distPrepared = true;
+    return;
   }
   const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,

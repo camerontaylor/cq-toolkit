@@ -8,6 +8,7 @@ import { describe, expect, test } from 'vitest';
 import {
   fingerprintFailure,
   fingerprintKey,
+  fingerprintPairs,
   fingerprintSet,
   fnv1a32Hex,
   type FingerprintConfig,
@@ -179,15 +180,25 @@ describe('fingerprintFailure location-less content matching (line null keys by m
     ).not.toBe(existing);
   });
 
-  test('the same message keys identically: whitespace runs collapse and trailing lines are ignored', () => {
+  test('the same full test name keys identically after whitespace normalization', () => {
     const canonical = fingerprintFailure(
       failureOf({ ...locationLess, message: 'suite > handles iso dates' }),
     );
     expect(
-      fingerprintFailure(
-        failureOf({ ...locationLess, message: 'suite >  handles\tiso  dates\nextra line' }),
-      ),
+      fingerprintFailure(failureOf({ ...locationLess, message: 'suite >  handles\tiso  dates' })),
     ).toBe(canonical);
+  });
+
+  test('the vitest full test name includes nested names split across lines', () => {
+    // The vitest regime keys on the WHOLE message, so a name the reporter
+    // split across lines keeps its whole identity: renaming the innermost
+    // segment changes the fingerprint.
+    const vitest = { ...locationLess } as const;
+    const vitestKey = (message: string): string =>
+      fingerprintFailure(failureOf({ ...vitest, message }), { tool: 'vitest' });
+    const suiteAndTest = vitestKey('outer suite\ninner suite\ntest name');
+    expect(vitestKey('outer suite\ninner suite\nrenamed test')).not.toBe(suiteAndTest);
+    expect(vitestKey('outer suite\ninner suite\ntest name')).toBe(suiteAndTest);
   });
 
   test('long messages keep full-length distinctness: NO prefix-collision cap', () => {
@@ -228,21 +239,21 @@ describe('canonical keys vs compact hash (exact matching)', () => {
     expect(pipeInRule).toContain('"r|s"');
   });
 
-  test('the canonical key is the gate identity; fingerprintFailure is only its compact FNV form', () => {
+  test('the canonical key feeds the gate occurrence identity; fingerprintFailure is compact FNV', () => {
     const failure = failureOf({});
     const key = fingerprintKey(failure);
     expect(fingerprintFailure(failure)).not.toBe(key);
     expect(fingerprintFailure(failure)).toMatch(/^[0-9a-f]{8}$/);
     expect(
       fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 }).has(
-        fingerprintKey(failure, { tool: 'vitest' }),
+        `${fingerprintKey(failure, { tool: 'vitest' })}#0`,
       ),
     ).toBe(true);
   });
 });
 
 describe('fingerprintSet', () => {
-  test('collects one fingerprint per failure, deduplicated', () => {
+  test('retains duplicate identities as distinct occurrence keys', () => {
     const set = fingerprintSet({
       tool: 'eslint',
       exitCode: 1,
@@ -252,11 +263,152 @@ describe('fingerprintSet', () => {
         failureOf({ line: 300 }),
       ],
     });
-    expect(set.size).toBe(2);
-    // fingerprintSet stores EXACT canonical keys with the FailureSet's tool
-    // folded in, so the expected member must be computed with the same tool
-    // in context (fingerprintKey, not the compact hash).
-    expect(set.has(fingerprintKey(failureOf({ line: 300 }), { tool: 'eslint' }))).toBe(true);
+    expect(set.size).toBe(3);
+    const pairs = fingerprintPairs({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [failureOf({ line: 3 }), failureOf({ line: 7 }), failureOf({ line: 300 })],
+    });
+    expect(pairs[0]?.key).not.toBe(pairs[1]?.key);
+    expect(pairs[0]?.key).toBe(`${fingerprintKey(failureOf({ line: 3 }), { tool: 'eslint' })}#0`);
+    expect(pairs[1]?.key).toBe(`${fingerprintKey(failureOf({ line: 7 }), { tool: 'eslint' })}#1`);
+    expect(set.has(pairs[2]?.key ?? '')).toBe(true);
+  });
+
+  test('duplicate identities are order-invariant: shuffling occurrences cannot change the key set', () => {
+    // Occurrences of ONE identity are interchangeable, so input order must
+    // not move a key in or out of the set (the ordinal disambiguates
+    // duplicates, it does not make the comparison order-sensitive).
+    const at3 = failureOf({ line: 3, message: 'same identity' });
+    const at7 = failureOf({ line: 7, message: 'same identity' });
+    const ordered = fingerprintSet({ tool: 'vitest', failures: [at3, at7], exitCode: 1 });
+    const shuffled = fingerprintSet({ tool: 'vitest', failures: [at7, at3], exitCode: 1 });
+    const single = fingerprintSet({ tool: 'vitest', failures: [at3], exitCode: 1 });
+
+    expect(ordered.size).toBe(2);
+    expect([...shuffled].sort()).toEqual([...ordered].sort());
+    expect([...ordered].filter((key) => !single.has(key))).toHaveLength(1);
+  });
+
+  test('a non-vitest location-less failure keys by the FIRST message line (drift tolerance)', () => {
+    const noisy = (headline: string, detail: string): CheckFailure =>
+      failureOf({ line: null, column: 1200, message: `${headline}\n${detail}` });
+    const keyOf = (failure: CheckFailure): string =>
+      fingerprintPairs({ tool: 'eslint', failures: [failure], exitCode: 1 })[0]?.key ?? '';
+
+    // Same first line, different trailing detail → same identity (drift).
+    expect(keyOf(noisy('parse error at token', 'expected `;` but found `}`'))).toBe(
+      keyOf(noisy('parse error at token', 'line 4, column 9')),
+    );
+    // Different first line → different identity.
+    expect(keyOf(noisy('parse error at token', 'expected `;`'))).not.toBe(
+      keyOf(noisy('unterminated string literal', 'line 9')),
+    );
+  });
+
+  test('multiset keys expose added and removed duplicate occurrences', () => {
+    const repeated = failureOf({ line: 5, message: 'first wording' });
+    const equivalent = failureOf({ line: 6, message: 'first wording' });
+    const base = fingerprintSet({ tool: 'vitest', failures: [repeated], exitCode: 1 });
+    const final = fingerprintSet({
+      tool: 'vitest',
+      failures: [equivalent, repeated],
+      exitCode: 1,
+    });
+    const reduced = fingerprintSet({ tool: 'vitest', failures: [repeated], exitCode: 1 });
+
+    expect([...final].filter((key) => !base.has(key))).toHaveLength(1);
+    expect([...final].filter((key) => !reduced.has(key))).toHaveLength(1);
+    expect([...reduced].filter((key) => !final.has(key))).toHaveLength(0);
+  });
+
+  test('Vitest identities use the full test name and ignore source-location drift', () => {
+    const original = failureOf({ line: 5, column: 1, message: 'suite > nested > test A' });
+    const moved = failureOf({ line: 300, column: 19, message: 'suite > nested > test A' });
+    const renamed = failureOf({ line: 5, column: 1, message: 'suite > nested > test B' });
+    const keyOf = (failure: CheckFailure): string =>
+      fingerprintPairs({ tool: 'vitest', failures: [failure], exitCode: 1 })[0]?.key ?? '';
+
+    expect(keyOf(moved)).toBe(keyOf(original));
+    expect(keyOf(renamed)).not.toBe(keyOf(original));
+  });
+
+  test('which duplicate occurrence receives the ordinal is independent of input order', () => {
+    const at205 = failureOf({ line: 205, message: 'suite > test' });
+    const at306 = failureOf({ line: 306, message: 'suite > test' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([at205, at306], at306)).toBe(keyFor([at306, at205], at306));
+    expect(keyFor([at205, at306], at205)).toBe(keyFor([at306, at205], at205));
+  });
+
+  test('null and empty-string files never alias in duplicate ordering', () => {
+    const nullFile = failureOf({ file: null, line: null, message: 'same' });
+    const emptyFile = failureOf({ file: '', line: null, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullFile, emptyFile], nullFile)).toBe(keyFor([emptyFile, nullFile], nullFile));
+  });
+
+  test('null and negative locations never alias in duplicate ordering', () => {
+    const nullLine = failureOf({ line: null, column: null, message: 'same' });
+    const negativeLine = failureOf({ line: -1, column: -1, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullLine, negativeLine], nullLine)).toBe(
+      keyFor([negativeLine, nullLine], nullLine),
+    );
+  });
+
+  test('NaN locations order deterministically in duplicate ordering', () => {
+    const finite = failureOf({ line: 5, column: 1, message: 'same' });
+    const nanLine = failureOf({ line: Number.NaN, column: 1, message: 'same' });
+    const nanColumn = failureOf({ line: 5, column: Number.NaN, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'vitest', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    for (const target of [finite, nanLine, nanColumn]) {
+      expect(keyFor([finite, nanLine, nanColumn], target)).toBe(
+        keyFor([nanColumn, nanLine, finite], target),
+      );
+    }
+  });
+
+  test('null and empty-string rule ids never alias in duplicate ordering', () => {
+    const nullRule = failureOf({ ruleId: null, line: null, message: 'same' });
+    const emptyRule = failureOf({ ruleId: '', line: null, message: 'same' });
+    const keyFor = (failures: CheckFailure[], target: CheckFailure): string | undefined =>
+      fingerprintPairs({ tool: 'eslint', failures, exitCode: 1 }).find(
+        (pair) => pair.failure === target,
+      )?.key;
+    expect(keyFor([nullRule, emptyRule], nullRule)).toBe(keyFor([emptyRule, nullRule], nullRule));
+  });
+
+  test('a suite-level vitest failure keys by the first message line, not the full error text', () => {
+    const suite = (message: string): string =>
+      fingerprintFailure(failureOf({ line: null, message, ruleId: 'vitest-suite' }), {
+        tool: 'vitest',
+      });
+    expect(suite('Error: cannot load\n  at /tmp/a.ts:10:5')).toBe(
+      suite('Error: cannot load\n  at /tmp/a.ts:99:1'),
+    );
+  });
+
+  test('unnamed vitest assertions with the same message at different lines key differently', () => {
+    const unnamed = (line: number): string =>
+      fingerprintFailure(
+        failureOf({ line, column: 1, message: 'AssertionError', ruleId: 'vitest-unnamed' }),
+        { tool: 'vitest' },
+      );
+    expect(unnamed(10)).not.toBe(unnamed(200));
+    expect(unnamed(10)).toBe(unnamed(11));
   });
 
   test('empty failure set yields an empty fingerprint set', () => {

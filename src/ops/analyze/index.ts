@@ -63,6 +63,7 @@ export type {
   ApprovalAuthorityConfig,
   ApprovalExercise,
   ApprovalGrant,
+  ApprovalPreflight,
   ApprovalState,
   ApprovalStateReader,
   ApprovalSubject,

@@ -99,7 +99,7 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(TEMPLATE).toContain('"{{PROMOTER_APP_ID}}"');
   });
 
-  it('names exactly the three rulesets and four environments', () => {
+  it('names exactly the three rulesets and five environments', () => {
     const settings = target();
     expect(settings.rulesets.map((r) => r.name)).toEqual([
       'cq-r0-history',
@@ -107,6 +107,7 @@ describe('github-settings.json: the committed D13 target', () => {
       'cq-r2-merge-queue',
     ]);
     expect(Object.keys(settings.environments).sort()).toEqual([
+      'adversarial-scratch',
       'automation',
       'cq-verdict',
       'drill',

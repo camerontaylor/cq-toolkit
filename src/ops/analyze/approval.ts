@@ -52,13 +52,12 @@
 //
 // O-6 (DO NON-APPROVAL WRITERS TAKE THIS LOCK? — open in ADR-0003 §4c step
 // 4, the closing rule the critic deferred to ADR §2.7). RESOLVED HERE for
-// the remediation path, and only here: EVERY write these two ops perform is
-// approval-required and holds the mutation lock, so the path contains no
-// non-approval writer to co-schedule against — the closing rule is vacuous
-// rather than unresolved. A concurrent writer OUTSIDE the lock is not made
-// safe by this module: that is ADR §2.7's open residual (a
-// post-mutation-hook hazard), recorded as such in the family NOTES. No
-// non-approval writer was modified here to pretend otherwise.
+// the remediation path: approved writes and rollback take the SAME workspace
+// mutation lock. Rollback restores targets only when their post-apply
+// fingerprint still matches, so an intervening approved write is not silently
+// discarded. A concurrent writer OUTSIDE the lock is not made safe by this
+// module: that is ADR §2.7's open residual (a post-mutation-hook hazard),
+// recorded as such in the family NOTES.
 //
 // THE ORDERING INVARIANT. `exercise` re-reads the state INSIDE the lock and
 // spends INSIDE the same lock hold, so check and spend are one critical
@@ -78,14 +77,17 @@ import {
   existsSync,
   fdatasyncSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { GIT_HARDEN } from '../ratchet/git.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
+import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
 
 /** The workspace state an approval binds to (ADR-0003 §2 `state`, §4c step 1). */
 export interface ApprovalState {
@@ -93,7 +95,7 @@ export interface ApprovalState {
   readonly workspace: string;
   /** `git rev-parse HEAD` at read time. */
   readonly headSha: string;
-  /** The STRICT clean predicate: `git status --porcelain=v1 --untracked-files=all` empty. */
+  /** Strict Git cleanliness, with only the verified applyRemediation report pair exempted. */
   readonly treeClean: boolean;
 }
 
@@ -107,6 +109,17 @@ export interface ApprovalSubject {
   readonly targets: readonly string[];
   /** A digest binding the op's exact inputs (the op-level stand-in for the kernel's `inputsHash`). */
   readonly inputDigest: string;
+  /**
+   * Only applyRemediation's exact rendered pair, bound into inputDigest.
+   * The real reader verifies the paths, bytes and scan-target separation
+   * at BOTH state reads; this is never a caller-supplied glob/ignore rule.
+   */
+  readonly analysisReports?: {
+    readonly fingerprint: string;
+    readonly sidecarSha256: string;
+    readonly markdownSha256: string;
+    readonly scanTargets: readonly string[];
+  };
 }
 
 /**
@@ -553,7 +566,7 @@ function realpathOrSelf(path: string): string {
 
 /** Reads the workspace state an approval binds to. */
 export interface ApprovalStateReader {
-  read(workspace: string): Promise<ApprovalState>;
+  read(workspace: string, subject?: ApprovalSubject): Promise<ApprovalState>;
 }
 
 /**
@@ -562,8 +575,10 @@ export interface ApprovalStateReader {
  * --ignore-submodules=none` empty, so an UNTRACKED file counts as dirty and a
  * submodule cannot opt itself out — plus a refusal of any index entry flagged
  * assume-unchanged or skip-worktree, which that status would not inspect.
- * Ignored files are out of scope, which ADR-0003 §4c records as a stated
- * residual (an ignored file can still influence a codemod that reads it).
+ * applyRemediation may supply a byte-verified exact report pair for the
+ * narrow untracked-only exception below. Other subjects use the strict
+ * predicate unchanged. Ignored files are out of scope, which ADR-0003 §4c
+ * records as a stated residual (an ignored file can still influence a codemod that reads it).
  *
  * Every fault THROWS; the exercise catches it and refuses `needs-human`. An
  * unreadable state is never treated as "unchanged" — that inversion is
@@ -571,7 +586,7 @@ export interface ApprovalStateReader {
  */
 export function makeGitApprovalStateReader(): ApprovalStateReader {
   return {
-    read: async (workspace) => {
+    read: async (workspace, subject) => {
       const root = realpathSync(workspace);
       const headSha = await git(root, ['rev-parse', 'HEAD']);
       // `--ignore-submodules=none` overrides a committed `ignore = all` in
@@ -580,6 +595,7 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
       const status = await git(root, [
         'status',
         '--porcelain=v1',
+        '-z',
         '--untracked-files=all',
         '--ignore-submodules=none',
       ]);
@@ -598,9 +614,66 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
           `${String(hidden.length)} index entr${hidden.length === 1 ? 'y is' : 'ies are'} flagged assume-unchanged or skip-worktree (${named.join(', ')}) — git status does not compare such files against the working tree, so a clean status cannot prove their bytes are the approved ones; clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree) and approve again`,
         );
       }
-      return { workspace: root, headSha, treeClean: status === '' };
+      const reports = verifiedAnalysisReportPaths(root, subject);
+      const repoRoot =
+        reports.size === 0 ? root : await git(root, ['rev-parse', '--show-toplevel']);
+      // EXACT REPORT EXCEPTION (promotion F3), with four guards:
+      // (1) only this run's two fingerprint-derived paths, never patterns;
+      // (2) exact SHA-256 bytes, bound into the approved input digest;
+      // (3) lstat regular files whose realpaths equal the canonical paths
+      // directly under the workspace, and no scan target or alias of either;
+      // (4) exclude ONLY their untracked entries: tracked changes and every
+      // unrelated file remain dirty. verifiedAnalysisReportPaths runs at
+      // admission AND the exercise re-check. Markdown cannot affect the
+      // explicit-target, inline-rule codemod; the sidecar's planning inputs
+      // are digest-bound and cannot change between planning and the write.
+      const dirty = status.split('\0').some((record) => {
+        if (record === '') return false;
+        return !record.startsWith('?? ') || !reports.has(resolve(repoRoot, record.slice(3)));
+      });
+      return { workspace: root, headSha, treeClean: !dirty };
     },
   };
+}
+
+/** Verify the exact rendered pair before granting its narrow untracked exception. */
+function verifiedAnalysisReportPaths(root: string, subject?: ApprovalSubject): Set<string> {
+  const reports = subject?.analysisReports;
+  if (reports === undefined) return new Set();
+  if (subject?.op !== 'analyze.applyRemediation' || !/^[0-9a-f]{16}$/.test(reports.fingerprint)) {
+    throw new Error('approval: invalid analysis report exception');
+  }
+  const pair = [
+    [join(root, sidecarFileName(reports.fingerprint)), reports.sidecarSha256],
+    [join(root, markdownFileName(reports.fingerprint)), reports.markdownSha256],
+  ] as const;
+  const paths = new Set<string>();
+  const identities = new Set<string>();
+  for (const [path, digest] of pair) {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || realpathSync(path) !== path) {
+      throw new Error(
+        `approval: analysis report '${path}' must be a regular file at its exact canonical workspace path`,
+      );
+    }
+    if (createHash('sha256').update(readFileSync(path)).digest('hex') !== digest) {
+      throw new Error(`approval: analysis report '${path}' bytes changed since planning`);
+    }
+    paths.add(path);
+    identities.add(`${String(stat.dev)}:${String(stat.ino)}`);
+  }
+  for (const target of [...subject.targets, ...reports.scanTargets]) {
+    const targetReal = realpathSync(resolve(root, target));
+    const targetStat = statSync(targetReal);
+    // Hard links alias bytes without sharing a realpath; refuse them too.
+    if (
+      paths.has(targetReal) ||
+      identities.has(`${String(targetStat.dev)}:${String(targetStat.ino)}`)
+    ) {
+      throw new Error(`approval: analysis report '${target}' cannot be a codemod target or alias`);
+    }
+  }
+  return paths;
 }
 
 /**
@@ -812,13 +885,14 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       }
       let state: ApprovalState;
       try {
-        state = await readState.read(subject.workspace);
+        state = await readState.read(subject.workspace, subject);
       } catch (err) {
         return {
           granted: false,
           reason: `approval refused: the workspace state could not be read — ${messageOf(err)}; an unreadable state is never treated as unchanged, and nothing was written`,
         };
       }
+      // The real reader has already verified any exact report exception.
       // A DIRTY TREE IS NOT AN APPROVABLE STATE — and this is the ACCEPTED
       // ADR's requirement, not a local tightening of it. ADR-0003 §4c step 1
       // requires the clean predicate to be EMPTY
@@ -909,7 +983,7 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       exercised.add(grant);
       let state: ApprovalState;
       try {
-        state = await readState.read(subject.workspace);
+        state = await readState.read(subject.workspace, subject);
       } catch (err) {
         return {
           granted: false,
@@ -951,6 +1025,38 @@ export type ApprovedMutation<T> =
   | { readonly status: 'needs-human'; readonly reason: string };
 
 /**
+ * The verdict of {@link withApprovedMutation}'s optional `preflight`: the
+ * caller's read-only check of the work it is ABOUT to request, or why it
+ * refuses.
+ *
+ * WHY THIS EXISTS (the #258 owner ruling, option D). A caller whose real
+ * pre-spend work happens inside the write — the playbook dispatch's engine
+ * scan, whose faults (a malformed rule, an unreadable target, a collision, a
+ * splice fault) were discovered only AFTER the nonce had been consumed —
+ * burned a single-use approval on a dispatch that never wrote a byte. Passing
+ * that check as `preflight` runs it INSIDE the mutation lock, after
+ * admission, BEFORE {@link ApprovalAuthority.exercise} consumes the nonce, so
+ * a refusal — or a throw — costs nothing: the token stays spendable and a
+ * retry with the SAME token is possible once the check passes.
+ *
+ * THE CONTRACT, in both directions:
+ *  - the preflight must be READ-ONLY (it runs under the workspace mutation
+ *    lock, but before the approval is exercised — nothing it observes
+ *    authorizes a byte);
+ *  - it receives NO {@link ExercisedScope}, deliberately: a scope asserts
+ *    that an approval was already consumed, which is FALSE at preflight
+ *    time — it is minted for, and handed only to, the write callback.
+ *
+ * The exercise's state re-check still runs AFTER the preflight and
+ * immediately before the spend, so the §7 TOCTOU guarantee is exactly where
+ * it was: a workspace that moves between admission and the spend is refused
+ * with the nonce unspent, preflight or no preflight.
+ */
+export type ApprovalPreflight =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+/**
  * The mutation seam an op calls INSTEAD of writing: admit (nothing spent),
  * then — under the workspace mutation lock — exercise (state re-check plus
  * the atomic nonce spend) and the write, with the lock held THROUGH the
@@ -962,6 +1068,16 @@ export type ApprovedMutation<T> =
  * This is the ONLY caller shape that can produce a write: there is no path
  * from a plan JSON `approved: true` to a byte on disk that does not pass a
  * check-and-spend under the lock first.
+ *
+ * THE OPTIONAL `preflight` (the #258 owner ruling, option D): a caller
+ * callback — typically the read-only scan of the work the write would do —
+ * that runs INSIDE the mutation lock, after admission, BEFORE `exercise`
+ * consumes the nonce. So the scan and the mutation it gates share one lock
+ * hold with no gap between them (no approved-writer TOCTOU between check and
+ * spend), and a preflight that refuses — or THROWS — returns a
+ * `needs-human` refusal with the token UNSPENT, never a burn and never a
+ * rejection. The write callback then runs after the spend exactly as before;
+ * restore-on-failure and every ordering guarantee are untouched.
  */
 /**
  * The capability ADR-0003 §6 defines for NESTED mutations: an approval
@@ -1071,6 +1187,7 @@ export async function withApprovedMutation<T>(
   authority: ApprovalAuthority,
   subject: ApprovalSubject,
   write: (scope: ExercisedScope) => Promise<T>,
+  preflight?: () => ApprovalPreflight | Promise<ApprovalPreflight>,
 ): Promise<ApprovedMutation<T>> {
   const admitted = await authority.admit(subject);
   if (!admitted.granted) return { status: 'needs-human', reason: admitted.reason };
@@ -1086,6 +1203,31 @@ export async function withApprovedMutation<T>(
     locks,
     subject.workspace,
     async (scope): Promise<ApprovedMutation<T>> => {
+      // THE PREFLIGHT, when the caller brought one: inside the lock, after
+      // admission, BEFORE the exercise spends the nonce — so a refused or
+      // faulting check leaves the token spendable (the #258 defect: a scan
+      // fault after the spend burned a single-use approval on a no-write
+      // dispatch). A throw is a REFUSAL here, not a rejection: the check
+      // faulted before any byte moved and before any lock release, so there
+      // is no write state to report and failing closed as needs-human is
+      // strictly more informative to the caller than an exception.
+      if (preflight !== undefined) {
+        let verdict: ApprovalPreflight;
+        try {
+          verdict = await preflight();
+        } catch (err) {
+          return {
+            status: 'needs-human',
+            reason: `approval refused: the preflight faulted before the nonce was spent — ${messageOf(err)}; nothing was written and the token is UNSPENT (the preflight runs inside the mutation lock before exercise precisely so a faulting check cannot burn the approval)`,
+          };
+        }
+        if (!verdict.ok) {
+          return {
+            status: 'needs-human',
+            reason: `approval refused: the preflight refused before the nonce was spent — ${verdict.reason}; nothing was written and the token is UNSPENT (the preflight runs inside the mutation lock before exercise precisely so a refused check cannot burn the approval; a retry with the SAME token is possible once the check passes)`,
+          };
+        }
+      }
       const exercised = await authority.exercise(admitted.grant, subject);
       if (!exercised.granted) return { status: 'needs-human', reason: exercised.reason };
       return { status: 'ok', value: await write(scope) };
@@ -1199,6 +1341,7 @@ function sameSubject(a: ApprovalSubject, b: ApprovalSubject): boolean {
     a.op === b.op &&
     a.workspace === b.workspace &&
     a.inputDigest === b.inputDigest &&
+    approvalInputDigest(a.analysisReports) === approvalInputDigest(b.analysisReports) &&
     a.targets.length === b.targets.length &&
     a.targets.every((target, index) => target === b.targets[index])
   );
