@@ -146,9 +146,9 @@ const signalChild = (signal) => {
     // the group is gone already
   }
 };
-/** How long a SIGKILLed group may take to disappear before the lock is pinned. */
+/** How long cleanup waits for a group to disappear before the lock is pinned. */
 const SWEEP_WAIT_MS = 10_000;
-/** Set when a child group outlived SIGKILL: the lock is then never released. */
+/** Set when a child group survives cleanup: the lock is then never released. */
 let lockPinned = false;
 /**
  * True once no RUNNABLE process of the group led by `pid` remains. A zombie
@@ -171,8 +171,9 @@ const groupGone = (pid) => {
   });
 };
 /**
- * SIGKILL the child's whole group and wait — bounded, synchronously (it also
- * runs from the 'exit' handler) — until it is gone: SIGKILL is asynchronous,
+ * SIGKILL only a group whose live leader matches its recorded start time,
+ * then wait — bounded, synchronously (also from the 'exit' handler) — until
+ * it is gone. An unverifiable group is never signalled. SIGKILL is asynchronous,
  * and the lock must not free while a member still runs. A group that outlives
  * the wait pins the lock: its record stays for the next waiter to judge.
  */
@@ -184,7 +185,7 @@ const sweepChild = () => {
   const deadline = Date.now() + SWEEP_WAIT_MS;
   while (!groupGone(child.pid)) {
     if (Date.now() >= deadline) {
-      say(`process group ${child.pid} outlived SIGKILL; leaving the host lock held`);
+      say(`process group ${child.pid} still runs after cleanup; leaving the host lock held`);
       lockPinned = true;
       releaseLock = () => {};
       return;
@@ -422,7 +423,7 @@ if (!distIsFresh()) {
     finish({
       result: 'error',
       exit: 1,
-      reason: 'the dist build left processes that outlived SIGKILL',
+      reason: 'the dist build left processes that survived cleanup',
     });
   }
   lock.annotate({ childPgid: null });

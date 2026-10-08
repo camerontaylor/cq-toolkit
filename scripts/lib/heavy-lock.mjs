@@ -22,7 +22,9 @@
 //     runs, when owner.json is still absent MISSING_OWNER_MS after the mkdir
 //     (the owner died in between), or when the record is older than
 //     MAX_HOLD_MS with no live owner or running group. A dead owner
-//     with an unrecorded pending spawn stays busy until that ceiling.
+//     with an unrecorded pending spawn stays busy indefinitely: its child
+//     cannot be identified. Only an operator who checked for stray heavy
+//     processes may clear it manually (test:narrow --help).
 //     An unverifiable running group stays busy even beyond that ceiling;
 //   - reclaim runs under a short-lived guard directory (one reclaimer at a
 //     time), re-judges the record under the guard, and removes the lock only
@@ -125,11 +127,11 @@ function unverifiedGroup(holder, processStartMs) {
   return Math.abs(actual - recorded) <= START_SLACK_MS ? null : 'its leader was reused';
 }
 
-/** Signal only an extant group whose leader is gone or has the recorded identity. */
+/** Signal only an extant group whose live leader has the recorded identity. */
 export function canSignalGroup(holder, deps = defaultDeps()) {
   const pgid = holder?.childPgid;
   if (typeof pgid !== 'number' || !deps.groupAlive(pgid)) return false;
-  if (!deps.isAlive(pgid)) return true;
+  if (!deps.isAlive(pgid)) return false;
   return unverifiedGroup(holder, deps.processStartMs) === null;
 }
 
@@ -143,18 +145,20 @@ export function judgeHolder(holder, dirMtimeMs, deps) {
   const expired = Number.isFinite(started) && now - started > MAX_HOLD_MS;
   if (alive(holder.pid, holder.startedAt)) return { reason: null };
   const pgid = holder.childPgid;
-  const pendingAt = Date.parse(holder.childPendingAt);
-  const pendingExpired = Number.isFinite(pendingAt) && now - pendingAt > MAX_HOLD_MS;
-  if (holder.childPending && typeof pgid !== 'number' && !pendingExpired) {
+  if (holder.childPending && typeof pgid !== 'number') {
     return {
       reason: null,
-      note: 'owner is gone with an unrecorded pending child; the lock stays busy until MAX_HOLD_MS',
+      note:
+        `owner ${holder.pid} died between spawning a child and recording it; the child cannot be identified, so the lock is kept; ` +
+        'manual recovery requires pausing callers and checking for stray heavy processes before removing the lock (see pnpm test:narrow --help)',
     };
   }
   if (typeof pgid !== 'number' || !groupAlive(pgid)) {
     return { reason: expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone` };
   }
-  const why = unverifiedGroup(holder, processStartMs);
+  const why = alive(pgid)
+    ? unverifiedGroup(holder, processStartMs)
+    : 'its leader is gone or unreadable';
   if (why === null) {
     const owner = expired ? 'held past MAX_HOLD_MS' : `owner pid ${holder.pid} is gone`;
     return { reason: `${owner}; orphaned child group ${pgid}`, kill: pgid };
@@ -264,6 +268,7 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       const verdict = judgeHolder(current, mtimeMs, { ...deps, now: deps.now() });
       if (verdict.reason === null) return;
       if (verdict.kill !== undefined) {
+        if (!canSignalGroup(current, deps)) return;
         // SIGKILL lands asynchronously: keep the lock until the group is gone
         // (a later poll finds it dead and reclaims).
         deps.killGroup(verdict.kill);
@@ -319,9 +324,6 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       if (!fs.existsSync(path)) continue;
     }
     const waitedMs = now - start;
-    if (waitedMs >= maxWaitMs) {
-      return { acquired: false, waitedMs, holder: readOwner(path, fs) ?? holder };
-    }
     if (reason === null && now - lastReport >= REPORT_EVERY_MS) {
       lastReport = now;
       deps.log(
@@ -329,6 +331,9 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
           (note === undefined ? '' : `${note}; `) +
           `waited ${Math.round(waitedMs / 1000)}s of at most ${Math.round(maxWaitMs / 1000)}s`,
       );
+    }
+    if (waitedMs >= maxWaitMs) {
+      return { acquired: false, waitedMs, holder: readOwner(path, fs) ?? holder };
     }
     await deps.sleep(Math.min(poll, maxWaitMs - waitedMs));
     poll = Math.min(poll * 2, MAX_POLL_MS);

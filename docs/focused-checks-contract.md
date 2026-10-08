@@ -83,6 +83,25 @@ obligations with a named owner.
 make it by hand. `pnpm test:narrow --dry-run` prints it without running it.
 The runner checks its ownership token immediately before each build or test
 spawn; exit 75 means a busy lock or lost ownership, and requires retrying later.
+An owner that dies with `childPending` and no recorded `childPgid` leaves the
+lock busy **indefinitely**, even beyond `MAX_HOLD_MS`: the child cannot be
+identified. The waiter reports: "owner <pid> died between spawning a child and
+recording it; the child cannot be identified, so the lock is kept". To recover
+manually, pause all `test:narrow` callers, read
+`/tmp/cq-toolkit-heavy.lock/owner.json`, and inspect the host process list
+(`ps -axo pid,ppid,pgid,command` on macOS/Linux) for stray runners, builds and
+test workers. Stop any such processes and verify they have exited. **Only
+then** explicitly run `rm -rf /tmp/cq-toolkit-heavy.lock` and resume callers.
+On Windows the directory is `<os.tmpdir()>/cq-toolkit-heavy.lock`; inspect the
+host process list and remove that directory with your shell after the same
+checks. `pnpm test:narrow --help` prints the host's actual lock path.
+
+Every process-group signal (interrupt, timeout, exit cleanup and orphan reclaim)
+requires a live leader at the recorded pgid whose start time matches
+`childStartedAt` within two seconds. A gone or reused leader makes a still-live
+group unverifiable: it is never signalled, and the lock stays busy until that
+group exits. Waiting is safe.
+
 Live drills also use this runner: export credentials first, then run
 `LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`.
 This drill is classified `integration`; suites classified `live` require

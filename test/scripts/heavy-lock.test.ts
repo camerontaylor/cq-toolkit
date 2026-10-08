@@ -154,6 +154,7 @@ describe('acquireLock', () => {
       maxWaitMs = 0,
       exitsAfterSleeps = Infinity,
       survivesKill = false,
+      leaderAlive = leaderStartMs !== null,
     } = {},
   ) => {
     holderRecord(99, 'tok-dead', startedAt);
@@ -176,7 +177,7 @@ describe('acquireLock', () => {
           sleeps += 1;
           await c.sleep(ms);
         },
-        isAlive: () => false,
+        isAlive: (pid) => pid === 555 && leaderAlive,
         groupAlive: (pgid) =>
           pgid === 555 && (survivesKill || killed.length === 0) && sleeps < exitsAfterSleeps,
         killGroup: (pgid) => void killed.push(pgid),
@@ -234,13 +235,54 @@ describe('acquireLock', () => {
   );
 
   it('acquires once an unverifiable group has exited by itself', async () => {
-    const { got, killed, log } = await orphan({}, null, {
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START, {
       maxWaitMs: 60_000,
       exitsAfterSleeps: 2,
+      leaderAlive: false,
     });
     expect(killed).toEqual([]);
     expect(got.acquired).toBe(true);
     expect(log).toContain('reclaimed a stale lock (owner pid 99 is gone)');
+  });
+
+  it('keeps a group busy when its leader is gone even if a start-time read matches', async () => {
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START, {
+      maxWaitMs: 60_000,
+      leaderAlive: false,
+    });
+    expect(got.acquired).toBe(false);
+    expect(killed).toEqual([]);
+    expect(readOwner(lock)?.token).toBe('tok-dead');
+    expect(log).toContain('its leader is gone or unreadable');
+    expect(log).not.toContain('reclaimed');
+  });
+
+  it('rechecks the live leader before signalling during reclaim', async () => {
+    holderRecord(99, 'tok-dead');
+    const record = readOwner(lock);
+    fs.writeFileSync(
+      join(lock, 'owner.json'),
+      JSON.stringify({ ...record, childPgid: 555, childStartedAt: leaderAt }),
+    );
+    let leaderChecks = 0;
+    const killed: number[] = [];
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: {
+        isAlive: (pid) => pid === 555 && ++leaderChecks < 3,
+        groupAlive: () => true,
+        processStartMs: () => LEADER_START,
+        killGroup: (pgid) => void killed.push(pgid),
+        token: () => 'reclaimer',
+        log: () => {},
+      },
+    });
+    expect(leaderChecks).toBe(3);
+    expect(killed).toEqual([]);
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)?.token).toBe('tok-dead');
   });
 
   it('keeps an expired unverifiable group busy without killing', async () => {
@@ -367,7 +409,11 @@ describe('judgeHolder', () => {
       childPgid: 9,
       childStartedAt: new Date(leader).toISOString(),
     };
-    const dead = { ...deps, isAlive: () => false, groupAlive: (pgid: number) => pgid === 9 };
+    const dead = {
+      ...deps,
+      isAlive: (pid: number) => pid === 9,
+      groupAlive: (pgid: number) => pgid === 9,
+    };
     expect(judgeHolder(withGroup, now, { ...dead, processStartMs: () => leader })).toEqual({
       reason: 'owner pid 1 is gone; orphaned child group 9',
       kill: 9,
@@ -450,23 +496,59 @@ describe('pending child and signal identity', () => {
   };
   const deps = { now, isAlive: () => false, groupAlive: () => false, processStartMs: () => null };
 
-  it('keeps a dead owner with an unrecorded spawn busy until the hold ceiling', () => {
-    expect(judgeHolder(holder, now, deps).reason).toBeNull();
-    expect(judgeHolder(holder, now, { ...deps, now: now + MAX_HOLD_MS }).reason).toBeNull();
-    expect(judgeHolder(holder, now, { ...deps, now: now + MAX_HOLD_MS + 1 }).reason).toBe(
-      'held past MAX_HOLD_MS',
-    );
-  });
+  it.each([0, MAX_HOLD_MS, MAX_HOLD_MS + 1, 100 * 365 * 24 * 60 * 60 * 1000])(
+    'never expires an unrecorded pending child (age=%s)',
+    (age) => {
+      const verdict = judgeHolder(holder, now, { ...deps, now: now + age });
+      expect(verdict.reason).toBeNull();
+      expect(verdict.kill).toBeUndefined();
+      expect(verdict.note).toContain(
+        'owner 1 died between spawning a child and recording it; the child cannot be identified, so the lock is kept',
+      );
+    },
+  );
 
-  it('times the pending-child grace from the spawn, even for an expired owner', () => {
+  it('keeps an expired owner with a missing pending timestamp busy indefinitely', () => {
     const oldOwner = { ...holder, startedAt: new Date(now - MAX_HOLD_MS - 1).toISOString() };
     expect(judgeHolder(oldOwner, now, deps).reason).toBeNull();
-    expect(judgeHolder(oldOwner, now, { ...deps, now: now + MAX_HOLD_MS + 1 }).reason).toBe(
-      'held past MAX_HOLD_MS',
-    );
+    const { childPendingAt: _pendingAt, ...undated } = oldOwner;
+    expect(judgeHolder(undated, now, { ...deps, now: now + MAX_HOLD_MS + 1 }).reason).toBeNull();
   });
 
-  it('signals only a living group with a gone or matching leader', () => {
+  it.each([0, 60_000])(
+    'times out without reclaiming an old pending child and explains manual recovery (wait=%s)',
+    async (maxWaitMs) => {
+      fs.mkdirSync(lock);
+      fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify(holder));
+      const c = clock(now + MAX_HOLD_MS + 1);
+      const lines: string[] = [];
+      const killed: number[] = [];
+      const got = await acquireLock({
+        path: lock,
+        maxWaitMs,
+        info,
+        deps: {
+          ...deps,
+          ...c,
+          token: () => 'waiter',
+          killGroup: (pgid) => void killed.push(pgid),
+          log: (line) => lines.push(line),
+        },
+      });
+      expect(got).toMatchObject({ acquired: false, waitedMs: maxWaitMs, holder });
+      expect(readOwner(lock)).toEqual(holder);
+      expect(killed).toEqual([]);
+      expect(lines.join('\n')).toContain(
+        'owner 1 died between spawning a child and recording it; the child cannot be identified, so the lock is kept',
+      );
+      expect(lines.join('\n')).toContain('checking for stray heavy processes before removing');
+      expect(lines.join('\n')).toContain('pnpm test:narrow --help');
+      expect(lines.join('\n')).toContain(lock);
+      expect(lines.join('\n')).not.toContain('reclaimed');
+    },
+  );
+
+  it('signals only a living group with a live matching leader', () => {
     const record = { childPgid: 9, childStartedAt: new Date(now).toISOString() };
     const alive = {
       ...deps,
@@ -477,8 +559,22 @@ describe('pending child and signal identity', () => {
     expect(canSignalGroup(record, alive)).toBe(true);
     expect(canSignalGroup(record, { ...alive, processStartMs: () => now + 60_000 })).toBe(false);
     expect(canSignalGroup(record, { ...alive, processStartMs: () => null })).toBe(false);
-    expect(canSignalGroup(record, { ...alive, isAlive: () => false })).toBe(true);
+    expect(canSignalGroup(record, { ...alive, isAlive: () => false })).toBe(false);
     expect(canSignalGroup(record, { ...alive, groupAlive: () => false })).toBe(false);
     expect(canSignalGroup({ childPgid: 9 }, alive)).toBe(false);
   });
+
+  it.each([-2_001, -2_000, 2_000, 2_001])(
+    'checks start-time slack in both directions (%s)',
+    (offset) => {
+      const record = { childPgid: 9, childStartedAt: new Date(now).toISOString() };
+      expect(
+        canSignalGroup(record, {
+          isAlive: (pid) => pid === 9,
+          groupAlive: (pgid) => pgid === 9,
+          processStartMs: () => now + offset,
+        }),
+      ).toBe(Math.abs(offset) <= 2_000);
+    },
+  );
 });

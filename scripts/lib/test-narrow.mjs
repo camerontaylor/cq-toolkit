@@ -14,7 +14,7 @@
 //     FULL suite, which is CI-only).
 
 import { constants } from 'node:os';
-import { EX_TEMPFAIL } from './heavy-lock.mjs';
+import { EX_TEMPFAIL, LOCK_PATH } from './heavy-lock.mjs';
 
 export const MAX_FILES = 10;
 export const NICE_INCREMENT = 5;
@@ -48,6 +48,13 @@ Refused: --watch, --coverage, --ui and any other vitest flag; more than
 ${MAX_FILES} test files; selections that fall back to every test; selections
 that include integration or live suites without their --include flag.
 Exit 75: host lock busy or ownership lost before a child spawn; retry later.
+Manual recovery for a dead owner with an unrecorded pending child:
+  This lock is NEVER auto-reclaimed: the child cannot be identified.
+  Pause all test:narrow callers. Read ${LOCK_PATH}/owner.json and inspect
+  the host process list for stray runners, builds and test workers; stop
+  them and verify they have exited. Only then remove the lock explicitly:
+    rm -rf ${LOCK_PATH}
+  On Windows remove that directory using your shell. Resume callers afterward.
 Live drill (classified integration):
   LIVE_GH=1 pnpm test:narrow --include-integration test/e2e/merge/live.test.ts`;
 
