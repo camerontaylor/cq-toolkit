@@ -88,17 +88,36 @@ function newestBuildInputMtimeMs() {
   return newest;
 }
 
+/** Invalidate prior success before the compiler or asset step can change dist. */
+export function invalidateBuild() {
+  rmSync(join(ROOT, 'dist', '.build-complete'), { force: true });
+}
+
+/** Called only by the final successful step of the package build command. */
+export function markBuildComplete() {
+  writeFileSync(join(ROOT, 'dist', '.build-complete'), `${new Date().toISOString()}\n`);
+}
+
 /**
  * ensureDist's reuse test: `dist/index.js` and the ratchet engine entry exist
- * and dist is newer than every src file. False (rebuild) on any fault — no
+ * and the successful build marker and dist are newer than every build input.
+ * False (rebuild) on any output fault — no
  * dist yet (CI cold checkout) or unreadable. test-narrow uses it to run the
  * build itself, as a child its host lock records.
  */
 export function distIsFresh() {
   try {
-    const marker = statSync(join(ROOT, 'dist', 'index.js'));
+    const marker = statSync(join(ROOT, 'dist', '.build-complete'));
+    const index = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
-    return marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestBuildInputMtimeMs();
+    const newestInput = newestBuildInputMtimeMs();
+    return (
+      marker.isFile() &&
+      index.isFile() &&
+      engineEntry.isFile() &&
+      marker.mtimeMs >= newestInput &&
+      index.mtimeMs >= newestInput
+    );
   } catch {
     return false;
   }
@@ -111,7 +130,8 @@ let distPrepared = false;
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
  * import) exists and is NEWER than every build input (src/ and the root
- * build configuration); anything else (missing, unreadable, or any input
+ * build configuration) and a successful build-completion marker is at least
+ * as new as those inputs; anything else (missing, unreadable, or any input
  * newer than dist) triggers a rebuild.
  *
  * TRADEOFF, deliberate: a CI cold checkout has no dist and always builds

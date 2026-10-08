@@ -187,14 +187,13 @@ that is not a merge-readiness claim.
   stamps `duration=`; `uptime=`, the host uptime in seconds sampled with it;
   and `nice=`). A summary without a run carries the process-start sample.
 
-- **Never record or claim worker-count tuning.** `--maxWorkers` is a no-op under
-  `vitest.config.ts`'s `fileParallelism: false`, which forces a single worker in
-  Vitest 5. No protocol step, record or performance claim may cite it as a lever.
-  This is the mechanism home for that rule: re-derive it whenever
-  `vitest.config.ts` changes, because a later slice may enable file-level
-  parallelism and flip the answer. `test:narrow` passes `--maxWorkers=1` and
-  `--no-file-parallelism` as a guard that keeps a narrow run serial if that
-  happens: a host-safety pin, not a lever.
+- **Never record or claim worker-count tuning.** The current
+  `vitest.config.ts` disables file parallelism, forcing serial execution in
+  Vitest 5. Worker-count options therefore have no effect and must not appear
+  in protocol steps, records or performance claims. Re-derive this mechanism
+  whenever `vitest.config.ts` changes, because a later slice may enable
+  file-level parallelism. `test:narrow` independently enforces serial files
+  and a single worker so narrow runs remain serial if the config changes.
 - **Never re-run an unchanged deterministic failure** to obtain a green result.
   Preserve the output, diagnose, change the relevant input, then run the targeted
   reproduction. An unexplained earlier failure is not erased by a later pass.

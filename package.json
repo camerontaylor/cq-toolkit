@@ -23,7 +23,7 @@
     "cq-harness-mcp": "dist/harness/mcp/bin.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs",
+    "build": "node --input-type=module -e \"import { invalidateBuild } from './scripts/ratchet-lib.mjs'; invalidateBuild()\" && tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs && node --input-type=module -e \"import { markBuildComplete } from './scripts/ratchet-lib.mjs'; markBuildComplete()\"",
     "prepack": "pnpm run build",
     "typecheck": "pnpm run check:static",
     "lint": "pnpm run check:static",

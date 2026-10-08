@@ -345,7 +345,7 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     'package.json',
     'scripts/copy-prompt-assets.mjs',
   ];
-  const outputs = ['dist/index.js', 'dist/ops/ratchet/checkRatchet.js'];
+  const outputs = ['dist/index.js', 'dist/ops/ratchet/checkRatchet.js', 'dist/.build-complete'];
   /** A fixture tree with ratchet-lib copied in (its ROOT is its own parent). */
   const fixture = async () => {
     const root = mkdtempSync(join(tmpdir(), 'dist-fresh-'));
@@ -359,8 +359,10 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     copyFileSync(lib, join(root, 'scripts/ratchet-lib.mjs'));
     const mod = (await import(pathToFileURL(join(root, 'scripts/ratchet-lib.mjs')).href)) as {
       distIsFresh: () => boolean;
+      invalidateBuild: () => void;
+      markBuildComplete: () => void;
     };
-    return { root, put, distIsFresh: mod.distIsFresh };
+    return { root, put, ...mod };
   };
 
   it('is fresh only while dist is newer than src/ and every root build input', async () => {
@@ -376,13 +378,45 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     }
   });
 
-  it('is never fresh without the dist marker; an absent input imposes nothing', async () => {
+  it('stays stale after an interrupted build refreshes the compiled outputs', async () => {
+    const { root, put, distIsFresh, invalidateBuild, markBuildComplete } = await fixture();
+    try {
+      expect(distIsFresh()).toBe(true);
+      invalidateBuild();
+      invalidateBuild(); // a cold or previously interrupted build is safe to start
+      put('dist/index.js', 4_000);
+      put('dist/ops/ratchet/checkRatchet.js', 4_000);
+      expect(distIsFresh()).toBe(false); // asset step has not completed
+      markBuildComplete();
+      expect(distIsFresh()).toBe(true);
+      put('dist/.build-complete', 500); // an old success cannot certify newer inputs
+      expect(distIsFresh()).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('requires every dist output, including the completion marker', async () => {
+    for (const output of outputs) {
+      const { root, distIsFresh } = await fixture();
+      try {
+        rmSync(join(root, output));
+        expect(distIsFresh()).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('reuses prebuilt dist without sources or root configs; absent inputs impose nothing', async () => {
     const { root, distIsFresh } = await fixture();
     try {
       // Fixture trees (ratchet-propose's) carry a prebuilt dist and no
       // sources or root configs: nothing there can be newer than dist.
       rmSync(join(root, 'src'), { recursive: true });
-      rmSync(join(root, 'tsconfig.build.json'));
+      for (const input of inputs.filter((file) => !file.startsWith('src/'))) {
+        rmSync(join(root, input));
+      }
       expect(distIsFresh()).toBe(true);
       rmSync(join(root, 'dist/index.js'));
       expect(distIsFresh()).toBe(false);
