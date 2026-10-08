@@ -337,7 +337,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
     ) as Record<string, unknown>;
 
   // The pinned identity, from the owner's registration record
-  // (toolkit-research plans/app-registration-session-20261004.md @ 408c87f):
+  // (toolkit-research plans/app-registration-session-20261004.md @ d8f132f):
   // App cq-promotion-reviewer (5230901), bot cq-promotion-reviewer[bot] /
   // 339373542 / Bot. The jq matrix below still uses synthetic fixtures;
   // these constants pin the RENDERED literals and the instances.json tokens.

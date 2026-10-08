@@ -26,7 +26,7 @@ starts per hour). It does not pre-empt a running review.
 
 crq reports the state as a commit status on the batch tip: context `crq/promotion-review`, posted
 by the promotion-review signer as the pinned reviewer bot `cq-promotion-reviewer[bot]` (identity:
-the owner's registration record, `app-registration-session-20261004.md` @ `408c87f` — see
+the owner's registration record, `app-registration-session-20261004.md` @ `d8f132f` — see
 [the interface](#the-crq-interface)).
 
 ## What blocks
@@ -46,7 +46,7 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
    by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
-   `339373542` (pinned in the gate template from the registration record @ `408c87f`, not a repo
+   `339373542` (pinned in the gate template from the registration record @ `d8f132f`, not a repo
    variable; an UNSET token leaves the gate refusing fail-closed). Any other creator — including
    the repository owner's own
    login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
@@ -70,7 +70,7 @@ C2 retires `merge-queue-gate`.
 Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
 for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
 `cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
-`408c87f` (the gate refuses fail-closed while unpinned).
+`d8f132f` (the gate refuses fail-closed while unpinned).
 
 - A `crq/promotion-review` status now proves the signer ran the review: its private key lives
   only in the dedicated `crq` macOS user's home — outside an unprivileged agent's reach (see the
@@ -144,7 +144,7 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
   key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
-  (identity per the registration record @ `408c87f`):
+  (identity per the registration record @ `d8f132f`):
   - `context`: `crq/promotion-review`
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
     (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
