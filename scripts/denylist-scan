@@ -44,7 +44,9 @@
 //                                      (the repo's required checks, each
 //                                      entry pairing a workflow FILE with
 //                                      the CHECK NAME of its producing
-//                                      job; denylist.yml included) must
+//                                      job — several per file allowed,
+//                                      which a two-pair fixture proves;
+//                                      denylist.yml included) must
 //                                      exist, declare a job with exactly
 //                                      its paired check name at the first
 //                                      indent level under `jobs:`; a
@@ -153,11 +155,11 @@ function treeAllowlistPaths(noDist) {
 // indent level under `jobs:` — without the pairing, a job rename leaves
 // every I4 leg green while PRs hang unmergeable and the gate times out
 // waiting for a check name nothing produces. Extend when a new required
-// check lands. A job-level `name:` override that differs from the paired
-// check name fails the leg too (the check run is reported under the name).
-// Each listed file must exist (a missing one fails the
-// workflow-I4 leg by name, which also keeps the denylist.yml-presence
-// requirement alive) and its `on:` block must be unfiltered.
+// check lands: a file may carry several pairs (one per required job), a
+// check name only one. A job-level `name:` override that differs from the
+// paired check name fails the leg too (the check run is reported under the
+// name). Each listed file must exist (a missing one fails the leg by name,
+// keeping denylist.yml's presence required) and its `on:` is unfiltered.
 // Queue-mechanics workflows (init/gate/sync: dispatch-only,
 // merge-queue-only, main-only triggers) are deliberately NOT listed — they
 // filter by design and get the sanity check instead. An empty or malformed
@@ -753,8 +755,8 @@ function selfTestNoDistAllowlist() {
 // EVERY pull request, so its workflow must never filter its triggers — no
 // paths, no paths-ignore, no branch or tag filters of any kind; a job-level
 // `if:` is the only sanctioned skip mechanism. Every file named in
-// REQUIRED_WORKFLOW_CHECKS must exist, declare a job with exactly its
-// paired check name at the first indent level under `jobs:`, and its
+// REQUIRED_WORKFLOW_CHECKS must exist, declare a job with exactly each of
+// its paired check names at the first indent level under `jobs:`, and its
 // top-level `on:` block must
 // carry BOTH a `push` and a `pull_request` trigger — each as a TOP-LEVEL
 // entry of the `on:` value, so a name merely nested inside another
@@ -1021,70 +1023,89 @@ function workflowDeclaresJob(text, jobName) {
 }
 
 // Per-workflow checks over the extracted, comment-stripped `on:` block;
-// prints a FAIL line naming the file and the reason and returns false on
-// the first violation. REQUIRED files (found by pairing the file name
-// against REQUIRED_WORKFLOW_CHECKS): no filter keys anywhere in the block
-// (checked first, mid-line, so a filtered flow map is named for the filter,
-// not just missing triggers), both triggers present as top-level entries —
-// which also means a null/empty or scalar `on:` hard-fails required
-// entries — and the file must declare a job with exactly the paired check
-// name at the first indent level under `jobs:`, so a job rename can never
-// silently orphan the branch-protection context it feeds. Other files: the
-// block merely has to parse (any trigger shape — filtered, scalar, or
-// null); the strict obligation belongs to required checks only, because
-// queue mechanics legitimately filter their triggers.
-function workflowI4Checks(rel, name, text) {
+// reports a FAIL line naming the file and the reason (through `fail`,
+// console.error by default) and returns false on any violation. REQUIRED
+// files (found by pairing the file name against `pairs`, default
+// REQUIRED_WORKFLOW_CHECKS — a file may carry several pairs): the trigger
+// checks run ONCE per file and stop at the first violation — no filter keys
+// anywhere in the block (checked first, mid-line, so a filtered flow map is
+// named for the filter, not just missing triggers), both triggers present
+// as top-level entries, which also means a null/empty or scalar `on:`
+// hard-fails required entries — and then EVERY pair for the file is checked
+// on its own: the file must declare a job with exactly that paired check
+// name at the first indent level under `jobs:`, with no differing `name:`
+// override, so a job rename can never silently orphan the branch-protection
+// context it feeds. Each failing pair is reported by name, so a second pair
+// can never hide behind a first. Other files: the block merely has to parse
+// (any trigger shape — filtered, scalar, or null); the strict obligation
+// belongs to required checks only, because queue mechanics legitimately
+// filter their triggers.
+function workflowI4Checks(rel, name, text, pairs = REQUIRED_WORKFLOW_CHECKS, fail = (msg) => console.error(msg)) {
   const block = extractOnBlock(text);
   if (block === null) {
-    console.error(`FAIL workflow-I4: no top-level \`on:\` block in ${rel}`);
+    fail(`FAIL workflow-I4: no top-level \`on:\` block in ${rel}`);
     return false;
   }
-  const pair = REQUIRED_WORKFLOW_CHECKS.find((p) => p.workflow === name);
-  if (pair === undefined) {
+  const required = pairs.filter((p) => p.workflow === name);
+  if (required.length === 0) {
     return true;
   }
   for (const l of block) {
     if (I4_BANNED_KEY.test(l)) {
-      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4 in the \`on:\` block of ${rel}: "${l.trim()}"`);
+      fail(`FAIL workflow-I4: trigger filter key violates invariant I4 in the \`on:\` block of ${rel}: "${l.trim()}"`);
       return false;
     }
   }
   if (!onBlockHasTrigger(block, 'push')) {
-    console.error(`FAIL workflow-I4: no \`push\` trigger in the \`on:\` block of ${rel}`);
+    fail(`FAIL workflow-I4: no \`push\` trigger in the \`on:\` block of ${rel}`);
     return false;
   }
   if (!onBlockHasTrigger(block, 'pull_request')) {
-    console.error(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
+    fail(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
     return false;
   }
-  const declared = workflowDeclaresJob(text, pair.check);
+  let ok = true;
+  for (const pair of required) {
+    if (!requiredJobI4Checks(rel, text, pair.check, fail)) ok = false;
+  }
+  return ok;
+}
+
+// The per-pair half of workflowI4Checks: the required workflow `rel`
+// declares a block-style job with exactly the id `check` and no `name:`
+// override that differs from it. Reports through `fail`; returns false on
+// a violation.
+function requiredJobI4Checks(rel, text, check, fail) {
+  const declared = workflowDeclaresJob(text, check);
   if (declared !== null && declared.flowDecl) {
-    console.error(`FAIL workflow-I4: required workflow ${rel} declares job "${pair.check}" with a FLOW-style or ALIASED value — not parseable by this text leg; use block style so the emitted check name stays verifiable`);
+    fail(`FAIL workflow-I4: required workflow ${rel} declares job "${check}" with a FLOW-style or ALIASED value — not parseable by this text leg; use block style so the emitted check name stays verifiable`);
     return false;
   }
   if (declared === null) {
-    console.error(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${pair.check}" at the first indent level under \`jobs:\` — the "${pair.check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
+    fail(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${check}" at the first indent level under \`jobs:\` — the "${check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
     return false;
   }
-  if (declared.nameOverride !== null && declared.nameOverride !== pair.check) {
-    console.error(`FAIL workflow-I4: required workflow ${rel} job "${pair.check}" overrides \`name:\` with "${declared.nameOverride}" — the check run is reported under the NAME, so the "${pair.check}" required check would never report and the gate would wait forever (drop the override, or make it identical to the job id)`);
+  if (declared.nameOverride !== null && declared.nameOverride !== check) {
+    fail(`FAIL workflow-I4: required workflow ${rel} job "${check}" overrides \`name:\` with "${declared.nameOverride}" — the check run is reported under the NAME, so the "${check}" required check would never report and the gate would wait forever (drop the override, or make it identical to the job id)`);
     return false;
   }
   return true;
 }
 
-// Fail-closed gate on the pairing data itself: every entry must be an
-// object carrying non-empty string `workflow` and `check` values, with no
-// duplicated workflow file or check name. Returns FAIL diagnostics (an
+// Fail-closed gate on the pairing data itself (`pairs`, default
+// REQUIRED_WORKFLOW_CHECKS): every entry must be an object carrying
+// non-empty string `workflow` and `check` values, and no check name may
+// appear twice — a check name is a single GitHub context, so two producers
+// for it (or the same pair listed twice) is ambiguous. A workflow file MAY
+// carry several pairs (one per required job). Returns FAIL diagnostics (an
 // empty array means the data is sound).
-function requiredWorkflowChecksProblems() {
+function requiredWorkflowChecksProblems(pairs = REQUIRED_WORKFLOW_CHECKS) {
   const problems = [];
-  if (REQUIRED_WORKFLOW_CHECKS.length === 0) {
+  if (pairs.length === 0) {
     problems.push('REQUIRED_WORKFLOW_CHECKS is empty — I4 would police nothing (fail-closed)');
   }
-  const files = new Set();
-  const checks = new Set();
-  for (const pair of REQUIRED_WORKFLOW_CHECKS) {
+  const checks = new Map(); // check name -> the workflow file that first paired it
+  for (const pair of pairs) {
     const wellFormed =
       pair !== null &&
       typeof pair === 'object' &&
@@ -1097,16 +1118,83 @@ function requiredWorkflowChecksProblems() {
       problems.push(`malformed required-check pair ${JSON.stringify(pair) ?? String(pair)} — expected { workflow: <file>, check: <job id> } with non-empty strings`);
       continue;
     }
-    if (files.has(pair.workflow)) {
-      problems.push(`duplicate workflow "${pair.workflow}" in REQUIRED_WORKFLOW_CHECKS`);
+    const prior = checks.get(pair.check);
+    if (prior === pair.workflow) {
+      problems.push(`duplicate pair { workflow: "${pair.workflow}", check: "${pair.check}" } in REQUIRED_WORKFLOW_CHECKS`);
+    } else if (prior !== undefined) {
+      problems.push(`duplicate check name "${pair.check}" in REQUIRED_WORKFLOW_CHECKS (paired with both "${prior}" and "${pair.workflow}")`);
+    } else {
+      checks.set(pair.check, pair.workflow);
     }
-    if (checks.has(pair.check)) {
-      problems.push(`duplicate check name "${pair.check}" in REQUIRED_WORKFLOW_CHECKS`);
-    }
-    files.add(pair.workflow);
-    checks.add(pair.check);
   }
   return problems;
+}
+
+// Pure-text fixtures for the pairing model (no live tree): the live
+// REQUIRED_WORKFLOW_CHECKS carries one pair per file today, so without
+// these nothing would exercise a multi-pair workflow. One fixture
+// file carries two required pairs: both jobs present passes; either job
+// renamed away fails naming THAT job (and only it); a `name:` override on
+// the second job fails naming it. The pairing-data gate accepts two pairs
+// for one file and still rejects a repeated check name and an exact
+// repeated pair. Expected diagnostics are captured, not printed; each case
+// asserts the verdict AND the job its diagnostic names (non-vacuity: a
+// check that fails for the wrong job does not count).
+function selfTestMultiPairFixtures() {
+  let ok = true;
+  const rel = path.join('.github', 'workflows', 'pair-fixture.yml');
+  const pairs = [
+    { workflow: 'pair-fixture.yml', check: 'first-job' },
+    { workflow: 'pair-fixture.yml', check: 'second-job' },
+  ];
+  const job = (id, extra = []) => [`  ${id}:`, ...extra, '    runs-on: ubuntu-latest', '    steps:', `      - run: echo ${id}`];
+  const fixture = (jobs) => ['name: pair-fixture', 'on:', '  push:', '  pull_request:', 'jobs:', ...jobs].join('\n');
+  const run = (text) => {
+    const messages = [];
+    const verdict = workflowI4Checks(rel, 'pair-fixture.yml', text, pairs, (msg) => messages.push(msg));
+    return { verdict, messages };
+  };
+  const names = (messages, check) => messages.some((m) => m.includes(`"${check}"`));
+  const sound = requiredWorkflowChecksProblems(pairs);
+  if (sound.length !== 0) {
+    console.error(`FAIL workflow-I4: two pairs for one workflow file were rejected as pairing data: ${sound.join('; ')}`);
+    ok = false;
+  }
+  const both = run(fixture([...job('first-job'), ...job('second-job')]));
+  if (!both.verdict || both.messages.length !== 0) {
+    console.error(`FAIL workflow-I4: a workflow declaring both of its paired jobs did not pass: ${both.messages.join('; ')}`);
+    ok = false;
+  }
+  for (const [missing, kept] of [
+    ['first-job', 'second-job'],
+    ['second-job', 'first-job'],
+  ]) {
+    const ids = pairs.map(({ check }) => (check === missing ? 'renamed-job' : check));
+    const renamed = run(fixture(ids.flatMap((id) => job(id))));
+    if (renamed.verdict || !names(renamed.messages, missing) || names(renamed.messages, kept)) {
+      console.error(`FAIL workflow-I4: a two-pair workflow with job "${missing}" renamed away did not fail naming exactly that job: ${renamed.messages.join('; ') || '(no diagnostic)'}`);
+      ok = false;
+    }
+  }
+  const override = run(fixture([...job('first-job'), ...job('second-job', ['    name: Second Job'])]));
+  if (override.verdict || !override.messages.some((m) => m.includes('job "second-job" overrides `name:`')) || names(override.messages, 'first-job')) {
+    console.error(`FAIL workflow-I4: a \`name:\` override on the second paired job did not fail naming it: ${override.messages.join('; ') || '(no diagnostic)'}`);
+    ok = false;
+  }
+  const dupCheck = requiredWorkflowChecksProblems([
+    { workflow: 'one.yml', check: 'shared' },
+    { workflow: 'two.yml', check: 'shared' },
+  ]);
+  if (!dupCheck.some((p) => p.startsWith('duplicate check name "shared"'))) {
+    console.error(`FAIL workflow-I4: a check name paired with two workflow files was not rejected: ${dupCheck.join('; ') || '(no problem reported)'}`);
+    ok = false;
+  }
+  const dupPair = requiredWorkflowChecksProblems([pairs[0], { ...pairs[0] }]);
+  if (!dupPair.some((p) => p.startsWith('duplicate pair'))) {
+    console.error(`FAIL workflow-I4: an exact repeated { workflow, check } pair was not rejected: ${dupPair.join('; ') || '(no problem reported)'}`);
+    ok = false;
+  }
+  return ok;
 }
 
 function selfTestWorkflowI4() {
@@ -1120,6 +1208,8 @@ function selfTestWorkflowI4() {
     ok = false;
   }
   if (!ok) return false;
+  // The pairing model itself, on fixtures, before the live tree.
+  if (!selfTestMultiPairFixtures()) ok = false;
   let entries;
   try {
     entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
@@ -1141,7 +1231,8 @@ function selfTestWorkflowI4() {
   // denylist.yml is the required file the list carries.
   // merge-queue-gate.yml deliberately is NOT in the list (queue mechanics
   // filter their triggers by design and get the sanity check only).
-  for (const { workflow } of REQUIRED_WORKFLOW_CHECKS) {
+  // Once per file: a file carrying several pairs is reported missing once.
+  for (const workflow of new Set(REQUIRED_WORKFLOW_CHECKS.map((p) => p.workflow))) {
     if (!workflows.includes(workflow)) {
       console.error(`FAIL workflow-I4: required workflow "${workflow}" is missing from ${WORKFLOWS_DIR}`);
       ok = false;

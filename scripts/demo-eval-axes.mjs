@@ -59,7 +59,7 @@
 // recomputes the fold independently and asserts the two agree (tolerance
 // 1e-9 USD) before printing the row.
 //
-// Standalone by design — never runs in `npm test` (CI has no keys, no
+// Standalone by design — never runs in `pnpm test` (CI has no keys, no
 // network). EXIT CODE: 0 only when every selected cell passed (identity,
 // fixture, and fold checks green); any failed cell sets exit 1. Usage:
 // zsh -lic 'node scripts/demo-eval-axes.mjs'
