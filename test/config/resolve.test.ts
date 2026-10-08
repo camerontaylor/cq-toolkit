@@ -398,7 +398,7 @@ describe('pure configuration resolution', () => {
       expect(() =>
         resolve({
           values: { 'driver.bindings': { 'custom/vendor': 'ai-sdk' } },
-          optIn: ['driver.bindings=custom/vendor:other'],
+          optIn: ['driver.bindings=custom/vendor:subprocess'],
         }),
       ).toThrow(/disagrees/);
     });
