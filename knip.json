@@ -7,6 +7,7 @@
     "src/ops/*/registry.ts",
     "scripts/*.mjs",
     "scripts/lib/affected-tests.d.mts",
+    "scripts/lib/build-env.d.mts",
     "scripts/lib/eval-axes-select.d.mts",
     "scripts/lib/heavy-lock.d.mts",
     "scripts/lib/render-templates.d.mts",

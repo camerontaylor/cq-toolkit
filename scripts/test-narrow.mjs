@@ -40,6 +40,7 @@ import { constants, getPriority, loadavg, setPriority, tmpdir, uptime } from 'no
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isTest, selectAffected } from './lib/affected-tests.mjs';
+import { scrubbedBuildEnv } from './lib/build-env.mjs';
 import { EX_TEMPFAIL, acquireLock, describeHolder } from './lib/heavy-lock.mjs';
 import {
   DEFAULT_BASE,
@@ -339,6 +340,7 @@ if (!distIsFresh()) {
     label: 'dist build',
     timeoutMs: BUILD_TIMEOUT_MS,
     stdio: ['ignore', 2, 2], // stdout carries only the summary line
+    env: scrubbedBuildEnv(process.env), // live suites' credentials stay out of the build
     shell: !POSIX, // pnpm is a .cmd shim on win32
   });
   lock.annotate({ childPgid: null });

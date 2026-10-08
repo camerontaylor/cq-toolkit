@@ -1,6 +1,12 @@
 // Policy of the one permitted local test command (scripts/lib/test-narrow.mjs):
-// argv refusals, the run plan (fallback, class gate, file cap) and the stable
-// summary line. Pure: no spawns, no git, no vitest invocation.
+// argv refusals, the run plan (fallback, class gate, file cap), the stable
+// summary line, and the build-freshness test it relies on (ratchet-lib's
+// distIsFresh, over a copied fixture tree). Pure: no spawns, no git, no
+// vitest invocation.
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   MAX_FILES,
@@ -327,5 +333,58 @@ describe('runVerdict', () => {
       exit: signalExit('SIGTERM'),
     });
     expect(signalExit('SIGINT')).toBe(130);
+  });
+});
+
+describe('distIsFresh (the runner skips the build only when this holds)', () => {
+  const lib = join(dirname(fileURLToPath(import.meta.url)), '../../scripts/ratchet-lib.mjs');
+  const inputs = [
+    'src/a.ts',
+    'tsconfig.json',
+    'tsconfig.build.json',
+    'package.json',
+    'scripts/copy-prompt-assets.mjs',
+  ];
+  const outputs = ['dist/index.js', 'dist/ops/ratchet/checkRatchet.js'];
+  /** A fixture tree with ratchet-lib copied in (its ROOT is its own parent). */
+  const fixture = async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dist-fresh-'));
+    const put = (file: string, seconds: number) => {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), '');
+      utimesSync(join(root, file), seconds, seconds);
+    };
+    for (const file of inputs) put(file, 1_000);
+    for (const file of outputs) put(file, 2_000);
+    copyFileSync(lib, join(root, 'scripts/ratchet-lib.mjs'));
+    const mod = (await import(pathToFileURL(join(root, 'scripts/ratchet-lib.mjs')).href)) as {
+      distIsFresh: () => boolean;
+    };
+    return { root, put, distIsFresh: mod.distIsFresh };
+  };
+
+  it('is fresh only while dist is newer than src/ and every root build input', async () => {
+    for (const input of inputs) {
+      const { root, put, distIsFresh } = await fixture();
+      try {
+        expect(distIsFresh()).toBe(true);
+        put(input, 3_000); // a newer input than dist
+        expect(distIsFresh()).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('is never fresh when an input or the dist marker cannot be read', async () => {
+    for (const missing of ['tsconfig.build.json', 'dist/index.js']) {
+      const { root, distIsFresh } = await fixture();
+      try {
+        rmSync(join(root, missing));
+        expect(distIsFresh()).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 });

@@ -48,12 +48,21 @@ export function fail(message) {
 // Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
 
+/** Build inputs outside src/: the build configuration and its asset step. */
+const ROOT_BUILD_INPUTS = [
+  'tsconfig.json',
+  'tsconfig.build.json',
+  'package.json',
+  'scripts/copy-prompt-assets.mjs',
+];
+
 /**
- * Newest file mtime under src/ (recursive), or 0 when unreadable — the
- * freshness baseline for the ensureDist reuse heuristic. Any stat fault
- * degrades to "never fresh", i.e. rebuild.
+ * Newest mtime across every build input — src/ (recursive) plus
+ * ROOT_BUILD_INPUTS — the freshness baseline for the ensureDist reuse
+ * heuristic. Any stat fault degrades to "never fresh" (Infinity), i.e.
+ * rebuild.
  */
-function newestSrcMtimeMs() {
+function newestBuildInputMtimeMs() {
   let newest = 0;
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -64,8 +73,11 @@ function newestSrcMtimeMs() {
   };
   try {
     walk(join(ROOT, 'src'));
+    for (const input of ROOT_BUILD_INPUTS) {
+      newest = Math.max(newest, statSync(join(ROOT, input)).mtimeMs);
+    }
   } catch {
-    return 0;
+    return Infinity;
   }
   return newest;
 }
@@ -80,7 +92,7 @@ export function distIsFresh() {
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
-    return marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs();
+    return marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestBuildInputMtimeMs();
   } catch {
     return false;
   }
@@ -92,8 +104,9 @@ let distPrepared = false;
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
- * import) exists and is NEWER than every file under src/; anything else
- * (missing, unreadable, or any src file newer than dist) triggers a rebuild.
+ * import) exists and is NEWER than every build input (src/ and the root
+ * build configuration); anything else (missing, unreadable, or any input
+ * newer than dist) triggers a rebuild.
  *
  * TRADEOFF, deliberate: a CI cold checkout has no dist and always builds
  * (correct and expected — ci.yml invokes the typecheck ratchet before any

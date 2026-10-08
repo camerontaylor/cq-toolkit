@@ -144,7 +144,12 @@ describe('acquireLock', () => {
   const orphan = async (
     extra: object,
     leaderStartMs: number | null,
-    { startedAt = new Date().toISOString(), maxWaitMs = 0, exitsAfterSleeps = Infinity } = {},
+    {
+      startedAt = new Date().toISOString(),
+      maxWaitMs = 0,
+      exitsAfterSleeps = Infinity,
+      survivesKill = false,
+    } = {},
   ) => {
     holderRecord(99, 'tok-dead', startedAt);
     const record = JSON.parse(fs.readFileSync(join(lock, 'owner.json'), 'utf8')) as object;
@@ -167,7 +172,8 @@ describe('acquireLock', () => {
           await c.sleep(ms);
         },
         isAlive: () => false,
-        groupAlive: (pgid) => pgid === 555 && killed.length === 0 && sleeps < exitsAfterSleeps,
+        groupAlive: (pgid) =>
+          pgid === 555 && (survivesKill || killed.length === 0) && sleeps < exitsAfterSleeps,
         killGroup: (pgid) => void killed.push(pgid),
         processStartMs: (pid) => (pid === 555 ? leaderStartMs : null),
         token: () => 'tok-h',
@@ -177,11 +183,30 @@ describe('acquireLock', () => {
     return { got, killed, log: lines.join('\n') };
   };
 
-  it('kills an orphaned child group whose leader identity matches, then reclaims', async () => {
-    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START);
+  it('kills a verified orphan group, and reclaims only once it has exited', async () => {
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START, {
+      maxWaitMs: 60_000,
+    });
     expect(killed).toEqual([555]);
-    expect(log).toContain('killed orphaned child group 555');
+    expect(log).toContain('killed orphaned child group 555; reclaiming once it exits');
+    expect(log).toContain('reclaimed a stale lock (owner pid 99 is gone)');
     expect(got.acquired).toBe(true);
+    // The kill and the reclaim are separate polls (SIGKILL is asynchronous):
+    // with no wait at all, the killer does not get the lock.
+    fs.rmSync(lock, { recursive: true, force: true });
+    const zero = await orphan({ childStartedAt: leaderAt }, LEADER_START);
+    expect(zero.killed).toEqual([555]);
+    expect(zero.got.acquired).toBe(false);
+  });
+
+  it('keeps the lock while a killed group has not exited, within the bounded wait', async () => {
+    const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, LEADER_START, {
+      maxWaitMs: 60_000,
+      survivesKill: true,
+    });
+    expect(killed.length).toBeGreaterThan(1); // re-killed on every poll
+    expect(got).toMatchObject({ acquired: false, holder: { token: 'tok-dead' } });
+    expect(log).not.toContain('reclaimed');
   });
 
   it.each([

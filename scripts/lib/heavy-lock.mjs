@@ -12,8 +12,9 @@
 //     than the record (a later start time means the pid was reused);
 //   - an orphaned child group (owner dead, group still running) is VERIFIED
 //     when its leader still runs with the recorded start time. A verified
-//     orphan is killed and the lock reclaimed: nobody is left to read its
-//     result. A pgid can be reused, so an alive but UNVERIFIABLE group
+//     orphan is killed (nobody is left to read its result) and the lock is
+//     reclaimed only once the group has exited: SIGKILL is asynchronous, so
+//     a later poll re-judges it, within the bounded wait. A pgid can be reused, so an alive but UNVERIFIABLE group
 //     (leader gone while workers remain, identity changed, or a record
 //     without one) is never signalled and keeps the lock BUSY: waiting is
 //     safe, overlapping is not;
@@ -248,8 +249,13 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
       const verdict = judgeHolder(current, mtimeMs, { ...deps, now: deps.now() });
       if (verdict.reason === null) return;
       if (verdict.kill !== undefined) {
+        // SIGKILL lands asynchronously: keep the lock until the group is gone
+        // (a later poll finds it dead and reclaims).
         deps.killGroup(verdict.kill);
-        deps.log(`heavy-lock: killed orphaned child group ${verdict.kill}`);
+        deps.log(
+          `heavy-lock: killed orphaned child group ${verdict.kill}; reclaiming once it exits`,
+        );
+        return;
       }
       if (verdict.warn !== undefined) deps.log(`heavy-lock: WARNING: ${verdict.warn}`);
       fs.rmSync(path, { recursive: true, force: true });
