@@ -115,8 +115,8 @@ balance endpoint, OpenCode usage endpoint, Claude unified-quota headers, and the
 live error shapes behind the `quota` vs `rate-limit` classification) are
 transcribed in `provider-profiles.ts` with the RS-14 evidence paths, because
 they were captured with credentials this lane does not hold and must not
-re-capture. Every such field is marked `verifiedBy: 'rs14-capture'` with its
-capture date, so a reader can tell a documented fact from a captured one.
+re-capture. Every such field carries `provenance.kind: 'rs14-capture'` with its
+`asOf` capture date, so a reader can tell a documented fact from a captured one.
 
 ### OpenAI 429 body codes (re-fetched 2026-10-01, HTTP 200)
 
