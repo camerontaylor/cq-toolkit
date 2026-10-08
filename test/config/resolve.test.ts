@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CONFIG_REGISTRY } from '../../src/config/registry.js';
 import { resolveConfig } from '../../src/config/resolve.js';
@@ -542,6 +543,25 @@ describe('pure configuration resolution', () => {
           },
         }),
       ).toThrow(/cannot be passed through/);
+    });
+
+    it('keeps the bundled solo-maintainer seed aligned with the registry solo values', () => {
+      const text = readFileSync(
+        new URL('../../policy/profiles/solo-maintainer.profile', import.meta.url),
+        'utf8',
+      );
+      const seeded = Object.fromEntries(
+        text
+          .split('\n')
+          .filter((line) => /^CQ_[A-Z0-9_]+=/.test(line))
+          .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+      );
+      const fromRegistry = Object.fromEntries(
+        CONFIG_REGISTRY.filter((key) => key.solo !== undefined && key.solo !== key.blank).map(
+          (key) => [key.env, key.solo],
+        ),
+      );
+      expect(seeded).toEqual(fromRegistry);
     });
 
     it('rejects driver bindings that name an unknown lane', () => {
