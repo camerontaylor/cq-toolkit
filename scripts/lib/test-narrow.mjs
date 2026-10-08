@@ -42,7 +42,8 @@ Options:
   -h, --help                 this text
 
 Refused: --watch, --coverage, --ui and any other vitest flag; more than
-${MAX_FILES} test files; selections that fall back to every test.`;
+${MAX_FILES} test files; selections that fall back to every test; selections
+that include integration or live suites without their --include flag.`;
 
 const REFUSED_FLAGS = {
   '--watch': 'watch mode never terminates and holds the host lock',
@@ -125,14 +126,13 @@ export function classOf(file, manifest) {
 /**
  * @param {{
  *   selection: { files: string[], fallback: boolean, reason: string },
- *   named: string[],      test files the caller named explicitly
  *   manifest: Record<string, string>,
  *   include: string[],    gated classes the caller opted into
  * }} input
- * @returns {{ ok: true, run: {file: string, project: string}[], dropped: {file: string, project: string}[] }
+ * @returns {{ ok: true, run: {file: string, project: string}[] }
  *   | { ok: false, reason: string, candidates: string[] }}
  */
-export function planRun({ selection, named, manifest, include }) {
+export function planRun({ selection, manifest, include }) {
   if (selection.fallback) {
     return {
       ok: false,
@@ -143,18 +143,23 @@ export function planRun({ selection, named, manifest, include }) {
     };
   }
   const run = [];
-  const dropped = [];
+  const gated = [];
   for (const file of selection.files) {
     const project = classOf(file, manifest);
     if (!GATED_CLASSES.includes(project) || include.includes(project)) {
       run.push({ file, project });
-    } else if (named.includes(file)) {
-      return {
-        ok: false,
-        reason: `${file} is classified ${project}; pass --include-${project} to run it`,
-        candidates: [],
-      };
-    } else dropped.push({ file, project });
+    } else gated.push({ file, project });
+  }
+  // A gated file that covers the change is refused, never silently skipped:
+  // a run without it would not test the change, so it cannot count as one.
+  if (gated.length > 0) {
+    const flags = [...new Set(gated.map((g) => `--include-${g.project}`))].sort();
+    const listed = gated.map((g) => `${g.file} (${g.project})`).join(', ');
+    return {
+      ok: false,
+      reason: `gated test files cover the change: ${listed}; pass ${flags.join(' ')} to run them`,
+      candidates: [],
+    };
   }
   if (run.length > MAX_FILES) {
     return {
@@ -165,7 +170,15 @@ export function planRun({ selection, named, manifest, include }) {
       candidates: run.map((r) => r.file),
     };
   }
-  return { ok: true, run, dropped };
+  return { ok: true, run };
+}
+
+/**
+ * test/suite-classes.json keys that name no file on disk. vitest.config.ts
+ * throws on them, so the runner refuses rather than filtering them away.
+ */
+export function missingManifestEntries(manifest, exists) {
+  return Object.keys(manifest).filter((file) => !exists(file));
 }
 
 /** Projects in vitest.config.ts group order, restricted to the plan. */
@@ -194,6 +207,7 @@ export function summaryLine(s) {
     ['duration', secs(s.durationMs)],
     ['nice', s.nice],
     ['load', s.load],
+    ['uptime', typeof s.uptimeS === 'number' ? `${Math.floor(s.uptimeS)}s` : undefined],
     ['source', s.source],
     ['ran', s.ran?.join(',')],
   ];
@@ -216,4 +230,25 @@ export function readReport(report, toRelative) {
     },
     ran: report.testResults.map((r) => toRelative(String(r.name))).sort(),
   };
+}
+
+/**
+ * The verdict on a finished vitest run. A pass must prove itself: a report,
+ * every selected file in it, nothing unselected, and at least one executed
+ * test — skipped and todo tests (all of them, under a `-t` that matches
+ * nothing) prove nothing.
+ */
+export function runVerdict({ exit, report, files, timedOut, interruptedBy }) {
+  const ran = report?.ran ?? [];
+  const unexpected = ran.filter((f) => !files.includes(f));
+  const unrun = files.filter((f) => !ran.includes(f));
+  const fail = (reason) => ({ result: 'fail', exit: exit || 1, reason });
+  if (timedOut) return { result: 'timeout', exit, reason: 'RUN_TIMEOUT_MS exceeded' };
+  if (interruptedBy !== null) return { result: 'interrupted', exit, reason: interruptedBy };
+  if (unexpected.length > 0) return fail(`ran unselected files: ${unexpected.join(',')}`);
+  if (exit !== 0) return { result: 'fail', exit };
+  if (report === null) return fail('vitest wrote no JSON report');
+  if (unrun.length > 0) return fail(`selected files did not run: ${unrun.join(',')}`);
+  if (report.tests.passed + report.tests.failed === 0) return fail('no tests executed');
+  return { result: 'pass', exit };
 }

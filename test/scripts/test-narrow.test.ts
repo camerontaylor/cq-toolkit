@@ -6,10 +6,12 @@ import {
   MAX_FILES,
   MAX_WAIT_CEILING_S,
   classOf,
+  missingManifestEntries,
   parseArgs,
   planRun,
   projectsOf,
   readReport,
+  runVerdict,
   summaryLine,
 } from '../../scripts/lib/test-narrow.mjs';
 
@@ -105,7 +107,6 @@ describe('planRun', () => {
   it('refuses a fallback selection instead of running every test', () => {
     const plan = planRun({
       selection: selection(['test/p.test.ts'], true),
-      named: [],
       manifest,
       include: [],
     });
@@ -113,40 +114,49 @@ describe('planRun', () => {
     expect(!plan.ok && plan.reason).toContain('unbounded (no mapping for x)');
   });
 
-  it('drops derived integration/live files, refuses named ones, runs opted-in classes', () => {
+  it('refuses gated integration/live files, naming them and their flags', () => {
     const files = ['test/i.test.ts', 'test/l.test.ts', 'test/p.test.ts'];
-    expect(planRun({ selection: selection(files), named: [], manifest, include: [] })).toEqual({
-      ok: true,
-      run: [{ file: 'test/p.test.ts', project: 'pure' }],
-      dropped: [
-        { file: 'test/i.test.ts', project: 'integration' },
-        { file: 'test/l.test.ts', project: 'live' },
-      ],
+    const plan = planRun({ selection: selection(files), manifest, include: [] });
+    expect(plan).toEqual({
+      ok: false,
+      reason:
+        'gated test files cover the change: test/i.test.ts (integration), ' +
+        'test/l.test.ts (live); pass --include-integration --include-live to run them',
+      candidates: [],
     });
-    const named = planRun({
-      selection: selection(['test/i.test.ts']),
-      named: ['test/i.test.ts'],
-      manifest,
-      include: [],
-    });
-    expect(!named.ok && named.reason).toContain('--include-integration');
+    // Only gated files selected (a change covered by integration tests alone)
+    // is a refusal too, never an empty `result=nothing` success.
+    const only = planRun({ selection: selection(['test/i.test.ts']), manifest, include: [] });
+    expect(!only.ok && only.reason).toContain('pass --include-integration to run them');
+    // One opted-in class still refuses the other.
+    const half = planRun({ selection: selection(files), manifest, include: ['integration'] });
+    expect(!half.ok && half.reason).toBe(
+      'gated test files cover the change: test/l.test.ts (live); pass --include-live to run them',
+    );
+  });
+
+  it('runs gated classes the caller opted into', () => {
     expect(
       planRun({
-        selection: selection(['test/i.test.ts']),
-        named: ['test/i.test.ts'],
+        selection: selection(['test/i.test.ts', 'test/p.test.ts']),
         manifest,
         include: ['integration'],
       }),
-    ).toEqual({ ok: true, run: [{ file: 'test/i.test.ts', project: 'integration' }], dropped: [] });
+    ).toEqual({
+      ok: true,
+      run: [
+        { file: 'test/i.test.ts', project: 'integration' },
+        { file: 'test/p.test.ts', project: 'pure' },
+      ],
+    });
   });
 
   it('caps the file count and lists the candidates', () => {
     const files = Array.from({ length: MAX_FILES + 1 }, (_, i) => `test/f${i}.test.ts`);
-    const plan = planRun({ selection: selection(files), named: [], manifest, include: [] });
+    const plan = planRun({ selection: selection(files), manifest, include: [] });
     expect(plan).toMatchObject({ ok: false, candidates: files });
     const atCap = planRun({
       selection: selection(files.slice(0, MAX_FILES)),
-      named: [],
       manifest,
       include: [],
     });
@@ -154,11 +164,16 @@ describe('planRun', () => {
   });
 
   it('plans an empty run for an empty selection (the caller then runs nothing)', () => {
-    expect(planRun({ selection: selection([]), named: [], manifest, include: [] })).toEqual({
+    expect(planRun({ selection: selection([]), manifest, include: [] })).toEqual({
       ok: true,
       run: [],
-      dropped: [],
     });
+  });
+
+  it('finds manifest entries whose test file no longer exists', () => {
+    const onDisk = new Set(['test/p.test.ts', 'test/i.test.ts', 'test/l.test.ts']);
+    expect(missingManifestEntries(manifest, (f) => onDisk.has(f))).toEqual(['test/q.test.ts']);
+    expect(missingManifestEntries(manifest, () => true)).toEqual([]);
   });
 
   it('orders projects as vitest.config.ts groups them', () => {
@@ -177,7 +192,7 @@ describe('summaryLine', () => {
   it('prints every key in a fixed order with dashes for absent values', () => {
     expect(summaryLine({ result: 'refused', exit: 2, reason: 'say "no"' })).toBe(
       'test:narrow result=refused exit=2 files=- projects=- tests=- failed=- skipped=- ' +
-        'wait=- duration=- nice=- load=- source=- ran=- reason="say \\"no\\""',
+        'wait=- duration=- nice=- load=- uptime=- source=- ran=- reason="say \\"no\\""',
     );
   });
 
@@ -193,12 +208,13 @@ describe('summaryLine', () => {
         durationMs: 5000,
         nice: 5,
         load: '3.2',
+        uptimeS: 86_400.7,
         source: 'base:origin/merge-queue@0123456789',
         ran: ['test/a.test.ts', 'test/b.test.ts'],
       }),
     ).toBe(
       'test:narrow result=pass exit=0 files=2 projects=pure,process tests=6/7 failed=0 ' +
-        'skipped=1 wait=1.2s duration=5.0s nice=5 load=3.2 ' +
+        'skipped=1 wait=1.2s duration=5.0s nice=5 load=3.2 uptime=86400s ' +
         'source=base:origin/merge-queue@0123456789 ran=test/a.test.ts,test/b.test.ts',
     );
   });
@@ -223,5 +239,54 @@ describe('readReport', () => {
   it('returns null for a missing or malformed report', () => {
     expect(readReport(null, String)).toBeNull();
     expect(readReport({ numTotalTests: 1 }, String)).toBeNull();
+  });
+});
+
+describe('runVerdict', () => {
+  const files = ['test/a.test.ts'];
+  const report = (tests: { total: number; passed: number; failed: number; skipped: number }) => ({
+    tests,
+    ran: ['test/a.test.ts'],
+  });
+  const base = { exit: 0, files, timedOut: false, interruptedBy: null };
+
+  it('passes a run that executed a test in every selected file', () => {
+    const r = report({ total: 2, passed: 1, failed: 0, skipped: 1 });
+    expect(runVerdict({ ...base, report: r })).toEqual({ result: 'pass', exit: 0 });
+  });
+
+  it('fails an all-skipped or all-todo run: no tests executed', () => {
+    // `-t` matching nothing, or describe.skipIf: total counts skipped and todo.
+    const r = report({ total: 3, passed: 0, failed: 0, skipped: 3 });
+    expect(runVerdict({ ...base, report: r })).toEqual({
+      result: 'fail',
+      exit: 1,
+      reason: 'no tests executed',
+    });
+  });
+
+  it('fails a run without a report, with a missing file, or with an extra one', () => {
+    expect(runVerdict({ ...base, report: null })).toMatchObject({ result: 'fail', exit: 1 });
+    const none = { tests: { total: 1, passed: 1, failed: 0, skipped: 0 }, ran: [] };
+    expect(runVerdict({ ...base, report: none }).reason).toBe(
+      'selected files did not run: test/a.test.ts',
+    );
+    const extra = { ...none, ran: ['test/a.test.ts', 'test/z.test.ts'] };
+    expect(runVerdict({ ...base, report: extra }).reason).toBe(
+      'ran unselected files: test/z.test.ts',
+    );
+  });
+
+  it('reports timeouts, interrupts and vitest failures before the pass proof', () => {
+    expect(runVerdict({ ...base, report: null, exit: 143, timedOut: true })).toMatchObject({
+      result: 'timeout',
+      exit: 143,
+    });
+    expect(runVerdict({ ...base, report: null, exit: 130, interruptedBy: 'SIGINT' })).toEqual({
+      result: 'interrupted',
+      exit: 130,
+      reason: 'SIGINT',
+    });
+    expect(runVerdict({ ...base, report: null, exit: 1 })).toEqual({ result: 'fail', exit: 1 });
   });
 });

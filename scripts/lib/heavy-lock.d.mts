@@ -13,11 +13,14 @@ export interface LockOwner {
   command: string;
   startedAt: string;
   childPgid?: number;
+  /** ISO start time of the child group's leader, recorded with childPgid. */
+  childStartedAt?: string;
 }
 export interface LockDeps {
   fs: typeof import('node:fs');
   now: () => number;
   isAlive: (pid: number, startedAt: string) => boolean;
+  processStartMs: (pid: number) => number | null;
   groupAlive: (pgid: number) => boolean;
   killGroup: (pgid: number) => void;
   sleep: (ms: number) => Promise<void>;

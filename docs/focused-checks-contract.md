@@ -183,7 +183,8 @@ that is not a merge-readiness claim.
   An unstamped local duration is not evidence; a loader on the same host is a
   measurement error, not a slow suite.
   The `test:narrow result=…` summary line carries its own stamp (`load=`, the
-  1-minute load average when the run started, and `nice=`).
+  1-minute load average when the run started, `uptime=`, the host uptime in
+  seconds captured with it, and `nice=`).
 
 - **Never record or claim worker-count tuning.** `--maxWorkers` is a no-op under
   `vitest.config.ts`'s `fileParallelism: false`, which forces a single worker in

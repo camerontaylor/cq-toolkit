@@ -6,7 +6,8 @@
 // `exit` handler):
 //   - acquire = atomic mkdir of LOCK_PATH, then owner.json written via a
 //     temp file + rename (a reader sees the whole record or none of it);
-//     `annotate` later adds the pid of the owner's detached child group;
+//     `annotate` later adds the pid of the owner's detached child group and
+//     that group leader's start time (its identity);
 //   - the holder is LIVE while its pid runs AND that process started no later
 //     than the record (a later start time means the pid was reused), or while
 //     its recorded child process group still runs;
@@ -15,7 +16,10 @@
 //     when the record is older than MAX_HOLD_MS (last-resort ceiling;
 //     test-narrow kills its own run long before that);
 //   - an orphaned child group (owner dead, group still running) is killed
-//     before the lock is reclaimed: nobody is left to read its result;
+//     before the lock is reclaimed: nobody is left to read its result. Only
+//     when its leader still has the recorded start time: a pgid can be
+//     reused, so an unverifiable group (leader gone, identity changed, or a
+//     record without one) is never signalled; the lock is reclaimed anyway;
 //   - reclaim runs under a short-lived guard directory (one reclaimer at a
 //     time) and removes the lock only if it still holds the record judged
 //     stale; a lock is never renamed or removed while it might be live;
@@ -55,6 +59,7 @@ const signalable = (target) => {
 
 /** Start time of a running pid via `ps -o lstart=` (macOS and Linux), or null. */
 function processStartMs(pid) {
+  if (process.platform === 'win32') return null;
   const res = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
     encoding: 'utf8',
     env: { ...process.env, LC_ALL: 'C' }, // local time, which Date.parse also assumes
@@ -68,7 +73,7 @@ function processStartMs(pid) {
 export function isAlive(pid, startedAt) {
   if (!signalable(pid)) return false;
   const started = Date.parse(startedAt);
-  const actual = process.platform === 'win32' ? null : processStartMs(pid);
+  const actual = processStartMs(pid);
   // Unknown start times count as alive: waiting is safe, overlapping is not.
   return actual === null || !Number.isFinite(started) || actual <= started + START_SLACK_MS;
 }
@@ -77,6 +82,7 @@ const defaultDeps = () => ({
   fs: nodeFs,
   now: Date.now,
   isAlive,
+  processStartMs,
   groupAlive: (pgid) => process.platform !== 'win32' && signalable(-pgid),
   killGroup: (pgid) => {
     try {
@@ -145,11 +151,21 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   const release = () => {
     if (readOwner(path, fs)?.token === token) fs.rmSync(path, { recursive: true, force: true });
   };
-  /** Add fields (e.g. childPgid) to our record while we still hold the lock. */
-  const annotate = (fields) => {
+  /** Record our child group, and its leader's identity, while we still hold the lock. */
+  const annotate = ({ childPgid }) => {
     if (readOwner(path, fs)?.token !== token) return;
-    record = { ...record, ...fields };
+    const startMs = deps.processStartMs(childPgid);
+    const childStartedAt = startMs === null ? undefined : new Date(startMs).toISOString();
+    record = { ...record, childPgid, childStartedAt };
     writeRecord();
+  };
+  /** Why the recorded group may not be signalled, or null when its leader is verified. */
+  const unverified = (owner) => {
+    const recorded = Date.parse(owner.childStartedAt);
+    if (!Number.isFinite(recorded)) return 'the record has no leader start time';
+    const actual = deps.processStartMs(owner.childPgid);
+    if (actual === null) return 'its leader is gone or unreadable';
+    return Math.abs(actual - recorded) <= START_SLACK_MS ? null : 'its leader was reused';
   };
 
   const tryCreate = () => {
@@ -200,8 +216,16 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
           : current?.token === judged.token;
       if (!same) return;
       if (typeof judged?.childPgid === 'number' && deps.groupAlive(judged.childPgid)) {
-        deps.killGroup(judged.childPgid);
-        deps.log(`heavy-lock: killed orphaned child group ${judged.childPgid}`);
+        const why = unverified(judged);
+        if (why === null) {
+          deps.killGroup(judged.childPgid);
+          deps.log(`heavy-lock: killed orphaned child group ${judged.childPgid}`);
+        } else {
+          deps.log(
+            `heavy-lock: not killing process group ${judged.childPgid}: ${why}; ` +
+              'treating the lock as stale',
+          );
+        }
       }
       fs.rmSync(path, { recursive: true, force: true });
       deps.log(`heavy-lock: reclaimed a stale lock (${reason})`);

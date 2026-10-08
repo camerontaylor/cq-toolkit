@@ -33,7 +33,7 @@ import {
   statSync,
   writeSync,
 } from 'node:fs';
-import { constants, getPriority, loadavg, setPriority, tmpdir } from 'node:os';
+import { constants, getPriority, loadavg, setPriority, tmpdir, uptime } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { selectAffected } from './lib/affected-tests.mjs';
@@ -43,10 +43,12 @@ import {
   NICE_INCREMENT,
   RUN_TIMEOUT_MS,
   USAGE,
+  missingManifestEntries,
   parseArgs,
   planRun,
   projectsOf,
   readReport,
+  runVerdict,
   summaryLine,
 } from './lib/test-narrow.mjs';
 
@@ -113,6 +115,7 @@ const summary = {
   exit: 1,
   nice: getPriority(),
   load: loadavg()[0].toFixed(1),
+  uptimeS: uptime(),
 };
 let printed = false;
 let releaseLock = () => {};
@@ -230,6 +233,11 @@ changed = [...new Set(changed)].sort();
 const missing = changed.filter((f) => !existsSync(f));
 
 const manifest = JSON.parse(readFileSync(join(ROOT, 'test/suite-classes.json'), 'utf8'));
+const staleEntries = missingManifestEntries(manifest, existsSync);
+if (staleEntries.length > 0) {
+  const reason = `test/suite-classes.json lists missing files: ${staleEntries.join(',')}`;
+  finish({ result: 'refused', exit: 2, reason });
+}
 // Every test file on disk, classified or not (unclassified ones run in the
 // conservative `process` project), so the class gate sees all of them.
 const allTests = [
@@ -268,8 +276,7 @@ if (sources.length > 0) {
 
 const selection = selectAffected({ changed, allTests, related, missing });
 if (relatedError !== null) selection.reason += `: ${relatedError}`;
-const named = changed.filter((f) => opts.files.length > 0 && allTests.includes(f));
-const plan = planRun({ selection, named, manifest, include: opts.include });
+const plan = planRun({ selection, manifest, include: opts.include });
 if (!plan.ok) {
   if (plan.candidates.length > 0) {
     say('selected (choose a subset and name it explicitly):');
@@ -283,18 +290,11 @@ const files = plan.run.map((r) => r.file);
 Object.assign(summary, { files, projects });
 say(`${changed.length} changed file(s) -> ${files.length} test file(s)`);
 for (const r of plan.run) say(`  ${r.project.padEnd(11)} ${r.file}`);
-for (const d of plan.dropped)
-  say(`  skipped (${d.project}; needs --include-${d.project}) ${d.file}`);
-const droppedNote =
-  plan.dropped.length === 0
-    ? undefined
-    : `${plan.dropped.length} ${[...new Set(plan.dropped.map((d) => d.project))].join('/')} ` +
-      'file(s) also cover the change and were not run (--include-<class> runs them)';
 
-if (opts.dryRun) finish({ result: 'dry-run', exit: 0, reason: droppedNote });
+if (opts.dryRun) finish({ result: 'dry-run', exit: 0 });
 if (files.length === 0) {
   // Never start vitest with no file filter: that would be the full suite.
-  finish({ result: 'nothing', exit: 0, reason: droppedNote ?? 'no test file covers the change' });
+  finish({ result: 'nothing', exit: 0, reason: 'no test file covers the change' });
 }
 
 // 5. Build once --------------------------------------------------------------
@@ -360,20 +360,6 @@ child.on('exit', (code, signal) => {
   }
   rmSync(reportDir, { recursive: true, force: true });
   const exit = code ?? signalExit(signal);
-  const fields = { exit, durationMs: Date.now() - started, ...report };
-  const ran = report?.ran ?? [];
-  const unexpected = ran.filter((f) => !files.includes(f));
-  const unrun = files.filter((f) => !ran.includes(f));
-  const failWith = (reason) => Object.assign(fields, { result: 'fail', exit: exit || 1, reason });
-  if (timedOut) Object.assign(fields, { result: 'timeout', reason: 'RUN_TIMEOUT_MS exceeded' });
-  else if (interruptedBy !== null) {
-    Object.assign(fields, { result: 'interrupted', reason: interruptedBy });
-  } else if (unexpected.length > 0) failWith(`ran unselected files: ${unexpected.join(',')}`);
-  else if (exit !== 0) fields.result = 'fail';
-  // A pass must prove itself: a report, every selected file in it, a test.
-  else if (report === null) failWith('vitest wrote no JSON report');
-  else if (unrun.length > 0) failWith(`selected files did not run: ${unrun.join(',')}`);
-  else if (report.tests.total === 0) failWith('no tests executed');
-  else Object.assign(fields, { result: 'pass', reason: droppedNote });
-  finish(fields);
+  const verdict = runVerdict({ exit, report, files, timedOut, interruptedBy });
+  finish({ durationMs: Date.now() - started, ...report, ...verdict });
 });

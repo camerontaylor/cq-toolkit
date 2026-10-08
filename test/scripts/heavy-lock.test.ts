@@ -1,5 +1,6 @@
 // Host-wide single-flight lock (scripts/lib/heavy-lock.mjs): acquire,
-// contention with a bounded wait, stale and orphan reclaim, the guarded
+// contention with a bounded wait, stale and orphan reclaim (an orphan group
+// is killed only when its leader's recorded identity verifies), the guarded
 // reclaim race, and the token-checked release. Pure: own temp dirs only; liveness, clock and sleep
 // are injected (no process is signalled, no real waiting).
 import * as fs from 'node:fs';
@@ -133,11 +134,17 @@ describe('acquireLock', () => {
     expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
   });
 
-  it('kills an orphaned child group before reclaiming its lock', async () => {
+  const LEADER_START = Date.parse('2026-10-08T01:02:03.000Z');
+  /** A dead owner whose child group 555 is still alive, with `extra` recorded. */
+  const orphan = async (extra: object, leaderStartMs: number | null) => {
     holderRecord(99, 'tok-dead');
     const record = JSON.parse(fs.readFileSync(join(lock, 'owner.json'), 'utf8')) as object;
-    fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ ...record, childPgid: 555 }));
+    fs.writeFileSync(
+      join(lock, 'owner.json'),
+      JSON.stringify({ ...record, childPgid: 555, ...extra }),
+    );
     const killed: number[] = [];
+    const lines: string[] = [];
     const got = await acquireLock({
       path: lock,
       maxWaitMs: 0,
@@ -146,12 +153,44 @@ describe('acquireLock', () => {
         isAlive: () => false,
         groupAlive: (pgid) => pgid === 555 && killed.length === 0,
         killGroup: (pgid) => void killed.push(pgid),
+        processStartMs: (pid) => (pid === 555 ? leaderStartMs : null),
         token: () => 'tok-h',
-        log: () => {},
+        log: (l) => lines.push(l),
       },
     });
+    return { got, killed, log: lines.join('\n') };
+  };
+
+  it('kills an orphaned child group whose leader identity matches, then reclaims', async () => {
+    const childStartedAt = new Date(LEADER_START).toISOString();
+    const { got, killed, log } = await orphan({ childStartedAt }, LEADER_START);
     expect(killed).toEqual([555]);
+    expect(log).toContain('killed orphaned child group 555');
     expect(got.acquired).toBe(true);
+  });
+
+  it('never kills a group whose leader cannot be verified, but reclaims the lock', async () => {
+    const childStartedAt = new Date(LEADER_START).toISOString();
+    // The pgid was reused: its leader started after the record was written.
+    const reused = await orphan({ childStartedAt }, LEADER_START + 60_000);
+    expect(reused.killed).toEqual([]);
+    expect(reused.log).toContain('not killing process group 555: its leader was reused');
+    expect(reused.log).toContain('treating the lock as stale');
+    expect(reused.got.acquired).toBe(true);
+    fs.rmSync(lock, { recursive: true, force: true });
+
+    // The leader is gone (only other group members remain), or unreadable.
+    const gone = await orphan({ childStartedAt }, null);
+    expect(gone.killed).toEqual([]);
+    expect(gone.log).toContain('its leader is gone or unreadable');
+    expect(gone.got.acquired).toBe(true);
+    fs.rmSync(lock, { recursive: true, force: true });
+
+    // A record from before childStartedAt existed carries no identity at all.
+    const legacy = await orphan({}, LEADER_START);
+    expect(legacy.killed).toEqual([]);
+    expect(legacy.log).toContain('the record has no leader start time');
+    expect(legacy.got.acquired).toBe(true);
   });
 
   it('waits while another reclaimer holds a fresh guard, and clears a stale one', async () => {
@@ -184,11 +223,20 @@ describe('acquireLock', () => {
       path: lock,
       maxWaitMs: 0,
       info,
-      deps: { token: () => 'tok-k', log: () => {} },
+      deps: {
+        token: () => 'tok-k',
+        log: () => {},
+        processStartMs: (pid) => (pid === 4321 ? Date.parse('2026-10-08T01:02:03.000Z') : null),
+      },
     });
     if (!got.acquired) throw new Error('expected the lock');
     got.annotate({ childPgid: 4321 });
-    expect(readOwner(lock)).toMatchObject({ token: 'tok-k', childPgid: 4321, ...info });
+    expect(readOwner(lock)).toMatchObject({
+      token: 'tok-k',
+      childPgid: 4321,
+      childStartedAt: '2026-10-08T01:02:03.000Z',
+      ...info,
+    });
     got.release();
   });
 

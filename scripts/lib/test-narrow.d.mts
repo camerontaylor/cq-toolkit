@@ -25,12 +25,13 @@ export interface PlannedFile {
 }
 export function planRun(input: {
   selection: { files: readonly string[]; fallback: boolean; reason: string };
-  named: readonly string[];
   manifest: Readonly<Record<string, string>>;
   include: readonly string[];
-}):
-  | { ok: true; run: PlannedFile[]; dropped: PlannedFile[] }
-  | { ok: false; reason: string; candidates: string[] };
+}): { ok: true; run: PlannedFile[] } | { ok: false; reason: string; candidates: string[] };
+export function missingManifestEntries(
+  manifest: Readonly<Record<string, string>>,
+  exists: (file: string) => boolean,
+): string[];
 export function projectsOf(run: readonly PlannedFile[]): string[];
 export interface TestCounts {
   total: number;
@@ -48,6 +49,7 @@ export interface Summary {
   durationMs?: number;
   nice?: number;
   load?: string;
+  uptimeS?: number;
   source?: string;
   ran?: readonly string[];
   reason?: string;
@@ -57,3 +59,10 @@ export function readReport(
   report: unknown,
   toRelative: (path: string) => string,
 ): { tests: TestCounts; ran: string[] } | null;
+export function runVerdict(input: {
+  exit: number;
+  report: { tests: TestCounts; ran: string[] } | null;
+  files: readonly string[];
+  timedOut: boolean;
+  interruptedBy: string | null;
+}): { result: string; exit: number; reason?: string };
