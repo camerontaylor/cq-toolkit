@@ -720,9 +720,15 @@ describe('pure configuration resolution', () => {
         );
         expect(() => resolve({ values: {} })).not.toThrow();
         expect(() =>
-          resolve({
-            env: { CQ_APPROVAL_LEDGER: `${state}/cq/approvals.ndjson` },
-            verifiedRealpaths: {},
+          resolveConfig({
+            env: {
+              ...baseEnv,
+              CQ_APPROVAL_LEDGER: `${state}/cq/approvals.ndjson`,
+            },
+            workspaceRootRealpath: root,
+            verifiedRealpaths: {
+              CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+            },
           }),
         ).toThrow(/verified workspace path evidence required/);
       } finally {
