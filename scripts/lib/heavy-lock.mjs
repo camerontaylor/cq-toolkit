@@ -4,10 +4,11 @@
 //
 // Protocol (every step is synchronous, so the release can run from an
 // `exit` handler):
-//   - acquire = initialize owner.json via temp file + rename in a unique
-//     sibling directory, then atomically rename that directory to LOCK_PATH
-//     and verify our token. A paused creator cannot write into another
-//     holder's directory. Later record writes verify our token before
+//   - acquire = atomically mkdir LOCK_PATH (never replace an existing directory),
+//     then initialize owner.json via a token-specific temp file + rename inside
+//     the directory we created, checking its identity and initialization grace.
+//     A paused creator cannot publish into another holder's directory. Later
+//     record writes verify our token before
 //     writing the temp file and again before renaming it into place;
 //     `annotate` later adds the pid of the owner's detached child group and
 //     that group leader's start time (its identity);
@@ -193,14 +194,14 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   let record = null;
 
   const stillHeld = () => readOwner(path, fs)?.token === token;
-  const writeRecord = (directory = path) => {
-    if (directory === path && !stillHeld()) return false;
-    const temp = join(directory, `owner.${token}.tmp`);
+  const writeRecord = (ownsDirectory = stillHeld) => {
+    if (!ownsDirectory()) return false;
+    const temp = join(path, `owner.${token}.tmp`);
     try {
-      fs.writeFileSync(temp, `${JSON.stringify(record)}\n`);
-      if (directory === path && !stillHeld()) return false;
-      fs.renameSync(temp, ownerFile(directory));
-      return directory !== path || stillHeld();
+      fs.writeFileSync(temp, `${JSON.stringify(record)}\n`, { flag: 'wx' });
+      if (!ownsDirectory()) return false;
+      fs.renameSync(temp, ownerFile(path));
+      return stillHeld();
     } finally {
       fs.rmSync(temp, { force: true });
     }
@@ -227,10 +228,32 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
   };
 
   const tryCreate = () => {
-    // Preserve the grace/reclaim path for empty legacy lock directories.
-    if (fs.existsSync(path)) return false;
-    const temporary = fs.mkdtempSync(`${path}.acquire-`);
+    const createdAt = deps.now();
     try {
+      // mkdir is exclusive even when a legacy caller just created an empty
+      // directory: POSIX rename, unlike mkdir, could replace that directory.
+      fs.mkdirSync(path);
+    } catch (error) {
+      if (error.code === 'EEXIST') return false;
+      throw error;
+    }
+    // If paused before recording identity, the empty directory could already
+    // have passed the legacy grace and been reclaimed. Never initialize then.
+    if (deps.now() - createdAt >= MISSING_OWNER_MS) return false;
+    // Initialization failures leave the directory for the legacy grace/reclaim
+    // path; never remove a path whose owner token we have not published.
+    try {
+      const created = fs.statSync(path);
+      const ownsInitialization = () => {
+        if (deps.now() - createdAt >= MISSING_OWNER_MS) return false;
+        const current = fs.statSync(path);
+        return (
+          current.dev === created.dev &&
+          current.ino === created.ino &&
+          current.birthtimeMs === created.birthtimeMs &&
+          readOwner(path, fs) === null
+        );
+      };
       record = {
         pid: deps.pid,
         token,
@@ -239,17 +262,14 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
         command: info.command,
         startedAt: new Date(deps.now()).toISOString(),
       };
-      writeRecord(temporary);
-      if (fs.existsSync(path)) return false;
-      try {
-        fs.renameSync(temporary, path);
-      } catch (error) {
-        if (error.code === 'EEXIST' || error.code === 'ENOTEMPTY') return false;
-        throw error;
-      }
-      return stillHeld();
-    } finally {
-      fs.rmSync(temporary, { recursive: true, force: true });
+      // Only this successful mkdir authorizes an absent-owner initialization.
+      // Recheck identity before the temp write and before its rename. If a
+      // reclaimer moves the directory after the latter check, it also moves
+      // our unique temp file, so publication into a replacement fails closed.
+      return writeRecord(ownsInitialization);
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
     }
   };
 
