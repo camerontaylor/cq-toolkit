@@ -8,7 +8,18 @@ const state = '/tmp';
 const sessions = '/tmp/cq-harness/sessions';
 const baselineEnv = { XDG_STATE_HOME: '/tmp', TMPDIR: '/tmp' };
 function resolve(input: Parameters<typeof resolveConfig>[0] = {}) {
-  const env = { ...baselineEnv, ...input.env };
+  const platform = input.platform ?? 'posix';
+  const fixtureRoot = platform === 'win32' ? 'C:\\workspace' : root;
+  const fixtureState = platform === 'win32' ? 'C:\\tmp' : state;
+  const separator = platform === 'win32' ? '\\' : '/';
+  const fixtureLedger = `${fixtureState}${separator}cq${separator}approvals.ndjson`;
+  const fixtureSessions = `${fixtureState}${separator}cq-harness${separator}sessions`;
+  const env = {
+    ...(platform === 'win32'
+      ? { XDG_STATE_HOME: fixtureState, TMPDIR: fixtureState }
+      : baselineEnv),
+    ...input.env,
+  };
   const customProfiles = Object.fromEntries(
     Object.entries(env)
       .filter(
@@ -26,13 +37,13 @@ function resolve(input: Parameters<typeof resolveConfig>[0] = {}) {
   return resolveConfig({
     ...input,
     env,
-    workspaceRootRealpath: root,
+    workspaceRootRealpath: fixtureRoot,
     verifiedRealpaths: {
       CQ_APPROVAL_LEDGER: {
-        input: `${state}/cq/approvals.ndjson`,
-        realpath: `${state}/cq/approvals.ndjson`,
+        input: fixtureLedger,
+        realpath: fixtureLedger,
       },
-      CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+      CQ_DRIVER_SESSIONS_DIR: { input: fixtureSessions, realpath: fixtureSessions },
       ...customProfiles,
       ...(input.verifiedRealpaths ?? {}),
     },
@@ -691,8 +702,22 @@ describe('pure configuration resolution', () => {
         // direct call here supplies them; the polluted names stay absent from
         // each record's own properties.
         const baseEnv = { XDG_STATE_HOME: '/tmp', TMPDIR: '/tmp' };
-        expect(resolveConfig({ env: { ...baseEnv } }).profile).toBe('conservative');
-        expect(resolveConfig({ env: baseEnv, values: {} }).profile).toBe('conservative');
+        const workspaceEvidence = {
+          workspaceRootRealpath: root,
+          verifiedRealpaths: {
+            CQ_APPROVAL_LEDGER: {
+              input: `${state}/cq/approvals.ndjson`,
+              realpath: `${state}/cq/approvals.ndjson`,
+            },
+            CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+          },
+        };
+        expect(resolveConfig({ env: { ...baseEnv }, ...workspaceEvidence }).profile).toBe(
+          'conservative',
+        );
+        expect(resolveConfig({ env: baseEnv, values: {}, ...workspaceEvidence }).profile).toBe(
+          'conservative',
+        );
         expect(() => resolve({ values: {} })).not.toThrow();
         expect(() =>
           resolve({
