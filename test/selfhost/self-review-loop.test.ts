@@ -185,6 +185,15 @@ const fixReportWithCost = (costUSD: number): RunReport => ({
   costUSD,
 });
 
+/** A loop outcome whose fix run spent `tokens` (unpriced: no costUSD) — the token cap's evidence. */
+const outcomeWithFixTokens = (pr: number, tokens: number): ReviewLoopOutcome => ({
+  ...fakeOutcome(pr),
+  fixReport: {
+    ...fixReportWithCost(0),
+    usage: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 },
+  },
+});
+
 /** A loop outcome whose fix run spent `costUSD` — the sweep cap's evidence. */
 const outcomeWithFixCost = (pr: number, costUSD: number): ReviewLoopOutcome => ({
   ...fakeOutcome(pr),
@@ -285,7 +294,9 @@ describe('runSelfReviewLoop — real run', () => {
     // Journal shapes: one dir per PR namespaced by the ONE run stamp; the
     // dispatch log persists per PR directly under the journal root.
     expect(first.runOptions?.journalDir).toBe(join(journalRoot, '7-1700000000000'));
-    expect(first.runOptions?.maxUsd).toBe(SelfhostDefaults.maxUsd);
+    // Token cap by default; NO USD cap (the served model is unpriced).
+    expect(first.runOptions?.maxTokens).toBe(SelfhostDefaults.maxTokens);
+    expect(first.runOptions?.maxUsd).toBeUndefined();
     expect(first.dispatchLogPath).toBe(join(journalRoot, 'dispatch-7.ndjson'));
     // Worktrees live under the gitignored runtime root.
     expect(first.worktreeRoot).toBe('/checkout/.selfhost/worktrees');
@@ -515,6 +526,52 @@ describe('runSelfReviewLoop — real run', () => {
     expect(summary.excluded).toEqual([{ pr: 8, reason: 'sweep budget exhausted (I9)' }]);
   });
 
+  test('the default TOKEN cap is sweep-level: unpriced usage carries forward and a spent budget records the PR', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8), pullRow(9)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => outcomeWithFixTokens(pr, 600)),
+      ),
+      baseCfg({ maxTokens: 1000, journalRoot: tempJournalRoot() }),
+    );
+
+    // 1000 → 400 → -200: PR 9 is reached at ≤ 0 remaining and is a recorded
+    // row. No USD cap is ever set (unpriced model), so no USD bookkeeping.
+    expect(calls.map((call) => call.opts.runOptions?.maxTokens)).toEqual([1000, 400]);
+    expect(calls.every((call) => call.opts.runOptions?.maxUsd === undefined)).toBe(true);
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 8]);
+    expect(summary.excluded).toEqual([{ pr: 9, reason: 'sweep budget exhausted (I9)' }]);
+  });
+
+  test('a thrown loop deducts its propagated TOKEN spend from the sweep budget', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr, opts) => {
+          if (pr === 7) {
+            opts.onSpend?.(0, 300);
+            throw new Error('injected loop boom after token spend');
+          }
+          return fakeOutcome(pr);
+        }),
+      ),
+      baseCfg({ maxTokens: 1000, journalRoot: tempJournalRoot() }),
+    );
+
+    expect(calls[1]?.opts.runOptions?.maxTokens).toBe(700);
+    expect(summary.failures).toEqual([
+      {
+        pr: 7,
+        error:
+          'injected loop boom after token spend — accounted spend 0 and 300 tokens deducted from the sweep budget',
+      },
+    ]);
+  });
+
   test('the sweep cap carries forward: each loop gets the remaining budget, not a fresh cap', async () => {
     const calls: RecordedCall[] = [];
     const gh = fakeGh([pullRow(7), pullRow(8), pullRow(9)]);
@@ -678,7 +735,7 @@ describe('runSelfReviewLoop — real run', () => {
     expect(summary.results.map((row) => row.pr)).toEqual([8]);
     expect(summary.excluded).toEqual([]);
     const eighth = calls.find((call) => call.opts.pr === 8);
-    expect(eighth?.opts.runOptions?.maxUsd).toBe(SelfhostDefaults.maxUsd);
+    expect(eighth?.opts.runOptions?.maxTokens).toBe(SelfhostDefaults.maxTokens);
   });
 
   test('matching heads: every dispatched loop is preceded by exactly one vouching single-PR read', async () => {

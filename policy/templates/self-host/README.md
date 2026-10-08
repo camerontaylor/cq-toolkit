@@ -20,8 +20,8 @@ in its own `.github/workflows/`.
    template's header), drop the results into `.github/workflows/`, and keep
    the `# instantiated from policy/templates/self-host/... — edit the
 template, not this file` provenance header.
-2. Build from source: both workflows run `npm ci` then `npm run build` and
-   invoke the built entries — the adoption is the SOURCE, never a published
+2. Build from source: both workflows run `pnpm install --frozen-lockfile`
+   then `pnpm run build` and invoke the built entries — the adoption is the SOURCE, never a published
    tarball.
 3. Configure the two secrets (below) and confirm the driver binding in
    `src/selfhost/config.ts` (`SelfhostDefaults`) names YOUR provider and its
@@ -76,7 +76,7 @@ exposed.
 | `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                           |
 
 Both are step-scoped in the workflows: they reach only the run step, never
-`npm ci`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
+`pnpm install`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
 non-required automation jobs skip successfully; required I4 checks are separate
 and never use this optional skip. A classic PAT with the blanket `repo` scope is the documented
 FALLBACK, not the recommendation — it reaches every repo the account can
@@ -104,10 +104,12 @@ adopter owns it by hand.
 
 ### Budget caps and the wall-clock ladder (I9)
 
-- Rule: every scheduled run carries `--max-usd` (default
-  `SelfhostDefaults.maxUsd`, 1 USD) as an honest stop — the governor halts
-  the run when the derived cost rollup crosses it rather than pretending to
-  have finished (a one-job merge plan shows the budget-exhausted job row —
+- Rule: every scheduled run carries a token cap (default
+  `SelfhostDefaults.maxTokens`, 2,000,000 tokens; `--max-usd` is an optional
+  USD opt-in for a priced model — the default model is unpriced, and a USD
+  cap over unpriced usage fails the run loud, DD-9) as an honest stop — the
+  governor halts the run when the rollup crosses it rather than pretending
+  to have finished (a one-job merge plan shows the budget-exhausted job row —
   `stoppedEarly` stays false — and the loop path's per-PR governors surface
   the trip through the job row too); the merge path
   also arms the governor's wall-clock ladder
@@ -121,7 +123,7 @@ adopter owns it by hand.
   construction over `runSelfMergePrs`'s runOptions (`buildRunInput` only
   prepares the plan input); the review loop's `runOptions` — from the frozen
   constants in `src/selfhost/config.ts`
-  (`SelfhostDefaults.maxUsd`, `SelfhostDefaults.perJobWallClockMs`).
+  (`SelfhostDefaults.maxTokens`, `SelfhostDefaults.perJobWallClockMs`).
 
 ### One ≤20-minute slot per schedule fire
 
@@ -188,7 +190,7 @@ adopter owns it by hand.
 
 ### Secret step-scoping
 
-- Rule: both secrets reach ONLY the run step — never `npm ci`'s lifecycle
+- Rule: both secrets reach ONLY the run step — never `pnpm install`'s lifecycle
   scripts — and their presence is asserted before any effect.
 - Why: the run step executes repo code; a credential that rode an earlier
   step's lifecycle scripts could leak into execution the review never saw.

@@ -9,7 +9,7 @@
 # this directory (policy/templates/self-host/). W0.6 disables the self-host
 # conflict stage: DIRTY candidates are reported as needs-human rather than
 # dispatched to a model. Reviews are counted under the trust rules; the former
-# blanket `awaiting` premise was incorrect. Scheduled runs carry the maxUsd
+# blanket `awaiting` premise was incorrect. Scheduled runs carry the token
 # budget cap (I9 — an honest, reported stop) and the governor wall-clock
 # ladder (a wedged governed job is escalated by the ladder instead of
 # stalling the slot).
@@ -61,7 +61,7 @@ on:
   workflow_dispatch:
     inputs:
       max_usd:
-        description: USD cap override for this run ('' = config default, SelfhostDefaults.maxUsd)
+        description: Optional USD cap for this run ('' = no USD cap; the default is the token cap, SelfhostDefaults.maxTokens)
         required: false
         default: ''
         type: string
@@ -91,6 +91,12 @@ concurrency:
 permissions:
   contents: read
 
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
 jobs:
   self-merge-prs:
     # Dispatch is an allowed carrier only on the default ref (D-A.1): a
@@ -117,34 +123,31 @@ jobs:
           # repo: two CodeRabbit cycles + the gates); the automation runs
           # only merged main.
           ref: main
-          # npm runs repo code below, so the checkout token must not
+          # pnpm runs repo code below, so the checkout token must not
           # survive checkout; gh rides GH_TOKEN, not the checkout
           # credential.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       - name: Build from source
-        run: npm run build
-      # DURABLE vs EPHEMERAL under .selfhost/journal: the conflict agent's
-      # SessionStore (journal/sessions — the entry's buildRunInput puts it
-      # there) is the resume memory — an interrupted conflict agent's
-      # session must be resumable by the next scheduled run, so this step
-      # persists the journal root between runs (each run saves under its
-      # own run-id key; the next run restores by the state- prefix).
-      # Deliberately ephemeral: per-run audit trails ride along but are not
-      # the point, and no conflict worktrees are cached — the stage is disabled
-      # OUTSIDE the journal, and cached worktree paths go stale as main
-      # advances (a fresh worktree is prepared per resolution). Restore
-      # runs at this step, before the run step; the save is a SEPARATE
-      # actions/cache/save step AFTER the run step, gated `if: always()` —
-      # the combined action's post-save runs only on job success, so a
-      # failed run would lose exactly the session state the next run must
-      # resume from.
+        run: pnpm run build
+      # DURABLE under .selfhost/journal: the merge run's journal (the governed
+      # kernel journal plus the per-run audit trail) is the state the next
+      # scheduled run resumes from, so this step persists the journal root
+      # between runs (each run saves under its own run-id key; the next run
+      # restores by the state- prefix). Restore runs at this step, before the
+      # run step; the save is a SEPARATE actions/cache/save step AFTER the run
+      # step, gated `if: always()` — the combined action's post-save runs only
+      # on job success, so a failed run would lose exactly the journal the
+      # next run must resume from.
       - name: Restore the journal state (merge run journal)
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         with:
@@ -155,7 +158,7 @@ jobs:
       - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
         env:
           # Step-scoped on purpose (the live-review.yml round-3
-          # discipline): the token must never reach npm ci's lifecycle
+          # discipline): the token must never reach pnpm install's lifecycle
           # scripts — it reaches ONLY this step.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           # gh resolves the repo from the environment (effects never pass
@@ -185,7 +188,6 @@ jobs:
           # is not broken: the non-required job skips honestly. Required I4 checks
           # never use this workflow and therefore never inherit this skip.
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
-          # Conflict-resolution pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           # Bash ARRAY, never a string: the expansions stay single words
           # even if a future value carries spaces (an unquoted $ARGS
           # word-splits).

@@ -1,0 +1,106 @@
+# Portable-suite probe — the macOS gate venue, NON-REQUIRED. Repo-owned (no
+# template; see policy/templates/required-check.md "The macOS venue is a
+# separate workflow"). It lives OUTSIDE ci.yml on purpose: the promotion
+# gate reads ci.yml by path and requires every job in the run to be green
+# (gate.yml --verifiedWorkflows), so a macOS job inside ci.yml would be a
+# required wait. This file is deliberately NOT in that list, nor in
+# REQUIRED_WORKFLOW_CHECKS, protected-paths.json, or github-settings.json.
+#
+# PROMOTION is a governed, outward-facing change made in ONE edit across
+# every declaration of the required set (protected-paths.json,
+# denylist-scan REQUIRED_WORKFLOW_CHECKS, github-settings.json, the gate's
+# verified-workflow list and check list, and the live rulesets), gated on a
+# 10-candidate pilot measured from the merge of the suite's
+# spawn-reduction work: p90 <= 15 min, max < 20 min, zero infra-only
+# failures. Runs before that merge are BASELINE data, not pilot candidates.
+name: macos-venue
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
+
+jobs:
+  # The job id stays `static-macos`: the check name the baseline report and
+  # any future promotion pair on. It runs the static job's command steps
+  # from the SAME composite action (.github/actions/static-gate) because a
+  # true full-gate mirror makes a macOS-only failure visible anywhere in the
+  # gate; one definition means the mirror cannot go stale.
+  static-macos:
+    runs-on: macos-latest
+    # Same cq-state skip as the static job (review-debt #226): the ledger
+    # push is not a reviewable change. Job-level, never a trigger filter.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    # The promotion gate refuses a candidate whose required checks have not
+    # all reported within 20 minutes, so a PROMOTED macOS job must finish
+    # under that bound: `max < 20 min` is a promotion test, not only
+    # `p90 <= 15 min`. This is the documented ceiling — it reports a hang as
+    # a red job with a timeout, it never converts a slow or failing run into
+    # a pass.
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # pnpm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # The static job's command steps, from the one shared definition (see
+      # the action's header). Timing probe (baseline component A): this job
+      # alone also writes the vitest JSON report (per-file durations) for
+      # each test invocation, under $RUNNER_TEMP — outside the worktree, so
+      # Knip and the build never see them. `--coverage` stays OFF: the
+      # ratchet is the instrumented Linux venue. `e2e-after-failure` runs
+      # e2e after a red unit run (unless cancelled), so failing candidates
+      # keep their e2e timing; the unit failure still fails the job — it only
+      # keeps later evidence flowing. Every other step keeps the implicit
+      # success(): they remain the gate.
+      - name: Static gate steps (.github/actions/static-gate)
+        uses: ./.github/actions/static-gate
+        with:
+          vitest-json-dir: ${{ runner.temp }}/vitest-reports
+          e2e-after-failure: 'true'
+      # The reporter writes in onFinished, so a red test run still leaves
+      # both files. This step proves both exist and parse (it is what
+      # catches a wrong reporter flag); it runs after a red test step
+      # (`!cancelled()`) and only ever adds its own failure, never masks one.
+      - name: Verify vitest JSON reports
+        if: ${{ !cancelled() }}
+        run: |
+          for f in vitest-unit vitest-e2e; do
+            node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$RUNNER_TEMP/vitest-reports/$f.json"
+          done
+      # Publishes whatever was written, even after a red run. Measurement
+      # plumbing must not become a second gate: continue-on-error and
+      # if-no-files-found: warn mean an upload problem can neither fail a
+      # green job nor mask a red one. The baseline report (lane A) downloads
+      # this artifact per run (`gh run download -n vitest-macos-<run_id>-<attempt>`)
+      # and reads `testResults[].startTime/endTime` per file; name encodes
+      # OS and run attempt so a re-run never collides.
+      - name: Upload vitest JSON reports
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (immutable commit pin; repo policy)
+        with:
+          name: vitest-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vitest-reports/
+          if-no-files-found: warn
+          retention-days: 30

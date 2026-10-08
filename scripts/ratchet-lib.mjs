@@ -30,13 +30,20 @@ export const COVERAGE_SUMMARY_PATH = join(ROOT, 'coverage', 'coverage-summary.js
 /** Compiler/vitest output can be megabytes on a red run — never truncate evidence. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+/**
+ * Deadline for the engine build. Mirrors BUILD_TIMEOUT_MS in test/global-setup.ts
+ * so the two build paths share one budget: a wedged tsc must fail the run as
+ * evidence, never block the ratchet runners indefinitely.
+ */
+const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** Loud, uniform driver failure: narration to stderr, exit 1. */
 export function fail(message) {
   console.error(`ratchet: ${message}`);
   process.exit(1);
 }
 
-// npm/npx are .cmd shims on win32; since Node's CVE-2024-27980 fix a .cmd
+// pnpm is a .cmd shim on win32; since Node's CVE-2024-27980 fix a .cmd
 // must be spawned through a shell. Package JS entrypoints run directly with
 // Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
@@ -63,6 +70,9 @@ function newestSrcMtimeMs() {
   return newest;
 }
 
+/** Set once dist is prepared; ensureDist is a no-op for the rest of the process. */
+let distPrepared = false;
+
 /**
  * Build the engine the scripts consume — ONLY when dist is stale: dist is
  * reused when `dist/index.js` (and the ratchet engine entry the scripts
@@ -79,28 +89,42 @@ function newestSrcMtimeMs() {
  * error fails loudly here, never downstream.
  */
 export function ensureDist() {
+  // Build-once per process: every consumer in one invocation reuses the first
+  // preparation instead of re-walking src/ or re-running `pnpm run build`.
+  if (distPrepared) return;
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
     if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
+      distPrepared = true;
       return; // dist exists and is newer than every src file — reuse it
     }
   } catch {
     // no dist yet (CI cold checkout) or unreadable — fall through to build
   }
-  const res = spawnSync('npm', ['run', 'build'], {
+  const res = spawnSync('pnpm', ['run', 'build'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
-  if (res.error || res.status !== 0) {
+  if (res.error || res.signal || res.status !== 0) {
+    // spawnSync reports a timeout as res.error (ETIMEDOUT) with res.signal set;
+    // a build killed from outside has a signal and a null status.
+    const reason = res.error
+      ? res.error.code === 'ETIMEDOUT'
+        ? `timed out after ${BUILD_TIMEOUT_MS}ms`
+        : res.error.message
+      : res.signal
+        ? `killed by signal ${res.signal}`
+        : `exit ${res.status}`;
     fail(
-      `cannot build the ratchet engine (npm run build): ${
-        res.error ? res.error.message : `exit ${res.status}`
-      }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
+      `cannot build the ratchet engine (pnpm run build): ${reason}\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
   }
+  distPrepared = true;
 }
 
 /**
@@ -350,9 +374,13 @@ export async function upsertProposalPr({ existing, edit, create }) {
  */
 export function runCoverageRaw() {
   rmSync(COVERAGE_SUMMARY_PATH, { force: true });
-  const res = spawnSync('npx', ['vitest', 'run', '--coverage'], {
+  // dist is made fresh here (a no-op once loadEngine has run), so Vitest's
+  // build-once global setup is told to skip its own rebuild.
+  ensureDist();
+  const res = spawnSync('pnpm', ['exec', 'vitest', 'run', '--coverage'], {
     cwd: ROOT,
     encoding: 'utf8',
+    env: { ...process.env, CQ_DIST_PREPARED: '1' },
     maxBuffer: MAX_BUFFER,
     shell: SHELL_ON_WINDOWS,
   });

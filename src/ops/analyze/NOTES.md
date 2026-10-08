@@ -217,3 +217,258 @@ otherwise (and always as a second, deterministic leg); the test logs which
 mode ran. The quarantine miniature in the same file dispatches a playbook
 whose verifier fails, asserts the quarantine record, and asserts the second
 dispatch is refused.
+
+### W4.3 — the approval token at the mutation, and rollback on a non-passing verifier
+
+Recorded: B12 (branch `cq02/remediation`, from `dd247ca`). The two
+reconciliation rows ADR-0003 §4c left open are resolved here, and both
+resolutions are decisions with a stated alternative, not defaults.
+
+- **O-5 — where the workspace mutation lock's RECORD lives: BESIDE the
+  operator approval ledger, in the P1-trusted layer, keyed on the sha256
+  of the workspace's enclosing git worktree root** (so nested containment
+  roots over one tree share one lock; `makeLedgerBesideMutationLocks`, built
+  on the sweep lane's existing `makeGitMutex` — no new lock subsystem). The
+  two candidates ADR-0003 rejected are excluded on evidence: an
+  environment-derived location (`os.tmpdir()`, `$XDG_STATE_HOME`)
+  reintroduces ADR §2.5's split-brain, and a record inside the workspace is
+  tamper vector #26 — the very tree under approval. `approval.ts` also
+  REFUSES a trusted layer that resolves inside the workspace it protects.
+  The process-local lock is offered for tests and single-process callers and
+  claims nothing cross-process; that claim is stated in its doc comment
+  rather than left to be assumed.
+- **O-6 — do non-approval writers take the lock: closed for THIS path, and
+  it took two attempts to get right.** The first version of this patch
+  claimed the question was vacuous because "every write holds the lock".
+  That was wrong, and a security review caught it: a ROLLBACK is a write
+  too. The dispatch released the lock when the engine call returned and
+  only wrote the pre-apply bytes back after the verifier had run, so a
+  concurrent approved dispatch of another playbook could land in that
+  window and have its edit silently discarded by this one's rollback — a
+  lost update between the ops' OWN writers, which no amount of "the
+  workspace is under approval" excuses. Two changes close it:
+  1. the restore runs under the SAME mutation lock (`withMutationLock`,
+     exported from `approval.ts` precisely so a second mutation of the same
+     workspace serializes like the first);
+  2. the restore is CONDITIONAL — it writes the pre-apply bytes back only
+     if the file still holds the exact bytes THIS dispatch wrote, compared
+     by a `sha256` fingerprint read back inside the apply's own critical
+     section. A file that no longer matches belongs to another writer and is
+     reported STRANDED, UNTOUCHED, with both digests.
+     A non-approval writer OUTSIDE the lock remains ADR §2.7's open residual
+     (a post-mutation-hook hazard) and is NOT closed here: no such writer was
+     modified to make it look closed. What is closed is the lost update
+     between writes this module itself performs.
+- **The trusted-layer containment guard was shipped reversed and is fixed.**
+  `isInside(parent, child)` asks whether CHILD is nested in PARENT; the
+  call site passed them the other way round, so it refused the harmless
+  layouts (a ledger under `$HOME/state` beside a workspace under `$HOME`)
+  and ALLOWED the actual tamper vector (a ledger inside the workspace). The
+  argument order is now commented at the call site, and the three cases the
+  reversal got wrong are pinned together in `approval.test.ts`: an ancestor
+  trusted layer is allowed, a nested one is refused even through a symlink
+  and before it exists on disk, and a prefix-sharing sibling (`/ws` vs
+  `/ws-cq`) is not "inside". Path resolution for that comparison also
+  resolves the longest EXISTING ancestor and rejoins the tail, because plain
+  `realpathSync` throws on a not-yet-created ledger directory and the raw
+  fallback compared `/var/...` against `/private/var/...` and missed the
+  nesting — silently, in the most common configuration.
+- **Rollback is a step, not a side effect.** The dispatch captures every
+  target's pre-apply bytes before the engine runs, and a `fail` or an
+  `indeterminate` verdict restores them through the same store, under the
+  mutation lock, conditionally on the post-apply bytes (see O-6). A restore
+  that cannot put a file back — a write fault OR a conflict with a
+  concurrent writer — reports that file as STRANDED, and the prose then
+  says the workspace is NOT at its pre-dispatch state; the report never
+  claims a clean rollback it did not achieve. A post-apply re-read failure
+  is its own outcome: the apply happened, the rollback cannot be proven
+  safe, so NO restore is attempted and the op says exactly that.
+- **A failed verifier is a `failed` dispatch, not an `ok` with a bad
+  outcome.** This reverses the old regressionGate "a definitive verdict is
+  the op's decision output" mapping, and the header says why: once step 5
+  restores the workspace there is no applied state left to report, and a
+  bare `ok` is exactly what a status-only reader takes as success. The
+  structured evidence moved to serialized JSON in `error`/`detail` (the
+  frozen `OpResult` taxonomy has no payload slot) under the
+  `PlaybookDispatchUnverified` shape.
+- **The signature half of ADR-0003 is NOT re-implemented here.** The kernel
+  verifier owns the signer snapshot, the TTL and the `inputsHash` check; this
+  patch consumes a `VerifiedApprovals` seam. The ops therefore default to
+  the DENY-ALL authority: with no authority bound, an apply or a dispatch is
+  refused `needs-human` and writes nothing, which is the A16 forged-
+  `approved: true` state.
+
+### Second security review — three state-binding corrections
+
+- **The nonce seam now carries the SIGNED state, and admission compares
+  it.** `VerifiedApprovals` returns `{ nonce, state }`, not a bare nonce.
+  The kernel's signature check and this op's admission are two different
+  instants; with only a nonce, a workspace mutated BETWEEN them had its
+  post-mutation state silently adopted as the baseline the exercise then
+  re-checked — the module re-verified itself against a state no human had
+  ever seen. Admission now refuses on any difference between the claim's
+  `state` and the state read at admission, with the nonce UNSPENT.
+  _Integration contract:_ the adapter MUST source `state` from the
+  verified claim. Re-reading it at call time collapses the two moments back
+  into one and reopens the window; an adapter that cannot supply it must
+  return `undefined` (refusal), not a guess.
+- **A dirty workspace is not an approvable state** — and this is the
+  ACCEPTED ADR's own requirement, not a local tightening of it. Verified
+  against the accepted `bf5f540`
+  `research/research-20260925-v11/adr-0003-approval-token.md`: §4c step 1
+  requires the clean predicate to be EMPTY
+  (`git status --porcelain=v1 --untracked-files=all`, untracked files
+  counting as dirty), §4c's enumerated refusal reasons include
+  `workspace dirty`, and §7 lists "a dirty tree from an untracked file" as a
+  required `needs-human` case. The observable contract this module
+  implements — `needs-human`, the `workspace dirty` reason, no write, no
+  spend — is the ADR's, and the refusal reason quotes the ADR's own token
+  so a refusal is traceable to the clause that requires it.
+  CORRECTION: an earlier revision of this note described the refusal as a
+  "deliberate tightening … a divergence needing the ADR owner's sign-off",
+  and listed that sign-off as an open lease. That claim was WRONG — it
+  misread the ADR's predicate as a bare boolean comparison rather than an
+  emptiness requirement — and the conductor's ruling (on this accepted
+  text) confirmed it. The behavior is unchanged and required; only the
+  description and the phantom lease were wrong. The check sits at ADMISSION
+  rather than only at the exercise because the claim's `treeClean` is a
+  boolean that cannot distinguish one dirty state from another (same
+  boolean, same HEAD, different bytes); refusing before a grant is minted
+  means that comparison is never reached, and an earlier refusal spends
+  nothing. Ignored files remain out of scope of the state predicate — the
+  ADR's own stated residual, unchanged here.
+- **The durable ledger is now actually durable.** `appendFileSync` returns
+  once the bytes are in the OS page cache, so a machine crash could lose a
+  spent nonce and leave the token REPLAYABLE — the exact outcome §4c's
+  crash analysis exists to prevent, while the function claimed otherwise.
+  The append now goes through an append-mode handle with `fdatasync`, and
+  the ledger's directory is fsync'd once when the file is created, matching
+  the journal's own `durable: true` idiom (src/kernel/journal.ts) rather
+  than a hand-rolled idea. Two residuals remain and are stated in the code:
+  macOS `F_FULLFSYNC` is not issued (a power-loss window the journal
+  documents too), and the ledger is a plain file, not a MAC'd one — it is
+  trusted because it lives in the P1-trusted layer (ADR §1), not because it
+  is tamper-evident.
+- **The append is write-ALL, fails closed, and a torn ledger is CORRUPTION
+  — not history.** `fs.writeSync` RETURNS a byte count and does not promise
+  the whole buffer, so the first version's single unchecked call could
+  `fdatasync` a TRUNCATED line, report `consumed`, and leave the full nonce
+  absent from the ledger — after which that same token replays cleanly, the
+  exact outcome the ledger exists to prevent. The write now loops to
+  completion, and a write that cannot make progress (or that over-reports)
+  THROWS, which `exercise` turns into a `needs-human` refusal with the
+  nonce UNSPENT.
+  A torn record is deliberately NOT truncated away: the file is shared, and
+  truncating to a remembered length could discard a CONCURRENT append,
+  turning a safe failure into an unsafe replay of another writer's token.
+  It is instead made DETECTABLE and fatal, because a torn tail is not inert
+  after all — the next O_APPEND fuses the partial record with the following
+  one into a line matching neither nonce, and a fresh instance absorbing
+  that merged line would never see the real nonce as spent. So the durable
+  ledger (a) refuses to append when the file ends with an unterminated
+  record, and (b) validates EVERY record it reads against ADR-0003 §2's
+  nonce shape (32 lowercase hex), failing the whole read closed on any
+  malformed line. Reading history wrong is worse than refusing to read it:
+  the operator must inspect and repair the file. The in-process ledger has
+  no such corruption mode and validates nothing, which is stated on it.
+
+### A lock fault reports the phase it actually reached
+
+The exercise runs INSIDE the mutation lock, so a fault ACQUIRING the lock has
+not spent the token, while a fault releasing or compromising it has. An
+earlier handler claimed "already EXERCISED, so the token is spent" for every
+lock fault, which is false for the acquire case — a message that asserts a
+fact it cannot know. `applyRemediation` now records whether the write was
+entered and reports the matching fate (UNSPENT and re-approvable vs spent
+and unreplayable), while the dispatch's rollback still marks every applied
+file STRANDED, because a section whose exclusivity cannot be proven proves
+no restore either way.
+
+### Residual: rollback resurrection under overlapping approved dispatches
+
+Two approved dispatches over OVERLAPPING targets can interleave so that a
+failed remediation survives on disk. Dispatch A applies file F and its
+verifier then fails; A's lock is released while the verifier runs (deliberate
+— a verifier may run to 600s); approved dispatch B applies to the same file,
+capturing A's post-A bytes as ITS pre-apply baseline, and also fails. B's
+conditional restore finds its own fingerprint still matching and writes F
+back to A's verifier-failed edits. A's restore correctly STRANDS (fingerprint
+mismatch) and says so.
+
+What still holds: nothing is clobbered, no lost update, and both reports are
+truthful from their own frame — A names the conflict with both digests, B
+reports a genuine restore of what it captured. What does NOT hold is the
+absolute phrasing "a pass is the only outcome that leaves the workspace
+alone": under this interleaving a failed remediation can be on disk
+afterwards. It requires two human-approved dispatches with overlapping targets
+and specific timing, and it is detectable from A's stranded evidence.
+
+NOT fixed here: the honest fix is to fingerprint the pre-apply capture INSIDE
+the mutation critical section rather than trusting bytes captured before the
+lock, which changes when the capture happens and is a behavioral change to
+step 3a. Recorded as a residual rather than absorbed silently.
+
+### Public surface changed — W3.1 handoff (API lane owns the baseline)
+
+This patch DID change the family's public surface, and no "no public API
+change" claim is made for it:
+
+- `makeAstGrepCodemod(run, storeFor)` gained two OPTIONAL parameters —
+  `approval` (an `ApprovalAuthority`, defaulting to deny-all) and `inherited`
+  (an `ExercisedScope`). Source-compatible for existing callers; the default
+  is fail-closed, so an unbinding caller that only passed two arguments now
+  has its applies REFUSED until it binds an authority. That is a behavioral
+  change on the public API and must appear in the next W3.1 report.
+- New public exports from `ops/analyze/approval.ts`: `ExercisedScope`,
+  `isExercisedScope`, `canonicalWorkspace`, `contentFingerprint`,
+  `withMutationLock`, `FileNonceLedgerConfig`, and the authority/ledger/lock
+  factories.
+- The family barrel `index.ts` (and so the root barrel, the package's only
+  export) re-exports the CONSTRUCTION AND BINDING surface: the approval types,
+  `DENY_ALL_APPROVALS`, `makeApprovalAuthority`, `makeFileNonceLedger`,
+  `makeInMemoryNonceLedger`, `makeLedgerBesideMutationLocks`,
+  `makeProcessLocalMutationLocks`, `makeGitApprovalStateReader`,
+  `approvalInputDigest`, and the registry's `setAnalyzeApprovalAuthority`.
+  This is required, not curation: the mutating factories default to deny-all
+  and `withApprovedMutation` reaches an authority's locks through a
+  module-private symbol, so without these exports an installed-package
+  consumer could never enable an apply (Codex P1 on #258). The mutation-seam
+  internals (`withApprovedMutation`, `withMutationLock`, `isExercisedScope`,
+  `canonicalWorkspace`, `contentFingerprint`) stay off the barrel.
+
+Handoff: regenerate the API report/baseline AFTER this lands, and record the
+`makeAstGrepCodemod` signature change explicitly — a consumer that composed
+the engine directly must now pass an authority or bind the shared one.
+
+### Open integration lease (for the #238 / kernel owner, NOT done here)
+
+1. `src/ops/analyze/registry.ts` is now **edited** (the lease was extended
+   for approval-authority integration only) and all THREE mutating call
+   sites — `analyze.applyRemediation`, `analyze.playbookDispatch` and
+   `analyze.astGrepCodemod` — bind the shared authority via
+   `setAnalyzeApprovalAuthority`. The DEFAULT is still deny-all, so the
+   registry-composed ops REFUSE every write until the kernel's verified
+   approvals are bound; what changed is that the binding point now exists and
+   is uniform across the family. Bind once per process, before op resolution
+   (see the tenancy note on the setter).
+2. The generated op docs describe the pre-W4.3 approval semantics
+   ("approved: true" as sufficient). `gen:op-docs` is generated from the
+   registry description, so the text moves with (1).
+3. `currentJobContext().approval` (ADR §4b step 7) and the journal's
+   `approval-consumed` event are kernel work; this patch consumes the
+   exercised grant at the op and leaves the durable audit record to that
+   lane rather than inventing a second journal shape.
+4. ADR-0003 §5's "same host, fresh `--journal-dir`" replay case is enforced
+   by the DURABLE ledger (`makeFileNonceLedger`); the process-local ledger
+   cannot enforce it and does not claim to.
+5. **Not safe for production binding until (1) above is wired.** With the
+   deny-all default the ops refuse every write, so there is no unsafe state
+   in the tree today; the risk is the adapter that binds the kernel
+   approvals. It inherits this contract: source `state` from the verified
+   claim, refuse rather than guess, and keep the deny-all default for any
+   subject the verifier has not approved.
+6. The journal's `approval-consumed` audit record (kid, nonce, subject
+   hash; token BYTES never) is still unwritten — this module consumes the
+   grant durably in the operator ledger but emits no journal event, so the
+   tamper-protection the journal fold would give is absent until the kernel
+   lane writes it.

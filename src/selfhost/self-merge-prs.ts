@@ -11,8 +11,8 @@
 //     exactly: a per-run createGovernor over governorConfig(runOptions,
 //     limits) rides runPlan's Governance handle — the runner itself performs
 //     admission, the wall-clock ladder, spend observation, the honest stop,
-//     and the v2 journal. The caps are the frozen SelfhostDefaults (maxUsd
-//     default, perJobWallClockMs arming the wall-clock ladder, #137) — this
+//     and the v2 journal. The caps are the frozen SelfhostDefaults (maxTokens
+//     default, an optional --max-usd opt-in, perJobWallClockMs arming the wall-clock ladder, #137) — this
 //     module invents no number;
 //   - the registry view is the central registry built exactly the way
 //     run-plan builds it (bottom-instantiation variance adapter); only
@@ -140,7 +140,11 @@ export interface SelfMergePrsCfg {
   repo: string;
   /** The checked-out repository root (the merge effects target). */
   repoRoot: string;
-  /** USD-cap override; default SelfhostDefaults.maxUsd (I9). */
+  /**
+   * OPTIONAL USD cap (I9); absent → no USD cap (the default cap is
+   * SelfhostDefaults.maxTokens — the served model is unpriced, and a USD cap
+   * over unpriced usage trips the governor's DD-9 fail-loud).
+   */
   maxUsd?: number;
   /** Journal root override (hosts the merge sessions dir); default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
@@ -464,7 +468,8 @@ export async function runSelfMergePrs(
   const runOptions: RunOptions = {
     concurrency: 1,
     stopOnError: false,
-    maxUsd: cfg.maxUsd ?? SelfhostDefaults.maxUsd,
+    maxTokens: SelfhostDefaults.maxTokens,
+    ...(cfg.maxUsd !== undefined ? { maxUsd: cfg.maxUsd } : {}),
     // The governed run's durable kernel journal (the RunReport's evidence
     // trail), namespaced `merge-<stamp>` under the journal root — stamp =
     // the same once-read clock the loop entry stamps its per-PR dirs with;
