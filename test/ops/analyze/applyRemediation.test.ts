@@ -194,15 +194,10 @@ function approvedAuthority(readState?: ApprovalStateReader): {
     // changed inputs are a different subject with no token at all.
     approvals: {
       verifiedFor: (subject) =>
-        (readState === undefined
-          ? Promise.resolve({ ...approvedState, workspace: subject.workspace })
-          : // A custom reader reports its own workspace spelling; the claim
-            // signs exactly what that reader observed.
-            readState.read(subject.workspace)
-        ).then((state) => ({
+        Promise.resolve({
           nonce: `nonce-${subject.op}-${subject.inputDigest.slice(0, 12)}`,
-          state,
-        })),
+          state: { ...approvedState, workspace: resolve(subject.workspace) },
+        }),
     },
     ledger,
     locks: makeProcessLocalMutationLocks(),
@@ -1032,7 +1027,10 @@ describe('W4.3 approval at the mutation boundary (applyRemediation)', () => {
     const result = await makeOp(store, codemodRunner(FIXTURE_FILES), authority)(baseInput());
     expect(result.status).toBe('needs-human');
     const reason = result.status === 'needs-human' ? result.reason : '';
+    expect(reads).toBe(2);
     expect(reason).toContain('approval state changed since approval');
+    expect(reason).toContain('issued against a different workspace state');
+    expect(reason).not.toContain("between the kernel's verification");
     expect(reason).toContain('UNSPENT');
     expect(reason).toContain('fully planned and NOTHING was written');
     expect(store.written.size).toBe(0);
