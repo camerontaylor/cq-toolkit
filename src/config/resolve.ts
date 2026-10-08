@@ -137,12 +137,17 @@ function ownEntries<V>(record: Readonly<Record<string, V>>): Record<string, V> {
 function ownVerifiedRealpaths(
   record: NonNullable<ResolveConfigOptions['verifiedRealpaths']>,
 ): NonNullable<ResolveConfigOptions['verifiedRealpaths']> {
-  const copy = Object.create(null) as NonNullable<ResolveConfigOptions['verifiedRealpaths']>;
+  type VerifiedRealpath = { readonly input: string; readonly realpath: string };
+  const copy: Record<string, VerifiedRealpath> = Object.create(null) as Record<
+    string,
+    VerifiedRealpath
+  >;
   for (const [name, evidence] of Object.entries(record)) {
-    copy[name] =
-      evidence && typeof evidence === 'object' && !Array.isArray(evidence)
-        ? ownEntries(evidence)
-        : evidence;
+    if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) continue;
+    const input = Object.hasOwn(evidence, 'input') ? evidence.input : undefined;
+    const realpath = Object.hasOwn(evidence, 'realpath') ? evidence.realpath : undefined;
+    if (typeof input !== 'string' || typeof realpath !== 'string') continue;
+    copy[name] = { input, realpath };
   }
   return copy;
 }

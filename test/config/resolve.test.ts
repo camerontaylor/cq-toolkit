@@ -726,7 +726,7 @@ describe('pure configuration resolution', () => {
             env: { CQ_DRIVER_SESSIONS_DIR: sessions },
             verifiedRealpaths: {
               CQ_DRIVER_SESSIONS_DIR: evidence,
-            } as unknown as NonNullable<Parameters<typeof resolveConfig>[0]['verifiedRealpaths']>,
+            } as unknown as NonNullable<Parameters<typeof resolveConfig>[0]>['verifiedRealpaths'],
           }),
         ).toThrow(/verified workspace path evidence required/);
       }
