@@ -433,10 +433,10 @@ describe('pure configuration resolution', () => {
     it('accepts typed served-alias records and order-insensitive call-only opt-ins', () => {
       const config = resolve({
         optIn: ['driver.servedAliases'],
-        values: { 'driver.servedAliases': { 'lane/provider/requested': 'served' } },
+        values: { 'driver.servedAliases': { 'ai-sdk/provider/requested': 'served' } },
       });
       expect(entryValue('driver.servedAliases', config)).toEqual({
-        'lane/provider/requested': 'served',
+        'ai-sdk/provider/requested': 'served',
       });
       expect(() =>
         resolve({
@@ -568,6 +568,109 @@ describe('pure configuration resolution', () => {
       expect(() => resolve({ env: { CQ_DRIVER_BINDINGS: '*/zai:ai-skd' } })).toThrow(
         /invalid map token/,
       );
+    });
+  });
+
+  describe('post-merge #256 follow-up: P2 review findings', () => {
+    it('rejects noncanonical CQ_* spellings that Windows lookups would alias', () => {
+      for (const name of ['cq_approval_max_ttl_ms', 'Cq_Profile', 'cQ_SANDBOX']) {
+        expect(() => resolve({ env: { [name]: 'x' } })).toThrow(
+          /expected canonical CQ_\* spelling/,
+        );
+      }
+    });
+
+    it('screens slashless URL-standard credential forms in passthrough values', () => {
+      for (const value of ['https:user:pass@example.test', 'https:/user:pass@example.test']) {
+        expect(() =>
+          resolve({ env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value } }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
+
+    it('requires the standalone gh executable to be a bare name or an absolute path', () => {
+      expect(entryValue('gh.bin', resolve())).toBe('gh');
+      expect(entryValue('gh.bin', resolve({ env: { CQ_GH_BIN: '/usr/local/bin/gh' } }))).toBe(
+        '/usr/local/bin/gh',
+      );
+      for (const value of ['bin/gh', '.\\bin\\gh.exe', 'C:gh.exe']) {
+        expect(() => resolve({ env: { CQ_GH_BIN: value } })).toThrow(/bare executable name/);
+      }
+    });
+
+    it('validates served-alias lanes against the shipped lane set', () => {
+      expect(() =>
+        resolve({ env: { CQ_DRIVER_SERVED_ALIASES: 'ai-skd/provider/requested=served' } }),
+      ).toThrow(/invalid served-alias entry/);
+      expect(
+        entryValue(
+          'driver.servedAliases',
+          resolve({ env: { CQ_DRIVER_SERVED_ALIASES: 'acp/provider/requested=served' } }),
+        ),
+      ).toEqual({ 'acp/provider/requested': 'served' });
+    });
+
+    it('reads caller records for own properties only', () => {
+      const inheritedEnv = Object.assign(Object.create({ CQ_PROFILE: 'solo-maintainer' }), {
+        XDG_STATE_HOME: '/tmp',
+        TMPDIR: '/tmp',
+      }) as Record<string, string | undefined>;
+      const config = resolveConfig({
+        env: inheritedEnv,
+        workspaceRootRealpath: root,
+        verifiedRealpaths: {
+          CQ_APPROVAL_LEDGER: {
+            input: `${state}/cq/approvals.ndjson`,
+            realpath: `${state}/cq/approvals.ndjson`,
+          },
+          CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+        },
+      });
+      expect(config.profile).toBe('conservative');
+      const inheritedValues = Object.create({ sandbox: 'off' }) as Exclude<
+        NonNullable<Parameters<typeof resolveConfig>[0]>['values'],
+        undefined
+      >;
+      expect(() =>
+        resolveConfig({
+          env: { ...baselineEnv },
+          values: inheritedValues,
+          workspaceRootRealpath: root,
+          verifiedRealpaths: {
+            CQ_APPROVAL_LEDGER: {
+              input: `${state}/cq/approvals.ndjson`,
+              realpath: `${state}/cq/approvals.ndjson`,
+            },
+            CQ_DRIVER_SESSIONS_DIR: { input: sessions, realpath: sessions },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it('rejects non-string scalars for list settings', () => {
+      expect(() =>
+        resolve({ values: { 'run.envPassthrough': true }, optIn: ['run.envPassthrough'] }),
+      ).toThrow(/expected a string or string list/);
+      expect(() =>
+        resolve({
+          values: { 'budget.releaseQuarantine': 42 },
+          optIn: ['budget.releaseQuarantine'],
+        }),
+      ).toThrow(/expected a string or string list/);
+    });
+
+    it('case-folds structurally excluded bot logins', () => {
+      for (const login of ['GitHub-Actions[bot]', 'CQ-Promoter[bot]']) {
+        expect(() => resolve({ env: { CQ_MERGE_TRUSTED_BOTS: login } })).toThrow(
+          /structurally excluded/,
+        );
+      }
+    });
+
+    it('deep-freezes secret presence records', () => {
+      const config = resolve({ env: { CQ_AUTOMATION_TOKEN: 'private' } });
+      expect(config.secrets.CQ_AUTOMATION_TOKEN).toEqual({ layer: 'env', set: true });
+      expect(Object.isFrozen(config.secrets.CQ_AUTOMATION_TOKEN)).toBe(true);
     });
   });
 });

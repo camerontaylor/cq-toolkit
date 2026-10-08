@@ -122,6 +122,11 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+/** Caller-owned records are read for own properties only; inherited ones are not configuration. */
+function ownEntries<V>(record: Readonly<Record<string, V>>): Record<string, V> {
+  return Object.fromEntries(Object.entries(record));
+}
+
 function validForeignBaseUrl(value: string): boolean {
   if (!/^https:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value)) return false;
   try {
@@ -139,9 +144,10 @@ function validForeignBaseUrl(value: string): boolean {
 }
 
 function credentialUrl(raw: string | undefined): boolean {
-  // URL consumers commonly trim, so screen the trimmed form.
+  // URL consumers commonly trim, and the parser admits special schemes with
+  // missing slashes, so screen every scheme-shaped value.
   const value = raw?.trim();
-  if (!value || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+  if (!value || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   try {
     const parsed = new URL(value);
     return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
@@ -217,11 +223,9 @@ function assertOutsideWorkspace(
 }
 
 function parseListItems(label: string, raw: unknown): string[] {
-  const parts = isStringArray(raw)
-    ? [...raw]
-    : String(raw)
-        .split(',')
-        .map((part) => part.trim());
+  if (typeof raw !== 'string' && !isStringArray(raw))
+    throw new Error(`${label}: expected a string or string list`);
+  const parts = isStringArray(raw) ? [...raw] : raw.split(',').map((part) => part.trim());
   if (parts.some((part) => part.length === 0)) throw new Error(`${label}: empty list item`);
   if (parts.includes('none') && parts.length !== 1)
     throw new Error(`${label}: 'none' must be the only item`);
@@ -247,13 +251,14 @@ function parse(
       throw new Error(`${key.env}: expected bot logins ending in [bot]`);
     if (
       key.id === 'merge.trustedBots' &&
+      // Login identity is case-insensitive, so compare case-folded.
       unique.some((value) =>
         [
           'github-actions[bot]',
           'cq-verdict[bot]',
           'cq-promoter[bot]',
           'cq-automation[bot]',
-        ].includes(value),
+        ].includes(value.toLowerCase()),
       )
     )
       throw new Error(`${key.env}: structurally excluded bot identity`);
@@ -323,7 +328,7 @@ function parse(
       if (
         parts.length !== 3 ||
         parts.some((part) => !part) ||
-        !/^[a-z0-9-]+$/.test(parts[0]!) ||
+        !(LANE_IDS as readonly string[]).includes(parts[0]!) ||
         !/^[a-z0-9-]+$/.test(parts[1]!) ||
         !served ||
         /[=,|]/.test(served)
@@ -395,6 +400,10 @@ function parse(
         throw new Error(`${key.env}: host must match the bundled provider usage endpoint`);
     }
   }
+  // A separator-bearing or drive-prefixed gh path is relative somewhere, and
+  // consumers resolve such paths against different working directories.
+  if (key.env === 'CQ_GH_BIN' && /[\\/]|^[A-Za-z]:/.test(value) && !isAbsolute(value))
+    throw new Error(`${key.env}: expected a bare executable name or an absolute path`);
   if (key.type === 'argv') {
     let argv: unknown;
     try {
@@ -595,7 +604,15 @@ function parseOptIns(optIns: readonly string[]): {
 }
 
 /** Resolve config exactly once from a caller-owned env snapshot. */
-export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfig {
+export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig {
+  // Caller records are read for own properties only: an inherited property
+  // never passed the own-key validation below, so it is not configuration.
+  const options: ResolveConfigOptions = {
+    ...input,
+    ...(input.env ? { env: ownEntries(input.env) } : {}),
+    ...(input.values ? { values: ownEntries(input.values) } : {}),
+    ...(input.verifiedRealpaths ? { verifiedRealpaths: ownEntries(input.verifiedRealpaths) } : {}),
+  };
   const env = options.env ?? {};
   const customProviderIds = Object.keys(env)
     .filter(
@@ -622,6 +639,10 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
   const foreign: Record<string, string> = {};
   const unknownNames: string[] = [];
   for (const name of Object.keys(env)) {
+    // Windows environment lookups are case-insensitive, so a noncanonical CQ_*
+    // spelling would silently alias its canonical variable; fail closed instead.
+    if (/^cq_/i.test(name) && !name.startsWith('CQ_'))
+      throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
     if (isSecret(name) && nonblank(env[name]) !== undefined) {
       if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
@@ -789,7 +810,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         throw new Error(`${id}: expected boolean value`);
       value = raw === true || raw === 'true';
     } else if (spec.type === 'list') {
-      value = parseListItems(id, isStringArray(raw) ? raw : String(raw));
+      value = parseListItems(id, raw);
     } else {
       value = String(raw);
       if ('values' in spec && !spec.values.some((supported: string) => supported === value))
@@ -811,7 +832,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     registryVersion: 1,
     profile,
     entries: Object.freeze(entries),
-    secrets: Object.freeze(secrets),
+    secrets: deepFreeze(secrets),
     credentials: Object.freeze(credentials),
     foreign: Object.freeze(foreign),
   });
