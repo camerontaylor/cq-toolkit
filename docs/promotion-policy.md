@@ -67,19 +67,24 @@ C2 retires `merge-queue-gate`.
 
 ## Accepted limit
 
-Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
-for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
+Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269. The gate
+now filters the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
 `cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
 `408c87f` (the gate refuses fail-closed while unpinned).
+PR-B remains on hold until S2 observes the actual status creator as
+`cq-promotion-reviewer[bot]` / `339373542` / `Bot` on the scratch repository.
 
-- A `crq/promotion-review` status now proves the signer ran the review: its private key lives
-  only in the dedicated `crq` macOS user's home — outside an unprivileged agent's reach (see the
-  residuals below) — and every promotion outcome is re-derived there. An agent holding the
-  owner's token can no longer post a promotion-review success that the gate trusts.
-- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo) a root-capable
-  agent can reach the signer's key, so the signal is T1-proof (no overeager-agent forgery), not
-  yet T2-proof; and P1 (the owner's PAT becoming interactive-only) is what makes the repository
-  as a whole, not just the signal, agent-proof.
+- The gate accepts only the pinned creator identity; the owner's token alone cannot post a
+  trusted review status. The App key lives in the dedicated `crq` account's home on ceres,
+  the headless CachyOS signer host (registration record §Host). This identity filter does
+  not prove exclusive signer custody while agents can obtain root on either host.
+- Owner D10 owns the infrastructure hardening. Until the owner hardens both neptune and
+  ceres, root-capable agents can reach the key. This includes removing agent-reachable
+  passwordless sudo, ceres's root-equivalent `docker` access, and revisiting sshd password
+  authentication, plus restricting the owner's credentials to interactive use. D4 also
+  requires a dedicated restricted forced-command spool key; the spool transport must not
+  grant an agent a general shell or access to the signer key. These are outstanding
+  conditions, not evidence of owner approval or completed hardening.
 - The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
   authorized by a trusted bot success bound to the previous main, and corroborates it against its
   own spool records; anything else raises a loud alert. Only the newest of several promotions
@@ -87,30 +92,38 @@ for the review signal by the pinned reviewer-bot identity — creator type `Bot`
 
 ## Owner override
 
-The owner runs the `crq-override` tool, installed beside the signer and executed from the `crq`
-account's own login session (Fast User Switching at the login window — never `su`/`sudo -u` from
-an agent-reachable terminal). It verifies the target sha is a queue state beyond `main`, computes
-`main` itself, posts the status as `cq-promotion-reviewer[bot]`, and logs the override to the signer's
-audit log:
+The owner runs the `crq-override` tool — installed beside the signer in root-owned
+`/opt/cq-reviewer/` on ceres — from the owner's own machine,
+`ssh ceres`, then `sudo -u crq`. ceres is headless, so the macOS plan's login-window design
+became this intended procedure: the issuing session must not be routed through neptune.
+Its isolation remains conditional on the outstanding owner hardening below. The tool verifies
+the target sha is a queue state beyond `main`, computes `main` itself, posts the status as
+`cq-promotion-reviewer[bot]`, and logs the override to the signer's audit log:
 
 ```sh
-crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
+sudo -u crq /opt/cq-reviewer/crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
 ```
 
-An agent cannot produce this status through the documented paths: the key exists only in the
-`crq` user's home — out of an unprivileged agent's reach, though a root-capable agent could
-reach it until P0 lands (see the accepted limit). The gate logs the `override` prefix in its run
-summary.
+The gate logs the `override` prefix in its run summary.
+
+**Accepted limit (the override is not agent-proof today).** Neptune agents can reach
+`ctaylor@ceres` without a password, and ctaylor holds NOPASSWD sudo and root-equivalent
+`docker` access on ceres. A root-capable agent can reach the PEM and mint an override or
+another trusted status. The accepted inability to be agent-proof remains until owner D10
+hardens both neptune and ceres, restricts owner authentication to credentials agents cannot
+use, and D4 supplies a dedicated restricted forced-command spool key. A physical-touch
+credential alone does not close existing agent-reachable root or general-shell paths.
+The terminal procedure above is conditional; it is not a claim of agent-proof isolation.
 
 I4 still applies: an override skips the review, never the required checks.
 
-## When the crq host is offline
+## When the signer is offline
 
-Nothing posts a review, so nothing promotes. **Promotion waits; nothing fails red.** A gate run
-woken by sync's dispatch or by hand ends green with "awaiting promotion review". When the host
-returns, crq picks up from the last promotion: it cuts a batch if a trigger has fired. The
-override needs the same host (`crq-override` runs in the `crq` user's login session), so while
-the host is down there is no remote override path either.
+Nothing posts a review while ceres is down, so nothing promotes. **Promotion waits; nothing
+fails red.** A gate run woken by sync's dispatch or by hand ends green with "awaiting promotion
+review". When the host returns, crq picks up from the last promotion: it cuts a batch if a
+trigger has fired. The override needs the same host (`crq-override` runs on ceres under `crq`
+from the owner's own ssh), so while the host is down there is no remote override path either.
 
 ## What a red gate run means
 
@@ -142,6 +155,11 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   delta item, run in a detached checkout at `batch_sha`. The run counts only when the CLI exits
   successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
+- **Coverage (PR-A contract):** a completed dirty review (any critical/major finding)
+  invalidates clean coverage for that range and remains sticky. Clean internal deltas cannot
+  clear it; only a subsequent clean full review covering the blocked range restores coverage.
+  Failed, skipped or incomplete runs cannot clear the dirty record. Coverage is determined
+  by signer records, never an agent's judgment that findings were addressed.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
   key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `408c87f`):
@@ -149,8 +167,8 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
     (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
     extends with its own clean internal deltas) covered the whole range with zero critical/major
-    findings; `failure` when a completed review found any; `error` for a skipped, oversized,
-    secret-scan-blocked or otherwise failed run (the batch is re-cut or escalated, never
+    findings and no sticky dirty record; `failure` when a completed review found any; `error`
+    for a skipped, oversized, secret-scan-blocked or otherwise failed run (the batch is re-cut or escalated, never
     promoted)
   - `description` (140 characters at most) always carries `main=<base_sha>`, for example
     `reviewed main=<base_sha> crq#<id>`,
