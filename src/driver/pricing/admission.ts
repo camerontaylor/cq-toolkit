@@ -297,13 +297,21 @@ export function classifyProviderSignal(
       marker.markerHeader === undefined &&
       marker.errorClass !== 'quota' &&
       signal.retryAfterMs !== undefined;
-    const deferUntilMs = retryAfterTakesPrecedence
-      ? undefined
-      : resolution.kind === 'definite'
-        ? resolution.at
-        : resolution.kind === 'unresolved-blocking'
-          ? undefined
-          : observedReleaseMs(observations);
+    // And a non-quota rule derives NO release time from the quota observations
+    // at all, with or without a retry hint: `observedReleaseMs` reads unified
+    // quota-window resets, and a throttle that falls through to it inherits a
+    // balance/window boundary as its release time — possibly weeks away, and
+    // contradicting the `deferUntilMs` contract, which is a QUOTA retry time.
+    // A throttle's only release evidence is the vendor's Retry-After, which
+    // stays with the caller; only a `quota` rule consumes the observations.
+    const deferUntilMs =
+      retryAfterTakesPrecedence || marker.errorClass !== 'quota'
+        ? undefined
+        : resolution.kind === 'definite'
+          ? resolution.at
+          : resolution.kind === 'unresolved-blocking'
+            ? undefined
+            : observedReleaseMs(observations);
     return {
       errorClass: marker.errorClass,
       ...(deferUntilMs === undefined ? {} : { deferUntilMs }),
