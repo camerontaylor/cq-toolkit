@@ -20,6 +20,11 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "items": {
         "additionalProperties": false,
         "properties": {
+          "legacySignature": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
           "package": {
             "minLength": 1,
             "type": "string"
