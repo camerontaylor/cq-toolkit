@@ -48,7 +48,8 @@ a failed listing) exits 1. The review-loop entry additionally reports its
 sweep token usage (see "Budget caps" below): a `sweepUsage` JSON line on
 stdout, a small markdown table appended to `$GITHUB_STEP_SUMMARY` when set,
 and the same JSON written to `$SWEEP_USAGE_OUT` for the workflow's artifact
-upload.
+upload. The workflow uses the visible `${{ runner.temp }}/sweep-usage.json`
+path so the upload action does not exclude it as hidden; missing files warn.
 
 I2 acceptance normally requires a non-author review. When author and reviewer
 agents must share one GitHub account, set repository variable
@@ -94,22 +95,23 @@ adopter owns it by hand.
 
 ### The cron window
 
-- Rule: schedule automation only OUTSIDE your model provider's peak window —
-  express the off-peak COMPLEMENT as cron lines (this repo's shape: one cron
-  for the weekday off-peak hours, one for the weekend complement when the
-  peak is weekday-only), and keep the run step's fail-closed guard refusing
-  to initiate operations inside the peak, exiting 0 as an honest no-op for a
-  delayed fire.
-- Why: this repo's review-loop instantiation schedules any time except
-  06:00–10:00 UTC Monday–Friday (14:00–18:00 Asia/Singapore), the Z.AI GLM
-  peak-hour window where quota consumption multiplies ~3x. Its
-  merge-dispatch sibling still carries the older, narrower 15:00–01:00 UTC
-  instantiation of the same off-peak rule.
-- Enforcement: the two literal cron expressions committed in each workflow
-  (this repo's instantiations), plus — for a delayed fire that lands inside
-  the peak anyway — the peak guard in the review-loop run step (exit 0, the
-  honest no-op). Hand-replacing the window for an adopting provider is the
-  adopter's own act and nothing checks it — `manual:`.
+- Rule: schedule starts only OUTSIDE your model provider's peak window
+  **and the preceding run headroom**. Subtract the job timeout or documented
+  maximum run duration from the peak start. Align the cron expressions and
+  run-step guard to those bounds; refuse delayed or manual starts inside
+  them, exiting 0 as an honest no-op.
+- Why: this repo's review loop excludes the 06:00–10:00 UTC Monday–Friday
+  Z.ai GLM peak (14:00–18:00 Asia/Singapore, ~3x quota consumption).
+  Its documented ≤20-minute run reserves 20 minutes before 06:00, so starts
+  from **05:40 inclusive to 10:00 exclusive** are refused on weekdays.
+  The three crons are `*/15 0-4,10-23 * * 1-5`, `0,15,30 5 * * 1-5`, and
+  `*/15 * * * 0,6`: the final pre-peak weekday slot is 05:30, weekdays resume
+  at 10:00, and weekends run all day. The merge-dispatch sibling still
+  carries the older, narrower 15:00–01:00 UTC window and is out of scope.
+- Enforcement: the review-loop template's three literal cron expressions
+  plus its fail-closed UTC weekday/time guard enforce the same start
+  exclusion for scheduled, delayed, and manual fires. Adopters must change
+  provider peak, run headroom, cron, and guard together — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 
