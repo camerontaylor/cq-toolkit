@@ -40,14 +40,12 @@ jobs:
       matrix:
         profile: [blank, solo-maintainer]
     steps:
-      - name: Check scratch target and credential availability
+      - name: Check scratch target and dispatch ref
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           DISPATCH_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
-          CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
         run: |
           set -euo pipefail
           # Fail, not skip: a skipped matrix would look like a clean run.
@@ -60,21 +58,9 @@ jobs:
             echo 'refusing: target must be the dedicated cq-scratch-v11-adversarial repository'
             exit 1
           fi
-          if [[ -z "$GH_TOKEN" || -z "$CQ_ADVERSARIAL_SECOND_TOKEN" ]]; then
-            echo 'refusing: both scratch credentials are required'
-            exit 1
-          fi
-          first="$(gh api user --jq .id)"
-          second="$(GH_TOKEN="$CQ_ADVERSARIAL_SECOND_TOKEN" gh api user --jq .id)"
-          if [[ -z "$first" || -z "$second" || "$first" == "$second" ]]; then
-            echo 'refusing: scratch credentials must represent two distinct test identities'
-            exit 1
-          fi
-          actual="$(gh api "repos/$SCRATCH_REPOSITORY" --jq .full_name)"
-          if [[ "$actual" != "$SCRATCH_REPOSITORY" ]]; then
-            echo 'refusing: scratch repository lookup did not match the requested target'
-            exit 1
-          fi
+          # Credential presence, distinct identities and the scratch repository
+          # lookup are the runner's preflight: it records each failure as
+          # per-row BLOCKED evidence (exit 3) instead of leaving no artifact.
       - name: Check out trusted suite code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:

@@ -88,3 +88,20 @@ it('rejects an unsupported option such as --row instead of defaulting to every r
   expect(result.stderr).toContain('Unsupported option: --row');
   expect(result.stdout).toBe('');
 });
+
+it('leaves credential checks to the runner so a missing credential still yields BLOCKED evidence', () => {
+  // A credential guard before the runner would exit with no evidence file;
+  // the runner's preflight records the same failure per row (Codex P2, #247).
+  for (const path of [
+    'policy/templates/adversarial-suite.yml',
+    '.github/workflows/adversarial-suite.yml',
+  ]) {
+    const text = readFileSync(resolve(path), 'utf8');
+    expect(text, path).toContain('node scripts/adversarial-suite.mjs');
+    const runnerStep = text.indexOf('      - name: Apply and verify scratch profile');
+    expect(runnerStep, path).toBeGreaterThan(0);
+    expect(text.slice(text.indexOf('    steps:'), runnerStep), path).not.toMatch(
+      /GH_TOKEN|secrets\.|gh api/,
+    );
+  }
+});
