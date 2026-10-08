@@ -247,6 +247,7 @@ describe('acquireLock', () => {
     const old = new Date(Date.now() - MAX_HOLD_MS - 1_000).toISOString();
     const { got, killed, log } = await orphan({ childStartedAt: leaderAt }, null, {
       startedAt: old,
+      maxWaitMs: 60_000, // virtual wait emits the busy diagnostic before timing out
     });
     expect(killed).toEqual([]);
     expect(got.acquired).toBe(false);
