@@ -16,6 +16,8 @@ remote, and it is deliberately kept outside cq-toolkit.
 | `state/queue.json` | The queue and per-PR cycle records (gitignored). |
 | `state/status.md` / `status.json` | **The file to read**: queue table, in-flight work, cooldown, schedule, recent events. |
 | `state/events.jsonl` | Append-only event log. |
+| `status_summary.py` | Allow-listed fleet summary producer, using queue counters, outcomes and cached refs. |
+| `~/Library/Application Support/crq/summary.json` | Atomic 0600 dashboard summary; home-resident so launchd readers avoid external-volume TCC restrictions. |
 | `state/runs/<run>/` | Per-review files: `meta.json`, raw `review.ndjson`, `stderr.log`, `exit.json`, `classification.json`, `findings.md`, `secret-scan.json`, plus `address-*` files when an agent is spawned. |
 | `state/ledger/{merged,delta}-findings.md` | Ledger-only findings for owner review. |
 
@@ -26,6 +28,21 @@ branch. The worktree is removed once the review is harvested. The tooling never
 touches the main checkout or any agent's PR worktree.
 
 ## Tick (every 12 min, Paseo schedule)
+
+Every completed tick and status refresh also publishes `summary.json` under
+`~/Library/Application Support/crq/`. Schema v1 includes `generated_at`, the
+unchanged completed `last_tick`, queue/cooldown and schedule state, rolling-hour
+starts and cap, in-flight reviews, 24-hour completed/interrupted/error outcomes,
+pending counts by kind, promotion state, last promoted SHA/time, unresolved
+blocker counts and merges waiting from cached refs. It contains no paths,
+review transcripts, finding text or configuration values. Fleet reads only
+this file over SSH; it does not inspect crq's queue or clone.
+
+`python3 crq.py summary` refreshes only this summary (no tick, review, fetch or
+queue write). A refresh never advances `last_tick`. Failed publishing preserves
+the previous complete file; ticks record `summary_failed` and continue. Missing
+scheduler/ref probes remain `unknown`/null. Counters are observed at
+`generated_at`, so rolling windows advance at the normal 12-minute tick cadence.
 
 1. Take `state/tick.lock` (a non-blocking flock) and run `git fetch`.
 2. **Harvest.** For each finished review, classify the NDJSON:

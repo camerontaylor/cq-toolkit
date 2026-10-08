@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import status_summary
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -2215,9 +2216,11 @@ def write_status(q: Dict[str, Any]) -> None:
                     f"| {(i.get('pinned_base') or '')[:10]} | {last.get('outcome', '')} | {(why or '')[:110]} | {extra} |")
     sched = CONFIG.get("schedule_id")
     next_run = ""
+    schedule = {}
     if sched:
         try:
             s = paseo_json(["schedule", "inspect", sched])
+            schedule = s
             next_run = f"{s.get('status')} · next run {s.get('nextRunAt')} · last run {s.get('lastRunAt')}"
         except Exception as exc:
             next_run = f"(schedule inspect failed: {exc})"[:200]
@@ -2266,6 +2269,12 @@ def write_status(q: Dict[str, Any]) -> None:
                                                    "items": [{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "pinned_base", "last_error",
                                                               "wait_reason")} for i in items]}, indent=2) + "\n")
+    try:
+        status_summary.publish(ROOT, q, CONFIG, schedule)
+    except Exception as exc:
+        # Preserve the last complete summary; failed publishing must not stop
+        # reviews or manufacture fresh zero counters.
+        event("summary_failed", error=type(exc).__name__)
 
 
 # ----------------------------------------------------------- init / admin
@@ -2447,6 +2456,7 @@ def main() -> int:
     p.add_argument("--ignore-quiet", action="store_true", help="skip the quiet-window gate (active agents still block)")
     p.add_argument("--dry-run", action="store_true")
     sub.add_parser("status")
+    sub.add_parser("summary", help="refresh only the home-resident fleet summary; no ticks or reviews")
     p = sub.add_parser("synth")
     p.add_argument("pr", type=int)
     for a in ("pause", "resume", "promote"):
@@ -2486,6 +2496,16 @@ def main() -> int:
         q = load_queue()
         write_status(q)
         print((STATE / "status.md").read_text())
+    elif args.cmd == "summary":
+        q = load_queue()
+        schedule = {}
+        if CONFIG.get("schedule_id"):
+            try:
+                schedule = paseo_json(["schedule", "inspect", CONFIG["schedule_id"]])
+            except Exception:
+                pass
+        status_summary.publish(ROOT, q, CONFIG, schedule)
+        print(WATCHDOG_HOME / "summary.json")
     elif args.cmd == "synth":
         q = load_queue()
         fetch()
