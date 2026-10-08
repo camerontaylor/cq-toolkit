@@ -329,9 +329,12 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     // The engine received the playbook's rule SERIALIZED (JSON is a valid
     // YAML form) and the verifier command crossed the runner with the
     // op-boundary cwd default (the authored command omits cwd — see
-    // playbookOf — so the dispatch fills it with the analysis dir).
-    expect(h.run.scans).toHaveLength(1);
+    // playbookOf — so the dispatch fills it with the analysis dir). TWO
+    // scans per dispatch since the preflight (option D): the dry-run
+    // preflight first, then the apply — the same rule text both times.
+    expect(h.run.scans).toHaveLength(2);
     expect((h.run.scans[0] as { args: string[] }).args[3]).toBe(JSON.stringify(RULE));
+    expect((h.run.scans[1] as { args: string[] }).args[3]).toBe(JSON.stringify(RULE));
     expect(h.run.verifierCalls).toEqual([
       { command: 'verify-tool', args: ['check'], timeoutMs: 30_000, cwd: '/ws' },
     ]);
@@ -393,9 +396,11 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     // The engine scanned with the REGISTERED rule (the original pattern,
-    // serialized verbatim), not the mutated one.
-    expect(h.run.scans).toHaveLength(1);
+    // serialized verbatim), not the mutated one — on both scans of the
+    // dispatch (preflight, then apply).
+    expect(h.run.scans).toHaveLength(2);
     expect((h.run.scans[0] as { args: string[] }).args[3]).toBe(originalRuleJson);
+    expect((h.run.scans[1] as { args: string[] }).args[3]).toBe(originalRuleJson);
     // And the verifier command is the registered one.
     expect(h.run.verifierCalls).toEqual([
       { command: 'verify-tool', args: ['check'], timeoutMs: 30_000, cwd: '/ws' },
@@ -447,7 +452,10 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       targets: ['src/a.ts'],
     });
     expect(refused.status).toBe('needs-human');
-    expect(h.run.scans).toHaveLength(1); // no second scan happened
+    // The FIRST dispatch scanned twice (its preflight, then its apply); the
+    // quarantined re-dispatch scanned NOTHING — the refusal precedes the
+    // engine.
+    expect(h.run.scans).toHaveLength(2);
   });
 
   test('verifier INDETERMINATE (null exit): honest indeterminate, NO quarantine, edits restored, evidence rides detail', async () => {
@@ -488,7 +496,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     });
     expect(again.status).toBe('needs-human');
     expect(again.status === 'needs-human' ? again.reason : '').toContain('already consumed');
-    expect(h.run.scans).toHaveLength(1);
+    expect(h.run.scans).toHaveLength(2); // the first dispatch's preflight + apply; the replay scanned nothing
     // ...and WITH a fresh approval the retry runs and reaches the verifier
     // again — the playbook was never quarantined.
     const approved = harness(FIXTURE, null, 'timeout kill');
@@ -498,7 +506,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       targets: ['src/a.ts'],
     });
     expect(retried.status).toBe('indeterminate');
-    expect(approved.run.scans).toHaveLength(1);
+    expect(approved.run.scans).toHaveLength(2);
   });
 
   test('an engine collision fails the dispatch; the ledger is untouched (the playbook did not fail its verifier)', async () => {
@@ -547,6 +555,52 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     }
     expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(false);
     expect(h.store.backing.get('src/a.ts')).toBe(FIXTURE['src/a.ts']);
+  });
+
+  test('the preflight catches a scan fault BEFORE the spend: the dispatch fails with the token UNSPENT, and the SAME token then dispatches cleanly (the #258 owner ruling, option D)', async () => {
+    const h = harness(FIXTURE, 0);
+    const { authority, ledger } = approvedAuthority();
+    // The first ast-grep scan answers GARBAGE (unparsable, exit 0): the
+    // dry-run preflight refuses before the nonce is exercised, so only ONE
+    // scan runs — the apply and the verifier never do.
+    let scanMode: 'garbage' | 'healthy' = 'garbage';
+    const inner = h.run;
+    const flaky = Object.assign(
+      async (cmd: Parameters<RunCheck>[0]): Promise<RawCheckOutput> => {
+        if (cmd.command === 'ast-grep' && scanMode === 'garbage') {
+          return { stdout: 'not json at all', stderr: '', exitCode: 0 };
+        }
+        return inner(cmd);
+      },
+      { scans: [], verifierCalls: [] },
+    ) as Harness['run'];
+    const dispatch = makePlaybookDispatchOp({
+      playbooks: h.playbooks,
+      quarantine: h.quarantine,
+      run: flaky,
+      storeFor: () => h.store,
+      approval: authority,
+    });
+    const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
+    const refused = await dispatch(input);
+    // The engine-fault shape (`failed` — the playbook did not fail its
+    // verifier), naming the preflight and the UNSPENT nonce.
+    expect(refused.status).toBe('failed');
+    if (refused.status === 'failed') {
+      expect(refused.error).toContain('preflight');
+      expect(refused.error).toContain('UNSPENT');
+    }
+    expect(flaky.verifierCalls).toHaveLength(0);
+    expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(false);
+    expect(h.store.backing.get('src/a.ts')).toBe(FIXTURE['src/a.ts']);
+    // THE load-bearing assertion: the refused dispatch burned NOTHING, so
+    // the same authority — the same token for the same subject — dispatches
+    // cleanly once the scan is healthy.
+    expect(ledger.spent()).toBe(0);
+    scanMode = 'healthy';
+    const retried = await dispatch(input);
+    expect(retried.status).toBe('ok');
+    expect(ledger.spent()).toBe(1);
   });
 
   test('a containment fault fails closed before any subprocess runs', async () => {
@@ -648,12 +702,14 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     // in-flight one).
     releaseVerifier?.();
     const firstResult = await first;
-    // ONE scan for the whole pair, counted only now that both have settled:
-    // the duplicate's refusal resolves before #1 has necessarily reached its
-    // own scan (the approval/lock boundary puts real awaits between the two
-    // dispatches), so asserting "exactly one" at that earlier point would be
-    // measuring scheduling order, not the duplicate's behaviour.
-    expect(h.run.scans).toHaveLength(1);
+    // TWO scans for the whole pair — the in-flight dispatch's preflight and
+    // its apply — counted only now that both have settled: the duplicate's
+    // refusal resolves before #1 has necessarily reached its own scan (the
+    // approval/lock boundary puts real awaits between the two dispatches),
+    // so asserting exact counts at that earlier point would be measuring
+    // scheduling order, not the duplicate's behaviour. The DUPLICATE
+    // contributed neither: it was refused before the registry lookup.
+    expect(h.run.scans).toHaveLength(2);
     expect(firstResult.status).toBe('failed');
     if (firstResult.status === 'failed') {
       expect(dispatchEvidence(firstResult.error).quarantined).toBe(true);
@@ -665,7 +721,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     if (later.status === 'needs-human') {
       expect(later.reason).toContain('never re-dispatched automatically');
     }
-    expect(h.run.scans).toHaveLength(1);
+    expect(h.run.scans).toHaveLength(2);
   }, 15_000);
 
   test('DIFFERENT playbooks stay unserialized: B dispatches (engine runs) while A is in flight', async () => {
@@ -696,8 +752,10 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     const a = serialized(input); // in flight (its verifier will park)
     const b = serialized({ ...input, playbookId: 'pb-second' });
     // A window for B's engine to run — it must: different ids never block.
+    // FOUR scans at the window: each dispatch runs its preflight and its
+    // apply (2 × 2), both parked at their verifiers by the gate.
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(h.run.scans).toHaveLength(2);
+    expect(h.run.scans).toHaveLength(4);
     releaseVerifier?.();
     expect((await a).status).toBe('ok');
     expect((await b).status).toBe('ok');
