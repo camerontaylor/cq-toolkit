@@ -6,6 +6,7 @@ import {
   type ConfigKey,
   providerKeysFor,
 } from './registry.js';
+import { LANE_IDS } from '../driver/served-model.js';
 import { isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 
 export type ConfigProfile = 'conservative' | 'solo-maintainer';
@@ -137,7 +138,9 @@ function validForeignBaseUrl(value: string): boolean {
   }
 }
 
-function credentialUrl(value: string | undefined): boolean {
+function credentialUrl(raw: string | undefined): boolean {
+  // URL consumers commonly trim, so screen the trimmed form.
+  const value = raw?.trim();
   if (!value || !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
   try {
     const parsed = new URL(value);
@@ -166,17 +169,26 @@ function unsafePassthrough(
   );
 }
 
+const pathVariable = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
 function expandPath(
   value: string,
   env: Readonly<Record<string, string | undefined>>,
   key: ConfigKey,
 ): string {
-  const expanded = value.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (_match, name: string) => {
-    const replacement = nonblank(env[name]);
-    if (!replacement || !isAbsolute(replacement))
-      throw new Error(`${key.env}: unresolved absolute path variable`);
-    return replacement;
-  });
+  // `$NAME` and `${NAME}` are separate complete forms; any other `$` or brace
+  // syntax (`${A:-b}`, `${A`, `$A}`) is rejected rather than partially expanded.
+  if (/[${}]/.test(value.replace(pathVariable, '')))
+    throw new Error(`${key.env}: expected an expanded absolute path`);
+  const expanded = value.replace(
+    pathVariable,
+    (_match, braced: string | undefined, bare: string | undefined) => {
+      const replacement = nonblank(env[(braced ?? bare)!]);
+      if (!replacement || !isAbsolute(replacement))
+        throw new Error(`${key.env}: unresolved absolute path variable`);
+      return replacement;
+    },
+  );
   if (expanded.includes('$') || !isAbsolute(expanded))
     throw new Error(`${key.env}: expected an expanded absolute path`);
   return resolvePath(expanded);
@@ -277,7 +289,8 @@ function parse(
         .trim();
       const valid =
         key.type === 'bindings'
-          ? /^(?:\*|[a-z0-9-]+)\/(?:\*|[a-z0-9-]+)$/.test(name) && /^[a-z][a-z0-9-]*$/.test(value)
+          ? /^(?:\*|[a-z0-9-]+)\/(?:\*|[a-z0-9-]+)$/.test(name) &&
+            (LANE_IDS as readonly string[]).includes(value)
           : key.env.endsWith('_WINDOW_FRACTIONS')
             ? /^[a-z0-9*-]+$/.test(name) && /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)
             : /^[a-z0-9*-]+$/.test(name) && /^[a-z0-9*-]+$/.test(value);
@@ -393,7 +406,8 @@ function parse(
       !Array.isArray(argv) ||
       argv.length === 0 ||
       argv.some((part) => typeof part !== 'string' || part.length === 0) ||
-      (typeof argv[0] === 'string' && /[\\/]/.test(argv[0]) && !isAbsolute(argv[0]))
+      // A drive prefix (`C:claude.exe`) is drive-relative on Windows, so it is path-like too.
+      (typeof argv[0] === 'string' && /[\\/]|^[A-Za-z]:/.test(argv[0]) && !isAbsolute(argv[0]))
     )
       throw new Error(`${key.env}: expected non-empty string argv`);
     return argv as string[];
@@ -402,32 +416,45 @@ function parse(
   return value;
 }
 
+function isDefaultSentinel(key: ConfigKey, raw: unknown): boolean {
+  return (
+    (key.env === 'CQ_DRIVER_SUBPROCESS_ROUTING' && raw === '<default-routing-table>') ||
+    (key.env === 'CQ_DRIVER_ACP_COMMAND' && raw === '<endpoint-argv>')
+  );
+}
+
+/** Parse and expand one layer's value; workspace evidence is checked once, on the final value. */
 function resolveValue(
   key: ConfigKey,
   raw: string | boolean | number | readonly string[] | Readonly<Record<string, string>> | null,
   env: Readonly<Record<string, string | undefined>>,
-  options: ResolveConfigOptions,
   allowDefaultSentinel = false,
 ): ConfigValue {
-  if (
-    allowDefaultSentinel &&
-    ((key.env === 'CQ_DRIVER_SUBPROCESS_ROUTING' && raw === '<default-routing-table>') ||
-      (key.env === 'CQ_DRIVER_ACP_COMMAND' && raw === '<endpoint-argv>'))
-  )
-    return raw;
-  let value = parse(key, raw);
+  if (allowDefaultSentinel && isDefaultSentinel(key, raw)) return raw;
+  const value = parse(key, raw);
   if (
     key.outsideWorkspace &&
     key.type === 'string' &&
     typeof value === 'string' &&
     value.startsWith('custom:')
-  ) {
-    const path = expandPath(value.slice('custom:'.length), env, key);
+  )
+    return `custom:${expandPath(value.slice('custom:'.length), env, key)}`;
+  if (key.type === 'path' && typeof value === 'string') return expandPath(value, env, key);
+  return value;
+}
+
+/** Canonicalize the effective value of an outside-workspace key against caller evidence. */
+function verifyWorkspacePath(
+  key: ConfigKey,
+  value: ConfigValue,
+  options: ResolveConfigOptions,
+): ConfigValue {
+  if (!key.outsideWorkspace || typeof value !== 'string' || isDefaultSentinel(key, value))
+    return value;
+  if (key.type === 'path') return assertOutsideWorkspace(key, value, options) ?? value;
+  if (key.type === 'string' && value.startsWith('custom:')) {
+    const path = value.slice('custom:'.length);
     return `custom:${assertOutsideWorkspace(key, path, options) ?? path}`;
-  }
-  if (key.type === 'path' && typeof value === 'string') {
-    value = expandPath(value, env, key);
-    value = assertOutsideWorkspace(key, value, options) ?? value;
   }
   return value;
 }
@@ -663,26 +690,43 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
 
   const entries: Record<string, ResolvedConfigEntry> = {};
   for (const key of registry) {
-    const defaultValue =
-      key.blank === null
-        ? key.type === 'list'
+    const raw = nonblank(env[key.env]);
+    const callRaw =
+      options.values?.[key.id] ??
+      optInValues.get(key.id) ??
+      (optIns.has(key.id) && key.type === 'bool' ? true : undefined);
+    const overridden =
+      raw !== undefined ||
+      callRaw !== undefined ||
+      (profile === 'solo-maintainer' && key.solo !== undefined);
+    let defaultValue: ConfigValue;
+    if (key.blank === null) {
+      defaultValue =
+        key.type === 'list'
           ? []
           : key.type === 'map' || key.type === 'bindings' || key.type === 'aliases'
             ? {}
-            : null
-        : resolveValue(key, key.blank, env, options, true);
+            : null;
+    } else {
+      try {
+        defaultValue = resolveValue(key, key.blank, env, true);
+      } catch (error) {
+        // A path default whose variable (XDG_STATE_HOME, TMPDIR) is unset only
+        // matters when it is the effective value; an override replaces it.
+        if (key.type !== 'path' || !overridden) throw error;
+        defaultValue = key.blank;
+      }
+    }
     const seeded =
       profile === 'solo-maintainer' && key.solo !== undefined
-        ? resolveValue(key, key.solo, env, options)
+        ? resolveValue(key, key.solo, env)
         : undefined;
     let current = seeded === undefined ? defaultValue : overlay(key, defaultValue, seeded);
     let layer: ConfigLayer = seeded === undefined ? 'default' : 'profile';
     let sourceEnv: string | undefined = seeded === undefined ? undefined : 'CQ_PROFILE';
-    const raw = nonblank(env[key.env]);
     if (raw !== undefined) {
       if (key.reserved) throw new Error(`${key.env}: reserved; not yet honoured`);
-      const projectValue =
-        key.id === 'automation.token' ? null : resolveValue(key, raw, env, options);
+      const projectValue = key.id === 'automation.token' ? null : resolveValue(key, raw, env);
       if (key.id === 'merge.trustedAssociations' && !isSubset(projectValue, defaultValue))
         throw new Error(`${key.env}: project values may only narrow the fixed association set`);
       if (key.order === 'union' && !isSubset(defaultValue, projectValue)) {
@@ -699,13 +743,9 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
       layer = 'env';
       sourceEnv = key.env;
     }
-    const callRaw =
-      options.values?.[key.id] ??
-      optInValues.get(key.id) ??
-      (optIns.has(key.id) && key.type === 'bool' ? true : undefined);
     if (callRaw !== undefined) {
       if (!key.perCall) throw new Error(`${key.id}: has no per-call layer`);
-      const next = resolveValue(key, callRaw, env, options);
+      const next = resolveValue(key, callRaw, env);
       if (
         key.id === 'run.envPassthrough' &&
         isStringArray(next) &&
@@ -722,7 +762,7 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
     }
     const relaxed = !tighter(key, current, defaultValue);
     entries[key.id] = Object.freeze({
-      value: deepFreeze(current),
+      value: deepFreeze(verifyWorkspacePath(key, current, options)),
       layer,
       ...(sourceEnv ? { env: sourceEnv } : {}),
       relaxed,
@@ -756,10 +796,14 @@ export function resolveConfig(options: ResolveConfigOptions = {}): ResolvedConfi
         throw new Error(`${id}: unsupported value '${value}'`);
       if (id === 'budget.breakLock' && !value) throw new Error(`${id}: run id is required`);
     }
+    // Every call-only key is a governance relaxation unless it is inert.
+    const inert = value === false || (isStringArray(value) && value.length === 0);
+    if (!inert && !optIns.has(id))
+      throw new Error(`${id}: call-only relaxation requires explicit opt-in`);
     entries[id] = Object.freeze({
       value: deepFreeze(value),
       layer: 'call',
-      relaxed: true,
+      relaxed: !inert,
       changed: true,
     });
   }

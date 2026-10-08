@@ -359,9 +359,10 @@ describe('pure configuration resolution', () => {
 
     it('applies the registered list grammar to call-only lists', () => {
       const quarantine = (value: string) =>
-        resolve({ values: { 'budget.releaseQuarantine': value } }).entries[
-          'budget.releaseQuarantine'
-        ]?.value;
+        resolve({
+          values: { 'budget.releaseQuarantine': value },
+          optIn: ['budget.releaseQuarantine'],
+        }).entries['budget.releaseQuarantine']?.value;
       expect(quarantine('none')).toEqual([]);
       expect(quarantine('run-b,run-a')).toEqual(['run-a', 'run-b']);
       expect(() => quarantine('run-a,,run-b')).toThrow(/empty list item/);
@@ -447,6 +448,106 @@ describe('pure configuration resolution', () => {
     it('treats reap-on-settle as a tightening of session retention', () => {
       const config = resolve({ values: { 'driver.sessionRetention': 'reap-on-settle' } });
       expect(entryValue('driver.sessionRetention', config)).toBe('reap-on-settle');
+    });
+  });
+
+  describe('conductor pass: review findings', () => {
+    // F1 (predecessor CLI cycle 1): a provider key must be matched by its
+    // underscore-separated suffix, and the derived provider id must not keep a
+    // trailing separator.
+    it('requires an underscore-separated provider key suffix (F1)', () => {
+      for (const name of [
+        'CQ_PROVIDER_DEEPSEEKRPM',
+        'CQ_PROVIDER_DEEPSEEK__RPM',
+        'CQ_PROVIDER_DEEPSEEK_RPMX',
+      ]) {
+        expect(() => resolve({ env: { [name]: '12' } })).toThrow(/unknown configuration variable/);
+      }
+      expect(() =>
+        resolve({ env: { CQ_PROVIDER_ACMEPROFILE: 'custom:/opt/cq/acme.json' } }),
+      ).toThrow(/unknown configuration variable/);
+      expect(() =>
+        resolve({ env: { CQ_PROVIDER_ACME__PROFILE: 'custom:/opt/cq/acme.json' } }),
+      ).toThrow(/unknown configuration variable/);
+      const custom = resolve({
+        env: { CQ_PROVIDER_ACME_PROFILE: 'custom:/opt/cq/acme.json', CQ_PROVIDER_ACME_RPM: '7' },
+      });
+      expect(entryValue('provider.acme.rpm', custom)).toBe(7);
+      expect(Object.keys(custom.entries).some((id) => id.startsWith('provider.acme-'))).toBe(false);
+    });
+
+    it('checks workspace evidence against the effective path only', () => {
+      const ledger = '/var/lib/cq/approvals.ndjson';
+      const sessionsDir = '/var/lib/cq/sessions';
+      // Neither XDG_STATE_HOME nor TMPDIR is set: explicit overrides must still resolve.
+      const config = resolveConfig({
+        env: { CQ_APPROVAL_LEDGER: ledger, CQ_DRIVER_SESSIONS_DIR: sessionsDir },
+        workspaceRootRealpath: root,
+        verifiedRealpaths: {
+          CQ_APPROVAL_LEDGER: { input: ledger, realpath: ledger },
+          CQ_DRIVER_SESSIONS_DIR: { input: sessionsDir, realpath: sessionsDir },
+        },
+      });
+      expect(entryValue('approval.ledger', config)).toBe(ledger);
+      expect(config.entries['approval.ledger']?.changed).toBe(true);
+      expect(entryValue('driver.sessionsDir', config)).toBe(sessionsDir);
+      // A per-call sessions dir that differs from the default is verified on its own evidence.
+      const perCall = resolve({
+        values: { 'driver.sessionsDir': sessionsDir },
+        verifiedRealpaths: {
+          CQ_DRIVER_SESSIONS_DIR: { input: sessionsDir, realpath: sessionsDir },
+        },
+      });
+      expect(entryValue('driver.sessionsDir', perCall)).toBe(sessionsDir);
+      // Without an override the unset default variable still fails closed.
+      expect(() => resolveConfig({ env: { TMPDIR: '/tmp' }, workspaceRootRealpath: root })).toThrow(
+        /CQ_APPROVAL_LEDGER: unresolved absolute path variable/,
+      );
+    });
+
+    it('rejects unbalanced or unsupported path-variable syntax', () => {
+      for (const value of ['${TMPDIR:-/var/tmp}/cq', '${TMPDIR/cq', '$TMPDIR}/cq']) {
+        expect(() => resolve({ env: { CQ_JOURNAL_DIR: value } })).toThrow(
+          /expected an expanded absolute path/,
+        );
+      }
+      expect(entryValue('journal.dir', resolve({ env: { CQ_JOURNAL_DIR: '${TMPDIR}/cq' } }))).toBe(
+        '/tmp/cq',
+      );
+    });
+
+    it('treats a drive-prefixed executable as path-like', () => {
+      expect(() => resolve({ env: { CQ_DRIVER_SUBPROCESS_COMMAND: '["C:claude.exe"]' } })).toThrow(
+        /argv/,
+      );
+    });
+
+    it('requires an explicit opt-in for call-only relaxations', () => {
+      for (const id of ['budget.raiseCap', 'budget.ungovernedOverGoverned']) {
+        expect(() => resolve({ values: { [id]: true } })).toThrow(/requires explicit opt-in/);
+        expect(resolve({ values: { [id]: true }, optIn: [id] }).entries[id]?.relaxed).toBe(true);
+        expect(resolve({ values: { [id]: false } }).entries[id]?.relaxed).toBe(false);
+      }
+      expect(() => resolve({ values: { 'budget.breakLock': 'run-a' } })).toThrow(
+        /requires explicit opt-in/,
+      );
+    });
+
+    it('screens trimmed passthrough values for credential URLs', () => {
+      expect(() =>
+        resolve({
+          env: {
+            CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT',
+            SAFE_ENDPOINT: ' https://user:pass@example.test',
+          },
+        }),
+      ).toThrow(/cannot be passed through/);
+    });
+
+    it('rejects driver bindings that name an unknown lane', () => {
+      expect(() => resolve({ env: { CQ_DRIVER_BINDINGS: '*/zai:ai-skd' } })).toThrow(
+        /invalid map token/,
+      );
     });
   });
 });

@@ -23,7 +23,10 @@ known only when its `PROFILE` value declares `custom:<absolute-path>`. Secret
 keys are held as presence only, foreign credential names are held as
 `set`, and `CQ_APPROVAL_KEY*` plus the reserved sandbox proxy key fail closed.
 Call-only governance inputs are represented separately and have no env
-mirror.
+mirror; each is a relaxation, so any value other than `false` or an empty
+list requires its exact opt-in. Outside-workspace paths are checked against
+caller-verified evidence once, on the effective value, so an override does not
+need the built-in default's variables (`XDG_STATE_HOME`, `TMPDIR`) to be set.
 
 | Key                      | Built-in     | solo-maintainer | Per-call id          | Policy direction               |
 | ------------------------ | ------------ | --------------- | -------------------- | ------------------------------ |
