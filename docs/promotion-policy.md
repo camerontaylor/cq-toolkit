@@ -20,7 +20,9 @@ checks to finish. The **base** is `main` at cut time. Only one promotion is open
 
 ## What gets reviewed
 
-One CodeRabbit CLI review of `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Promotion review covers `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
+Clean coverage comes from a clean full review or signer-recorded clean internal deltas
+extending clean full coverage, only while no dirty taint exists. See the coverage rule below.
 crq gives a `promotion` item **absolute priority for the next start slot** (crq allows at most 5
 starts per hour). It does not pre-empt a running review.
 
@@ -33,10 +35,11 @@ the owner's registration record, `app-registration-session-20261004.md` @ `408c8
 
 - A critical or major finding blocks. The signer posts `failure` and the batch waits.
 - **Minor** findings go to the crq ledger and never block.
-- A blocking finding is cleared only by a fix landing in `merge-queue` followed by a clean **full
-  signer review** of `main..<new tip>`: success always means a clean signer-recorded review
-  covering the whole range, never a judgment that findings were "addressed". Rejecting a false
-  positive is a human decision and goes through an owner override.
+- A dirty batch cannot be cleared by a same-byte rerun, even a clean full rerun. A blocking
+  finding requires a fix landing in `merge-queue`, a post-fix new batch, and a fresh clean
+  **full signer review** of `main..<new tip>` completed after the latest dirty result.
+  Clean internal deltas cannot clear dirty taint. Rejecting a false positive is a human
+  decision and goes through an owner override.
 
 ## What promotes
 
@@ -155,21 +158,21 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   delta item, run in a detached checkout at `batch_sha`. The run counts only when the CLI exits
   successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
-- **Coverage (PR-A contract):** a completed dirty review (any critical/major finding)
-  invalidates clean coverage for that range and remains sticky. Clean internal deltas cannot
-  clear it; only a subsequent clean full review covering the blocked range restores coverage.
-  Failed, skipped or incomplete runs cannot clear the dirty record. Coverage is determined
-  by signer records, never an agent's judgment that findings were addressed.
+- **Coverage (PR-A contract):** success requires signer-recorded clean full coverage or
+  clean internal deltas extending it, only absent dirty taint. A completed dirty review
+  (any critical/major finding) invalidates clean coverage and stays sticky for that batch.
+  A same-byte rerun cannot clear it. After a fix, a new batch requires a fresh clean full
+  review covering the whole range after the latest dirty result; internal deltas cannot
+  satisfy this recovery requirement. Failed, skipped or incomplete runs cannot clear taint.
+  Coverage is determined by signer records, never an agent's judgment of addressed findings.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
   key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `408c87f`):
   - `context`: `crq/promotion-review`
-  - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
-    (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
-    extends with its own clean internal deltas) covered the whole range with zero critical/major
-    findings and no sticky dirty record; `failure` when a completed review found any; `error`
-    for a skipped, oversized, secret-scan-blocked or otherwise failed run (the batch is re-cut or escalated, never
-    promoted)
+  - `state`: `pending` while reviewing; `success` only with clean whole-range coverage
+    under the sticky coverage rule above; `failure` when a completed review found any
+    critical/major finding; `error` for a skipped, oversized, secret-scan-blocked or otherwise
+    failed run (the batch is re-cut or escalated, never promoted)
   - `description` (140 characters at most) always carries `main=<base_sha>`, for example
     `reviewed main=<base_sha> crq#<id>`,
     `blocked: 1 critical/2 major main=<base_sha> crq#<id>`, or
