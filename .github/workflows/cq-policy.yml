@@ -8,7 +8,8 @@
 # judges it (RS-4 T-2/T-8). Everything that decides comes from the trust ref
 # (`github.sha` here, the default-branch tip):
 #   - the verifier code: the toolkit built from the trust checkout with
-#     `npm ci --ignore-scripts` (never the head's dist/ or node_modules);
+#     `pnpm install --frozen-lockfile --ignore-scripts` (never the head's
+#     dist/ or node_modules);
 #   - the protected-path lists, the ratchet definition set and the policy
 #     file, read by `gates.policyDiff` AT THE TRUST REF;
 #   - the posture: `vars.CQ_MERGE_PROTECTED_PATHS`, a repository variable
@@ -27,13 +28,17 @@
 #   - `resolve` verifies the triggering run (workflow path, event, repository
 #     id — fork runs are refused) and resolves the subject from `head_sha`,
 #     never `head_branch`; a PR subject's PR and base come from the
-#     commit→PR API.
+#     commit→PR API. No open same-repo PR into merge-queue/main with that
+#     head (superseded, closed, merged or another base) is NOTHING TO
+#     JUDGE: a notice, no verdict, `judge` skipped, a green run.
 #   - `judge` builds the trusted toolkit, fetches the subject, the base and
 #     (when present) `cq-state` as objects with a step-scoped read-only
 #     credential, fetches the timeline label events, runs `gates.policyDiff`
 #     and posts `cq/policy`. The run report — including every field of the
 #     `cq-override` label record it checked — is the check-run summary and
-#     the step summary.
+#     the step summary. A fail or needs-human verdict is a RED CHECK RUN,
+#     not a red job (cq-accept's rule): the job fails only when the
+#     verifier crashed or the post failed.
 #
 # EXPAND (ADR-0004 D-H.2; W1.10 Decision 6): `cq/policy` is NOT a required
 # check yet. `judge` runs in environment `cq-verdict` and posts with a
@@ -65,6 +70,12 @@ permissions: {}
 concurrency:
   group: cq-policy-${{ github.event.workflow_run.id || inputs.signal_run_id }}
   cancel-in-progress: false
+
+# pnpm-workspace.yaml's global virtual store is a local-worktree speedup
+# only: CI installs a conventional per-project node_modules, so no step
+# inherits pnpm's NODE_PATH/NODE_OPTIONS resolve hook for shared stores.
+env:
+  PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
   resolve:
@@ -124,18 +135,64 @@ jobs:
               # (ADR-0004 D-C.2). Exactly one open same-repo PR into
               # merge-queue or main must carry the subject as its head:
               # the label record is per PR, so an ambiguous PR is refused.
-              matches="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
-                --jq "[.[] | select(.state == \"open\"
-                   and .head.sha == \"${subject}\"
-                   and .head.repo.id == ${REPO_ID}
-                   and (.base.ref == \"merge-queue\"
-                     or .base.ref == \"main\"))
-                   | {number, base: .base.ref}]")"
+              # Every page, slurped into one array; an API error fails the
+              # step (assignment under `set -e`, `pipefail`).
+              list_pulls() {
+                gh api --paginate \
+                  "repos/${REPO}/commits/${subject}/pulls?per_page=100" \
+                  | jq -s 'add // []'
+              }
+              match_pulls() {
+                jq -c --arg sha "$subject" --argjson repo "$REPO_ID" \
+                  '[.[] | select(.state == "open"
+                     and .head.sha == $sha
+                     and .head.repo.id == $repo
+                     and (.base.ref == "merge-queue"
+                       or .base.ref == "main"))
+                     | {number, base: .base.ref}]' <<<"$pulls"
+              }
+              pulls="$(list_pulls)"
+              matches="$(match_pulls)"
               count="$(jq 'length' <<<"$matches")"
-              [ "$count" = 1 ] || {
-                echo "refusing: ${count} open same-repo PRs"
-                echo "into merge-queue/main have head ${subject}"
-                exit 1; }
+              if [ "$count" = 0 ]; then
+                # The commit→PR association can lag a push, and nothing
+                # re-runs this verdict: look once more before skipping.
+                sleep "${CQ_ASSOC_RETRY_SECONDS:-20}"
+                pulls="$(list_pulls)"
+                matches="$(match_pulls)"
+                count="$(jq 'length' <<<"$matches")"
+              fi
+              case "$count" in
+                0)
+                  # NOTHING TO JUDGE, not a refusal (cq-accept's rule): the
+                  # PR has moved past this head (superseded), is closed or
+                  # merged, or targets another base (a stacked PR). No
+                  # verdict is posted, `judge` is skipped and the run stays
+                  # green. A current head gets its own cq-signal run and
+                  # verdict; the gate recomputes policy itself. An empty
+                  # association even after the retry is reported as
+                  # unconfirmed, not as a superseded or closed PR.
+                  carriers="$(jq -r --arg sha "$subject" \
+                    --argjson repo "$REPO_ID" '
+                    [.[] | select(.head.repo.id == $repo)
+                     | "#\(.number) \(.state) into \(.base.ref)"
+                       + (if .head.sha == $sha then ""
+                          else " (head moved to \(.head.sha[0:12]))" end)]
+                    | join("; ")' <<<"$pulls")"
+                  if [ -z "$carriers" ]; then
+                    msg="nothing to judge: commit→PR association unconfirmed: no same-repo PR lists ${subject} (looked twice)"
+                  else
+                    msg="nothing to judge: no open same-repo PR into merge-queue/main has head ${subject} (same-repo PRs containing it: ${carriers})"
+                  fi
+                  echo "::notice title=cq-policy::${msg}"
+                  echo "$msg" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+                  exit 0;;
+                1) ;;
+                *)
+                  echo "refusing: ${count} open same-repo PRs"
+                  echo "into merge-queue/main have head ${subject}"
+                  exit 1;;
+              esac
               pr="$(jq -r '.[0].number' <<<"$matches")"
               base="$(jq -r '.[0].base' <<<"$matches")"
               [[ "$pr" =~ ^[0-9]+$ ]] || {
@@ -160,6 +217,8 @@ jobs:
   judge:
     name: judge
     needs: resolve
+    # An empty subject is resolve's "nothing to judge" (no verdict owed).
+    if: needs.resolve.outputs.subject != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The verdict signer's environment (Decision 6): its only secret is the
@@ -201,6 +260,11 @@ jobs:
           # The object fetch below scopes its own credential to that step;
           # nothing persists into the trusted build or the verifier.
           persist-credentials: false
+      - name: Set up pnpm (version from package.json packageManager)
+        # v6.1.0, immutable commit pin (repo policy)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: trust/package.json
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
         # v5.0.0, immutable commit pin (repo policy)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -210,8 +274,8 @@ jobs:
       - name: Install and build the trusted toolkit
         working-directory: trust
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
       - name: Fetch the subject, base and cq-state objects (no checkout)
         id: objects
         env:
@@ -382,5 +446,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           gh api -X POST "repos/${REPO}/check-runs" \
             --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
-          jq -e '.conclusion == "success"' \
-            "${RUNNER_TEMP}/check-run.json" >/dev/null
+          # A fail or needs-human verdict is a RED CHECK RUN, not a red job
+          # (cq-accept's rule): cq/policy carries it. The job fails only
+          # when the verifier crashed (no ok result) or the post failed.
+          if ! jq -e '.status == "ok"' "${RUNNER_TEMP}/verdict.json" \
+            >/dev/null; then
+            echo 'policy verifier crashed: see the cq/policy check run'
+            exit 1
+          fi

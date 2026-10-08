@@ -2,7 +2,7 @@
 //
 // Opt-in only: runs when CQ_LIVE_CLI=1, against the REAL `claude` CLI on
 // PATH and a real provider, through the BUILT package (`dist/index.js` —
-// run `npm run build` first). Using dist is deliberate: it is the one path
+// run `pnpm run build` first). Using dist is deliberate: it is the one path
 // that exercises the production launch spec (`process.execPath` +
 // `dist/harness/mcp/bin.js`), which the source-mode unit tests stub.
 // CI never runs it (no CLI, no key); the recorded results live in
@@ -11,7 +11,7 @@
 // ISOLATION: run under a throwaway HOME so no ambient settings, MCP
 // servers or connectors can leak in (the closed surface must hold on its
 // own, but the leg should not depend on the operator's config either):
-//   HOME=/tmp/cq-live-home CQ_LIVE_CLI=1 ZAI_API_KEY=… npx vitest run test/driver/harness-live.test.ts
+//   HOME=/tmp/cq-live-home CQ_LIVE_CLI=1 ZAI_API_KEY=… pnpm exec vitest run test/driver/harness-live.test.ts
 // The route is the shipped `zai` endpoint (glm-4.5-air): a real route env
 // (ANTHROPIC_AUTH_TOKEN) reaches the CLI, so the server's env scrub is
 // exercised for real. Override the model with CQ_LIVE_MODEL.
@@ -56,7 +56,7 @@ interface LiveDriverModule {
 
 async function loadDist(): Promise<LiveDriverModule> {
   if (!existsSync(DIST_INDEX)) {
-    throw new Error('live leg needs the built package: run `npm run build` first');
+    throw new Error('live leg needs the built package: run `pnpm run build` first');
   }
   return (await import(DIST_INDEX)) as LiveDriverModule;
 }

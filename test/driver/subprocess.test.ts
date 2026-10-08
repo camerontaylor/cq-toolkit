@@ -51,6 +51,8 @@ import {
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import type { ManagedChild, SpawnOptions } from '../../src/driver/subprocess/process.js';
+import { fakeManagedSpawn } from '../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import {
   RoutingTableSchema,
@@ -148,43 +150,6 @@ function conformanceRoutingTable(): RoutingTable {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Directive → FAKE_AGENT_* env (the conformance script contract, scripted
-// into the fixture). The spawn override injects these per driver instance —
-// process.env is never mutated per-run (vitest runs tests sequentially
-// within a file and `fileParallelism: false` serializes files; per-driver
-// env keeps runs isolated).
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_AGENT_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_AGENT_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_AGENT_MODE: 'tool-then-reply',
-        FAKE_AGENT_TOOL: directive.tool,
-        FAKE_AGENT_INPUT: JSON.stringify(directive.input),
-        FAKE_AGENT_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: directive.text };
-    // No output-invalid legs ship yet (seam v2 goal F): until then the fake
-    // CLI answers the directive with a prose reply that is NOT the JSON
-    // object a structured-output schema demands.
-    case 'reply-invalid-json':
-      return {
-        FAKE_AGENT_MODE: 'ok',
-        FAKE_AGENT_REPLY: 'this reply is prose, not the required JSON object',
-      };
-    case undefined:
-    default:
-      return { FAKE_AGENT_MODE: 'ok' };
-  }
-}
-
 /** The --allowedTools value of a built argv (the fixture's permission gate). */
 function allowedToolsArg(args: readonly string[]): string {
   const index = args.indexOf('--allowedTools');
@@ -259,11 +224,143 @@ function conformanceHarnessConfig(
   };
 }
 
-/** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
+let fakeManagedSessionCounter = 0;
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tool-leg directive → FAKE_AGENT_* env for the REAL fixture CLI. Tool legs keep the
+ * real process: in harness mode the harness MCP server the fixture spawns
+ * executes the tool and records the session, a boundary an in-process fake
+ * cannot honestly stand in for.
+ */
+function toolLegEnv(
+  directive: Extract<ModelDirective, { kind: 'tool-then-reply' }>,
+): Record<string, string> {
+  return {
+    FAKE_AGENT_MODE: 'tool-then-reply',
+    FAKE_AGENT_TOOL: directive.tool,
+    FAKE_AGENT_INPUT: JSON.stringify(directive.input),
+    FAKE_AGENT_REPLY: directive.reply,
+  };
+}
+
+/**
+ * In-process stand-in for the stream-json CLI on the non-tool conformance
+ * legs. It reports the init surface the fail-closed assertion demands:
+ * exactly the driver's `--allowedTools` plus `StructuredOutput` under
+ * `--json-schema`, and the `cq-harness` server connected when configured.
+ */
+function fakeManagedScript(
+  opts: { cwd: string; args: readonly string[] },
+  directive: ModelDirective | undefined,
+): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
+  const modelIndex = opts.args.indexOf('--model');
+  const model =
+    modelIndex === -1 ? 'conformance-1' : (opts.args[modelIndex + 1] ?? 'conformance-1');
+  const allowedIndex = opts.args.indexOf('--allowedTools');
+  const allowed = (allowedIndex === -1 ? '' : (opts.args[allowedIndex + 1] ?? ''))
+    .split(' ')
+    .filter(Boolean);
+  const harnessMode = opts.args.includes('--tools');
+  const hasSchema = opts.args.includes('--json-schema');
+  const sessionId = `fake-cli-${fakeManagedSessionCounter++}`;
+  const usage = {
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 3,
+  };
+  return (frame, peer) => {
+    if (frame['method'] !== 'stdin') return;
+    if (directive?.kind === 'block-until-abort') return;
+    if (directive?.kind === 'fail') {
+      // The fixture CLI's fail persona: the vendor quota-with-reset stderr
+      // (conformance leg s classifies it `quota` and extracts resetAt).
+      peer.stderr("You've hit your use limit · resets 1h30m");
+      peer.finish(1);
+      return;
+    }
+    peer.send({
+      type: 'system',
+      subtype: 'init',
+      session_id: sessionId,
+      model,
+      ...(harnessMode
+        ? {
+            tools: [...(hasSchema ? ['StructuredOutput'] : []), ...allowed],
+            mcp_servers: opts.args.includes('--mcp-config')
+              ? [{ name: 'cq-harness', status: 'connected', source: 'dynamic' }]
+              : [],
+          }
+        : {}),
+    });
+    const text =
+      directive?.kind === 'reply'
+        ? directive.text
+        : directive?.kind === 'reply-invalid-json'
+          ? 'this reply is prose, not the required JSON object'
+          : 'ok';
+    peer.send({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    // A schema'd run answers through the CLI's StructuredOutput tool with the
+    // scripted reply's JSON; a non-JSON reply offers none, so the driver
+    // reports output-invalid.
+    const structured = hasSchema ? parseJson(text) : undefined;
+    if (structured !== undefined) {
+      peer.send({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'fake-structured',
+              name: 'StructuredOutput',
+              input: structured,
+            },
+          ],
+        },
+      });
+      peer.send({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'fake-structured',
+              is_error: false,
+              content: 'Structured output provided successfully',
+            },
+          ],
+        },
+      });
+    }
+    peer.send({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: sessionId,
+      model,
+      usage,
+      ...(harnessMode ? { permission_denials: [] } : {}),
+      ...(structured !== undefined ? { structured_output: structured } : {}),
+    });
+    peer.finish();
+  };
+}
+
+/** Fresh SubprocessDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
-  const calls: SpawnCall[] = [];
+  const directive = spec.directive;
+  const toolLeg = directive?.kind === 'tool-then-reply';
   return new SubprocessDriver({
-    ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
+    ...baseOptions(spec.scratchDir, toolLeg ? toolLegEnv(directive) : {}, []),
+    ...(toolLeg ? {} : { spawn: fakeManagedSpawn((opts) => fakeManagedScript(opts, directive)) }),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -697,7 +794,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect((await readFile(sidecarPath, 'utf8')).trim()).toBe(cliId);
       await noSidecarInWorkspace();
     });
-  });
+    // Real CLI resume argv plus the sidecar filesystem contract; this budget
+    // covers two child process startups, not an in-process decision.
+  }, 15_000);
 
   test('deny-tool: the CLI permission denial maps to the frozen {tool, reason} shape under the HARNESS name', async () => {
     await withScratch(async (scratchDir) => {
@@ -1292,6 +1391,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       }
       expect(dead).toBe(true);
     });
+    // Structural OS-signal-ladder budget: SIGTERM grace, then SIGKILL, then
+    // descendant teardown are each subject to host-load swings beyond the
+    // five-second process-death poll above, after a PID-readiness poll of
+    // up to 20s: the budget stays above both sequential windows.
   }, 30_000);
 
   test('stdout retention is a bounded TAIL: droppedBytes counted, every line still observed (#19-10)', async () => {

@@ -1,3 +1,7 @@
+// Leaf-scoped contract: `pnpm fix <owned-file...>` runs safe Oxlint fixes
+// and Oxfmt on the named files ONLY. It launches no full static gate and no
+// tests — deleted-only inputs and clean trees included. The full static gate
+// is its own explicit command (`pnpm run check:static`).
 import { lintArgs, ownedFiles, run } from './lib/owned-files.mjs';
 
 let lintStatus = 0;
@@ -14,8 +18,7 @@ try {
     const format = run('node_modules/oxfmt/bin/oxfmt', files);
     if (format !== 0) throw new Error(`Oxfmt exited ${format}`);
   }
-  // A dependent outside the owned set can break: always check the package.
-  process.exitCode = run('scripts/ratchet-typecheck.mjs', []) || lintStatus;
+  process.exitCode = lintStatus;
 } catch (error) {
   console.error(`fix: ${error.message}`);
   process.exitCode = 1;
