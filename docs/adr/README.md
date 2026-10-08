@@ -174,8 +174,8 @@ equivalent pnpm ones. D-E's adopter install (`npm ci --ignore-scripts`, then
 §2.5 and §2.8 ship the lane classes and `runDriverConformance` from a
 `./driver` package subpath. The package does not export that subpath yet:
 [`package.json`](../../package.json) `exports` has only `.`, so an import from
-`@camerontaylor/cq-toolkit/driver` fails. The driver barrel exists in source
-([`src/driver/index.ts`](../../src/driver/index.ts)) and is not a package
-entry point. Until the subpath is added, the root export (`.`) provides the
-four lane classes, and `runDriverConformance` is not available to package
-consumers.
+`@camerontaylor/cq-toolkit/driver` fails. The driver barrel
+([`src/driver/index.ts`](../../src/driver/index.ts)), including the four lane
+classes and `runDriverConformance`, is re-exported from the package root, so
+consumers import them from `@camerontaylor/cq-toolkit` until the subpath is
+added.
