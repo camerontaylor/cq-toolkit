@@ -129,7 +129,9 @@ const signalChild = (signal) => {
   if (child === null || childDone || child.pid === undefined) return;
   try {
     if (POSIX) process.kill(-child.pid, signal);
-    else child.kill(signal);
+    // Windows has no process groups and child.kill() ends only the leader:
+    // end the whole tree (cmd/pnpm/tsc, vitest's workers) while it is alive.
+    else spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
   } catch {
     // the group is gone already
   }

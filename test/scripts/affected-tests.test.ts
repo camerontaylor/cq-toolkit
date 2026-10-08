@@ -129,6 +129,35 @@ describe('selectAffected', () => {
     ]);
   });
 
+  it('maps workflow and template edits to the adversarial suites that scan them', () => {
+    const pool = [
+      ...allTests,
+      'test/adversarial/a14-privileged-workflow.test.ts',
+      'test/scripts/adversarial-suite.test.ts',
+    ];
+    const pick = (path: string) => selectAffected({ changed: [path], allTests: pool, related: [] });
+    for (const path of ['.github/workflows/adversarial-suite.yml', 'policy/templates/gate.yml']) {
+      expect(pick(path).files).toEqual(
+        expect.arrayContaining([
+          'test/adversarial/a14-privileged-workflow.test.ts',
+          'test/scripts/adversarial-suite.test.ts',
+        ]),
+      );
+    }
+  });
+
+  it('adds the process-inventory scanner to every edited test/ suite', () => {
+    const pool = [...allTests, 'test/driver/process-inventory.test.ts', 'lint/rules/r.test.ts'];
+    const pick = (path: string) =>
+      selectAffected({ changed: [path], allTests: pool, related: [] }).files;
+    expect(pick('test/kernel/b.test.ts')).toEqual([
+      'test/driver/process-inventory.test.ts',
+      'test/kernel/b.test.ts',
+    ]);
+    // The inventory scans test/**/*.test.ts only.
+    expect(pick('lint/rules/r.test.ts')).toEqual(['lint/rules/r.test.ts']);
+  });
+
   it('selects nothing for inert prose edits without falling back', () => {
     expect(
       selectAffected({ changed: ['README.md', 'docs/guide.md'], allTests, related: [] }),

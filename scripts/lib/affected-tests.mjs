@@ -62,7 +62,15 @@ export const NON_IMPORT_MAP = [
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/i1\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
-  [/^policy\/templates\//, [/^test\/workflows\//, /^test\/scripts\//, /^test\/ops\/gates\//]],
+  [
+    /^policy\/templates\//,
+    [
+      /^test\/workflows\//,
+      /^test\/scripts\//,
+      /^test\/ops\/gates\//,
+      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
+    ],
+  ],
   [/^policy\/self-host\//, [/^test\/workflows\//, /^test\/selfhost\//]],
   [/^docs\/ops\//, [/^test\/scripts\//]],
   [/^baselines\//, [/^test\/(scripts|workflows)\//, /^test\/ops\/(ratchet|gates)\//]],
@@ -90,7 +98,8 @@ export const NON_IMPORT_MAP = [
       /^test\/workflows\//,
       /^test\/ops\/gates\/(workflowScan|policyDiff|protectedPaths)\.test\.ts$/,
       /^test\/ops\/ratchet\/definitions\.test\.ts$/,
-      /^test\/scripts\/github-settings\.test\.ts$/,
+      /^test\/scripts\/(github-settings|adversarial-suite)\.test\.ts$/,
+      /^test\/adversarial\/a14-privileged-workflow\.test\.ts$/,
     ],
   ],
   // Dependency and compiler inputs affect every test project.
@@ -99,6 +108,10 @@ export const NON_IMPORT_MAP = [
     [/^(test|lint)\//],
   ],
 ];
+
+// Suites that scan the test files themselves, so a test edit has no import
+// edge to them: the process inventory reads every test/**/*.test.ts.
+const TEST_FILE_READERS = [/^test\/driver\/process-inventory\.test\.ts$/];
 
 /** Paths whose edits no test reads: prose and repo metadata. */
 export const INERT = [
@@ -138,6 +151,10 @@ export function selectAffected({ changed, allTests, related, missing = [] }) {
   for (const path of changed) {
     if (isTest(path)) {
       if (allTests.includes(path)) selected.add(path);
+      if (/^test\/.*\.test\.ts$/.test(path)) {
+        for (const test of allTests)
+          if (TEST_FILE_READERS.some((t) => t.test(test))) selected.add(test);
+      }
       continue;
     }
     const rows = NON_IMPORT_MAP.filter(([pattern]) => pattern.test(path));
