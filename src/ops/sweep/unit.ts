@@ -288,8 +288,11 @@ export interface SweepUnitBindings {
    */
   gitTimeoutMs?: number;
   /**
-   * Budget caps for the fixer invocation, ENFORCED by the op: at least one
-   * of maxTokens/maxUsd/wallClockMs; maxAttempts is refused (internal/fixerBudget.ts).
+   * Budget for the fixer invocation (internal/fixerBudget.ts): wallClockMs
+   * is REQUIRED — the enforced spend bound, the only cap that stops a fixer
+   * in flight; maxTokens/maxUsd are optional post-run landing gates (a
+   * breach refuses to stage the work), not spend limits; maxAttempts is
+   * refused.
    */
   budget: Budget;
   /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). */
@@ -567,10 +570,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     let denial: string | undefined;
     let errorClass: string | undefined;
     let sessionId: string | undefined;
-    // The op ENFORCES every accepted budget cap (internal/fixerBudget.ts):
-    // the wallClockMs deadline rides the run's signal, and the usage/cost
-    // caps are checked on the settled result — lane-neutral, so a cap is
-    // never accepted and then ignored by a lane that does not enforce it.
+    // The fixer budget, lane-neutral (internal/fixerBudget.ts): the required
+    // wallClockMs deadline rides the run's signal — the in-flight spend
+    // bound — and the optional maxTokens/maxUsd landing gates are checked on
+    // the settled result, so over-budget work is never staged or landed.
     let budgetBreach: string | undefined;
     const deadline = startFixerDeadline(currentJobContext()?.signal, bindings.budget.wallClockMs);
     try {
@@ -633,8 +636,8 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     } finally {
       deadline.dispose();
     }
-    // A breached cap fails the unit before any of the fixer's work is
-    // staged — whatever stop reason the lane reported (an elapsed deadline
+    // A breached cap (the deadline, or a landing gate) fails the unit
+    // before any of the fixer's work is staged — whatever stop reason the lane reported (an elapsed deadline
     // surfaces as 'aborted', which must not read as a resumable cancel).
     if (budgetBreach !== undefined) return budgetTripResult(unit, budgetBreach, sessionId);
     // A RESOLVED governed cancellation — the governor's signal fired and a
@@ -1512,7 +1515,7 @@ export interface SweepUnitDriverConfig {
   model: string;
   /** Tool policy; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
-  /** Budget caps, enforced by the op: at least one of maxTokens/maxUsd/wallClockMs; maxAttempts is refused. */
+  /** Fixer budget: wallClockMs required (the in-flight spend bound); maxTokens/maxUsd optional post-run landing gates; maxAttempts refused. */
   budget: Budget;
 }
 

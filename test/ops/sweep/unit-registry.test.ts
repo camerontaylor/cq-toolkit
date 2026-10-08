@@ -74,7 +74,7 @@ const VALID: SweepUnitDispatchInput = {
   driver: {
     provider: 'cq-e2e',
     model: 'sweep-fake',
-    budget: { maxUsd: 1 },
+    budget: { wallClockMs: 600_000, maxUsd: 1 },
   },
   check: {
     adapter: 'tsc-lines',
@@ -109,13 +109,18 @@ describe('sweep.unit registry entry (jSKJF)', () => {
         driver: { ...VALID.driver!, budget: {} },
       }).success,
     ).toBe(false);
-    // FAIL CLOSED (PR #246 review): only caps the unit op enforces are
-    // admitted. maxAttempts — alone or beside an enforced cap — is refused
-    // (each rescue redispatch is its own job), as are unusable values.
+    // FAIL CLOSED (PR #246 review): wallClockMs — the only cap enforced
+    // while the fixer runs — is REQUIRED, so a post-run landing gate alone
+    // ({maxTokens} or {maxUsd}) is refused. maxAttempts — alone or beside
+    // the deadline — is refused (each rescue redispatch is its own job), as
+    // are unusable values.
     for (const budget of [
+      { maxTokens: 1000 },
+      { maxUsd: 0.5 },
+      { maxTokens: 1000, maxUsd: 0.5 },
       { maxAttempts: 3 },
-      { maxTokens: 1000, maxAttempts: 3 },
-      { maxTokens: 0 },
+      { wallClockMs: 600_000, maxAttempts: 3 },
+      { wallClockMs: 600_000, maxTokens: 0 },
       { wallClockMs: 1.5 },
       { wallClockMs: 2 ** 31 },
     ]) {
@@ -124,7 +129,11 @@ describe('sweep.unit registry entry (jSKJF)', () => {
           .success,
       ).toBe(false);
     }
-    for (const budget of [{ maxTokens: 1000 }, { wallClockMs: 600_000 }, { maxUsd: 0.5 }]) {
+    for (const budget of [
+      { wallClockMs: 600_000 },
+      { wallClockMs: 600_000, maxTokens: 1000 },
+      { wallClockMs: 600_000, maxUsd: 0.5 },
+    ]) {
       expect(
         SweepUnitDispatchInputSchema.safeParse({ ...VALID, driver: { ...VALID.driver!, budget } })
           .success,
@@ -243,6 +252,12 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(() =>
       bindingsFromDispatch({ ...VALID, driver: { ...VALID.driver!, budget: {} } }, fakeFactory),
     ).toThrow(/driver.budget is required/);
+    expect(() =>
+      bindingsFromDispatch(
+        { ...VALID, driver: { ...VALID.driver!, budget: { maxTokens: 1000 } } },
+        fakeFactory,
+      ),
+    ).toThrow(/wallClockMs is required — it is the only cap enforced while the fixer runs/);
     expect(() =>
       bindingsFromDispatch(
         { ...VALID, driver: { ...VALID.driver!, budget: { maxAttempts: 2 } } },

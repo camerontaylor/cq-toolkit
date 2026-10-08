@@ -184,7 +184,7 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
     checkCommand: (unit, cwd) => ({ command: 'vitest', args: [unit.package], cwd }),
     driver: world.driverFactory(),
     modelSpec: { model: 'fake', provider: 'test' },
-    budget: { maxTokens: 1_000_000 },
+    budget: { wallClockMs: 600_000, maxTokens: 1_000_000 },
     prompt: () => 'fix it',
     git: world.gitFactory(),
     pushBranch: async (repoRoot, branch) => {
@@ -353,9 +353,10 @@ describe('sweep unit in-process scenarios', () => {
   });
 });
 
-// PR #246 review (Codex P1): every budget cap sweep.unit ACCEPTS is a cap it
-// ENFORCES, lane-neutrally — a breach fails the unit [INFRA] before anything
-// is staged, committed, or pushed.
+// PR #246 review (Codex P1): the fixer budget, lane-neutrally. wallClockMs is
+// REQUIRED — the enforced in-flight spend bound; maxTokens/maxUsd are post-run
+// landing gates. Any breach fails the unit [INFRA] before anything is staged,
+// committed, or pushed.
 describe('sweep unit fixer budget enforcement', () => {
   const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
@@ -388,11 +389,11 @@ describe('sweep unit fixer budget enforcement', () => {
     expect(world.pushCalls).toEqual([]);
   }
 
-  test('maxTokens: a settled run at or above the cap trips, whatever the lane reported', async () => {
+  test('maxTokens landing gate: a settled run at or above the cap is refused, whatever the lane reported', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
       const result = await runUnit(world, {
-        budget: { maxTokens: 1000 },
+        budget: { wallClockMs: 600_000, maxTokens: 1000 },
         driver: settled({ input: 600, output: 400, cacheRead: 0, cacheWrite: 0 }),
       });
       expectBudgetTrip(world, result, /token total 1000 reached maxTokens 1000/);
@@ -401,11 +402,11 @@ describe('sweep unit fixer budget enforcement', () => {
     }
   });
 
-  test('maxUsd: unpriced usage trips (DD-9 fail closed); a priced run is bound by the cap', async () => {
+  test('maxUsd landing gate: unpriced usage is refused (DD-9 fail closed); priced work lands only within the cap', async () => {
     const unpriced = await makeWorld([{ failing: true }, { failing: false }]);
     try {
       const result = await runUnit(unpriced, {
-        budget: { maxUsd: 5 },
+        budget: { wallClockMs: 600_000, maxUsd: 5 },
         driver: settled({ input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }),
       });
       expectBudgetTrip(unpriced, result, /unpriced usage .* under maxUsd 5/);
@@ -415,7 +416,7 @@ describe('sweep unit fixer budget enforcement', () => {
     const over = await makeWorld([{ failing: true }, { failing: false }]);
     try {
       const result = await runUnit(over, {
-        budget: { maxUsd: 5 },
+        budget: { wallClockMs: 600_000, maxUsd: 5 },
         driver: settled({ input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, 6),
       });
       expectBudgetTrip(over, result, /cost 6 USD exceeded maxUsd 5/);
@@ -425,7 +426,7 @@ describe('sweep unit fixer budget enforcement', () => {
     const within = await makeWorld([{ failing: true }, { failing: false }]);
     try {
       const result = await runUnit(within, {
-        budget: { maxUsd: 5 },
+        budget: { wallClockMs: 600_000, maxUsd: 5 },
         driver: settled({ input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, 4),
       });
       expect(result.status).toBe('ok');
@@ -470,14 +471,20 @@ describe('sweep unit fixer budget enforcement', () => {
     }
   });
 
-  test('maxAttempts is refused at construction — the op cannot enforce it per invocation', async () => {
+  test('a budget without wallClockMs, or with maxAttempts, is refused at construction', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
+      // A landing gate alone bounds no in-flight spend.
+      for (const budget of [{ maxTokens: 1000 }, { maxUsd: 5 }]) {
+        expect(() => makeSweepUnitOp(bindingsOf(world, { budget }))).toThrow(
+          /wallClockMs is required/,
+        );
+      }
       expect(() => makeSweepUnitOp(bindingsOf(world, { budget: { maxAttempts: 2 } }))).toThrow(
         /maxAttempts is not enforceable/,
       );
       expect(() =>
-        makeSweepUnitOp(bindingsOf(world, { budget: { maxTokens: 10, maxAttempts: 2 } })),
+        makeSweepUnitOp(bindingsOf(world, { budget: { wallClockMs: 600_000, maxAttempts: 2 } })),
       ).toThrow(/maxAttempts is not enforceable/);
     } finally {
       await rm(world.root, { recursive: true, force: true });

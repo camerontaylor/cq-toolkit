@@ -276,9 +276,10 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
         provider: z.string().min(1),
         model: z.string().min(1),
         toolPolicy: ToolPolicySchema.exactOptional(),
-        // Fail closed (PR #246 review): only caps sweep.unit ENFORCES are
-        // admitted — maxTokens/maxUsd/wallClockMs, at least one; maxAttempts
-        // is refused (the rescue lane owns attempts). See fixerBudget.ts.
+        // Fail closed (PR #246 review): wallClockMs is REQUIRED — the only
+        // cap sweep.unit enforces while the fixer runs; maxTokens/maxUsd are
+        // optional post-run landing gates; maxAttempts is refused (the
+        // rescue lane owns attempts). See internal/fixerBudget.ts.
         budget: BudgetSchema.superRefine((budget, ctx) => {
           const fault = fixerBudgetFault(budget);
           if (fault !== null) ctx.addIssue({ code: 'custom', message: `driver.budget: ${fault}` });

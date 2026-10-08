@@ -311,7 +311,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     const driver = {
       provider: 'cq-e2e',
       model: 'sweep-fake',
-      budget: { maxUsd: 1 },
+      budget: { wallClockMs: 600_000, maxUsd: 1 },
     };
     const check = {
       adapter: 'tsc-lines' as const,
@@ -575,15 +575,19 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           }),
           driver,
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-          budget: { maxUsd: 1 },
+          budget: { wallClockMs: 600_000, maxUsd: 1 },
           prompt: () => 'capture me',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };
         const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
         // The SDK requires a cap before the unit can run.
-        expect(() => makeSweepUnitOp({ ...base, budget: {} })).toThrow(/nonempty budget/);
+        expect(() => makeSweepUnitOp({ ...base, budget: {} })).toThrow(/wallClockMs is required/);
         expect(() => makeSweepUnitOp({ ...base, budget: undefined } as never)).toThrow(
-          /nonempty budget/,
+          /wallClockMs is required/,
+        );
+        // A post-run landing gate alone is not a spend bound (PR #246 review).
+        expect(() => makeSweepUnitOp({ ...base, budget: { maxTokens: 1000 } })).toThrow(
+          /wallClockMs is required/,
         );
         // DEFAULT: workspace-write.
         const refused = await makeSweepUnitOp(base)(unit);
@@ -591,7 +595,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
         expect(captured[0]?.sandboxPolicy).toEqual({
           level: 'workspace-write',
         });
-        expect(captured[0]?.budget).toEqual({ maxUsd: 1 });
+        expect(captured[0]?.budget).toEqual({ wallClockMs: 600_000, maxUsd: 1 });
         // WORKSPACE BINDING (ADR-0002 §2.4): the worktree rides the
         // invocation as its workspace — no pre-created session record, no
         // sessionRef — and the invocation carries the bindings' (resolved)
@@ -655,7 +659,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
             }),
           },
           modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
-          budget: { maxUsd: 1 },
+          budget: { wallClockMs: 600_000, maxUsd: 1 },
           prompt: () => 'cancelled mid-run',
           git: async () => ({ code: 0, stdout: '', stderr: '' }),
         };

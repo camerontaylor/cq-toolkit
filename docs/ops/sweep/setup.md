@@ -28,12 +28,17 @@ A Windows timeout kills only the direct child, not lifecycle-script
 descendants (the harness's documented v1 process-group limitation).
 
 The default sandbox request is `workspace-write`; the worker binary must
-enforce it. Dispatched fixers require at least one `driver.budget` cap:
-`maxTokens`, `maxUsd`, or `wallClockMs`. The unit op enforces every cap it
-accepts, whichever lane the driver factory resolves. `wallClockMs` aborts
-the fixer when it elapses. `maxTokens` and `maxUsd` are checked against the
-settled run's usage and cost. A breach fails the unit as `[INFRA]` before
-anything is staged. Under `maxUsd`, a run that reports usage but no cost (an
-unpriced model) is a breach: a USD cap cannot bind it. `maxAttempts` is
-rejected, because each rescue redispatch is a separate job; bound attempts
-with the plan's `rescue.maxRedispatch`.
+enforce it. Every dispatched fixer budget must set `driver.budget.wallClockMs`.
+It is the enforced spend bound: the unit op aborts the fixer when it elapses,
+whichever lane the driver factory resolves, and it is the only cap that stops
+a fixer while it runs. `maxTokens` and `maxUsd` are optional post-run landing
+gates, not spend limits. They are checked against the settled run's usage and
+cost, and a breach refuses to stage, commit, or push the work, but a runaway
+fixer spends up to the wall clock first. Under `maxUsd`, a run that reports
+usage but no cost (an unpriced model) is a breach: a USD cap cannot bind it.
+Any breach fails the unit as `[INFRA]` before anything is staged.
+`maxAttempts` is rejected, because each rescue redispatch is a separate job;
+bound attempts with the plan's `rescue.maxRedispatch`. Fixer spend is not yet
+reported to the run governor, so run-level caps do not see it (follow-up:
+report it through `currentJobContext().reportResult`, as `review.fixItem`
+does).

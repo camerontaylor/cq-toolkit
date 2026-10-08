@@ -1,20 +1,24 @@
-// Fixer budget enforcement for sweep.unit — every cap the op ACCEPTS is a
-// cap the op ENFORCES, whatever lane the driver factory resolves.
+// Fixer budget for sweep.unit — what the op accepts, and what each cap
+// honestly does, whatever lane the driver factory resolves.
 //
 // The lanes are uneven: the subprocess lane checks Budget.maxTokens only
 // after the run, leaves maxUsd to caller-side accounting, and ignores
 // wallClockMs (the governor's ladder owns wall clock — but the governor's
-// limits are RUN-level, not this per-invocation budget). So the op enforces
+// limits are RUN-level, not this per-invocation budget). So the op applies
 // the per-invocation caps itself, lane-neutrally:
-//   - wallClockMs: a deadline signal composed with the governed signal and
-//     handed to driver.run — a conforming driver settles 'aborted' (or
-//     throws) when it fires, and the op reports the budget trip instead of
-//     a cancellation;
-//   - maxTokens: the run's usage total (the lanes' own fold) at or above
-//     the cap is a budget trip;
-//   - maxUsd: a present costUSD above the cap is a budget trip, and real
-//     usage with NO costUSD is one too — an unpriced model cannot be bound
-//     by a USD cap (DD-9: fail loud, never fail open; the governor's rule).
+//   - wallClockMs — the ENFORCED SPEND BOUND, and REQUIRED: a deadline
+//     signal composed with the governed signal and handed to driver.run; a
+//     conforming driver settles 'aborted' (or throws) when it fires, and the
+//     op reports the budget trip instead of a cancellation. It is the only
+//     cap that stops a fixer IN FLIGHT.
+//   - maxTokens / maxUsd — optional POST-RUN LANDING GATES, not spend
+//     limits: checked on the settled result, a breach refuses to stage,
+//     commit or push the work. maxTokens trips at a usage total at or above
+//     the cap; maxUsd trips on a costUSD above the cap and on real usage
+//     with NO costUSD (an unpriced model cannot be bound by a USD cap —
+//     DD-9: fail loud, never fail open; the governor's rule). They become
+//     spend limits only once a lane enforces them in flight, or once fixer
+//     spend is reported to the run governor (follow-up).
 // maxAttempts is REFUSED: one sweep.unit invocation dispatches the fixer
 // once, and attempts are owned by the plan's rescue lane (each redispatch
 // is its own job, so no per-invocation attempt ordinal counts them). A cap
@@ -33,17 +37,27 @@ function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
+/** Why a fixer budget lacks the in-flight bound — the one cap that stops a running fixer. */
+const WALL_CLOCK_REQUIRED =
+  'budget.wallClockMs is required — it is the only cap enforced while the fixer runs (the in-flight spend bound); maxTokens and maxUsd are optional post-run landing gates that refuse to stage over-budget work, not spend limits';
+
 /**
- * Why `budget` cannot bind a sweep fixer, or null when it can: at least one
- * enforced cap (maxTokens, maxUsd, wallClockMs), each a usable value, and no
- * maxAttempts.
+ * Why `budget` cannot bind a sweep fixer, or null when it can: a usable
+ * wallClockMs (required — the enforced spend bound), usable optional
+ * maxTokens/maxUsd landing gates, and no maxAttempts.
  */
 export function fixerBudgetFault(budget: Budget | undefined): string | null {
-  if (budget === undefined) {
-    return 'a nonempty budget is required: set at least one cap (maxTokens, maxUsd or wallClockMs)';
-  }
+  if (budget === undefined) return WALL_CLOCK_REQUIRED;
   if (budget.maxAttempts !== undefined) {
-    return 'budget.maxAttempts is not enforceable per fixer invocation — attempts belong to the rescue lane (rescue.maxRedispatch); use maxTokens, maxUsd or wallClockMs';
+    return 'budget.maxAttempts is not enforceable per fixer invocation — attempts belong to the rescue lane (rescue.maxRedispatch); bound the fixer with wallClockMs';
+  }
+  if (budget.wallClockMs === undefined) return WALL_CLOCK_REQUIRED;
+  if (
+    !Number.isInteger(budget.wallClockMs) ||
+    budget.wallClockMs < 1 ||
+    budget.wallClockMs > MAX_TIMER_MS
+  ) {
+    return `budget.wallClockMs must be an integer in [1, ${String(MAX_TIMER_MS)}], got ${String(budget.wallClockMs)}`;
   }
   if (
     budget.maxTokens !== undefined &&
@@ -53,21 +67,6 @@ export function fixerBudgetFault(budget: Budget | undefined): string | null {
   }
   if (budget.maxUsd !== undefined && (!Number.isFinite(budget.maxUsd) || budget.maxUsd < 0)) {
     return `budget.maxUsd must be a finite number >= 0, got ${String(budget.maxUsd)}`;
-  }
-  if (
-    budget.wallClockMs !== undefined &&
-    (!Number.isInteger(budget.wallClockMs) ||
-      budget.wallClockMs < 1 ||
-      budget.wallClockMs > MAX_TIMER_MS)
-  ) {
-    return `budget.wallClockMs must be an integer in [1, ${String(MAX_TIMER_MS)}], got ${String(budget.wallClockMs)}`;
-  }
-  if (
-    budget.maxTokens === undefined &&
-    budget.maxUsd === undefined &&
-    budget.wallClockMs === undefined
-  ) {
-    return 'a nonempty budget is required: set at least one cap (maxTokens, maxUsd or wallClockMs)';
   }
   return null;
 }
@@ -105,7 +104,7 @@ export function startFixerDeadline(
   };
 }
 
-/** The usage/cost cap the settled run breached, or undefined when within budget. */
+/** The post-run landing gate (maxTokens/maxUsd) the settled run breached, or undefined. */
 export function fixerBudgetBreach(
   budget: Budget,
   worker: { usage: Usage; costUSD?: number },

@@ -172,7 +172,7 @@ describe('served-model real construction paths', () => {
           driver: {
             model: 'construction-model',
             provider: 'construction',
-            budget: { maxUsd: 1 },
+            budget: { wallClockMs: 600_000, maxUsd: 1 },
           },
           check: { adapter: 'tsc-lines', command: 'unused', args: [] },
         },
