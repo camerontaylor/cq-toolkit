@@ -39,20 +39,22 @@ import type { HarnessSurface } from '../surface.js';
 import { HARNESS_MCP_SERVER_NAME } from '../surface.js';
 
 /**
- * MCP protocol revisions this server speaks, oldest → newest (the schema
- * directory's revisions as of 2026-09-25). The tools subset used here is
- * unchanged across all of them.
+ * MCP protocol revisions this server speaks, oldest → newest. The tools
+ * subset used here is unchanged across all of them. `2026-07-28` is
+ * deliberately absent: that revision removes the `initialize` handshake and
+ * requires `server/discover`, which this initialize-based server does not
+ * implement. A modern client's `server/discover` probe gets `-32601`, and the
+ * spec has the client fall back to `initialize` on that error.
  */
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
   '2024-11-05',
   '2025-03-26',
   '2025-06-18',
   '2025-11-25',
-  '2026-07-28',
 ]);
 
 /** The newest supported revision — answered when the client asks for an unknown one. */
-export const LATEST_PROTOCOL_VERSION = '2026-07-28';
+export const LATEST_PROTOCOL_VERSION = '2025-11-25';
 
 /**
  * The server version in `serverInfo`. Kept in lockstep with the root
