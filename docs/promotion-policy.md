@@ -113,6 +113,16 @@ An agent cannot produce this status through the documented paths: the key exists
 agent could reach it until P0 lands (see the accepted limit). The gate logs the `override`
 prefix in its run summary.
 
+**Accepted limit (the override is not agent-proof today).** The procedure above holds only
+while ceres's ssh and sudo are closed. Today neptune agents reach `ctaylor@ceres` without a
+password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on ceres — so a
+root-capable agent can become root there, reach the PEM, and mint an override or any other
+status. Same shape as #269's accepted forgeable-status limit: accepted for the rollout, and
+closed only when BOTH (1) ceres P0 removes ctaylor's NOPASSWD and `docker` membership and
+closes sshd password auth, and (2) the owner's ceres credential is one agents cannot use
+(e.g. a FIDO `sk-ssh-ed25519` key requiring physical touch, never a copyable plain key).
+Until then the override — like every path in this policy — is T1-grade, not T2-grade.
+
 I4 still applies: an override skips the review, never the required checks.
 
 ## When the signer is offline
