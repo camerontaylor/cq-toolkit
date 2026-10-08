@@ -10,9 +10,8 @@
 # the static gate. Changes here change what the `static` required check
 # runs. `.github/` is a protected path, so an edit here always raises a D11
 # `protected-path` finding (needs a human under the default `human` posture).
-# Until policyDiff counts local actions used by a required-check job as that
-# check's producer (follow-up PR), the `diff-check` posture passes such an
-# edit where the same change inline in ci.yml would need a human.
+# An edit here also raises a D11 `required-check` (producer) finding through
+# policyDiff's local-action tracing, which needs a human under every posture.
 name: static-gate
 description: The static gate's ordered command steps, shared by ci.yml static and macos-venue.yml static-macos.
 

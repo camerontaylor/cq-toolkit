@@ -571,11 +571,23 @@ function valueText(lines: readonly Line[], span: Span): string {
   return [lines[span.at]!.value, rest].filter((s) => s !== '').join('\n');
 }
 
-/** A scalar value's literal: unquoted inline value, or `null` if it is not a literal. */
-function literalOf(lines: readonly Line[], span: Span | undefined): string | null {
+/**
+ * A scalar value's literal: unquoted inline value, or `null` if it is not a
+ * literal. With `wholeValue`, a plain value that continues onto more-indented
+ * content lines is not a literal either (GitHub reads `a` + `x` as `a x`);
+ * only `uses` tracing opts in, so other keys keep their single-line reading.
+ */
+function literalOf(
+  lines: readonly Line[],
+  span: Span | undefined,
+  wholeValue = false,
+): string | null {
   if (!span) return null;
   const inline = lines[span.at]!.value;
   if (inline === '' || /^[|>]/.test(inline)) return null;
+  if (wholeValue && lines.slice(span.at + 1, span.end).some((l) => l.kind === 'content')) {
+    return null;
+  }
   return unquote(inline);
 }
 
@@ -593,6 +605,8 @@ interface JobDetail {
   readonly steps: readonly Step[];
   /** The workflow-level and job-level `env:` blocks, each as its own source text. */
   readonly envTexts: readonly string[];
+  /** The job or one of its steps has a `uses:` whose value is not a literal. */
+  readonly nonLiteralUses: boolean;
 }
 
 /** Private scan-level detail: the normalised top-level `name:`. */
@@ -956,8 +970,10 @@ function readJob(
   }
 
   const localUses = new Set<string>();
+  let nonLiteralUses = false;
   const addLocal = (span: Span | undefined): void => {
-    const target = literalOf(lines, span);
+    const target = literalOf(lines, span, true);
+    if (span !== undefined && target === null) nonLiteralUses = true;
     if (target?.startsWith('./')) localUses.add(target.slice(2).replace(/\/+$/, '') || '.');
   };
   addLocal(children.get('uses'));
@@ -978,6 +994,7 @@ function readJob(
     lines,
     steps,
     envTexts: [level.workflowEnv, envSpan ? valueText(lines, envSpan) : ''],
+    nonLiteralUses,
   });
   return job;
 }
@@ -985,6 +1002,16 @@ function readJob(
 // ---------------------------------------------------------------------------
 // Consumers: producers, lint, diff
 // ---------------------------------------------------------------------------
+
+/**
+ * True when the job or one of its steps has a `uses:` whose value is not a
+ * literal (a block scalar, a value on the next line), so whether it names a
+ * local action cannot be read; {@link WorkflowJob.localUses} omits it. A job
+ * that did not come from {@link scanWorkflow} is undecidable, so true.
+ */
+export function hasNonLiteralUses(job: WorkflowJob): boolean {
+  return JOB_DETAIL.get(job)?.nonLiteralUses ?? true;
+}
 
 /**
  * Job ids whose check-run name is statically `check`: a literal `name:` equal

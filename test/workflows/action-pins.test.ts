@@ -59,7 +59,10 @@ const TEMPLATE_FILES = [
 function usesRefs(text: string): Array<{ line: number; ref: string }> {
   const refs: Array<{ line: number; ref: string }> = [];
   text.split(/\r?\n/).forEach((line, idx) => {
-    const pattern = /["']?uses["']?\s*:\s*(\S+)/g;
+    // Left boundary: `statuses: read` (a permissions key) ends in `uses:` but
+    // is not a `uses:` key; a real key is preceded by space, `-`, `{`, `,` or
+    // a quote, never by a word character.
+    const pattern = /(?<![A-Za-z0-9_])["']?uses["']?\s*:\s*(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
       const ref = match[1];

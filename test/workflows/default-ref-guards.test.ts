@@ -7,8 +7,10 @@
 //      job(s) to the default ref (D-A.1): a dispatch on any other ref would
 //      run that ref's copy of the file. The seven files below either hold a
 //      promotion-adjacent credential or dispatch one; the carriers that are
-//      not dispatch (`push`, `schedule`, `workflow_run`) carry no
-//      dispatcher-chosen ref, so their disjuncts admit them unconditionally.
+//      not dispatch (`push`, `schedule`, `workflow_run`, `status`) carry no
+//      dispatcher-chosen ref, so their disjuncts admit them without the ref
+//      clause (merge-queue-gate's `status` disjunct also filters the
+//      context and state; its dispatch disjunct is `!= 'status'` + ref).
 //   2. `gate.yml`'s `wake` job consumes exactly ONE field of the
 //      `workflow_run` payload — the run id — and re-reads everything else
 //      from the API by that id (path, event, branch, head repository id,
@@ -58,7 +60,7 @@ const DEFAULT_REF = "format('refs/heads/{0}', github.event.repository.default_br
  * dispatcher-chosen ref).
  */
 const carriers: Readonly<Record<string, readonly string[]>> = {
-  'merge-queue-gate.yml': ['push'],
+  'merge-queue-gate.yml': ['status'],
   'sync-merge-queue.yml': ['push'],
   'init-merge-queue.yml': [],
   'self-merge-prs.yml': ['schedule'],
