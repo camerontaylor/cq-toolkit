@@ -496,7 +496,12 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     });
     expect(again.status).toBe('needs-human');
     expect(again.status === 'needs-human' ? again.reason : '').toContain('already consumed');
-    expect(h.run.scans).toHaveLength(2); // the first dispatch's preflight + apply; the replay scanned nothing
+    // THREE scans: the first dispatch's preflight + apply, PLUS the replay's
+    // own preflight — the preflight runs before exercise, and only the
+    // ledger (consulted at exercise) knows the nonce is spent, so a
+    // spent-token replay costs one read-only dry-run scan before the
+    // refusal. No write, no spend.
+    expect(h.run.scans).toHaveLength(3);
     // ...and WITH a fresh approval the retry runs and reaches the verifier
     // again — the playbook was never quarantined.
     const approved = harness(FIXTURE, null, 'timeout kill');
