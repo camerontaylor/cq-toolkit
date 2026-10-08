@@ -422,12 +422,19 @@ change" claim is made for it:
 - New public exports from `ops/analyze/approval.ts`: `ExercisedScope`,
   `isExercisedScope`, `canonicalWorkspace`, `contentFingerprint`,
   `withMutationLock`, `FileNonceLedgerConfig`, and the authority/ledger/lock
-  factories. The family barrel `index.ts` is deliberately NOT re-exporting
-  them (public-surface curation is the API lane's), so the published surface
-  only changes by the signature above until that lane acts.
-- `setAnalyzeApprovalAuthority` is exported from the family's `registry.ts`
-  (the injection point for the kernel authority) and is likewise not
-  re-exported from the barrel.
+  factories.
+- The family barrel `index.ts` (and so the root barrel, the package's only
+  export) re-exports the CONSTRUCTION AND BINDING surface: the approval types,
+  `DENY_ALL_APPROVALS`, `makeApprovalAuthority`, `makeFileNonceLedger`,
+  `makeInMemoryNonceLedger`, `makeLedgerBesideMutationLocks`,
+  `makeProcessLocalMutationLocks`, `makeGitApprovalStateReader`,
+  `approvalInputDigest`, and the registry's `setAnalyzeApprovalAuthority`.
+  This is required, not curation: the mutating factories default to deny-all
+  and `withApprovedMutation` reaches an authority's locks through a
+  module-private symbol, so without these exports an installed-package
+  consumer could never enable an apply (Codex P1 on #258). The mutation-seam
+  internals (`withApprovedMutation`, `withMutationLock`, `isExercisedScope`,
+  `canonicalWorkspace`, `contentFingerprint`) stay off the barrel.
 
 Handoff: regenerate the API report/baseline AFTER this lands, and record the
 `makeAstGrepCodemod` signature change explicitly — a consumer that composed
