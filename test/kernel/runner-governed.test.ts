@@ -32,16 +32,16 @@
 //
 // The fold-ordering unit rules themselves live in journal-v2.test.ts — this
 // file pins only the runner's USE of that order.
-import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
 import type { Governance, GovernorEvent } from '../../src/kernel/governor.js';
-import { openRunLog } from '../../src/kernel/journal.js';
+import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
-import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
+import { runPlan as kernelRunPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type {
   JournalEvent,
   Op,
@@ -50,6 +50,63 @@ import type {
   Plan,
   RunReport,
 } from '../../src/kernel/types.js';
+
+// Mirrors journal.ts private PUBLICATION_STARTUP_MS; update if that bound changes.
+// First acquisition: boot lookup 10s + guard/record I/O 10s (the retired flock
+// helper's slot, kept until re-measured) + startup/I/O margin 5s. Later
+// acquisitions reuse the successful boot identity: guard/record I/O 10s + 5s.
+const ACQUISITION_STEP_MS = 2 * 10_000 + 5_000;
+function journalEnclosure(steps: number): number {
+  return ACQUISITION_STEP_MS + (steps - 1) * 15_000 + 5_000;
+}
+const pendingRuns = new Map<Promise<unknown>, AbortController>();
+const cleanupActions = new Set<() => void>();
+function runPlan(...args: Parameters<typeof kernelRunPlan>): ReturnType<typeof kernelRunPlan> {
+  const abort = new AbortController();
+  const governance = args[3];
+  const running = kernelRunPlan(
+    args[0],
+    args[1],
+    args[2],
+    governance === undefined
+      ? undefined
+      : {
+          ...governance,
+          signal:
+            governance.signal === undefined
+              ? abort.signal
+              : AbortSignal.any([abort.signal, governance.signal]),
+        },
+  );
+  pendingRuns.set(running, abort);
+  // Observe outcomes immediately, keeping the original rejecting promise for assertions.
+  void running.then(
+    () => pendingRuns.delete(running),
+    () => pendingRuns.delete(running),
+  );
+  return running;
+}
+async function settleFixtureWork(): Promise<void> {
+  for (const abort of pendingRuns.values()) abort.abort();
+  for (const action of cleanupActions) action();
+  cleanupActions.clear();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcomes = await Promise.race([
+      Promise.allSettled([...pendingRuns.keys()]),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('fixture cleanup: work did not settle; journal retained')),
+          ACQUISITION_STEP_MS,
+        );
+      }),
+    ]);
+    const rejection = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (rejection?.status === 'rejected') throw rejection.reason;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fakes — the runner.test.ts registry/plan patterns, plus spend/flag variants
@@ -563,130 +620,143 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
   });
 
   afterEach(async () => {
+    await settleFixtureWork();
     await rm(dir, { recursive: true, force: true });
-  });
+  }, ACQUISITION_STEP_MS + 5_000);
 
-  test('a spent dispatch quota carries across TWO governed resumes', async () => {
-    const calls: string[] = [];
-    const plan: Plan = {
-      id: 'plan-chained-quota',
-      jobs: [
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
-        { id: 'j3', op: 'fake', input: { jobId: 'j3' } },
-      ],
-    };
-    // Run 1: j1 and j2 spend the quota of 2; j3 is refused.
-    const report1 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({ runDispatchQuota: 2 }), allowAdvisory: true },
-    );
-    expect(rowStatuses(report1)).toEqual(['ok', 'ok', 'budget-exhausted']);
-    expect(calls).toEqual(['j1', 'j2']);
-
-    // Resume with a FRESH governor: the fold seeds the spent quota (ALL
-    // prior runs, not just the latest), so j3 stays refused — while j1/j2
-    // replay-skip (a replay consumes no quota).
-    const governor2 = createGovernor({ runDispatchQuota: 2 });
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: governor2, allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1', 'j2']); // UNCHANGED — j3 never runs the op
-    expect(rowStatuses(report2)).toEqual(['ok', 'ok', 'budget-exhausted']);
-    const refusals = governor2.events.filter(
-      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
-    );
-    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
-    expect(governor2.dispatchCount).toBe(2); // seeded from the fold; refusals do not consume
-  });
-
-  test('a corrupt sibling-plan journal cannot block this plan’s governed resume ("a" vs "a--b", shared filter)', async () => {
-    // Review VB1C r1: a prefix-only candidate filter read a corrupt journal
-    // of plan 'a--b' into plan 'a's fold. The shared candidateRunsForPlan
-    // filter rejects it (the runId remainder after 'a--' is THREE segments,
-    // not the exact two-segment tail), so the governed run below — which
-    // folds the whole dir — never parses the corrupt file.
-    const log = openRunLog(dir);
-    const plan: Plan = {
-      id: 'a',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
-    const runId = 'a--r1--aa';
-    await log.append(runId, {
-      type: 'run-started',
-      runId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'a',
-      journalVersion: 2,
-      seq: 1,
-      governance: { attended: false },
-    });
-    await log.append(runId, {
-      type: 'job-started',
-      runId,
-      at: '2026-01-01T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(runId, {
-      type: 'job-finished',
-      runId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: hash,
-      result: { status: 'ok', value: 'j1' },
-    });
-    // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
-    await appendFile(
-      join(dir, 'a--b--k3y--c0ffee.ndjson'),
-      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: '2026-01-01T00:00:00.000Z', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
-      'utf8',
-    );
-
-    const calls: string[] = [];
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}), allowAdvisory: true },
-    );
-    expect(calls).toEqual([]); // j1 replayed from the fold — no corrupt-read blowup
-    expect(report.counts.done).toBe(1);
-  });
-
-  test('a dependency cycle throws BEFORE anything is claimed or journalled', async () => {
-    // Plan corruption is invalid input: the rejection must precede the seq
-    // claim and the governed run-started append, or the failed invocation
-    // would permanently establish governed history and refuse later
-    // corrected (uncapped, opt-in-free) runs as ungoverned-over-governed.
-    const calls: string[] = [];
-    const plan: Plan = {
-      id: 'plan-gov-cycle',
-      jobs: [
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' }, dependsOn: ['j2'] },
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
-      ],
-    };
-    await expect(
-      runPlan(
+  test(
+    'a spent dispatch quota carries across TWO governed resumes',
+    async () => {
+      const calls: string[] = [];
+      const plan: Plan = {
+        id: 'plan-chained-quota',
+        jobs: [
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+          { id: 'j3', op: 'fake', input: { jobId: 'j3' } },
+        ],
+      };
+      // Run 1: j1 and j2 spend the quota of 2; j3 is refused.
+      const report1 = await runPlan(
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-      ),
-    ).rejects.toThrow(/dependency cycle/);
-    expect(calls).toEqual([]); // nothing dispatched either
-    // The journal dir stays empty: no claim tombstone, no run-started file.
-    expect(await readdir(dir)).toEqual([]);
-  });
+        { governor: createGovernor({ runDispatchQuota: 2 }), allowAdvisory: true },
+      );
+      expect(rowStatuses(report1)).toEqual(['ok', 'ok', 'budget-exhausted']);
+      expect(calls).toEqual(['j1', 'j2']);
+
+      // Resume with a FRESH governor: the fold seeds the spent quota (ALL
+      // prior runs, not just the latest), so j3 stays refused — while j1/j2
+      // replay-skip (a replay consumes no quota).
+      const governor2 = createGovernor({ runDispatchQuota: 2 });
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: governor2, allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1', 'j2']); // UNCHANGED — j3 never runs the op
+      expect(rowStatuses(report2)).toEqual(['ok', 'ok', 'budget-exhausted']);
+      const refusals = governor2.events.filter(
+        (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+      );
+      expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+      expect(governor2.dispatchCount).toBe(2); // seeded from the fold; refusals do not consume
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'a corrupt sibling-plan journal cannot block this plan’s governed resume ("a" vs "a--b", shared filter)',
+    async () => {
+      // Review VB1C r1: a prefix-only candidate filter read a corrupt journal
+      // of plan 'a--b' into plan 'a's fold. The shared candidateRunsForPlan
+      // filter rejects it (the runId remainder after 'a--' is THREE segments,
+      // not the exact two-segment tail), so the governed run below — which
+      // folds the whole dir — never parses the corrupt file.
+      const log = openRunLog(dir);
+      const plan: Plan = {
+        id: 'a',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+      const runId = 'a--r1--aa';
+      await log.append(runId, {
+        type: 'run-started',
+        runId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'a',
+        journalVersion: 2,
+        seq: 1,
+        governance: { attended: false },
+      });
+      await log.append(runId, {
+        type: 'job-started',
+        runId,
+        at: '2026-01-01T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(runId, {
+        type: 'job-finished',
+        runId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'ok', value: 'j1' },
+      });
+      // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
+      await appendFile(
+        join(dir, 'a--b--k3y--c0ffee.ndjson'),
+        `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: '2026-01-01T00:00:00.000Z', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
+        'utf8',
+      );
+
+      const calls: string[] = [];
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({}), allowAdvisory: true },
+      );
+      expect(calls).toEqual([]); // j1 replayed from the fold — no corrupt-read blowup
+      expect(report.counts.done).toBe(1);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'a dependency cycle throws BEFORE anything is claimed or journalled',
+    async () => {
+      // Plan corruption is invalid input: the rejection must precede the seq
+      // claim and the governed run-started append, or the failed invocation
+      // would permanently establish governed history and refuse later
+      // corrected (uncapped, opt-in-free) runs as ungoverned-over-governed.
+      const calls: string[] = [];
+      const plan: Plan = {
+        id: 'plan-gov-cycle',
+        jobs: [
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' }, dependsOn: ['j2'] },
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+        ],
+      };
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+        ),
+      ).rejects.toThrow(/dependency cycle/);
+      expect(calls).toEqual([]); // nothing dispatched either
+      // The journal dir stays empty: no claim tombstone, no run-started file.
+      expect(await readdir(dir)).toEqual([]);
+    },
+    journalEnclosure(1),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1023,138 +1093,158 @@ describe('governed journal v2 + resume', () => {
   });
 
   afterEach(async () => {
+    await settleFixtureWork();
     await rm(dir, { recursive: true, force: true });
-  });
+  }, ACQUISITION_STEP_MS + 5_000);
 
-  test('a governed run writes run-started with journalVersion 2, seq 1 and the governance block', async () => {
-    const governor = createGovernor({ maxUsd: 5 });
-    const USAGE = { input: 4, output: 2, cacheRead: 0, cacheWrite: 0 };
-    const spendy = async (): Promise<OpResult<unknown>> => {
-      currentJobContext()?.reportResult({ usage: USAGE, costUSD: 0.25 });
-      return { status: 'ok', value: 'done' };
-    };
-    const report = await runPlan(
-      independentPlan('plan-gov-journal', 1, 'spendy'),
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('spendy', spendy)),
-      { governor, allowAdvisory: true },
-    );
-    const events = await openRunLog(dir).read(report.runId);
-    expect(events[0]).toMatchObject({
-      type: 'run-started',
-      planId: 'plan-gov-journal',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 5, attended: false },
-    });
-    // The per-job ledger rollups ride the job-finished event.
-    const finishes = jobFinishes(events);
-    expect(finishes[0]).toMatchObject({ jobId: 'j1', usage: USAGE, costUSD: 0.25 });
-    // The run-finished coupling (schema-enforced) stays honest.
-    expect(events[events.length - 1]).toMatchObject({ type: 'run-finished', stoppedEarly: false });
-    // The seq claim leaves its tombstone.
-    const listing = await readdir(dir);
-    expect(listing.some((name) => name === 'plan-gov-journal.seq.1')).toBe(true);
-  });
+  test(
+    'a governed run writes run-started with journalVersion 2, seq 1 and the governance block',
+    async () => {
+      const governor = createGovernor({ maxUsd: 5 });
+      const USAGE = { input: 4, output: 2, cacheRead: 0, cacheWrite: 0 };
+      const spendy = async (): Promise<OpResult<unknown>> => {
+        currentJobContext()?.reportResult({ usage: USAGE, costUSD: 0.25 });
+        return { status: 'ok', value: 'done' };
+      };
+      const report = await runPlan(
+        independentPlan('plan-gov-journal', 1, 'spendy'),
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('spendy', spendy)),
+        { governor, allowAdvisory: true },
+      );
+      const events = await openRunLog(dir).read(report.runId);
+      expect(events[0]).toMatchObject({
+        type: 'run-started',
+        planId: 'plan-gov-journal',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+      });
+      // The per-job ledger rollups ride the job-finished event.
+      const finishes = jobFinishes(events);
+      expect(finishes[0]).toMatchObject({ jobId: 'j1', usage: USAGE, costUSD: 0.25 });
+      // The run-finished coupling (schema-enforced) stays honest.
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'run-finished',
+        stoppedEarly: false,
+      });
+      // The seq claim leaves its tombstone.
+      const listing = await readdir(dir);
+      expect(listing.some((name) => name === 'plan-gov-journal.seq.1')).toBe(true);
+    },
+    journalEnclosure(1),
+  );
 
-  test('a governed run over a NOT-YET-EXISTING journal dir creates it (the seq claim mkdirs)', async () => {
-    // The v1 append path created the journal dir lazily on first write; the
-    // v2 seq claim (exclusive create) runs BEFORE any append, so it must
-    // carry the same lazy-create contract — a first governed run with a
-    // fresh `--journal-dir` is the CLI's ordinary case.
-    const freshDir = join(dir, 'fresh-sub');
-    const report = await runPlan(
-      independentPlan('plan-gov-fresh-dir', 1, 'ok'),
-      { concurrency: 1, stopOnError: false, journalDir: freshDir },
-      viewWith(entry('ok', okOp)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    const events = await openRunLog(freshDir).read(report.runId);
-    expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 1 });
-  });
+  test(
+    'a governed run over a NOT-YET-EXISTING journal dir creates it (the seq claim mkdirs)',
+    async () => {
+      // The v1 append path created the journal dir lazily on first write; the
+      // v2 seq claim (exclusive create) runs BEFORE any append, so it must
+      // carry the same lazy-create contract — a first governed run with a
+      // fresh `--journal-dir` is the CLI's ordinary case.
+      const freshDir = join(dir, 'fresh-sub');
+      const report = await runPlan(
+        independentPlan('plan-gov-fresh-dir', 1, 'ok'),
+        { concurrency: 1, stopOnError: false, journalDir: freshDir },
+        viewWith(entry('ok', okOp)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      const events = await openRunLog(freshDir).read(report.runId);
+      expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 1 });
+    },
+    journalEnclosure(1),
+  );
 
-  test('a governed resume continues attempt numbers (seeded fold → admission attempt 2)', async () => {
-    const calls: string[] = [];
-    let behave: 'fail' | 'ok' = 'fail';
-    const flaky = async (raw: unknown): Promise<OpResult<unknown>> => {
-      calls.push((raw as { jobId: string }).jobId);
-      return behave === 'fail' ? { status: 'failed', error: 'flake' } : okOp(raw);
-    };
-    const plan: Plan = {
-      id: 'plan-gov-attempt',
-      jobs: [{ id: 'j1', op: 'flaky', input: { jobId: 'j1' } }],
-    };
-    const report1 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('flaky', flaky)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    const log = openRunLog(dir);
-    expect(jobStarts(await log.read(report1.runId)).map((event) => event.attempt)).toEqual([1]);
+  test(
+    'a governed resume continues attempt numbers (seeded fold → admission attempt 2)',
+    async () => {
+      const calls: string[] = [];
+      let behave: 'fail' | 'ok' = 'fail';
+      const flaky = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push((raw as { jobId: string }).jobId);
+        return behave === 'fail' ? { status: 'failed', error: 'flake' } : okOp(raw);
+      };
+      const plan: Plan = {
+        id: 'plan-gov-attempt',
+        jobs: [{ id: 'j1', op: 'flaky', input: { jobId: 'j1' } }],
+      };
+      const report1 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('flaky', flaky)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      const log = openRunLog(dir);
+      expect(jobStarts(await log.read(report1.runId)).map((event) => event.attempt)).toEqual([1]);
 
-    // Resume with the op fixed: the runner folds run 1, seeds attempt 1, so
-    // this dispatch IS attempt 2.
-    behave = 'ok';
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('flaky', flaky)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1', 'j1']);
-    const events2 = await log.read(report2.runId);
-    expect(events2[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 2 });
-    expect(jobStarts(events2).map((event) => event.attempt)).toEqual([2]);
-    expect(report2.counts.done).toBe(1);
-  });
-
-  test('an UNGOVERNED run over governed history refuses; the opt-in marks the run ungoverned', async () => {
-    const governor1 = createGovernor({ maxUsd: 5 });
-    const report1 = await runPlan(
-      independentPlan('plan-gov-mark', 1),
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('fake', okOp)),
-      { governor: governor1, allowAdvisory: true },
-    );
-    expect(report1.counts.done).toBe(1);
-    expect(await openRunLog(dir).runs()).toHaveLength(1);
-
-    // Ungoverned over governed history → refusal, before anything is written.
-    const calls: string[] = [];
-    await expect(
-      runPlan(
-        independentPlan('plan-gov-mark', 1),
+      // Resume with the op fixed: the runner folds run 1, seeds attempt 1, so
+      // this dispatch IS attempt 2.
+      behave = 'ok';
+      const report2 = await runPlan(
+        plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls))),
-      ),
-    ).rejects.toThrow(
-      'runPlan: plan plan-gov-mark has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned',
-    );
-    expect(calls).toEqual([]);
-    expect(await openRunLog(dir).runs()).toHaveLength(1); // nothing claimed or emitted
+        viewWith(entry('flaky', flaky)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1', 'j1']);
+      const events2 = await log.read(report2.runId);
+      expect(events2[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 2 });
+      expect(jobStarts(events2).map((event) => event.attempt)).toEqual([2]);
+      expect(report2.counts.done).toBe(1);
+    },
+    journalEnclosure(2),
+  );
 
-    // The opt-in runs UNGOVERNED-MARKED: no admission, no caps, ops execute
-    // exactly as the ungoverned path — and the marker is journalled.
-    const markerGovernor = createGovernor({});
-    const report2 = await runPlan(
-      independentPlan('plan-gov-mark', 1),
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: markerGovernor, optIn: ['budget.ungovernedOverGoverned'], allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1']); // the op ran ungoverned
-    expect(markerGovernor.events.filter((event) => event.kind === 'admitted')).toEqual([]);
-    const events2 = await openRunLog(dir).read(report2.runId);
-    expect(events2[0]).toMatchObject({
-      type: 'run-started',
-      journalVersion: 2,
-      seq: 2,
-      ungoverned: { optIn: true },
-    });
-    expect('governance' in (events2[0] as { governance?: unknown })).toBe(false);
-    expect(jobStarts(events2).map((event) => event.attempt)).toEqual([1]); // ungoverned attempt
-  });
+  test(
+    'an UNGOVERNED run over governed history refuses; the opt-in marks the run ungoverned',
+    async () => {
+      const governor1 = createGovernor({ maxUsd: 5 });
+      const report1 = await runPlan(
+        independentPlan('plan-gov-mark', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', okOp)),
+        { governor: governor1, allowAdvisory: true },
+      );
+      expect(report1.counts.done).toBe(1);
+      expect(await openRunLog(dir).runs()).toHaveLength(1);
+
+      // Ungoverned over governed history → refusal, before anything is written.
+      const calls: string[] = [];
+      await expect(
+        runPlan(
+          independentPlan('plan-gov-mark', 1),
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+        ),
+      ).rejects.toThrow(
+        'runPlan: plan plan-gov-mark has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned',
+      );
+      expect(calls).toEqual([]);
+      expect(await openRunLog(dir).runs()).toHaveLength(1); // nothing claimed or emitted
+
+      // The opt-in runs UNGOVERNED-MARKED: no admission, no caps, ops execute
+      // exactly as the ungoverned path — and the marker is journalled.
+      const markerGovernor = createGovernor({});
+      const report2 = await runPlan(
+        independentPlan('plan-gov-mark', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: markerGovernor, optIn: ['budget.ungovernedOverGoverned'], allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1']); // the op ran ungoverned
+      expect(markerGovernor.events.filter((event) => event.kind === 'admitted')).toEqual([]);
+      const events2 = await openRunLog(dir).read(report2.runId);
+      expect(events2[0]).toMatchObject({
+        type: 'run-started',
+        journalVersion: 2,
+        seq: 2,
+        ungoverned: { optIn: true },
+      });
+      expect('governance' in (events2[0] as { governance?: unknown })).toBe(false);
+      expect(jobStarts(events2).map((event) => event.attempt)).toEqual([1]); // ungoverned attempt
+    },
+    journalEnclosure(3),
+  );
 
   test('caps + budget.ungovernedOverGoverned refuse — the marker cannot carry unenforceable caps (cycle 2)', async () => {
     // The ungoverned marker dispatches with NO admission, so caps riding it
@@ -1176,590 +1266,699 @@ describe('governed journal v2 + resume', () => {
     expect(calls).toEqual([]); // never dispatched
   });
 
-  test("an uncapped governed run does not clobber the ledger cap — the raise refusal still sees run 1's cap (cycle 4)", async () => {
-    // The ledger's C only moves UP with budget.raiseCap. A capless governed
-    // run (an opt-in-only handle) journals governance WITHOUT capUsd; if the
-    // fold let that undefined clobber prevCapUsd, the next capped run could
-    // raise freely — the refusal must still see run 1's cap.
-    const view = viewWith(entry('fake', okOp));
-    const plan = independentPlan('plan-cap-carry', 1);
-    // r1: governed, capped at 1.
-    await runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 1 }, view, {
-      governor: createGovernor({ maxUsd: 1 }),
-    });
-    // r2: governed, NO cap — the opt-in-free handle is a legal governed shape.
-    await runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir }, view, {
-      governor: createGovernor({}),
-    });
-    // r3: a raise over r1's 1 refuses without the opt-in...
-    await expect(
-      runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 }, view, {
-        governor: createGovernor({ maxUsd: 5 }),
-      }),
-    ).rejects.toThrow(/cap raised from 1 to 5/);
-    // ...and proceeds WITH it, recording the raise against r1's cap.
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 },
-      view,
-      { governor: createGovernor({ maxUsd: 5 }), optIn: ['budget.raiseCap'], allowAdvisory: true },
-    );
-    const started = (await openRunLog(dir).read(report.runId))[0];
-    expect(started).toMatchObject({ governance: { raiseCap: { from: 1, to: 5 } } });
-  });
-
-  test('governed over unaccounted v1 dispatches refuses; legacyJournal=reset honours and records the reset (sticky)', async () => {
-    const plan: Plan = {
-      id: 'plan-gov-v1',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const log = openRunLog(dir);
-    const v1RunId = 'plan-gov-v1--legacy--aa';
-    await log.append(v1RunId, {
-      type: 'run-started',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-gov-v1',
-    });
-    await log.append(v1RunId, {
-      type: 'job-started',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    const calls: string[] = [];
-
-    // Refusal names the count and the runs, whether or not resume is set.
-    await expect(
-      runPlan(
+  test(
+    "an uncapped governed run does not clobber the ledger cap — the raise refusal still sees run 1's cap (cycle 4)",
+    async () => {
+      // The ledger's C only moves UP with budget.raiseCap. A capless governed
+      // run (an opt-in-only handle) journals governance WITHOUT capUsd; if the
+      // fold let that undefined clobber prevCapUsd, the next capped run could
+      // raise freely — the refusal must still see run 1's cap.
+      const view = viewWith(entry('fake', okOp));
+      const plan = independentPlan('plan-cap-carry', 1);
+      // r1: governed, capped at 1.
+      await runPlan(
         plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}), allowAdvisory: true },
-      ),
-    ).rejects.toThrow(
-      'runPlan: governed resume over v1 journals with unaccounted dispatches (1 jobs in plan-gov-v1--legacy--aa); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.',
-    );
-    await expect(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir },
-        viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}), allowAdvisory: true },
-      ),
-    ).rejects.toThrow(/unaccounted dispatches/);
-    expect(calls).toEqual([]);
-
-    // With the opt-in the reset is HONOURED (it was needed) and recorded.
-    const report1 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}), optIn: ['budget.legacyJournal=reset'], allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1']); // j1 re-dispatched (the v1 start never finished)
-    const events1 = await log.read(report1.runId);
-    expect(events1[0]).toMatchObject({
-      type: 'run-started',
-      journalVersion: 2,
-      seq: 1,
-      governance: {
-        attended: false,
-        legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v1--legacy--aa'] },
-      },
-    });
-
-    // STICKY: a second governed resume does not refuse (the reset is in the
-    // folded governance record). Note the reset re-dispatch also journalled
-    // a finish for j1, so this resume replays it — zero invocations.
-    const calls2: string[] = [];
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls2))),
-      { governor: createGovernor({}), allowAdvisory: true },
-    );
-    expect(calls2).toEqual([]);
-    expect(report2.counts.done).toBe(1);
-
-    // A NEW v1 file with dispatches is unaccounted again → refuses.
-    const v1RunId2 = 'plan-gov-v1--legacy2--bb';
-    await log.append(v1RunId2, {
-      type: 'run-started',
-      runId: v1RunId2,
-      at: '2026-01-02T00:00:00.000Z',
-      planId: 'plan-gov-v1',
-    });
-    await log.append(v1RunId2, {
-      type: 'job-started',
-      runId: v1RunId2,
-      at: '2026-01-02T00:00:00.000Z',
-      jobId: 'j2',
-      op: 'fake',
-      attempt: 1,
-    });
-    await expect(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls2))),
-        { governor: createGovernor({}), allowAdvisory: true },
-      ),
-    ).rejects.toThrow(/unaccounted dispatches \(1 jobs in plan-gov-v1--legacy2--bb\)/);
-  });
-
-  test('an honoured reset excludes a v1 finish\u2019s usage from the ledger seed — reset means charged 0 (annex §4)', async () => {
-    // A versionless journal whose job-finished carries usage (the frozen v1
-    // schema permits the field; v1 writers never emitted it). The reset
-    // charges those dispatches 0, so the usage must not seed the ledger:
-    // neither the DD-9 unpriced fold nor the token/USD seed caps may see it.
-    const plan: Plan = {
-      id: 'plan-gov-v1spend',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const log = openRunLog(dir);
-    const v1RunId = 'plan-gov-v1spend--legacy--cc';
-    await log.append(v1RunId, {
-      type: 'run-started',
-      runId: v1RunId,
-      at: '2026-01-03T00:00:00.000Z',
-      planId: 'plan-gov-v1spend',
-    });
-    await log.append(v1RunId, {
-      type: 'job-started',
-      runId: v1RunId,
-      at: '2026-01-03T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(v1RunId, {
-      type: 'job-finished',
-      runId: v1RunId,
-      at: '2026-01-03T00:01:00.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: 'h1',
-      result: { status: 'failed', error: 'seeded legacy failure' },
-      usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0 },
-    });
-
-    // A TIGHT maxTokens (the seeded usage alone would exceed it) proves the
-    // exclusion: the run admits and completes instead of tripping at seed.
-    const governor = createGovernor({ maxUsd: 1, maxTokens: 150 });
-    const calls: string[] = [];
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor, optIn: ['budget.legacyJournal=reset'], allowAdvisory: true },
-    );
-    expect(report.counts.done).toBe(1);
-    expect(governor.tripped).toBe(false);
-    expect(governor.usage).toBeUndefined(); // the v1 usage never entered the ledger
-    expect(governor.usdSpent).toBe(0);
-    // The reset is recorded for stickiness.
-    const events = await log.read(report.runId);
-    expect(events[0]).toMatchObject({
-      type: 'run-started',
-      journalVersion: 2,
-      governance: {
-        capUsd: 1,
-        capTokens: 150,
-        attended: false,
-        legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v1spend--legacy--cc'] },
-      },
-    });
-  });
-
-  test('a cap raise over the ledger refuses without budget.raiseCap; honoured, it is recorded', async () => {
-    const plan: Plan = {
-      id: 'plan-gov-raise',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('fake', okOp)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    const runsBefore = await openRunLog(dir).runs();
-
-    // Raising 5 → 10 without the opt-in refuses BEFORE anything is written.
-    const calls: string[] = [];
-    await expect(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({ maxUsd: 10 }), allowAdvisory: true },
-      ),
-    ).rejects.toThrow('runPlan: cap raised from 5 to 10');
-    expect(calls).toEqual([]);
-    expect(await openRunLog(dir).runs()).toEqual(runsBefore); // no seq claim, no run file
-
-    // With budget.raiseCap the run proceeds and records the transition.
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({ maxUsd: 10 }), optIn: ['budget.raiseCap'], allowAdvisory: true },
-    );
-    const events = await openRunLog(dir).read(report.runId);
-    expect(events[0]).toMatchObject({
-      type: 'run-started',
-      journalVersion: 2,
-      seq: 2,
-      governance: { capUsd: 10, attended: false, raiseCap: { from: 5, to: 10 } },
-    });
-  });
-
-  test('a resume seeds the ledger spend: 3 spent + 2.5 more trips the 5 cap mid-run', async () => {
-    const calls: string[] = [];
-    let behave: 'spend3-fail' | 'spend2.5-ok' = 'spend3-fail';
-    const ledgerOp = async (raw: unknown): Promise<OpResult<unknown>> => {
-      const jobId = (raw as { jobId: string }).jobId;
-      calls.push(jobId);
-      if (behave === 'spend3-fail') {
-        currentJobContext()?.reportResult({ costUSD: 3 });
-        return { status: 'failed', error: 'flake after spend' };
-      }
-      currentJobContext()?.reportResult({ costUSD: 2.5 });
-      return okOp(raw);
-    };
-    const plan: Plan = {
-      id: 'plan-gov-ledger',
-      jobs: [
-        { id: 'j1', op: 'ledger', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'ledger', input: { jobId: 'j2' }, dependsOn: ['j1'] },
-      ],
-    };
-    // Run 1: j1 spends 3 (under the 5 cap) and FAILS; j2 blocked for real.
-    await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('ledger', ledgerOp)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    // Run 2 (resume): the seed carries the 3; j1's fresh 2.5 pushes the
-    // rollup to 5.5 — the cap trips mid-run, and queued j2 is re-marked.
-    behave = 'spend2.5-ok';
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('ledger', ledgerOp)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1', 'j1']); // j1 re-ran (its last finish was failed)…
-    expect(calls).not.toContain('j2'); // …j2 never dispatched
-    expect(report2.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' }); // real verdict kept
-    expect(report2.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
-    expect(report2.stoppedEarly).toBe(true);
-    expect(report2.earlyStopReason).toBe('budget');
-    expect(report2.costUSD).toBe(5.5); // the ledger: seeded 3 + live 2.5
-  });
-
-  test('the resume fold follows seq, not a reversed fake-clock `at`', async () => {
-    const plan: Plan = {
-      id: 'plan-gov-seqfold',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
-    const log = openRunLog(dir);
-    // seq 1 started LATE by its own `at` and finished j1 ok.
-    const run1 = 'plan-gov-seqfold--late--aa';
-    await log.append(run1, {
-      type: 'run-started',
-      runId: run1,
-      at: '2026-01-02T00:00:00.000Z',
-      planId: 'plan-gov-seqfold',
-      journalVersion: 2,
-      seq: 1,
-      governance: { attended: false },
-    });
-    await log.append(run1, {
-      type: 'job-started',
-      runId: run1,
-      at: '2026-01-02T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(run1, {
-      type: 'job-finished',
-      runId: run1,
-      at: '2026-01-02T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: hash,
-      result: { status: 'ok', value: 'j1' },
-    });
-    // seq 2 started EARLY by `at` and re-attempted j1 to a FAILED finish.
-    const run2 = 'plan-gov-seqfold--early--bb';
-    await log.append(run2, {
-      type: 'run-started',
-      runId: run2,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-gov-seqfold',
-      journalVersion: 2,
-      seq: 2,
-      governance: { attended: false },
-    });
-    await log.append(run2, {
-      type: 'job-started',
-      runId: run2,
-      at: '2026-01-01T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 2,
-    });
-    await log.append(run2, {
-      type: 'job-finished',
-      runId: run2,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: hash,
-      result: { status: 'failed', error: 'seq-2 attempt blew up' },
-    });
-
-    // A by-`at` fold would let the seq-1 ok win (zero dispatch); the
-    // seq-ordered fold correctly takes seq 2's failed finish as the last
-    // word and re-dispatches — as attempt 3 (two prior starts seeded).
-    const calls: string[] = [];
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}), allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1']);
-    const events = await log.read(report.runId);
-    expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 3 });
-    expect(jobStarts(events).map((event) => event.attempt)).toEqual([3]);
-    expect(report.counts.done).toBe(1);
-  });
-
-  test('budget.ungovernedOverGoverned with NO governed history refuses — the marker names a condition the plan does not have (composition H3)', async () => {
-    // Fresh dir: no prior runs. Honouring the marker here would dispatch the
-    // ops ungoverned and strand this run's spend outside every future ledger
-    // — a silent forfeit. The refusal names the condition and the resolution.
-    const calls: string[] = [];
-    await expect(
-      runPlan(
-        independentPlan('plan-gov-mark-nohistory', 1),
-        { concurrency: 1, stopOnError: false, journalDir: dir },
-        viewWith(entry('fake', countingOp(calls))),
+        { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 1 },
+        view,
         {
-          governor: createGovernor({}),
-          optIn: ['budget.ungovernedOverGoverned'],
+          governor: createGovernor({ maxUsd: 1 }),
+        },
+      );
+      // r2: governed, NO cap — the opt-in-free handle is a legal governed shape.
+      await runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir }, view, {
+        governor: createGovernor({}),
+      });
+      // r3: a raise over r1's 1 refuses without the opt-in...
+      await expect(
+        runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 }, view, {
+          governor: createGovernor({ maxUsd: 5 }),
+        }),
+      ).rejects.toThrow(/cap raised from 1 to 5/);
+      // ...and proceeds WITH it, recording the raise against r1's cap.
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 },
+        view,
+        {
+          governor: createGovernor({ maxUsd: 5 }),
+          optIn: ['budget.raiseCap'],
           allowAdvisory: true,
         },
-      ),
-    ).rejects.toThrow(
-      'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
-    );
-    expect(calls).toEqual([]); // never dispatched
-    expect(await readdir(dir)).toEqual([]); // nothing claimed or emitted — before any state
-  });
+      );
+      const started = (await openRunLog(dir).read(report.runId))[0];
+      expect(started).toMatchObject({ governance: { raiseCap: { from: 1, to: 5 } } });
+    },
+    journalEnclosure(4),
+  );
 
-  test('replay-skip re-attestation copies the prior finish\u2019s costUSD, not just usage (composition M2)', async () => {
-    const USAGE = { input: 6, output: 3, cacheRead: 0, cacheWrite: 0 };
-    const calls: string[] = [];
-    const spendy = async (raw: unknown): Promise<OpResult<unknown>> => {
-      calls.push((raw as { jobId: string }).jobId);
-      currentJobContext()?.reportResult({ usage: USAGE, costUSD: 0.25 });
-      return { status: 'ok', value: 'done' };
-    };
-    const plan = independentPlan('plan-gov-reattest-cost', 1, 'spendy');
-    await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir },
-      viewWith(entry('spendy', spendy)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    // Resume: the job replay-skips (zero invocation); the re-attested
-    // finish-only event must carry usage AND costUSD (annex §3 rule 1) so
-    // this run's journal self-containedly prices the fold.
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('spendy', spendy)),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    expect(calls).toEqual(['j1']); // run 1 only — the resume skipped
-    const events2 = await openRunLog(dir).read(report2.runId);
-    expect(jobFinishes(events2)).toMatchObject([
-      { jobId: 'j1', result: { status: 'ok' }, usage: USAGE, costUSD: 0.25 },
-    ]);
-  });
-
-  test('a claim tombstone beyond the highest folded seq refuses the fold — a deleted run file cannot silently lower the seed (composition H2)', async () => {
-    const plan: Plan = {
-      id: 'plan-gov-seqgap',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const log = openRunLog(dir);
-    const run1 = 'plan-gov-seqgap--r1--aa';
-    await log.append(run1, {
-      type: 'run-started',
-      runId: run1,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-gov-seqgap',
-      journalVersion: 2,
-      seq: 1,
-      governance: { attended: false },
-    });
-    // The seq-2 claim tombstone EXISTS but its run file does not: a deleted
-    // run (or an orphaned claim). The fold sees maxPriorSeq 1 and must refuse
-    // — governed AND plain — instead of silently forgetting the missing
-    // run's spend.
-    await appendFile(join(dir, 'plan-gov-seqgap.seq.2'), '', 'utf8');
-    const calls: string[] = [];
-    await expect(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}), allowAdvisory: true },
-      ),
-    ).rejects.toThrow(/journal: corrupt — seq gap for plan 'plan-gov-seqgap'/);
-    await expect(
-      runPlan(
-        plan,
-        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-        viewWith(entry('fake', countingOp(calls))),
-      ),
-    ).rejects.toThrow(/seq gap/);
-    expect(calls).toEqual([]);
-  });
-
-  test('ANNEX §5 golden: a verbatim v1 journal replays with a zero-invocation skip and a v1-shaped run-started', async () => {
-    // The golden replay rule (annex §5), against a file written RAW exactly
-    // as a v1 binary wrote it — versionless run-started, attempt-1
-    // job-started, the frozen replay record, run-finished. The ungoverned
-    // resume must skip the job (ok + same op + same inputsHash) with zero op
-    // invocation and write its OWN run-started still v1-shaped.
-    const plan: Plan = {
-      id: 'plan-gov-golden-v1',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
-    const v1RunId = 'plan-gov-golden-v1--20260101--abcd1234';
-    const v1Lines = [
-      JSON.stringify({
+  test(
+    'governed over unaccounted v1 dispatches refuses; legacyJournal=reset honours and records the reset (sticky)',
+    async () => {
+      const plan: Plan = {
+        id: 'plan-gov-v1',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const log = openRunLog(dir);
+      const v1RunId = 'plan-gov-v1--legacy--aa';
+      await log.append(v1RunId, {
         type: 'run-started',
         runId: v1RunId,
         at: '2026-01-01T00:00:00.000Z',
-        planId: 'plan-gov-golden-v1',
-      }),
-      JSON.stringify({
+        planId: 'plan-gov-v1',
+      });
+      await log.append(v1RunId, {
         type: 'job-started',
         runId: v1RunId,
         at: '2026-01-01T00:00:00.000Z',
         jobId: 'j1',
         op: 'fake',
         attempt: 1,
-      }),
-      JSON.stringify({
+      });
+      const calls: string[] = [];
+
+      // Refusal names the count and the runs, whether or not resume is set.
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({}), allowAdvisory: true },
+        ),
+      ).rejects.toThrow(
+        'runPlan: governed resume over v1 journals with unaccounted dispatches (1 jobs in plan-gov-v1--legacy--aa); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.',
+      );
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({}), allowAdvisory: true },
+        ),
+      ).rejects.toThrow(/unaccounted dispatches/);
+      expect(calls).toEqual([]);
+
+      // With the opt-in the reset is HONOURED (it was needed) and recorded.
+      const report1 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        {
+          governor: createGovernor({}),
+          optIn: ['budget.legacyJournal=reset'],
+          allowAdvisory: true,
+        },
+      );
+      expect(calls).toEqual(['j1']); // j1 re-dispatched (the v1 start never finished)
+      const events1 = await log.read(report1.runId);
+      expect(events1[0]).toMatchObject({
+        type: 'run-started',
+        journalVersion: 2,
+        seq: 1,
+        governance: {
+          attended: false,
+          legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v1--legacy--aa'] },
+        },
+      });
+
+      // STICKY: a second governed resume does not refuse (the reset is in the
+      // folded governance record). Note the reset re-dispatch also journalled
+      // a finish for j1, so this resume replays it — zero invocations.
+      const calls2: string[] = [];
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls2))),
+        { governor: createGovernor({}), allowAdvisory: true },
+      );
+      expect(calls2).toEqual([]);
+      expect(report2.counts.done).toBe(1);
+
+      // A NEW v1 file with dispatches is unaccounted again → refuses.
+      const v1RunId2 = 'plan-gov-v1--legacy2--bb';
+      await log.append(v1RunId2, {
+        type: 'run-started',
+        runId: v1RunId2,
+        at: '2026-01-02T00:00:00.000Z',
+        planId: 'plan-gov-v1',
+      });
+      await log.append(v1RunId2, {
+        type: 'job-started',
+        runId: v1RunId2,
+        at: '2026-01-02T00:00:00.000Z',
+        jobId: 'j2',
+        op: 'fake',
+        attempt: 1,
+      });
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls2))),
+          { governor: createGovernor({}), allowAdvisory: true },
+        ),
+      ).rejects.toThrow(/unaccounted dispatches \(1 jobs in plan-gov-v1--legacy2--bb\)/);
+    },
+    journalEnclosure(5),
+  );
+
+  test(
+    'an honoured reset excludes a v1 finish\u2019s usage from the ledger seed — reset means charged 0 (annex §4)',
+    async () => {
+      // A versionless journal whose job-finished carries usage (the frozen v1
+      // schema permits the field; v1 writers never emitted it). The reset
+      // charges those dispatches 0, so the usage must not seed the ledger:
+      // neither the DD-9 unpriced fold nor the token/USD seed caps may see it.
+      const plan: Plan = {
+        id: 'plan-gov-v1spend',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const log = openRunLog(dir);
+      const v1RunId = 'plan-gov-v1spend--legacy--cc';
+      await log.append(v1RunId, {
+        type: 'run-started',
+        runId: v1RunId,
+        at: '2026-01-03T00:00:00.000Z',
+        planId: 'plan-gov-v1spend',
+      });
+      await log.append(v1RunId, {
+        type: 'job-started',
+        runId: v1RunId,
+        at: '2026-01-03T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(v1RunId, {
+        type: 'job-finished',
+        runId: v1RunId,
+        at: '2026-01-03T00:01:00.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: 'h1',
+        result: { status: 'failed', error: 'seeded legacy failure' },
+        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0 },
+      });
+
+      // A TIGHT maxTokens (the seeded usage alone would exceed it) proves the
+      // exclusion: the run admits and completes instead of tripping at seed.
+      const governor = createGovernor({ maxUsd: 1, maxTokens: 150 });
+      const calls: string[] = [];
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor, optIn: ['budget.legacyJournal=reset'], allowAdvisory: true },
+      );
+      expect(report.counts.done).toBe(1);
+      expect(governor.tripped).toBe(false);
+      expect(governor.usage).toBeUndefined(); // the v1 usage never entered the ledger
+      expect(governor.usdSpent).toBe(0);
+      // The reset is recorded for stickiness.
+      const events = await log.read(report.runId);
+      expect(events[0]).toMatchObject({
+        type: 'run-started',
+        journalVersion: 2,
+        governance: {
+          capUsd: 1,
+          capTokens: 150,
+          attended: false,
+          legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v1spend--legacy--cc'] },
+        },
+      });
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'a cap raise over the ledger refuses without budget.raiseCap; honoured, it is recorded',
+    async () => {
+      const plan: Plan = {
+        id: 'plan-gov-raise',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', okOp)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      const runsBefore = await openRunLog(dir).runs();
+
+      // Raising 5 → 10 without the opt-in refuses BEFORE anything is written.
+      const calls: string[] = [];
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({ maxUsd: 10 }), allowAdvisory: true },
+        ),
+      ).rejects.toThrow('runPlan: cap raised from 5 to 10');
+      expect(calls).toEqual([]);
+      expect(await openRunLog(dir).runs()).toEqual(runsBefore); // no seq claim, no run file
+
+      // With budget.raiseCap the run proceeds and records the transition.
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        {
+          governor: createGovernor({ maxUsd: 10 }),
+          optIn: ['budget.raiseCap'],
+          allowAdvisory: true,
+        },
+      );
+      const events = await openRunLog(dir).read(report.runId);
+      expect(events[0]).toMatchObject({
+        type: 'run-started',
+        journalVersion: 2,
+        seq: 2,
+        governance: { capUsd: 10, attended: false, raiseCap: { from: 5, to: 10 } },
+      });
+    },
+    journalEnclosure(3),
+  );
+
+  test(
+    'a resume seeds the ledger spend: 3 spent + 2.5 more trips the 5 cap mid-run',
+    async () => {
+      const calls: string[] = [];
+      let behave: 'spend3-fail' | 'spend2.5-ok' = 'spend3-fail';
+      const ledgerOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        calls.push(jobId);
+        if (behave === 'spend3-fail') {
+          currentJobContext()?.reportResult({ costUSD: 3 });
+          return { status: 'failed', error: 'flake after spend' };
+        }
+        currentJobContext()?.reportResult({ costUSD: 2.5 });
+        return okOp(raw);
+      };
+      const plan: Plan = {
+        id: 'plan-gov-ledger',
+        jobs: [
+          { id: 'j1', op: 'ledger', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'ledger', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+        ],
+      };
+      // Run 1: j1 spends 3 (under the 5 cap) and FAILS; j2 blocked for real.
+      await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('ledger', ledgerOp)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      // Run 2 (resume): the seed carries the 3; j1's fresh 2.5 pushes the
+      // rollup to 5.5 — the cap trips mid-run, and queued j2 is re-marked.
+      behave = 'spend2.5-ok';
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('ledger', ledgerOp)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1', 'j1']); // j1 re-ran (its last finish was failed)…
+      expect(calls).not.toContain('j2'); // …j2 never dispatched
+      expect(report2.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' }); // real verdict kept
+      expect(report2.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
+      expect(report2.stoppedEarly).toBe(true);
+      expect(report2.earlyStopReason).toBe('budget');
+      expect(report2.costUSD).toBe(5.5); // the ledger: seeded 3 + live 2.5
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'the resume fold follows seq, not a reversed fake-clock `at`',
+    async () => {
+      const plan: Plan = {
+        id: 'plan-gov-seqfold',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+      const log = openRunLog(dir);
+      // seq 1 started LATE by its own `at` and finished j1 ok.
+      const run1 = 'plan-gov-seqfold--late--aa';
+      await log.append(run1, {
+        type: 'run-started',
+        runId: run1,
+        at: '2026-01-02T00:00:00.000Z',
+        planId: 'plan-gov-seqfold',
+        journalVersion: 2,
+        seq: 1,
+        governance: { attended: false },
+      });
+      await log.append(run1, {
+        type: 'job-started',
+        runId: run1,
+        at: '2026-01-02T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(run1, {
+        type: 'job-finished',
+        runId: run1,
+        at: '2026-01-02T00:00:01.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'ok', value: 'j1' },
+      });
+      // seq 2 started EARLY by `at` and re-attempted j1 to a FAILED finish.
+      const run2 = 'plan-gov-seqfold--early--bb';
+      await log.append(run2, {
+        type: 'run-started',
+        runId: run2,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'plan-gov-seqfold',
+        journalVersion: 2,
+        seq: 2,
+        governance: { attended: false },
+      });
+      await log.append(run2, {
+        type: 'job-started',
+        runId: run2,
+        at: '2026-01-01T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
+      });
+      await log.append(run2, {
+        type: 'job-finished',
+        runId: run2,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'failed', error: 'seq-2 attempt blew up' },
+      });
+
+      // A by-`at` fold would let the seq-1 ok win (zero dispatch); the
+      // seq-ordered fold correctly takes seq 2's failed finish as the last
+      // word and re-dispatches — as attempt 3 (two prior starts seeded).
+      const calls: string[] = [];
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({}), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1']);
+      const events = await log.read(report.runId);
+      expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 3 });
+      expect(jobStarts(events).map((event) => event.attempt)).toEqual([3]);
+      expect(report.counts.done).toBe(1);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'budget.ungovernedOverGoverned with NO governed history refuses — the marker names a condition the plan does not have (composition H3)',
+    async () => {
+      // Fresh dir: no prior runs. Honouring the marker here would dispatch the
+      // ops ungoverned and strand this run's spend outside every future ledger
+      // — a silent forfeit. The refusal names the condition and the resolution.
+      const calls: string[] = [];
+      await expect(
+        runPlan(
+          independentPlan('plan-gov-mark-nohistory', 1),
+          { concurrency: 1, stopOnError: false, journalDir: dir },
+          viewWith(entry('fake', countingOp(calls))),
+          {
+            governor: createGovernor({}),
+            optIn: ['budget.ungovernedOverGoverned'],
+            allowAdvisory: true,
+          },
+        ),
+      ).rejects.toThrow(
+        'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
+      );
+      expect(calls).toEqual([]); // never dispatched
+      // Inspecting shared history requires a lease even when the refusal
+      // creates no run journal or seq claim. Release retains its lock record.
+      const lockName = 'plan-gov-mark-nohistory.lock.json';
+      const files = await readdir(dir);
+      expect(files.filter((name) => name.endsWith('.ndjson') || name.includes('.seq.'))).toEqual(
+        [],
+      );
+      // The guard lease directory is removed at the end of acquisition.
+      expect(files.sort()).toEqual([lockName]);
+      const released = JSON.parse(await readFile(join(dir, lockName), 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(released.nonce).toMatch(/^[0-9a-f-]{36}$/);
+      expect(released.bootId).toMatch(/\S/);
+      expect(released.runId).toMatch(/^plan-gov-mark-nohistory--[0-9a-z]+--[0-9a-f]+$/i);
+      expect(released).toEqual({
+        nonce: released.nonce,
+        socketPath: `/tmp/cq-j-${String(released.nonce)}.sock`,
+        pid: process.pid,
+        host: hostname(),
+        bootId: released.bootId,
+        runId: released.runId,
+        released: true,
+      });
+      const contender = await acquirePlanLock(dir, 'plan-gov-mark-nohistory', 'refusal-contender');
+      try {
+        await contender.assertHeld();
+      } finally {
+        await contender.release();
+      }
+      const nextReleased = JSON.parse(await readFile(join(dir, lockName), 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      expect(nextReleased.nonce).toMatch(/^[0-9a-f-]{36}$/);
+      expect(nextReleased).toEqual({
+        ...released,
+        nonce: nextReleased.nonce,
+        socketPath: `/tmp/cq-j-${String(nextReleased.nonce)}.sock`,
+        runId: 'refusal-contender',
+      });
+      expect(nextReleased.nonce).not.toBe(released.nonce);
+      // The contender's reclamation leaves its succession claim on the
+      // released record.
+      expect((await readdir(dir)).sort()).toEqual([
+        lockName,
+        `${lockName}.${String(released.nonce)}.claim`,
+      ]);
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'replay-skip re-attestation copies the prior finish\u2019s costUSD, not just usage (composition M2)',
+    async () => {
+      const USAGE = { input: 6, output: 3, cacheRead: 0, cacheWrite: 0 };
+      const calls: string[] = [];
+      const spendy = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push((raw as { jobId: string }).jobId);
+        currentJobContext()?.reportResult({ usage: USAGE, costUSD: 0.25 });
+        return { status: 'ok', value: 'done' };
+      };
+      const plan = independentPlan('plan-gov-reattest-cost', 1, 'spendy');
+      await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('spendy', spendy)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      // Resume: the job replay-skips (zero invocation); the re-attested
+      // finish-only event must carry usage AND costUSD (annex §3 rule 1) so
+      // this run's journal self-containedly prices the fold.
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('spendy', spendy)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1']); // run 1 only — the resume skipped
+      const events2 = await openRunLog(dir).read(report2.runId);
+      expect(jobFinishes(events2)).toMatchObject([
+        { jobId: 'j1', result: { status: 'ok' }, usage: USAGE, costUSD: 0.25 },
+      ]);
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'a claim tombstone beyond the highest folded seq refuses the fold — a deleted run file cannot silently lower the seed (composition H2)',
+    async () => {
+      const plan: Plan = {
+        id: 'plan-gov-seqgap',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const log = openRunLog(dir);
+      const run1 = 'plan-gov-seqgap--r1--aa';
+      await log.append(run1, {
+        type: 'run-started',
+        runId: run1,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'plan-gov-seqgap',
+        journalVersion: 2,
+        seq: 1,
+        governance: { attended: false },
+      });
+      // The seq-2 claim tombstone EXISTS but its run file does not: a deleted
+      // run (or an orphaned claim). The fold sees maxPriorSeq 1 and must refuse
+      // — governed AND plain — instead of silently forgetting the missing
+      // run's spend.
+      await appendFile(join(dir, 'plan-gov-seqgap.seq.2'), '', 'utf8');
+      const calls: string[] = [];
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({}), allowAdvisory: true },
+        ),
+      ).rejects.toThrow(/journal: corrupt — seq gap for plan 'plan-gov-seqgap'/);
+      await expect(
+        runPlan(
+          plan,
+          { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+          viewWith(entry('fake', countingOp(calls))),
+        ),
+      ).rejects.toThrow(/seq gap/);
+      expect(calls).toEqual([]);
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'ANNEX §5 golden: a verbatim v1 journal replays with a zero-invocation skip and a v1-shaped run-started',
+    async () => {
+      // The golden replay rule (annex §5), against a file written RAW exactly
+      // as a v1 binary wrote it — versionless run-started, attempt-1
+      // job-started, the frozen replay record, run-finished. The ungoverned
+      // resume must skip the job (ok + same op + same inputsHash) with zero op
+      // invocation and write its OWN run-started still v1-shaped.
+      const plan: Plan = {
+        id: 'plan-gov-golden-v1',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+      const v1RunId = 'plan-gov-golden-v1--20260101--abcd1234';
+      const v1Lines = [
+        JSON.stringify({
+          type: 'run-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          planId: 'plan-gov-golden-v1',
+        }),
+        JSON.stringify({
+          type: 'job-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          jobId: 'j1',
+          op: 'fake',
+          attempt: 1,
+        }),
+        JSON.stringify({
+          type: 'job-finished',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:01.000Z',
+          jobId: 'j1',
+          opId: 'fake',
+          inputsHash: hash,
+          result: { status: 'ok', value: 'j1' },
+        }),
+        JSON.stringify({
+          type: 'run-finished',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:02.000Z',
+          stoppedEarly: false,
+        }),
+      ];
+      await appendFile(join(dir, `${v1RunId}.ndjson`), `${v1Lines.join('\n')}\n`, 'utf8');
+
+      const calls: string[] = [];
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+      );
+      expect(calls).toEqual([]); // the v1 ok finish skips — zero invocation
+      expect(report.counts.done).toBe(1);
+      const log = openRunLog(dir);
+      const runs = await log.runs();
+      expect(runs).toHaveLength(2);
+      const events = await log.read(report.runId);
+      const started = events[0] as { type: string; journalVersion?: unknown; seq?: unknown };
+      expect(started.type).toBe('run-started');
+      expect('journalVersion' in started).toBe(false); // the new run is v1-shaped too
+      expect('seq' in started).toBe(false);
+      // The self-contained re-attestation: this run's journal carries the
+      // finish-only event for j1.
+      expect(jobFinishes(events)).toMatchObject([
+        { jobId: 'j1', opId: 'fake', result: { status: 'ok' } },
+      ]);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'ANNEX §4 row 1: an ungoverned run over v1-only history works unchanged (skip + re-run, no refusal)',
+    async () => {
+      // v1 history: j1 finished ok (skips), j2 started and never finished (the
+      // crash — re-runs). The plain path neither refuses nor changes shape.
+      const plan: Plan = {
+        id: 'plan-gov-v1row1',
+        jobs: [
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        ],
+      };
+      const manifest = makeManifest(plan);
+      const v1RunId = 'plan-gov-v1row1--20260101--beefcafe';
+      const log = openRunLog(dir);
+      await log.append(v1RunId, {
+        type: 'run-started',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'plan-gov-v1row1',
+      });
+      await log.append(v1RunId, {
+        type: 'job-started',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(v1RunId, {
         type: 'job-finished',
         runId: v1RunId,
         at: '2026-01-01T00:00:01.000Z',
         jobId: 'j1',
         opId: 'fake',
-        inputsHash: hash,
+        inputsHash: manifest.jobs[0]?.inputsHash ?? '',
         result: { status: 'ok', value: 'j1' },
-      }),
-      JSON.stringify({
-        type: 'run-finished',
+      });
+      await log.append(v1RunId, {
+        type: 'job-started',
         runId: v1RunId,
-        at: '2026-01-01T00:00:02.000Z',
-        stoppedEarly: false,
-      }),
-    ];
-    await appendFile(join(dir, `${v1RunId}.ndjson`), `${v1Lines.join('\n')}\n`, 'utf8');
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j2',
+        op: 'fake',
+        attempt: 1,
+      });
 
-    const calls: string[] = [];
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-    );
-    expect(calls).toEqual([]); // the v1 ok finish skips — zero invocation
-    expect(report.counts.done).toBe(1);
-    const log = openRunLog(dir);
-    const runs = await log.runs();
-    expect(runs).toHaveLength(2);
-    const events = await log.read(report.runId);
-    const started = events[0] as { type: string; journalVersion?: unknown; seq?: unknown };
-    expect(started.type).toBe('run-started');
-    expect('journalVersion' in started).toBe(false); // the new run is v1-shaped too
-    expect('seq' in started).toBe(false);
-    // The self-contained re-attestation: this run's journal carries the
-    // finish-only event for j1.
-    expect(jobFinishes(events)).toMatchObject([
-      { jobId: 'j1', opId: 'fake', result: { status: 'ok' } },
-    ]);
-  });
-
-  test('ANNEX §4 row 1: an ungoverned run over v1-only history works unchanged (skip + re-run, no refusal)', async () => {
-    // v1 history: j1 finished ok (skips), j2 started and never finished (the
-    // crash — re-runs). The plain path neither refuses nor changes shape.
-    const plan: Plan = {
-      id: 'plan-gov-v1row1',
-      jobs: [
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
-      ],
-    };
-    const manifest = makeManifest(plan);
-    const v1RunId = 'plan-gov-v1row1--20260101--beefcafe';
-    const log = openRunLog(dir);
-    await log.append(v1RunId, {
-      type: 'run-started',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'plan-gov-v1row1',
-    });
-    await log.append(v1RunId, {
-      type: 'job-started',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:00.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(v1RunId, {
-      type: 'job-finished',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
-      result: { status: 'ok', value: 'j1' },
-    });
-    await log.append(v1RunId, {
-      type: 'job-started',
-      runId: v1RunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j2',
-      op: 'fake',
-      attempt: 1,
-    });
-
-    const calls: string[] = [];
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-    );
-    expect(calls).toEqual(['j2']); // j1 skipped (verified ok); j2 re-runs
-    expect(report.counts.done).toBe(2);
-    const events = await log.read(report.runId);
-    expect(jobStarts(events).map((event) => event.jobId)).toEqual(['j2']); // j1 was never re-dispatched
-  });
+      const calls: string[] = [];
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+      );
+      expect(calls).toEqual(['j2']); // j1 skipped (verified ok); j2 re-runs
+      expect(report.counts.done).toBe(2);
+      const events = await log.read(report.runId);
+      expect(jobStarts(events).map((event) => event.jobId)).toEqual(['j2']); // j1 was never re-dispatched
+    },
+    journalEnclosure(1),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1774,8 +1973,9 @@ describe('W2.3 reserve-then-settle', () => {
     w3dir = await mkdtemp(join(tmpdir(), 'w23-reserve-'));
   });
   afterEach(async () => {
+    await settleFixtureWork();
     await rm(w3dir, { recursive: true, force: true });
-  });
+  }, ACQUISITION_STEP_MS + 5_000);
 
   const spendOnce =
     (calls: string[], usd: number) =>
@@ -1789,946 +1989,1032 @@ describe('W2.3 reserve-then-settle', () => {
       return okOp(raw);
     };
 
-  test('journal order pins write-ahead: reservation-opened (durable) before the dispatch, settled before the finish', async () => {
-    const calls: string[] = [];
-    const report = await runPlan(
-      independentPlan('w23-order', 1),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', spendOnce(calls, 0.1))),
-      { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
-    );
-    expect(report.counts.done).toBe(1);
-    const events = await openRunLog(w3dir).read(report.runId);
-    const types = events.map((event) => event.type);
-    expect(types).toEqual([
-      'run-started',
-      'job-started',
-      'reservation-opened',
-      'reservation-settled',
-      'job-finished',
-      'run-finished',
-    ]);
-    const opened = events.find(
-      (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
-        event.type === 'reservation-opened',
-    );
-    expect(opened).toMatchObject({
-      jobId: 'j1',
-      attempt: 1,
-      reservationId: `${report.runId}:j1:1:1`,
-      usd: 1, // the fair share C/concurrency = 1/1
-      class: 'advisory',
-    });
-    const settled = events.find(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    expect(settled).toMatchObject({ charged: 0.1, basis: 'observed', priced: true });
-    const finished = events.find((event): event is FinishedEvent => event.type === 'job-finished');
-    expect(finished).toMatchObject({ charged: 0.1, costUSD: 0.1 });
-  });
-
-  test('an op that REJECTS settles basis full (the failed verdict cannot say the dispatch never started)', async () => {
-    // executeOp never rejects: a throwing op becomes a `failed` OpResult, so
-    // the ladder reports 'completed' and the settle basis alone would read
-    // 'observed' and charge zero for a dispatch that had already started
-    // billable work. The dispatch signals the post-invocation failure out
-    // of band.
-    const throwAfterDispatch = async (): Promise<OpResult<unknown>> => {
-      // Billable work started, then the op died before reporting anything.
-      throw new Error('op died mid-dispatch');
-    };
-    const governor = createGovernor({ maxUsd: 1 });
-    const report = await runPlan(
-      independentPlan('w23-threw', 1),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', throwAfterDispatch)),
-      { governor, allowAdvisory: true },
-    );
-    expect(report.jobs[0]?.result.status).toBe('failed');
-    const events = await openRunLog(w3dir).read(report.runId);
-    const settled = events.find(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    // charged = the whole reservation (fair share C/concurrency = 1/1), not
-    // the zero the definitive-verdict reading would have produced.
-    expect(settled).toMatchObject({ charged: 1, basis: 'full' });
-    expect(governor.usdSpent).toBeCloseTo(1);
-  });
-
-  test('an op that RESOLVES to a contract violation also settles basis full', async () => {
-    // The successful-but-invalid sibling of the rejecting case: the body ran
-    // (and may have spent), then resolved to something executeOp refuses —
-    // here a value that is not an OpResult at all. Same unknown-spend
-    // exposure, same out-of-band signal; a verdict-only reading would settle
-    // 'observed' zero.
-    const resolvesToGarbage = (): Promise<OpResult<unknown>> =>
-      Promise.resolve({ not: 'an OpResult' } as unknown as OpResult<unknown>);
-    const governor = createGovernor({ maxUsd: 1 });
-    const report = await runPlan(
-      independentPlan('w23-contract', 1),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', resolvesToGarbage)),
-      { governor, allowAdvisory: true },
-    );
-    expect(report.jobs[0]?.result.status).toBe('failed');
-    const events = await openRunLog(w3dir).read(report.runId);
-    const settled = events.find(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    expect(settled).toMatchObject({ charged: 1, basis: 'full' });
-    expect(governor.usdSpent).toBeCloseTo(1);
-  });
-
-  test('a PRE-dispatch failure still settles observed zero (the full basis is not over-wide)', async () => {
-    // The other side of the same boundary: nothing was dispatched, so the
-    // reservation must settle at zero. An unknown op never reaches the op
-    // body — the pre-dispatch reading must survive the new signal.
-    const governor = createGovernor({ maxUsd: 1 });
-    const report = await runPlan(
-      independentPlan('w23-pre-dispatch', 1, 'nosuchop'),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', okOp)),
-      { governor, allowAdvisory: true },
-    );
-    expect(report.jobs[0]?.result.status).toBe('failed');
-    const events = await openRunLog(w3dir).read(report.runId);
-    const settled = events.find(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    expect(settled).toMatchObject({ charged: 0, basis: 'observed' });
-    expect(governor.usdSpent).toBeCloseTo(0);
-  });
-
-  test('capacity waits FIFO behind outstanding reservations, then admits (settled + outstanding + proposed ≤ cap)', async () => {
-    // The park is CONSTRUCTED, not hoped for. cap 1.0, concurrency 4 → the
-    // fair-share proposal is 0.25, so j1–j4 fill C exactly (4 × 0.25 = 1.0)
-    // and j5's 0.25 proposal has nowhere to come from until a settle frees
-    // room. Every op is GATED and released by this test in a known order, so
-    // the wait is deterministic rather than a race:
-    //   - j1–j4 hold their reservations (O = 1.0) until released;
-    //   - releasing j1 frees its p-limit slot, so j5's dispatch starts and
-    //     reaches `reserve` while j3 and j4 still hold theirs: free capacity
-    //     is 1.0 − 0.1 − 0.75 = 0.15 < the 0.25 proposal → j5 WAITS;
-    //   - only j2's settle (free 0.30 ≥ 0.25) wakes the head.
-    // The middle assertion is the proof: a runner that granted j5 straight
-    // after j1's settle would leave O at 0.90, not 0.75.
-    const releases = new Map<string, () => void>();
-    const entered: string[] = [];
-    // A WALL-CLOCK wait, not the file's setImmediate `waitFor`: every
-    // dispatch here writes durable journal events (fdatasync), and a tight
-    // setImmediate loop can outrun the threadpool on a loaded runner — the
-    // first wait then fails with jobs still starting (observed on CI, not
-    // locally). setTimeout yields to the poll phase, so the durable writes
-    // land inside the bound.
-    const waitUntil = async (condition: () => boolean, what: string): Promise<void> => {
-      const deadline = Date.now() + 10_000;
-      while (!condition() && Date.now() < deadline) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, 1);
-        });
-      }
-      expect(condition(), `waitUntil: ${what}`).toBe(true);
-    };
-    const gated = async (raw: unknown): Promise<OpResult<unknown>> => {
-      const jobId = (raw as { jobId: string }).jobId;
-      entered.push(jobId);
-      await new Promise<void>((resolve) => {
-        releases.set(jobId, resolve);
+  test(
+    'journal order pins write-ahead: reservation-opened (durable) before the dispatch, settled before the finish',
+    async () => {
+      const calls: string[] = [];
+      const report = await runPlan(
+        independentPlan('w23-order', 1),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', spendOnce(calls, 0.1))),
+        { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
+      );
+      expect(report.counts.done).toBe(1);
+      const events = await openRunLog(w3dir).read(report.runId);
+      const types = events.map((event) => event.type);
+      expect(types).toEqual([
+        'run-started',
+        'job-started',
+        'reservation-opened',
+        'reservation-settled',
+        'job-finished',
+        'run-finished',
+      ]);
+      const opened = events.find(
+        (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
+          event.type === 'reservation-opened',
+      );
+      expect(opened).toMatchObject({
+        jobId: 'j1',
+        attempt: 1,
+        reservationId: `${report.runId}:j1:1:1`,
+        usd: 1, // the fair share C/concurrency = 1/1
+        class: 'advisory',
       });
-      currentJobContext()?.reportResult({
-        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+      const settled = events.find(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      expect(settled).toMatchObject({ charged: 0.1, basis: 'observed', priced: true });
+      const finished = events.find(
+        (event): event is FinishedEvent => event.type === 'job-finished',
+      );
+      expect(finished).toMatchObject({ charged: 0.1, costUSD: 0.1 });
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'an op that REJECTS settles basis full (the failed verdict cannot say the dispatch never started)',
+    async () => {
+      // executeOp never rejects: a throwing op becomes a `failed` OpResult, so
+      // the ladder reports 'completed' and the settle basis alone would read
+      // 'observed' and charge zero for a dispatch that had already started
+      // billable work. The dispatch signals the post-invocation failure out
+      // of band.
+      const throwAfterDispatch = async (): Promise<OpResult<unknown>> => {
+        // Billable work started, then the op died before reporting anything.
+        throw new Error('op died mid-dispatch');
+      };
+      const governor = createGovernor({ maxUsd: 1 });
+      const report = await runPlan(
+        independentPlan('w23-threw', 1),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', throwAfterDispatch)),
+        { governor, allowAdvisory: true },
+      );
+      expect(report.jobs[0]?.result.status).toBe('failed');
+      const events = await openRunLog(w3dir).read(report.runId);
+      const settled = events.find(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      // charged = the whole reservation (fair share C/concurrency = 1/1), not
+      // the zero the definitive-verdict reading would have produced.
+      expect(settled).toMatchObject({ charged: 1, basis: 'full' });
+      expect(governor.usdSpent).toBeCloseTo(1);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'an op that RESOLVES to a contract violation also settles basis full',
+    async () => {
+      // The successful-but-invalid sibling of the rejecting case: the body ran
+      // (and may have spent), then resolved to something executeOp refuses —
+      // here a value that is not an OpResult at all. Same unknown-spend
+      // exposure, same out-of-band signal; a verdict-only reading would settle
+      // 'observed' zero.
+      const resolvesToGarbage = (): Promise<OpResult<unknown>> =>
+        Promise.resolve({ not: 'an OpResult' } as unknown as OpResult<unknown>);
+      const governor = createGovernor({ maxUsd: 1 });
+      const report = await runPlan(
+        independentPlan('w23-contract', 1),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', resolvesToGarbage)),
+        { governor, allowAdvisory: true },
+      );
+      expect(report.jobs[0]?.result.status).toBe('failed');
+      const events = await openRunLog(w3dir).read(report.runId);
+      const settled = events.find(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      expect(settled).toMatchObject({ charged: 1, basis: 'full' });
+      expect(governor.usdSpent).toBeCloseTo(1);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'a PRE-dispatch failure still settles observed zero (the full basis is not over-wide)',
+    async () => {
+      // The other side of the same boundary: nothing was dispatched, so the
+      // reservation must settle at zero. An unknown op never reaches the op
+      // body — the pre-dispatch reading must survive the new signal.
+      const governor = createGovernor({ maxUsd: 1 });
+      const report = await runPlan(
+        independentPlan('w23-pre-dispatch', 1, 'nosuchop'),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', okOp)),
+        { governor, allowAdvisory: true },
+      );
+      expect(report.jobs[0]?.result.status).toBe('failed');
+      const events = await openRunLog(w3dir).read(report.runId);
+      const settled = events.find(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      expect(settled).toMatchObject({ charged: 0, basis: 'observed' });
+      expect(governor.usdSpent).toBeCloseTo(0);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'capacity waits FIFO behind outstanding reservations, then admits (settled + outstanding + proposed ≤ cap)',
+    async () => {
+      // The park is CONSTRUCTED, not hoped for. cap 1.0, concurrency 4 → the
+      // fair-share proposal is 0.25, so j1–j4 fill C exactly (4 × 0.25 = 1.0)
+      // and j5's 0.25 proposal has nowhere to come from until a settle frees
+      // room. Every op is GATED and released by this test in a known order, so
+      // the wait is deterministic rather than a race:
+      //   - j1–j4 hold their reservations (O = 1.0) until released;
+      //   - releasing j1 frees its p-limit slot, so j5's dispatch starts and
+      //     reaches `reserve` while j3 and j4 still hold theirs: free capacity
+      //     is 1.0 − 0.1 − 0.75 = 0.15 < the 0.25 proposal → j5 WAITS;
+      //   - only j2's settle (free 0.30 ≥ 0.25) wakes the head.
+      // The middle assertion is the proof: a runner that granted j5 straight
+      // after j1's settle would leave O at 0.90, not 0.75.
+      const releases = new Map<string, () => void>();
+      const entered: string[] = [];
+      // A WALL-CLOCK wait, not the file's setImmediate `waitFor`: every
+      // dispatch here writes durable journal events (fdatasync), and a tight
+      // setImmediate loop can outrun the threadpool on a loaded runner — the
+      // first wait then fails with jobs still starting (observed on CI, not
+      // locally). setTimeout yields to the poll phase, so the durable writes
+      // land inside the bound.
+      const waitUntil = async (condition: () => boolean, what: string): Promise<void> => {
+        const deadline = Date.now() + 10_000;
+        while (!condition() && Date.now() < deadline) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 1);
+          });
+        }
+        expect(condition(), `waitUntil: ${what}`).toBe(true);
+      };
+      const gated = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        entered.push(jobId);
+        await new Promise<void>((resolve) => {
+          releases.set(jobId, resolve);
+        });
+        currentJobContext()?.reportResult({
+          usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+          costUSD: 0.1,
+        });
+        return { status: 'ok', value: jobId };
+      };
+      const governor = createGovernor({ maxUsd: 1 });
+      const runPromise = runPlan(
+        independentPlan('w23-fifo', 5),
+        { concurrency: 4, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', gated)),
+        { governor, allowAdvisory: true },
+      );
+      await waitUntil(() => entered.length === 4, 'j1–j4 to hold their reservations');
+      expect(governor.outstandingUsd).toBeCloseTo(1);
+      releases.get('j1')?.();
+      // j1's settle is journalled inside its own dispatch, BEFORE p-limit
+      // releases the slot — so once the ledger shows the charge, j5's reserve
+      // is either parked or has already been granted.
+      await waitUntil(() => governor.usdSpent >= 0.1, 'j1 to settle');
+      expect(governor.outstandingUsd).toBeCloseTo(0.75); // j5 NOT granted: it parked
+      expect(entered).not.toContain('j5');
+      // The second settle frees the room j5's proposal needs.
+      releases.get('j2')?.();
+      await waitUntil(() => entered.includes('j5'), 'j5 to be granted its reservation');
+      releases.get('j5')?.();
+      releases.get('j3')?.();
+      releases.get('j4')?.();
+      const report = await runPromise;
+      expect(entered).toEqual(expect.arrayContaining(['j1', 'j2', 'j3', 'j4', 'j5']));
+      expect(report.counts.done).toBe(5);
+      expect(report.costUSD).toBeCloseTo(0.5); // the seeded-less ledger: Σ charged
+      // The cap held through the wait: settled + outstanding never exceeded C.
+      expect(governor.outstandingUsd).toBeCloseTo(0);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'A12c: an unattended governed run refuses every ADVISORY dispatch without the escape',
+    async () => {
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 5 });
+      const report = await runPlan(
+        independentPlan('w23-a12c', 2),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor }, // no attended, no allowAdvisory — the v1.1 default
+      );
+      expect(calls).toEqual([]); // nothing dispatched
+      expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
+      const events = await openRunLog(w3dir).read(report.runId);
+      expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(2);
+      expect(events.filter((event) => event.type === 'job-started')).toHaveLength(0);
+      const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
+      expect(started.governance).toMatchObject({ attended: false, capUsd: 5 });
+      expect(started.governance?.allowAdvisory).toBeUndefined();
+      // The refusal rows are terminal budget evidence; nothing was gated into
+      // a stop claim (I9, both directions like the admission refusals).
+      expect(report.stoppedEarly).toBe(false);
+      const shorts = governor.events.filter(
+        (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+      );
+      expect(shorts.map((event) => event.reason)).toEqual(['advisory-lane', 'advisory-lane']);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'A12c: allowAdvisory and attended are the two named escapes, and the journal records WHO set the escape (r1 M4)',
+    async () => {
+      for (const escape of [
+        { allowAdvisory: true, allowAdvisoryProvenance: 'product' as const },
+        { allowAdvisory: true, allowAdvisoryProvenance: 'operator' as const },
+        { attended: true },
+      ] as const) {
+        const w3dirEscape = await mkdtemp(join(tmpdir(), 'w23-escape-'));
+        try {
+          const calls: string[] = [];
+          const report = await runPlan(
+            independentPlan('w23-escape', 1),
+            { concurrency: 1, stopOnError: false, journalDir: w3dirEscape },
+            viewWith(entry('fake', countingOp(calls))),
+            { governor: createGovernor({}), ...escape },
+          );
+          expect(calls).toEqual(['j1']);
+          expect(report.counts.done).toBe(1);
+          const events = await openRunLog(w3dirEscape).read(report.runId);
+          const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
+          if ('allowAdvisory' in escape) {
+            expect(started.governance?.allowAdvisory).toBe(true);
+            // The provenance rides the escape (ADR §2.3: allowAdvisory
+            // admissions sit OUTSIDE C_max — the breach must be attributable).
+            expect(started.governance?.allowAdvisoryProvenance).toBe(
+              escape.allowAdvisoryProvenance,
+            );
+          } else {
+            expect(started.governance?.attended).toBe(true);
+            expect(started.governance?.allowAdvisory).toBeUndefined();
+          }
+        } finally {
+          await rm(w3dirEscape, { recursive: true, force: true });
+        }
+      }
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'A12c: dependents of advisory-refused jobs re-mark budget-exhausted transitively, not fabricated failed',
+    async () => {
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 5 });
+      const plan: Plan = {
+        id: 'w23-a12c-chain',
+        jobs: [
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+        ],
+      };
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor }, // unattended, no escape — both dispatches refuse
+      );
+      expect(calls).toEqual([]);
+      // j1: the refusal row IS its terminal budget verdict. j2: blocked by j1,
+      // and the CAUSE is the advisory refusal → re-marked budget-exhausted
+      // (ADR §2.9), never a fabricated `failed` row.
+      expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
+      expect(report.counts['budget-exhausted']).toBe(2);
+      expect(report.counts.blocked).toBe(0);
+      // The stop gated j2's undispatched work — the honest-stop claim holds.
+      expect(report.stoppedEarly).toBe(true);
+      expect(report.earlyStopReason).toBe('budget');
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'comp 1: stopOnError halts on an advisory refusal WITHOUT re-marking the sibling or claiming a budget stop',
+    async () => {
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 5 });
+      // Unattended, no escape: j1's dispatch is refused by the A12c gate. The
+      // operator's stopOnError halts the run there — but a classification
+      // refusal is a per-row terminal verdict, NOT a governor trip, so the
+      // honest-stop pass must NOT re-mark j2 budget-exhausted (it stays
+      // queued, re-runnable) and the run must NOT claim `earlyStopReason:
+      // 'budget'` the journal has no budget-tripped fact for (the run spent
+      // $0 and no bound fired).
+      const report = await runPlan(
+        independentPlan('w23-comp1', 2),
+        { concurrency: 1, stopOnError: true, journalDir: w3dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor }, // no attended, no allowAdvisory
+      );
+      expect(calls).toEqual([]); // nothing dispatched
+      // j1: the refusal row is its terminal budget verdict. j2: queued.
+      expect(rowStatuses(report)).toEqual(['budget-exhausted', 'indeterminate']);
+      expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toMatchObject({
+        status: 'indeterminate',
+      });
+      // No budget stop claimed, no budget-tripped event journalled: the
+      // report and the journal agree (I9).
+      expect(report.stoppedEarly).toBe(false);
+      expect(report.earlyStopReason).toBeUndefined();
+      const events = await openRunLog(w3dir).read(report.runId);
+      expect(events.some((event) => event.type === 'budget-tripped')).toBe(false);
+      expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(1);
+      const finished = events.find(
+        (event): event is Extract<JournalEvent, { type: 'run-finished' }> =>
+          event.type === 'run-finished',
+      );
+      expect(finished).toMatchObject({ stoppedEarly: false });
+      // The writer half of the line-count check (comp 2): the total matches,
+      // run-finished included.
+      expect(finished?.eventCount).toBe(events.length);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'A12b: an unresolved reservation charges IN FULL and QUARANTINES the job (never re-run)',
+    async () => {
+      // Run 1 "crashes" mid-dispatch: run-started v2 (capped), job-started,
+      // reservation-opened — no settle, no finish. The resumed run must charge
+      // the full reservation and refuse to re-run the job.
+      const log = openRunLog(w3dir);
+      const plan: Plan = {
+        id: 'w23-a12b',
+        jobs: [
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+        ],
+      };
+      const crashRunId = 'w23-a12b--r1--aa';
+      await log.append(crashRunId, {
+        type: 'run-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'w23-a12b',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+      });
+      await log.append(crashRunId, {
+        type: 'job-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(crashRunId, {
+        type: 'reservation-opened',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.500Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+        reservationId: `${crashRunId}:j1:1:1`,
+        usd: 0.75,
+        class: 'advisory',
+      });
+
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 5 });
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor, allowAdvisory: true },
+      );
+      // The seed charged the crash window IN FULL before anything ran.
+      expect(governor.usdSpent).toBe(0.75);
+      // j1: quarantined — needs-human, never dispatched.
+      const j1 = report.jobs.find((row) => row.jobId === 'j1');
+      expect(j1?.result.status).toBe('needs-human');
+      if (j1?.result.status !== 'needs-human') throw new Error('expected needs-human');
+      expect(j1.result.reason).toContain('quarantined');
+      expect(calls).not.toContain('j1');
+      // j2: blocked by its quarantined dependency.
+      expect(report.jobs.find((row) => row.jobId === 'j2')?.result.status).toBe('failed');
+      // Journal evidence: the quarantine stands, no dispatch happened for j1.
+      const events = await openRunLog(w3dir).read(report.runId);
+      const quarantined = events.find(
+        (event): event is Extract<JournalEvent, { type: 'job-quarantined' }> =>
+          event.type === 'job-quarantined',
+      );
+      expect(quarantined).toMatchObject({
+        jobId: 'j1',
+        reservationId: `${crashRunId}:j1:1:1`,
+        chargedUsd: 0.75,
+        reason: 'unresolved-reservation',
+      });
+      expect(events.some((event) => event.type === 'job-started' && event.jobId === 'j1')).toBe(
+        false,
+      );
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'A12b: the quarantine re-attests each run; releaseQuarantine re-runs the job but never refunds',
+    async () => {
+      const log = openRunLog(w3dir);
+      const plan: Plan = {
+        id: 'w23-release',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+      const crashRunId = 'w23-release--r1--aa';
+      await log.append(crashRunId, {
+        type: 'run-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'w23-release',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+      });
+      await log.append(crashRunId, {
+        type: 'job-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(crashRunId, {
+        type: 'reservation-opened',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.500Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+        reservationId: `${crashRunId}:j1:1:1`,
+        usd: 2,
+        class: 'advisory',
+      });
+
+      // Run 2 (no release): re-attested — still quarantined, still charged 2.
+      const calls2: string[] = [];
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', countingOp(calls2))),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(report2.jobs[0]?.result.status).toBe('needs-human');
+      expect(calls2).toEqual([]);
+      const events2 = await openRunLog(w3dir).read(report2.runId);
+      expect(events2.some((event) => event.type === 'job-quarantined')).toBe(true);
+
+      // Run 3 (released): the job dispatches, the release is journalled with
+      // provenance 'call', and the FULL charge stays in the ledger (the new
+      // dispatch's own spend ADDS to it).
+      const calls3: string[] = [];
+      const governor3 = createGovernor({ maxUsd: 5 });
+      const report3 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', spendOnce(calls3, 0.5))),
+        { governor: governor3, allowAdvisory: true, releaseQuarantine: ['j1'] },
+      );
+      expect(calls3).toEqual(['j1']);
+      expect(report3.jobs[0]?.result.status).toBe('ok');
+      const events3 = await openRunLog(w3dir).read(report3.runId);
+      expect(events3.some((event) => event.type === 'quarantine-released')).toBe(true);
+      // Ledger: 2 (the never-refunded crash charge) + 0.5 (the new dispatch).
+      expect(governor3.usdSpent).toBeCloseTo(2.5);
+      void hash;
+
+      // Run 4 (NO release passed): the journalled release from run 3 LIFTS the
+      // standing quarantine — j1 runs (or replays) normally, needs-human never
+      // returns. The run-1 charge stays in the ledger forever.
+      const calls4: string[] = [];
+      const governor4 = createGovernor({ maxUsd: 5 });
+      const report4 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', countingOp(calls4))),
+        { governor: governor4, allowAdvisory: true },
+      );
+      expect(report4.jobs[0]?.result.status).toBe('ok'); // replayed from run 3's verified ok
+      expect(calls4).toEqual([]); // zero invocation — the replay skip, not a refusal
+      expect(governor4.usdSpent).toBeCloseTo(2.5); // the crash charge + run 3's spend, still held
+    },
+    journalEnclosure(3),
+  );
+
+  test(
+    'A12b: a released job RE-RUNS even when an older ok sits in the replay map (no replay-skip bypass)',
+    async () => {
+      // Codex P1 on the fix round: run 0 completes j1 ok (verified, journalled);
+      // run 1 re-runs it and CRASHES after opening its reservation (its effects
+      // are unknown); run 2 resumes WITH --release-quarantine. The release
+      // contract says the job re-runs — an older matching ok must not let the
+      // replay-skip mark it done without dispatching.
+      const log = openRunLog(w3dir);
+      const plan: Plan = {
+        id: 'w23-release-replay',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+      // Run 0: j1 completes ok (priced).
+      const okRunId = 'w23-release-replay--r0--aa';
+      await log.append(okRunId, {
+        type: 'run-started',
+        runId: okRunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'w23-release-replay',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+      });
+      await log.append(okRunId, {
+        type: 'job-started',
+        runId: okRunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(okRunId, {
+        type: 'job-finished',
+        runId: okRunId,
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'ok', value: 'r0' },
         costUSD: 0.1,
       });
-      return { status: 'ok', value: jobId };
-    };
-    const governor = createGovernor({ maxUsd: 1 });
-    const runPromise = runPlan(
-      independentPlan('w23-fifo', 5),
-      { concurrency: 4, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', gated)),
-      { governor, allowAdvisory: true },
-    );
-    await waitUntil(() => entered.length === 4, 'j1–j4 to hold their reservations');
-    expect(governor.outstandingUsd).toBeCloseTo(1);
-    releases.get('j1')?.();
-    // j1's settle is journalled inside its own dispatch, BEFORE p-limit
-    // releases the slot — so once the ledger shows the charge, j5's reserve
-    // is either parked or has already been granted.
-    await waitUntil(() => governor.usdSpent >= 0.1, 'j1 to settle');
-    expect(governor.outstandingUsd).toBeCloseTo(0.75); // j5 NOT granted: it parked
-    expect(entered).not.toContain('j5');
-    // The second settle frees the room j5's proposal needs.
-    releases.get('j2')?.();
-    await waitUntil(() => entered.includes('j5'), 'j5 to be granted its reservation');
-    releases.get('j5')?.();
-    releases.get('j3')?.();
-    releases.get('j4')?.();
-    const report = await runPromise;
-    expect(entered).toEqual(expect.arrayContaining(['j1', 'j2', 'j3', 'j4', 'j5']));
-    expect(report.counts.done).toBe(5);
-    expect(report.costUSD).toBeCloseTo(0.5); // the seeded-less ledger: Σ charged
-    // The cap held through the wait: settled + outstanding never exceeded C.
-    expect(governor.outstandingUsd).toBeCloseTo(0);
-  });
-
-  test('A12c: an unattended governed run refuses every ADVISORY dispatch without the escape', async () => {
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 5 });
-    const report = await runPlan(
-      independentPlan('w23-a12c', 2),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor }, // no attended, no allowAdvisory — the v1.1 default
-    );
-    expect(calls).toEqual([]); // nothing dispatched
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
-    const events = await openRunLog(w3dir).read(report.runId);
-    expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(2);
-    expect(events.filter((event) => event.type === 'job-started')).toHaveLength(0);
-    const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
-    expect(started.governance).toMatchObject({ attended: false, capUsd: 5 });
-    expect(started.governance?.allowAdvisory).toBeUndefined();
-    // The refusal rows are terminal budget evidence; nothing was gated into
-    // a stop claim (I9, both directions like the admission refusals).
-    expect(report.stoppedEarly).toBe(false);
-    const shorts = governor.events.filter(
-      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
-    );
-    expect(shorts.map((event) => event.reason)).toEqual(['advisory-lane', 'advisory-lane']);
-  });
-
-  test('A12c: allowAdvisory and attended are the two named escapes, and the journal records WHO set the escape (r1 M4)', async () => {
-    for (const escape of [
-      { allowAdvisory: true, allowAdvisoryProvenance: 'product' as const },
-      { allowAdvisory: true, allowAdvisoryProvenance: 'operator' as const },
-      { attended: true },
-    ] as const) {
-      const w3dirEscape = await mkdtemp(join(tmpdir(), 'w23-escape-'));
-      try {
-        const calls: string[] = [];
-        const report = await runPlan(
-          independentPlan('w23-escape', 1),
-          { concurrency: 1, stopOnError: false, journalDir: w3dirEscape },
-          viewWith(entry('fake', countingOp(calls))),
-          { governor: createGovernor({}), ...escape },
-        );
-        expect(calls).toEqual(['j1']);
-        expect(report.counts.done).toBe(1);
-        const events = await openRunLog(w3dirEscape).read(report.runId);
-        const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
-        if ('allowAdvisory' in escape) {
-          expect(started.governance?.allowAdvisory).toBe(true);
-          // The provenance rides the escape (ADR §2.3: allowAdvisory
-          // admissions sit OUTSIDE C_max — the breach must be attributable).
-          expect(started.governance?.allowAdvisoryProvenance).toBe(escape.allowAdvisoryProvenance);
-        } else {
-          expect(started.governance?.attended).toBe(true);
-          expect(started.governance?.allowAdvisory).toBeUndefined();
-        }
-      } finally {
-        await rm(w3dirEscape, { recursive: true, force: true });
-      }
-    }
-  });
-
-  test('A12c: dependents of advisory-refused jobs re-mark budget-exhausted transitively, not fabricated failed', async () => {
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 5 });
-    const plan: Plan = {
-      id: 'w23-a12c-chain',
-      jobs: [
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
-      ],
-    };
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor }, // unattended, no escape — both dispatches refuse
-    );
-    expect(calls).toEqual([]);
-    // j1: the refusal row IS its terminal budget verdict. j2: blocked by j1,
-    // and the CAUSE is the advisory refusal → re-marked budget-exhausted
-    // (ADR §2.9), never a fabricated `failed` row.
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
-    expect(report.counts['budget-exhausted']).toBe(2);
-    expect(report.counts.blocked).toBe(0);
-    // The stop gated j2's undispatched work — the honest-stop claim holds.
-    expect(report.stoppedEarly).toBe(true);
-    expect(report.earlyStopReason).toBe('budget');
-  });
-
-  test('comp 1: stopOnError halts on an advisory refusal WITHOUT re-marking the sibling or claiming a budget stop', async () => {
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 5 });
-    // Unattended, no escape: j1's dispatch is refused by the A12c gate. The
-    // operator's stopOnError halts the run there — but a classification
-    // refusal is a per-row terminal verdict, NOT a governor trip, so the
-    // honest-stop pass must NOT re-mark j2 budget-exhausted (it stays
-    // queued, re-runnable) and the run must NOT claim `earlyStopReason:
-    // 'budget'` the journal has no budget-tripped fact for (the run spent
-    // $0 and no bound fired).
-    const report = await runPlan(
-      independentPlan('w23-comp1', 2),
-      { concurrency: 1, stopOnError: true, journalDir: w3dir },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor }, // no attended, no allowAdvisory
-    );
-    expect(calls).toEqual([]); // nothing dispatched
-    // j1: the refusal row is its terminal budget verdict. j2: queued.
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'indeterminate']);
-    expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toMatchObject({
-      status: 'indeterminate',
-    });
-    // No budget stop claimed, no budget-tripped event journalled: the
-    // report and the journal agree (I9).
-    expect(report.stoppedEarly).toBe(false);
-    expect(report.earlyStopReason).toBeUndefined();
-    const events = await openRunLog(w3dir).read(report.runId);
-    expect(events.some((event) => event.type === 'budget-tripped')).toBe(false);
-    expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(1);
-    const finished = events.find(
-      (event): event is Extract<JournalEvent, { type: 'run-finished' }> =>
-        event.type === 'run-finished',
-    );
-    expect(finished).toMatchObject({ stoppedEarly: false });
-    // The writer half of the line-count check (comp 2): the total matches,
-    // run-finished included.
-    expect(finished?.eventCount).toBe(events.length);
-  });
-
-  test('A12b: an unresolved reservation charges IN FULL and QUARANTINES the job (never re-run)', async () => {
-    // Run 1 "crashes" mid-dispatch: run-started v2 (capped), job-started,
-    // reservation-opened — no settle, no finish. The resumed run must charge
-    // the full reservation and refuse to re-run the job.
-    const log = openRunLog(w3dir);
-    const plan: Plan = {
-      id: 'w23-a12b',
-      jobs: [
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
-      ],
-    };
-    const crashRunId = 'w23-a12b--r1--aa';
-    await log.append(crashRunId, {
-      type: 'run-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'w23-a12b',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(crashRunId, {
-      type: 'job-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(crashRunId, {
-      type: 'reservation-opened',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.500Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-      reservationId: `${crashRunId}:j1:1:1`,
-      usd: 0.75,
-      class: 'advisory',
-    });
-
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 5 });
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor, allowAdvisory: true },
-    );
-    // The seed charged the crash window IN FULL before anything ran.
-    expect(governor.usdSpent).toBe(0.75);
-    // j1: quarantined — needs-human, never dispatched.
-    const j1 = report.jobs.find((row) => row.jobId === 'j1');
-    expect(j1?.result.status).toBe('needs-human');
-    if (j1?.result.status !== 'needs-human') throw new Error('expected needs-human');
-    expect(j1.result.reason).toContain('quarantined');
-    expect(calls).not.toContain('j1');
-    // j2: blocked by its quarantined dependency.
-    expect(report.jobs.find((row) => row.jobId === 'j2')?.result.status).toBe('failed');
-    // Journal evidence: the quarantine stands, no dispatch happened for j1.
-    const events = await openRunLog(w3dir).read(report.runId);
-    const quarantined = events.find(
-      (event): event is Extract<JournalEvent, { type: 'job-quarantined' }> =>
-        event.type === 'job-quarantined',
-    );
-    expect(quarantined).toMatchObject({
-      jobId: 'j1',
-      reservationId: `${crashRunId}:j1:1:1`,
-      chargedUsd: 0.75,
-      reason: 'unresolved-reservation',
-    });
-    expect(events.some((event) => event.type === 'job-started' && event.jobId === 'j1')).toBe(
-      false,
-    );
-  });
-
-  test('A12b: the quarantine re-attests each run; releaseQuarantine re-runs the job but never refunds', async () => {
-    const log = openRunLog(w3dir);
-    const plan: Plan = {
-      id: 'w23-release',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
-    const crashRunId = 'w23-release--r1--aa';
-    await log.append(crashRunId, {
-      type: 'run-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'w23-release',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(crashRunId, {
-      type: 'job-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(crashRunId, {
-      type: 'reservation-opened',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.500Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-      reservationId: `${crashRunId}:j1:1:1`,
-      usd: 2,
-      class: 'advisory',
-    });
-
-    // Run 2 (no release): re-attested — still quarantined, still charged 2.
-    const calls2: string[] = [];
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', countingOp(calls2))),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    expect(report2.jobs[0]?.result.status).toBe('needs-human');
-    expect(calls2).toEqual([]);
-    const events2 = await openRunLog(w3dir).read(report2.runId);
-    expect(events2.some((event) => event.type === 'job-quarantined')).toBe(true);
-
-    // Run 3 (released): the job dispatches, the release is journalled with
-    // provenance 'call', and the FULL charge stays in the ledger (the new
-    // dispatch's own spend ADDS to it).
-    const calls3: string[] = [];
-    const governor3 = createGovernor({ maxUsd: 5 });
-    const report3 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', spendOnce(calls3, 0.5))),
-      { governor: governor3, allowAdvisory: true, releaseQuarantine: ['j1'] },
-    );
-    expect(calls3).toEqual(['j1']);
-    expect(report3.jobs[0]?.result.status).toBe('ok');
-    const events3 = await openRunLog(w3dir).read(report3.runId);
-    expect(events3.some((event) => event.type === 'quarantine-released')).toBe(true);
-    // Ledger: 2 (the never-refunded crash charge) + 0.5 (the new dispatch).
-    expect(governor3.usdSpent).toBeCloseTo(2.5);
-    void hash;
-
-    // Run 4 (NO release passed): the journalled release from run 3 LIFTS the
-    // standing quarantine — j1 runs (or replays) normally, needs-human never
-    // returns. The run-1 charge stays in the ledger forever.
-    const calls4: string[] = [];
-    const governor4 = createGovernor({ maxUsd: 5 });
-    const report4 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', countingOp(calls4))),
-      { governor: governor4, allowAdvisory: true },
-    );
-    expect(report4.jobs[0]?.result.status).toBe('ok'); // replayed from run 3's verified ok
-    expect(calls4).toEqual([]); // zero invocation — the replay skip, not a refusal
-    expect(governor4.usdSpent).toBeCloseTo(2.5); // the crash charge + run 3's spend, still held
-  });
-
-  test('A12b: a released job RE-RUNS even when an older ok sits in the replay map (no replay-skip bypass)', async () => {
-    // Codex P1 on the fix round: run 0 completes j1 ok (verified, journalled);
-    // run 1 re-runs it and CRASHES after opening its reservation (its effects
-    // are unknown); run 2 resumes WITH --release-quarantine. The release
-    // contract says the job re-runs — an older matching ok must not let the
-    // replay-skip mark it done without dispatching.
-    const log = openRunLog(w3dir);
-    const plan: Plan = {
-      id: 'w23-release-replay',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
-    // Run 0: j1 completes ok (priced).
-    const okRunId = 'w23-release-replay--r0--aa';
-    await log.append(okRunId, {
-      type: 'run-started',
-      runId: okRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'w23-release-replay',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(okRunId, {
-      type: 'job-started',
-      runId: okRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(okRunId, {
-      type: 'job-finished',
-      runId: okRunId,
-      at: '2026-01-01T00:00:02.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: hash,
-      result: { status: 'ok', value: 'r0' },
-      costUSD: 0.1,
-    });
-    // Run 1: re-dispatch crashes after opening its reservation (no settle,
-    // no finish) — the A12b window over a job with an OLDER verified ok.
-    const crashRunId = 'w23-release-replay--r1--bb';
-    await log.append(crashRunId, {
-      type: 'run-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:00.000Z',
-      planId: 'w23-release-replay',
-      journalVersion: 2,
-      seq: 2,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(crashRunId, {
-      type: 'job-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 2,
-    });
-    await log.append(crashRunId, {
-      type: 'reservation-opened',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:01.500Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 2,
-      reservationId: `${crashRunId}:j1:2:1`,
-      usd: 1,
-      class: 'advisory',
-    });
-
-    // Run 2: resume WITH the release — the job must RE-DISPATCH (a fresh
-    // reservation, a real invocation), never replay-skip on run 0's ok.
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 5 });
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', spendOnce(calls, 0.25))),
-      { governor, allowAdvisory: true, releaseQuarantine: ['j1'] },
-    );
-    expect(calls).toEqual(['j1']); // the re-run HAPPENED — the bypass is closed
-    expect(report.jobs[0]?.result.status).toBe('ok');
-    const events = await openRunLog(w3dir).read(report.runId);
-    expect(events.some((event) => event.type === 'quarantine-released')).toBe(true);
-    // The re-dispatch opened its own write-ahead reservation.
-    expect(events.some((event) => event.type === 'reservation-opened')).toBe(true);
-    // Ledger: run 0's priced 0.1 + the never-refunded 1.0 crash charge +
-    // the re-run's 0.25.
-    expect(governor.usdSpent).toBeCloseTo(1.35);
-  });
-
-  test('A12b: a release run with NO replacement finish still re-runs the job on the next resume', async () => {
-    // Verifier repro (fix r2): run 0 completes j1 ok; run 1 crashes in the
-    // A12b window (reservation opened, no settle); run 2 resumes WITH the
-    // release but a sibling's stopOnError halts the run BEFORE j1
-    // re-dispatches — the journal carries quarantine-released and NO j1
-    // finish. Run 3 must re-dispatch j1: the journalled release lifts the
-    // quarantine, and run 0's PRE-release ok must not replay-skip it —
-    // otherwise --release-quarantine is a silent permanent no-op across
-    // runs and the report asserts an ok the run never produced.
-    const log = openRunLog(w3dir);
-    const plan: Plan = {
-      id: 'w23-release-nofinish',
-      // j2 first: with concurrency 1 its failure stops the run before j1.
-      jobs: [
-        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
-        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
-      ],
-    };
-    const hash = makeManifest(plan).jobs.find((job) => job.id === 'j1')?.inputsHash ?? '';
-    // Run 0: j1 completes ok (priced).
-    const okRunId = 'w23-release-nofinish--r0--aa';
-    await log.append(okRunId, {
-      type: 'run-started',
-      runId: okRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'w23-release-nofinish',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(okRunId, {
-      type: 'job-started',
-      runId: okRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(okRunId, {
-      type: 'job-finished',
-      runId: okRunId,
-      at: '2026-01-01T00:00:02.000Z',
-      jobId: 'j1',
-      opId: 'fake',
-      inputsHash: hash,
-      result: { status: 'ok', value: 'r0' },
-      costUSD: 0.1,
-    });
-    // Run 1: re-dispatch crashes after opening its reservation (no settle,
-    // no finish) — the A12b window over j1's OLDER verified ok.
-    const crashRunId = 'w23-release-nofinish--r1--bb';
-    await log.append(crashRunId, {
-      type: 'run-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:00.000Z',
-      planId: 'w23-release-nofinish',
-      journalVersion: 2,
-      seq: 2,
-      governance: { capUsd: 5, attended: false },
-    });
-    await log.append(crashRunId, {
-      type: 'job-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 2,
-    });
-    await log.append(crashRunId, {
-      type: 'reservation-opened',
-      runId: crashRunId,
-      at: '2026-01-01T00:01:01.500Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 2,
-      reservationId: `${crashRunId}:j1:2:1`,
-      usd: 1,
-      class: 'advisory',
-    });
-
-    // Run 2: resume WITH the release; sibling j2 fails first and
-    // stopOnError halts the run before j1 re-dispatches.
-    const calls2: string[] = [];
-    const governor2 = createGovernor({ maxUsd: 5 });
-    const report2 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: true, journalDir: w3dir, resume: true },
-      viewWith(
-        entry('fake', async (raw) => {
-          const jobId = (raw as { jobId: string }).jobId;
-          calls2.push(jobId);
-          return jobId === 'j2'
-            ? { status: 'failed' as const, error: 'sibling failure' }
-            : okOp(raw);
-        }),
-      ),
-      { governor: governor2, allowAdvisory: true, releaseQuarantine: ['j1'] },
-    );
-    const events2 = await openRunLog(w3dir).read(report2.runId);
-    expect(events2.some((event) => event.type === 'quarantine-released')).toBe(true);
-    // The release run produced NO replacement finish for j1.
-    expect(jobFinishes(events2).some((event) => event.jobId === 'j1')).toBe(false);
-    expect(calls2).toEqual(['j2']); // j1 was never re-dispatched this run
-
-    // Run 3: resume WITHOUT the release flag — the journalled release lifts
-    // the quarantine, and the job must RE-DISPATCH, not replay-skip run 0's
-    // stale pre-release ok.
-    const calls3: string[] = [];
-    const governor3 = createGovernor({ maxUsd: 5 });
-    const report3 = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', countingOp(calls3, 0.25))),
-      { governor: governor3, allowAdvisory: true },
-    );
-    expect(governor3.quarantinedJobs.size).toBe(0); // lifted, not re-attested
-    expect(calls3).toEqual(['j2', 'j1']); // j1 RE-DISPATCHED — bypass closed
-    expect(report3.jobs.find((row) => row.jobId === 'j1')?.result.status).toBe('ok');
-  });
-
-  test('A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch', async () => {
-    const log = openRunLog(w3dir);
-    const plan: Plan = {
-      id: 'w23-crashcap',
-      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
-    };
-    const crashRunId = 'w23-crashcap--r1--aa';
-    await log.append(crashRunId, {
-      type: 'run-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:00.000Z',
-      planId: 'w23-crashcap',
-      journalVersion: 2,
-      seq: 1,
-      governance: { capUsd: 1, attended: false },
-    });
-    await log.append(crashRunId, {
-      type: 'job-started',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.000Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-    });
-    await log.append(crashRunId, {
-      type: 'reservation-opened',
-      runId: crashRunId,
-      at: '2026-01-01T00:00:01.500Z',
-      jobId: 'j1',
-      op: 'fake',
-      attempt: 1,
-      reservationId: `${crashRunId}:j1:1:1`,
-      usd: 1.5,
-      class: 'advisory',
-    });
-
-    const calls: string[] = [];
-    const governor = createGovernor({ maxUsd: 1 });
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
-      viewWith(entry('fake', countingOp(calls))),
-      { governor, allowAdvisory: true },
-    );
-    expect(calls).toEqual([]); // the seeded overrun trips BEFORE any dispatch
-    expect(governor.tripped).toBe(true);
-    expect(governor.tripKind).toBe('exhausted');
-    // The row is QUARANTINED (needs-human), not re-marked: the quarantine
-    // pass runs before the waves and the honest-stop walk never touches
-    // quarantined rows — a quarantine verdict outranks the budget re-mark,
-    // and both facts (the job-quarantined event and the trip) are on the
-    // journal for the operator.
-    expect(rowStatuses(report)).toEqual(['needs-human']);
-    expect(report.stoppedEarly).toBe(false);
-  });
-
-  test('abort-on-trip: a budget trip aborts the IN-FLIGHT dispatch; its reservation settles and the slot is held until then', async () => {
-    const calls: string[] = [];
-    let observedAbort = false;
-    const slowOp = async (raw: unknown): Promise<OpResult<unknown>> => {
-      const jobId = (raw as { jobId: string }).jobId;
-      calls.push(jobId);
-      const ctx = currentJobContext();
-      await new Promise<void>((resolve) => {
-        ctx?.signal.addEventListener('abort', () => {
-          observedAbort = true;
-          resolve();
-        });
+      // Run 1: re-dispatch crashes after opening its reservation (no settle,
+      // no finish) — the A12b window over a job with an OLDER verified ok.
+      const crashRunId = 'w23-release-replay--r1--bb';
+      await log.append(crashRunId, {
+        type: 'run-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:00.000Z',
+        planId: 'w23-release-replay',
+        journalVersion: 2,
+        seq: 2,
+        governance: { capUsd: 5, attended: false },
       });
-      // Post-abort evidence: the dispatch was mid-flight when the trip landed.
-      ctx?.reportResult({
-        usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
-        costUSD: 0.2,
+      await log.append(crashRunId, {
+        type: 'job-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
       });
-      return { status: 'ok', value: jobId };
-    };
-    const governor = createGovernor({ maxUsd: 1 });
-    const plan: Plan = {
-      id: 'w23-abort',
-      jobs: [
-        { id: 'j1', op: 'slow', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'spendy', input: { jobId: 'j2' } },
-      ],
-    };
-    const report = await runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('slow', slowOp), entry('spendy', spendOnce(calls, 1.5))),
-      { governor, allowAdvisory: true },
-    );
-    // j2's observed spend (1.5) crossed the cap → exhausted; j1 was aborted
-    // in-flight and kept its real post-abort verdict.
-    expect(observedAbort).toBe(true);
-    expect(governor.tripped).toBe(true);
-    expect(governor.tripKind).toBe('exhausted');
-    // Every row kept its real post-abort verdict and nothing was gated (both
-    // jobs ran; there was nothing left undispatched), so no early-stop claim
-    // is honest here (I9, both directions).
-    expect(report.stoppedEarly).toBe(false);
-    // Both dispatches settled: the journal carries exactly two
-    // reservation-settled events, and the run-level ledger moved by their
-    // charges (j2 1.5 via fold + breach-safe settle; j1 0.2 observed).
-    const events = await openRunLog(w3dir).read(report.runId);
-    const settles = events.filter(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    expect(settles).toHaveLength(2);
-    const j2 = settles.find((event) => event.jobId === 'j2');
-    expect(j2).toMatchObject({ charged: 1.5, basis: 'observed' }); // the fold was the evidence
-    const j1 = settles.find((event) => event.jobId === 'j1');
-    expect(j1).toMatchObject({ charged: 0.2, basis: 'observed' });
-    // The trip EVIDENCE event lands before run-finished.
-    expect(events[events.length - 1]?.type).toBe('run-finished');
-    expect(events[events.length - 2]).toMatchObject({
-      type: 'budget-tripped',
-      tripKind: 'exhausted',
-    });
-  });
+      await log.append(crashRunId, {
+        type: 'reservation-opened',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:01.500Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
+        reservationId: `${crashRunId}:j1:2:1`,
+        usd: 1,
+        class: 'advisory',
+      });
 
-  test('dispatch-closed guard: late evidence from a killed op is dropped (usdSpent equals the journal charged)', async () => {
-    // A local virtual clock (the governor suite owns the shared one): the
-    // kill rungs must fire deterministically for the detached-promise test.
-    let nowMs = 1_000_000;
-    const timers: Array<{ at: number; fn: () => void }> = [];
-    const clock = {
-      now: () => nowMs,
-      setTimeout(fn: () => void, ms: number) {
-        const timer = { at: nowMs + ms, fn };
-        timers.push(timer);
-        return timer;
-      },
-      clearTimeout(handle: unknown) {
-        const index = timers.indexOf(handle as { at: number; fn: () => void });
-        if (index >= 0) timers.splice(index, 1);
-      },
-      advance(ms: number) {
-        const target = nowMs + ms;
-        for (;;) {
-          const due = timers.filter((timer) => timer.at <= target).sort((a, b) => a.at - b.at)[0];
-          if (due === undefined) break;
-          nowMs = due.at;
-          timers.splice(timers.indexOf(due), 1);
-          due.fn();
-        }
-        nowMs = target;
-      },
-    };
-    const pump = async (promise: Promise<unknown>): Promise<void> => {
-      let settled = false;
-      void promise.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
+      // Run 2: resume WITH the release — the job must RE-DISPATCH (a fresh
+      // reservation, a real invocation), never replay-skip on run 0's ok.
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 5 });
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', spendOnce(calls, 0.25))),
+        { governor, allowAdvisory: true, releaseQuarantine: ['j1'] },
       );
-      for (let i = 0; i < 1000 && !settled; i++) {
-        clock.advance(10);
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      }
-      if (!settled) throw new Error('pump: run did not settle');
-    };
-    const calls: string[] = [];
-    let held: ReturnType<typeof currentJobContext>;
-    let runReport: RunReport | undefined;
-    const hangThenReport = async (raw: unknown): Promise<OpResult<unknown>> => {
-      const jobId = (raw as { jobId: string }).jobId;
-      calls.push(jobId);
-      held = currentJobContext();
-      await new Promise<never>(() => {}); // hangs — killed at the final rung
-      return okOp(raw); // unreachable
-    };
-    const governor = createGovernor(
-      { maxUsd: 5, perJobWallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
-      clock,
-    );
-    const plan: Plan = { id: 'w23-late', jobs: [{ id: 'j1', op: 'hang', input: { jobId: 'j1' } }] };
-    await pump(
-      runPlan(
+      expect(calls).toEqual(['j1']); // the re-run HAPPENED — the bypass is closed
+      expect(report.jobs[0]?.result.status).toBe('ok');
+      const events = await openRunLog(w3dir).read(report.runId);
+      expect(events.some((event) => event.type === 'quarantine-released')).toBe(true);
+      // The re-dispatch opened its own write-ahead reservation.
+      expect(events.some((event) => event.type === 'reservation-opened')).toBe(true);
+      // Ledger: run 0's priced 0.1 + the never-refunded 1.0 crash charge +
+      // the re-run's 0.25.
+      expect(governor.usdSpent).toBeCloseTo(1.35);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'A12b: a release run with NO replacement finish still re-runs the job on the next resume',
+    async () => {
+      // Verifier repro (fix r2): run 0 completes j1 ok; run 1 crashes in the
+      // A12b window (reservation opened, no settle); run 2 resumes WITH the
+      // release but a sibling's stopOnError halts the run BEFORE j1
+      // re-dispatches — the journal carries quarantine-released and NO j1
+      // finish. Run 3 must re-dispatch j1: the journalled release lifts the
+      // quarantine, and run 0's PRE-release ok must not replay-skip it —
+      // otherwise --release-quarantine is a silent permanent no-op across
+      // runs and the report asserts an ok the run never produced.
+      const log = openRunLog(w3dir);
+      const plan: Plan = {
+        id: 'w23-release-nofinish',
+        // j2 first: with concurrency 1 its failure stops the run before j1.
+        jobs: [
+          { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+          { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        ],
+      };
+      const hash = makeManifest(plan).jobs.find((job) => job.id === 'j1')?.inputsHash ?? '';
+      // Run 0: j1 completes ok (priced).
+      const okRunId = 'w23-release-nofinish--r0--aa';
+      await log.append(okRunId, {
+        type: 'run-started',
+        runId: okRunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'w23-release-nofinish',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 5, attended: false },
+      });
+      await log.append(okRunId, {
+        type: 'job-started',
+        runId: okRunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(okRunId, {
+        type: 'job-finished',
+        runId: okRunId,
+        at: '2026-01-01T00:00:02.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'ok', value: 'r0' },
+        costUSD: 0.1,
+      });
+      // Run 1: re-dispatch crashes after opening its reservation (no settle,
+      // no finish) — the A12b window over j1's OLDER verified ok.
+      const crashRunId = 'w23-release-nofinish--r1--bb';
+      await log.append(crashRunId, {
+        type: 'run-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:00.000Z',
+        planId: 'w23-release-nofinish',
+        journalVersion: 2,
+        seq: 2,
+        governance: { capUsd: 5, attended: false },
+      });
+      await log.append(crashRunId, {
+        type: 'job-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
+      });
+      await log.append(crashRunId, {
+        type: 'reservation-opened',
+        runId: crashRunId,
+        at: '2026-01-01T00:01:01.500Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
+        reservationId: `${crashRunId}:j1:2:1`,
+        usd: 1,
+        class: 'advisory',
+      });
+
+      // Run 2: resume WITH the release; sibling j2 fails first and
+      // stopOnError halts the run before j1 re-dispatches.
+      const calls2: string[] = [];
+      const governor2 = createGovernor({ maxUsd: 5 });
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: true, journalDir: w3dir, resume: true },
+        viewWith(
+          entry('fake', async (raw) => {
+            const jobId = (raw as { jobId: string }).jobId;
+            calls2.push(jobId);
+            return jobId === 'j2'
+              ? { status: 'failed' as const, error: 'sibling failure' }
+              : okOp(raw);
+          }),
+        ),
+        { governor: governor2, allowAdvisory: true, releaseQuarantine: ['j1'] },
+      );
+      const events2 = await openRunLog(w3dir).read(report2.runId);
+      expect(events2.some((event) => event.type === 'quarantine-released')).toBe(true);
+      // The release run produced NO replacement finish for j1.
+      expect(jobFinishes(events2).some((event) => event.jobId === 'j1')).toBe(false);
+      expect(calls2).toEqual(['j2']); // j1 was never re-dispatched this run
+
+      // Run 3: resume WITHOUT the release flag — the journalled release lifts
+      // the quarantine, and the job must RE-DISPATCH, not replay-skip run 0's
+      // stale pre-release ok.
+      const calls3: string[] = [];
+      const governor3 = createGovernor({ maxUsd: 5 });
+      const report3 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', countingOp(calls3, 0.25))),
+        { governor: governor3, allowAdvisory: true },
+      );
+      expect(governor3.quarantinedJobs.size).toBe(0); // lifted, not re-attested
+      expect(calls3).toEqual(['j2', 'j1']); // j1 RE-DISPATCHED — bypass closed
+      expect(report3.jobs.find((row) => row.jobId === 'j1')?.result.status).toBe('ok');
+    },
+    journalEnclosure(2),
+  );
+
+  test(
+    'A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch',
+    async () => {
+      const log = openRunLog(w3dir);
+      const plan: Plan = {
+        id: 'w23-crashcap',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
+      const crashRunId = 'w23-crashcap--r1--aa';
+      await log.append(crashRunId, {
+        type: 'run-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'w23-crashcap',
+        journalVersion: 2,
+        seq: 1,
+        governance: { capUsd: 1, attended: false },
+      });
+      await log.append(crashRunId, {
+        type: 'job-started',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(crashRunId, {
+        type: 'reservation-opened',
+        runId: crashRunId,
+        at: '2026-01-01T00:00:01.500Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+        reservationId: `${crashRunId}:j1:1:1`,
+        usd: 1.5,
+        class: 'advisory',
+      });
+
+      const calls: string[] = [];
+      const governor = createGovernor({ maxUsd: 1 });
+      const report = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor, allowAdvisory: true },
+      );
+      expect(calls).toEqual([]); // the seeded overrun trips BEFORE any dispatch
+      expect(governor.tripped).toBe(true);
+      expect(governor.tripKind).toBe('exhausted');
+      // The row is QUARANTINED (needs-human), not re-marked: the quarantine
+      // pass runs before the waves and the honest-stop walk never touches
+      // quarantined rows — a quarantine verdict outranks the budget re-mark,
+      // and both facts (the job-quarantined event and the trip) are on the
+      // journal for the operator.
+      expect(rowStatuses(report)).toEqual(['needs-human']);
+      expect(report.stoppedEarly).toBe(false);
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'abort-on-trip: a budget trip aborts the IN-FLIGHT dispatch; its reservation settles and the slot is held until then',
+    async () => {
+      const calls: string[] = [];
+      let observedAbort = false;
+      const slowOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        calls.push(jobId);
+        const ctx = currentJobContext();
+        await new Promise<void>((resolve) => {
+          ctx?.signal.addEventListener('abort', () => {
+            observedAbort = true;
+            resolve();
+          });
+        });
+        // Post-abort evidence: the dispatch was mid-flight when the trip landed.
+        ctx?.reportResult({
+          usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+          costUSD: 0.2,
+        });
+        return { status: 'ok', value: jobId };
+      };
+      const governor = createGovernor({ maxUsd: 1 });
+      const plan: Plan = {
+        id: 'w23-abort',
+        jobs: [
+          { id: 'j1', op: 'slow', input: { jobId: 'j1' } },
+          { id: 'j2', op: 'spendy', input: { jobId: 'j2' } },
+        ],
+      };
+      const report = await runPlan(
+        plan,
+        { concurrency: 2, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('slow', slowOp), entry('spendy', spendOnce(calls, 1.5))),
+        { governor, allowAdvisory: true },
+      );
+      // j2's observed spend (1.5) crossed the cap → exhausted; j1 was aborted
+      // in-flight and kept its real post-abort verdict.
+      expect(observedAbort).toBe(true);
+      expect(governor.tripped).toBe(true);
+      expect(governor.tripKind).toBe('exhausted');
+      // Every row kept its real post-abort verdict and nothing was gated (both
+      // jobs ran; there was nothing left undispatched), so no early-stop claim
+      // is honest here (I9, both directions).
+      expect(report.stoppedEarly).toBe(false);
+      // Both dispatches settled: the journal carries exactly two
+      // reservation-settled events, and the run-level ledger moved by their
+      // charges (j2 1.5 via fold + breach-safe settle; j1 0.2 observed).
+      const events = await openRunLog(w3dir).read(report.runId);
+      const settles = events.filter(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      expect(settles).toHaveLength(2);
+      const j2 = settles.find((event) => event.jobId === 'j2');
+      expect(j2).toMatchObject({ charged: 1.5, basis: 'observed' }); // the fold was the evidence
+      const j1 = settles.find((event) => event.jobId === 'j1');
+      expect(j1).toMatchObject({ charged: 0.2, basis: 'observed' });
+      // The trip EVIDENCE event lands before run-finished.
+      expect(events[events.length - 1]?.type).toBe('run-finished');
+      expect(events[events.length - 2]).toMatchObject({
+        type: 'budget-tripped',
+        tripKind: 'exhausted',
+      });
+    },
+    journalEnclosure(1),
+  );
+
+  test(
+    'dispatch-closed guard: late evidence from a killed op is dropped (usdSpent equals the journal charged)',
+    async () => {
+      // A local virtual clock (the governor suite owns the shared one): the
+      // kill rungs must fire deterministically for the detached-promise test.
+      let nowMs = 1_000_000;
+      const timers: Array<{ at: number; fn: () => void }> = [];
+      const clock = {
+        now: () => nowMs,
+        setTimeout(fn: () => void, ms: number) {
+          const timer = { at: nowMs + ms, fn };
+          timers.push(timer);
+          return timer;
+        },
+        clearTimeout(handle: unknown) {
+          const index = timers.indexOf(handle as { at: number; fn: () => void });
+          if (index >= 0) timers.splice(index, 1);
+        },
+        advance(ms: number) {
+          const target = nowMs + ms;
+          for (;;) {
+            const due = timers.filter((timer) => timer.at <= target).sort((a, b) => a.at - b.at)[0];
+            if (due === undefined) break;
+            nowMs = due.at;
+            timers.splice(timers.indexOf(due), 1);
+            due.fn();
+          }
+          nowMs = target;
+        },
+      };
+      const pump = async (promise: Promise<unknown>): Promise<void> => {
+        let settled = false;
+        void promise.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        for (let i = 0; i < 1000 && !settled; i++) {
+          clock.advance(10);
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+        if (!settled) throw new Error('pump: run did not settle');
+      };
+      let bodyEntered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        bodyEntered = resolve;
+      });
+      cleanupActions.add(() => clock.advance(10_000));
+      const calls: string[] = [];
+      let held: ReturnType<typeof currentJobContext>;
+      let runReport: RunReport | undefined;
+      const hangThenReport = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const jobId = (raw as { jobId: string }).jobId;
+        calls.push(jobId);
+        held = currentJobContext();
+        bodyEntered();
+        await new Promise<never>(() => {}); // hangs — killed at the final rung
+        return okOp(raw); // unreachable
+      };
+      const governor = createGovernor(
+        { maxUsd: 5, perJobWallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
+        clock,
+      );
+      const plan: Plan = {
+        id: 'w23-late',
+        jobs: [{ id: 'j1', op: 'hang', input: { jobId: 'j1' } }],
+      };
+      const running = runPlan(
         plan,
         { concurrency: 1, stopOnError: false, journalDir: w3dir },
         viewWith(entry('hang', hangThenReport)),
         { governor, allowAdvisory: true },
       ).then((report) => {
         runReport = report;
-      }),
-    );
-    // The kill settled the dispatch: basis 'full', charged = the whole
-    // reservation (the fair share C/concurrency = 5/1).
-    const report = runReport as RunReport;
-    expect(report.jobs[0]?.result.status).toBe('budget-exhausted');
-    const events = await openRunLog(w3dir).read(report.runId);
-    const settles = events.filter(
-      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
-        event.type === 'reservation-settled',
-    );
-    expect(settles).toHaveLength(1);
-    const journalCharged = settles[0]?.charged ?? 0;
-    expect(journalCharged).toBeGreaterThan(0);
-    expect(governor.usdSpent).toBeCloseTo(journalCharged);
-    // LATE evidence from the detached promise: DROPPED — the ledger does not
-    // move past the journal, and no usage event lands.
-    const eventsBefore = governor.events.length;
-    held?.reportResult({
-      usage: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 },
-      costUSD: 9,
-    });
-    expect(governor.usdSpent).toBeCloseTo(journalCharged);
-    expect(governor.events.length).toBe(eventsBefore);
-  });
+      });
+      await Promise.race([
+        ready,
+        running.then(() => {
+          throw new Error('fixture: run settled before body entry');
+        }),
+      ]);
+      await pump(running);
+      // The kill settled the dispatch: basis 'full', charged = the whole
+      // reservation (the fair share C/concurrency = 5/1).
+      const report = runReport as RunReport;
+      expect(report.jobs[0]?.result.status).toBe('budget-exhausted');
+      const events = await openRunLog(w3dir).read(report.runId);
+      const settles = events.filter(
+        (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+          event.type === 'reservation-settled',
+      );
+      expect(settles).toHaveLength(1);
+      const journalCharged = settles[0]?.charged ?? 0;
+      expect(journalCharged).toBeGreaterThan(0);
+      expect(governor.usdSpent).toBeCloseTo(journalCharged);
+      // LATE evidence from the detached promise: DROPPED — the ledger does not
+      // move past the journal, and no usage event lands.
+      const eventsBefore = governor.events.length;
+      held?.reportResult({
+        usage: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 },
+        costUSD: 9,
+      });
+      expect(governor.usdSpent).toBeCloseTo(journalCharged);
+      expect(governor.events.length).toBe(eventsBefore);
+    },
+    journalEnclosure(1),
+  );
 
-  test('a capless governed run over capped history inherits C_prev conservatively and journals the inheritance', async () => {
-    // Run 1: capped at 5, spends 3.
-    const calls1: string[] = [];
-    await runPlan(
-      independentPlan('w23-inherit', 1),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', spendOnce(calls1, 3))),
-      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
-    );
-    // Run 2: governed but UNCAPPED — inherits C_prev 5 and journals it.
-    const calls2: string[] = [];
-    const governor2 = createGovernor({});
-    const report2 = await runPlan(
-      independentPlan('w23-inherit', 1),
-      { concurrency: 1, stopOnError: false, journalDir: w3dir },
-      viewWith(entry('fake', spendOnce(calls2, 1))),
-      { governor: governor2, allowAdvisory: true },
-    );
-    const events2 = await openRunLog(w3dir).read(report2.runId);
-    const started2 = events2[0] as Extract<JournalEvent, { type: 'run-started' }>;
-    expect(started2.governance?.inheritedCapUsd).toBe(5);
-    expect(started2.governance?.capUsd).toBeUndefined();
-    // The inherited cap BOUND the reservations: 5 − 3 seeded = 2 capacity.
-    const opens = events2.filter(
-      (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
-        event.type === 'reservation-opened',
-    );
-    expect(opens[0]).toMatchObject({ usd: 2, proposedUsd: 5 }); // share C/concurrency = 5/1, shrunk to capacity 2
-    expect(governor2.usdSpent).toBeCloseTo(4); // 3 seeded + 1 this run
-    // Run 3: a cap RAISE over C_prev still refuses — the inheritance did not move C.
-    const calls3: string[] = [];
-    await expect(
-      runPlan(
+  test(
+    'a capless governed run over capped history inherits C_prev conservatively and journals the inheritance',
+    async () => {
+      // Run 1: capped at 5, spends 3.
+      const calls1: string[] = [];
+      await runPlan(
         independentPlan('w23-inherit', 1),
         { concurrency: 1, stopOnError: false, journalDir: w3dir },
-        viewWith(entry('fake', countingOp(calls3))),
-        { governor: createGovernor({ maxUsd: 6 }), allowAdvisory: true },
-      ),
-    ).rejects.toThrow('runPlan: cap raised from 5 to 6');
-  });
+        viewWith(entry('fake', spendOnce(calls1, 3))),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      // Run 2: governed but UNCAPPED — inherits C_prev 5 and journals it.
+      const calls2: string[] = [];
+      const governor2 = createGovernor({});
+      const report2 = await runPlan(
+        independentPlan('w23-inherit', 1),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', spendOnce(calls2, 1))),
+        { governor: governor2, allowAdvisory: true },
+      );
+      const events2 = await openRunLog(w3dir).read(report2.runId);
+      const started2 = events2[0] as Extract<JournalEvent, { type: 'run-started' }>;
+      expect(started2.governance?.inheritedCapUsd).toBe(5);
+      expect(started2.governance?.capUsd).toBeUndefined();
+      // The inherited cap BOUND the reservations: 5 − 3 seeded = 2 capacity.
+      const opens = events2.filter(
+        (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
+          event.type === 'reservation-opened',
+      );
+      expect(opens[0]).toMatchObject({ usd: 2, proposedUsd: 5 }); // share C/concurrency = 5/1, shrunk to capacity 2
+      expect(governor2.usdSpent).toBeCloseTo(4); // 3 seeded + 1 this run
+      // Run 3: a cap RAISE over C_prev still refuses — the inheritance did not move C.
+      const calls3: string[] = [];
+      await expect(
+        runPlan(
+          independentPlan('w23-inherit', 1),
+          { concurrency: 1, stopOnError: false, journalDir: w3dir },
+          viewWith(entry('fake', countingOp(calls3))),
+          { governor: createGovernor({ maxUsd: 6 }), allowAdvisory: true },
+        ),
+      ).rejects.toThrow('runPlan: cap raised from 5 to 6');
+    },
+    journalEnclosure(3),
+  );
 });

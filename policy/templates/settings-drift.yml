@@ -84,6 +84,10 @@ jobs:
         with:
           node-version: 24
           cache: ''
+          # The root package.json names pnpm (packageManager), which this
+          # job never installs: setup-node's automatic package-manager
+          # cache would look for pnpm and fail the step.
+          package-manager-cache: false
       - name: Mint the verdict App token (when the App is registered)
         id: verdict-app
         if: vars.CQ_VERDICT_APP_CLIENT_ID != ''

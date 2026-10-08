@@ -38,6 +38,10 @@ const REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '(?:^|/)package\\.json$': ['package.json'],
   '(?:^|/)package-lock\\.json$': ['package-lock.json'],
   '(?:^|/)npm-shrinkwrap\\.json$': ['npm-shrinkwrap.json'],
+  '(?:^|/)pnpm-lock\\.yaml$': ['pnpm-lock.yaml'],
+  // pnpm settings and install hooks decide what is installed.
+  '(?:^|/)pnpm-workspace\\.yaml$': ['pnpm-workspace.yaml', 'packages/x/pnpm-workspace.yaml'],
+  '(?:^|/)\\.pnpmfile\\.[cm]?js$': ['.pnpmfile.cjs', '.pnpmfile.mjs'],
   '(?:^|/)\\.npmrc$': ['.npmrc', 'packages/x/.npmrc'],
   '(?:^|/)\\.nvmrc$': ['.nvmrc'],
   '(?:^|/)\\.node-version$': ['.node-version'],
@@ -154,6 +158,10 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '(?:^|\\/)vitest\\.(?:workspace|projects)\\.(?:[cm]?[jt]sx?|json)$': ['vitest.workspace.json'],
   '(?:^|\\/)(?:package(?:-lock)?\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|bun\\.lockb?|poetry\\.lock|uv\\.lock|pdm\\.lock|Pipfile\\.lock|Gemfile\\.lock|Cargo\\.lock|composer\\.lock|mix\\.lock|go\\.sum)$':
     ['package-lock.json', 'npm-shrinkwrap.json'],
+  '(?:^|\\/)(?:pnpm-workspace\\.yaml|\\.pnpmfile\\.[cm]?js)$': [
+    'pnpm-workspace.yaml',
+    '.pnpmfile.cjs',
+  ],
   '\\.snap$': ['src/__snapshots__/a.snap'],
 };
 
