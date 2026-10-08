@@ -58,21 +58,32 @@ describe('acquireLock', () => {
     expect(fs.existsSync(lock)).toBe(false);
   });
 
-  it('never publishes an ownerless directory while a creator is paused', async () => {
+  it('a paused initializer never overwrites a fresh replacement holder', async () => {
+    let now = Date.now();
     const racingFs = {
       ...fs,
-      mkdtempSync: (prefix: string) => {
-        const temporary = fs.mkdtempSync(prefix);
-        expect(fs.existsSync(lock)).toBe(false);
-        holderRecord(7, 'fresh');
-        return temporary;
+      mkdirSync: (target: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+        fs.mkdirSync(target, options);
+        if (String(target) === lock) {
+          // The creator pauses past the ownerless grace; another waiter
+          // reclaims that directory and publishes its own holder meanwhile.
+          now += MISSING_OWNER_MS + 1;
+          fs.rmSync(lock, { recursive: true, force: true });
+          holderRecord(7, 'fresh');
+        }
       },
     } as typeof fs;
     const got = await acquireLock({
       path: lock,
       maxWaitMs: 0,
       info,
-      deps: { fs: racingFs, token: () => 'ours', isAlive: () => true, log: () => {} },
+      deps: {
+        fs: racingFs,
+        now: () => now,
+        token: () => 'ours',
+        isAlive: () => true,
+        log: () => {},
+      },
     });
     expect(got.acquired).toBe(false);
     expect(readOwner(lock)?.token).toBe('fresh');
@@ -80,17 +91,16 @@ describe('acquireLock', () => {
   });
 
   it.each(['EEXIST', 'ENOTEMPTY'])(
-    'cleans private initialization after a %s publication collision',
+    'preserves the competing holder after an exclusive mkdir %s collision',
     async (code) => {
       const racingFs = {
         ...fs,
-        renameSync: (from: fs.PathLike, to: fs.PathLike) => {
-          if (String(to) === lock) {
-            expect(readOwner(String(from))?.token).toBe('ours');
+        mkdirSync: (target: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+          if (String(target) === lock) {
             holderRecord(7, 'fresh');
             throw Object.assign(new Error('held'), { code });
           }
-          fs.renameSync(from, to);
+          fs.mkdirSync(target, options);
         },
       } as typeof fs;
       const got = await acquireLock({
@@ -110,7 +120,7 @@ describe('acquireLock', () => {
       ...fs,
       renameSync: (from: fs.PathLike, to: fs.PathLike) => {
         fs.renameSync(from, to);
-        if (String(to) === lock) {
+        if (String(to) === join(lock, 'owner.json')) {
           fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 7, token: 'fresh' }));
         }
       },
@@ -136,13 +146,19 @@ describe('acquireLock', () => {
   it.each(['before writing', 'before renaming'])(
     'does not annotate a replacement owner %s',
     async (phase) => {
+      let tempWrites = 0;
       const replace = () =>
         fs.writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: 7, token: 'fresh' }));
       const racingFs = {
         ...fs,
         writeFileSync: (target: fs.PathOrFileDescriptor, data: string) => {
           fs.writeFileSync(target, data);
-          if (phase === 'before renaming' && String(target) === join(lock, 'owner.ours.tmp'))
+          if (String(target) === join(lock, 'owner.ours.tmp')) tempWrites += 1;
+          if (
+            phase === 'before renaming' &&
+            String(target) === join(lock, 'owner.ours.tmp') &&
+            tempWrites === 2
+          )
             replace();
         },
       } as typeof fs;
