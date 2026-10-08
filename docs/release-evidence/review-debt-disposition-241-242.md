@@ -8,6 +8,13 @@ them. No shared-seam file was written in this engagement, and no test was
 run or added: B08 holds the host Vitest slot, and test additions wait for
 the conductor's head-bound slot grant.
 
+**Rechecked 2026-10-08** at `merge-queue` `4cf42d5`. Both issues are still
+open, and every source and test anchor cited below is unchanged
+(`src/driver/schema.ts:155` still accepts any finite `retryAfterMs`). The
+slot and file-ownership constraints in the last section describe the
+2026-10-02 coordination state. Test selection now follows the
+[focused-checks contract](../focused-checks-contract.md).
+
 ## #241 — round-3 low findings follow-ups (head `0027bc5`)
 
 | #       | Finding                                                                    | Classification                          | Notes                                                                                                                                                                                                                                                                                                                                            |
