@@ -727,11 +727,15 @@ const writeSweepUsageFile = (
       `${JSON.stringify({ sweepUsage: usage, ...(error !== undefined ? { error } : {}) })}\n`,
     );
   } catch (error) {
-    process.stderr.write(
-      `sweep-usage: could not write ${outPath}: ${
-        error instanceof Error ? error.message : String(error)
-      }\n`,
-    );
+    try {
+      process.stderr.write(
+        `sweep-usage: could not write ${outPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    } catch {
+      // Best-effort diagnostics must not mask the original whole-run error.
+    }
   }
 };
 
