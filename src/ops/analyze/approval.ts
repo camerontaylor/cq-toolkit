@@ -52,13 +52,12 @@
 //
 // O-6 (DO NON-APPROVAL WRITERS TAKE THIS LOCK? — open in ADR-0003 §4c step
 // 4, the closing rule the critic deferred to ADR §2.7). RESOLVED HERE for
-// the remediation path, and only here: EVERY write these two ops perform is
-// approval-required and holds the mutation lock, so the path contains no
-// non-approval writer to co-schedule against — the closing rule is vacuous
-// rather than unresolved. A concurrent writer OUTSIDE the lock is not made
-// safe by this module: that is ADR §2.7's open residual (a
-// post-mutation-hook hazard), recorded as such in the family NOTES. No
-// non-approval writer was modified here to pretend otherwise.
+// the remediation path: approved writes and rollback take the SAME workspace
+// mutation lock. Rollback restores targets only when their post-apply
+// fingerprint still matches, so an intervening approved write is not silently
+// discarded. A concurrent writer OUTSIDE the lock is not made safe by this
+// module: that is ADR §2.7's open residual (a post-mutation-hook hazard),
+// recorded as such in the family NOTES.
 //
 // THE ORDERING INVARIANT. `exercise` re-reads the state INSIDE the lock and
 // spends INSIDE the same lock hold, so check and spend are one critical
@@ -78,14 +77,17 @@ import {
   existsSync,
   fdatasyncSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { GIT_HARDEN } from '../ratchet/git.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
+import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
 
 /** The workspace state an approval binds to (ADR-0003 §2 `state`, §4c step 1). */
 export interface ApprovalState {
@@ -93,7 +95,7 @@ export interface ApprovalState {
   readonly workspace: string;
   /** `git rev-parse HEAD` at read time. */
   readonly headSha: string;
-  /** The STRICT clean predicate: `git status --porcelain=v1 --untracked-files=all` empty. */
+  /** Strict Git cleanliness, with only the verified applyRemediation report pair exempted. */
   readonly treeClean: boolean;
 }
 
@@ -107,6 +109,17 @@ export interface ApprovalSubject {
   readonly targets: readonly string[];
   /** A digest binding the op's exact inputs (the op-level stand-in for the kernel's `inputsHash`). */
   readonly inputDigest: string;
+  /**
+   * Only applyRemediation's exact rendered pair, bound into inputDigest.
+   * The real reader verifies the paths, bytes and scan-target separation
+   * at BOTH state reads; this is never a caller-supplied glob/ignore rule.
+   */
+  readonly analysisReports?: {
+    readonly fingerprint: string;
+    readonly sidecarSha256: string;
+    readonly markdownSha256: string;
+    readonly scanTargets: readonly string[];
+  };
 }
 
 /**
@@ -553,7 +566,7 @@ function realpathOrSelf(path: string): string {
 
 /** Reads the workspace state an approval binds to. */
 export interface ApprovalStateReader {
-  read(workspace: string): Promise<ApprovalState>;
+  read(workspace: string, subject?: ApprovalSubject): Promise<ApprovalState>;
 }
 
 /**
@@ -562,8 +575,10 @@ export interface ApprovalStateReader {
  * --ignore-submodules=none` empty, so an UNTRACKED file counts as dirty and a
  * submodule cannot opt itself out — plus a refusal of any index entry flagged
  * assume-unchanged or skip-worktree, which that status would not inspect.
- * Ignored files are out of scope, which ADR-0003 §4c records as a stated
- * residual (an ignored file can still influence a codemod that reads it).
+ * applyRemediation may supply a byte-verified exact report pair for the
+ * narrow untracked-only exception below. Other subjects use the strict
+ * predicate unchanged. Ignored files are out of scope, which ADR-0003 §4c
+ * records as a stated residual (an ignored file can still influence a codemod that reads it).
  *
  * Every fault THROWS; the exercise catches it and refuses `needs-human`. An
  * unreadable state is never treated as "unchanged" — that inversion is
@@ -571,7 +586,7 @@ export interface ApprovalStateReader {
  */
 export function makeGitApprovalStateReader(): ApprovalStateReader {
   return {
-    read: async (workspace) => {
+    read: async (workspace, subject) => {
       const root = realpathSync(workspace);
       const headSha = await git(root, ['rev-parse', 'HEAD']);
       // `--ignore-submodules=none` overrides a committed `ignore = all` in
@@ -580,6 +595,7 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
       const status = await git(root, [
         'status',
         '--porcelain=v1',
+        '-z',
         '--untracked-files=all',
         '--ignore-submodules=none',
       ]);
@@ -598,9 +614,66 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
           `${String(hidden.length)} index entr${hidden.length === 1 ? 'y is' : 'ies are'} flagged assume-unchanged or skip-worktree (${named.join(', ')}) — git status does not compare such files against the working tree, so a clean status cannot prove their bytes are the approved ones; clear the flags (git update-index --no-assume-unchanged / --no-skip-worktree) and approve again`,
         );
       }
-      return { workspace: root, headSha, treeClean: status === '' };
+      const reports = verifiedAnalysisReportPaths(root, subject);
+      const repoRoot =
+        reports.size === 0 ? root : await git(root, ['rev-parse', '--show-toplevel']);
+      // EXACT REPORT EXCEPTION (promotion F3), with four guards:
+      // (1) only this run's two fingerprint-derived paths, never patterns;
+      // (2) exact SHA-256 bytes, bound into the approved input digest;
+      // (3) lstat regular files whose realpaths equal the canonical paths
+      // directly under the workspace, and no scan target or alias of either;
+      // (4) exclude ONLY their untracked entries: tracked changes and every
+      // unrelated file remain dirty. verifiedAnalysisReportPaths runs at
+      // admission AND the exercise re-check. Markdown cannot affect the
+      // explicit-target, inline-rule codemod; the sidecar's planning inputs
+      // are digest-bound and cannot change between planning and the write.
+      const dirty = status.split('\0').some((record) => {
+        if (record === '') return false;
+        return !record.startsWith('?? ') || !reports.has(resolve(repoRoot, record.slice(3)));
+      });
+      return { workspace: root, headSha, treeClean: !dirty };
     },
   };
+}
+
+/** Verify the exact rendered pair before granting its narrow untracked exception. */
+function verifiedAnalysisReportPaths(root: string, subject?: ApprovalSubject): Set<string> {
+  const reports = subject?.analysisReports;
+  if (reports === undefined) return new Set();
+  if (subject?.op !== 'analyze.applyRemediation' || !/^[0-9a-f]{16}$/.test(reports.fingerprint)) {
+    throw new Error('approval: invalid analysis report exception');
+  }
+  const pair = [
+    [join(root, sidecarFileName(reports.fingerprint)), reports.sidecarSha256],
+    [join(root, markdownFileName(reports.fingerprint)), reports.markdownSha256],
+  ] as const;
+  const paths = new Set<string>();
+  const identities = new Set<string>();
+  for (const [path, digest] of pair) {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || realpathSync(path) !== path) {
+      throw new Error(
+        `approval: analysis report '${path}' must be a regular file at its exact canonical workspace path`,
+      );
+    }
+    if (createHash('sha256').update(readFileSync(path)).digest('hex') !== digest) {
+      throw new Error(`approval: analysis report '${path}' bytes changed since planning`);
+    }
+    paths.add(path);
+    identities.add(`${String(stat.dev)}:${String(stat.ino)}`);
+  }
+  for (const target of [...subject.targets, ...reports.scanTargets]) {
+    const targetReal = realpathSync(resolve(root, target));
+    const targetStat = statSync(targetReal);
+    // Hard links alias bytes without sharing a realpath; refuse them too.
+    if (
+      paths.has(targetReal) ||
+      identities.has(`${String(targetStat.dev)}:${String(targetStat.ino)}`)
+    ) {
+      throw new Error(`approval: analysis report '${target}' cannot be a codemod target or alias`);
+    }
+  }
+  return paths;
 }
 
 /**
@@ -812,13 +885,14 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       }
       let state: ApprovalState;
       try {
-        state = await readState.read(subject.workspace);
+        state = await readState.read(subject.workspace, subject);
       } catch (err) {
         return {
           granted: false,
           reason: `approval refused: the workspace state could not be read — ${messageOf(err)}; an unreadable state is never treated as unchanged, and nothing was written`,
         };
       }
+      // The real reader has already verified any exact report exception.
       // A DIRTY TREE IS NOT AN APPROVABLE STATE — and this is the ACCEPTED
       // ADR's requirement, not a local tightening of it. ADR-0003 §4c step 1
       // requires the clean predicate to be EMPTY
@@ -909,7 +983,7 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
       exercised.add(grant);
       let state: ApprovalState;
       try {
-        state = await readState.read(subject.workspace);
+        state = await readState.read(subject.workspace, subject);
       } catch (err) {
         return {
           granted: false,
@@ -1199,6 +1273,7 @@ function sameSubject(a: ApprovalSubject, b: ApprovalSubject): boolean {
     a.op === b.op &&
     a.workspace === b.workspace &&
     a.inputDigest === b.inputDigest &&
+    approvalInputDigest(a.analysisReports) === approvalInputDigest(b.analysisReports) &&
     a.targets.length === b.targets.length &&
     a.targets.every((target, index) => target === b.targets[index])
   );
