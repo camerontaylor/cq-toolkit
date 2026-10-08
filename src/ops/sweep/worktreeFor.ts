@@ -940,6 +940,21 @@ export function makeSubprocessWorktreeEffects(
         add.repoRoot,
         timeoutMs,
       );
+      try {
+        await runGit(
+          ['worktree', 'lock', '--reason', 'cq sweep active', add.path],
+          add.repoRoot,
+          timeoutMs,
+        );
+      } catch (err) {
+        // Roll back: the reuse path never locks, so an unlocked checkout left
+        // behind would later be trusted as an active sweep worktree.
+        await runGit(['worktree', 'remove', '--force', add.path], add.repoRoot, timeoutMs).catch(
+          () => undefined,
+        );
+        await runGit(['branch', '-D', add.branch], add.repoRoot, timeoutMs).catch(() => undefined);
+        throw err;
+      }
     },
     worktreePrune: async (root) => {
       await runGit(['worktree', 'prune'], root, timeoutMs);

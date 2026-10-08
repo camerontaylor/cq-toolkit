@@ -23,7 +23,7 @@
 //     construction and the served-model assertion, ADR-0002 §2.5/§2.6: plan
 //     data never names an executable or a lane class), real probes over
 //     subprocessRunCheck, the real git push (args-array
-//     `push -u origin <branch>`, inside a git mutex on the run-state dir).
+//     `push origin <branch>`, outside the local git mutex).
 //     LIMITS, honestly: the prompt is a caller TEMPLATE
 //     ({package}/{fixer}/{worktree} placeholders; the shipped default is
 //     deliberately generic — the toolkit bakes in no vendor prompt), and a
@@ -31,6 +31,8 @@
 //     binds its lane through DriverFactoryConfig — bindings + per-lane
 //     construction knobs — and hands the factory to this seam).
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -45,11 +47,11 @@ import { isProtectedStagePath, PROTECTED_STAGE_PATTERNS } from '../gates/protect
 import { regressionGate } from '../gates/regressionGate.js';
 import type { RegressionReport } from '../gates/regressionGate.js';
 import { makeGhRunner } from '../review/gh.js';
+import { runArgvCommand } from '../../harness/run.js';
 import type { GhFn } from '../review/gh.js';
 import type { WorkUnit } from './planSweep.js';
-import { makeGitMutex } from './gitMutex.js';
-import type { GitMutex } from './gitMutex.js';
 import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
+import { fixerBudgetBreach, fixerBudgetFault, startFixerDeadline } from './internal/fixerBudget.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
 import type { WorktreeEffects } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -198,6 +200,11 @@ export interface SweepUnitBindings {
   repoRoot: string;
   /** Parent dir for worktree checkouts (the worktreeFor seam). */
   worktreesDir: string;
+  /**
+   * Dependency install hook, run before a probe in any checkout (worker or
+   * detached final-probe) that has not yet recorded a successful install.
+   */
+  installDeps?: (worktreePath: string, signal?: AbortSignal) => Promise<void>;
   /** The run's reserved branch prefix. */
   runPrefix: string;
   /** The base the worktrees check out (and the PRs target). */
@@ -268,7 +275,7 @@ export interface SweepUnitBindings {
   /** Tool policy for the fixer invocation; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
   /**
-   * Sandbox preference for the fixer invocation; default `{level: 'none'}`.
+   * Sandbox preference for the fixer invocation; default `{level: 'workspace-write'}`.
    * PRODUCTION callers should set this (the subprocess driver does not
    * enforce the level itself — it narrows the tool surface and records the
    * unenforced request per run): the binding exists so a deployment can
@@ -280,8 +287,14 @@ export interface SweepUnitBindings {
    * default DEFAULT_UNIT_GIT_TIMEOUT_MS (the worktreeFor family's 600s).
    */
   gitTimeoutMs?: number;
-  /** Budget caps for the fixer invocation; default uncapped. */
-  budget?: Budget;
+  /**
+   * Budget for the fixer invocation (internal/fixerBudget.ts): wallClockMs
+   * is REQUIRED — the enforced spend bound, the only cap that stops a fixer
+   * in flight; maxTokens/maxUsd are optional post-run landing gates (a
+   * breach refuses to stage the work), not spend limits; maxAttempts is
+   * refused.
+   */
+  budget: Budget;
   /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). */
   prompt: (unit: WorkUnit, worktree: SweepWorkspace) => string;
   /** The git transport for the stage, diff, and commit steps. */
@@ -380,9 +393,40 @@ export function sweepUnitFaultClass(error: string): SweepUnitFaultClass {
   return 'unknown';
 }
 
+/** Fault prefix marking a governed cancellation (maps to `indeterminate`, never `failed`). */
+const CANCELLED_FAULT = '[CANCELLED]';
+
+/** Map a leg fault to its op result: cancellation is resumable, anything else failed. */
+function faultResult(
+  fault: string,
+): { status: 'indeterminate'; detail: string } | { status: 'failed'; error: string } {
+  return fault.startsWith(CANCELLED_FAULT)
+    ? { status: 'indeterminate', detail: fault }
+    : { status: 'failed', error: fault };
+}
+
 /** Prefix a class tag onto a unit fault message (stable, machine-readable). */
 function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): string {
   return `[${cls.toUpperCase()}] ${message}`;
+}
+
+/**
+ * An op-enforced fixer budget trip: the same `failed` [INFRA] shape as a
+ * lane-reported 'budget' stop, naming the breached cap.
+ */
+function budgetTripResult(
+  unit: WorkUnit,
+  breach: string,
+  sessionId: string | undefined,
+): { status: 'failed'; error: string } {
+  return {
+    status: 'failed',
+    error: tagged(
+      'infra',
+      `sweep.unit ${unit.package}: the fixer worker stopped with reason 'budget' — ${breach}` +
+        (sessionId !== undefined ? ` (session ${sessionId})` : ''),
+    ),
+  };
 }
 
 /**
@@ -423,7 +467,7 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *   9. commit — skipped when nothing is staged (an idempotent re-run's
  *      no-op fixer); commits exactly the scanned set.
  *  10. push — with a push binding and a fresh commit, publish the unit's
- *      branch (`push -u origin <branch>` in the shipped binding); skipped
+ *      branch (`push origin <branch>` in the shipped binding); skipped
  *      when nothing was committed or no binding is present. On the
  *      no-commit leg, a branch carrying commits beyond the base is an
  *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
@@ -447,7 +491,7 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *   8. commit — skipped when nothing is staged (an idempotent re-run's
  *      no-op fixer); commits exactly the scanned set.
  *   9. push — with a push binding and a fresh commit, publish the unit's
- *      branch (`push -u origin <branch>` in the shipped binding); skipped
+ *      branch (`push origin <branch>` in the shipped binding); skipped
  *      when nothing was committed or no binding is present. On the
  *      no-commit leg, a branch carrying commits beyond the base is an
  *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
@@ -458,6 +502,10 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *      unit with nothing on the remote never assembles an empty-diff PR.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
+  const budgetFault = fixerBudgetFault(bindings.budget);
+  if (budgetFault !== null) {
+    throw new Error(`sweep.unit: ${budgetFault}`);
+  }
   const probe = makeBaselineProbe(bindings.runCheck);
   const worktreeFor = makeWorktreeFor(
     bindings.worktreeEffects ??
@@ -476,7 +524,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // strictly clean, and the probe below is always a fresh re-probe, I7).
     const before = await probeLeg(probe, bindings, unit, worktreeFor, 'baseline');
     if (before.worktree === undefined || before.probe === undefined) {
-      return { status: 'failed', error: before.fault ?? '(no detail)' };
+      return faultResult(before.fault ?? '(no detail)');
     }
     const worktree = before.worktree;
     const baseline = before.probe;
@@ -522,6 +570,12 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     let denial: string | undefined;
     let errorClass: string | undefined;
     let sessionId: string | undefined;
+    // The fixer budget, lane-neutral (internal/fixerBudget.ts): the required
+    // wallClockMs deadline rides the run's signal — the in-flight spend
+    // bound — and the optional maxTokens/maxUsd landing gates are checked on
+    // the settled result, so over-budget work is never staged or landed.
+    let budgetBreach: string | undefined;
+    const deadline = startFixerDeadline(currentJobContext()?.signal, bindings.budget.wallClockMs);
     try {
       // NO pre-created session record: the worktree rides the invocation as
       // its workspace binding (ADR-0002 §2.4) — the lane creates the fresh
@@ -535,14 +589,20 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         {
           prompt: bindings.prompt(unit, worktree),
           modelSpec: bindings.modelSpec,
-          toolPolicy: bindings.toolPolicy ?? { allow: ['edit'], mode: 'allowlist' },
-          sandboxPolicy: bindings.sandboxPolicy ?? { level: 'none' },
+          toolPolicy: bindings.toolPolicy ?? {
+            allow: ['edit'],
+            mode: 'allowlist',
+          },
+          sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
           workspace: { path: worktree.path },
-          budget: bindings.budget ?? {},
+          budget: bindings.budget,
         },
-        { signal: currentJobContext()?.signal },
+        { signal: deadline.signal },
       );
       stopReason = worker.stopReason;
+      budgetBreach = deadline.expired()
+        ? `wallClockMs ${String(bindings.budget.wallClockMs)} elapsed`
+        : fixerBudgetBreach(bindings.budget, worker);
       const first = worker.denials[0];
       if (first !== undefined) denial = `${first.tool}: ${first.reason}`;
       if (worker.errorClass !== undefined) errorClass = worker.errorClass;
@@ -554,7 +614,15 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       // provider/role, a missing key env, a workspace realpath mismatch —
       // ADR-0002 §2.9's throw rows) — the human's to arrange, so
       // `needs-human`, never `failed` (which would claim the fixer ran and
-      // broke; review-debt #186).
+      // broke; review-debt #186). A throw after the budget deadline fired is
+      // the budget trip, not a misconfiguration.
+      if (deadline.expired()) {
+        return budgetTripResult(
+          unit,
+          `wallClockMs ${String(bindings.budget.wallClockMs)} elapsed`,
+          undefined,
+        );
+      }
       if (currentJobContext()?.signal.aborted === true) {
         return {
           status: 'indeterminate',
@@ -565,7 +633,13 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         status: 'needs-human',
         reason: `sweep.unit ${unit.package}: the fixer driver could not dispatch — ${messageOf(err)}`,
       };
+    } finally {
+      deadline.dispose();
     }
+    // A breached cap (the deadline, or a landing gate) fails the unit
+    // before any of the fixer's work is staged — whatever stop reason the lane reported (an elapsed deadline
+    // surfaces as 'aborted', which must not read as a resumable cancel).
+    if (budgetBreach !== undefined) return budgetTripResult(unit, budgetBreach, sessionId);
     // A RESOLVED governed cancellation — the governor's signal fired and a
     // conforming driver settled the aborted run with stopReason 'aborted'
     // (§2.1) — is the same I8 posture as the thrown-abort path above: no
@@ -692,7 +766,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       async (cleanWorktree) => probeLeg(probe, bindings, unit, worktreeFor, 'final', cleanWorktree),
     );
     if (finalProbe.fault !== null) {
-      return { status: 'failed', error: finalProbe.fault };
+      return faultResult(finalProbe.fault);
     }
     if (finalProbe.probe === undefined) {
       return { status: 'failed', error: '(final probe returned no evidence)' };
@@ -930,9 +1004,11 @@ async function withBaseOwnedFinalTree(
   unit: WorkUnit,
   worktree: SweepWorkspace,
   baseHead: string,
-  run: (
-    clean: SweepWorkspace,
-  ) => Promise<{ worktree?: SweepWorkspace; probe?: UnitProbe; fault?: string }>,
+  run: (clean: SweepWorkspace) => Promise<{
+    worktree?: SweepWorkspace;
+    probe?: UnitProbe;
+    fault?: string;
+  }>,
 ): Promise<{ probe?: UnitProbe; fault: string | null; treeSha?: string }> {
   const tree = await bindings.git(['-C', worktree.path, 'write-tree']);
   if (tree.code !== 0) {
@@ -1007,6 +1083,33 @@ async function withBaseOwnedFinalTree(
   }
 }
 
+/** Run the install hook unless this checkout already recorded a successful install. */
+async function ensureInstalled(
+  bindings: SweepUnitBindings,
+  installDeps: (worktreePath: string, signal?: AbortSignal) => Promise<void>,
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    const marker = await bindings.git([
+      '-C',
+      worktreePath,
+      'rev-parse',
+      '--git-path',
+      'cq-install-complete',
+    ]);
+    if (marker.code !== 0 || marker.stdout.trim() === '') {
+      return `cannot locate the install marker — ${marker.stderr.trim()}`;
+    }
+    const markerPath = resolve(worktreePath, marker.stdout.trim());
+    if (existsSync(markerPath)) return null;
+    await installDeps(worktreePath, currentJobContext()?.signal);
+    await writeFile(markerPath, '');
+    return null;
+  } catch (err) {
+    return messageOf(err);
+  }
+}
+
 /** One probe leg, creating the worktree on the baseline leg when not in hand yet. */
 async function probeLeg(
   probe: ReturnType<typeof makeBaselineProbe>,
@@ -1029,6 +1132,43 @@ async function probeLeg(
       };
     }
     worktree = result.value;
+  }
+  // Both the worker checkout and the detached final-probe checkout need
+  // dependencies. Completion is recorded in the checkout's private Git dir,
+  // so a failed install is retried on reuse rather than trusted.
+  if (bindings.installDeps !== undefined) {
+    const installFault = await ensureInstalled(bindings, bindings.installDeps, worktree.path);
+    if (installFault !== null) {
+      // A governed cancellation killed the install: no verdict, resumable.
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          worktree,
+          fault: `${CANCELLED_FAULT} sweep.unit ${unit.package}: dependency install cancelled — ${installFault}`,
+        };
+      }
+      return {
+        worktree,
+        fault: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: dependency install failed — ${installFault}`,
+        ),
+      };
+    }
+    if (leg === 'final') {
+      // The probed bytes must be the published bytes: the tree was fixed
+      // before install, so an install that writes a nonignored file would
+      // let the probe pass on content absent from the commit.
+      const status = await bindings.git(['-C', worktree.path, 'status', '--porcelain']);
+      if (status.code !== 0 || status.stdout.trim() !== '') {
+        return {
+          worktree,
+          fault: tagged(
+            'infra',
+            `sweep.unit ${unit.package}: the install hook changed nonignored files in the final-probe checkout — ${status.code !== 0 ? status.stderr.trim() : status.stdout.trim().split('\n').slice(0, 5).join('; ')}`,
+          ),
+        };
+      }
+    }
   }
   const input: BaselineProbeInput = {
     adapter: bindings.adapter,
@@ -1256,7 +1396,10 @@ async function commitStaged(
   expectedTreeSha?: string,
 ): Promise<{ committed: boolean; fault: string | null }> {
   if (expectedTreeSha === undefined) {
-    return { committed: false, fault: 'sweep.unit: final probe did not return a tree sha' };
+    return {
+      committed: false,
+      fault: 'sweep.unit: final probe did not return a tree sha',
+    };
   }
   const empty = await bindings.git([
     '-C',
@@ -1372,8 +1515,8 @@ export interface SweepUnitDriverConfig {
   model: string;
   /** Tool policy; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
-  /** Budget caps; default uncapped. */
-  budget?: Budget;
+  /** Fixer budget: wallClockMs required (the in-flight spend bound); maxTokens/maxUsd optional post-run landing gates; maxAttempts refused. */
+  budget: Budget;
 }
 
 /** The JSON-serializable probe binding of a dispatch input. */
@@ -1399,7 +1542,10 @@ export interface SweepUnitCheckConfig {
  */
 export interface SweepUnitDispatchInput {
   repoRoot: string;
-  worktreesDir: string;
+  /** Defaults to `<repo-parent>/worktrees/cq`, outside the repository. */
+  worktreesDir?: string;
+  /** Optional argv-based dependency install hook (see SweepUnitBindings.installDeps). */
+  install?: { command: string; args: string[]; timeoutMs?: number };
   runPrefix: string;
   base: string;
   package: string;
@@ -1435,15 +1581,14 @@ export interface SweepUnitDispatchInput {
    * trustworthy record can exist there — fail closed, needs-human).
    */
   runStateDir?: string;
-  /** The run-state dir's git-mutex lockfile (`<runStateDir>/git-mutex.lock`,
-   * family timings); the push shares the same lockfile. */
+  /** Optional override of the common Git directory mutex. */
   mutex?: WorktreeMutexConfig;
-  /** Sandbox preference; default `{level: 'none'}` (production callers set it). */
+  /** Sandbox preference; default `{level: 'workspace-write'}`. */
   sandboxPolicy?: SandboxPolicy;
   /** Wall-clock cap for one git subprocess; default the family's 600s. */
   gitTimeoutMs?: number;
   /**
-   * Push the unit's branch after a commit (`push -u origin <branch>` inside
+   * Push the unit's branch after a commit (`push origin <branch>` outside
    * the git mutex). DEFAULT TRUE — a fleet's branches must exist on the
    * remote before pr.assemblePrs; set false ONLY for local-only sweeps.
    */
@@ -1474,75 +1619,84 @@ const GIT_NO_AUTO_MAINTENANCE_ENV = {
 } as const;
 
 /**
- * The shipped push leg: `git push -u origin <branch>` run in `repoRoot` with
+ * The shipped push leg: `git push origin <branch>` run in `repoRoot` with
  * an execFile ARGS ARRAY (never a shell string), bounded by the worktreeFor
- * family's default wall clock, and serialized through a git mutex on
- * `lockPath` (default `<runStateDir>/git-mutex.lock` — the SAME lockfile the
- * worktree mutations serialize on). Resolves void; REJECTS with the captured
+ * family's default wall clock, and run OUTSIDE the local git mutex. No `-u`:
+ * setting upstream tracking writes the shared `.git/config`, which concurrent
+ * sibling pushes would contend for. Resolves void; REJECTS with the captured
  * stderr on a non-zero exit (the op folds the rejection into a `failed`
  * result naming the branch).
  */
 export function makePushBranch(opts?: {
   timeoutMs?: number;
-  lockPath?: string;
-  /** Mutex timings — preserved from the caller's mutex config (jeDcl): a push misclassifying a held lock on a different stale window would race a sibling's worktree mutations. */
-  staleMs?: number;
-  retries?: number;
-  retryBaseMs?: number;
 }): (repoRoot: string, branch: string) => Promise<void> {
   const git = makeGhRunner({
     bin: 'git',
     timeoutMs: opts?.timeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
     env: { ...GIT_NO_AUTO_MAINTENANCE_ENV },
   });
-  const mutex: GitMutex | undefined =
-    opts?.lockPath === undefined
-      ? undefined
-      : makeGitMutex({
-          lockPath: opts.lockPath,
-          ...(opts.staleMs !== undefined ? { staleMs: opts.staleMs } : {}),
-          ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
-          ...(opts.retryBaseMs !== undefined ? { retryBaseMs: opts.retryBaseMs } : {}),
-        });
   return async (repoRoot: string, branch: string): Promise<void> => {
-    const run = async (): Promise<void> => {
-      const pushed = await git(['-C', repoRoot, 'push', '-u', 'origin', branch]);
-      if (pushed.code !== 0) {
-        throw new Error(pushed.stderr.trim() || `git push -u origin ${branch} failed`);
-      }
-    };
-    if (mutex === undefined) {
-      await run();
-      return;
+    const pushed = await git(['-C', repoRoot, 'push', 'origin', branch]);
+    if (pushed.code !== 0) {
+      throw new Error(pushed.stderr.trim() || `git push origin ${branch} failed`);
     }
-    await mutex.withLock(run);
   };
 }
 
+/** Retained bytes per install output stream (failure detail only). */
+const INSTALL_OUTPUT_MAX_BYTES = 64 * 1024;
+
+/** The parent environment as plain strings, for the install subprocess. */
+function inheritedEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
 /**
- * The push-lock options for one dispatch (jeDcl): the caller's FULL mutex
- * config — timings PRESERVED, `lockPath` swapped to the push lockfile — so
- * the push's stale window matches the worktree mutex's exactly (a push
- * holding a lock under a shorter stale window than the worktree mutex's
- * could be misclassified stale by a waiting sibling and steal it mid-push).
+ * The most Git subprocesses one holder runs inside a single guarded section
+ * on this mutex: cleanup's removal (worktree list, tip read, status, unlock,
+ * remove, then branch delete — or the re-lock when removal fails) is six;
+ * worktreeFor's create (prune, add, lock, plus the remove and branch-delete
+ * rollback when locking fails) is five. Raise it when a section grows.
  */
-export function pushLockOptions(
-  mutex: WorktreeMutexConfig,
-  gitTimeoutMs?: number,
-): {
-  timeoutMs?: number;
-  lockPath: string;
-  staleMs?: number;
-  retries?: number;
-  retryBaseMs?: number;
-} {
-  return {
-    ...(gitTimeoutMs !== undefined ? { timeoutMs: gitTimeoutMs } : {}),
-    lockPath: mutex.lockPath,
-    ...(mutex.staleMs !== undefined ? { staleMs: mutex.staleMs } : {}),
-    ...(mutex.retries !== undefined ? { retries: mutex.retries } : {}),
-    ...(mutex.retryBaseMs !== undefined ? { retryBaseMs: mutex.retryBaseMs } : {}),
-  };
+export const GUARDED_SECTION_MAX_GIT_CALLS = 6;
+
+/** Exponential backoff retries whose nominal waiter span covers a whole guarded section. */
+export function mutexWaiterRetries(gitTimeoutMs: number): number {
+  // A live holder may spend the git timeout on EVERY call of its critical
+  // section. Give a waiter at least that long, while retaining crash
+  // recovery's 30-second stale-window floor when a short timeout is set.
+  const sectionMs = GUARDED_SECTION_MAX_GIT_CALLS * gitTimeoutMs;
+  return Math.max(9, Math.ceil(Math.log2(sectionMs / 100 + 1)));
+}
+
+/** Resolve the shared Git directory so linked worktrees use one mutex. */
+function gitCommonDir(repoRoot: string, gitTimeoutMs: number): string {
+  try {
+    const path = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      // The caller's per-subprocess cap: this lookup is synchronous, so an
+      // unbounded stall would block every concurrent job in the runner.
+      timeout: gitTimeoutMs,
+      killSignal: 'SIGKILL',
+    }).trim();
+    if (path === '') throw new Error('empty git common dir');
+    return path;
+  } catch (err) {
+    // A materialized repository with an unreadable Git directory must never
+    // silently take a different mutex domain. Synthetic dispatch inputs may
+    // be composed before their checkout exists; Git operations reject later.
+    if (existsSync(repoRoot)) {
+      throw new Error(`sweep.unit: cannot resolve git common dir for '${repoRoot}'`, {
+        cause: err,
+      });
+    }
+    return join(repoRoot, '.git');
+  }
 }
 
 /**
@@ -1575,6 +1729,10 @@ export function bindingsFromDispatch(
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
+  const budgetFault = fixerBudgetFault(input.driver.budget);
+  if (budgetFault !== null) {
+    throw new Error(`sweep.unit: driver.budget is required and enforceable — ${budgetFault}`);
+  }
   // The factory resolves BEFORE any effect is constructed: an unresolvable
   // binding (unknown provider, no lane bound for the role) is a
   // configuration refusal, not a half-bound sweep.
@@ -1582,13 +1740,13 @@ export function bindingsFromDispatch(
     role: 'fixer',
     modelSpec: { provider: input.driver.provider, model: input.driver.model },
   });
-  const runStateDir = sweepRunStateDir(input.repoRoot, input.worktreesDir, input.runPrefix);
-  // jVgCc: the dispatch mutex DEFAULTS to a repo-level lock on the run-state
-  // dir (family timings), so sibling units dispatched concurrently serialize
-  // their worktree mutations AND their pushes on ONE lockfile; the input's
-  // mutex block overrides (the builder/overlay seam).
+  // All linked worktrees of this repository share the same Git directory.
+  // Only local mutations use this mutex; the network push runs afterward.
+  const worktreesDir = input.worktreesDir ?? resolve(input.repoRoot, '..', 'worktrees', 'cq');
+  const gitTimeoutMs = input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS;
   const mutex: WorktreeMutexConfig = input.mutex ?? {
-    lockPath: join(runStateDir, 'git-mutex.lock'),
+    lockPath: join(gitCommonDir(input.repoRoot, gitTimeoutMs), 'cq-git-mutex'),
+    retries: mutexWaiterRetries(gitTimeoutMs),
   };
   // jTPa1: the plan builder's resolved segments win (collision-safe); a bare
   // dispatch derives its own.
@@ -1610,7 +1768,33 @@ export function bindingsFromDispatch(
   // model assertion is the factory's hook, §2.6).
   return {
     repoRoot: input.repoRoot,
-    worktreesDir: input.worktreesDir,
+    worktreesDir,
+    ...(input.install === undefined
+      ? {}
+      : {
+          installDeps: async (worktreePath: string, signal?: AbortSignal): Promise<void> => {
+            // Own process group: a timeout kills lifecycle-script descendants
+            // too, and a relative command resolves inside the new worktree.
+            const outcome = await runArgvCommand(
+              input.install?.command ?? '',
+              input.install?.args ?? [],
+              {
+                cwd: worktreePath,
+                env: inheritedEnv(),
+                maxBytes: INSTALL_OUTPUT_MAX_BYTES,
+                timeoutMs: input.install?.timeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
+                ...(signal !== undefined ? { signal } : {}),
+              },
+            );
+            if (outcome.kind === 'spawn-error') throw new Error(messageOf(outcome.error));
+            if (outcome.kind === 'killed') {
+              throw new Error(outcome.stderr.trim() || 'install was killed (timeout or signal)');
+            }
+            if (outcome.code !== 0) {
+              throw new Error(outcome.stderr.trim() || `install exited ${String(outcome.code)}`);
+            }
+          },
+        }),
     runPrefix: input.runPrefix,
     base: input.base,
     segments,
@@ -1638,9 +1822,9 @@ export function bindingsFromDispatch(
     // The RESOLVED spec (the alias normalised away) — never the input's raw spec.
     modelSpec: resolved.modelSpec,
     ...(input.driver.toolPolicy !== undefined ? { toolPolicy: input.driver.toolPolicy } : {}),
-    ...(input.sandboxPolicy !== undefined ? { sandboxPolicy: input.sandboxPolicy } : {}),
+    sandboxPolicy: input.sandboxPolicy ?? { level: 'workspace-write' },
     ...(input.gitTimeoutMs !== undefined ? { gitTimeoutMs: input.gitTimeoutMs } : {}),
-    ...(input.driver.budget !== undefined ? { budget: input.driver.budget } : {}),
+    budget: input.driver.budget,
     prompt: (unit, worktree) =>
       (input.promptTemplate ?? DEFAULT_UNIT_PROMPT_TEMPLATE)
         // FUNCTION replacers (review-debt #175 item 7): a worktree path or
@@ -1656,14 +1840,14 @@ export function bindingsFromDispatch(
     }),
     // DEFAULT TRUE: a fleet's branches must reach the remote before
     // assemblePrs; an explicit push:false opts into a local-only run. The
-    // push shares the dispatch mutex's lockfile AND its timings (jeDcl — a
-    // push under a shorter stale window could be misclassified stale by a
-    // waiting sibling and stolen mid-push) so it cannot race a sibling's
-    // worktree add/prune.
+    // Push runs outside the local Git mutex so network latency cannot block
+    // sibling worktree operations.
     ...(input.push === false
       ? {}
       : {
-          pushBranch: makePushBranch(pushLockOptions(mutex, input.gitTimeoutMs)),
+          pushBranch: makePushBranch(
+            input.gitTimeoutMs === undefined ? undefined : { timeoutMs: input.gitTimeoutMs },
+          ),
         }),
     ...(input.stagePathAllowlist !== undefined
       ? { stagePathAllowlist: input.stagePathAllowlist }
@@ -1944,7 +2128,11 @@ export async function readCommittedMarkers(
           typeof record.branch === 'string' &&
           record.branch !== ''
         ) {
-          markers.push({ package: record.package, fixer: record.fixer, branch: record.branch });
+          markers.push({
+            package: record.package,
+            fixer: record.fixer,
+            branch: record.branch,
+          });
         }
       } catch {
         // A malformed marker is skipped, never trusted (I9: the assemble leg
