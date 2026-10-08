@@ -27,6 +27,16 @@ const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_NAME = /token|secret|password|passwd|credential|api_?key|private_?key|auth/i;
 
 /**
+ * Connection-string names (DATABASE_URL, REDIS_URL, SENTRY_DSN, ...) usually
+ * embed a password or key inside the value, so the name filter above misses
+ * them; the build needs none of them either.
+ */
+const CONNECTION_NAME = /(?:^|_)(?:database|db|redis|mongo(?:db)?|amqp|broker|dsn)(?:_|$)/i;
+
+/** A URL whose userinfo carries a password (`scheme://user:pass@host`), whatever the variable is named. */
+const URL_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]+@/i;
+
+/**
  * Projects inheriting the root config (`extends: true`) may each run this
  * setup, possibly from separate module instances, but always in the one main
  * process: the in-flight build is shared through globalThis so a run builds
@@ -39,7 +49,14 @@ const BUILD_KEY = Symbol.for('cq-toolkit.vitest.global-build');
  * scope tokens to the live test; the build must not inherit them.
  */
 export function scrubbedBuildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => !CREDENTIAL_NAME.test(name)));
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([name, value]) =>
+        !CREDENTIAL_NAME.test(name) &&
+        !CONNECTION_NAME.test(name) &&
+        !(value !== undefined && URL_WITH_PASSWORD.test(value)),
+    ),
+  );
 }
 
 /** True only when the caller has declared dist fresh (`CQ_DIST_PREPARED=1`). */
