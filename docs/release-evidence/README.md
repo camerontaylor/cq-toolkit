@@ -3,8 +3,7 @@
 The 0.2 release evidence is recorded at the release cut, on the promoted
 release candidate, per the
 [0.2 runbook preflight](../0.2-release-runbook.md#preflight-record). The
-accepted ADR copies and their research sources are listed in
-[`docs/adr/README.md`](../adr/README.md). Everything below is the historical
+accepted ADRs are indexed in [`docs/adr/README.md`](../adr/README.md). Everything below is the historical
 v1.0.0 record, retained unpublished.
 
 Raw logs captured by the T5.1 publication checklist (plan §6). They are the
