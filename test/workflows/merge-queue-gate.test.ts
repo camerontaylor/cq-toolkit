@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
+import { parseDocument } from 'yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -269,9 +270,7 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
 describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files in lockstep)', () => {
   // REVIEW_JQ verbatim from each file. The jq program is token-free ($bot_login
   // and $bot_id arrive as jq variables from the step that runs it), so the
-  // extraction is byte-identical across the generated file and the template;
-  // what DIFFERS between the files is only how the step passes the variables,
-  // pinned textually below (template tokens there, literals in the render).
+  // extraction is byte-identical across the generated file and the template.
   const extractReviewJq = (text: string): string => {
     const lines = text.split(/\r?\n/);
     const start = lines.findIndex((line) => line.trim().startsWith('REVIEW_JQ:'));
@@ -336,7 +335,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       ),
     ) as Record<string, unknown>;
 
-  it('REVIEW_JQ is byte-identical and both steps read reviewer identity at the trust ref', () => {
+  it('REVIEW_JQ is byte-identical and each trust step consumes the identity source', () => {
     const [generated, template] = sources;
     if (generated === undefined || template === undefined)
       throw new Error('both workflow sources are required');
@@ -350,15 +349,47 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
     for (const { text, label } of sources) {
       expect(text, label).not.toContain(identity.login);
       expect(text, label).not.toContain(String(identity.id));
-      expect(text.match(/contents\/policy\/promotion-reviewer\.json\?ref=\$\{GITHUB_SHA\}/g)?.length, label).toBe(2);
-      expect(text.match(/jq -r \.login/g)?.length, label).toBe(2);
-      expect(text.match(/jq -r \.id/g)?.length, label).toBe(2);
-      expect(text.match(/--arg bot_login "\$\{reviewer_login\}"/g)?.length, label).toBe(2);
-      expect(text.match(/--argjson bot_id "\$\{reviewer_id\}"/g)?.length, label).toBe(2);
-      expect(text.match(/\.schemaVersion == 1/g)?.length, label).toBe(2);
       expect(text, label).not.toMatch(/\{\{REVIEWER_BOT_(?:LOGIN|ID)\}\}/);
       expect(text, label).not.toContain('cq-reviewer[bot]');
       expect(text, label).not.toContain('202921479');
+
+      const document = parseDocument(text, { uniqueKeys: true });
+      expect(document.errors, `${label}: valid workflow YAML`).toEqual([]);
+      const parsed = document.toJS() as {
+        jobs?: { gate?: { steps?: Array<{ id?: string; name?: string; run?: unknown }> } };
+      };
+      const steps = parsed.jobs?.gate?.steps ?? [];
+      const reviewSteps = steps.filter((step) => step.id === 'review');
+      const promoteSteps = steps.filter(
+        (step) => step.name === 'Fast-forward promote the gated sha (guarded)',
+      );
+      expect(reviewSteps, `${label}: unique review trust step`).toHaveLength(1);
+      expect(promoteSteps, `${label}: unique pre-push trust step`).toHaveLength(1);
+      const trustSteps = [
+        reviewSteps[0],
+        promoteSteps[0],
+      ];
+      for (const [index, step] of trustSteps.entries()) {
+        if (step === undefined || typeof step.run !== 'string') {
+          throw new Error(`${label}: trust step ${index + 1} is missing its run script`);
+        }
+        const script = step.run
+          .split(/\r?\n/)
+          .filter((line) => !line.trimStart().startsWith('#'))
+          .join('\n');
+        expect(script, `${label}: trust step ${index + 1} fetches at GITHUB_SHA`).toContain(
+          'contents/policy/promotion-reviewer.json?ref=${GITHUB_SHA}',
+        );
+        expect(script, `${label}: trust step ${index + 1} extracts login`).toContain(
+          'jq -r .login <<<"${reviewer_json}"',
+        );
+        expect(script, `${label}: trust step ${index + 1} extracts id`).toContain(
+          'jq -r .id <<<"${reviewer_json}"',
+        );
+        expect(script, `${label}: trust step ${index + 1} binds both values to REVIEW_JQ`).toMatch(
+          /jq -s --arg bot_login "\$\{reviewer_login\}" \\\s*--argjson bot_id "\$\{reviewer_id\}" "\$\{REVIEW_JQ\}"/,
+        );
+      }
     }
     const instances = JSON.parse(
       readFileSync(join(ROOT, 'policy/templates/instances.json'), 'utf8'),
