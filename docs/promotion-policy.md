@@ -90,7 +90,7 @@ fail-closed).
   the registration record §Host) — outside an unprivileged agent's reach (see the residuals
   below) — and every promotion outcome is re-derived there. An agent holding the owner's token
   can no longer post a promotion-review success that the gate trusts.
-- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo on neptune, and
+- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo on the agent host, and
   on the signer host removing `ctaylor` from `docker`/`wheel` and closing sshd password auth — record
   §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
   overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
@@ -106,7 +106,7 @@ The owner runs the `crq-override` tool — installed beside the signer in root-o
 `/opt/cq-reviewer/` on the signer host — from a terminal no agent can reach: from the owner's OWN machine,
 `ssh` to the signer host, then `sudo -u crq`. The host is headless, so the macOS plan's login-window design
 became this: the invariant that survives is that the issuing terminal is unreachable from
-neptune's agents, and the session is never routed through neptune. The tool verifies the target
+the fleet agents', and the session is never routed through an agent-reachable host. The tool verifies the target
 sha is a queue state beyond `main`, computes `main` itself, posts the status as
 `cq-promotion-reviewer[bot]`, and logs the override to the signer's audit log:
 
@@ -120,7 +120,7 @@ agent could reach it until P0 lands (see the accepted limit). The gate logs the 
 prefix in its run summary.
 
 **Accepted limit (the override is not agent-proof today).** The procedure above holds only
-while the signer host's ssh and sudo are closed. Today neptune agents reach `ctaylor@` on the
+while the signer host's ssh and sudo are closed. Today the fleet agents reach `ctaylor@` on the
 signer host without a
 password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on the signer host — so a
 root-capable agent can become root there, reach the PEM, and mint an override or any other
@@ -134,7 +134,7 @@ I4 still applies: an override skips the review, never the required checks.
 
 ## When the signer is offline
 
-If the signer host — or the ssh path from crq (neptune) to the spool — is down, nothing posts a review,
+If the signer host — or the ssh path from crq to the spool — is down, nothing posts a review,
 so nothing promotes. crq treats ssh failure as **unknown**: no new request, no withdrawal, no
 false "signer down"; after 30 minutes it alerts "signer host unreachable" (distinct from the
 signer-down alert) and keeps triage. **Promotion waits; nothing fails red.** Gate runs woken
