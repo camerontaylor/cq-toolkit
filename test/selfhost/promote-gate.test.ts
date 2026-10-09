@@ -1425,13 +1425,14 @@ describe('runGate', () => {
     expect(r.verdict).toBe('promoted');
     expect(r.subject).toBe(M1);
     expect(r.tip).toBe(t2);
-    // The fake's last pre-push queue observation serves M1 (the fake graph's
-    // queue ref) while the run-start tip is t2 — off the tip, so the queue
-    // refspec rides along as a pure lease at the tip (it can never land;
-    // --atomic would refuse main with it). Only main's refspec can move.
+    // The queue refspec is ALWAYS leased at the run-start tip (luna round
+    // 4 — even off-tip it can never land; --atomic would refuse main with
+    // it), and the cq/promoted marker moves with the promotion (leased at
+    // its read: the bootstrap marker is main).
     expect(seen).toEqual([
       [
         { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+        { refspec: `${M1}:refs/heads/cq/promoted`, expected: MAIN },
         { refspec: `${t2}:refs/heads/merge-queue`, expected: t2 },
       ],
     ]);
@@ -1607,6 +1608,8 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     git(trust, ['update-ref', 'refs/remotes/origin/main', main]);
     git(trust, ['update-ref', 'refs/remotes/origin/merge-queue', tip]);
     git(trust, ['push', '-q', remote, `${main}:refs/heads/main`, `${tip}:refs/heads/merge-queue`]);
+    // C2-cutover bootstrap: the replay marker starts at the cutover main.
+    git(trust, ['push', '-q', remote, `${main}:refs/heads/cq/promoted`]);
     return { trust, remote, main, head, tip };
   }
 

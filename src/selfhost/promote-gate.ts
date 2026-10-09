@@ -842,17 +842,32 @@ async function gateBody(
   //     — promotion-policy.md, accepted limit).
   const walk = await git.firstParentRange(cfg.repo, main, tip);
   if (walk[0] !== tip) refuse('subject: the first-parent chain does not start at the tip');
-  // The replay marker: last promoted subject, or null before the first
-  // promotion. Anything but a clean "ref absent" fails closed.
+  // The replay marker: the last promoted subject. A MISSING marker fails
+  // closed — deleting the ref (accidentally, or by anything holding
+  // contents:write) must never silently re-enable replay of an old review
+  // after a rewind. Bootstrap is a one-time cutover step (marker = the
+  // current main; promotion-policy.md, C2 checklist) and the
+  // refs/heads/cq/* ruleset protects the ref from deletion and
+  // non-fast-forward updates thereafter.
   let promotedMarked: string | null = null;
   try {
     const wire = asRecord(await getJson(`${repoPath}/git/ref/heads/${PROMOTED_REF}`));
     const sha = asString(asRecord(wire['object'])['sha']).toLowerCase();
-    if (SHA_RE.test(sha)) promotedMarked = sha;
+    if (!SHA_RE.test(sha)) {
+      refuse(`the ${PROMOTED_REF} replay marker did not resolve to a commit sha`);
+    }
+    promotedMarked = sha;
   } catch (error) {
-    const notFound =
-      error instanceof GhError && /not found|no such|does not exist/i.test(error.stderr);
-    if (!notFound) throw error;
+    if (
+      error instanceof Refusal ||
+      !(error instanceof GhError) ||
+      !/not found|no such|does not exist/i.test(error.stderr)
+    ) {
+      throw error;
+    }
+    refuse(
+      `the ${PROMOTED_REF} replay marker is absent — bootstrap it (set it to the current main) per the C2 cutover checklist, and keep it protected by the refs/heads/cq/* ruleset; refusing to promote while it is missing`,
+    );
   }
   let subject: string | null = null;
   let subjectBase: string | null = null;
