@@ -390,7 +390,10 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
     }
     const manifest = JSON.parse(
       readFileSync(join(ROOT, 'policy/templates/instances.json'), 'utf8'),
-    ) as { schemaVersion: number; instances: Array<{ workflow: string; tokens: Record<string, string> }> };
+    ) as {
+      schemaVersion: number;
+      instances: Array<{ workflow: string; tokens: Record<string, string> }>;
+    };
     const gate = manifest.instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
     expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBeUndefined();
     expect(gate?.tokens['REVIEWER_BOT_ID']).toBeUndefined();
