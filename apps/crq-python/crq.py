@@ -52,7 +52,7 @@ CLONE = Path(CONFIG["clone"])
 WT_ROOT = Path(CONFIG["worktree_root"])
 WT_PREFIX = CONFIG["worktree_prefix"]
 REPO = CONFIG["repo"]
-BLOCKING_SEVERITIES = set(CONFIG["address_severities"])
+BLOCKING_SEVERITIES = {"critical", "major"}
 SEVERITIES = ["critical", "major", "minor", "trivial", "info", "none"]
 
 # ---------------------------------------------------------------- utilities
@@ -345,7 +345,14 @@ _AGENTS_CACHE: Dict[str, Any] = {}
 def running_agents() -> List[Dict[str, Any]]:
     if "v" not in _AGENTS_CACHE:
         try:
-            _AGENTS_CACHE["v"] = [a for a in paseo_json(["ls"]) if a.get("status") == "running"]
+            hosts = CONFIG.get("paseo_hosts")
+            if not hosts or len(hosts) < 2:
+                raise RuntimeError("both Paseo endpoints must be configured")
+            agents = []
+            for host in hosts:
+                data = paseo_json(["ls", "--host", host])
+                agents.extend(data.get("agents", []) if isinstance(data, dict) else data)
+            _AGENTS_CACHE["v"] = [a for a in agents if a.get("status") in ("running", "initializing")]
         except Exception as exc:  # fail closed: unknown activity blocks starts
             _AGENTS_CACHE["v"] = None
             event("paseo_ls_failed", error=str(exc)[:300])
@@ -369,8 +376,6 @@ def active_agents_for(pr: int, branch: str) -> Optional[List[str]]:
     slug = branch.replace("/", "-")
     for a in agents:
         title = a.get("name") or a.get("title") or ""
-        if title.startswith(CONFIG["tick_agent_title_prefix"]):
-            continue
         cwd = a.get("cwd") or ""
         if (re.search(rf"#{pr}\b", title) or re.search(rf"pr-?{pr}\b", cwd)
                 or os.path.basename(cwd.rstrip("/")) == slug or agent_branch(cwd) == branch):
@@ -676,13 +681,11 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
     (rdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
-    # Reparent via sh to escape descendant-tree cleanup. The child also calls
-    # setsid to escape Codex's process-group cleanup when the tick command exits.
-    # launchctl submit cannot read this repo's external volume under macOS TCC.
-    child = " ".join(shlex.quote(a) for a in (sys.executable, str(Path(__file__).resolve()), "_review", run_id))
-    p = run(["/bin/sh", "-c", f"{child} </dev/null >>{shlex.quote(str(rdir / 'runner.log'))} 2>&1 & echo $!"],
-            cwd=ROOT, timeout=30)
-    pid = int(p.stdout.strip())
+    with (rdir / "runner.log").open("a") as output:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
+                                cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                start_new_session=True)
+    pid = proc.pid
     item["state"] = "reviewing"
     item["run"] = {"run_id": run_id, "pid": pid, "started_at": meta["started_at"]}
     item["wait_reason"] = None
@@ -693,12 +696,11 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
 
 def cmd_review_child(run_id: str) -> int:
     """Detached child: run the CLI once, record exit status. Never retries."""
-    os.setsid()
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
     tmo = CONFIG["review_timeout_min"]
-    cmd = ["gtimeout", "--kill-after=60", f"{tmo}m", *meta["cmd"]]
+    cmd = [CONFIG.get("timeout_bin", "timeout"), "--kill-after=60", f"{tmo}m", *meta["cmd"]]
     pidfile = rdir / "review.pid"
     identity = {"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}
     pidfile.write_text(json.dumps(identity) + "\n")
@@ -1696,9 +1698,6 @@ def notify_owner(text: str) -> Dict[str, Any]:
     if aid:
         p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90, env=top_level_env())
         res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
-    o = run(["osascript", "-e", f"display notification {json.dumps(text[:220])} with title "
-             f"\"crq alert\" sound name \"Basso\""], check=False, timeout=30)
-    res["osascript"] = o.returncode
     return res
 
 
@@ -2012,6 +2011,8 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
 
 def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = False) -> List[str]:
     log: List[str] = []
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
     for item in q["items"]:
@@ -2138,51 +2139,8 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
         save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
         write_status(q)
         write_heartbeat(q)
-        cleanup_tick_agents(q)  # time-boxed, saves incrementally
         save_queue(q)
     return log
-
-
-def cleanup_tick_agents(q: Dict[str, Any], budget_s: Optional[float] = None) -> None:
-    """Archive finished tick agents (+ their workspaces) except the last few,
-    each ONCE, within a hard time budget; progress is saved after every
-    archive, the rest waits for the next tick. Runs AFTER status.md is
-    written, so a slow cleanup can never hide a successful tick.
-    History: re-archiving every past run (~3 s per paseo call) once pushed ticks
-    past the tick agent's 120 s limit (2026-10-04); on 2026-10-07 a backlog of
-    101 failed runs, plus a 500-entry cap that forgot the oldest runs, made each
-    tick ~330 s, so no tick ever persisted its progress (a self-feeding wedge)."""
-    sid = CONFIG.get("schedule_id")
-    if not sid:
-        return
-    deadline = time.monotonic() + (budget_s if budget_s is not None else CONFIG.get("cleanup_budget_s", 30))
-    try:
-        runs = paseo_json(["schedule", "inspect", sid]).get("runs") or []
-    except Exception:
-        return
-    done = [r for r in runs if r.get("agentId") and r.get("status") != "running"]
-    keep = CONFIG["keep_tick_agents"]
-    archived = set(q.get("archived_tick_runs") or [])
-    ids = [r["id"] for r in runs]
-    if archived:  # archiving is oldest-first: every run older than the oldest recorded one is done
-        first = min((ids.index(x) for x in archived if x in ids), default=0)
-        archived.update(ids[:first])
-    elif "archived_tick_runs" not in q:  # first run ever: earlier ticks archived all but the newest few
-        archived = {r["id"] for r in done[:-(keep + 1)]}
-    todo = [r for r in (done[:-keep] if len(done) > keep else []) if r["id"] not in archived]
-    for n, r in enumerate(todo):
-        if time.monotonic() >= deadline:
-            q["cleanup_backlog"] = len(todo) - n
-            break
-        run(["paseo", "archive", r["agentId"]], check=False, timeout=30)
-        if r.get("workspaceId"):
-            run(["paseo", "workspace", "archive", r["workspaceId"]], check=False, timeout=30)
-        archived.add(r["id"])
-        q["archived_tick_runs"] = [x for x in ids if x in archived]  # bounded by the schedule's own run list
-        save_queue(q)
-    else:
-        q["cleanup_backlog"] = 0
-    q["archived_tick_runs"] = [x for x in ids if x in archived]
 
 
 # ----------------------------------------------------------- status
@@ -2324,6 +2282,8 @@ def apply_measure(i: Dict[str, Any]) -> None:
 
 
 def cmd_measure() -> None:
+    if (STATE / "runner-disabled").exists():
+        return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
     merged = [i for i in q["items"] if i["kind"] == "merged"]
@@ -2346,7 +2306,7 @@ def cmd_measure() -> None:
               f"{str(m['focus']):>6} {str(m['docs_only'])[0]}    {i['state']}")
 
 
-WATCHDOG_HOME = Path.home() / "Library" / "Application Support" / "crq"
+WATCHDOG_HOME = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq"
 
 
 def write_heartbeat(q: Dict[str, Any]) -> None:

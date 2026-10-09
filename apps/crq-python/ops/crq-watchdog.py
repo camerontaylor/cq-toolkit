@@ -11,10 +11,11 @@ plus a best-effort macOS notification). Installed by hand from the crq repo's
 ops/ directory; see README "Watchdog". Python 3.9, stdlib only."""
 import datetime as dt
 import json
+import os
 import subprocess
 from pathlib import Path
 
-HOME = Path.home() / "Library" / "Application Support" / "crq"
+HOME = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq"
 HB, ST = HOME / "heartbeat.json", HOME / "watchdog-state.json"
 
 
@@ -47,17 +48,10 @@ def main():
     if st.get("alerted_for") == last:
         print(f"{utcnow():%FT%TZ} stale {gap:.0f}m; already alerted")
         return
-    sched = ""
-    p = sh(["paseo", "schedule", "inspect", hb["schedule_id"], "--json"])
-    if p.returncode == 0:
-        d = json.loads(p.stdout)
-        r = (d.get("runs") or [{}])[-1]
-        sched = (f" Schedule {hb['schedule_id']} is {d.get('status')}; last run {r.get('scheduledFor')} "
-                 f"{r.get('status')}: {str(r.get('output') or r.get('error') or '')[:200]!r}.")
+    sched = " systemd crq-tick.timer."
     text = (f"crq STALLED: no completed tick for {gap:.0f}m (last {last}, alarm at {limit}m).{sched} "
             f"Diagnose: cd {hb['root']} && python3 crq.py tick --dry-run")
     sent = sh(["paseo", "send", "--no-wait", hb["alert_agent_id"], text], timeout=90)
-    sh(["osascript", "-e", f"display notification {json.dumps(text[:220])} with title \"crq STALLED\" sound name \"Basso\""])
     ST.write_text(json.dumps({"alerted_for": last, "alerted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                               "gap_min": round(gap), "paseo_send": sent.returncode,
                               "paseo_err": sent.stderr.strip()[:200]}) + "\n")

@@ -106,7 +106,7 @@ def publish(root, queue, config, schedule, home=None, now=None):
         data["promotion"]["merges_waiting"] = int(count.strip())
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired):
         data["promotion"]["merges_error"] = "cached merge refs unavailable"
-    target = home / "Library/Application Support/crq/summary.json"
+    target = Path(os.environ.get("XDG_STATE_HOME", str(home / ".local/state"))) / "crq/summary.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".summary-", dir=target.parent)
     try:

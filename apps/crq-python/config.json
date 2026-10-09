@@ -56,5 +56,78 @@
     "signer_down_min": 30
   },
   "cleanup_budget_s": 30,
-  "stale_alarm_min": 36
+  "stale_alarm_min": 36,
+  "timeout_bin": "timeout",
+  "paseo_hosts": [],
+  "repair": {
+    "enabled": false,
+    "spend_authorization": null,
+    "max_concurrent": 3,
+    "max_rounds_per_pin": 2,
+    "fix_pr_cycles": 1,
+    "peak": {
+      "tz": "Asia/Singapore",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "start": "14:00",
+      "end": "18:00"
+    },
+    "budget": {
+      "wall_clock_min": 20,
+      "max_tokens": 400000
+    },
+    "mechanical": {
+      "tests": false,
+      "hack_detector": true
+    },
+    "judge_sample_rate": 0.0,
+    "cq_bin": "/home/operator/repos/cq-toolkit/dist/cli.js",
+    "roles": {
+      "fixer": {
+        "default": {
+          "driver": "cq",
+          "model": "zai/glm-5.3-flash"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6-luna"
+        }
+      },
+      "fixer_escalation": {
+        "default": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        }
+      },
+      "judge": {
+        "default": {
+          "driver": "cq",
+          "model": "zai/glm-5.3-flash"
+        },
+        "peak": {
+          "driver": "paseo",
+          "model": "pi/opencode-go/muse-spark-1.3-contributor"
+        }
+      },
+      "judge_critical": {
+        "default": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        }
+      }
+    }
+  }
 }

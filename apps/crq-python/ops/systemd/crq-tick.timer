@@ -1,0 +1,7 @@
+[Unit]
+Description=CRQ quota paced twelve minute tick
+[Timer]
+OnCalendar=*:0/12
+Persistent=true
+[Install]
+WantedBy=timers.target
