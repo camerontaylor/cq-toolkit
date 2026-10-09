@@ -25,7 +25,8 @@
 #     read.
 #   - The promotion review is trusted from the pinned reviewer ONLY:
 #     creator.type "Bot" AND the recorded bot login AND its numeric id
-#     (REVIEWER_BOT_* tokens below, from the registration record) — a commit
+#     (the protected policy/promotion-reviewer.json, validated by the CLI
+#     and read from the trust checkout) — a commit
 #     status carries no app id, so the bot user is the identity. Any other
 #     creator's crq/promotion-review status on the tip, with no trusted
 #     review anywhere, is a RED refusal; with a reviewed subject below it,
@@ -66,13 +67,11 @@
 #                       enforces this for the instance). Above that the
 #                       runner may kill `decide` mid-wait: still no
 #                       promotion (fails closed), but the report is lost.
-#   REVIEWER_BOT_LOGIN -> the pinned promotion reviewer's bot login, from
-#                        the owner's registration record (UNSET/@@UNSET
-#                        values make the CLI refuse before any read — the
-#                        identity is never guessed from a name lookup).
-#   REVIEWER_BOT_ID   -> the pinned reviewer's numeric bot user id (same
-#                        record, numeric compare via --argjson-style flag
-#                        parsing). Same UNSET fail-closed rule.
+#   (The pinned reviewer identity is NOT a token: `decide` reads the
+#   protected `policy/promotion-reviewer.json` from the trust checkout —
+#   the same file the merge-queue gate reads at GITHUB_SHA and the signer
+#   and crq validate on main — and passes its login/id to the CLI, which
+#   still validates the pair and refuses banned or malformed identities.)
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — values reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -284,6 +283,21 @@ jobs:
           fi
           [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || {
             echo "refusing: default branch '$DEFAULT_BRANCH'"; exit 1; }
+          # The pinned reviewer identity comes from the protected
+          # policy/promotion-reviewer.json at the TRUST ref (GITHUB_SHA) —
+          # the same source the merge-queue gate reads and the signer and
+          # crq validate on main; never a workflow literal or repo
+          # variable. Fail closed on a missing/malformed file: the CLI
+          # re-validates the pair (shape, banned identities) regardless.
+          REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
+          REVIEWER_LOGIN="$(jq -r '.login // empty' <<<"${REVIEWER_JSON}")"
+          REVIEWER_ID="$(jq -r '.id // empty' <<<"${REVIEWER_JSON}")"
+          [[ "$REVIEWER_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || {
+            echo "refusing: policy promotion-reviewer login '$REVIEWER_LOGIN'"; exit 1; }
+          [[ "$REVIEWER_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "refusing: policy promotion-reviewer id '$REVIEWER_ID'"; exit 1; }
+          jq -e '.type == "Bot" and .schemaVersion == 1' <<<"${REVIEWER_JSON}" >/dev/null || {
+            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin'; exit 1; }
           args=(
             --repo=trust
             --repository="$REPO"
@@ -292,8 +306,8 @@ jobs:
             --defaultBranch="$DEFAULT_BRANCH"
             --verifiedWorkflows={{GATE_WORKFLOWS}}
             --timeoutMin={{GATE_TIMEOUT_MIN}}
-            --reviewerBotLogin={{REVIEWER_BOT_LOGIN}}
-            --reviewerBotId={{REVIEWER_BOT_ID}}
+            --reviewerBotLogin="$REVIEWER_LOGIN"
+            --reviewerBotId="$REVIEWER_ID"
             --push
           )
           if [ -n "$VERDICT_APP_ID" ]; then
