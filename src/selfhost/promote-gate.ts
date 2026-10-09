@@ -84,6 +84,7 @@ import {
 import {
   gitFirstParentRange,
   gitIsAncestor,
+  gitLsRemoteRef,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
@@ -642,6 +643,7 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
+  lsRemoteRef(repo: string, url: string, ref: string, token: string): Promise<string | null>;
   pushAtomic(
     repo: string,
     url: string,
@@ -658,6 +660,7 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
+  lsRemoteRef: gitLsRemoteRef,
   pushAtomic: gitPushAtomic,
 };
 
@@ -986,20 +989,34 @@ async function gateBody(
   const pushToken = cfg.pushToken;
   if (pushToken === null) refuse('push: no push credential');
   // The main lease is the step-1 read: main must still be `main`. The
-  // SUBJECT is what promotes (PR-C): a queue that advanced past it is fine —
-  // those commits simply wait for their own review — so unlike the old
-  // tip-keyed push there is no queue CAS to lose a race against, and only
-  // main is ever sent. A break-glass rewound queue cannot be re-promoted:
-  // the reviewed sha's base must be contained in the MAIN THE GATE READ, so
-  // a rewound main makes the base check (and the lease) refuse.
+  // SUBJECT is what promotes (PR-C): a queue that ADVANCED past it is fine —
+  // those commits simply wait for their own review. Any OTHER queue movement
+  // must stop this promotion — a break-glass rewind below the tip in
+  // particular puts the subject off the queue, and promoting an off-queue
+  // commit from a stale read is exactly the equal-OID/lease hole. So the
+  // last pre-push observation, on the same transport the push uses, is the
+  // queue ref as the remote serves it NOW. Still the run-start tip — the
+  // normal case, which step 1 pinned the local mirror to — ONLY main is
+  // sent (D-K.6 by construction, not by git's equal-OID skip). Moved — the
+  // merge-queue refspec rides along as a pure lease: leased at the tip it
+  // can never land, and --atomic refuses main with it, so a rewound queue
+  // can never re-promote the subject, and an advanced one (the rewind
+  // window's other half) makes the next sweep retry from fresh reads.
+  const queueNow = await git.lsRemoteRef(cfg.repo, cfg.remoteUrl, QUEUE_BRANCH, pushToken);
   const updates: LeasedUpdate[] = [
     { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
   ];
+  if (queueNow !== tip) {
+    updates.push({
+      refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`,
+      expected: tip,
+    });
+  }
   const pushed = await git.pushAtomic(cfg.repo, cfg.remoteUrl, updates, pushToken);
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
     refuse(
-      'push: the atomic leased push was rejected (main moved since the read); next sweep retries',
+      'push: the atomic leased push was rejected (main or the queue moved since the read); next sweep retries',
     );
   }
   report.push(`push: main at ${subject} (reviewed sha, base ${subjectBase})`);

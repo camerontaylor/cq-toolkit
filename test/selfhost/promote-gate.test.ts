@@ -30,6 +30,7 @@ import {
   BANNED_REVIEWER_IDS,
   BANNED_REVIEWER_LOGINS,
   POLL_MS,
+  QUEUE_BRANCH,
   checkClosure,
   checkVerifiedRun,
   mainWith,
@@ -779,6 +780,9 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
+    // The remote queue serves the default tip unless a test moves it: the
+    // normal case where the push sends ONLY main.
+    lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? M1 : null),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -1313,7 +1317,9 @@ describe('runGate', () => {
     const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
     expect(r.verdict).toBe('promoted');
     // PR-C: the SUBJECT is what promotes — one main refspec, leased at the
-    // step-1 main read. There is no queue CAS to lose a race against.
+    // step-1 main read, when the last pre-push observation still serves the
+    // run-start queue tip. The queue refspec rides along ONLY as a lease
+    // when that observation sees the queue elsewhere (the next test).
     expect(seen).toEqual([
       {
         updates: [{ refspec: `${M1}:refs/heads/main`, expected: MAIN }],
@@ -1323,6 +1329,27 @@ describe('runGate', () => {
     expect(r.report.join('\n')).toMatch(
       new RegExp(`push: main at ${M1} \\(reviewed sha, base ${MAIN}\\)`),
     );
+  });
+
+  test('a queue that moved before the push adds its refspec as a pure lease', async () => {
+    const h = harness(world());
+    const seen: unknown[] = [];
+    h.deps.git = fakeGit({
+      lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? H1 : null), // the queue is elsewhere now
+      pushAtomic: (_repo, _url, updates, _token) => {
+        seen.push({ updates });
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(seen).toEqual([
+      {
+        updates: [
+          { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+          { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
+        ],
+      },
+    ]);
   });
 
   test('a tip ahead of the reviewed sha promotes the SUBJECT and leaves the queue alone', async () => {
@@ -1382,7 +1409,16 @@ describe('runGate', () => {
     expect(r.verdict).toBe('promoted');
     expect(r.subject).toBe(M1);
     expect(r.tip).toBe(t2);
-    expect(seen).toEqual([[{ refspec: `${M1}:refs/heads/main`, expected: MAIN }]]);
+    // The fake's last pre-push queue observation serves M1 (the fake graph's
+    // queue ref) while the run-start tip is t2 — off the tip, so the queue
+    // refspec rides along as a pure lease at the tip (it can never land;
+    // --atomic would refuse main with it). Only main's refspec can move.
+    expect(seen).toEqual([
+      [
+        { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+        { refspec: `${t2}:refs/heads/merge-queue`, expected: t2 },
+      ],
+    ]);
     const text = r.report.join('\n');
     expect(text).toMatch(new RegExp(`subject: reviewed sha ${M1} .* queue tip ${t2} waits`));
     expect(h.acceptanceInputs).toEqual([
