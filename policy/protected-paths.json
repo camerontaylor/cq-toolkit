@@ -7,6 +7,7 @@
     "^src/selfhost/(?:merge-recheck|settle-state|state-branch|candidates|acceptance|promote-gate)\\.ts$",
     "^src/ops/review/(?:gh|threads)\\.ts$",
     "^src/shared/independent-review\\.ts$",
+    "^policy/promotion-reviewer\\.json$",
     "^scripts/ratchet-[^/]+\\.mjs$",
     "^scripts/(?:github-settings-drift|render-templates)\\.mjs$",
     "^scripts/lib/(?:github-settings|render-templates)\\.mjs$",

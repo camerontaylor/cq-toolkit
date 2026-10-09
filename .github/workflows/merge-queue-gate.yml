@@ -8,8 +8,8 @@
 #     binds the reviewed range as `main=<40-hex>` (that base must be main
 #     or an ancestor of main, so main..sha was reviewed). The pinned
 #     reviewer is the promotion reviewer App's bot user, matched by ALL
-#     THREE of creator.type == "Bot", creator.login == cq-promotion-reviewer[bot]
-#     and creator.id == 339373542 (a status carries no app id, so
+#     THREE of creator.type == "Bot", creator.login and creator.id match
+#     policy/promotion-reviewer.json at the trust ref (a status carries no app id, so
 #     the bot user is the identity: the `[bot]` login suffix is reserved for
 #     Apps and slugs are globally unique, and the numeric id survives even
 #     a hypothetical slug reuse). The identity comes ONLY from the owner's
@@ -70,22 +70,9 @@
 #                       names, e.g. static,denylist
 #   GATE_TIMEOUT_MIN -> minutes to wait for the checks before refusing
 #                       (default 20)
-#   REVIEWER_BOT_LOGIN -> the pinned reviewer's bot login, from the owner's
-#                        registration record
-#                        (toolkit-research/plans/app-registration-session-
-#                        20261004.md). While UNSET (the shipped placeholder
-#                        starts `@@UNSET`), the rendered gate refuses
-#                        fail-closed on every run.
-#   REVIEWER_BOT_ID   -> the pinned reviewer's numeric bot user id (a JSON
-#                        number at run time: passed with --argjson, never
-#                        --arg, so the compare is numeric), same record
-#                        source, same UNSET fail-closed rule. The RENDERED
-#                        file must carry both literals: crq's signer-mode
-#                        activation greps main's copy of this file for
-#                        them. They are not repo variables on purpose: a
-#                        token value changes only through a reviewed
-#                        promotion, an admin token could edit a variable
-#                        without review.
+#   Reviewer identity is read from policy/promotion-reviewer.json at GITHUB_SHA
+#   through the Contents API in each trust-filter step. The source is reviewed
+#   policy, not a repo variable or a workflow literal.
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — inputs reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -162,17 +149,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Fail closed while the reviewer identity is unpinned (both steps):
-          # the tokens are UNSET placeholders until the owner's registration
-          # record (toolkit-research/plans/app-registration-session-
-          # 20261004.md) provides the real bot login + numeric id. Never a
-          # public-API lookup by guessed name — a stranger's public App can
-          # own any name.
-          case "cq-promotion-reviewer[bot]" in
-            @@UNSET*)
-              echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
-              exit 1;;
-          esac
           if [ -n "${SHA_INPUT}" ]; then
             sha="${SHA_INPUT}"
           elif [ "${GITHUB_EVENT_NAME}" = "status" ]; then
@@ -202,15 +178,20 @@ jobs:
               exit 0;;
           esac
           # Every page of the sha's statuses through the job's REVIEW_JQ,
-          # trusting only the pinned reviewer bot (login + numeric id).
+          # trusting only the reviewer identity read from policy at the trust ref (login + numeric id).
+          reviewer_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${GITHUB_SHA}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at trust ref ${GITHUB_SHA}"; exit 1; }
+          reviewer_login="$(jq -r .login <<<"${reviewer_json}")"
+          reviewer_id="$(jq -r .id <<<"${reviewer_json}")"
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" |
-            jq -s --arg bot_login 'cq-promotion-reviewer[bot]' \
-              --argjson bot_id 339373542 "${REVIEW_JQ}")"
+            jq -s --arg bot_login "${reviewer_login}" \
+              --argjson bot_id "${reviewer_id}" "${REVIEW_JQ}")"
           others="$(jq -r '.others' <<<"${rows}")"
           if jq -e '.review == null' <<<"${rows}" >/dev/null; then
             if [ "${GITHUB_EVENT_NAME}" = status ] || [ "${others}" -gt 0 ]; then
-              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from the pinned reviewer (cq-promotion-reviewer[bot]/339373542)"
+              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from the reviewer recorded at the trust ref"
               exit 1
             fi
             await "no crq/promotion-review status"
@@ -357,11 +338,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "cq-promotion-reviewer[bot]" in
-            @@UNSET*)
-              echo "refusing: reviewer identity not pinned (REVIEWER_BOT_* tokens are UNSET placeholders; fill them only from toolkit-research/plans/app-registration-session-20261004.md)"
-              exit 1;;
-          esac
           git fetch origin main merge-queue
           if git merge-base --is-ancestor "${SHA}" origin/main; then
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
@@ -398,10 +374,15 @@ jobs:
           # meanwhile must stop this promotion. Only the very review
           # verified above, still the newest trusted one, may promote; a
           # newer success review wakes its own gate run.
+          reviewer_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${GITHUB_SHA}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at trust ref ${GITHUB_SHA}"; exit 1; }
+          reviewer_login="$(jq -r .login <<<"${reviewer_json}")"
+          reviewer_id="$(jq -r .id <<<"${reviewer_json}")"
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
-            jq -s --arg bot_login 'cq-promotion-reviewer[bot]' \
-              --argjson bot_id 339373542 "${REVIEW_JQ}")"
+            jq -s --arg bot_login "${reviewer_login}" \
+              --argjson bot_id "${reviewer_id}" "${REVIEW_JQ}")"
           now_id="$(jq -r '.review.id // "none"' <<<"${rows}")"
           now_state="$(jq -r '.review.state // "none"' <<<"${rows}")"
           if [ "${now_id}" != "${REVIEW_ID}" ] || [ "${now_state}" != success ]; then

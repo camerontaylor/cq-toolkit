@@ -336,15 +336,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       ),
     ) as Record<string, unknown>;
 
-  // The pinned identity, from the owner's registration record
-  // (toolkit-research plans/app-registration-session-20261004.md @ d8f132f):
-  // App cq-promotion-reviewer (5230901), bot cq-promotion-reviewer[bot] /
-  // 339373542 / Bot. The jq matrix below still uses synthetic fixtures;
-  // these constants pin the RENDERED literals and the instances.json tokens.
-  const PIN_LOGIN = 'cq-promotion-reviewer[bot]';
-  const PIN_ID = '339373542';
-
-  it('REVIEW_JQ is byte-identical across the files, and each step passes the pinned reviewer', () => {
+  it('REVIEW_JQ is byte-identical and both steps read reviewer identity at the trust ref', () => {
     const [generated, template] = sources;
     if (generated === undefined || template === undefined)
       throw new Error('both workflow sources are required');
@@ -352,107 +344,32 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       extractReviewJq(generated.text),
       'the trust filter drifted between template and instantiation',
     ).toBe(extractReviewJq(template.text));
+    const identity = JSON.parse(
+      readFileSync(join(ROOT, 'policy/promotion-reviewer.json'), 'utf8'),
+    ) as { login: string; id: number; type: string; schemaVersion: number };
     for (const { text, label } of sources) {
-      // The id rides --argjson (a JSON number): an --arg string compare
-      // against the numeric cid would fail closed on every status.
-      expect(text.match(/--argjson bot_id /g)?.length, label).toBe(2);
-      expect(text.match(/--arg bot_login /g)?.length, label).toBe(2);
-      expect(text, label).not.toMatch(/--arg bot_id\b/);
-      // The old allow-list plumbing is gone from both files.
-      expect(text, label).not.toContain('CQ_PROMOTION_REVIEWERS');
-      expect(text, label).not.toContain('REVIEWERS_VAR');
-      // The fail-closed unpinned guard sits in BOTH steps of BOTH files:
-      // while the tokens are UNSET placeholders, every run refuses before it
-      // can trust anything.
-      expect(
-        text.match(/refusing: reviewer identity not pinned/g)?.length,
-        `${label}: the unpinned guard in both steps`,
-      ).toBe(2);
-      expect(text.match(/@@UNSET\*\)/g)?.length, `${label}: the sentinel branch`).toBe(2);
-      // Provenance regression: a STRANGER's public App ("cq-reviewer", owner
-      // `cqrect`, App id 1175046) once sat in these literals. Neither file
-      // may ever carry that name or id again — real values land only from
-      // the owner's registration record.
-      expect(text, `${label}: no stranger login`).not.toContain('cq-reviewer[bot]');
-      expect(text, `${label}: no stranger id`).not.toContain('202921479');
+      expect(text, label).not.toContain(identity.login);
+      expect(text, label).not.toContain(String(identity.id));
+      expect(text.match(/contents\/policy\/promotion-reviewer\.json\?ref=\$\{GITHUB_SHA\}/g)?.length, label).toBe(2);
+      expect(text.match(/jq -r \.login/g)?.length, label).toBe(2);
+      expect(text.match(/jq -r \.id/g)?.length, label).toBe(2);
+      expect(text.match(/--arg bot_login "\$\{reviewer_login\}"/g)?.length, label).toBe(2);
+      expect(text.match(/--argjson bot_id "\$\{reviewer_id\}"/g)?.length, label).toBe(2);
+      expect(text.match(/\.schemaVersion == 1/g)?.length, label).toBe(2);
+      expect(text, label).not.toMatch(/\{\{REVIEWER_BOT_(?:LOGIN|ID)\}\}/);
+      expect(text, label).not.toContain('cq-reviewer[bot]');
+      expect(text, label).not.toContain('202921479');
     }
-    // The rendered instance carries the pinned literals (crq's signer-mode
-    // activation greps main's copy for them); the template carries the
-    // tokens. The pinned login appears six times: twice in the jq args,
-    // twice in the guard case subjects, twice in the red-refusal messages.
-    const loginRe = new RegExp(PIN_LOGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-    expect(generated.text.match(loginRe)?.length).toBe(6);
-    expect(generated.text).toContain(`--argjson bot_id ${PIN_ID} `);
-    expect(generated.text).toContain(`case "${PIN_LOGIN}" in`);
-    expect(generated.text).toContain(`none from the pinned reviewer (${PIN_LOGIN}/${PIN_ID})`);
-    expect(template.text.match(/case "\{\{REVIEWER_BOT_LOGIN\}\}" in/g)?.length).toBe(2);
-    expect(template.text.match(/'\{\{REVIEWER_BOT_LOGIN\}\}'/g)?.length).toBe(2);
-    expect(template.text.match(/--argjson bot_id \{\{REVIEWER_BOT_ID\}\}/g)?.length).toBe(2);
-    // instances.json is the render's single identity source, straight from
-    // the registration record.
     const instances = JSON.parse(
       readFileSync(join(ROOT, 'policy/templates/instances.json'), 'utf8'),
     ) as Array<{ workflow: string; tokens: Record<string, string> }>;
     const gate = instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
-    expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBe(PIN_LOGIN);
-    expect(gate?.tokens['REVIEWER_BOT_ID']).toBe(PIN_ID);
-  });
-
-  // The guard must actually FIRE, not merely be present: each file's case
-  // block runs under bash — the UNSET sentinel exits 1 with the refusing
-  // message, a real-shaped login passes, and the SHIPPED pin (the rendered
-  // literal, or the record values substituted into the template) passes too.
-  describe('fail-closed unpinned-identity guard (behavioral)', () => {
-    const guardTmp = mkdtempSync(join(tmpdir(), 'gate-identity-'));
-    afterAll(() => rmSync(guardTmp, { recursive: true, force: true }));
-
-    for (const { label, text } of sources) {
-      const lines = text.split(/\r?\n/);
-      const guardBlock = (): string => {
-        const start = lines.findIndex(
-          (line) =>
-            line.trim().startsWith('case "') &&
-            (line.includes('{{REVIEWER_BOT_LOGIN}}') ||
-              line.includes('@@UNSET-REVIEWER-BOT-LOGIN@@') ||
-              line.includes(PIN_LOGIN)),
-        );
-        if (start === -1) throw new Error('no unpinned-identity guard found');
-        const block: string[] = [];
-        for (let i = start; i < lines.length; i++) {
-          const line = lines[i] ?? '';
-          block.push(line);
-          if (line.trim().endsWith(';;')) break;
-        }
-        block.push('esac');
-        return block.join('\n');
-      };
-      const runGuard = (subject: string): { status: number | null; output: string } => {
-        const script = join(guardTmp, `identity-${label}-${subject.slice(0, 6)}.sh`);
-        const body = guardBlock().replace(/case ".*" in/, `case "${subject}" in`);
-        writeFileSync(script, `set -euo pipefail\n${body}\n`);
-        const res = spawnSync('bash', [script], { encoding: 'utf8' });
-        return { status: res.status, output: `${res.stdout ?? ''}${res.stderr ?? ''}` };
-      };
-      it(`refuses the UNSET sentinel with exit 1 (${label})`, () => {
-        const res = runGuard('@@UNSET-REVIEWER-BOT-LOGIN@@');
-        expect(res.status, res.output).toBe(1);
-        expect(res.output).toContain('refusing: reviewer identity not pinned');
-      });
-      it(`positive control: a real-shaped login passes the guard (${label})`, () => {
-        const res = runGuard('promo-review-fixture[bot]');
-        expect(res.status, res.output).toBe(0);
-      });
-      it(`the shipped pin itself passes the guard (${label})`, () => {
-        const script = join(guardTmp, `identity-${label}-shipped.sh`);
-        const body =
-          label === 'generated'
-            ? guardBlock()
-            : guardBlock().replace(/case ".*" in/, `case "${PIN_LOGIN}" in`);
-        writeFileSync(script, `set -euo pipefail\n${body}\n`);
-        const res = spawnSync('bash', [script], { encoding: 'utf8' });
-        expect(res.status, `${res.stdout ?? ''}${res.stderr ?? ''}`).toBe(0);
-      });
-    }
+    expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBeUndefined();
+    expect(gate?.tokens['REVIEWER_BOT_ID']).toBeUndefined();
+    const protectedPaths = JSON.parse(
+      readFileSync(join(ROOT, 'policy/protected-paths.json'), 'utf8'),
+    ) as { protectedPaths: string[] };
+    expect(protectedPaths.protectedPaths).toContain('^policy/promotion-reviewer\\.json$');
   });
 
   it('trusts only creator type Bot + pinned login + numeric id, newest wins', () => {

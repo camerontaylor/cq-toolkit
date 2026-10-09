@@ -61,9 +61,7 @@
       "tokens": {
         "PROMOTE_SECRET": "PROMOTE_TOKEN",
         "GATE_CHECKS": "static,denylist,ratchet",
-        "GATE_TIMEOUT_MIN": "20",
-        "REVIEWER_BOT_LOGIN": "cq-promotion-reviewer[bot]",
-        "REVIEWER_BOT_ID": "339373542"
+        "GATE_TIMEOUT_MIN": "20"
       }
     },
     {
