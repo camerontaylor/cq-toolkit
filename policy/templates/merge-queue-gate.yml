@@ -52,11 +52,15 @@
 # skipped or cancelled, or never reported in time, a reviewed sha off the
 # queue, a review base main does not contain, or a diverged main.
 #
-# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): while the batch policy holds,
-# cq-gate (gate.yml) runs REPORT-ONLY, so this gate is the one component
-# that advances main. C2 must first teach cq-gate the promotion-review
-# signal. It reads the repository-level PROMOTE_SECRET: once the owner
-# moves that secret into environment `promote`, this gate fails closed.
+# SOLE PROMOTER UNTIL C2 (W1.10; ADR-0004 D-H.3.1): cq-gate (gate.yml)
+# runs REPORT-ONLY — its CQ_GATE_PROMOTES switch is 'false' — so this gate
+# is the one component that advances main, and the cq/promoted replay
+# marker only records cq-gate promotions once armed. The C2 cutover
+# checklist (docs/promotion-policy.md) freezes promotion, bootstraps the
+# marker, adds the refs/heads/cq/* ruleset, flips cq-gate's switch, and
+# deletes this workflow — the two gates never both push. It reads the
+# repository-level PROMOTE_SECRET: once the owner moves that secret into
+# environment `promote`, this gate fails closed.
 #
 # Instantiate (each token below is written in double braces in the body):
 #   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with
