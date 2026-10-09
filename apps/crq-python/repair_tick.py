@@ -15,25 +15,28 @@ def own_range(c, q, base, head):
 def enqueue(c, q, item, meta, rdir):
     existing = item.setdefault('repair_runs', {}).get(meta['run_id'])
     if existing:
-        return True
+        return existing['state'] in ('queued', 'ready', 'publish_failed')
     actionable = findings(rdir / 'review.ndjson')
     if not actionable:
         return False
     if own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
         return False
-    pin = meta.get('pr_head', meta['head'])
-    count = sum(r.get('pin') == pin for r in item['repair_runs'].values())
+    pin = meta.get('review_pin') or item.get('pinned_base') or meta['base']
+    # Delta items are separate queue entries but share a PR/pin repair ceiling.
+    history = [r for i in q['items'] if i.get('pr') == item.get('pr')
+               for r in i.get('repair_runs', {}).values()]
+    count = sum(r.get('pin') == pin for r in history)
     if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
         item['last_error'] = 'repair round ceiling reached; needs human'
         return False
-    open_pr = item['kind'] == 'open' or item['kind'] == 'delta' and item.get('followup') != 'merged'
-    base = pin if open_pr else c.git('rev-parse', 'origin/merge-queue')
+    open_pr = item['kind'] in ('open', 'delta') and bool(meta.get('pr_branch'))
+    base = meta.get('pr_head', meta['head']) if open_pr else c.git('rev-parse', 'origin/merge-queue')
     record = {'jobs': [], 'pin': pin, 'base': base, 'branch': meta.get('pr_branch'),
               'open_pr': open_pr, 'round': count + 1, 'state': 'queued'}
     reviewed_diff = c.git('diff', meta['base'], meta['head'])
     for n, finding in enumerate(actionable, 1):
         job_id = 'crq-' + meta['run_id'] + '-F' + str(n)
-        prior = [v for r in item['repair_runs'].values() for v in r.get('verdicts', [])
+        prior = [v for r in history for v in r.get('verdicts', [])
                  if v.get('verdict') == 'NOT-FIXED' and v.get('finding', {}).get('path') == finding['path']
                  and v.get('finding', {}).get('severity') == finding['severity']]
         job = {'job': job_id, 'item': item['id'], 'kind': item['kind'], 'pr': item['pr'],
@@ -45,6 +48,9 @@ def enqueue(c, q, item, meta, rdir):
         if not path.exists():
             atomic(path, job)
         record['jobs'].append(job_id)
+        for blocker in item.get('blocking', []):
+            if blocker.get('run') == meta['run_id'] and blocker.get('run_finding') == n:
+                blocker['repair_job'] = job_id
     item['repair_runs'][meta['run_id']] = record
     return True
 
@@ -52,6 +58,11 @@ def enqueue(c, q, item, meta, rdir):
 def harvest(c, q, item, dry=False):
     messages = []
     for run, record in item.get('repair_runs', {}).items():
+        if record['state'] in ('published', 'done', 'failed', 'stale'):
+            # Reconcile atomically persisted publication after a caller crash.
+            if item['kind'] != 'promotion' and item.get('state') == 'repairing':
+                item['state'] = 'repair_failed' if record['state'] == 'failed' else 'done'
+            continue
         if record['state'] not in ('queued', 'ready', 'publish_failed'):
             continue
         verdicts = []
@@ -98,7 +109,7 @@ def harvest(c, q, item, dry=False):
         record['state'] = 'ready'
         if item['kind'] == 'promotion':
             for blocker in item.get('blocking', []):
-                related = [v for v in verdicts if v['finding'].get('path') == blocker.get('file')]
+                related = [v for v in verdicts if v['job'] == blocker.get('repair_job')]
                 if related:
                     blocker['repair_advice'] = related[-1]['reason']
         fixed = [v for v in verdicts if v['verdict'] == 'FIXED']
@@ -119,6 +130,11 @@ def harvest(c, q, item, dry=False):
 
 
 def publish(c, q, item, run, record, fixed):
+    journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
+    if journal.exists():
+        publication = json.loads(journal.read_text())
+        recover_publication(c, q, item, run, record, publication)
+        return
     commits = [sha for v in fixed for sha in v['commits']]
     # Re-read GitHub pin immediately before publishing; never force push.
     info = c.pr_info(item['pr']) if record['open_pr'] else None
@@ -162,49 +178,110 @@ def publish(c, q, item, run, record, fixed):
             remote_branch = record['branch']
         else:
             remote_branch = 'crq/fix-' + run
+        publication = {'head': head, 'target': target, 'branch': remote_branch,
+                       'commits': translated, 'open_pr': bool(info), 'at': c.iso()}
+        journal = c.STATE / 'repair' / record['jobs'][0] / 'publication.json'
+        c.git('update-ref', 'refs/crq/publication/' + run, head)
+        atomic(journal, publication)
+        record['publication'] = publication
+        c.save_queue(q)  # durable identity before any remote mutation
         c.git('push', 'origin', 'HEAD:refs/heads/' + remote_branch, cwd=wt)
-        q.setdefault('repair_own_commits', []).extend(sha for sha in translated if sha not in q.get('repair_own_commits', []))
-        record['published_commits'] = translated
-        if info:
-            item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
-        else:
-            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', remote_branch, '--state', 'all', '--json', 'number,url,state'])
-            if not prs:
-                body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
-                for v in record['verdicts']:
-                    body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', '\\|').replace('\n', ' ') + ' |')
-                body_path = patch.parent / 'fix-pr.md'
-                body_path.write_text('\n'.join(body) + '\n')
-                c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', 'merge-queue', '--head', remote_branch,
-                       '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(body_path)], cwd=wt)
-                prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', remote_branch, '--state', 'all', '--json', 'number,url,state'])
-            pr = prs[0]
-            record['fix_pr'] = pr
-            if not any(i['pr'] == pr['number'] and i['kind'] == 'open' for i in q['items']):
-                c.new_item(q, [], False, id='pr' + str(pr['number']), pr=pr['number'], kind='open', tier=1,
-                           prior_cycles=2 - c.CONFIG['repair'].get('fix_pr_cycles', 1), repair_origin=run,
-                           why='verified repair fix PR')
-        record['state'] = 'published'
+        finalize_publication(c, q, item, run, record, publication)
     finally:
         c.remove_worktree(wt, branch)
+
+
+def recover_publication(c, q, item, run, record, publication):
+    head, branch = publication['head'], publication['branch']
+    remote = c.git('ls-remote', '--heads', 'origin', 'refs/heads/' + branch)
+    remote_head = remote.split()[0] if remote else None
+    if publication['open_pr']:
+        info = c.pr_info(item['pr'])
+        if info['state'] != 'OPEN' or info['headRefName'] != branch:
+            record.update(state='stale', error='PR no longer publishable')
+            return
+        if info['headRefOid'] == head or c.is_ancestor(head, info['headRefOid']):
+            finalize_publication(c, q, item, run, record, publication)
+            return
+        if info['headRefOid'] != publication['target']:
+            record.update(state='stale', error='head moved after prepared publication; needs new review')
+            return
+    else:
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state,headRefOid'])
+        if prs:
+            if len(prs) != 1 or prs[0]['headRefOid'] != head:
+                raise ValueError('fix PR identity or prepared head mismatch')
+            finalize_publication(c, q, item, run, record, publication)
+            return
+    if not publication['open_pr'] and remote_head and remote_head != head:
+        raise ValueError('existing fix branch differs from prepared publication')
+    if remote_head != head:
+        # Immutable publication SHA survives retries via refs/crq/publication.
+        c.git('push', 'origin', head + ':refs/heads/' + branch)
+    finalize_publication(c, q, item, run, record, publication)
+
+
+def finalize_publication(c, q, item, run, record, publication):
+    translated, head, branch = publication['commits'], publication['head'], publication['branch']
+    owned = q.setdefault('repair_own_commits', [])
+    owned.extend(sha for sha in translated if sha not in owned)
+    record['published_commits'] = translated
+    if publication['open_pr']:
+        item['last_push'] = {'sha': head, 'shas': translated, 'at': c.iso()}
+    else:
+        prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
+        if not prs:
+            if publication.get('pr_create_pending'):
+                raise ValueError('previous PR creation outcome unknown; reconcile existing PR before retry')
+            body = ['Verified CodeRabbit repairs from ' + run, '', '| finding | verdict | reason |', '|---|---|---|']
+            for v in record['verdicts']:
+                body.append('| ' + v['job'] + ' | ' + v['verdict'] + ' | ' + v['reason'].replace('|', r'\|').replace('\n', ' ') + ' |')
+            path = c.STATE / 'repair' / record['jobs'][0] / 'fix-pr.md'
+            path.write_text('\n'.join(body) + '\n')
+            publication['pr_create_pending'] = True
+            atomic(c.STATE / 'repair' / record['jobs'][0] / 'publication.json', publication)
+            c.save_queue(q)
+            c.run(['gh', 'pr', 'create', '--repo', c.REPO, '--base', 'merge-queue', '--head', branch,
+                   '--title', 'fix: Address CodeRabbit findings from ' + run, '--body-file', str(path)])
+            prs = c.gh_json(['pr', 'list', '--repo', c.REPO, '--head', branch, '--state', 'all', '--json', 'number,url,state'])
+        if len(prs) != 1:
+            raise ValueError('fix PR identity is ambiguous')
+        pr = prs[0]
+        record['fix_pr'] = pr
+        if not any(i['pr'] == pr['number'] and i['kind'] == 'open' for i in q['items']):
+            c.new_item(q, [], False, id='pr' + str(pr['number']), pr=pr['number'], kind='open', tier=1,
+                       prior_cycles=2 - c.CONFIG['repair'].get('fix_pr_cycles', 1), repair_origin=run,
+                       why='verified repair fix PR')
+    record['state'] = 'published'
+    if item['kind'] != 'promotion':
+        item['state'] = 'done'
+    c.save_queue(q)
 
 
 def backfill(c, q):
     if q.get('legacy_repair_backfilled'):
         return
+    missing = []
     for item in q['items']:
         for cycle in item.get('cycles', []):
             run = cycle['run_id']
             path = c.RUNS / run
             if not (path / 'meta.json').exists() or not (path / 'review.ndjson').exists():
+                # No evidence means no verdict and no archive permission.
+                if cycle.get('findings') or cycle.get('severity_counts') or item.get('blocking') or run.startswith('signer:'):
+                    missing.append({'item': item['id'], 'run': run})
                 continue
             meta = json.loads((path / 'meta.json').read_text())
             enqueue(c, q, item, meta, path)
-    q['legacy_repair_backfilled'] = c.iso()
+    q['legacy_repair_missing'] = missing
+    if not missing:
+        q['legacy_repair_backfilled'] = c.iso()
     # Archive only when all backfilled findings have terminal verdicts.
 
 
 def archive_legacy(c, q):
+    if q.get('legacy_repair_missing') or not q.get('legacy_repair_backfilled'):
+        return
     records = [r for i in q['items'] for r in i.get('repair_runs', {}).values()]
     if any(r['state'] in ('queued', 'ready', 'publish_failed') for r in records):
         return
@@ -235,7 +312,7 @@ def reconcile_fix_prs(c, q):
                 for index, job in enumerate(record['jobs'], 1):
                     if job in fixed:
                         for blocker in item.get('blocking', []):
-                            if blocker.get('run') == next((r for r, rr in item['repair_runs'].items() if rr is record), None) and blocker.get('n') == index:
+                            if blocker.get('repair_job') == job:
                                 blocker['resolution'] = {'fix_pr': pr['number'], 'merge': merge, 'at': c.iso()}
                 record['fix_merged'] = c.iso()
 

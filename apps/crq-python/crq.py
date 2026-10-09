@@ -577,7 +577,7 @@ def plan_open(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[str
             item["target_ref"] = target
     cycle = item.get("prior_cycles", 0) + len(item.get("cycles", [])) + 1
     return {"base": pin, "head": head, "target": target, "label": f"cycle {cycle} of 2", "cycle": cycle,
-            "notes": notes, "branch": info["headRefName"]}
+            "notes": notes, "branch": info["headRefName"], "review_pin": pin}
 
 
 class NothingToReview(Exception):
@@ -640,7 +640,7 @@ def plan_delta(item: Dict[str, Any], info: Dict[str, Any], dry: bool) -> Dict[st
     when = "post-merge" if merged else "post-cycle"
     return {"base": base, "head": review_head, "pr_head": head, "target": target,
             "label": f"informational {when} review — {scope}", "cycle": None, "notes": [],
-            "branch": None if merged else info["headRefName"]}
+            "branch": None if merged else info["headRefName"], "review_pin": pin}
 
 
 def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
@@ -678,7 +678,7 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
     meta = {"run_id": run_id, "item_id": item["id"], "pr": item["pr"], "kind": item["kind"],
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
-            "pr_head": plan.get("pr_head", plan["head"]),
+            "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
@@ -1538,7 +1538,28 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         item.update(state="findings", cycles=[{"run_id": f"signer:{iid}"}],
                     blocking=[{"n": x.get("n"), "severity": x.get("severity"), "file": x.get("file"), "line": x.get("line"),
                                "title": str(x.get("title"))[:160], "resolution": None} for x in r.get("findings") or []])
-        return f"{iid}: signer failure ({r.get('blocking')}) → findings"
+        # Persist the authenticated spool finding summaries as review evidence.
+        # The forced-command transport and signer request identity remain unchanged.
+        run_id = "signer-" + iid
+        rdir = RUNS / run_id
+        rdir.mkdir(parents=True, exist_ok=True)
+        raw = r.get("findings") or []
+        actionable = [x for x in raw if x.get("severity") in ("critical", "major")]
+        events = [{"type": "finding", "severity": x["severity"], "fileName": x.get("file"),
+                   "codegenInstructions": x.get("codegenInstructions") or x.get("body") or
+                       (str(x.get("title") or "") + " at line " + str(x.get("line") or 1))}
+                  for x in actionable]
+        (rdir / "review.ndjson").write_text("".join(json.dumps(e) + "\n" for e in events))
+        meta = {"run_id": run_id, "base": item["base_sha"], "head": item["batch_sha"],
+                "review_pin": item["base_sha"], "cycle": None, "pr_branch": None}
+        (rdir / "meta.json").write_text(json.dumps(meta) + "\n")
+        item["cycles"] = [{"run_id": run_id, "findings": len(events)}]
+        for n, x in enumerate(actionable, 1):
+            blocker = next((b for b in item["blocking"] if b["n"] == x.get("n")), None)
+            if blocker is not None:
+                blocker.update(run=run_id, run_finding=n)
+        repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+        return f"{iid}: signer failure ({r.get('blocking')}) → findings / detached repair"
     if o in ("skipped", "too_large"):
         item["state"] = "split_needed"  # signer already posted error; promotion_tick halves
         return f"{iid}: signer {o} → split"
@@ -1761,7 +1782,7 @@ def harvest_promotion(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str,
     new = blocking_findings(rdir / "review.ndjson")
     base = item["base_sha"]
     if new:
-        item["blocking"] = item.get("blocking", []) + [dict(b, n=len(item.get("blocking", [])) + k + 1, run=meta["run_id"])
+        item["blocking"] = item.get("blocking", []) + [dict(b, n=len(item.get("blocking", [])) + k + 1, run=meta["run_id"], run_finding=k + 1)
                                                        for k, b in enumerate(new)]
         sev = ", ".join(f"{sum(1 for b in new if b['severity'] == s)} {s}" for s in ("critical", "major")
                         if any(b["severity"] == s for b in new))

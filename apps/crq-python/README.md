@@ -110,3 +110,12 @@ refreshes the digest; `summary` refreshes only the fleet summary. `tick` is rese
 for the sole installed runner. `pause`/`resume` control queue starts;
 `promotion-resolve` and `promotion-ack` retain the owner override/audit workflow.
 Do not execute dry ticks, model jobs or test-bearing gates during the suspension.
+
+Runtime activation also requires verified hard-budget launchers for Codex and
+Paseo. Codex exec exposes no verified hard token cap in the inspected interface;
+CRQ refuses paid dispatch rather than substitute a prompt or post-hoc usage cap.
+The Codex launcher contract is `launcher --max-tokens N -- codex exec ...`.
+The Paseo launcher additionally accepts `--wall-clock-seconds N` and must keep a
+remote per-agent token guard alive after background creation until termination.
+Set the corresponding `*_budget_launcher_verified` only from concrete existing
+operational evidence. No launcher or judge capability was exercised here.

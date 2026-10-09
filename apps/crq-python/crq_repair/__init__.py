@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import signal
 import tempfile
 
 
@@ -28,7 +29,20 @@ def atomic(path, value):
 
 
 def command(argv, cwd=None, env=None, timeout=1200):
-    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Only this command's owned process group, never unrelated workers.
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def git(wt, *args):
@@ -52,7 +66,7 @@ def verify(wt, base, commits, job):
             raise ValueError('commit is not an ancestor of HEAD')
         if not git(wt, 'diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha):
             raise ValueError('empty commit')
-        if not re.search(re.escape(job) + r'(?!\d)', git(wt, 'show', '-s', '--format=%B', sha)):
+        if not re.search(r'(?<!\d)' + re.escape(job) + r'(?!\d)', git(wt, 'show', '-s', '--format=%B', sha)):
             raise ValueError('commit message missing finding id')
     if set(git(wt, 'rev-list', base + '..HEAD').splitlines()) != set(commits):
         raise ValueError('unclaimed commits in repair range')

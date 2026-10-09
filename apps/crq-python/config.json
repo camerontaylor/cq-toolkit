@@ -118,7 +118,11 @@
       }
     },
     "paseo_host": null,
-    "paseo_read_only_mode": null
+    "paseo_read_only_mode": null,
+    "codex_budget_launcher": null,
+    "codex_budget_launcher_verified": false,
+    "paseo_budget_launcher": null,
+    "paseo_budget_launcher_verified": false
   },
   "coverage": {
     "max_paths": 8,

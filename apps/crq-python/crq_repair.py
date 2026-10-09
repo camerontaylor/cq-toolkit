@@ -7,8 +7,6 @@ import fcntl
 import json
 from pathlib import Path
 import random
-import shutil
-import subprocess
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, utc, verify
 from crq_repair.drivers import cq, codex, paseo
@@ -56,6 +54,10 @@ def process(config, job, wt):
         prior = json.loads(result_path.read_text())
         if not prior.get('retry_after') or dt.datetime.fromisoformat(prior['retry_after'].replace('Z', '+00:00')) > dt.datetime.now(dt.timezone.utc):
             return prior
+    saved_job = directory / 'job.json'
+    if saved_job.exists():
+        saved = json.loads(saved_job.read_text())
+        job['window'] = saved['window']
     selected = job.get('window') or window(repair)
     job['window'] = selected
     roles = {name: copy.deepcopy(values[selected]) for name, values in repair['roles'].items()}
@@ -65,70 +67,113 @@ def process(config, job, wt):
     if result_path.exists():
         result = json.loads(result_path.read_text())
         result.pop('retry_after', None)
+    progress_path = directory / 'progress.json'
+    if progress_path.exists() and (not result_path.exists() or progress_path.stat().st_mtime_ns > result_path.stat().st_mtime_ns):
+        result = json.loads(progress_path.read_text())
+        if result.get('dispatch_pending'):
+            result.update(verdict='FAILED', reason='worker interrupted with unknown outcome; needs human', finished_at=utc())
+            result.pop('dispatch_pending', None)
+            atomic(result_path, result)
+            return result
     atomic(directory / 'job.json', job)
     base = job['repair_base']
-    evidence = ''
-    start_rung = max((int(a['rung'][1:]) + 1 for a in result['attempts']), default=0)
-    rung = start_rung
+    evidence = result.get('evidence', '')
+    rung = result.get('next_rung', max((int(a['rung'][1:]) + 1 for a in result['attempts']), default=0))
+    def defer(reason):
+        result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        result['reason'] = reason
+        atomic(result_path, result)
+        return result
     while rung < 3:
         role = roles['fixer' if rung < 2 else 'fixer_escalation']
         attempt_dir = directory / ('A' + str(rung))
-        git(wt, 'reset', '--hard', base)
-        git(wt, 'clean', '-fd')
         current = copy.deepcopy(job)
         current['finding']['body'] += '\nMechanical evidence / judge rationale: ' + evidence
         try:
-            report = dispatch(config, role, current, wt, attempt_dir)
-            if report.get('stop') == 'rate-limit':
-                result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
-                result['reason'] = 'provider rate limit; attempt deferred'
-                atomic(result_path, result)
-                return result
-            attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
-                       'driver': role['driver'], 'model': role['model'], 'stop': report.get('stop'),
-                       'changed': report.get('changed', False)}
-            result['attempts'].append(attempt)
-            if report.get('stop') != 'ok' or report.get('truncated'):
-                raise ValueError('driver failure or truncated context')
-            if report.get('changed'):
-                attempt['mechanical'] = mechanical(config, wt, base, report.get('commits'), job['job'], attempt_dir)
-                result.update(verdict='FIXED', reason=report.get('summary', ''), commits=report['commits'])
-                break
-            if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
-                raise ValueError('unchanged report left repository changes')
-            reason = report.get('summary') or 'no change proposed'
-            judge_required = job['finding']['severity'] == 'critical' or job.get('recurrence') or random.random() < repair.get('judge_sample_rate', 0)
+            if result.get('pending_judge'):
+                reason = result['pending_judge']['fixer_reason']
+            else:
+                if rung == 2:
+                    # Escalation gets a fresh worktree, not A0/A1 files or harness state.
+                    git(config['clone'], 'worktree', 'remove', '--force', str(wt))
+                    git(config['clone'], 'worktree', 'add', '--detach', str(wt), base)
+                else:
+                    git(wt, 'reset', '--hard', base)
+                    git(wt, 'clean', '-fd')
+                result['dispatch_pending'] = {'rung': 'A' + str(rung), 'role': role}
+                atomic(progress_path, result)
+                report = dispatch(config, role, current, wt, attempt_dir)
+                result.pop('dispatch_pending', None)
+                if report.get('stop') == 'rate-limit':
+                    result['next_rung'] = rung
+                    return defer('provider rate limit; attempt deferred')
+                attempt = {'rung': 'A' + str(rung), 'role': 'fixer' if rung < 2 else 'fixer_escalation',
+                           'driver': role['driver'], 'model': role['model'], 'stop': report.get('stop'),
+                           'changed': report.get('changed', False)}
+                result['attempts'].append(attempt)
+                if report.get('stop') == 'configuration':
+                    result['reason'] = report.get('summary', 'driver prerequisite missing; needs human')
+                    break
+                if report.get('stop') != 'ok' or report.get('truncated'):
+                    raise ValueError('driver failure or truncated context')
+                if report.get('changed'):
+                    attempt['mechanical'] = mechanical(config, wt, base, report.get('commits'), job['job'], attempt_dir)
+                    result.update(verdict='FIXED', reason=report.get('summary', ''), commits=report['commits'])
+                    break
+                if git(wt, 'status', '--porcelain') or git(wt, 'rev-parse', 'HEAD') != base:
+                    raise ValueError('unchanged report left repository changes')
+                reason = report.get('summary') or 'no change proposed'
+            judge_required = bool(result.get('pending_judge')) or job['finding']['severity'] == 'critical' or job.get('recurrence') or random.random() < repair.get('judge_sample_rate', 0)
             if judge_required and result['judge'] is None:
                 judge_role = roles['judge_critical' if job['finding']['severity'] == 'critical' else 'judge']
                 current['fixer_reason'] = reason
                 current['review_diff'] = job.get('review_diff', '')
-                judged = dispatch(config, judge_role, current, wt, directory / 'J', judge=True)
-                result['judge'] = judged
+                result['pending_judge'] = {'fixer_reason': reason, 'rung': rung}
+                result['next_rung'] = rung
+                result['dispatch_pending'] = {'rung': 'J', 'role': judge_role}
+                atomic(progress_path, result)
+                try:
+                    judged = dispatch(config, judge_role, current, wt, directory / 'J', judge=True)
+                except Exception:
+                    # Unknown outcome cannot be retried as a fresh paid judgement.
+                    result['judge'] = {'stop': 'error', 'verdict': 'unsure', 'reason': 'judge dispatch failed; needs human'}
+                    raise
+                finally:
+                    result.pop('dispatch_pending', None)
                 if judged.get('stop') == 'rate-limit':
-                    result['attempts'].pop()
-                    result['judge'] = None
-                    result['retry_after'] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%SZ')
-                    atomic(result_path, result)
-                    return result
+                    return defer('judge rate limit; resume judge without repeating fixer')
+                result.pop('pending_judge', None)
+                result['judge'] = judged
                 if judged.get('verdict') == 'valid' and judged.get('stop') == 'ok':
                     evidence = judged.get('reason', '')
-                    # Skip same-worker retry: judge-directed refix gets A2 only.
+                    result['evidence'] = evidence
+                    result['next_rung'] = 2
+                    atomic(progress_path, result)
                     rung = 2
                     continue
                 result.update(verdict='NOT-FIXED' if judged.get('verdict') == 'invalid' and judged.get('stop') == 'ok' else 'FAILED',
                               reason=judged.get('reason') or 'judge unsure; needs human')
                 break
-            result.update(verdict='NOT-FIXED', reason=reason)
+            confirmed = (result.get('judge') or {}).get('verdict') == 'valid'
+            result.update(verdict='FAILED' if confirmed else 'NOT-FIXED',
+                          reason='judge-confirmed defect unresolved after A2; needs human' if confirmed else reason)
             break
         except Exception as exc:
+            result.pop('dispatch_pending', None)
             evidence = str(exc)[:1000]
             result['reason'] = evidence
-            if len(result['attempts']) <= rung:
+            if result.get('pending_judge'):
+                result.pop('pending_judge', None)
+                result['reason'] = 'judge outcome unavailable; needs human'
+                break
+            if not result['attempts'] or result['attempts'][-1]['rung'] != 'A' + str(rung):
                 result['attempts'].append({'rung': 'A' + str(rung), 'driver': role['driver'],
                                            'model': role['model'], 'stop': 'error', 'changed': False})
             else:
                 result['attempts'][-1]['mechanical'] = {'failure': evidence, 'tests': 'suspended'}
-        atomic(directory / 'progress.json', result)
+        result['evidence'] = evidence
+        result['next_rung'] = rung + 1
+        atomic(progress_path, result)
         rung += 1
     result['finished_at'] = utc()
     atomic(result_path, result)
@@ -145,17 +190,18 @@ def process_item(config, jobs):
         p = command(['git', 'worktree', 'add', '--detach', str(wt), base], cwd=config['clone'])
         if p.returncode:
             raise RuntimeError('repair worktree creation failed')
+    jobs.sort(key=lambda j: (j['run'], int(j['job'].rsplit('-F', 1)[1])))
+    last_run = None
     for job in jobs:
+        if job['run'] != last_run:
+            base = job['repair_base']
+            last_run = job['run']
+        job['repair_base'] = base
         res = process(config, job, wt)
         if res.get('retry_after'):
             break
         if res['verdict'] == 'FIXED':
             base = res['commits'][-1]
-        job_base = base
-        # Each following job's base must preserve already verified earlier fixes.
-        index = jobs.index(job)
-        if index + 1 < len(jobs):
-            jobs[index + 1]['repair_base'] = job_base
 
 
 def main():
@@ -164,6 +210,14 @@ def main():
     if not repair.get('enabled') or not repair.get('spend_authorization'):
         print('repair dispatch disabled: existing spend authorization not verified')
         return
+    # Validate all configured paid lanes before any A0 spend. Missing hard
+    # budget support is an activation prerequisite, never a soft prompt promise.
+    drivers = {role['driver'] for windows in repair['roles'].values() for role in windows.values()}
+    for driver in ('codex', 'paseo'):
+        if driver in drivers and (not repair.get(driver + '_budget_launcher') or
+                                  not repair.get(driver + '_budget_launcher_verified')):
+            print('repair dispatch disabled: verified ' + driver + ' budget launcher required')
+            return
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'service.lock').open('a') as lock:
