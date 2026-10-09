@@ -630,6 +630,8 @@ interface World {
   dispatchCode: number;
   /** Called on each check-runs read (lets a test publish the verdict later). */
   onCheckRuns?: (n: number) => void;
+  /** Called on each statuses read (the walk and the pre-push re-read). */
+  onStatuses?: (n: number) => void;
 }
 
 const ok = (value: unknown): GhResult => ({
@@ -640,6 +642,7 @@ const ok = (value: unknown): GhResult => ({
 
 function fakeGh(world: World, calls: string[][]): GhFn {
   let checkReads = 0;
+  let statusReads = 0;
   return (args) => {
     calls.push(args);
     const path = args[0] === 'api' && args[1] === '-X' ? (args[3] ?? '') : (args[1] ?? '');
@@ -660,7 +663,11 @@ function fakeGh(world: World, calls: string[][]): GhFn {
     let m = /^repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls$/.exec(q);
     if (m !== null) return Promise.resolve(ok([world.prs.get(m[1] ?? '') ?? []]));
     m = /^repos\/o\/r\/commits\/([0-9a-f]{40})\/statuses$/.exec(q);
-    if (m !== null) return Promise.resolve(ok([world.statuses.get(m[1] ?? '') ?? []]));
+    if (m !== null) {
+      world.onStatuses?.(statusReads);
+      statusReads += 1;
+      return Promise.resolve(ok([world.statuses.get(m[1] ?? '') ?? []]));
+    }
     if (q === 'repos/o/r') return Promise.resolve(ok({ owner: { id: 1 } }));
     if (/^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
       return Promise.resolve(
@@ -1425,6 +1432,67 @@ describe('runGate', () => {
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
     ]);
+  });
+
+  test('a success bound to an older base is not selectable (rewind replay refused)', async () => {
+    // Break-glass rewind: main sits at MAIN while the reviewed M1 (whose
+    // success binds base=M1, the rewind target) is still on the queue. The
+    // exact-base binding refuses to replay the older review; nothing is
+    // judged and nothing promotes.
+    const h = harness(
+      world(M1, MAIN, {
+        statuses: new Map([[M1, [promoReview(M1)]]]),
+      }),
+    );
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(r.report.join('\n')).toMatch(
+      new RegExp(`success base ${M1} is not the current main ${MAIN}`),
+    );
+    expect(h.acceptanceInputs).toEqual([]);
+    expect(h.policyInputs).toEqual([]);
+  });
+
+  test('the selected promotion review is re-read before the push; a stale one refuses', async () => {
+    for (const [name, later] of [
+      [
+        'a newer trusted failure',
+        { state: 'failure', description: `blocked: 2 major main=${MAIN}` },
+      ],
+      ['a malformed success', { description: 'reviewed crq#x' }],
+    ] as const) {
+      let pushed = false;
+      const w = world();
+      w.onStatuses = (n) => {
+        if (n === 1) w.statuses = new Map([[M1, [promoReview(MAIN, { id: 901, ...later })]]]);
+      };
+      const h = harness(w);
+      h.deps.git = fakeGit({
+        pushAtomic: () => {
+          pushed = true;
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      });
+      const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+      expect(r.verdict, name).toBe('refused');
+      expect(pushed, name).toBe(false);
+      expect(r.report.at(-1), name).toMatch(/changed since selection/);
+    }
+  });
+
+  test('an unchanged promotion review passes the pre-push re-read and promotes', async () => {
+    let pushed = false;
+    const h = harness(world());
+    h.deps.git = fakeGit({
+      pushAtomic: () => {
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(pushed).toBe(true);
   });
 
   test('no reviewed commit on the queue is an awaiting (green), with no judging reads', async () => {

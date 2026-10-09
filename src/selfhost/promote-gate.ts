@@ -819,17 +819,23 @@ async function gateBody(
   report.push('ancestry: main is an ancestor of the tip (fast-forward)');
 
   // 2b. Subject: the newest queue commit whose newest trusted promotion
-  //     review is a success bound into main (PR-C). Walk the first-parent
-  //     line main..tip newest-first; everything below judges and promotes
-  //     the SUBJECT, not the tip — a tip ahead of the reviewed sha simply
-  //     waits for its own review. Untrusted promotion-review statuses on
-  //     the TIP with no selected review refuse (a foreign or forged
-  //     signal); on older commits they are history and inert, because the
-  //     subject — never the tip — is what promotes.
+  //     review is a success bound to EXACTLY this main (PR-C). Walk the
+  //     first-parent line main..tip newest-first; everything below judges
+  //     and promotes the SUBJECT, not the tip — a tip ahead of the
+  //     reviewed sha simply waits for its own review. Untrusted
+  //     promotion-review statuses on the TIP with no selected review
+  //     refuse (a foreign or forged signal); on older commits they are
+  //     history and inert, because the subject — never the tip — is what
+  //     promotes. The exact-base binding is the replay guard: an older
+  //     base only exists below a rewound main, and a success bound to it
+  //     must never re-promote after a break-glass rewind (the residual is
+  //     the EXACT-base rewind, which crq's backward-main audit alerts on
+  //     — promotion-policy.md, accepted limit).
   const walk = await git.firstParentRange(cfg.repo, main, tip);
   if (walk[0] !== tip) refuse('subject: the first-parent chain does not start at the tip');
   let subject: string | null = null;
   let subjectBase: string | null = null;
+  let subjectReviewId: number | null = null;
   let othersOnTip = 0;
   for (const sha of walk) {
     const statusesPath = `${repoPath}/commits/${sha}/statuses?per_page=100`;
@@ -842,16 +848,16 @@ async function gateBody(
       report.push(`  review walk ${sha}: ${review.state}`, ...review.lines.map((l) => `  ${l}`));
       continue;
     }
-    const baseInMain = review.base === main || (await git.isAncestor(cfg.repo, review.base, main));
-    if (!baseInMain) {
+    if (review.base !== main) {
       report.push(
-        `  review walk ${sha}: success base ${review.base} is not contained in main`,
+        `  review walk ${sha}: success base ${review.base} is not the current main ${main} — refusing to replay a review of an older range`,
         ...review.lines.map((l) => `  ${l}`),
       );
       continue;
     }
     subject = sha;
     subjectBase = review.base;
+    subjectReviewId = review.winner;
     report.push(`  review walk ${sha}: SELECTED`, ...review.lines.map((l) => `  ${l}`));
     break;
   }
@@ -988,6 +994,30 @@ async function gateBody(
   }
   const pushToken = cfg.pushToken;
   if (pushToken === null) refuse('push: no push credential');
+  // 10-pre. The selected promotion review must still be the subject's
+  // newest trusted status and still success at PUSH time (the waits above
+  // re-check verdicts and verified runs, but a newer trusted failure or
+  // pending, or a malformed success, posted on the subject during that
+  // interval must stop the promotion here). The review is also bound to
+  // the main this run read: a review of an older range can only exist
+  // below a rewound main, and replaying it would defeat the rewind.
+  const recheckPath = `${repoPath}/commits/${subject}/statuses?per_page=100`;
+  const fresh = selectPromotionReview(
+    slurpedComments(await getSlurp(recheckPath), recheckPath).flat(),
+    cfg.reviewer,
+  );
+  if (fresh.state !== 'success' || fresh.winner !== subjectReviewId || fresh.base !== subjectBase) {
+    refuse(
+      `push: the promotion review on ${subject} changed since selection (newest trusted: ${fresh.state}${
+        fresh.winner === null ? '' : ` status ${fresh.winner}`
+      }); next sweep retries`,
+    );
+  }
+  if (fresh.base !== main) {
+    refuse(
+      `push: the review's recorded base ${fresh.base} is not the current main ${main} — refusing to replay a review of an older range`,
+    );
+  }
   // The main lease is the step-1 read: main must still be `main`. The
   // SUBJECT is what promotes (PR-C): a queue that ADVANCED past it is fine —
   // those commits simply wait for their own review. Any OTHER queue movement

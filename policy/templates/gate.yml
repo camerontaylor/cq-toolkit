@@ -70,8 +70,10 @@
 #   (The pinned reviewer identity is NOT a token: `decide` reads the
 #   protected `policy/promotion-reviewer.json` from the trust checkout —
 #   the same file the merge-queue gate reads at GITHUB_SHA and the signer
-#   and crq validate on main — and passes its login/id to the CLI, which
-#   still validates the pair and refuses banned or malformed identities.)
+#   and crq validate on main — checks its JSON types BEFORE extracting
+#   (number id > 0, string login, type Bot, schemaVersion 1), and passes
+#   the login/id to the CLI, which still validates the pair and refuses
+#   banned or malformed identities.)
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — values reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -290,14 +292,19 @@ jobs:
           # variable. Fail closed on a missing/malformed file: the CLI
           # re-validates the pair (shape, banned identities) regardless.
           REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
-          REVIEWER_LOGIN="$(jq -r '.login // empty' <<<"${REVIEWER_JSON}")"
-          REVIEWER_ID="$(jq -r '.id // empty' <<<"${REVIEWER_JSON}")"
+          # JSON types are checked BEFORE any jq -r extraction: -r renders
+          # every value as a string, so a string-typed id would pass the
+          # numeric regex below unchecked.
+          jq -e '((.schemaVersion | type) == "number") and .schemaVersion == 1
+                 and ((.type | type) == "string") and .type == "Bot"
+                 and ((.login | type) == "string")
+                 and ((.id | type) == "number") and .id > 0' \
+            <<<"${REVIEWER_JSON}" >/dev/null || {
+            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin (number id > 0, string login)'; exit 1; }
+          REVIEWER_LOGIN="$(jq -r '.login' <<<"${REVIEWER_JSON}")"
+          REVIEWER_ID="$(jq -r '.id' <<<"${REVIEWER_JSON}")"
           [[ "$REVIEWER_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || {
             echo "refusing: policy promotion-reviewer login '$REVIEWER_LOGIN'"; exit 1; }
-          [[ "$REVIEWER_ID" =~ ^[1-9][0-9]*$ ]] || {
-            echo "refusing: policy promotion-reviewer id '$REVIEWER_ID'"; exit 1; }
-          jq -e '.type == "Bot" and .schemaVersion == 1' <<<"${REVIEWER_JSON}" >/dev/null || {
-            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin'; exit 1; }
           args=(
             --repo=trust
             --repository="$REPO"
