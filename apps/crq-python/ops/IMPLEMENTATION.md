@@ -34,7 +34,8 @@ without changing the reviewed code head.
 
 Model-free cutover: requires final source head/config delivery, old-run drain,
 locked consistent state snapshot and worker-host inert proof before enabling queue-host.
-Fleet-reader location and signer custody/forced-command key are coordinated with
+Fleet-reader compatibility mirror is prepared (legacy and XDG worker-host paths point
+to queue-host data without refreshing its tick timestamp). Signer custody/key is coordinated with
 the parent/identity lane; no plain-shell spool fallback or inferred identity.
 24-hour >=95% tick acceptance remains pending actual observations after cutover.
 

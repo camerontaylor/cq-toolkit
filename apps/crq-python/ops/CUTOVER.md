@@ -43,3 +43,12 @@ completed without tests; all user units installed stopped; static unit verify
 exit 0; both Paseo queries/auth-status commands succeeded. No queue imported and
 queue-host marked inert at preparation. Exact deployment evidence is maintained in
 state/implementation-deployment.json after the safe handover.
+
+Fleet-reader compatibility: the actual consumer was not identified by targeted
+configuration/source search. The documented old worker-host location is preserved
+by ops/fleet-reader.py: every five minutes it reads only queue-host XDG summary over
+SSH and atomically mirrors both worker-host legacy and XDG summary locations. It
+never ticks or advances last_tick. Install its plist and home-contained script
+only after a valid queue-host summary exists. Disable the old worker-host watchdog at
+handover; the sole watchdog becomes queue-host. Retain old summary/watchdog artifacts
+in the rollback snapshot. A missing remote summary leaves the old snapshot stale.
