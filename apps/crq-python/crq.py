@@ -244,7 +244,7 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     bad_lines = 0
     if ndjson.exists():
-        for line in ndjson.read_text(errors="replace").splitlines():
+        for line in ndjson.read_text(errors="replace").splitlines() if ndjson.exists() else []:
             line = line.strip()
             if not line:
                 continue
@@ -293,7 +293,9 @@ def classify(ndjson: Path, exit_code: Optional[int]) -> Dict[str, Any]:
     elif last.get("status") != "review_completed":
         res.update(outcome="skipped", message=f"complete.status={last.get('status')}")
     else:
-        res.update(outcome="completed", reviewed_files=len(last.get("reviewedFiles") or []))
+        reviewed = last.get("reviewedFiles") or []
+        count = len(reviewed) if isinstance(reviewed, list) else reviewed if isinstance(reviewed, int) and not isinstance(reviewed, bool) and reviewed >= 0 else 0
+        res.update(outcome="completed", reviewed_files=count)
     res["counted"] = res["outcome"] == "completed"
     return res
 
@@ -304,7 +306,7 @@ def findings_md(ndjson: Path, meta: Dict[str, Any], cls: Dict[str, Any]) -> str:
            f"- base `{meta['base']}` → head `{meta['head']}` (clean tree)",
            f"- severity counts: {json.dumps(cls['severity_counts'])}", ""]
     i = 0
-    for line in ndjson.read_text(errors="replace").splitlines():
+    for line in ndjson.read_text(errors="replace").splitlines() if ndjson.exists() else []:
         try:
             e = json.loads(line)
         except ValueError:
@@ -1451,7 +1453,7 @@ def request_promotion_review(q: Dict[str, Any], item: Dict[str, Any], log: List[
                        "batch_sha": item["batch_sha"], "requested_at": iso()}, sort_keys=True).encode()
     item["state"] = "requested"
     item["request"] = {"sha256": hashlib.sha256(body).hexdigest(), "requested_at": json.loads(body)["requested_at"],
-                       "dispatch_pending": True}
+                       "dispatch_pending": True, "payload": body.decode()}
     q.setdefault("starts", []).append(item["request"]["requested_at"])
     save_queue(q)  # identity and quota survive unknown spool mutation outcomes
     try:
@@ -1492,6 +1494,18 @@ def harvest_signer(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     spool_ok(q)
     age = (now() - parse_iso(item["request"]["requested_at"])).total_seconds() / 60
     if snap["result"] is None:
+        if snap.get("request") or snap["claimed"]:
+            item["request"]["dispatch_pending"] = False
+        elif item["request"].get("dispatch_pending") and age > 1:
+            # v1 snapshot does not establish absence of a dot-renamed request
+            # during claiming. Never redispatch an unknown paid request or use
+            # withdrawal ENOENT as a false proof. Retain exact identity/payload
+            # and quota reservation for explicit custody-side reconciliation.
+            item["state"] = "blocked"
+            item["last_error"] = "journaled signer delivery absent or indeterminate; exact request reconciliation required"
+            item["request"]["reconciliation_required"] = True
+            save_queue(q)
+            return f"{iid}: signer delivery needs human; exact request identity retained"
         if snap["claimed"]:
             if not dry:
                 item["state"] = "signer_running"
@@ -1793,7 +1807,7 @@ def promotion_audit(q: Dict[str, Any], dry: bool) -> List[str]:
 
 def blocking_findings(ndjson: Path) -> List[Dict[str, Any]]:
     out = []
-    for line in ndjson.read_text(errors="replace").splitlines():
+    for line in ndjson.read_text(errors="replace").splitlines() if ndjson.exists() else []:
         try:
             e = json.loads(line)
         except ValueError:

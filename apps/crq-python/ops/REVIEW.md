@@ -54,3 +54,11 @@ queue-host marker removal only after worker-host inert proof, promotion status t
 and visible repair rationale in the generated private-mesh record/status view,
 and mirror unload plus watchdog restoration on rollback. Signed status target
 links remain the separate signer's integration seam; transport is unchanged.
+
+Review 5a3f2bca2d00c9836f506ecf5cf5dfc08789bfc7 found missing-file recovery,
+undelivered signer journal handling, and count-only classification. Corrections:
+findings rendering tolerates a never-started review; count-only terminals normalize;
+absent/indeterminate signer delivery transitions explicitly to blocked with exact
+request payload, identity and quota retained. v1 snapshot cannot prove absence of
+a dot-renamed claiming request, so no automatic paid redispatch is inferred.
+Custody-side reconciliation is explicit rather than an indefinitely held state.
