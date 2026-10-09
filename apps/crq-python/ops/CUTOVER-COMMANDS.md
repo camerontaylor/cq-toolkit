@@ -118,6 +118,13 @@ locations. Record deployment evidence in state/implementation-deployment.json.
 Stop queue-host tick/watchdog timers first; wait for exact owned reviews and signer
 ownership to drain, then stop records service and mark queue-host inert. Lock both
 hosts while retaining and migrating the latest queue state back; verify digests.
+Repeat section 2's recursive commit inventory on the latest queue-host queue and run
+metadata under the locks. Verify and pin those commits in the queue-host runtime clone,
+then create a fresh --all Git bundle. Transfer that bundle with the latest state
+to worker-host and import its refs into a retained namespace in worker-host's configured
+queue clone, without moving its checkout. Verify every required commit object
+exists on worker-host before restoring ownership; matching queue digests alone is
+insufficient. Stop rollback on missing objects needed by nonterminal records.
 Unload com.crq.fleet-reader before restoring worker-host summaries. Restore retained
 watchdog artifacts and bootstrap its plist. Prove queue-host inert with no active
 owned jobs before removing worker-host's marker and recreating the retained schedule
