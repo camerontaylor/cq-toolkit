@@ -30,7 +30,6 @@ import {
   BANNED_REVIEWER_IDS,
   BANNED_REVIEWER_LOGINS,
   POLL_MS,
-  QUEUE_BRANCH,
   checkClosure,
   checkVerifiedRun,
   mainWith,
@@ -1358,9 +1357,7 @@ describe('runGate', () => {
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('awaiting');
     expect(r.subject).toBeNull();
-    expect(r.report.join('\n')).toMatch(
-      new RegExp(`already promoted \\(cq/promoted at ${M1}\\)`),
-    );
+    expect(r.report.join('\n')).toMatch(new RegExp(`already promoted \\(cq/promoted at ${M1}\\)`));
     expect(h.acceptanceInputs).toEqual([]);
   });
 
