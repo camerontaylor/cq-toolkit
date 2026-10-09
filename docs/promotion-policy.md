@@ -46,8 +46,10 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
    by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
-   `339373542` (pinned in the gate template from the registration record @ `d8f132f`, not a repo
-   variable; an UNSET token leaves the gate refusing fail-closed). Any other creator — including
+   `339373542`. The pinned identity comes ONLY from the protected `policy/promotion-reviewer.json`
+   — the trust root, read at `GITHUB_SHA` in each trust step and sourced from the registration
+   record @ `d8f132f` (a reviewed protected path, not a repo variable; a missing, invalid or
+   mismatched file leaves the gate refusing fail-closed). Any other creator — including
    the repository owner's own
    login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
    a red refusal when no trusted review exists. The gate re-reads the status
@@ -72,7 +74,8 @@ for the review signal by the pinned reviewer-bot identity — creator type `Bot`
 `cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
 `d8f132f` (the gate refuses fail-closed while unpinned).
 
-- A `crq/promotion-review` status now proves the signer ran the review: its private key lives
+- A `crq/promotion-review` status now proves an authorized signer action — a completed review, or
+  the owner's `crq-override` below (the same bot posts both): the signer's private key lives
   only in the dedicated `crq` macOS user's home — outside an unprivileged agent's reach (see the
   residuals below) — and every promotion outcome is re-derived there. An agent holding the
   owner's token can no longer post a promotion-review success that the gate trusts.
@@ -116,7 +119,8 @@ the host is down there is no remote override path either.
 
 A red run means a human must act. The causes are:
 
-- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`;
+- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`
+  while no trusted review exists (a foreign status alongside a trusted one is inert, not red);
 - a reviewed SHA whose required checks failed, were skipped or cancelled, or never reported
   within the timeout;
 - a reviewed SHA that is off `merge-queue`;
@@ -143,7 +147,7 @@ bullets describe the interim user mode and are rewritten when the policy doc is 
   successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
   posts nothing new (or `error`) and is retried. It is never reported as `success`.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
-  key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
+  key in the dedicated `crq` account's home on the offline signer host) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `d8f132f`):
   - `context`: `crq/promotion-review`
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
