@@ -441,3 +441,20 @@ root ownership and package-integrity evidence are required before enablement.
 S2-b remains a separately authorized action: ALL new probes are suspended.
 An installation or code review does not produce S2 evidence. Runtime repair
 remains disabled; this signer only consumes requests already quota-reserved by crq.
+
+Independent source-review corrections: restore selectors explicitly include both
+`.coderabbit.yaml` and `.coderabbit.yml`. Before claim rename the daemon fsyncs a
+private validated request/checksum journal under its 0700 state directory. Recovery
+uses that private journal exclusively; unjournaled old/shared orphan files require
+human reconciliation and cause no App status or automatic review dispatch.
+
+Signer and owner override share private `publication.lock`, held across status
+read/check/post. The override revalidates main/subject after interactive confirmation
+under this lock. An override posted first cannot be replaced by a later signer
+pending/failure/error; an override waiting behind a signer post is published last.
+Only the pinned context is considered by success-preservation checks.
+
+Legacy user-mode record IDs (`promo-<sha>-delta` and arbitrarily repeated `+`)
+retain their raw records/routes and percent-encoded status URLs. They never enter
+canonical signer alias mapping. Canonical alias routes remain injective and are
+always checked against the exact raw `item` stored in their record.

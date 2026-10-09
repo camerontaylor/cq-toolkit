@@ -905,8 +905,11 @@ def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
 def promotion_record(item: Dict[str, Any]) -> Optional[str]:
     """Persist the owner-visible record without a GitHub comment or review."""
     iid = item["id"]
-    from record_ids import record_id
-    alias = record_id(iid)
+    from record_ids import record_id, legacy_record_id
+    try:
+        alias = record_id(iid)
+    except ValueError:
+        alias = legacy_record_id(iid)  # no canonical normalization of old state
     if not re.fullmatch(r"[A-Za-z0-9_+.-]+", iid):
         raise ValueError("invalid promotion record id")
     directory = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq/records"
@@ -918,7 +921,8 @@ def promotion_record(item: Dict[str, Any]) -> Optional[str]:
             raise ValueError('ambiguous promotion record binding')
         repair_tick.atomic(target, record)
     template = PROMO.get("record_url_template")
-    return template.format(item=alias) if template else None
+    from urllib.parse import quote
+    return template.format(item=quote(alias, safe="-_")) if template else None
 
 
 def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str, log: List[str]) -> None:

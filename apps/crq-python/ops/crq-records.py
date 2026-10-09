@@ -9,7 +9,7 @@ import subprocess
 import sys
 import urllib.parse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from record_ids import record_id, canonical_id
+from record_ids import record_id, canonical_id, legacy_record_id
 
 ROOT = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'crq/records'
 
@@ -24,7 +24,7 @@ class Records(http.server.BaseHTTPRequestHandler):
             return
         try:
             iid = canonical_id(match[1]) if '_' in match[1] else match[1]
-            record_id(iid)
+            legacy_record_id(iid)
         except ValueError:
             self.send_error(404)
             return

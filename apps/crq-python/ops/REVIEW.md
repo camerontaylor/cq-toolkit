@@ -62,3 +62,10 @@ absent/indeterminate signer delivery transitions explicitly to blocked with exac
 request payload, identity and quota retained. v1 snapshot cannot prove absence of
 a dot-renamed claiming request, so no automatic paid redispatch is inferred.
 Custody-side reconciliation is explicit rather than an indefinitely held state.
+
+Signer recovery slice381138e independent source review identified four major
+findings: omitted CodeRabbit config restoration; shared orphan bytes used as
+recovery authority; override publication race; legacy record alias rejection.
+Corrections add both config filenames, a private fsynced validated claim journal,
+a shared signer/override publication lock and separate legacy raw-route support.
+Exact corrected-head review remains required; no deployment attestation implied.

@@ -15,3 +15,10 @@ def canonical_id(alias):
     if record_id(item) != alias:
         raise ValueError('ambiguous promotion record alias')
     return item
+
+
+def legacy_record_id(item):
+    """Read compatibility only; legacy user-mode records never become aliases."""
+    if not isinstance(item, str) or not re.fullmatch(r'promo-[0-9a-f]{10}(?:-delta)?\+*', item):
+        raise ValueError('invalid legacy promotion record id')
+    return item

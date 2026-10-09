@@ -37,6 +37,7 @@ only in memory — never argv, never a URL, never logged. Python
 from __future__ import annotations
 
 import base64
+import fcntl
 import datetime as dt
 import json
 import os
@@ -232,6 +233,17 @@ def precheck(sha: str) -> str:
 
 
 def post_override(sha: str, desc: str) -> Any:
+    directory = Path('/home/crq/.local/state/crq-signer')
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / 'publication.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current_main = precheck(sha)  # revalidate after confirmation, under lock
+        if f'main={current_main} ' not in desc:
+            raise RuntimeError('main changed during owner confirmation')
+        return _post_override_locked(sha, desc)
+
+
+def _post_override_locked(sha: str, desc: str) -> Any:
     token = install_token()
     return api("POST", f"repos/{REPO}/statuses/{sha}", token=token,
                body={"context": STATUS_CONTEXT, "state": "success", "description": desc})

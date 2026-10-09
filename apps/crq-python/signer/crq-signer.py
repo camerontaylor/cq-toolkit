@@ -156,7 +156,7 @@ MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
 # base's .coderabbit.yaml when that key parses (R8). Restoring (or deleting)
 # these from base keeps a head-side file from suppressing findings.
 GUIDELINE_BASENAMES = {"AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md",
-                       ".cursorrules", ".windsurfrules"}
+                       ".cursorrules", ".windsurfrules", ".coderabbit.yaml", ".coderabbit.yml"}
 GUIDELINE_DIR_SEGMENTS = {".clinerules", ".rules"}   # <anywhere>/<dir>/<child>
 GUIDELINE_NESTED_DIRS = {".cursor"}                  # <anywhere>/.cursor/rules/<child>
 GUIDELINE_EXACT = (".github/copilot-instructions.md",)
@@ -1230,6 +1230,14 @@ def close_out(iid: str, req: Optional[Dict[str, Any]], req_sha: Optional[str], *
 
 
 def post_final(iid: str, sha: str, state: str, desc: str) -> Optional[Dict[str, Any]]:
+    # Same private publication lock as the owner override. Hold across GET/POST.
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / 'publication.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _post_final_locked(iid, sha, state, desc)
+
+
+def _post_final_locked(iid: str, sha: str, state: str, desc: str) -> Optional[Dict[str, Any]]:
     """Post a final status (fresh token, per use). Best effort: a failed post
     is audited and shows up as posted_state=none/pending, never fatal. Before
     any FINAL post, skip when the newest trusted status on the sha is already
@@ -1324,6 +1332,10 @@ def process_request(path: Path) -> None:
     # withdrawal check — the steward's unlink either wins or ENOENTs; only
     # then is the .claimed marker written.
     claiming = REQUESTS / f".{iid}.json.claiming"
+    # Private validated identity survives crashes; shared request bytes never
+    # authorize recovery statuses. Persist before crossing the claim boundary.
+    atomic_json(STATE / 'claims' / (iid + '.json'),
+                {'request': req, 'request_sha256': req_sha, 'validated_at': iso()}, mode=0o600)
     try:
         os.rename(path, claiming)
     except OSError:
@@ -1480,34 +1492,26 @@ def recover_orphans() -> None:
             continue
         if (RESULTS / f"{iid}.json").exists():
             continue
-        src = None
-        for cand in (REQUESTS / f"{iid}.json", REQUESTS / f".{iid}.json.claiming"):
-            if cand.exists():
-                src = cand
-                break
-        if src is None:
-            continue  # request already gone: nothing to recover toward
-        started_at = iso()
-        req: Optional[Dict[str, Any]] = None
-        req_sha: Optional[str] = None
+        journal = STATE / 'claims' / (iid + '.json')
         try:
-            req, req_sha = read_request(src, expect_item=iid)
-        except Reject:
-            pass
-        base = str((req or {}).get("base_sha", ""))
-        batch = str((req or {}).get("batch_sha", ""))
-        posted = None
-        if SHA40.fullmatch(base) and SHA40.fullmatch(batch):
-            posted = post_final(iid, batch, "error", f"review error main={base} crq#{iid}")
-        write_result(iid, req, req_sha, outcome="interrupted",
-                     posted_state=posted["state"] if posted else "none",
+            saved = json.loads(journal.read_text())
+            req, req_sha = saved['request'], saved['request_sha256']
+            if (req.get('item') != iid or req.get('v') != 1 or req.get('kind') != 'promotion'
+                    or not SHA40.fullmatch(req.get('base_sha', ''))
+                    or not SHA40.fullmatch(req.get('batch_sha', ''))
+                    or not re.fullmatch('[0-9a-f]{64}', req_sha)):
+                raise ValueError('invalid private journal')
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            audit('orphan-needs-human', item=iid, why='private validated identity unavailable')
+            continue  # no App status from agent-writable orphan bytes
+        base, batch = req['base_sha'], req['batch_sha']
+        posted = post_final(iid, batch, 'error', f'review error main={base} crq#{iid}')
+        write_result(iid, req, req_sha, outcome='interrupted',
+                     posted_state=posted['state'] if posted else 'none',
                      severity_counts={s: 0 for s in SEVERITIES}, posted=posted,
-                     started_at=started_at)
-        audit("orphan-recovered", item=iid)
-        try:
-            src.unlink()
-        except OSError as e:
-            audit("unlink-failed", item=iid, why=type(e).__name__)
+                     started_at=saved.get('validated_at') or iso())
+        consume_request(iid)
+        audit('orphan-recovered', item=iid)
 
 
 # ---------------------------------------------------------------- daemon loop
