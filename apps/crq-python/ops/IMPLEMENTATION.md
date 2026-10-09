@@ -44,3 +44,8 @@ credential (not found in checked secrets files), verified hard-budget launchers
 for Codex/Paseo and verified read-only judge mode. Repair enabled=false throughout.
 Spend/ZAI are not model-free tick handover blockers. No testing or probes, including
 automatic follow-up dispatches, are authorized. Promotion override and pacing stay.
+
+Signer dependency correction: original PR-A source exists on identity/cq-reviewer-signer
+@ f43b48f; earlier missing source meant deployed/main tree only. Conductor owns
+signer/ and shared record mapping; original runtime/unit/override/transport recovered
+and hardened, source-only independent review in progress. No install/key/probe/activation.

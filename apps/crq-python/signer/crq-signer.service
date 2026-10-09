@@ -1,0 +1,38 @@
+# crq-signer — the cq-reviewer promotion-review signer daemon (system unit).
+#
+# Runs as the dedicated daemon user `crq` on queue-host (uid 1001, never logs in;
+# reached only via sudo). The interpreter is the pacman-owned /usr/bin/python3
+# with -I (isolated: no env vars, no user site dirs); PATH is /usr/bin:/bin
+# only. The code it runs is root-owned in /opt/cq-reviewer/ — installed from
+# the PINNED merge commit and hash-verified per signer/README.md (S2), never
+# from a working tree. Keys live only in /home/crq/.local/share/cq-app-keys
+# (0700 crq). The spool at /var/lib/crq-spool is reachable by crq directly
+# and by operator (crq-spool group) only through requests/.
+#
+# ProtectSystem=strict leaves writable only what ReadWritePaths reopens:
+# the spool and crq's own home. Logs go to journald
+# (`journalctl -u crq-signer`).
+[Unit]
+Description=crq promotion-review signer (posts as cq-promotion-reviewer[bot])
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=crq
+Group=crq
+ExecStart=/usr/bin/python3 -I /opt/cq-reviewer/crq-signer.py
+Restart=always
+RestartSec=10
+Environment=HOME=/home/crq
+Environment=PATH=/usr/bin
+Umask=022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/crq-spool /home/crq
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

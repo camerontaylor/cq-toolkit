@@ -905,14 +905,20 @@ def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
 def promotion_record(item: Dict[str, Any]) -> Optional[str]:
     """Persist the owner-visible record without a GitHub comment or review."""
     iid = item["id"]
+    from record_ids import record_id
+    alias = record_id(iid)
     if not re.fullmatch(r"[A-Za-z0-9_+.-]+", iid):
         raise ValueError("invalid promotion record id")
     directory = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq/records"
     record = {"item": iid, "state": item["state"], "base": item.get("base_sha"),
               "batch": item.get("batch_sha"), "blocking": item.get("blocking", []), "as_of": iso()}
-    repair_tick.atomic(directory / (iid + ".json"), record)
+    for name in {iid, alias}:
+        target = directory / (name + '.json')
+        if target.exists() and json.loads(target.read_text()).get('item') != iid:
+            raise ValueError('ambiguous promotion record binding')
+        repair_tick.atomic(target, record)
     template = PROMO.get("record_url_template")
-    return template.format(item=iid) if template else None
+    return template.format(item=alias) if template else None
 
 
 def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str, log: List[str]) -> None:
