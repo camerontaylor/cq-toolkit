@@ -84,13 +84,14 @@ for the review signal by the pinned reviewer-bot identity — creator type `Bot`
 `GITHUB_SHA`, validated by the signer and crq on `main`; a missing or invalid file refuses
 fail-closed).
 
-- A `crq/promotion-review` status now proves the signer ran the review: its private key lives
-  only in the dedicated `crq` account's home on ceres (the headless CachyOS signer host, per
+- A `crq/promotion-review` status now proves an authorized signer action — a completed review, or
+  the owner's `crq-override` below (the same bot posts both): the signer's private key lives
+  only in the dedicated `crq` account's home on the headless CachyOS signer host (per
   the registration record §Host) — outside an unprivileged agent's reach (see the residuals
   below) — and every promotion outcome is re-derived there. An agent holding the owner's token
   can no longer post a promotion-review success that the gate trusts.
 - Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo on neptune, and
-  on ceres removing `ctaylor` from `docker`/`wheel` and closing sshd password auth — record
+  on the signer host removing `ctaylor` from `docker`/`wheel` and closing sshd password auth — record
   §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
   overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
   is what makes the repository as a whole, not just the signal, agent-proof.
@@ -102,8 +103,8 @@ fail-closed).
 ## Owner override
 
 The owner runs the `crq-override` tool — installed beside the signer in root-owned
-`/opt/cq-reviewer/` on ceres — from a terminal no agent can reach: from the owner's OWN machine,
-`ssh ceres`, then `sudo -u crq`. ceres is headless, so the macOS plan's login-window design
+`/opt/cq-reviewer/` on the signer host — from a terminal no agent can reach: from the owner's OWN machine,
+`ssh` to the signer host, then `sudo -u crq`. The host is headless, so the macOS plan's login-window design
 became this: the invariant that survives is that the issuing terminal is unreachable from
 neptune's agents, and the session is never routed through neptune. The tool verifies the target
 sha is a queue state beyond `main`, computes `main` itself, posts the status as
@@ -114,17 +115,18 @@ sudo -u crq /opt/cq-reviewer/crq-override <sha> "<reason>"    # posts: override 
 ```
 
 An agent cannot produce this status through the documented paths: the key exists only in the
-`crq` account's home on ceres — out of an unprivileged agent's reach, though a root-capable
+`crq` account's home on the signer host — out of an unprivileged agent's reach, though a root-capable
 agent could reach it until P0 lands (see the accepted limit). The gate logs the `override`
 prefix in its run summary.
 
 **Accepted limit (the override is not agent-proof today).** The procedure above holds only
-while ceres's ssh and sudo are closed. Today neptune agents reach `ctaylor@ceres` without a
-password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on ceres — so a
+while the signer host's ssh and sudo are closed. Today neptune agents reach `ctaylor@` on the
+signer host without a
+password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on the signer host — so a
 root-capable agent can become root there, reach the PEM, and mint an override or any other
 status. Same shape as #269's accepted forgeable-status limit: accepted for the rollout, and
-closed only when BOTH (1) ceres P0 removes ctaylor's NOPASSWD and `docker` membership and
-closes sshd password auth, and (2) the owner's ceres credential is one agents cannot use
+closed only when BOTH (1) signer-host P0 removes ctaylor's NOPASSWD and `docker` membership and
+closes sshd password auth, and (2) the owner's signer-host credential is one agents cannot use
 (e.g. a FIDO `sk-ssh-ed25519` key requiring physical touch, never a copyable plain key).
 Until then the override — like every path in this policy — is T1-grade, not T2-grade.
 
@@ -132,20 +134,21 @@ I4 still applies: an override skips the review, never the required checks.
 
 ## When the signer is offline
 
-If ceres — or the ssh path from crq (neptune) to the spool — is down, nothing posts a review,
+If the signer host — or the ssh path from crq (neptune) to the spool — is down, nothing posts a review,
 so nothing promotes. crq treats ssh failure as **unknown**: no new request, no withdrawal, no
-false "signer down"; after 30 minutes it alerts "ceres unreachable" (distinct from the
+false "signer down"; after 30 minutes it alerts "signer host unreachable" (distinct from the
 signer-down alert) and keeps triage. **Promotion waits; nothing fails red.** Gate runs woken
-meanwhile end green with "awaiting promotion review". When ceres returns, crq re-issues the
+meanwhile end green with "awaiting promotion review". When the signer host returns, crq re-issues the
 request and the signer-down timer restarts from recovery. The override needs the same host
-(`crq-override` runs on ceres under `crq` from the owner's own ssh), so while the host is
+(`crq-override` runs on the signer host under `crq` from the owner's own ssh), so while the host is
 unreachable there is no remote override path either.
 
 ## What a red gate run means
 
 A red run means a human must act. The causes are:
 
-- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`;
+- a `crq/promotion-review` status from a creator other than the pinned `cq-promotion-reviewer[bot]`
+  while no trusted review exists (a foreign status alongside a trusted one is inert, not red);
 - a reviewed SHA whose required checks failed, were skipped or cancelled, or never reported
   within the timeout;
 - a reviewed SHA that is off `merge-queue`;
@@ -163,11 +166,11 @@ the spool and no agent-judged success. The spool contract (`signer/README.md` in
 is normative; this section is the policy-level summary.
 
 - **Item kind:** `promotion`, carrying `batch_sha` (40-hex) and `base_sha` (`main` at cut
-  time), written to the spool on ceres over ssh. At most one promotion is open at a time.
+  time), written to the spool on the signer host over ssh. At most one promotion is open at a time.
 - **Priority:** a `promotion` item takes the signer's next start slot ahead of everything
   else. It never pre-empts a running review.
 - **Review:** the CodeRabbit CLI over `base_sha..batch_sha`, run by the signer in its own
-  detached clone and worktree at `batch_sha` on ceres, with review configuration restored from
+  detached clone and worktree at `batch_sha` on the signer host, with review configuration restored from
   `base_sha` (a head-side file cannot suppress findings) and the diff secret-scanned before any
   upload. The run counts only when the CLI exits successfully with a terminal, non-skipped
   completion. A failed, rate-limited or auth-failed run posts nothing new (or `error`) and is
@@ -177,7 +180,7 @@ is normative; this section is the policy-level summary.
   its own clean internal deltas; a dirty run voids the same range's clean record. The steward
   never sees, requests or judges coverage.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
-  key in the `crq` user's home on ceres) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
+  key in the `crq` user's home on the offline signer host) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `d8f132f`):
   - `context`: `crq/promotion-review`
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
