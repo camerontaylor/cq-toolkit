@@ -388,10 +388,13 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
         );
       }
     }
-    const instances = JSON.parse(
+    const manifest = JSON.parse(
       readFileSync(join(ROOT, 'policy/templates/instances.json'), 'utf8'),
-    ) as Array<{ workflow: string; tokens: Record<string, string> }>;
-    const gate = instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
+    ) as {
+      schemaVersion: number;
+      instances: Array<{ workflow: string; tokens: Record<string, string> }>;
+    };
+    const gate = manifest.instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
     expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBeUndefined();
     expect(gate?.tokens['REVIEWER_BOT_ID']).toBeUndefined();
     const protectedPaths = JSON.parse(
