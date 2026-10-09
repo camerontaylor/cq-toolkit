@@ -365,10 +365,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       );
       expect(reviewSteps, `${label}: unique review trust step`).toHaveLength(1);
       expect(promoteSteps, `${label}: unique pre-push trust step`).toHaveLength(1);
-      const trustSteps = [
-        reviewSteps[0],
-        promoteSteps[0],
-      ];
+      const trustSteps = [reviewSteps[0], promoteSteps[0]];
       for (const [index, step] of trustSteps.entries()) {
         if (step === undefined || typeof step.run !== 'string') {
           throw new Error(`${label}: trust step ${index + 1} is missing its run script`);
