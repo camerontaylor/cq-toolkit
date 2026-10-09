@@ -37,8 +37,15 @@
 #   - `decide` is the SOLE member of concurrency group `promote`, and runs in
 #     environment `promote` (main-only branch policy).
 #
-# PROMOTES (C2: this gate is now the only component that advances main;
-# merge-queue-gate.yml is retired by C2's deletion): the CLI runs WITH
+# PROMOTES — one promoter at a time: REPORT-ONLY UNTIL C2. The CLI runs
+# WITHOUT `--push` while merge-queue-gate.yml is the sole promoter (its
+# base rule: the recorded review base contained in main; this gate's, when
+# armed: the recorded base equal to main). The single explicit switch is
+# CQ_GATE_PROMOTES below: the C2 cutover checklist
+# (docs/promotion-policy.md) freezes promotion, bootstraps the cq/promoted
+# replay marker, adds the refs/heads/cq/* ruleset, flips this switch to
+# `true` by a reviewed promotion, deletes merge-queue-gate.yml, and
+# unfreezes — the two gates never both push. When armed, the CLI runs WITH
 # `--push` and promotes the reviewed SUBJECT by a single main-refspec
 # fast-forward leased at the main it read — the queue is never written, so
 # a tip ahead of the reviewed sha simply waits for its own review. Green
@@ -266,6 +273,12 @@ jobs:
           TRUST: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          # C2 SWITCH (single, explicit): 'false' = report-only while
+          # merge-queue-gate.yml is the sole promoter. The cutover
+          # checklist flips this ONE value to 'true' by a reviewed
+          # promotion (template + render in the same commit) — never
+          # before the freeze/bootstrap/ruleset steps.
+          CQ_GATE_PROMOTES: 'false'
         run: |
           set -euo pipefail
           [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
@@ -314,8 +327,10 @@ jobs:
             --timeoutMin={{GATE_TIMEOUT_MIN}}
             --reviewerBotLogin="$REVIEWER_LOGIN"
             --reviewerBotId="$REVIEWER_ID"
-            --push
           )
+          if [ "${CQ_GATE_PROMOTES}" = 'true' ]; then
+            args+=(--push)
+          fi
           if [ -n "$VERDICT_APP_ID" ]; then
             args+=(--verdictAppId="$VERDICT_APP_ID")
           fi
@@ -357,8 +372,11 @@ jobs:
               + "\n\n```text\n"
               + ($report | gsub("`{3,}"; "` ` `"))
               + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
-          # With --push this gate IS the promoter (C2): green verdicts are
-          # promoted / noop / awaiting / would-promote; a refused verdict is
-          # a RED run (the gate judged and said no — a human looks), and a
-          # crashed gate stays red.
-          jq -e '.status == "ok" and .value.verdict != "refused"' "${RUNNER_TEMP}/gate.json" >/dev/null
+          # Red policy follows the switch: report-only (pre-C2) every ok
+          # verdict is advisory — the summary above is the product, and only
+          # a crashed gate is red. With CQ_GATE_PROMOTES=true a refused
+          # verdict is a RED run (the gate judged and said no — a human
+          # looks), and a crashed gate stays red.
+          jq -e --arg promoting "${CQ_GATE_PROMOTES}" \
+            '.status == "ok" and ($promoting != "true" or .value.verdict != "refused")' \
+            "${RUNNER_TEMP}/gate.json" >/dev/null
