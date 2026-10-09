@@ -1608,6 +1608,38 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     expect(git(remote, ['rev-parse', 'main'])).toBe(head);
     expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(tip);
   });
+
+  test('a queue rewound to an ancestor before the push is refused; main unchanged', async () => {
+    const { trust, remote, main, head, tip } = setup('queue-rewind');
+    const h = harness(prWorld(tip, main, head));
+    // Break-glass rewinds merge-queue to the PR head (an ancestor of the
+    // tip) after the gate's step-1 read, observed by the pre-push ls-remote
+    // (the same transport the push uses). The push then carries the queue
+    // refspec as a pure lease at the tip: git refuses it against the rewound
+    // ref, and --atomic refuses main with it — a dropped merge (the subject
+    // among it) is never silently re-promoted off a stale queue read.
+    h.deps.git = {
+      ...realGateGit,
+      lsRemoteRef: (repo, url, ref, token) => {
+        git(remote, ['update-ref', 'refs/heads/merge-queue', head]);
+        return realGateGit.lsRemoteRef(repo, url, ref, token);
+      },
+    };
+    const r = await runGate(
+      h.deps,
+      cfg({
+        repo: trust,
+        trustRef: main,
+        push: true,
+        pushToken: 'tok',
+        remoteUrl: remote,
+      }),
+    );
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/atomic leased push was rejected/);
+    expect(git(remote, ['rev-parse', 'main'])).toBe(main);
+    expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(head);
+  });
 });
 
 describe('mainWith (the CLI seam)', () => {
