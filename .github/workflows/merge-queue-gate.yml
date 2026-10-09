@@ -14,13 +14,14 @@
 #     Apps and slugs are globally unique, and the numeric id survives even
 #     a hypothetical slug reuse). The identity comes ONLY from the owner's
 #     registration record
-#     (toolkit-research/plans/app-registration-session-20261004.md): until
-#     that record exists the tokens are UNSET placeholders and BOTH steps
-#     refuse fail-closed ("reviewer identity not pinned") — never a
-#     public-API lookup by guessed name, since a stranger's public App can
-#     own any name. The values are template tokens, not repo
-#     variables: changing a token value takes a reviewed promotion, while
-#     an admin token can edit a repo variable without review. Any other
+#     (toolkit-research/plans/app-registration-session-20261004.md), pinned
+#     as the protected policy/promotion-reviewer.json which BOTH steps read
+#     at GITHUB_SHA: a missing, invalid or mismatched file makes BOTH steps
+#     refuse fail-closed ("invalid policy/promotion-reviewer.json") — never
+#     a public-API lookup by guessed name, since a stranger's public App can
+#     own any name. The file is a reviewed protected path, not a repo
+#     variable: changing it takes a reviewed promotion, while an admin
+#     token can edit a repo variable without review. Any other
 #     creator — the repository owner's own User login, GITHUB_TOKEN, and
 #     every App including cq-verdict[bot] — is untrusted, and a
 #     crq/promotion-review status from one turns the run into a red
@@ -379,6 +380,23 @@ jobs:
             echo "refusing: invalid policy/promotion-reviewer.json at trust ref ${GITHUB_SHA}"; exit 1; }
           reviewer_login="$(jq -r .login <<<"${reviewer_json}")"
           reviewer_id="$(jq -r .id <<<"${reviewer_json}")"
+          # Identity revalidation before the push: this run's trust policy is
+          # the one at GITHUB_SHA (run start), but an identity-rotation batch
+          # can have promoted while this run waited for checks. Re-read the
+          # pinned identity from CURRENT origin/main (fresh from the fetch
+          # above) and require it to equal the run-start identity, else refuse
+          # fail-closed — the next queue push re-runs the gate entirely under
+          # the rotated identity, so a revoked identity can never promote a
+          # later sha through a run pinned to the old one.
+          main_now="$(git rev-parse origin/main)"
+          reviewer_json_main="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${main_now}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json_main}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at main ${main_now}"; exit 1; }
+          if [ "$(jq -r .login <<<"${reviewer_json_main}")" != "${reviewer_login}" ] ||
+            [ "$(jq -r .id <<<"${reviewer_json_main}")" != "${reviewer_id}" ]; then
+            echo "refusing: the pinned reviewer identity changed between ${GITHUB_SHA} and main ${main_now} — rerunning under the rotated identity"
+            exit 1
+          fi
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
             jq -s --arg bot_login "${reviewer_login}" \

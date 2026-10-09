@@ -361,7 +361,7 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       const steps = parsed.jobs?.gate?.steps ?? [];
       const reviewSteps = steps.filter((step) => step.id === 'review');
       const promoteSteps = steps.filter(
-        (step) => step.name === 'Fast-forward promote the gated sha (guarded)',
+        (step) => step.name === 'Fast-forward promote the gated sha to main (guarded)',
       );
       expect(reviewSteps, `${label}: unique review trust step`).toHaveLength(1);
       expect(promoteSteps, `${label}: unique pre-push trust step`).toHaveLength(1);
