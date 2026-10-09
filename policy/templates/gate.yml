@@ -294,13 +294,12 @@ jobs:
           REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
           # JSON types are checked BEFORE any jq -r extraction: -r renders
           # every value as a string, so a string-typed id would pass the
-          # numeric regex below unchecked.
-          jq -e '((.schemaVersion | type) == "number") and .schemaVersion == 1
-                 and ((.type | type) == "string") and .type == "Bot"
-                 and ((.login | type) == "string")
-                 and ((.id | type) == "number") and .id > 0' \
+          # numeric regex below unchecked. The predicate is byte-identical
+          # to merge-queue-gate.yml's — ONE definition of a valid pin; keep
+          # the two in lockstep when either changes.
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' \
             <<<"${REVIEWER_JSON}" >/dev/null || {
-            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin (number id > 0, string login)'; exit 1; }
+            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin (number id > 0, string login, record string)'; exit 1; }
           REVIEWER_LOGIN="$(jq -r '.login' <<<"${REVIEWER_JSON}")"
           REVIEWER_ID="$(jq -r '.id' <<<"${REVIEWER_JSON}")"
           [[ "$REVIEWER_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || {

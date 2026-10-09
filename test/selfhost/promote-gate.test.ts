@@ -632,6 +632,10 @@ interface World {
   onCheckRuns?: (n: number) => void;
   /** Called on each statuses read (the walk and the pre-push re-read). */
   onStatuses?: (n: number) => void;
+  /** The cq/promoted replay marker's sha; undefined = ref absent. */
+  promoted?: string;
+  /** When set, the marker ref read fails with this stderr (fail-closed). */
+  promotedError?: string;
 }
 
 const ok = (value: unknown): GhResult => ({
@@ -659,6 +663,13 @@ function fakeGh(world: World, calls: string[][]): GhFn {
     }
     if (q === 'repos/o/r/git/ref/heads/main') {
       return Promise.resolve(ok({ object: { sha: world.main, type: 'commit' } }));
+    }
+    if (q === 'repos/o/r/git/ref/heads/cq/promoted') {
+      if (world.promotedError !== undefined)
+        return Promise.resolve({ code: 1, stdout: '', stderr: world.promotedError });
+      if (world.promoted === undefined)
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' });
+      return Promise.resolve(ok({ object: { sha: world.promoted, type: 'commit' } }));
     }
     let m = /^repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls$/.exec(q);
     if (m !== null) return Promise.resolve(ok([world.prs.get(m[1] ?? '') ?? []]));
@@ -787,9 +798,6 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
-    // The remote queue serves the default tip unless a test moves it: the
-    // normal case where the push sends ONLY main.
-    lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? M1 : null),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -1312,7 +1320,7 @@ describe('runGate', () => {
     expect(h.sleeps).toEqual([POLL_MS]);
   });
 
-  test('the push sends ONLY main, leased on the step-1 read (the queue is never written)', async () => {
+  test('the push always leases all three refs: main, the replay marker, and the queue', async () => {
     const h = harness(world());
     const seen: unknown[] = [];
     h.deps.git = fakeGit({
@@ -1323,13 +1331,17 @@ describe('runGate', () => {
     });
     const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
     expect(r.verdict).toBe('promoted');
-    // PR-C: the SUBJECT is what promotes — one main refspec, leased at the
-    // step-1 main read, when the last pre-push observation still serves the
-    // run-start queue tip. The queue refspec rides along ONLY as a lease
-    // when that observation sees the queue elsewhere (the next test).
+    // luna round 4: the queue ref is leased at the run-start tip EVEN when
+    // it equals the tip (an up-to-date ref passes; any movement rejects the
+    // whole push), and the cq/promoted marker MUST move with the promotion
+    // (zeros = the ref must not exist yet, the clean first-promotion case).
     expect(seen).toEqual([
       {
-        updates: [{ refspec: `${M1}:refs/heads/main`, expected: MAIN }],
+        updates: [
+          { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+          { refspec: `${M1}:refs/heads/cq/promoted`, expected: '0'.repeat(40) },
+          { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
+        ],
         token: 't',
       },
     ]);
@@ -1338,25 +1350,25 @@ describe('runGate', () => {
     );
   });
 
-  test('a queue that moved before the push adds its refspec as a pure lease', async () => {
-    const h = harness(world());
-    const seen: unknown[] = [];
-    h.deps.git = fakeGit({
-      lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? H1 : null), // the queue is elsewhere now
-      pushAtomic: (_repo, _url, updates, _token) => {
-        seen.push({ updates });
-        return Promise.resolve({ ok: true, output: '' });
-      },
-    });
-    await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
-    expect(seen).toEqual([
-      {
-        updates: [
-          { refspec: `${M1}:refs/heads/main`, expected: MAIN },
-          { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
-        ],
-      },
-    ]);
+  test('a replay marker naming the subject blocks selection (stateful refusal)', async () => {
+    // Break-glass rewind to exactly the review base: base === main holds,
+    // the success is still newest-trusted — but the cq/promoted marker at
+    // the subject refuses the replay statelessly-unreachable case.
+    const h = harness(world(M1, MAIN, { promoted: M1 }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(r.report.join('\n')).toMatch(
+      new RegExp(`already promoted \\(cq/promoted at ${M1}\\)`),
+    );
+    expect(h.acceptanceInputs).toEqual([]);
+  });
+
+  test('an unreadable replay marker fails closed', async () => {
+    const h = harness(world(M1, MAIN, { promotedError: 'HTTP 500: kaboom' }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/gate error: gh exit 1: HTTP 500/);
   });
 
   test('a tip ahead of the reviewed sha promotes the SUBJECT and leaves the queue alone', async () => {
@@ -1681,16 +1693,17 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     const { trust, remote, main, head, tip } = setup('queue-rewind');
     const h = harness(prWorld(tip, main, head));
     // Break-glass rewinds merge-queue to the PR head (an ancestor of the
-    // tip) after the gate's step-1 read, observed by the pre-push ls-remote
-    // (the same transport the push uses). The push then carries the queue
-    // refspec as a pure lease at the tip: git refuses it against the rewound
-    // ref, and --atomic refuses main with it — a dropped merge (the subject
-    // among it) is never silently re-promoted off a stale queue read.
+    // tip) between the gate's step-1 read and the push itself. The push
+    // ALWAYS carries the queue refspec leased at the run-start tip (luna
+    // round 4 — leased even when the observation still served the tip):
+    // git refuses it against the rewound ref, and --atomic refuses main
+    // with it — a dropped merge (the subject among it) is never silently
+    // re-promoted off a stale queue read.
     h.deps.git = {
       ...realGateGit,
-      lsRemoteRef: (repo, url, ref, token) => {
+      pushAtomic: (repo, url, updates, token) => {
         git(remote, ['update-ref', 'refs/heads/merge-queue', head]);
-        return realGateGit.lsRemoteRef(repo, url, ref, token);
+        return realGateGit.pushAtomic(repo, url, updates, token);
       },
     };
     const r = await runGate(

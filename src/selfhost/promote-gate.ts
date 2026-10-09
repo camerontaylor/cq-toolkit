@@ -84,7 +84,6 @@ import {
 import {
   gitFirstParentRange,
   gitIsAncestor,
-  gitLsRemoteRef,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
@@ -107,6 +106,18 @@ export const MAIN_BRANCH = 'main';
 
 /** The queue branch whose tip is promoted. */
 export const QUEUE_BRANCH = 'merge-queue';
+
+/**
+ * The stateful replay marker (luna round 4): the last subject this gate
+ * promoted, as a branch ref updated atomically with each promotion. A
+ * subject at or below the marker is already promoted — selecting it again
+ * would let a rewound main replay an old review, which the exact-base
+ * binding alone cannot refuse (a rewind to EXACTLY the review base keeps
+ * base === main). Updated in the same --atomic push as main, leased at the
+ * pre-push read; a missing ref is the clean first-promotion state, and an
+ * unreadable ref (any error but "not found") fails closed.
+ */
+export const PROMOTED_REF = 'cq/promoted';
 
 /** The promotion-review status context the gate trusts (PR-C). */
 export const PROMOTION_REVIEW_CONTEXT = 'crq/promotion-review';
@@ -643,7 +654,6 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
-  lsRemoteRef(repo: string, url: string, ref: string, token: string): Promise<string | null>;
   pushAtomic(
     repo: string,
     url: string,
@@ -660,7 +670,6 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
-  lsRemoteRef: gitLsRemoteRef,
   pushAtomic: gitPushAtomic,
 };
 
@@ -833,6 +842,18 @@ async function gateBody(
   //     — promotion-policy.md, accepted limit).
   const walk = await git.firstParentRange(cfg.repo, main, tip);
   if (walk[0] !== tip) refuse('subject: the first-parent chain does not start at the tip');
+  // The replay marker: last promoted subject, or null before the first
+  // promotion. Anything but a clean "ref absent" fails closed.
+  let promotedMarked: string | null = null;
+  try {
+    const wire = asRecord(await getJson(`${repoPath}/git/ref/heads/${PROMOTED_REF}`));
+    const sha = asString(asRecord(wire['object'])['sha']).toLowerCase();
+    if (SHA_RE.test(sha)) promotedMarked = sha;
+  } catch (error) {
+    const notFound =
+      error instanceof GhError && /not found|no such|does not exist/i.test(error.stderr);
+    if (!notFound) throw error;
+  }
   let subject: string | null = null;
   let subjectBase: string | null = null;
   let subjectReviewId: number | null = null;
@@ -852,6 +873,15 @@ async function gateBody(
       report.push(
         `  review walk ${sha}: success base ${review.base} is not the current main ${main} — refusing to replay a review of an older range`,
         ...review.lines.map((l) => `  ${l}`),
+      );
+      continue;
+    }
+    if (
+      promotedMarked !== null &&
+      (sha === promotedMarked || (await git.isAncestor(cfg.repo, sha, promotedMarked)))
+    ) {
+      report.push(
+        `  review walk ${sha}: already promoted (cq/promoted at ${promotedMarked}) — skipping`,
       );
       continue;
     }
@@ -1018,30 +1048,24 @@ async function gateBody(
       `push: the review's recorded base ${fresh.base} is not the current main ${main} — refusing to replay a review of an older range`,
     );
   }
-  // The main lease is the step-1 read: main must still be `main`. The
-  // SUBJECT is what promotes (PR-C): a queue that ADVANCED past it is fine —
-  // those commits simply wait for their own review. Any OTHER queue movement
-  // must stop this promotion — a break-glass rewind below the tip in
-  // particular puts the subject off the queue, and promoting an off-queue
-  // commit from a stale read is exactly the equal-OID/lease hole. So the
-  // last pre-push observation, on the same transport the push uses, is the
-  // queue ref as the remote serves it NOW. Still the run-start tip — the
-  // normal case, which step 1 pinned the local mirror to — ONLY main is
-  // sent (D-K.6 by construction, not by git's equal-OID skip). Moved — the
-  // merge-queue refspec rides along as a pure lease: leased at the tip it
-  // can never land, and --atomic refuses main with it, so a rewound queue
-  // can never re-promote the subject, and an advanced one (the rewind
-  // window's other half) makes the next sweep retry from fresh reads.
-  const queueNow = await git.lsRemoteRef(cfg.repo, cfg.remoteUrl, QUEUE_BRANCH, pushToken);
+  // Three leased updates in one --atomic push (luna round 4): (a) main to
+  // the subject, leased at the step-1 read; (b) the replay marker to the
+  // subject, leased at its pre-push read — the marker MUST move with the
+  // promotion, or a rewound main could replay the same review; (c) the
+  // queue ref, ALWAYS leased at the run-start tip (luna ruling: lease it
+  // even when it equals the tip — an up-to-date ref passes, any movement
+  // between the read and the push rejects the whole push, so a rewound or
+  // advanced queue can never ride along, and a rewind below the tip puts
+  // the subject off the queue exactly when its stale read must not
+  // promote). Every read is on the same transport the push uses.
   const updates: LeasedUpdate[] = [
     { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
+    {
+      refspec: `${subject}:refs/heads/${PROMOTED_REF}`,
+      expected: promotedMarked ?? '0'.repeat(40),
+    },
+    { refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`, expected: tip },
   ];
-  if (queueNow !== tip) {
-    updates.push({
-      refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`,
-      expected: tip,
-    });
-  }
   const pushed = await git.pushAtomic(cfg.repo, cfg.remoteUrl, updates, pushToken);
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
