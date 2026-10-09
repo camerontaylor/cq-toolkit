@@ -69,3 +69,8 @@ recovery authority; override publication race; legacy record alias rejection.
 Corrections add both config filenames, a private fsynced validated claim journal,
 a shared signer/override publication lock and separate legacy raw-route support.
 Exact corrected-head review remains required; no deployment attestation implied.
+
+Reconciliation with original PR-A: ported structured reviewer-policy mode detection
+to crq.py. No workflow text parsing or absent-policy User fallback remains.
+Both signer and queue validate policy/promotion-reviewer.json at origin/main;
+required fields/schema/configured identity fail closed and extra keys are allowed.

@@ -30,3 +30,8 @@ Rollback: stop the signer and let exact owned CLI processes terminate; retain
 private coverage/start ledgers and public results/claims. Never clear claims to
 force a retry. Roll back root-owned committed artifacts only while stopped; use
 orphan recovery on the next authorized start. Keep all keys and spool evidence.
+
+Single source reconciliation: install artifacts from the final integrated reviewed
+head of impl/crq-review-repair-20261009, not the older standalone f43b48f branch.
+Queue and signer use the same structured policy contract on origin/main. Missing
+policy or unset host identity refuses promotion; no workflow-text heuristic.

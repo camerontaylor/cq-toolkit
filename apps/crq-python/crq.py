@@ -1354,10 +1354,7 @@ _MODE_WHY: Dict[str, str] = {}
 # owner's registration record (toolkit-research/plans/app-registration-session-20261004.md).
 BANNED_BOT_IDS = {202921479}
 BANNED_BOT_LOGINS = {"cq-reviewer[bot]"}
-GATE_UNSET = "@@UNSET-REVIEWER-BOT-LOGIN@@"
-GATE_PIN_LOGIN = re.compile(r"--arg bot_login '([^']*)'")
-GATE_PIN_ID = re.compile(r"--argjson bot_id (-?\d+)")
-
+REVIEWER_POLICY_PATH = "policy/promotion-reviewer.json"
 
 def reviewer_identity() -> Optional[Tuple[str, int]]:
     """(bot login, numeric bot user id) from config, or None (unpinned → fail closed).
@@ -1371,36 +1368,35 @@ def reviewer_identity() -> Optional[Tuple[str, int]]:
 
 
 def promotion_mode_at(rev: str) -> str:
-    """'signer' only when the gate at `rev` pins a reviewer bot (rendered
-    `--arg bot_login '<login>'` + `--argjson bot_id <n>`) that EXACTLY equals crq's
-    configured identity. 'signer_unconfigured' when the gate has the bot-pin
-    machinery but it is UNSET (PR-B sentinels), pins an identity crq does not
-    have, or is unparseable: promotion halts (a User status would be refused red).
-    'user' when the gate has no bot pin at all (the #269 User-allowlist gate)."""
+    """Validate the structured trust source; never infer pins from workflow text.
+
+    PR-B's protected required-static lockstep check guarantees that each gate
+    step consumes this source. Missing or invalid policy never permits User
+    status fallback. Extra JSON fields are allowed.
+    """
     if rev not in _MODE:
-        p = run(["git", "show", f"{rev}:.github/workflows/merge-queue-gate.yml"], cwd=CLONE, check=False)
-        text = p.stdout if p.returncode == 0 else ""
-        # every rendered pin occurrence must agree (same rule as the signer's gate_pins_signer)
-        logins, ids = set(GATE_PIN_LOGIN.findall(text)), {int(x) for x in GATE_PIN_ID.findall(text)}
-        ident = reviewer_identity()
-        if GATE_UNSET in text or any(x.startswith("@@UNSET") for x in logins) or any(x <= 0 for x in ids):
-            _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", "the gate's reviewer identity is an UNSET sentinel"
-        elif logins or ids:
-            if len(logins) != 1 or len(ids) != 1:
-                _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", (f"the gate's reviewer pins are inconsistent "
-                                                                    f"(logins {sorted(logins)}, ids {sorted(ids)})")
-                return _MODE[rev]
-            pinned = (next(iter(logins)), next(iter(ids)))
-            if ident and ident == pinned:
-                _MODE[rev] = "signer"
-            else:
-                _MODE[rev] = "signer_unconfigured"
-                _MODE_WHY[rev] = (f"the gate pins {pinned[0]}/{pinned[1]} but crq's identity is "
-                                  f"{'unset' if not ident else f'{ident[0]}/{ident[1]}'}")
-        elif re.search(r"bot_login|bot_id|REVIEWER_BOT", text):
-            _MODE[rev], _MODE_WHY[rev] = "signer_unconfigured", "the gate has an unrecognised reviewer-pin format"
-        else:
-            _MODE[rev] = "user"
+        source = run(['git', 'show', f'{rev}:{REVIEWER_POLICY_PATH}'], cwd=CLONE, check=False)
+        try:
+            identity = json.loads(source.stdout) if source.returncode == 0 else None
+        except (ValueError, UnicodeDecodeError):
+            identity = None
+        configured = reviewer_identity()
+        valid = (
+            configured is not None
+            and isinstance(identity, dict)
+            and not isinstance(identity.get('schemaVersion'), bool)
+            and identity.get('schemaVersion') == 1
+            and identity.get('type') == 'Bot'
+            and isinstance(identity.get('login'), str)
+            and identity.get('login') == configured[0]
+            and type(identity.get('id')) in (int, float)
+            and identity.get('id') == configured[1]
+            and isinstance(identity.get('record'), str)
+            and bool(identity.get('record', '').strip())
+        )
+        _MODE[rev] = 'signer' if valid else 'signer_unconfigured'
+        if not valid:
+            _MODE_WHY[rev] = 'promotion reviewer policy absent, invalid, unconfigured or mismatched'
     return _MODE[rev]
 
 
