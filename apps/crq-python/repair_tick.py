@@ -272,7 +272,10 @@ def backfill(c, q):
                     missing.append({'item': item['id'], 'run': run})
                 continue
             meta = json.loads((path / 'meta.json').read_text())
-            enqueue(c, q, item, meta, path)
+            queued = enqueue(c, q, item, meta, path)
+            if not queued and run not in item.get('repair_runs', {}) and findings(path / 'review.ndjson'):
+                if not own_range(c, q, meta['base'], meta.get('pr_head', meta['head'])):
+                    missing.append({'item': item['id'], 'run': run, 'reason': item.get('last_error') or 'no repair verdict'})
     q['legacy_repair_missing'] = missing
     if not missing:
         q['legacy_repair_backfilled'] = c.iso()

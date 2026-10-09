@@ -145,6 +145,9 @@ def process(config, job, wt):
                 result.pop('pending_judge', None)
                 result['judge'] = judged
                 if judged.get('verdict') == 'valid' and judged.get('stop') == 'ok':
+                    if rung == 2:
+                        result.update(verdict='FAILED', reason='judge-confirmed defect; escalation already exhausted; needs human')
+                        break
                     evidence = judged.get('reason', '')
                     result['evidence'] = evidence
                     result['next_rung'] = 2
@@ -218,6 +221,9 @@ def main():
                                   not repair.get(driver + '_budget_launcher_verified')):
             print('repair dispatch disabled: verified ' + driver + ' budget launcher required')
             return
+    if 'paseo' in drivers and (not repair.get('paseo_host') or not repair.get('paseo_read_only_mode')):
+        print('repair dispatch disabled: verified Paseo endpoint and read-only mode required')
+        return
     directory = ROOT / 'state/repair'
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / 'service.lock').open('a') as lock:

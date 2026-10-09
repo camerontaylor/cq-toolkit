@@ -1,14 +1,5 @@
 #!/usr/bin/python3
-"""crq outage watchdog: agent-free, run by launchd every 10 min.
-
-Paseo schedule runs can report 'succeeded' while every tick failed
-(2026-10-07: 101 OAuth failures, then a cleanup wedge, ~25 h down). So
-liveness is judged only from the heartbeat each completed tick writes. This
-script lives under ~/Library/Application Support/crq/ and reads only files
-there: macOS TCC denies launchd-started python access to the external volume
-the crq repo is on. Alerts once per outage (Paseo message to the chancellor
-plus a best-effort macOS notification). Installed by hand from the crq repo's
-ops/ directory; see README "Watchdog". Python 3.9, stdlib only."""
+"""Model-free CRQ heartbeat watchdog; shared XDG state, once per outage alert."""
 import datetime as dt
 import json
 import os
@@ -50,7 +41,7 @@ def main():
         return
     sched = " systemd crq-tick.timer."
     text = (f"crq STALLED: no completed tick for {gap:.0f}m (last {last}, alarm at {limit}m).{sched} "
-            f"Diagnose: cd {hb['root']} && python3 crq.py tick --dry-run")
+            "Inspect heartbeat and systemctl --user status crq-tick.timer; do not run tests or model probes.")
     sent = sh(["paseo", "send", "--no-wait", hb["alert_agent_id"], text], timeout=90)
     ST.write_text(json.dumps({"alerted_for": last, "alerted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                               "gap_min": round(gap), "paseo_send": sent.returncode,

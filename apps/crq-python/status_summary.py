@@ -85,7 +85,7 @@ def read_events(path):
 
 
 def publish(root, queue, config, schedule, home=None, now=None):
-    """Write only ~/Library/Application Support/crq/summary.json atomically.
+    """Write the shared XDG state summary atomically.
 
     Call after persisting a completed tick. Administrative summary refreshes
     retain the queue's last_tick, so they cannot hide a stopped schedule.

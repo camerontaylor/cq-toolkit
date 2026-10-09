@@ -1,23 +1,9 @@
 #!/usr/bin/env python3
-"""crq — CodeRabbit CLI review queue for camerontaylor/cq-toolkit.
+"""Single quota owner: model-free ticks, detached reviews and bounded repair jobs.
 
-Pays down CodeRabbit CLI review debt at a steady, quota-safe pace while
-following docs/coderabbit-review.md (the "protocol"):
-
-  * one immutable base per PR: merge-base against the PR's explicit target
-    (its GitHub base ref), the same pin for both cycles (§3);
-  * a cycle counts ONLY when the CLI exits 0, the stream ends in a terminal
-    non-skipped `complete`, and no `error`/`action_required` event occurred
-    (§4/§6) — rate limits, auth failures, skips and interruptions never count;
-  * the diff is secret-scanned (denylist classes + gitleaks defaults) before
-    upload (§1); --use-credits is never passed (§6 billing);
-  * STOP at two cycles per PR (§5).
-
-Everything runs in a dedicated clone + per-run detached worktrees under
-/srv/operator/repos/worktrees/coderabbit-queue-*; it never
-touches the main cq-toolkit checkout or other agents' PR worktrees.
-
-Python 3.9 stdlib only. See README.md for operations.
+Each unreviewed range is reviewed once; terminal success alone earns a cycle.
+The tick alone persists the queue and publishes verified repairs. Repair workers
+never own GitHub or queue mutation. See README.md and ops/CUTOVER.md.
 """
 from __future__ import annotations
 
@@ -115,9 +101,7 @@ def load_queue() -> Dict[str, Any]:
 
 
 def save_queue(q: Dict[str, Any]) -> None:
-    tmp = QUEUE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(q, indent=2) + "\n")
-    tmp.replace(QUEUE)
+    repair_tick.atomic(QUEUE, q)
 
 
 def pid_alive(pid: Optional[int]) -> bool:
@@ -353,7 +337,8 @@ def running_agents() -> List[Dict[str, Any]]:
             agents = []
             for host in hosts:
                 data = paseo_json(["ls", "--host", host])
-                agents.extend(data.get("agents", []) if isinstance(data, dict) else data)
+                for agent in data.get("agents", []) if isinstance(data, dict) else data:
+                    agents.append({**agent, "crq_endpoint": host})
             _AGENTS_CACHE["v"] = [a for a in agents if a.get("status") in ("running", "initializing")]
         except Exception as exc:  # fail closed: unknown activity blocks starts
             _AGENTS_CACHE["v"] = None
@@ -363,6 +348,9 @@ def running_agents() -> List[Dict[str, Any]]:
 
 def agent_branch(cwd: str) -> Optional[str]:
     p = Path(os.path.expanduser(cwd))
+    # Never inspect an unrelated repository merely because an agent lists it.
+    if "webfront" in p.parts or not p.is_relative_to(WT_ROOT) and not p.is_relative_to(CLONE):
+        return None
     if not p.is_dir():
         return None
     r = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=p, check=False, timeout=20)
@@ -380,12 +368,19 @@ def active_agents_for(pr: int, branch: str) -> Optional[List[str]]:
         title = a.get("name") or a.get("title") or ""
         cwd = a.get("cwd") or ""
         if (re.search(rf"#{pr}\b", title) or re.search(rf"pr-?{pr}\b", cwd)
-                or os.path.basename(cwd.rstrip("/")) == slug or agent_branch(cwd) == branch):
+                or os.path.basename(cwd.rstrip("/")) == slug):
             hits.append(f"{a.get('shortId') or a.get('id', '')[:8]} {title[:50]}")
+        elif cwd and "webfront" not in Path(cwd).parts:
+            # A foreign cwd must not be interpreted using this host's files.
+            # Conservatively block toolkit activity whose branch is unknown.
+            if any(x in cwd for x in ("cq-toolkit", "identity-cq-reviewer", "coderabbit-queue-repo")):
+                hits.append(f"{a.get('shortId') or a.get('id', '')[:8]} toolkit agent active; branch unknown")
+            elif agent_branch(cwd) == branch:
+                hits.append(f"{a.get('shortId') or a.get('id', '')[:8]} active on PR branch")
     return hits
 
 
-def quiet_reason(item: Dict[str, Any], info: Dict[str, Any]) -> Optional[str]:
+def quiet_reason(item: Dict[str, Any], info: Dict[str, Any], ignore_age: bool = False) -> Optional[str]:
     """Return why the PR head is not quiet enough to review (None = quiet)."""
     branch = info["headRefName"]
     act = active_agents_for(item["pr"], branch)
@@ -393,6 +388,8 @@ def quiet_reason(item: Dict[str, Any], info: Dict[str, Any]) -> Optional[str]:
         return "paseo agent list unavailable (fail closed)"
     if act:
         return "active agent(s): " + "; ".join(act)
+    if ignore_age:
+        return None
     ours = (item.get("last_push") or {}).get("sha") == info["headRefOid"]
     if ours:
         return None  # head is our own addressing push and nobody else is running on it
@@ -779,17 +776,21 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
             except ValueError:
                 continue
             if terminal.get("type") == "complete":
-                for path in terminal.get("reviewedFiles") or []:
-                    value = path if isinstance(path, str) else path.get("path") or path.get("fileName")
+                reviewed = terminal.get("reviewedFiles") or []
+                # Count-only terminal formats cannot establish per-path credit.
+                for path in reviewed if isinstance(reviewed, list) else []:
+                    value = path if isinstance(path, str) else (path.get("path") or path.get("fileName")) if isinstance(path, dict) else None
                     if value:
                         terminal_paths.append(value)
         q["coverage"] = coverage.record_review(q.get("coverage") or coverage.new_ledger(),
             run_id=meta["run_id"], completed_at=record["completed_at"], reviewed_paths=terminal_paths,
             review_sha=meta.get("coverage_sha") or meta.get("reviewed_tip") or meta["head"],
             counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
-        repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         if item["kind"] == "promotion":
-            return f"{item['id']}: completed ({cls['findings']} findings) {harvest_promotion(item, meta, cls, rdir)}"
+            promotion_result = harvest_promotion(item, meta, cls, rdir)
+            repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+            return f"{item['id']}: completed ({cls['findings']} findings) {promotion_result}"
+        repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
         item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
@@ -2103,7 +2104,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                         log.append(f"{item['id']}: PR {info['state']} → skipped")
                         continue
                     # merged heads are immutable and get no addressing agent: no busy/quiet gate
-                    qr = None if ignore_quiet or post_merge else quiet_reason(item, info)
+                    qr = None if post_merge else quiet_reason(item, info, ignore_age=ignore_quiet)
                     if qr:
                         item["wait_reason"] = qr
                         continue

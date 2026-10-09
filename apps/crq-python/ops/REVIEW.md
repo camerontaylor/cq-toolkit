@@ -32,4 +32,17 @@ worktree; immutable prepared publication refs and PR-creation pending journal
 prevent repeated cherry-picks, pushes and ambiguous create retries. Existing fix
 PR lookup includes closed/merged PRs before considering a deleted branch push.
 
-Final exact-head follow-up: pending independent reviewer notification.
+Follow-up reviewed exact fef6b54ef21f5e3cacd8b1e9362d65c8e24af0d6, clean
+worktree. Four additional findings, now corrected:
+
+- Create local promotion blockers before enqueue binds repair identities.
+- A2 first no-change plus valid J cannot dispatch another A2; exhausted => FAILED.
+- Ceiling-skipped legacy findings prevent backfill completion and ledger archival.
+- Paid-lane startup preflight also requires the Paseo endpoint/read-only mode.
+
+The reviewer found no remaining duplicate push/PR retry defect in publication
+recovery and confirmed pending-J deferrals avoid repeated fixer dispatch.
+Final candidate review is requested against the exact committed HEAD. The
+conductor saves the final independent attestation at
+[state/implementation-review.json](../state/implementation-review.json) after
+notification; this runtime evidence does not rewrite the reviewed source head.

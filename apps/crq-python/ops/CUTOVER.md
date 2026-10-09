@@ -10,7 +10,8 @@ approval has been verified and recorded; installation does not authorize spend.
    key presence only, never print values. Keep signer forced-command transport.
 2. Render config host paths and both Paseo endpoint addresses. Unknown endpoints
    fail the quiet gate closed. Install ops/systemd units under ~/.config/systemd/user.
-   Keep every unit stopped. Verify unit syntax using systemd-analyze verify.
+   Use ops/prepare-host.py to render the host config and inert marker; it refuses
+   active units. Keep every unit stopped. Verify unit syntax using systemd-analyze verify.
 3. Pause worker-host schedule schedule-example. Wait for the exact existing tick/review PIDs
    to finish; inspect queue run IDs against command lines. Never kill unrelated
    processes. Block legacy addressing dispatch. No tests or model probes.
@@ -30,5 +31,15 @@ Rollback: stop queue-host timer and wait for its exact active reviews first; mig
 latest state back while both runners are stopped; remove worker-host inert marker
 and recreate schedule only after queue-host is provably stopped. Never run both.
 
-External prerequisites: verified spend authorization; built cq seam, credentials,
-Paseo endpoints/read-only judge mode, and fleet reader location update.
+Model-free handover prerequisites: final head/config, CodeRabbit/GitHub auth,
+both quiet-gate endpoints, locked drained state, fleet reader location update,
+and mutually exclusive runner ownership. Signer installation remains its own
+identity/custody lane; unavailable signer blocks promotion, never falls back.
+Repair activation only: existing spend authorization, ZAI credential, hard-budget
+launchers and read-only judge mode. These must not block the model-free handover.
+
+Prepared 2026-10-09: toolkit build 2d58441298f52561167166a88797b72ceb33582b
+completed without tests; all user units installed stopped; static unit verify
+exit 0; both Paseo queries/auth-status commands succeeded. No queue imported and
+queue-host marked inert at preparation. Exact deployment evidence is maintained in
+state/implementation-deployment.json after the safe handover.
