@@ -10,19 +10,8 @@
   "rate_limit_default_backoff_min": 30,
   "error_backoff_min": 30,
   "max_item_failures": 3,
-  "spawn_addressing": true,
-  "address_provider": "codex/gpt-6.1-sol",
-  "address_mode": "full-access",
-  "address_timeout_min": 180,
-  "address_severities": [
-    "critical",
-    "major"
-  ],
   "merged_min_survival": 0.25,
   "merged_min_surviving_lines": 15,
-  "tick_agent_title_prefix": "crq tick",
-  "keep_tick_agents": 3,
-  "schedule_id": "schedule-example",
   "merged_min_file_focus": 0.25,
   "promotion": {
     "enabled": true,
@@ -55,7 +44,6 @@
     "signer_stall_min": 90,
     "signer_down_min": 30
   },
-  "cleanup_budget_s": 30,
   "stale_alarm_min": 36,
   "timeout_bin": "timeout",
   "paseo_hosts": [],
@@ -128,6 +116,13 @@
           "model": "gpt-6.1-sol"
         }
       }
-    }
+    },
+    "paseo_host": null,
+    "paseo_read_only_mode": null
+  },
+  "coverage": {
+    "max_paths": 8,
+    "min_age_hours": 24,
+    "excluded_paths": []
   }
 }

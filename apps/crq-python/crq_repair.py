@@ -28,8 +28,8 @@ def mechanical(config, wt, base, commits, job, directory):
     patch.write_text(git(wt, 'diff', base + '..HEAD'))
     p = command(['node', config['repair']['cq_bin'], 'gates.hackDetector', '--diff=@' + str(patch), '--json'], cwd=wt)
     data = json.loads(p.stdout)
-    value = data.get('value') or {}
-    if p.returncode or data.get('status') != 'ok' or value.get('findings') or value.get('verdict') not in ('pass', 'passed', 'ok', 'clean'):
+    value = data.get('value')
+    if p.returncode or data.get('status') != 'ok' or not isinstance(value, list) or value:
         raise ValueError('hack detector did not pass')
     return {'verify': 'ok', 'hack': 'ok', 'tests': 'suspended'}
 
@@ -38,9 +38,7 @@ def dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
     if role['driver'] == 'cq':
         if judge:
-            # cq fixItem is a fixer, never a read-only judge. Fail closed until
-            # a configured read-only cq judge operation is available.
-            raise RuntimeError('read-only cq judge operation not configured')
+            return cq.judge(config, role, job, wt, directory)
         return cq.invoke(config, role, job, wt, directory)
     if role['driver'] == 'codex':
         return codex.invoke(config, role, job, wt, directory, judge=judge)
@@ -70,8 +68,9 @@ def process(config, job, wt):
     atomic(directory / 'job.json', job)
     base = job['repair_base']
     evidence = ''
-    start_rung = len(result['attempts'])
-    for rung in range(start_rung, 3):
+    start_rung = max((int(a['rung'][1:]) + 1 for a in result['attempts']), default=0)
+    rung = start_rung
+    while rung < 3:
         role = roles['fixer' if rung < 2 else 'fixer_escalation']
         attempt_dir = directory / ('A' + str(rung))
         git(wt, 'reset', '--hard', base)
@@ -114,7 +113,7 @@ def process(config, job, wt):
                 if judged.get('verdict') == 'valid' and judged.get('stop') == 'ok':
                     evidence = judged.get('reason', '')
                     # Skip same-worker retry: judge-directed refix gets A2 only.
-                    result['attempts'].append({'rung': 'A1', 'stop': 'skipped', 'reason': 'judge-directed A2'})
+                    rung = 2
                     continue
                 result.update(verdict='NOT-FIXED' if judged.get('verdict') == 'invalid' and judged.get('stop') == 'ok' else 'FAILED',
                               reason=judged.get('reason') or 'judge unsure; needs human')
@@ -130,6 +129,7 @@ def process(config, job, wt):
             else:
                 result['attempts'][-1]['mechanical'] = {'failure': evidence, 'tests': 'suspended'}
         atomic(directory / 'progress.json', result)
+        rung += 1
     result['finished_at'] = utc()
     atomic(result_path, result)
     return result

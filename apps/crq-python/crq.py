@@ -36,6 +36,8 @@ import sys
 import tempfile
 import time
 import status_summary
+import repair_tick
+import coverage
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -680,6 +682,11 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "started_at": iso(),
             "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
+    if item["kind"] in ("merged", "coverage"):
+        meta["planned_paths"] = (item.get("measure") or {}).get("synthetic_paths")
+        meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
+        meta["coverage_sha"] = item.get("coverage_sha")
+        meta["coverage_paths"] = item.get("coverage_paths")
     (rdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     with (rdir / "runner.log").open("a") as output:
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
@@ -764,22 +771,26 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                   "pr_head": meta.get("pr_head", meta["head"]),
                   "dirty_diff": "clean tree", "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
-        if item["kind"] == "open":
-            item.setdefault("cycles", []).append(record)
-            blocking = sum(cls["severity_counts"].get(s, 0) for s in BLOCKING_SEVERITIES)
-            if blocking and CONFIG["spawn_addressing"]:
-                spawn_addressing(item, meta, rdir)
-            else:
-                record["addressing"] = "none needed (no critical/major findings; minor/trivial recorded, not chased)"
-                advance_open(item)
-        elif item["kind"] == "promotion":
-            item.setdefault("cycles", []).append(record)
-            ledger_append(item, meta, cls, rdir)
+        item.setdefault("cycles", []).append(record)
+        terminal_paths = []
+        for line in (rdir / "review.ndjson").read_text().splitlines():
+            try:
+                terminal = json.loads(line)
+            except ValueError:
+                continue
+            if terminal.get("type") == "complete":
+                for path in terminal.get("reviewedFiles") or []:
+                    value = path if isinstance(path, str) else path.get("path") or path.get("fileName")
+                    if value:
+                        terminal_paths.append(value)
+        q["coverage"] = coverage.record_review(q.get("coverage") or coverage.new_ledger(),
+            run_id=meta["run_id"], completed_at=record["completed_at"], reviewed_paths=terminal_paths,
+            review_sha=meta.get("coverage_sha") or meta.get("reviewed_tip") or meta["head"],
+            counted=True, outcome="completed", focus_paths=meta.get("coverage_paths") or meta.get("planned_paths"))
+        repair_pending = repair_tick.enqueue(sys.modules[__name__], q, item, meta, rdir)
+        if item["kind"] == "promotion":
             return f"{item['id']}: completed ({cls['findings']} findings) {harvest_promotion(item, meta, cls, rdir)}"
-        else:
-            item.setdefault("cycles", []).append(record)
-            ledger_append(item, meta, cls, rdir)
-            item["state"] = "done"
+        item["state"] = "repairing" if repair_pending else "done"
         return f"{item['id']}: completed ({cls['findings']} findings)"
     if o == "rate_limited":
         mins = cls.get("wait_minutes") or q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]
@@ -828,106 +839,7 @@ def ledger_append(item: Dict[str, Any], meta: Dict[str, Any], cls: Dict[str, Any
                   f"- run `{meta['run_id']}`; base `{meta['base'][:12]}` head `{meta['head'][:12]}`; "
                   f"{cls['findings']} findings {json.dumps(cls['severity_counts'])}\n"
                   f"- details: {rdir}/findings.md\n"
-                  f"- disposition: owner review (no follow-up PR/issue without owner approval)\n")
-
-
-# ----------------------------------------------------------- addressing agents
-
-
-def top_level_env() -> Dict[str, str]:
-    """Without these, `paseo run` from a tick agent creates the tick agent's
-    SUBAGENT — and archiving old tick agents could interrupt it mid-fix."""
-    return {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")}
-
-
-def spawn_addressing(item: Dict[str, Any], meta: Dict[str, Any], rdir: Path) -> None:
-    cycle = meta["cycle"]
-    wt, wbranch = make_worktree(f"addr-{item['id']}-c{cycle}", meta["head"])
-    result = rdir / "address-result.json"
-    tmpl = (ROOT / "prompts" / "address.md").read_text()
-    prompt = (tmpl.replace("{PR}", str(item["pr"])).replace("{BRANCH}", meta["pr_branch"])
-              .replace("{WORKTREE}", str(wt)).replace("{BASE}", meta["base"]).replace("{HEAD}", meta["head"])
-              .replace("{CYCLE}", str(cycle)).replace("{FINDINGS_MD}", str(rdir / "findings.md"))
-              .replace("{NDJSON}", str(rdir / "review.ndjson")).replace("{RESULT}", str(result))
-              .replace("{TARGET}", meta["target"]))
-    (rdir / "address-prompt.md").write_text(prompt)
-    # --new-workspace local: without it an agent-scoped caller's workspace
-    # (e.g. the tick agent's) silently overrides --cwd.
-    p = run(["paseo", "run", "--background", "--json", "--new-workspace", "local",
-             "--provider", CONFIG["address_provider"], "--mode", CONFIG["address_mode"], "--cwd", str(wt),
-             "--title", f"crq address PR #{item['pr']} cycle {cycle}", "--label", "crq=address", prompt],
-            check=False, timeout=180, env=top_level_env())
-    agent_id = cwd_ok = None
-    ws = re.search(r"Created workspace (wks_[0-9a-f]+)", p.stdout + p.stderr)
-    try:
-        out = json.loads(p.stdout[p.stdout.index("{"):])
-        agent_id = out.get("agentId")
-        cwd_ok = out.get("cwd") == str(wt)
-    except ValueError:
-        pass
-    if p.returncode != 0 or not agent_id or not cwd_ok:
-        if agent_id:  # wrong cwd: never let it work outside its worktree
-            run(["paseo", "archive", "--force", agent_id], check=False, timeout=60)
-        item["state"] = "blocked"
-        item["last_error"] = f"could not spawn addressing agent: {p.stderr.strip()[:200] or p.stdout[:200]}"
-        event("blocked", item=item["id"], reason=item["last_error"])
-        return
-    if ws:  # its own workspace (a shared one would override --cwd); give it a findable name
-        run(["paseo", "workspace", "rename", ws.group(1), f"crq · address PR #{item['pr']} c{cycle}"],
-            check=False, timeout=60, env=top_level_env())
-    item["state"] = "addressing"
-    item["addressing"] = {"agent_id": agent_id, "run_id": meta["run_id"], "cycle": cycle, "worktree": str(wt),
-                          "wt_branch": wbranch, "result": str(result), "started_at": iso(),
-                          "workspace_id": ws.group(1) if ws else None}
-    event("addressing_started", item=item["id"], agent=agent_id, cycle=cycle)
-
-
-def harvest_addressing(item: Dict[str, Any], dry: bool) -> Optional[str]:
-    a = item["addressing"]
-    result = Path(a["result"])
-    if result.exists():
-        if dry:
-            return f"would harvest addressing result for {item['id']}"
-        try:
-            res = json.loads(result.read_text())
-        except ValueError as exc:
-            res = {"status": "blocked", "reason": f"unparseable result file: {exc}"}
-        cyc = next((c for c in item["cycles"] if c["run_id"] == a["run_id"]), None)
-        if cyc is not None:
-            cyc["addressing"] = {"agent_id": a["agent_id"], **{k: res.get(k) for k in
-                                 ("status", "pushed_sha", "summary", "dispositions", "checks", "reason")}}
-        if res.get("pushed_sha"):
-            item["last_push"] = {"sha": res["pushed_sha"], "at": iso()}
-        remove_worktree(Path(a["worktree"]), a["wt_branch"])
-        run(["paseo", "archive", a["agent_id"]], check=False, timeout=60)
-        if a.get("workspace_id"):
-            run(["paseo", "workspace", "archive", a["workspace_id"]], check=False, timeout=60)
-        item["addressing"] = None
-        if res.get("status") in ("pushed", "no_changes"):
-            advance_open(item)
-            event("addressing_finished", item=item["id"], status=res.get("status"), sha=res.get("pushed_sha"))
-            return f"{item['id']}: addressing {res.get('status')} → {item['state']}"
-        item["state"] = "blocked"
-        item["last_error"] = f"addressing blocked: {res.get('reason')}"
-        event("blocked", item=item["id"], reason=item["last_error"])
-        return f"{item['id']}: addressing blocked"
-    started = parse_iso(a["started_at"])
-    age = (now() - started).total_seconds() / 60
-    try:
-        st = (paseo_json(["inspect", a["agent_id"]]).get("Status") or "unknown").lower()
-    except Exception:
-        st = "unknown"
-    if st == "running" and age < CONFIG["address_timeout_min"]:
-        return None
-    if st == "running" or age > 5:
-        if dry:
-            return f"would block {item['id']} (addressing agent {st}, no result)"
-        item["state"] = "blocked"
-        item["last_error"] = (f"addressing agent {a['agent_id'][:8]} status={st} after {age:.0f}m without "
-                              f"writing {result.name}; worktree kept at {a['worktree']}")
-        event("blocked", item=item["id"], reason=item["last_error"])
-        return f"{item['id']}: addressing stalled → blocked"
-    return None
+                  f"- disposition: detached repair inbox; see status digest\n")
 
 
 # ----------------------------------------------------------- promotion to main
@@ -1696,7 +1608,7 @@ def notify_owner(text: str) -> Dict[str, Any]:
     res: Dict[str, Any] = {}
     aid = PROMO.get("alert_agent_id")
     if aid:
-        p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90, env=top_level_env())
+        p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90)
         res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
     return res
 
@@ -1882,6 +1794,8 @@ def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
 def rank(item: Dict[str, Any]) -> int:
     """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
     follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog."""
+    if item["kind"] == "coverage":
+        return coverage.COVERAGE_RANK
     if item["kind"] in ("open", "promotion"):
         return 0
     if item["kind"] == "delta":
@@ -1959,13 +1873,19 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
         if not mine:
             stacked = "" if p["baseRefName"] == "merge-queue" else f", stacked on {p['baseRefName']}"
-            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=0,
+            new_item(q, log, dry, id=f"pr{n}", pr=n, kind="open", tier=1, prior_cycles=(2 - CONFIG["repair"].get("fix_pr_cycles", 1)) if p["headRefName"].startswith("crq/fix-") else 0,
                      why=f"open PR not yet enrolled{stacked}")
             continue
-        if any(i["state"] in ("pending", "reviewing", "addressing", "blocked") for i in mine):
+        if any(i["state"] in ("pending", "reviewing", "repairing", "blocked") for i in mine):
             continue
         last = last_reviewed(q, n)
-        if last and reviewed_head(last) != head and not any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
+        own = False
+        if last and reviewed_head(last) != head:
+            try:
+                own = repair_tick.own_range(sys.modules[__name__], q, reviewed_head(last), head)
+            except Exception:
+                own = False
+        if last and not own and reviewed_head(last) != head and not any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
             new_item(q, log, dry, id=f"pr{n}-delta-{head[:7]}", pr=n, kind="delta", followup="open",
                      since=reviewed_head(last), why=f"head moved {reviewed_head(last)[:10]} → {head[:10]} after CLI review")
     seeded_at = parse_iso(q["created_at"])
@@ -1976,7 +1896,7 @@ def enroll(q: Dict[str, Any], dry: bool) -> List[str]:
         mine = [i for i in q["items"] if i["pr"] == n and i["kind"] in ("open", "delta")]
         if any(i["id"] == f"pr{n}-delta-{head[:7]}" for i in mine):
             continue  # this merged head already has its delta (done, skipped as a pure restack, …): sticky
-        if any(i["state"] in ("reviewing", "addressing") for i in mine):
+        if any(i["state"] in ("reviewing", "repairing") for i in mine):
             continue  # harvest first
         for i in mine:
             if i["kind"] == "open" and i["state"] == "pending":
@@ -2009,13 +1929,60 @@ def deps_met(q: Dict[str, Any], item: Dict[str, Any]) -> bool:
     return d is None or d["state"] in ("done", "skipped")
 
 
+def coverage_fallback(q, log, dry, only):
+    if only:
+        return None, False
+    mq = git("rev-parse", "origin/merge-queue")
+    candidates = [i for i in q["items"] if i["kind"] == "coverage" and i["state"] == "pending"]
+    for i in candidates:
+        if i.get("coverage_sha") != mq:
+            i["state"] = "skipped"
+            i["last_error"] = "coverage tip moved; re-cut"
+    candidates = [i for i in candidates if i["state"] == "pending"]
+    if not candidates:
+        for i in q["items"]:
+            if i["kind"] == "merged" and i.get("merge_commit"):
+                try:
+                    i["measure"] = measure_merged(i)
+                except Exception as exc:
+                    log.append("coverage measurement failed: " + str(exc)[:150])
+        candidate = coverage.coverage_candidate(q, q.get("coverage") or coverage.new_ledger(),
+            merge_queue_sha=mq, ordinary_eligible=False, now=now(),
+            **CONFIG.get("coverage", {}))
+        if candidate:
+            q["items"].append(candidate)
+            candidates = [candidate]
+    available = False
+    for item in candidates:
+        if item.get("not_before") and parse_iso(item["not_before"]) > now() or not deps_met(q, item):
+            continue
+        available = True
+        if dry:
+            log.append("DRY-RUN would cut coverage " + item["id"])
+            return None, True
+        try:
+            base, head, paths = build_synthetic(item)
+            if not git("diff", "--name-only", base, head):
+                item.update(state="skipped", last_error="empty coverage range")
+                continue
+            plan = dict(base=base, head=head, target="origin/merge-queue", cycle=None,
+                        branch=None, notes=[], label="lowest-priority coverage review")
+            run_id = launch(q, item, plan)
+            log.append("coverage " + item["id"] + ": " + item["state"])
+            return run_id if item["state"] == "reviewing" else None, True
+        except Exception as exc:
+            item["wait_reason"] = "coverage planning failed: " + str(exc)[:200]
+    return None, available
+
+
 def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = False) -> List[str]:
     log: List[str] = []
     if (STATE / "runner-disabled").exists():
         return ["runner disabled for host handover"]
     q = load_queue()
     fetch()
-    for item in q["items"]:
+    starts_before = len(q.get("starts", []))
+    for item in list(q["items"]):
         if item["kind"] == "promotion" and item["state"] in SIGNER_STATES:
             msg = harvest_signer(q, item, dry)
             if msg:
@@ -2025,9 +1992,18 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
             if msg:
                 log.append(msg)
         elif item["state"] == "addressing":
-            msg = harvest_addressing(item, dry)
-            if msg:
-                log.append(msg)
+            if not dry:
+                item["state"] = "repair_failed"
+                item["last_error"] = "legacy addressing retained for manual reconciliation; no new dispatch"
+        if not dry and item.get("repair_runs"):
+            try:
+                log.extend(repair_tick.harvest(sys.modules[__name__], q, item))
+            except Exception as exc:
+                item["last_error"] = "repair harvest failed: " + str(exc)[:300]
+    if not dry:
+        repair_tick.backfill(sys.modules[__name__], q)
+        repair_tick.archive_legacy(sys.modules[__name__], q)
+        repair_tick.reconcile_fix_prs(sys.modules[__name__], q)
     prev = parse_iso(q.get("last_tick"))
     stale_min = CONFIG.get("stale_alarm_min", 36)
     if prev and not dry and (now() - prev).total_seconds() / 60 > stale_min:
@@ -2051,16 +2027,25 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
     except Exception as exc:  # never let promotion bookkeeping stop the queue
         log.append(f"promotion: error {exc}"[:300])
     started = None
+    has_coverage = False
+    global_gate = None
+    pending_at_selection = any(i["state"] == "pending" for i in q["items"])
     if q.get("paused"):
+        global_gate = "paused"
         log.append(f"queue paused: {q.get('pause_reason')}")
     elif q.get("cooldown_until") and parse_iso(q["cooldown_until"]) > now():
+        global_gate = "cooldown"
         log.append(f"rate-limit cooldown until {q['cooldown_until']}")
     elif starts_last_hour(q) >= CONFIG["max_starts_per_hour"]:
+        global_gate = "hourly_cap"
         log.append(f"hourly cap reached ({CONFIG['max_starts_per_hour']} starts in the last 60m)")
     elif len(inflight(q)) >= CONFIG["max_inflight"]:
+        global_gate = "inflight"
         log.append(f"{len(inflight(q))} review(s) in flight (max {CONFIG['max_inflight']})")
     else:
         for item in sorted(q["items"], key=sort_key):
+            if item["kind"] == "coverage":
+                continue
             if only and item["id"] != only:
                 continue
             if item["state"] != "pending":
@@ -2131,11 +2116,17 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                                           f"reviewing main={item['base_sha']} crq#{item['id']}"[:140], log)
             break
         else:
-            log.append("no eligible item this tick")
+            started, has_coverage = coverage_fallback(q, log, dry, only)
+            if not started:
+                log.append("no eligible item this tick")
         if dry:
             log += [f"  waiting {i['id']}: {i['wait_reason']}" for i in sorted(q["items"], key=sort_key)
                     if i["state"] == "pending" and i.get("wait_reason")]
     if not dry:
+        q["coverage"] = coverage.record_opportunity(q.get("coverage") or coverage.new_ledger(),
+            at=q["last_tick"], started=len(q.get("starts", [])) > starts_before,
+            pending=pending_at_selection, candidate_exists=has_coverage,
+            blocked_reason=global_gate or ("only" if only else None))
         save_queue(q)  # before the slow Paseo calls: a killed tick must not lose a launch
         write_status(q)
         write_heartbeat(q)
@@ -2148,7 +2139,7 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
 
 def write_status(q: Dict[str, Any]) -> None:
     items = sorted(q["items"], key=sort_key)
-    owed_open = sum(max(0, 2 - i.get("prior_cycles", 0) - len(i.get("cycles", []))) for i in items
+    owed_open = sum(max(0, 1 - len(i.get("cycles", []))) for i in items
                     if i["kind"] == "open" and i["state"] not in ("skipped",))
     rows = []
     for i in items:
@@ -2174,7 +2165,7 @@ def write_status(q: Dict[str, Any]) -> None:
                     f"| {(i.get('pinned_base') or '')[:10]} | {last.get('outcome', '')} | {(why or '')[:110]} | {extra} |")
     sched = CONFIG.get("schedule_id")
     next_run = ""
-    schedule = {}
+    schedule = {"status": "systemd", "id": "crq-tick.timer"}
     if sched:
         try:
             s = paseo_json(["schedule", "inspect", sched])
@@ -2211,7 +2202,7 @@ def write_status(q: Dict[str, Any]) -> None:
           f"- rate-limit cooldown until: {q.get('cooldown_until') or '—'}",
           f"- starts in last 60m: {starts_last_hour(q)}/{CONFIG['max_starts_per_hour']}; in flight: "
           f"{', '.join(i['id'] + ' (' + ((i.get('run') or {}).get('run_id') or 'signer ' + i['state']) + ')' for i in inflight(q)) or 'none'}",
-          f"- addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
+          f"- legacy addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
           f"- open-PR CLI reviews still owed: {owed_open}",
           f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {promotion_mode()}"
           f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
@@ -2221,6 +2212,10 @@ def write_status(q: Dict[str, Any]) -> None:
           f"- last tick: {q.get('last_tick')}", "",
           "| item | kind | state | cycles | pinned base | last outcome | wait / last error | supersession |",
           "|---|---|---|---|---|---|---|---|", *rows, "", "## Recent events", "", "```", *recent, "```", ""]
+    md.extend(["## Repair and utilization", "", "```json",
+               json.dumps({"repair": repair_tick.digest(ROOT, q),
+                   "utilization": coverage.utilization_digest(q, q.get("coverage") or coverage.new_ledger(),
+                       now=now(), max_starts_per_hour=CONFIG["max_starts_per_hour"])}, indent=2), "```", ""])
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),

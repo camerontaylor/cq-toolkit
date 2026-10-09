@@ -1,5 +1,7 @@
 """Atomic, allow-listed fleet summary; no review launches or git fetches."""
 import datetime as dt
+import coverage
+import repair_tick
 import json
 import os
 from pathlib import Path
@@ -28,7 +30,7 @@ def command(argv, timeout):
 def summarize(status, queue, heartbeat, config, events, now):
     items = queue["items"]
     backlog = {kind: sum(i["kind"] == kind and i["state"] == "pending" for i in items)
-               for kind in ("open", "delta", "merged", "promotion")}
+               for kind in ("open", "delta", "merged", "promotion", "coverage")}
     outcomes = {key: 0 for key in ("completed", "interrupted", "error")}
     other = 0
     for event in events:
@@ -95,8 +97,11 @@ def publish(root, queue, config, schedule, home=None, now=None):
                      config, read_events(root / "state/events.jsonl"), now)
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
-    data.update(schema_version=1, generated_at=generated)
-    data["schedule"] = {"id": config.get("schedule_id"), "state": schedule.get("status") or "unknown"}
+    data.update(schema_version=2, generated_at=generated)
+    data["repair"] = repair_tick.digest(root, queue)
+    data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
+        now=now, max_starts_per_hour=config["max_starts_per_hour"])
+    data["schedule"] = {"id": config.get("schedule_id", "crq-tick.timer"), "state": schedule.get("status") or "systemd"}
     if data["schedule"]["state"] == "unknown":
         data["schedule"]["error"] = "schedule probe unavailable"
     data["promotion"]["merges_waiting"] = None

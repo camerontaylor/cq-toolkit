@@ -1,0 +1,6 @@
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Unit=crq-repair.service
+[Install]
+WantedBy=timers.target
