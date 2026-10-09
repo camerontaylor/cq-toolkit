@@ -46,8 +46,11 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
    by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
-   `339373542` (pinned in the gate template from the registration record @ `d8f132f`, not a repo
-   variable; an UNSET token leaves the gate refusing fail-closed). Any other creator — including
+   `339373542`. The identity is not a workflow literal or repo variable: it lives in the
+   protected `policy/promotion-reviewer.json` (from the registration record @ `d8f132f`) — the
+   merge-queue gate reads it at `GITHUB_SHA`, the signer and crq validate it on `main`, and a
+   per-step lockstep test guarantees the gate actually consumes it; a missing, invalid or
+   mismatched file leaves the gate refusing fail-closed. Any other creator — including
    the repository owner's own
    login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
    a red refusal when no trusted review exists. The gate re-reads the status
@@ -76,8 +79,10 @@ waits for its own review.
 
 Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
 for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
-`cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
-`d8f132f` (the gate refuses fail-closed while unpinned).
+`cq-promotion-reviewer[bot]` plus numeric id `339373542`, carried in the protected
+`policy/promotion-reviewer.json` from the registration record @ `d8f132f` (read by the gate at
+`GITHUB_SHA`, validated by the signer and crq on `main`; a missing or invalid file refuses
+fail-closed).
 
 - A `crq/promotion-review` status now proves the signer ran the review: its private key lives
   only in the dedicated `crq` account's home on ceres (the headless CachyOS signer host, per
