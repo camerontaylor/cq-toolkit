@@ -387,7 +387,10 @@ jobs:
           # above) and require it to equal the run-start identity, else refuse
           # fail-closed — the next queue push re-runs the gate entirely under
           # the rotated identity, so a revoked identity can never promote a
-          # later sha through a run pinned to the old one.
+          # later sha through a run pinned to the old one. The push below
+          # leases main at ${main_now} (--force-with-lease, same transport),
+          # so this check and the push are atomic together: main cannot move
+          # between the check and the push without rejecting the promotion.
           main_now="$(git rev-parse origin/main)"
           reviewer_json_main="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${main_now}" | jq -r .content | base64 -d)"
           jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json_main}" >/dev/null || {
@@ -413,9 +416,14 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Fast-forward only: no --force, so the server rejects any update
-          # that is not a fast-forward of main (a concurrent promotion).
-          if ! git push origin "${SHA}:refs/heads/main"; then
+          # Fast-forward only: the update stays a pure fast-forward of main
+          # (no --force), and the --force-with-lease pins main to the exact
+          # commit this run revalidated the pinned identity against, so a
+          # rotation landing on main after that check rejects the push (the
+          # branch below then distinguishes a superseding promotion from a
+          # real failure). A concurrent promotion is a rejection, not a
+          # silent race.
+          if ! git push --force-with-lease="refs/heads/main:${main_now}" origin "${SHA}:refs/heads/main"; then
             git fetch origin main
             if git merge-base --is-ancestor "${SHA}" origin/main; then
               echo "no-op: main reached ${SHA} during the push (already promoted)"
