@@ -1362,6 +1362,10 @@ describe('runGate', () => {
         Promise.resolve(
           rev === 'refs/remotes/origin/merge-queue' ? t2 : rev.startsWith('refs/') ? MAIN : rev,
         ),
+      // The fake graph is main <- M1 <- t2: the queue advanced one batch past
+      // the reviewed sha. Without this edge the gate's diverged-refusal check
+      // (isAncestor(main, tip)) would refuse the very scenario under test.
+      isAncestor: (_r, a, b) => Promise.resolve(a === b || (a === MAIN && (b === M1 || b === t2))),
       firstParentRange: (_r, _from, to) => Promise.resolve(to === t2 ? [t2, M1] : [M1]),
       rangeCommits: (_r, _from, to) => Promise.resolve(to === M1 ? ONE : []),
     });
