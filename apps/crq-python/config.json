@@ -42,7 +42,8 @@
       }
     },
     "signer_stall_min": 90,
-    "signer_down_min": 30
+    "signer_down_min": 30,
+    "record_url_template": null
   },
   "stale_alarm_min": 36,
   "timeout_bin": "timeout",

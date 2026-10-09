@@ -77,6 +77,10 @@ harness, removes CQ_SANDBOX* and CQ_RUN_TOOL, and never uses promptOverride.
 Codex uses ephemeral structured output with workspace-write for fixing and
 read-only for judgement; remote pushurl is overridden to /dev/null in children.
 The cq read-only judge bridge uses the toolkit AI SDK driver with tools disabled.
+`crq-records.service` exposes only tick-generated promotion metadata/rationale on
+queue-host's private mesh address. User-mode promotion statuses link this record with
+`target_url`; signer statuses require the separate signer's matching integration.
+`state/status.md` also displays the rationale for owner override decisions.
 Its dist module layout must exist in the deployed merge-queue build. Paseo judges
 require a verified queue-host endpoint and read-only mode; absent configuration fails
 closed. No dry model dispatch is part of provisioning.

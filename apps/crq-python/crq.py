@@ -684,16 +684,20 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
         meta["coverage_sha"] = item.get("coverage_sha")
         meta["coverage_paths"] = item.get("coverage_paths")
-    (rdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    repair_tick.atomic(rdir / "meta.json", meta)
+    item["state"] = "reviewing"
+    item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
+    item["wait_reason"] = None
+    q.setdefault("starts", []).append(meta["started_at"])
+    # Reserve identity/quota BEFORE any child or remote status mutation. A
+    # crash leaves a known run to reconcile, never a pending item to redispatch.
+    save_queue(q)
     with (rdir / "runner.log").open("a") as output:
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
                                 cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                                 start_new_session=True)
-    pid = proc.pid
-    item["state"] = "reviewing"
-    item["run"] = {"run_id": run_id, "pid": pid, "started_at": meta["started_at"]}
-    item["wait_reason"] = None
-    q.setdefault("starts", []).append(meta["started_at"])
+    item["run"].update(pid=proc.pid, launch_pending=False)
+    save_queue(q)
     event("review_started", item=item["id"], run=run_id, base=plan["base"], head=plan["head"], label=plan["label"])
     return run_id
 
@@ -707,12 +711,12 @@ def cmd_review_child(run_id: str) -> int:
     cmd = [CONFIG.get("timeout_bin", "timeout"), "--kill-after=60", f"{tmo}m", *meta["cmd"]]
     pidfile = rdir / "review.pid"
     identity = {"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}
-    pidfile.write_text(json.dumps(identity) + "\n")
+    repair_tick.atomic(pidfile, identity)
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
-        pidfile.write_text(json.dumps({**identity, "cli_pid": proc.pid}) + "\n")
+        repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
         rc = proc.wait()
-    (rdir / "exit.json").write_text(json.dumps({"exit": rc, "ended_at": iso(), "timed_out": rc == 124}) + "\n")
+    repair_tick.atomic(rdir / "exit.json", {"exit": rc, "ended_at": iso(), "timed_out": rc == 124})
     return 0
 
 
@@ -896,6 +900,19 @@ def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
     return None
 
 
+def promotion_record(item: Dict[str, Any]) -> Optional[str]:
+    """Persist the owner-visible record without a GitHub comment or review."""
+    iid = item["id"]
+    if not re.fullmatch(r"[A-Za-z0-9_+.-]+", iid):
+        raise ValueError("invalid promotion record id")
+    directory = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "crq/records"
+    record = {"item": iid, "state": item["state"], "base": item.get("base_sha"),
+              "batch": item.get("batch_sha"), "blocking": item.get("blocking", []), "as_of": iso()}
+    repair_tick.atomic(directory / (iid + ".json"), record)
+    template = PROMO.get("record_url_template")
+    return template.format(item=iid) if template else None
+
+
 def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str, log: List[str]) -> None:
     if not MAIN_TOKEN.search(desc) or len(desc) > 140:
         raise RuntimeError(f"bad promotion status description: {desc!r}")
@@ -909,11 +926,15 @@ def post_promotion_status(item: Dict[str, Any], sha: str, state: str, desc: str,
     who = run(["gh", "api", "user", "--jq", '.login + " " + .type'], timeout=60).stdout.strip()
     if who != f"{PROMO['poster']} User":
         raise RuntimeError(f"refusing to post {PROMO['status_context']}: gh auth is {who!r}, not {PROMO['poster']} (User)")
-    out = run(["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
-               "-f", f"state={state}", "-f", f"description={desc}"], timeout=60).stdout
+    target = promotion_record(item)
+    argv = ["gh", "api", "-X", "POST", f"repos/{REPO}/statuses/{sha}", "-f", f"context={PROMO['status_context']}",
+            "-f", f"state={state}", "-f", f"description={desc}"]
+    if target:
+        argv.extend(["-f", "target_url=" + target])
+    out = run(argv, timeout=60).stdout
     # the GitHub status id is what the promotion audit matches against
     item.setdefault("statuses", []).append({"at": iso(), "sha": sha, "state": state, "description": desc,
-                                            "id": json.loads(out).get("id")})
+                                            "id": json.loads(out).get("id"), "target_url": target})
     event("promotion_status", item=item["id"], sha=sha, state=state, description=desc)
     log.append(f"promotion: posted {state} on {sha[:10]}: {desc}")
 
@@ -1428,14 +1449,20 @@ def request_promotion_review(q: Dict[str, Any], item: Dict[str, Any], log: List[
         raise NotReady(f"item id {item['id']} does not fit the signer id pattern")
     body = json.dumps({"v": 1, "kind": "promotion", "item": item["id"], "base_sha": item["base_sha"],
                        "batch_sha": item["batch_sha"], "requested_at": iso()}, sort_keys=True).encode()
+    item["state"] = "requested"
+    item["request"] = {"sha256": hashlib.sha256(body).hexdigest(), "requested_at": json.loads(body)["requested_at"],
+                       "dispatch_pending": True}
+    q.setdefault("starts", []).append(item["request"]["requested_at"])
+    save_queue(q)  # identity and quota survive unknown spool mutation outcomes
     try:
         SPOOL.write_request(item["id"], body)
     except SpoolUnreachable as exc:
+        item["last_error"] = "signer request delivery unknown; reconcile exact request id before retry"
+        save_queue(q)
         raise NotReady(spool_unreachable(q, exc, log))
     spool_ok(q)
-    item["state"] = "requested"
-    item["request"] = {"sha256": hashlib.sha256(body).hexdigest(), "requested_at": json.loads(body)["requested_at"]}
-    q.setdefault("starts", []).append(item["request"]["requested_at"])  # signer runs share crq's CLI budget
+    item["request"]["dispatch_pending"] = False
+    save_queue(q)
     event("promotion_requested", item=item["id"], base=item["base_sha"], batch=item["batch_sha"])
     log.append(f"promotion: requested signer review {item['id']} main={item['base_sha'][:10]}..{item['batch_sha'][:10]}")
 
@@ -2210,6 +2237,14 @@ def write_status(q: Dict[str, Any]) -> None:
             banner.append(f"> **ALERT — PROMOTION SIGNER** ({x['at']}): {x['text']}. Ack: "
                           f"`crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
     for i in items:
+        if i["kind"] == "promotion":
+            url = promotion_record(i)
+            for blocker in i.get("blocking", []):
+                advice = blocker.get("repair_advice")
+                if advice:
+                    banner.append(f"> Repair advice {i['id']} F{blocker['n']}: " +
+                                  str(advice).replace("\n", " ")[:1000] +
+                                  (f" — [promotion record]({url})" if url else ""))
         if i["kind"] == "promotion" and i["state"] == "findings":
             open_b = [b for b in i.get("blocking", []) if not b.get("resolution")]
             if open_b:

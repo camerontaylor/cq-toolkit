@@ -46,3 +46,11 @@ Final candidate review is requested against the exact committed HEAD. The
 conductor saves the final independent attestation at
 [state/implementation-review.json](../state/implementation-review.json) after
 notification; this runtime evidence does not rewrite the reviewed source head.
+
+Review binding 3d1982d1026f379c24043d14762af4bd98240894 found three further
+issues; f90dab9bafff64c470a237957427c3072ec9c853 added one rollback finding.
+Corrections: durable review/spool identity and quota before dispatch, explicit
+queue-host marker removal only after worker-host inert proof, promotion status target_url
+and visible repair rationale in the generated private-mesh record/status view,
+and mirror unload plus watchdog restoration on rollback. Signed status target
+links remain the separate signer's integration seam; transport is unchanged.

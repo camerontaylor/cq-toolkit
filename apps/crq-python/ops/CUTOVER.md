@@ -19,7 +19,10 @@ approval has been verified and recorded; installation does not authorize spend.
    runs and ledger; copy state to queue-host and retain an immutable rollback snapshot.
    PID liveness is host-local: migrate only after active reviews finish.
 5. Mark worker-host inert with state/runner-disabled. Delete schedule schedule-example only
-   after state and config are ready on queue-host. Enable queue-host tick/watchdog timers.
+   after state and config are ready on queue-host. Prove worker-host schedule paused and
+   marker present, with no matching active tick/review/addressing process. THEN
+   remove queue-host state/runner-disabled before enabling its tick/watchdog timers.
+   Start crq-records.service for owner-visible promotion rationale over the mesh.
    Exactly one runner must exist; flock alone cannot coordinate hosts.
 6. Inspect systemctl --user status, journal and heartbeat/summary under
    ${XDG_STATE_HOME:-~/.local/state}/crq. Repair units remain gated and disabled.
@@ -29,7 +32,10 @@ approval has been verified and recorded; installation does not authorize spend.
 
 Rollback: stop queue-host timer and wait for its exact active reviews first; migrate
 latest state back while both runners are stopped; remove worker-host inert marker
-and recreate schedule only after queue-host is provably stopped. Never run both.
+and recreate schedule only after queue-host is provably stopped. Unload worker-host's
+com.crq.fleet-reader launchd job BEFORE restoring worker-host summaries, then restore
+its retained watchdog script/plist and bootstrap com.crq.watchdog. Stop the queue-host
+record service; mark queue-host inert. Never run both queue runners.
 
 Model-free handover prerequisites: final head/config, CodeRabbit/GitHub auth,
 both quiet-gate endpoints, locked drained state, fleet reader location update,

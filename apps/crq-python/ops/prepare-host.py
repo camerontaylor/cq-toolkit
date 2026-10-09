@@ -20,6 +20,7 @@ from crq_repair import atomic
 config = json.loads((root / 'config.json').read_text())
 config.update(clone='/home/operator/repos/crq-toolkit-runtime', worktree_root='/home/operator/repos/worktrees',
               timeout_bin='/usr/bin/timeout', paseo_hosts=['worker-host.tailnet.example:6767', '127.0.0.1:6767'])
+config['promotion']['record_url_template'] = 'http://queue-host.tailnet.example:6778/promotion/{item}'
 config['repair'].update(enabled=False, spend_authorization=None,
                        cq_bin='/home/operator/repos/crq-toolkit-runtime/dist/cli.js', paseo_host='127.0.0.1:6767')
 atomic(root / 'config.json', config)
