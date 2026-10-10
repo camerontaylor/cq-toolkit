@@ -92,7 +92,10 @@ never has to cover `merge-queue-gate` promotions.
 ### C2 cutover checklist
 
 1. **Freeze promotion:** pause crq promotion items and disable `merge-queue-gate.yml`
-   (disable the workflow); no gate may push from here until step 6.
+   (disable the workflow), then **drain it**: cancel any in-flight or queued runs and confirm
+   none remain — `gh run list --workflow merge-queue-gate.yml --status in_progress` and
+   `--status queued` must both come back empty — before touching the marker in step 2; no gate
+   may push from here until step 6.
 2. **Bootstrap the replay marker:** `git push origin <main>:refs/heads/cq/promoted` — the
    marker starts at the then-current `main`.
 3. Owner settings step: a ruleset protecting `refs/heads/cq/*` from deletion and
