@@ -75,17 +75,41 @@ Decision 8): the jobs that read them declare `environment: automation`, so a
 dispatch from any other ref fails at job admission, before a secret is
 exposed.
 
-| token                     | secret holds                                                                                                                                                                                                                                                                                                                                  |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                           |
+| token                     | secret holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{{SELFHOST_TOKEN}}`      | the loop's GitHub credential. Recommended END STATE: the registered automation GitHub App's installation token (this repository's App: cq-automation) — but see the identity note below: a static installation-token secret does not support the schedule without a refresh path. Working identity until then: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 Both are step-scoped in the workflows: they reach only the run step, never
 `pnpm install`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
 non-required automation jobs skip successfully; required I4 checks are separate
-and never use this optional skip. A classic PAT with the blanket `repo` scope is the documented
-FALLBACK, not the recommendation — it reaches every repo the account can
-touch, so grant it only where fine-grained PATs are unavailable.
+and never use this optional skip. A classic PAT with the blanket `repo` scope is the
+last-resort FALLBACK — it reaches every repo the account can touch, so grant
+it only where fine-grained PATs are unavailable.
+
+### The loop's identity: the App is the end state, the PAT is the working identity
+
+The recommended END STATE for the `{{SELFHOST_TOKEN}}` value is the
+registered automation GitHub App's installation token (this repository's
+App: cq-automation), not a human or role PAT: an App identity keeps the
+loop's replies, reviews and fix pushes attributable and review-independent
+(doctrine I2), revokes independently of every human credential, and avoids
+a long-lived repo-scope secret. But installation tokens are short-lived,
+and the workflow consumes `GH_TOKEN` directly per run with nothing to
+re-mint — a STATIC installation-token secret does NOT support ongoing
+scheduled runs. The App identity therefore REQUIRES a refresh path:
+
+- an external process (cron/hook) re-mints the installation token and
+  updates the `automation` environment secret before each expiry, or
+- the workflow mints its own token per run — a separately scoped BEHAVIOR
+  change (new steps/permissions in the privileged job), explicitly out of
+  scope for now.
+
+Until one exists, the WORKING identity is the long-lived PAT — prefer the
+fine-grained, target-repository-only PAT described in the table above; the
+classic blanket-`repo` PAT stays the last-resort fallback. That trades the
+I2/attribution and revocability benefits above, and the `GH_TOKEN` env
+indirection is what lets either identity drive the same code.
 
 ## Standing requirements (Rule / Why / Enforcement)
 
