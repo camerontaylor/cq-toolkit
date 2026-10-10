@@ -64,6 +64,15 @@ export interface RunReport {
   executed: Record<string, number>;
 }
 export function signalExit(signal: string): number;
+/** How long a repeat of a terminal signal is still the parent relay's duplicate. */
+export const INTERRUPT_GRACE_MS: number;
+export type InterruptAction = 'relay' | 'absorb' | 'escalate' | 'finish';
+export function interruptAction(input: {
+  childLive: boolean;
+  signal: string;
+  relayedAt: Readonly<Record<string, number | undefined>>;
+  now: number;
+}): InterruptAction;
 export function runVerdict(input: {
   exit: number;
   report: RunReport | null;

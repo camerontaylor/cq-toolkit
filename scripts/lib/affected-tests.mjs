@@ -30,9 +30,11 @@ export const NON_IMPORT_MAP = [
   [/^scripts\/copy-prompt-assets\.mjs$/, [/^test\/cli\/plans\.smoke\.test\.ts$/]],
   // Source-tree scanners read src/** from disk: no import-graph edge.
   // Deliberately NOT mapped: whole-tree consumers — plans.smoke (builds dist
-  // from all of src/) and ratchet-baseline (typechecks the real tree). Every
-  // source change would select them; what only they add, the build and the
-  // typecheck, is the mandatory local check:static gate and CI's build.
+  // from all of src/) and ratchet-baseline (typechecks the real tree) are
+  // heavy integration suites that CI's full run covers, so local selection
+  // omits them on purpose. Every source change would select them; what only
+  // they add, the build and the typecheck, is the mandatory local
+  // check:static gate and CI's build.
   [/^src\/kernel\//, [/^test\/kernel\/driver-hygiene\.test\.ts$/]],
   [
     /^src\/driver\//,
@@ -62,6 +64,12 @@ export const NON_IMPORT_MAP = [
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/i1\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
+  // Deliberately NOT mapped: policy/profiles/ — consumed from disk (no
+  // import edge) by test/config/resolve.test.ts today, but a row here names
+  // only the consumers we know; one missed filesystem consumer would let a
+  // profile edit narrow past its real impact. Unmapped, the edit falls back
+  // and is refused locally instead; CI's full suite stays the authority
+  // for profiles (#283).
   [
     /^policy\/templates\//,
     [

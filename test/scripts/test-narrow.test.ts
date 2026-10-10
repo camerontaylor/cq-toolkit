@@ -19,9 +19,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+  INTERRUPT_GRACE_MS,
   MAX_FILES,
   MAX_WAIT_CEILING_S,
   classOf,
+  interruptAction,
   loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
@@ -502,6 +504,58 @@ describe('distIsFresh (the runner skips the build only when this holds)', () => 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('interruptAction', () => {
+  it('relays the first copy of a signal to the child group', () => {
+    expect(interruptAction({ childLive: true, signal: 'SIGINT', relayedAt: {}, now: 5_000 })).toBe(
+      'relay',
+    );
+  });
+
+  it('absorbs the immediate duplicate inside the grace window', () => {
+    // One terminal interrupt reaches the niced runner twice — the terminal
+    // signals the whole foreground group, and the un-niced parent relays —
+    // a few milliseconds apart. That duplicate must never escalate.
+    expect(
+      interruptAction({
+        childLive: true,
+        signal: 'SIGINT',
+        relayedAt: { SIGINT: 5_000 },
+        now: 5_000 + INTERRUPT_GRACE_MS - 1,
+      }),
+    ).toBe('absorb');
+  });
+
+  it('escalates a repeat after the grace window to the group sweep', () => {
+    // The graceful relay went unheeded: a second Ctrl-C escalates instead
+    // of waiting out the run/build timeout (#283).
+    expect(
+      interruptAction({
+        childLive: true,
+        signal: 'SIGINT',
+        relayedAt: { SIGINT: 5_000 },
+        now: 5_000 + INTERRUPT_GRACE_MS,
+      }),
+    ).toBe('escalate');
+  });
+
+  it('grants each signal its own graceful relay', () => {
+    expect(
+      interruptAction({
+        childLive: true,
+        signal: 'SIGTERM',
+        relayedAt: { SIGINT: 5_000 },
+        now: 9_000,
+      }),
+    ).toBe('relay');
+  });
+
+  it('finishes at once when no child group is live', () => {
+    expect(interruptAction({ childLive: false, signal: 'SIGINT', relayedAt: {}, now: 0 })).toBe(
+      'finish',
+    );
   });
 });
 

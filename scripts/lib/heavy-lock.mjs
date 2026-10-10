@@ -2,6 +2,17 @@
 // consumed by scripts/test-narrow.mjs). Node, not flock(1): stock macOS has
 // no flock, and the lock must behave identically on macOS and Linux.
 //
+// KNOWN LIMITATION — Windows records no child-tree identity (#283): this
+// protocol's identity checks are POSIX-only (process groups, `ps -o
+// lstart=`), so a Windows runner's build/vitest descendants are invisible
+// to the next waiter once the runner itself dies — the lock looks free and
+// the next run starts alongside the orphans (the runner's taskkill cleanup
+// only runs while the runner is alive to invoke it). Windows is not a
+// supported host for test:narrow and has no Windows CI, so this stays
+// deliberate: real support needs child-tree tracking whose lifetime is
+// tied to the lock (e.g. a job object) before the single-flight guarantee
+// can hold there.
+//
 // Protocol (every step is synchronous, so the release can run from an
 // `exit` handler):
 //   - acquire = atomically mkdir LOCK_PATH (never replace an existing directory),
