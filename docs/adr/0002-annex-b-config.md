@@ -6,7 +6,7 @@
   [approval-token annex](0003-approval-token.md), the [journal annex](0003-journal-migration.md),
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
-Post-acceptance notes N3 and N4 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N3, N4 and N15 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.
@@ -151,6 +151,10 @@ built-in default  →  project env (CQ_*, optionally seeded by the bundled profi
    - `CQ_PROFILE` has no per-call form, since a per-call profile would be a wildcard relaxation, which P7 forbids.
    - `CQ_PROFILE` is only _how_ the `solo-maintainer` values arrive. It adds no layer, and setting the individual
      `vars.*` remains equivalent.
+
+   > Narrowed: the bundled profiles ship as `.profile`, not `.env`; see post-acceptance note N15 in the
+   > [ADR index](README.md#post-acceptance-notes).
+
 2. **Order classes.** Every key declares one class:
    - **`tighter`**, a conservative order. Per-call movement toward it is free.
    - **`limit`**, a `tighter` key whose blank is "no extra limit": `CQ_BUDGET_MAX_USD`, `CQ_BUDGET_MAX_TOKENS`,
@@ -278,6 +282,9 @@ through an unredacted name.
    - A gate sweep interval is a workflow `schedule` cron, so it is an adopt-time template placeholder
      (`{{GATE_SWEEP_CRON}}`, next to `{{GATE_TIMEOUT_MIN}}`), **not** a `CQ_*` key: a runtime env var cannot change
      a cron trigger.
+
+   > Narrowed: three rows of this list read differently in code; see post-acceptance note N15 in the
+   > [ADR index](README.md#post-acceptance-notes).
 
 6. **solo-maintainer on the owner's repos:** one variable, `CQ_PROFILE=solo-maintainer`, plus any per-repo key
    overrides. The profile's expansion is journalled key by key, so one variable doesn't hide what it relaxed.

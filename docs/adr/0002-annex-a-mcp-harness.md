@@ -5,7 +5,7 @@
 - **Amends / Related:** [ADR-0002](0002-worker-driver-seam-v2.md) (seam v2), [Annex B](0002-annex-b-config.md)
   (configuration keys)
 
-Post-acceptance note N2 in the [ADR index](README.md#post-acceptance-notes) narrows part of this record.
+Post-acceptance notes N2 and N14 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 The toolkit's read/edit/run harness is served to the `subprocess` and `claude-agent` lanes as an MCP server named
 `cq-harness`, so both lanes run the same tools under the same confinement. Per
@@ -100,6 +100,10 @@ belongs to OS confinement (D14), not this annex.
   is `{"mcpServers":{"cq-harness":{"command":<execPath>,"args":[<bin.js>,<manifest JSON>],"env":{}}}}`. The lane
   deletes it as soon as `system/init` reports `cq-harness` connected, and again when the run settles, whatever the
   verdict and the `sessionRetention`.
+
+  > Narrowed: the shipped file name carries a per-run uuid; see post-acceptance note N14 in the
+  > [ADR index](README.md#post-acceptance-notes).
+
 - **Argv**, in order:
   `-p --output-format stream-json --verbose [--json-schema …] --tools "" --setting-sources "" --strict-mcp-config
 [--mcp-config <file>] --allowedTools "<qualified names, space-joined, one argv element; empty when none>"

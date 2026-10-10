@@ -64,9 +64,9 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 and rechecked against `merge-queue` the same day. Each
-note names the accepted text, what changed or remains open, and where the
-current source of truth is.
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17), each set rechecked
+against `merge-queue` the same day. Each note names the accepted text, what
+changed or remains open, and where the current source of truth is.
 
 ### N1 — ADR-0003 §2.9: `signal` exit codes
 
@@ -179,3 +179,112 @@ equivalent pnpm ones. D-E's adopter install (`npm ci --ignore-scripts`, then
 classes and `runDriverConformance`, is re-exported from the package root, so
 consumers import them from `@camerontaylor/cq-toolkit` until the subpath is
 added.
+
+### N11 — ADR-0002 §3, ADR-0003 §2.5 and the approval-token annex §4c: O-1, O-5 and O-8 settled in code
+
+Three points left open at acceptance are resolved by the implementation; none
+rewrites a decision.
+
+- **O-1 (ADR-0002 §3, the `RunOptions` collision).** The root barrel exports
+  the seam's per-call options as `DriverRunOptions` — an explicit aliased
+  export that beats the driver star-export at the barrel tail — and the kernel
+  plan-run `RunOptions` keeps the root name. The seam's `BudgetReservation`
+  gets the same treatment as `DriverBudgetReservation`
+  ([`src/index.ts`](../../src/index.ts)).
+- **O-5 (approval-token annex §4c, where the mutation lock's record lives).**
+  The record lives beside the operator approval ledger in the P1-trusted
+  layer, keyed on the sha256 of the workspace's enclosing git worktree root —
+  the annex keyed the lock on `sha256(realpath(workspace))`, and the shipped
+  key is the worktree root, so every path into the same workspace computes the
+  same record. The annex's two rejected candidates are excluded on evidence:
+  an environment-derived location reintroduces §2.5's split-brain, and a
+  record inside the workspace is tamper vector #26
+  ([`src/ops/analyze/approval.ts`](../../src/ops/analyze/approval.ts),
+  `makeLedgerBesideMutationLocks`).
+- **O-8 (ADR-0003 §2.5 acquire step 4, the empty or half-written record).**
+  §2.5's `open('wx')`-then-write publish could leave an empty canonical
+  record. The implemented publish is whole-record: a synced temporary is
+  published by exclusive `link(2)`, and replacing a record goes through an
+  exclusive succession claim (`<lock>.<nonce>.claim`), so an empty or
+  half-written canonical record cannot occur; an unparseable one refuses
+  (`journal: corrupt or half-written plan lock …`) instead of being stolen
+  ([`src/kernel/journal.ts`](../../src/kernel/journal.ts), `publishRecord`,
+  `claimSuccession`).
+
+### N12 — Approval-token annex §4c step 1: the clean predicate exempts the verified report pair
+
+§4c step 1 requires `git status --porcelain=v1 --untracked-files=all` empty.
+applyRemediation's own rendered report pair (markdown + sidecar) is
+deliberately exempt, and narrowly: the exercise verifies the exact pair —
+paths derived from a 16-hex fingerprint, bytes matched against SHA-256s
+carried on the subject and bound into its `inputDigest` — at BOTH state reads
+before granting the exception, and every other subject keeps the strict
+predicate unchanged
+([`src/ops/analyze/approval.ts`](../../src/ops/analyze/approval.ts),
+`verifiedAnalysisReportPaths`). Read the clean predicate as strict, with this
+one byte-verified, input-bound exemption.
+
+### N13 — ADR-0003 §2.3 and §2.5: the early-stop widening and `budget.breakLock` are descoped
+
+§2.3 widens `RunEarlyStopReason` to six values and §2.5 names
+`budget.breakLock=<runId>` as a journalled opt-in. Neither is in force,
+deliberately: the type is still `'budget' | 'signal'`
+([`src/kernel/types.ts`](../../src/kernel/types.ts)), and the kernel's
+`GovernanceOptIn` union carries only the three ledger keys —
+`budget.breakLock` exists as a per-call string in the config registry
+([`src/config/registry.ts`](../../src/config/registry.ts), `CALL_ONLY_CONFIG`)
+but not in the kernel union, so a foreign-host lock refusal cannot currently
+be broken by opt-in. Recorded as a descope so the accepted lines are not read
+as shipped behaviour.
+
+### N14 — Annex A §A.4: the MCP config file name gains a per-run uuid
+
+§A.4 names the binding file `<sessionsDir>/<sessionId>.cq-harness-mcp.json`.
+The lane creates `<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json` —
+unique per run; still created exclusively (`O_EXCL`) with mode 0600, never in
+the workspace, deleted as soon as `system/init` reports the harness connected
+and again at settle — so two concurrent runs over one session can never read,
+replace or delete each other's binding. Deliberate hardening of the accepted
+shape
+([`src/driver/subprocess/index.ts`](../../src/driver/subprocess/index.ts),
+`HARNESS_MCP_CONFIG_FILE`).
+
+### N15 — Annex B §B.4, §B.6 and §B.9: the profile suffix and three CI-mapping rows
+
+Two alignments with [`src/config/registry.ts`](../../src/config/registry.ts);
+neither changes a decision.
+
+- **Profiles ship as `.profile`, not `.env`.** §B.4.1 and §B.9 say
+  `policy/profiles/<name>.env`; the bundled profiles are
+  `policy/profiles/<name>.profile`, because `.env`-shaped files are
+  deliberately scanned as key material by the denylist, so a profile must not
+  be one. §B.4.1's rule is unchanged: profiles load only from the installed
+  toolkit package, never from the workspace.
+- **CI mapping.** §B.6.5's `ci: false` list reads, in code:
+  `CQ_APPROVAL_MAX_TTL_MS` is `ci: 'vars'` (a duration, not a path — the
+  blanket `CQ_APPROVAL_*` path rule does not cover it); every
+  `CQ_PROVIDER_<ID>_PROFILE` is `ci: false` (not only `custom:` values); and
+  `CQ_DRIVER_ACP_ENDPOINT` sits in the path/executable `ci: false` set beside
+  `CQ_DRIVER_ACP_COMMAND`.
+
+### N16 — ADR-0004 D-K.7: the gate sweep interval is every 15 minutes
+
+D-K.7 left the gate sweep's interval unspecified (open point O-7). Decided:
+every 15 minutes (`cron: '7,22,37,52 * * * *'`), so a missed wake-up delays
+promotion by at most 15 minutes
+([`policy/templates/gate.yml`](../../policy/templates/gate.yml)). The
+`cq-signal` sweep's separate automation-window cadence is unchanged and still
+does not bound promotion.
+
+### N17 — ADR-0004 D-B: `cq-signal` also triggers on pushes to `merge-queue`
+
+D-B lists `cq-signal`'s triggers as the seven `pull_request` types,
+`pull_request_review` and `pull_request_review_comment`. The shipped template
+adds `push: [merge-queue]`, so a queue advance re-fires the verifiers without
+a PR event
+([`policy/templates/cq-signal.yml`](../../policy/templates/cq-signal.yml)).
+The trigger changes nothing about trust: `cq-signal` remains a wake-up only
+(`permissions: {}`, empty body) — exactly D-A.4's head-defined
+untrusted-producer class; D-A.2's push exclusion is for privileged or
+deciding jobs, which `cq-signal` is not — and every verdict is still
+recomputed from the API by `head_sha`.

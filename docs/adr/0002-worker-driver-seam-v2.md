@@ -7,7 +7,7 @@
   bump that P2 allows. Annexes: [A](0002-annex-a-mcp-harness.md) (MCP harness server) and
   [B](0002-annex-b-config.md) (configuration keys).
 
-Post-acceptance note N10 in the [ADR index](README.md#post-acceptance-notes) narrows part of this record.
+Post-acceptance notes N10 and N11 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## 1. Context
 
@@ -450,6 +450,10 @@ break.
 - `Driver.run`'s return type and first parameter; the only signature change is the optional `RunOptions`
   parameter. The name `RunOptions` collides with the kernel's existing `RunOptions` on the `.` barrel; the rename
   was left open at acceptance (open point O-1).
+
+  > Resolved in code: see post-acceptance note N11 in the
+  > [ADR index](README.md#post-acceptance-notes).
+
 - The op contract `Op<I,R> = (input) => Promise<OpResult<R>>` and the `OpResult` status set.
 - The journal event shapes (ADR-0003 owns those).
 
