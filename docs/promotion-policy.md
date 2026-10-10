@@ -46,10 +46,11 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
    by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
-   `339373542`. The pinned identity comes ONLY from the protected `policy/promotion-reviewer.json`
-   — the trust root, read at `GITHUB_SHA` in each trust step and sourced from the registration
-   record @ `d8f132f` (a reviewed protected path, not a repo variable; a missing, invalid or
-   mismatched file leaves the gate refusing fail-closed). Any other creator — including
+   `339373542`. The identity is not a workflow literal or repo variable: it lives in the
+   protected `policy/promotion-reviewer.json` (from the registration record @ `d8f132f`) — the
+   merge-queue gate reads it at `GITHUB_SHA`, the signer and crq validate it on `main`, and a
+   per-step lockstep test guarantees the gate actually consumes it; a missing, invalid or
+   mismatched file leaves the gate refusing fail-closed. Any other creator — including
    the repository owner's own
    login, `GITHUB_TOKEN`, and every App — never counts, and a promotion-review status from one is
    a red refusal when no trusted review exists. The gate re-reads the status
@@ -64,25 +65,69 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
 The crq status event wakes the gate. A dispatch of `merge-queue-gate` with a `sha` re-runs it.
 Gate runs serialize per target SHA, so a tip dispatch never displaces a queued promotion of a
 reviewed SHA.
-`cq-gate` (`gate.yml`) runs report-only while this policy holds. It must learn this signal before
-C2 retires `merge-queue-gate`.
+
+One promoter at a time. `merge-queue-gate` is the sole promoter: its base rule is that the
+recorded review base is **contained in `main`** (an ancestor — the batch may sit behind later
+promotions). `cq-gate` (`gate.yml`) runs **report-only until C2** — its single explicit
+`CQ_GATE_PROMOTES` switch is `'false'`, so it promotes nothing while `merge-queue-gate`
+exists. `cq-gate` has nonetheless learned the signal: its subject is the newest queue commit
+carrying a trusted success whose recorded base **equals** the current `main` (a review of an
+older range can only exist below a rewound `main` and is never selected), every check
+(closure, policy, verdict, verified runs) judges `main..<subject>`, and its verdicts are
+`promoted`/`noop`/`awaiting` (no reviewed commit yet), green, with `refused` red — or, while
+report-only, advisory in the step summary. A tip ahead of the reviewed sha simply waits for
+its own review. The two gates have different base rules on purpose: `merge-queue-gate`'s
+ancestor rule promotes any reviewed batch behind `main`, while `cq-gate`'s equality rule
+promotes exactly the batch cut from the current `main`.
+
+**Stateful replay refusal (arms with `cq-gate`).** Each `cq-gate` promotion moves the
+`cq/promoted` ref to the promoted subject in the same atomic, leased push as `main`.
+Selection skips any subject at or below that marker, so a break-glass rewind to exactly the
+review base cannot replay the old review (the one case the exact-base binding cannot refuse
+statelessly). The marker is re-read before every promotion and **fails closed whenever it is
+missing or unreadable**: deleting the ref must never silently re-enable replay. Because the
+cutover freezes promotion and disarms `merge-queue-gate` before arming `cq-gate`, the marker
+never has to cover `merge-queue-gate` promotions.
+
+### C2 cutover checklist
+
+1. **Freeze promotion:** pause crq promotion items and disable `merge-queue-gate.yml`
+   (disable the workflow), then **drain it**: cancel any in-flight or queued runs and confirm
+   none remain — `gh run list --all --workflow merge-queue-gate.yml --status in_progress` and
+   `--status queued` must both come back empty (`--all` is required: without it the filter
+   cannot see a disabled workflow) — before touching the marker in step 2; no gate may push
+   from here until step 6.
+2. **Bootstrap the replay marker:** `git push origin <main>:refs/heads/cq/promoted` — the
+   marker starts at the then-current `main`.
+3. Owner settings step: a ruleset protecting `refs/heads/cq/*` from deletion and
+   non-fast-forward updates.
+4. **Arm `cq-gate`:** flip its single `CQ_GATE_PROMOTES` switch to `'true'` (template +
+   re-render, one reviewed promotion).
+5. Delete `merge-queue-gate.yml` (and drop its required-check entries); `cq-gate` is the sole
+   promoter from here on.
+6. **Unfreeze:** resume crq promotion items. The two gates never both pushed, so the marker
+   only ever records `cq-gate` promotions.
 
 ## Accepted limit
 
 Owner ruling (2026-10-04): the forgeable-status limit below was accepted for #269 and is closed
 for the review signal by the pinned reviewer-bot identity — creator type `Bot` plus login
-`cq-promotion-reviewer[bot]` plus numeric id `339373542`, from the registration record @
-`d8f132f` (the gate refuses fail-closed while unpinned).
+`cq-promotion-reviewer[bot]` plus numeric id `339373542`, carried in the protected
+`policy/promotion-reviewer.json` from the registration record @ `d8f132f` (read by the gate at
+`GITHUB_SHA`, validated by the signer and crq on `main`; a missing or invalid file refuses
+fail-closed).
 
 - A `crq/promotion-review` status now proves an authorized signer action — a completed review, or
   the owner's `crq-override` below (the same bot posts both): the signer's private key lives
-  only in the dedicated `crq` macOS user's home — outside an unprivileged agent's reach (see the
-  residuals below) — and every promotion outcome is re-derived there. An agent holding the
-  owner's token can no longer post a promotion-review success that the gate trusts.
-- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo) a root-capable
-  agent can reach the signer's key, so the signal is T1-proof (no overeager-agent forgery), not
-  yet T2-proof; and P1 (the owner's PAT becoming interactive-only) is what makes the repository
-  as a whole, not just the signal, agent-proof.
+  only in the dedicated `crq` account's home on the headless CachyOS signer host (per
+  the registration record §Host) — outside an unprivileged agent's reach (see the residuals
+  below) — and every promotion outcome is re-derived there. An agent holding the owner's token
+  can no longer post a promotion-review success that the gate trusts.
+- Residuals, stated plainly: until P0 (removing `ctaylor`'s passwordless sudo on the agent host, and
+  on the signer host removing `ctaylor` from `docker`/`wheel` and closing sshd password auth — record
+  §Deviations 4) a root-capable agent can reach the signer's key, so the signal is T1-proof (no
+  overeager-agent forgery), not yet T2-proof; and P1 (the owner's PAT becoming interactive-only)
+  is what makes the repository as a whole, not just the signal, agent-proof.
 - The crq-side audit stays **detective**. On each tick, crq checks that every `main` advance was
   authorized by a trusted bot success bound to the previous main, and corroborates it against its
   own spool records; anything else raises a loud alert. Only the newest of several promotions
@@ -90,30 +135,46 @@ for the review signal by the pinned reviewer-bot identity — creator type `Bot`
 
 ## Owner override
 
-The owner runs the `crq-override` tool, installed beside the signer and executed from the `crq`
-account's own login session (Fast User Switching at the login window — never `su`/`sudo -u` from
-an agent-reachable terminal). It verifies the target sha is a queue state beyond `main`, computes
-`main` itself, posts the status as `cq-promotion-reviewer[bot]`, and logs the override to the signer's
-audit log:
+The owner runs the `crq-override` tool — installed beside the signer in root-owned
+`/opt/cq-reviewer/` on the signer host — from a terminal no agent can reach: from the owner's OWN machine,
+`ssh` to the signer host, then `sudo -u crq`. The host is headless, so the macOS plan's login-window design
+became this: the invariant that survives is that the issuing terminal is unreachable from
+the fleet agents', and the session is never routed through an agent-reachable host. The tool verifies the target
+sha is a queue state beyond `main`, computes `main` itself, posts the status as
+`cq-promotion-reviewer[bot]`, and logs the override to the signer's audit log:
 
 ```sh
-crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
+sudo -u crq /opt/cq-reviewer/crq-override <sha> "<reason>"    # posts: override main=<current main sha> <reason>
 ```
 
 An agent cannot produce this status through the documented paths: the key exists only in the
-`crq` user's home — out of an unprivileged agent's reach, though a root-capable agent could
-reach it until P0 lands (see the accepted limit). The gate logs the `override` prefix in its run
-summary.
+`crq` account's home on the signer host — out of an unprivileged agent's reach, though a root-capable
+agent could reach it until P0 lands (see the accepted limit). The gate logs the `override`
+prefix in its run summary.
+
+**Accepted limit (the override is not agent-proof today).** The procedure above holds only
+while the signer host's ssh and sudo are closed. Today the fleet agents reach `ctaylor@` on the
+signer host without a
+password, and ctaylor holds NOPASSWD sudo and `docker` (root-equivalent) on the signer host — so a
+root-capable agent can become root there, reach the PEM, and mint an override or any other
+status. Same shape as #269's accepted forgeable-status limit: accepted for the rollout, and
+closed only when BOTH (1) signer-host P0 removes ctaylor's NOPASSWD and `docker` membership and
+closes sshd password auth, and (2) the owner's signer-host credential is one agents cannot use
+(e.g. a FIDO `sk-ssh-ed25519` key requiring physical touch, never a copyable plain key).
+Until then the override — like every path in this policy — is T1-grade, not T2-grade.
 
 I4 still applies: an override skips the review, never the required checks.
 
-## When the crq host is offline
+## When the signer is offline
 
-Nothing posts a review, so nothing promotes. **Promotion waits; nothing fails red.** A gate run
-woken by sync's dispatch or by hand ends green with "awaiting promotion review". When the host
-returns, crq picks up from the last promotion: it cuts a batch if a trigger has fired. The
-override needs the same host (`crq-override` runs in the `crq` user's login session), so while
-the host is down there is no remote override path either.
+If the signer host — or the ssh path from crq to the spool — is down, nothing posts a review,
+so nothing promotes. crq treats ssh failure as **unknown**: no new request, no withdrawal, no
+false "signer down"; after 30 minutes it alerts "signer host unreachable" (distinct from the
+signer-down alert) and keeps triage. **Promotion waits; nothing fails red.** Gate runs woken
+meanwhile end green with "awaiting promotion review". When the signer host returns, crq re-issues the
+request and the signer-down timer restarts from recovery. The override needs the same host
+(`crq-override` runs on the signer host under `crq` from the owner's own ssh), so while the host is
+unreachable there is no remote override path either.
 
 ## What a red gate run means
 
@@ -133,21 +194,26 @@ runs.
 
 ## The crq interface
 
-Signer mode, which this change arms: every request is a full `base_sha..batch_sha` review —
-there are no delta items and no agent-judged success. The delta-item mechanics in the next three
-bullets describe the interim user mode and are rewritten when the policy doc is (PR-D).
+Signer mode: every request is a full `base_sha..batch_sha` review — there are no delta items in
+the spool and no agent-judged success. The spool contract (`signer/README.md` in the crq repo)
+is normative; this section is the policy-level summary.
 
-- **Item kind:** `promotion`, carrying `batch_sha` (40-hex), `base_sha` (`main` at cut time), and
-  for a delta item, `reviewed_sha` (the previously reviewed tip, an ancestor of `batch_sha`).
-- **Priority:** a `promotion` item takes the next start slot ahead of everything else, and so does
-  its delta re-review. It never pre-empts a running review. At most one promotion is open at a
-  time.
-- **Review:** the CodeRabbit CLI over `base_sha..batch_sha`, or `reviewed_sha..batch_sha` for a
-  delta item, run in a detached checkout at `batch_sha`. The run counts only when the CLI exits
-  successfully with a terminal, non-skipped completion. A failed, rate-limited or auth-failed run
-  posts nothing new (or `error`) and is retried. It is never reported as `success`.
+- **Item kind:** `promotion`, carrying `batch_sha` (40-hex) and `base_sha` (`main` at cut
+  time), written to the spool on the signer host over ssh. At most one promotion is open at a time.
+- **Priority:** a `promotion` item takes the signer's next start slot ahead of everything
+  else. It never pre-empts a running review.
+- **Review:** the CodeRabbit CLI over `base_sha..batch_sha`, run by the signer in its own
+  detached clone and worktree at `batch_sha` on the signer host, with review configuration restored from
+  `base_sha` (a head-side file cannot suppress findings) and the diff secret-scanned before any
+  upload. The run counts only when the CLI exits successfully with a terminal, non-skipped
+  completion. A failed, rate-limited or auth-failed run posts nothing new (or `error`) and is
+  retried. It is never reported as `success`.
+- **Coverage:** success comes only from the signer's own recorded clean reviews covering the
+  whole range — a full `base_sha..batch_sha` run, optionally a full run the signer extends with
+  its own clean internal deltas; a dirty run voids the same range's clean record. The steward
+  never sees, requests or judges coverage.
 - **Status:** posted by the promotion-review signer (its installation token minted from the App
-  key in the dedicated `crq` account's home on the offline signer host) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
+  key in the `crq` user's home on the offline signer host) as the pinned reviewer bot `cq-promotion-reviewer[bot]`
   (identity per the registration record @ `d8f132f`):
   - `context`: `crq/promotion-review`
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
