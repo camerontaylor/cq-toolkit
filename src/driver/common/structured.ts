@@ -196,18 +196,24 @@ export function toOutputSchema(name: string, schema: z.ZodType): OutputSchema {
  * BEFORE shipping the document to its provider — an uncompilable document
  * (an unresolvable/unrepresentable doc) must surface as the uniform
  * `output-invalid` verdict compiled locally, never as a provider/harness
- * failure from a request-setup rejection. Returns the compiler's objection
- * (the same text `validateStructured` reports), or `undefined` when the
- * document compiles.
+ * failure from a request-setup rejection. Compiles the document ONCE and
+ * hands the result back (issue #241): `{ schema }` when the document
+ * compiles, or `{ fault }` — the compiler's objection, the same text
+ * {@link validateStructured} reports — when it does not.
  */
-export function compileOutputSchemaFault(os: OutputSchema): string | undefined {
+export function compileOutputSchema(
+  os: OutputSchema,
+): { schema: z.ZodType<unknown> } | { fault: string } {
+  // `JsonSchema` is deliberately the loose plain-data seam type; zod's
+  // importer wants its own (structurally identical) JSON Schema type.
   try {
-    z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
-    return undefined;
+    return { schema: z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema) };
   } catch (err) {
-    return `schema '${os.name}' could not be compiled from its JSON Schema document: ${
-      err instanceof Error ? err.message : String(err)
-    }`;
+    return {
+      fault: `schema '${os.name}' could not be compiled from its JSON Schema document: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
   }
 }
 
@@ -236,21 +242,19 @@ export function uncompilableSchemaVerdict(lane: string, fault: string): WorkerRe
  * on `ok` returns the schema-normalised plain JSON (e.g. unknown keys are
  * treated exactly as the emitted document treats them). A document that
  * cannot even COMPILE is an `ok: false` result naming the schema and the
- * compiler's objection — the same objection {@link compileOutputSchemaFault}
- * preflights before dispatch.
+ * compiler's objection — the same objection {@link compileOutputSchema}
+ * preflights before dispatch. The document is compiled once here (issue
+ * #241) and the compiled schema is reused for the parse.
  */
 export function validateStructured(
   os: OutputSchema,
   value: unknown,
 ): { ok: true; value: unknown } | { ok: false; reason: string } {
-  // `JsonSchema` is deliberately the loose plain-data seam type; zod's
-  // importer wants its own (structurally identical) JSON Schema type.
-  const fault = compileOutputSchemaFault(os);
-  if (fault !== undefined) {
-    return { ok: false, reason: fault };
+  const compiled = compileOutputSchema(os);
+  if ('fault' in compiled) {
+    return { ok: false, reason: compiled.fault };
   }
-  const schema = z.fromJSONSchema(os.schema as unknown as z.core.JSONSchema.JSONSchema);
-  const parsed = schema.safeParse(value);
+  const parsed = compiled.schema.safeParse(value);
   if (!parsed.success) {
     return { ok: false, reason: z.prettifyError(parsed.error) };
   }

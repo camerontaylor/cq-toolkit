@@ -40,7 +40,9 @@ const driverReturning = (value: WorkerResult): Driver => ({
   run: async () => value,
 });
 
-const lanes = ['ai-sdk', 'claude-agent', 'subprocess', 'acp'] as const;
+// The matrix runs every first-party lane — derived from LANE_IDS (the
+// single runtime statement of the lane set), never re-stated (issue #241).
+const lanes = LANE_IDS;
 
 describe('served-model assertion — the m-ii matrix', () => {
   test('an observed mismatch becomes error/served-model-mismatch: payload dropped, spend kept', async () => {

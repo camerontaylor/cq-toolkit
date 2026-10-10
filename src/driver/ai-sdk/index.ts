@@ -213,7 +213,7 @@ import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import {
-  compileOutputSchemaFault,
+  compileOutputSchema,
   uncompilableSchemaVerdict,
   validateStructured,
 } from '../common/structured.js';
@@ -361,9 +361,9 @@ export class AiSdkDriver implements Driver {
     // uniform LOCAL 'output-invalid' verdict, never a provider/harness
     // failure from a request-setup rejection.
     if (opInvocation.outputSchema !== undefined) {
-      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
-      if (schemaFault !== undefined) {
-        return uncompilableSchemaVerdict('ai-sdk', schemaFault);
+      const compiled = compileOutputSchema(opInvocation.outputSchema);
+      if ('fault' in compiled) {
+        return uncompilableSchemaVerdict('ai-sdk', compiled.fault);
       }
     }
 

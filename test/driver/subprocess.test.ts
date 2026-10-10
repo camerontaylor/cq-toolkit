@@ -3068,6 +3068,28 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
     });
   });
 
+  test('I8 precedence: an already-aborted signal outranks an uncompilable outputSchema (PR #241)', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, calls));
+      const controller = new AbortController();
+      controller.abort();
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+        { signal: controller.signal },
+      );
+      // The governed cancellation outranks the schema fault: the run settles
+      // the plain abort verdict, never the LOCAL output-invalid one.
+      expect(result.stopReason).toBe('aborted');
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      expect(calls).toEqual([]); // the CLI never ran
+    });
+  });
+
   test('classifier rows through the lane: quota (claude limit text, spend limit, opencode funds) and rate-limit rows', async () => {
     await withScratch(async (scratchDir) => {
       let runCount = 0;

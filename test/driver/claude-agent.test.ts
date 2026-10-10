@@ -2705,6 +2705,34 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
     }
   });
 
+  test('I8 precedence: an already-aborted signal outranks an uncompilable outputSchema (PR #241)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-i8-'));
+    try {
+      let consulted = false;
+      const driver = streamDriver(scratchDir, () => {
+        consulted = true;
+        return [];
+      });
+      const controller = new AbortController();
+      controller.abort();
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+          toolPolicy: { allow: [], mode: 'none' },
+        }),
+        { signal: controller.signal },
+      );
+      // The governed cancellation outranks the schema fault: the run settles
+      // the plain abort verdict, never the LOCAL output-invalid one.
+      expect(result.stopReason).toBe('aborted');
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      expect(consulted).toBe(false); // the agent SDK never ran
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('an assistant frame with the structured error rate_limit classifies quota', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {
