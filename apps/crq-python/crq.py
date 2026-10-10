@@ -2285,6 +2285,7 @@ def write_status(q: Dict[str, Any]) -> None:
                               + f". {PROMO.get('resolver', 'conductor')}: fix in merge-queue, then "
                               f"`crq.py promotion-resolve <n|all> \"fixed in PR #N\"`")
     attempts = [f"{a['item']} ({a['merges']} merges: {a['why']})" for a in st_p.get("attempts", [])[-6:]]
+    mode = promotion_mode()
     md = [f"# CodeRabbit review queue — status ({iso()})", "", *banner, *([""] if banner else []),
           f"- queue: {'**PAUSED** — ' + str(q.get('pause_reason')) if q.get('paused') else 'active'}",
           f"- schedule: `{sched}` {next_run}",
@@ -2293,7 +2294,7 @@ def write_status(q: Dict[str, Any]) -> None:
           f"{', '.join(i['id'] + ' (' + ((i.get('run') or {}).get('run_id') or 'signer ' + i['state']) + ')' for i in inflight(q)) or 'none'}",
           f"- legacy addressing: {', '.join(i['id'] + ' agent ' + i['addressing']['agent_id'][:8] for i in items if i['state'] == 'addressing') or 'none'}",
           f"- open-PR CLI reviews still owed: {owed_open}",
-          f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {promotion_mode()}"
+          f"- promotion: {'enabled' if PROMO.get('enabled') else 'DISABLED'} · mode {mode}"
           f"{'' if PROMO.get('post_status') else ' (statuses not posted)'}; last promoted "
           f"{(q.get('promotion') or {}).get('last_promoted_sha', '—')} at {(q.get('promotion') or {}).get('last_promoted_at', '—')}"
           f"{'; splitting toward ' + st_p['continue_to'][:10] + ' at ≤' + str(st_p.get('batch_cap')) + ' merges' if st_p.get('continue_to') else ''}",
@@ -2312,7 +2313,7 @@ def write_status(q: Dict[str, Any]) -> None:
                                                               "prior_cycles", "cycles", "pinned_base", "last_error",
                                                               "wait_reason")} for i in items]}, indent=2) + "\n")
     try:
-        status_summary.publish(ROOT, q, CONFIG, schedule)
+        status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=mode)
     except Exception as exc:
         # Preserve the last complete summary; failed publishing must not stop
         # reviews or manufacture fresh zero counters.
@@ -2549,7 +2550,7 @@ def main() -> int:
                 schedule = paseo_json(["schedule", "inspect", CONFIG["schedule_id"]])
             except Exception:
                 pass
-        status_summary.publish(ROOT, q, CONFIG, schedule)
+        status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=promotion_mode())
         print(WATCHDOG_HOME / "summary.json")
     elif args.cmd == "synth":
         q = load_queue()

@@ -1,7 +1,7 @@
 # CRQ implementation status and file leases
 
-Sole conductor/integrator: 00000000-0000-4000-8000-000000000003 (owner-delegated maintainer,
-full authorization 2026-10-10; previous conductor 20d7d77e is no longer live).
+Sole CRQ owner/conductor/integrator: chancellor 00000000-0000-4000-8000-000000000004
+(owner since 2026-10-11; previous conductor 00000000-0000-4000-8000-000000000003).
 
 **Deployed 2026-10-10:** queue-host is the sole runner at 2696601 (cutover 11:52Z; first tick 12:00Z);
 worker-host inert (schedule schedule-example deleted, watchdog booted out, marker set, rollback set retained).

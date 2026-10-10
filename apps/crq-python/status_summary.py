@@ -5,6 +5,7 @@ import repair_tick
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -84,7 +85,74 @@ def read_events(path):
                     raise  # a complete corrupt record must never become zero outcomes
 
 
-def publish(root, queue, config, schedule, home=None, now=None):
+def systemd_activity():
+    """Observe user units, independently of the configured scheduling backend."""
+    timers = ("crq-tick.timer", "crq-watchdog.timer", "crq-records.timer")
+    services = ("crq-records.service",)
+    units = timers + services
+    activity = {unit: {"active": None, "active_state": None, "load_state": None}
+                for unit in units}
+    for unit in timers:
+        activity[unit].update(last_trigger=None, next_elapse=None)
+    try:
+        output = command(["systemctl", "--user", "show", "--timestamp=unix",
+                          "--property=Id,LoadState,ActiveState,LastTriggerUSec,"
+                          "NextElapseUSecRealtime,NextElapseUSecMonotonic", *units], 5)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        for entry in activity.values():
+            entry["error"] = "systemctl user show unavailable"
+        return {unit: activity[unit] for unit in timers}, {unit: activity[unit] for unit in services}
+
+    realtime, monotonic = time.time(), time.clock_gettime(time.CLOCK_MONOTONIC)
+
+    def unix_time(value):
+        if not value or value in ("0", "infinity", "n/a"):
+            return None
+        if not value.startswith("@"):
+            raise ValueError("unexpected systemd timestamp")
+        return float(value[1:]) or None
+
+    def iso_time(value):
+        return (dt.datetime.fromtimestamp(value, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if value is not None else None)
+
+    def monotonic_time(value):
+        if not value or value in ("0", "infinity", "n/a"):
+            return None
+        scales = {"w": 604800, "d": 86400, "h": 3600, "min": 60,
+                  "s": 1, "ms": .001, "us": .000001, "µs": .000001}
+        parts = re.findall(r"(\d+(?:\.\d+)?)(min|ms|us|µs|w|d|h|s)", value)
+        if not parts or re.sub(r"\d+(?:\.\d+)?(?:min|ms|us|µs|w|d|h|s)\s*", "", value).strip():
+            raise ValueError("unexpected systemd timespan")
+        return realtime + sum(float(n) * scales[unit] for n, unit in parts) - monotonic
+
+    for block in output.strip().split("\n\n"):
+        properties = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        unit = properties.get("Id")
+        if unit not in activity:
+            continue
+        entry = activity[unit]
+        entry.update(active_state=properties.get("ActiveState"), load_state=properties.get("LoadState"))
+        if entry["active_state"] is not None:
+            entry["active"] = entry["active_state"] == "active"
+        if entry["load_state"] != "loaded":
+            entry["error"] = "systemd unit not loaded"
+        if unit in timers:
+            try:
+                entry["last_trigger"] = iso_time(unix_time(properties.get("LastTriggerUSec")))
+                next_elapse = unix_time(properties.get("NextElapseUSecRealtime"))
+                if next_elapse is None:
+                    next_elapse = monotonic_time(properties.get("NextElapseUSecMonotonic"))
+                entry["next_elapse"] = iso_time(next_elapse)
+            except (ValueError, OverflowError, OSError):
+                entry["error"] = "systemd timer timestamp unavailable"
+    for entry in activity.values():
+        if entry["active_state"] is None:
+            entry["error"] = "systemd unit observation unavailable"
+    return {unit: activity[unit] for unit in timers}, {unit: activity[unit] for unit in services}
+
+
+def publish(root, queue, config, schedule, home=None, now=None, *, promotion_mode=None):
     """Write the shared XDG state summary atomically.
 
     Call after persisting a completed tick. Administrative summary refreshes
@@ -98,6 +166,8 @@ def publish(root, queue, config, schedule, home=None, now=None):
     if not data["last_tick"]:
         raise ValueError("no completed tick to publish")
     data.update(schema_version=2, generated_at=generated)
+    data["promotion"]["mode"] = promotion_mode
+    data["systemd_timers"], data["systemd_services"] = systemd_activity()
     data["repair"] = repair_tick.digest(root, queue)
     data["utilization"] = coverage.utilization_digest(queue, queue.get("coverage") or coverage.new_ledger(),
         now=now, max_starts_per_hour=config["max_starts_per_hour"])

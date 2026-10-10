@@ -25,6 +25,15 @@ Never enable them merely because code or units have been installed.
 
 `crq-watchdog.timer` checks completed tick heartbeat age and alerts at 36 minutes.
 Heartbeat and summary are atomic under `${XDG_STATE_HOME:-~/.local/state}/crq`.
+The additive schema-2 summary includes `promotion.mode` from the status.md resolver,
+and `systemd_timers` keyed by `crq-tick.timer`, `crq-watchdog.timer`, and
+`crq-records.timer`. Each observation has `active` (boolean, or null if unknown),
+`active_state`, `load_state`, `last_trigger`, and `next_elapse` (UTC ISO timestamps,
+or null when unavailable/never), with `error` when observation fails or the unit
+is not loaded. Watchdog monotonic deadlines are converted to UTC at observation.
+Records runs continuously: its absent timer is reported as `load_state=not-found`,
+while `systemd_services["crq-records.service"]` reports its actual activity.
+These observations are independent of `schedule.state`, which names the backend.
 Fleet readers must use that location after handover. Twenty-four-hour acceptance
 requires actual observations and is not implied by installation or static checks.
 
