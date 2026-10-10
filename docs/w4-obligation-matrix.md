@@ -16,8 +16,8 @@ the owner's live steps are ordered by direction around that change (§2.6, §5.2
 
 Evidence base: `origin/main` = `origin/merge-queue` = `70de728` (read on
 2026-10-02, the date the spec's review pass was taken), the live GitHub API
-for this repository, and the superseded plan
-`toolkit-research-validation-efficiency/plans/ralplan-agent-validation-efficiency.md`
+for this repository, and the superseded `ralplan-agent-validation-efficiency`
+plan (not published; plan identifiers are labels only and need no lookup)
 §4 (`:133-141`). Every claim below carries a `file:line` or an API read.
 Refreshed on 2026-10-03 against `origin/merge-queue` = `6dd2337` (PR #262,
 npm→pnpm): every command spelling and line citation below is re-verified
