@@ -15,7 +15,8 @@
 # (`ls-tree` + `cat-file`, never `git archive` or a checkout), and its
 # measurement artifact is size-capped and schema-validated, never executed.
 #
-# Jobs (ADR-0004 D-B compute/sign split, critic r2 R2-4):
+# Jobs (ADR-0004 D-B compute/sign split — no credential-bearing job runs head
+# content):
 #   - `resolve` verifies the triggering run (workflow path, event, repository
 #     id — fork runs are refused) and resolves the subject from `head_sha`,
 #     never `head_branch`; a PR subject's base comes from the commit→PR API.
@@ -264,7 +265,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Runs the trust-ref tsc over HEAD CONTENT (a head tsconfig can point tsc
-    # at runner paths), so this job holds no credential at all (R2-4).
+    # at runner paths), so this job holds no credential at all (ADR-0004 D-B).
     permissions: {}
     outputs:
       typecheck_count: ${{ steps.count.outputs.typecheck_count }}
