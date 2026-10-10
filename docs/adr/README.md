@@ -151,7 +151,9 @@ permanently, outside the interim set
 ([`policy/templates/github-settings.json`](../../policy/templates/github-settings.json),
 `drill`). **Open:** before C3, the owner decides whether D-D.2 gains an
 explicit exception for the drill PAT, or C3 also revokes it and the drill
-moves to non-human authentication.
+moves to non-human authentication. Resolved for the `adversarial-scratch`
+environment by N18 (2026-10-11): non-human credentials, no exception; the
+`drill` environment's question remains open.
 
 ### N9 — ADR-0004 D-B, D-C.4 and D-E: npm commands after the move to pnpm
 
@@ -288,3 +290,59 @@ The trigger changes nothing about trust: `cq-signal` remains a wake-up only
 untrusted-producer class; D-A.2's push exclusion is for privileged or
 deciding jobs, which `cq-signal` is not — and every verdict is still
 recomputed from the API by `head_sha`.
+
+### N18 — ADR-0004 D-D.2, D-I and N8: the `adversarial-scratch` environment moves to a scratch App identity
+
+D-I's environment list (`cq-verdict`, `promote`, `automation`, `drill`)
+omits the `adversarial-scratch` environment the settings template declares,
+and N8's open question covers its three permanent secrets:
+`CQ_ADVERSARIAL_TOKEN`, `CQ_ADVERSARIAL_SECOND_TOKEN` and
+`CQ_ADVERSARIAL_PROFILE_TOKEN` are, when provisioned per the current runner
+contract, human-authenticating PATs. The primary must be the scratch
+repository's owner and admin
+([`scripts/adversarial-suite.mjs`](../../scripts/adversarial-suite.mjs)
+preflight), so it is necessarily an owner-account credential — squarely
+inside D-D.2's bar once C3 completes.
+
+**Owner decision (2026-10-11):** the adversarial drills and scratch-token use
+move to an App-token identity; D-D.2 gains no exception for this
+environment. Application, with D-D.2's rules unchanged:
+
+- **No existing App fits.** The verdict App is the trust anchor (check-run
+  authority), the promoter App holds the R1 `main` bypass and `workflows:
+write`, and the automation App is the merger/propose/reply identity the
+  drills deliberately attack (A1 untrusted approvals, A14 workflow pushes,
+  A15 the automation-governed skip marker) — a drill credential must not be
+  able to ride it. The drills get a **dedicated scratch App**
+  (`cq-adversarial-scratch`), installed on the scratch repository
+  (`camerontaylor/cq-scratch-v11-adversarial`) **only, never on cq-toolkit**,
+  with the least privilege its probes need: **Actions read/write**
+  (repository and environment Actions variables) and **Administration
+  read-only** (the preflight's environments-list read), nothing else.
+- **Per-run minting, not a static installation token.** As with the
+  `cq-verdict`/`promote`/`automation` environments, the environment secret
+  holds the App's private key (`CQ_ADVERSARIAL_APP_KEY`), the App's client id
+  is a repository variable (`CQ_ADVERSARIAL_APP_CLIENT_ID`), and
+  [`policy/templates/adversarial-suite.yml`](../../policy/templates/adversarial-suite.yml)
+  mints a scratch-repo installation token per run. A static installation
+  token expires with nothing to re-mint it; dispatch-only drills need no
+  refresh path when they mint per run. (The self-review loop's identity
+  note, PR #303, defers its per-run minting as a behavior change; here the
+  mint step ships with this change.)
+- **The three PAT names are interim, gone at C3.** The settings template
+  moves all three to `interimSecrets`. `CQ_ADVERSARIAL_PROFILE_TOKEN` is
+  consumed only until the App is registered (the mint step is
+  variable-gated and falls back to it).
+  `CQ_ADVERSARIAL_TOKEN` and `CQ_ADVERSARIAL_SECOND_TOKEN` stay interim
+  because their consumers — the runner's preflight, which verifies two
+  distinct human-type identities (the owner-admin primary and the
+  non-collaborator outsider) — cannot yet accept App identities. Moving
+  those two slots to scratch App identities (installation-identity
+  verification, distinct-App assertions, App-posted outsider reviews) is the
+  recorded prerequisite for revoking their PATs at C3; until it lands, C3
+  leaves those probe rows BLOCKED (fail-closed), never passing.
+- **D-I's environment list gains `adversarial-scratch`**, with the same
+  default-branch-only policy as the others (D-D.1).
+
+N8's open question is resolved for this environment (non-human credentials,
+no exception); the `drill` environment's question remains open.
