@@ -140,6 +140,17 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     expect(boundedErrorText(far)).toBe(far);
   });
 
+  // Delta review r3 (PR #305): the wrapped tier's cap must not also cap
+  // CONTIGUOUS userinfo — a long tunnel/DSN token escaped a capped span. The
+  // contiguous tier is unbounded and cannot swallow unrelated text: it stops
+  // at the first whitespace or the `@`.
+  test('boundedErrorText redacts a long contiguous userinfo token beyond any cap', () => {
+    const longToken = 'x'.repeat(201);
+    expect(boundedErrorText(`GET https://user:${longToken}@example.test/db refused`)).toBe(
+      'GET [redacted] refused',
+    );
+  });
+
   test('boundedErrorText keeps credential-free URLs visible, even with @ in the path', () => {
     expect(boundedErrorText('see https://example.com/a@b for details')).toBe(
       'see https://example.com/a@b for details',
