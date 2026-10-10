@@ -141,13 +141,20 @@ jobs:
               case "$event" in
                 pull_request|pull_request_review|pull_request_review_comment)
                   # The PR comes from the commit→PR API, never from
-                  # pull_requests[] (ADR-0004 D-C.2).
-                  targets="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
-                    --jq "[.[] | select(.state == \"open\"
+                  # pull_requests[] (ADR-0004 D-C.2). Every page, slurped
+                  # into one array; an API error fails the step (assignment
+                  # under `set -e`, `pipefail`).
+                  list_pulls() {
+                    gh api --paginate \
+                      "repos/${REPO}/commits/${subject}/pulls?per_page=100" \
+                      | jq -s 'add // []'
+                  }
+                  pulls="$(list_pulls)"
+                  targets="$(jq "[.[] | select(.state == \"open\"
                        and .head.sha == \"${subject}\"
                        and .head.repo.id == ${REPO_ID}
                        and .base.ref == \"merge-queue\")
-                       | {pr: .number, subject: .head.sha}]")"
+                       | {pr: .number, subject: .head.sha}]" <<<"$pulls")"
                   count="$(jq 'length' <<<"$targets")"
                   case "$count" in
                     0)
