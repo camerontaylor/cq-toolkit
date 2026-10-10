@@ -11,11 +11,9 @@
 //               reads use a NARROW runtime allowlist — the Sol audit rejected
 //               the earlier broad `(subpath "/")` allow with narrow denies,
 //               which left sibling host paths (e.g. other /private/var/tmp
-//               trees) readable.  LIVE STATUS: this narrow-allow profile has
-//               NOT yet executed a child on any host (the broad-root variant
-//               did — a limited 6/6 canary observation, retracted as
-//               certification by audit); final-head live evidence is a gate
-//               of the fresh protocol sequence.
+//               trees) readable. Real enforcement is exercised on macOS by
+//               the backend/probe tests and seatbelt-live certification
+//               canaries; profile construction alone is not certification.
 //   bwrap     — Linux bubblewrap: minimal read-only binds of the OS runtime
 //               trees (no host-root bind — same audit finding), unshare the
 //               network namespace for model-only posture.
@@ -377,11 +375,9 @@ export const SEATBELT_BIN = '/usr/bin/sandbox-exec';
  * No rule implies denial under `(deny default)`, and seatbelt `deny` is
  * sticky, so the composition stays minimal.
  *
- * LIVE STATUS: the broad-root variant of this profile executed children on
- * darwin 24.6.0 (limited 6/6 canary observation, audit-retracted as
- * certification); THIS narrow-allow variant has not yet run on any host —
- * live evidence at final head is a gate of the fresh protocol sequence.  A
- * wrong SBPL rule (e.g. a bad `(remote ip ...)` form) surfaces as a child
+ * Real enforcement is exercised by the macOS backend/probe tests and the
+ * seatbelt-live certification canaries. A wrong SBPL rule (e.g. a bad
+ * `(remote ip ...)` form) surfaces as a child
  * launch failure, which the probe records as a control failure — it can
  * never pass by accident.
  */
@@ -523,6 +519,11 @@ export function seatbeltAdapter(): SandboxBackendAdapter {
         spawnError: message,
       });
       const env = launcherEnv(request);
+      // Shell lookup must agree with the profile's executable trees. A host
+      // PATH preferring Homebrew/GNU tools otherwise selects a denied binary
+      // for an ordinary command such as `cat`, even though /bin/cat is allowed.
+      // Explicit commands outside these trees remain denied by the profile.
+      env['PATH'] = '/usr/bin:/bin:/sbin:/usr/libexec';
       // The policy NEVER lives in the model-writable workspace, and its
       // parent is CANONICAL — never env-derived (Sol final audit: an
       // inherited TMPDIR pointing inside the workspace would defeat any
