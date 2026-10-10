@@ -5,11 +5,10 @@ repository. This document **supersedes the previous "three full local gates"
 (3×) rule** everywhere it was stated. It is normative: no protocol step,
 handoff record or review cycle may require a local full-suite run.
 
-Slice 1 of the execution-policy spec — `specs/optimise-test-suite-execution-policy-spec.md`
-in the **toolkit-research** repo (this repository does not contain it; the path is
-relative to that repo's root) — component **B —
+This contract is slice 1 of the execution-policy spec — component **B —
 Operating policy**, plus the **C — Gate venue** rule that makes required CI the
-full-gate authority. The later slices measure, retime and parallelise the
+full-gate authority. The spec is not published; its identifiers here are labels
+only and need no lookup. The later slices measure, retime and parallelise the
 suite; they do not revisit this contract.
 
 ## 1. The rule
