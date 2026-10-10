@@ -46,7 +46,14 @@ ssh queue-host 'cd /home/operator/repos/coderabbit-queue && python3 -c "import j
 ```
 
 `prepare-host.py` renders from the committed `HEAD:config.json`, so re-running
-it is idempotent. Verify the spool with crq's exact argv:
+it is idempotent. After the handover NEVER run it plain (it marks the runner
+inert). Live update procedure (code or committed config change):
+`systemctl --user stop crq-tick.timer`, wait for `crq-tick.service` inactive,
+`git restore config.json`, fast-forward, `python3 ops/prepare-host.py
+--live-config` (holds the tick lock, rewrites config.json only — live-only edits
+are overwritten and repair stays disabled), `systemctl --user start
+crq-tick.timer`, then confirm the next `~/.local/state/crq/heartbeat.json` has
+`"alert_agent_host": "worker-host.tailnet.example:6767"`. Verify the spool with crq's exact argv:
 
 ```sh
 ssh queue-host '/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@127.0.0.1 exist promo-0000000000'   # promo-0000000000 0

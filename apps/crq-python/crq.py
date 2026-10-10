@@ -1678,14 +1678,19 @@ def promotion_statuses(sha: str) -> List[Dict[str, Any]]:
 
 
 def notify_owner(text: str) -> Dict[str, Any]:
-    """Paseo message to the chancellor (the owner's desk; works from the
-    Background launchd session ticks run in) plus a best-effort macOS
-    notification (osascript exits 0 there but may not display)."""
+    """Paseo message to the chancellor (the owner's desk). promotion.alert_agent_host
+    names its daemon when it is not the local one (queue-host runner → worker-host). Never
+    raises: an unreachable daemon must not stall the tick that is reporting."""
     res: Dict[str, Any] = {}
     aid = PROMO.get("alert_agent_id")
     if aid:
-        p = run(["paseo", "send", "--no-wait", aid, text], check=False, timeout=90)
-        res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
+        host = PROMO.get("alert_agent_host")
+        try:
+            p = run(["paseo", "send", "--no-wait", *(["--host", host] if host else []), aid, text], check=False,
+                    timeout=30 if host else 90)
+            res["paseo_send"] = p.returncode if p.returncode == 0 else f"{p.returncode}: {p.stderr.strip()[:150]}"
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            res["paseo_send"] = f"error: {exc}"[:150]
     return res
 
 
@@ -2396,7 +2401,8 @@ def write_heartbeat(q: Dict[str, Any]) -> None:
         tmp = WATCHDOG_HOME / ".heartbeat.json.tmp"
         tmp.write_text(json.dumps({"last_tick": q["last_tick"], "stale_alarm_min": CONFIG.get("stale_alarm_min", 36),
                                    "schedule_id": CONFIG.get("schedule_id"), "root": str(ROOT),
-                                   "alert_agent_id": PROMO.get("alert_agent_id")}) + "\n")
+                                   "alert_agent_id": PROMO.get("alert_agent_id"),
+                                   "alert_agent_host": PROMO.get("alert_agent_host")}) + "\n")
         tmp.replace(WATCHDOG_HOME / "heartbeat.json")
     except OSError as exc:
         event("heartbeat_failed", error=str(exc)[:200])

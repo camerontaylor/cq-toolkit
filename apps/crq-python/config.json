@@ -28,6 +28,8 @@
     "tip_search_depth": 15,
     "poster": "camerontaylor",
     "alert_agent_id": "00000000-0000-4000-8000-000000000004",
+    "alert_agent_host": null,
+    "_alert_agent_host_note": "null = local Paseo daemon (a worker-host runner, rollback); ops/prepare-host.py renders the worker-host endpoint for the queue-host runner",
     "allowed_reviewers": [],
     "resolver": "conductor (acceptance conductor reviewer-example)",
     "signer": {

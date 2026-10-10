@@ -42,11 +42,15 @@ def main():
     sched = " systemd crq-tick.timer."
     text = (f"crq STALLED: no completed tick for {gap:.0f}m (last {last}, alarm at {limit}m).{sched} "
             "Inspect heartbeat and systemctl --user status crq-tick.timer; do not run tests or model probes.")
-    sent = sh(["paseo", "send", "--no-wait", hb["alert_agent_id"], text], timeout=90)
-    ST.write_text(json.dumps({"alerted_for": last, "alerted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    host = hb.get("alert_agent_host")
+    sent = sh(["paseo", "send", "--no-wait", *(["--host", host] if host else []), hb["alert_agent_id"], text], timeout=90)
+    # Only a delivered alert closes this outage; a failed send retries on the next timer run.
+    key = "alerted_for" if sent.returncode == 0 else "failed_attempt_for"
+    ST.write_text(json.dumps({key: last, "attempted_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                               "gap_min": round(gap), "paseo_send": sent.returncode,
                               "paseo_err": sent.stderr.strip()[:200]}) + "\n")
-    print(f"{utcnow():%FT%TZ} ALERTED stale {gap:.0f}m (paseo send exit {sent.returncode})")
+    print(f"{utcnow():%FT%TZ} {'ALERTED' if sent.returncode == 0 else 'ALERT FAILED'} stale {gap:.0f}m "
+          f"(paseo send exit {sent.returncode})")
 
 
 if __name__ == "__main__":
