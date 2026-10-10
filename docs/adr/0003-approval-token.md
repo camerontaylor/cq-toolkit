@@ -5,7 +5,7 @@
 - **Amends / Related:** part of [ADR-0003](0003-governed-runner.md) (§2.7); implements W4.3 and guards the A16
   forged-approval attack.
 
-Post-acceptance note N5 in the [ADR index](README.md#post-acceptance-notes) narrows parts of this record.
+Post-acceptance notes N5, N11 and N12 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 The token replaces the plan-data boolean `approved: true`, which any plan author can write, in the analyze ops
 (`applyRemediation`, the ast-grep codemod engine primitive, and `playbookDispatch`, which used to self-satisfy the
@@ -108,11 +108,17 @@ or fails. **Where its record lives is open** (O-5): an environment-derived locat
 Non-approval writers don't take this lock; the closing rule is open (O-6, ADR-0003 §2.7).
 
 > Open: see post-acceptance note N5 in the [ADR index](README.md#post-acceptance-notes).
+> O-5 is resolved in code: see post-acceptance note N11 in the
+> [ADR index](README.md#post-acceptance-notes).
 
 1. **Re-compute the state and require deep equality** with `grant.state`: `realpath` matches;
    `git rev-parse HEAD === headSha`; and the clean predicate, `git status --porcelain=v1 --untracked-files=all` is
    empty (untracked files count as dirty; ignored files are **out of scope**, a stated residual since an ignored
    file can influence a codemod that reads it).
+
+   > Narrowed: the clean predicate exempts applyRemediation's byte-verified report pair; see post-acceptance note
+   > N12 in the [ADR index](README.md#post-acceptance-notes).
+
 2. **Nonce check-and-append, in one critical section** of the ledger lock (the same primitive): re-read the
    ledger, check against snapshot ∪ in-run ∪ fresh read, then append the nonce **durably to the operator ledger
    first**.

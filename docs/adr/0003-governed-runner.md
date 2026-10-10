@@ -7,7 +7,7 @@
   types bump, `SEAM_VERSION = 2`.
 - **Annexes:** [approval token](0003-approval-token.md), [journal v2](0003-journal-migration.md).
 
-Post-acceptance notes N1 and N6 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N1, N6, N11 and N13 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## 1. Context
 
@@ -192,6 +192,9 @@ export interface BudgetReservation {
   `'budget' | 'signal' | 'stalled' | 'deferred' | 'lock-lost' | 'provider'`. `exhausted`/`breach`/`token-cap` trips
   → `budget`; `signal` → `signal`; `lock-lost` → `lock-lost`; profile `refuse` → `provider`, `defer` → `deferred`.
 
+  > Partly in force: only `'budget' | 'signal'`; see post-acceptance note N13 in the
+  > [ADR index](README.md#post-acceptance-notes).
+
 ### 2.4 Lane classification
 
 A `(lane, provider, model)` is **HARD for USD** only when all of the following are **demonstrated** by a
@@ -294,6 +297,10 @@ retires after the v1.1 soak window (an owner input, §6).
   - **Other users of the primitive.** The approval nonce ledger's lock anchors its record **beside the ledger file**.
     The per-workspace mutation lock (approval-token annex §4c) needs the same split-brain-proof anchor; where its
     record lives is open (O-5).
+
+  > O-5 and O-8 are resolved in code, and the `budget.breakLock` opt-in above is not in the kernel union yet: see
+  > post-acceptance notes N11 and N13 in the [ADR index](README.md#post-acceptance-notes).
+
 - **Ungoverned over governed:** refused unless `optIn: budget.ungovernedOverGoverned`. When opted in, the run takes
   the plan lock and honours quarantine, writes **no** reservation events, and records
   `run-started.ungoverned = {optIn: true}` (outside the bound, §2.3 precondition 3); a later governed resume emits a

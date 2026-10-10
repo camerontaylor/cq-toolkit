@@ -4,7 +4,7 @@
 - **Date:** 2026-09-24
 - **Related:** [ADR-0002 Annex B](0002-annex-b-config.md) (secret keys and their environments)
 
-Post-acceptance notes N7, N8 and N9 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N7, N8, N9, N16 and N17 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## Context
 
@@ -53,6 +53,9 @@ All deciding verifiers run under `workflow_run` from the default-branch definiti
 | **ratchet-propose**                                            | `ratchet-propose-measure` (`push: main`, `permissions: {}`) produces an artifact. `ratchet-propose` (`workflow_run`, env `automation`) opens the proposal PR **against `merge-queue`**, branched from the merge-queue tip, authored by the automation App (excluded from the trust set, D2).                                                                                                                                                                                                                                                                                                                                                                                                                     | normal PR checks                                                   | normal gate                                                                                 |
 
 `cq-signal` (`pull_request` with `types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review, edited]`, plus `pull_request_review` and `pull_request_review_comment`; `permissions: {}`; empty body) is a **wake-up only**. Verifiers re-read everything from the API by `head_sha`, and a `schedule` sweep (default-branch definition, every 15 minutes in the automation window) re-evaluates open merge-queue PRs whose App verdicts are missing or stale. Label and review events therefore re-evaluate D11 records and acceptance.
+
+> Extended: the shipped template also triggers on `push: [merge-queue]`; see post-acceptance note N17 in the
+> [ADR index](README.md#post-acceptance-notes).
 
 `pull_request_target` is **not used for any required check.** A non-required, informational `pull_request_target` job is permitted but not shipped by default: it would add a secrets-bearing, default-branch-ref carrier that the lint must police, and it gives no signal `cq/policy` doesn't. If one is used, it must reference no `environment:` and no `secrets.*` other than `GITHUB_TOKEN` (enforced by the D-G.3 lint), and the repository Actions event policy must allow it (D-I).
 
@@ -248,6 +251,10 @@ This binds every consumer: the gate, `self-merge-prs`/`classifyPr`, `self-review
 7. **Liveness:**
    - a `schedule` sweep (default-branch definition) runs `decide` when `merge-queue` is ahead of `main`;
    - a missed wake-up delays promotion by at most one sweep interval. **The gate sweep's interval bounds promotion latency**; its value is not yet specified (open point O-7). The `cq-signal` sweep runs only in the automation window and does not bound promotion.
+
+     > Decided: every 15 minutes; see post-acceptance note N16 in the
+     > [ADR index](README.md#post-acceptance-notes).
+
    - **Workflow-file refusals are needs-human, not retries.** The merge executor and the conflict agent classify GitHub's "refusing to allow a GitHub App to create or update workflow … without `workflows` permission" as needs-human. This covers `self-merge-prs` merging a D11-authorized workflow-touching PR, the conflict agent's `git merge FETCH_HEAD` push on a branch older than a queued workflow change, and a sync PR merge after a break-glass workflow change on `main`. All three fail closed; the W1.9/W1.10 executors must not loop on them.
 
 ## Named non-adoptions
