@@ -18,9 +18,11 @@
 // runs, so the userinfo span admits whitespace; a contiguous span is
 // unbounded (a long token must not escape), while the wrapped span is
 // bounded so a stray `@` paragraphs later cannot drag a large block into one
-// match — scrubbing too much near the URL is the acceptable direction. A
-// credential-free URL — including one whose only `@` sits in the path — is
-// untouched.
+// match — scrubbing too much near the URL is the acceptable direction. The
+// wrapped tier is tried FIRST so an inner `@` cannot truncate the match
+// mid-password; the unbounded contiguous tier is the fallback beyond the
+// cap. A credential-free URL — including one whose only `@` sits in the
+// path — is untouched.
 const MAX_ERROR_CHARS = 500;
 // `_URL` is deliberately absent from the suffix list (owner decision,
 // issue #291 row 6b): a plain URL value is not a secret. URLs that DO carry
@@ -38,20 +40,21 @@ const SECRET_ENV_SUFFIXES = [
   'PRIVATE_KEY',
 ];
 // A URL whose userinfo is present (user[:password]@ before the first `/`)
-// embeds a credential in the value itself. Two tiers: a CONTIGUOUS userinfo
-// span (no whitespace) is unbounded — a long tunnel/DSN token must not
-// escape the scrub, and a contiguous run cannot swallow unrelated text (it
-// stops at the first whitespace or the `@`). A WRAPPED span (userinfo
-// containing whitespace, e.g. split across a raw newline) is capped at 200
-// chars purely as the anti-swallow bound for pathological cross-line
-// content — a real wrapped URL is short, and a >200-char userinfo with
-// newlines inside is pathological; that residual risk is accepted here. The
-// span excludes `/`, so a credential-free URL whose only `@` sits in the
-// path does not match. Greedy resolution picks the LAST `@` within reach, so
-// an `@` inside a wrapped password cannot leave a credential fragment
-// behind.
+// embeds a credential in the value itself. Two tiers, WRAPPED FIRST: the
+// wrapped span (whitespace allowed, e.g. a raw newline splitting the
+// userinfo) is capped at 200 chars purely as the anti-swallow bound for
+// pathological cross-line content — a real wrapped URL is short, and a
+// >200-char userinfo with newlines inside is pathological (residual risk
+// accepted) — and resolves greedily to the LAST `@` within reach. It is
+// tried FIRST because contiguous-first would match the inner `@` of a
+// wrapped password (`user:pa@`) and leave the rest visible; the unbounded
+// CONTIGUOUS fallback only needs to catch userinfo longer than the wrap
+// cap (which the wrapped tier cannot span) — a long tunnel/DSN token — and
+// cannot swallow unrelated text (it stops at the first whitespace or the
+// `@`). The span excludes `/`, so a credential-free URL whose only `@` sits
+// in the path does not match.
 const CREDENTIAL_URL_PATTERN =
-  /[a-z][a-z0-9+.-]*:\/\/(?:[^\s/<>"'`]+|[^/<>"'`]{0,200})@[^\s<>"'`]*/gi;
+  /[a-z][a-z0-9+.-]*:\/\/(?:[^/<>"'`]{0,200}|[^\s/<>"'`]+)@[^\s<>"'`]*/gi;
 
 /** The caught cause as plain message text (never a vendor class name). */
 export function describeError(err: unknown): string {

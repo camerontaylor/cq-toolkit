@@ -151,6 +151,16 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     );
   });
 
+  // Delta review r4 (PR #305): alternation order matters. Contiguous-first
+  // matched the inner `@` of a wrapped password (`user:pa@`), truncating the
+  // redaction and leaving `word@example.test/db` visible. The wrapped tier
+  // now resolves first — greedy, to the last `@` within the cap — and the
+  // unbounded contiguous tier is only the fallback for userinfo longer than
+  // the wrap cap.
+  test('boundedErrorText fully redacts a wrapped password whose inner @ would tempt the contiguous tier', () => {
+    expect(boundedErrorText('ERR https://user:pa@ss\nword@example.test/db')).toBe('ERR [redacted]');
+  });
+
   test('boundedErrorText keeps credential-free URLs visible, even with @ in the path', () => {
     expect(boundedErrorText('see https://example.com/a@b for details')).toBe(
       'see https://example.com/a@b for details',
