@@ -55,9 +55,10 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
   });
 
   // Issue #291 row 6b (owner decision): `_URL` is not a secret suffix, so a
-  // plain URL-valued var is no longer blanket-redacted. A URL value carrying
-  // embedded credentials is handled by the credential-URL screen at the env
-  // boundary (src/config/resolve.ts), not by this redaction.
+  // plain URL-valued var is no longer blanket-redacted. A URL value that DOES
+  // carry embedded credentials is still scrubbed — by VALUE, right here in
+  // the text, independent of any env name; the config resolver's credential-
+  // URL screen additionally refuses such values at the passthrough boundary.
   test('boundedErrorText no longer redacts a plain _URL-suffixed value', () => {
     const prior = process.env.CQ_TEST_URL;
     process.env.CQ_TEST_URL = 'https://example.test/api';
@@ -86,5 +87,39 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       if (priorUrl === undefined) delete process.env.CQ_TEST_URL;
       else process.env.CQ_TEST_URL = priorUrl;
     }
+  });
+
+  // Review fix (PR #305): redaction is also VALUE-based for URLs — a URL
+  // carrying embedded userinfo is scrubbed whole from the text no matter
+  // which env name (if any) holds it.
+  test('boundedErrorText redacts a URL with embedded userinfo, env-independent', () => {
+    expect(boundedErrorText('GET https://user:pass@example.test/db failed')).toBe(
+      'GET [redacted] failed',
+    );
+    // Username-only userinfo still embeds a credential (Sentry-style DSNs).
+    expect(boundedErrorText('dsn https://abc@o1.ingest.example.test/2 rejected')).toBe(
+      'dsn [redacted] rejected',
+    );
+  });
+
+  test('boundedErrorText redacts a credential-bearing _URL env value echoed into text', () => {
+    const prior = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_URL = 'https://user:pass@example.test/db';
+    try {
+      // The name rule no longer covers `_URL`, so only the value-based scrub
+      // can catch the echoed endpoint URL.
+      expect(boundedErrorText('connect refused: https://user:pass@example.test/db')).toBe(
+        'connect refused: [redacted]',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = prior;
+    }
+  });
+
+  test('boundedErrorText keeps credential-free URLs visible, even with @ in the path', () => {
+    expect(boundedErrorText('see https://example.com/a@b for details')).toBe(
+      'see https://example.com/a@b for details',
+    );
   });
 });
