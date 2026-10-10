@@ -265,7 +265,9 @@ export const AgenticRemediationInputSchema: z.ZodType<AgenticRemediationInput> =
     sandboxPolicy: SandboxPolicySchema.exactOptional(),
     budget: BudgetSchema.exactOptional(),
     sessionRef: z.string().min(1).exactOptional(),
-    // The write-policy approval flag (R2-2): required by the OP (not the
+    // The write-policy approval flag (the rule's home is
+    // agenticRemediation.ts's header: widening beyond read-only is an
+    // approval-gated decision): required by the OP (not the
     // boundary) only when the effective policies permit writes — absence is
     // a decision the op refuses, not a malformed input.
     approved: z.boolean().exactOptional(),

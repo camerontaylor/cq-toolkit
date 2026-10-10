@@ -37,6 +37,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { z } from 'zod';
+import { GovernanceOptInRefusedError } from '../../src/kernel/errors.js';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
 import type { Governance, GovernorEvent } from '../../src/kernel/governor.js';
 import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
@@ -58,6 +59,19 @@ import type {
 const ACQUISITION_STEP_MS = 2 * 10_000 + 5_000;
 function journalEnclosure(steps: number): number {
   return ACQUISITION_STEP_MS + (steps - 1) * 15_000 + 5_000;
+}
+
+/**
+ * Captures a runPlan rejection as a value so its CLASS can be asserted: the
+ * ledger refusals are GovernanceOptInRefusedError (ADR-0003 §2.9 — the CLI's
+ * exit-2 mapping reads the class, never the message), so each canonical
+ * refusal test pins the class beside the message contract.
+ */
+async function refusalOf(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
 }
 const pendingRuns = new Map<Promise<unknown>, AbortController>();
 const cleanupActions = new Set<() => void>();
@@ -1208,15 +1222,19 @@ describe('governed journal v2 + resume', () => {
       expect(report1.counts.done).toBe(1);
       expect(await openRunLog(dir).runs()).toHaveLength(1);
 
-      // Ungoverned over governed history → refusal, before anything is written.
+      // Ungoverned over governed history → refusal, before anything is
+      // written. Typed (ADR-0003 §2.9): the class is what the CLI's exit-2
+      // mapping reads, so it is pinned beside the message contract.
       const calls: string[] = [];
-      await expect(
+      const refusal = await refusalOf(
         runPlan(
           independentPlan('plan-gov-mark', 1),
           { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
           viewWith(entry('fake', countingOp(calls))),
         ),
-      ).rejects.toThrow(
+      );
+      expect(refusal).toBeInstanceOf(GovernanceOptInRefusedError);
+      expect((refusal as Error).message).toBe(
         'runPlan: plan plan-gov-mark has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned',
       );
       expect(calls).toEqual([]);
@@ -1337,14 +1355,18 @@ describe('governed journal v2 + resume', () => {
       const calls: string[] = [];
 
       // Refusal names the count and the runs, whether or not resume is set.
-      await expect(
+      // Typed: GovernanceOptInRefusedError (ADR-0003 §2.9), pinned beside the
+      // message contract.
+      const v1Refusal = await refusalOf(
         runPlan(
           plan,
           { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
           viewWith(entry('fake', countingOp(calls))),
           { governor: createGovernor({}), allowAdvisory: true },
         ),
-      ).rejects.toThrow(
+      );
+      expect(v1Refusal).toBeInstanceOf(GovernanceOptInRefusedError);
+      expect((v1Refusal as Error).message).toBe(
         'runPlan: governed resume over v1 journals with unaccounted dispatches (1 jobs in plan-gov-v1--legacy--aa); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.',
       );
       await expect(
@@ -1505,15 +1527,18 @@ describe('governed journal v2 + resume', () => {
       const runsBefore = await openRunLog(dir).runs();
 
       // Raising 5 → 10 without the opt-in refuses BEFORE anything is written.
+      // Typed: GovernanceOptInRefusedError (ADR-0003 §2.9).
       const calls: string[] = [];
-      await expect(
+      const raiseRefusal = await refusalOf(
         runPlan(
           plan,
           { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
           viewWith(entry('fake', countingOp(calls))),
           { governor: createGovernor({ maxUsd: 10 }), allowAdvisory: true },
         ),
-      ).rejects.toThrow('runPlan: cap raised from 5 to 10');
+      );
+      expect(raiseRefusal).toBeInstanceOf(GovernanceOptInRefusedError);
+      expect((raiseRefusal as Error).message).toBe('runPlan: cap raised from 5 to 10');
       expect(calls).toEqual([]);
       expect(await openRunLog(dir).runs()).toEqual(runsBefore); // no seq claim, no run file
 

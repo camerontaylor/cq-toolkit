@@ -7,8 +7,8 @@
 //   - ATTRIBUTE-FREE EXTRACTION: the subject tree is materialized with
 //     `ls-tree -r -z` + `cat-file --batch` (./git.js), never `git archive`
 //     (which honours head-controlled `.gitattributes`: `export-ignore`
-//     silently drops error files, `export-subst` rewrites content; critic r2
-//     R2-2) and never a checkout (smudge filters). Symlinks and gitlinks are
+//     silently drops error files, `export-subst` rewrites content;
+//     ADR-0004 D-C.5) and never a checkout (smudge filters). Symlinks and gitlinks are
 //     skipped, so a head symlink cannot point tsc at runner paths. Tracked
 //     `node_modules` paths are refused, so head declarations cannot shadow
 //     the trusted dependency install.
@@ -25,7 +25,8 @@
 //
 // The caller runs this in a job that holds NO credential (the compute half
 // of D-B's compute/sign split): a head tsconfig can still steer which files
-// tsc reads. Diagnostics are never returned beyond the count (R2-4).
+// tsc reads. Diagnostics are never returned beyond the count (ADR-0004 D-B,
+// the typecheck-count row: "Diagnostics are not logged beyond counts").
 // Residual (D-J): suppression pragmas and ambient declarations in head
 // SOURCE are content, not definition, and still lower the count.
 import { mkdir, readdir, symlink } from 'node:fs/promises';

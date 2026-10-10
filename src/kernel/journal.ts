@@ -40,6 +40,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { LockOptions, lock } from 'proper-lockfile';
 import { z } from 'zod';
+import { PlanLockRefusedError } from './errors.js';
 import { runLadder } from './governor.js';
 import { JournalEventSchema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
@@ -591,7 +592,10 @@ async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecor
   // A foreign host's liveness evidence is unverifiable from here; only its
   // explicit release tombstone makes the record reclaimable.
   if (previous.host !== record.host) {
-    throw new Error(
+    // Typed, not plain: the CLI maps the lock refusal to exit 3 by CLASS
+    // (ADR-0003 §2.9 — transient, so never the permanent-usage 2). The
+    // message is unchanged contract.
+    throw new PlanLockRefusedError(
       `journal: plan locked by foreign host '${previous.host}' run '${previous.runId}'`,
     );
   }
@@ -599,7 +603,7 @@ async function assertReclaimable(previous: PlanLockRecord, record: PlanLockRecor
     (await socketIsAlive(previous.socketPath)) ||
     (previous.bootId === record.bootId && pidIsAlive(previous.pid))
   ) {
-    throw new Error(`journal: plan locked by '${previous.runId}'`);
+    throw new PlanLockRefusedError(`journal: plan locked by '${previous.runId}'`);
   }
 }
 

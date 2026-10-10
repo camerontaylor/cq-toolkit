@@ -1279,7 +1279,8 @@ async function awaitVerdicts(
 
 /**
  * Dispatch cq-verify on the default ref for the SUBJECT's completed
- * cq-measure push run (ADR-0004 D-K.5, R2-5). Never throws; `dispatched` is
+ * cq-measure push run (ADR-0004 D-K.5; the measure→verify pairing is D-B's
+ * ratchet row). Never throws; `dispatched` is
  * true only when the dispatch call succeeded (a subject with no completed
  * measure run yet is retried on the next poll).
  */

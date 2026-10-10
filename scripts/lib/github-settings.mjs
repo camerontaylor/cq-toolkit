@@ -472,7 +472,7 @@ function compareEnvironment(name, expected, actual, drift, notices) {
   if (canon(expDbp) !== canon(actDbp)) {
     const t19 =
       actDbp?.protected_branches === true
-        ? ' (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 T-19)'
+        ? ' (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 D-D.1)'
         : '';
     drift.push(
       `${prefix}: deployment_branch_policy differs: expected ${canon(expDbp)} actual ${canon(actDbp)}${t19}`,

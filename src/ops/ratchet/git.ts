@@ -35,7 +35,7 @@
 // no filters, no textconv, no eol conversion and no export-subst, so the bytes
 // are exactly the committed blob. The tree is extracted with `ls-tree` +
 // `cat-file --batch` — NEVER `git archive` (honours the head's
-// export-ignore/export-subst, ADR-0004 R2-2) and never a checkout (runs smudge
+// export-ignore/export-subst, ADR-0004 D-C.5) and never a checkout (runs smudge
 // filters and hooks).
 //
 // Every fault THROWS an Error prefixed `ratchet git:` — callers fold it into
@@ -540,7 +540,7 @@ async function prepareDest(dest: string): Promise<void> {
  * (the trusted tool only reads the tree, so the exec bit is irrelevant).
  *
  * Never `git archive` (it honours the head's export-ignore/export-subst,
- * ADR-0004 R2-2) and never a checkout (smudge filters, hooks, eol
+ * ADR-0004 D-C.5) and never a checkout (smudge filters, hooks, eol
  * conversion). Symlinks (120000) are SKIPPED and recorded — a head symlink
  * could point the trusted `tsc` at runner paths — as are gitlinks (160000).
  * Any path that is absolute or carries an empty/`.`/`..`/`.git` segment is

@@ -330,14 +330,14 @@ describe('compareSettings', () => {
     ]);
   });
 
-  it('reports protected_branches: true with the T-19 reason', () => {
+  it('reports protected_branches: true with the D-D.1 reason', () => {
     const live = liveFrom(target());
     const env = live.environments['cq-verdict'];
     if (env === undefined) throw new Error('no env');
     env.deployment_branch_policy = { protected_branches: true, custom_branch_policies: false };
     env.branch_policies = [];
     expect(driftOf(live)).toEqual([
-      'environment cq-verdict: deployment_branch_policy differs: expected {"custom_branch_policies":true,"protected_branches":false} actual {"custom_branch_policies":false,"protected_branches":true} (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 T-19)',
+      'environment cq-verdict: deployment_branch_policy differs: expected {"custom_branch_policies":true,"protected_branches":false} actual {"custom_branch_policies":false,"protected_branches":true} (protected_branches admits any protected branch, e.g. merge-queue: ADR-0004 D-D.1)',
       'environment cq-verdict: deployment branch policy {"name":"main","type":"branch"} missing',
     ]);
   });
