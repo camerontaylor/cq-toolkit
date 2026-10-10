@@ -632,7 +632,7 @@ interface World {
   /** Called on each statuses read (the walk and the pre-push re-read). */
   onStatuses?: (n: number) => void;
   /** The cq/promoted replay marker's sha; undefined = ref absent. */
-  promoted?: string;
+  promoted?: string | undefined;
   /** When set, the marker ref read fails with this stderr (fail-closed). */
   promotedError?: string;
 }
@@ -771,6 +771,10 @@ function world(tip = M1, main = MAIN, over: Partial<World> = {}): World {
     // The default world's tip carries a trusted success bound to main: the
     // normal "batch tip reviewed, ready to promote" shape.
     statuses: new Map([[tip, [promoReview(main)]]]),
+    // The bootstrap invariant: the cq/promoted marker exists (== the main
+    // at cutover). The gate refuses while it is missing — fail-closed — so
+    // every fixture bootstraps it; tests exercise absence explicitly.
+    promoted: main,
     checkRuns: [[verdictRow(tip, main)]],
     measureRuns: [],
     verifiedRuns: new Map([
@@ -1333,12 +1337,12 @@ describe('runGate', () => {
     // luna round 4: the queue ref is leased at the run-start tip EVEN when
     // it equals the tip (an up-to-date ref passes; any movement rejects the
     // whole push), and the cq/promoted marker MUST move with the promotion
-    // (zeros = the ref must not exist yet, the clean first-promotion case).
+    // (leased at its own read: the bootstrap marker is main).
     expect(seen).toEqual([
       {
         updates: [
           { refspec: `${M1}:refs/heads/main`, expected: MAIN },
-          { refspec: `${M1}:refs/heads/cq/promoted`, expected: '0'.repeat(40) },
+          { refspec: `${M1}:refs/heads/cq/promoted`, expected: MAIN },
           { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
         ],
         token: 't',
@@ -1358,6 +1362,14 @@ describe('runGate', () => {
     expect(r.verdict).toBe('awaiting');
     expect(r.subject).toBeNull();
     expect(r.report.join('\n')).toMatch(new RegExp(`already promoted \\(cq/promoted at ${M1}\\)`));
+    expect(h.acceptanceInputs).toEqual([]);
+  });
+
+  test('a missing replay marker refuses (bootstrap required; deletion never re-enables replay)', async () => {
+    const h = harness(world(M1, MAIN, { promoted: undefined }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/replay marker is absent/);
     expect(h.acceptanceInputs).toEqual([]);
   });
 
