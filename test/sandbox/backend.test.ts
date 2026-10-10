@@ -1,10 +1,9 @@
 // The RS-13 backend adapters (B14): boundary construction is data (assertable
 // on any host), while boundary ENFORCEMENT is only claimed where it can
 // actually execute (the darwin seatbelt legs skip elsewhere — certification
-// evidence comes from probe.ts, never from these builders alone).  LIVE
-// STATUS of the narrow-allow seatbelt profile is recorded in backend.ts: it
-// replaces the audit-rejected broad-root read and has not yet executed on
-// any host; live evidence at final head is a gate of the fresh protocol.
+// evidence comes from probe.ts, never from these builders alone). The
+// seatbelt-live suite also exercises network, clipboard and process-group
+// canaries on macOS without broadening the profile's file permissions.
 import { mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -501,7 +500,7 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
       network: 'model-only',
     });
     expect(result.spawnError).toBeUndefined();
-    expect(result.ok).toBe(true);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
     expect(result.stdout).toContain('in-boundary');
     // The policy is compiled from parent-PRIVATE storage (Sol review: the
     // workspace is model-writable, so a policy there is attacker-replaceable);
@@ -509,6 +508,31 @@ describe.runIf(process.platform === 'darwin')('seatbelt executes inside the boun
     const listing = await readdir(workspace);
     expect(listing).not.toContain('.cq-seatbelt.sb');
     expect(listing.filter((name) => name.endsWith('.sb'))).toEqual([]);
+  }, 30_000);
+
+  test('shell lookup ignores a host PATH preferring a denied executable', async () => {
+    const adapter = seatbeltAdapter();
+    const workspace = await mkdtemp(join(adapter.workspaceParent(), 'cq-sbx-path-'));
+    const outside = await mkdtemp(join(tmpdir(), 'cq-sbx-path-out-'));
+    scratch.push(workspace, outside);
+    const shadow = join(outside, 'cat');
+    await writeFile(shadow, '#!/bin/sh\necho shadow-tool\n', { mode: 0o755 });
+    const request = {
+      workspace,
+      network: 'model-only' as const,
+      parentEnv: { ...process.env, PATH: `${outside}:/usr/bin:/bin` },
+      envPassthrough: ['PATH'],
+    };
+    const lookup = await adapter.launch({
+      ...request,
+      argv: ['/bin/sh', '-c', 'echo system-tool > proof.txt && cat proof.txt'],
+    });
+    expect(lookup.ok, JSON.stringify(lookup)).toBe(true);
+    expect(lookup.stdout.trim()).toBe('system-tool');
+    const explicit = await adapter.launch({ ...request, argv: [shadow] });
+    expect(explicit.ok).toBe(false);
+    expect(explicit.stderr).toMatch(/Operation not permitted|Permission denied/);
+    expect(explicit.stdout).not.toContain('shadow-tool');
   }, 30_000);
 
   test('the launcher env scrub reaches the confined child, and TMPDIR moves inside', async () => {

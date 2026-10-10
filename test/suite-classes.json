@@ -143,6 +143,7 @@
   "test/plans/sweep.test.ts": "process",
   "test/sandbox/config.test.ts": "pure",
   "test/sandbox/launcher.test.ts": "process",
+  "test/sandbox/seatbelt-live.test.ts": "live",
   "test/scripts/adversarial-suite.test.ts": "process",
   "test/scripts/affected-tests.test.ts": "pure",
   "test/scripts/demo-eval-axes.test.ts": "process",
