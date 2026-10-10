@@ -1176,6 +1176,14 @@ describe('WorkerResult.providerSignals — seam v2, allowed on ANY verdict', () 
     });
   });
 
+  test('a negative retryAfterMs is rejected by the mirror bound (issue #242)', () => {
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      { ...base, stopReason: 'complete', providerSignals: { retryAfterMs: -1 } },
+      'a negative retryAfterMs',
+    );
+  });
+
   test('an empty providerSignals object parses — every field is optional', () => {
     roundTripsThrough(kernelSchema.WorkerResultSchema, {
       ...base,
