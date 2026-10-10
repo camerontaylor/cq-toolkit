@@ -74,8 +74,9 @@
 // resume:true — only the replay-skip map is resume-gated — and seeds the
 // governor from it.
 //
-// Governed refusals (thrown BEFORE anything is emitted or claimed; the CLI
-// maps on the 'runPlan: ' prefix):
+// Governed refusals (thrown BEFORE anything is emitted or claimed; each is a
+// GovernanceOptInRefusedError — the typed class the CLI maps to exit 2,
+// ADR-0003 §2.9 — with the message prefix kept for narration contract):
 //   - an ungoverned run over governed history (run governed or opt in with
 //     `budget.ungovernedOverGoverned`);
 //   - the marker itself on a plan with NO governed history — the opt-in names
@@ -144,6 +145,7 @@
 // honest stop).
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
+import { GovernanceOptInRefusedError } from './errors.js';
 import {
   acquirePlanLock,
   assertNoSeqGap,
@@ -837,7 +839,7 @@ async function runPlanUnderLease(
     // (a) Ungoverned over governed history: the plan's ledger is governed —
     // an ungoverned run would split it.
     if (governedRunIds.length > 0) {
-      throw new Error(
+      throw new GovernanceOptInRefusedError(
         `runPlan: plan ${plan.id} has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned`,
       );
     }
@@ -849,7 +851,7 @@ async function runPlanUnderLease(
     // run's ops with no admission and strand its spend outside every future
     // ledger — a silent forfeit. Refuse, naming the condition and both
     // resolutions (the operator almost certainly meant to run governed).
-    throw new Error(
+    throw new GovernanceOptInRefusedError(
       `runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan ${plan.id} has no governed history — the marker exists for an ungoverned run OVER governed history; drop the opt-in and run governed`,
     );
   } else if (!ungovernedMarked) {
@@ -865,7 +867,7 @@ async function runPlanUnderLease(
           if (event.type === 'job-started') dispatchedJobIds.add(event.jobId);
         }
       }
-      throw new Error(
+      throw new GovernanceOptInRefusedError(
         `runPlan: governed resume over v1 journals with unaccounted dispatches (${dispatchedJobIds.size} jobs in ${unaccountedV1.join(' ')}); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.`,
       );
     }
@@ -877,7 +879,9 @@ async function runPlanUnderLease(
       nextCapUsd > prevCapUsd &&
       !gov.optIn?.includes('budget.raiseCap')
     ) {
-      throw new Error(`runPlan: cap raised from ${prevCapUsd} to ${nextCapUsd}`);
+      throw new GovernanceOptInRefusedError(
+        `runPlan: cap raised from ${prevCapUsd} to ${nextCapUsd}`,
+      );
     }
   }
   // The ungoverned-marked path takes NO refusals: it IS the opt-out — its

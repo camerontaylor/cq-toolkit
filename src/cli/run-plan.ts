@@ -17,19 +17,26 @@
 // op subcommands map flags by EXACT schema key (the asymmetry is documented
 // in main.ts).
 //
-// ERROR SHAPES (the 1-vs-2 line): all INPUT defects are exit 2 —
+// ERROR SHAPES (the 1-vs-2-vs-3 line): all INPUT defects are exit 2 —
 // schema-invalid flags; a --plan path that is missing or not a regular file;
-// corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); and
-// the kernel's own input-validation class — a thrown error whose message
-// starts with 'runPlan: ' (duplicate job ids, the concurrency bound,
-// resume:true without journalDir, caps without governance, governance
-// without a governor, and the LEDGER refusals: a run over governed history
-// without governance, the ungoverned marker on a plan with no governed
-// history, a governed run over v1 journals with unaccounted dispatches, a
-// cap raise over the last governed cap) or 'journal: runId must match ' (the filename-safety assert: a
-// PlanSchema-valid plan whose id cannot become a journal file name, e.g.
-// 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
-// is set — the plan id is still the defective input). RUNTIME throws are
+// corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); the
+// kernel's typed LEDGER refusals — GovernanceOptInRefusedError (a run over
+// governed history without governance, the ungoverned marker on a plan with
+// no governed history, a governed run over v1 journals with unaccounted
+// dispatches, a cap raise over the last governed cap: each names the
+// operator's resolution, an opt-in or a flag change, so the invocation is
+// the defective input) — and the kernel's other input-validation class, a
+// thrown error whose message starts with 'runPlan: ' (duplicate job ids, the
+// concurrency bound, resume:true without journalDir, caps without governance,
+// governance without a governor) or 'journal: runId must match ' (the
+// filename-safety assert: a PlanSchema-valid plan whose id cannot become a
+// journal file name, e.g. 'bad/id', thrown by assertSafeRunId inside runPlan
+// when --journal-dir is set — the plan id is still the defective input).
+// The LOCK refusal is NOT an input defect: PlanLockRefusedError
+// ('journal: plan locked by …') is TRANSIENT — the holder may release, abort
+// or die — so it maps to exit 3 by CLASS, never by message matching
+// (ADR-0003 §2.9: automation treats 2 as a permanent usage error and would
+// never retry). RUNTIME throws are
 // exit 1 — anything else (a journal open/write failure, a file read that
 // raced the stat gate) propagates to main.ts's catch, which narrates and
 // returns 1 'thrown'. No result ever existed on a throw, so stdout stays
@@ -46,6 +53,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { z } from 'zod';
+import { GovernanceOptInRefusedError, PlanLockRefusedError } from '../kernel/errors.js';
 import { createGovernor, governorConfig, type Governance } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import { PlanSchema } from '../kernel/schema.js';
@@ -270,7 +278,10 @@ export function parseRunPlanInput<T>(
  * by run-plan (a plan FILE) and the plan subcommands (a registry floor plan);
  * see run-plan.ts's header for the shared error taxonomy.
  *
- * Kernel-input-class throws (`runPlan: `/`journal: runId must match `/`topoOrder: `) are
+ * The typed lock refusal (PlanLockRefusedError) is a narrated exit 3 —
+ * transient, so never the permanent-usage 2 (ADR-0003 §2.9). Kernel
+ * input-class throws — the typed GovernanceOptInRefusedError and the
+ * `runPlan: `/`journal: runId must match `/`topoOrder: ` prefixes — are
  * narrated exits 2; any other throw propagates to the caller's catch → 1.
  */
 export async function runPlanThroughKernel(
@@ -363,28 +374,39 @@ export async function runPlanThroughKernel(
     // report (no post-run annotation pass to compose).
     report = await runPlan(plan, runOptions, view, governance);
   } catch (err) {
+    // The lock refusal is TRANSIENT (the holder may release, abort or die) →
+    // exit 3 by CLASS (ADR-0003 §2.9): automation treats 2 as a permanent
+    // usage error and would never retry, and 1 would read as the run's own
+    // failure instead of a contention wait. The message is the narration
+    // contract; the class is the datum — never message matching.
+    if (err instanceof PlanLockRefusedError) {
+      narrateIfHuman(io, mode, messageOf(err));
+      return EXIT_CODES.needsHuman;
+    }
     // Kernel-input-class throws are INPUT defects → exit 2, consistent with
-    // the schema/content defects above: messages starting 'runPlan: '
-    // (duplicate job ids, the concurrency bound, resume:true without
-    // journalDir, caps without governance, governance without a governor,
-    // AND the ledger refusals — a run over governed history without
-    // governance, the ungoverned marker on a plan with no governed history,
-    // a governed run over v1 journals with unaccounted dispatches, a cap
-    // raise over the last governed cap: each names the operator's
-    // resolution, an opt-in or a flag change, so the invocation is the
-    // defective input), messages
-    // starting 'journal: runId must match ' — the filename-safety assert
-    // (assertSafeRunId, via makeRunId inside runPlan) fires on a
+    // the schema/content defects above. The LEDGER refusals (a run over
+    // governed history without governance, the ungoverned marker on a plan
+    // with no governed history, a governed run over v1 journals with
+    // unaccounted dispatches, a cap raise over the last governed cap: each
+    // names the operator's resolution, an opt-in or a flag change, so the
+    // invocation is the defective input) carry the typed
+    // GovernanceOptInRefusedError, mapped by CLASS (ADR-0003 §2.9 — never by
+    // message matching). The remaining kernel input classes still match by
+    // message prefix: 'runPlan: ' (duplicate job ids, the concurrency bound,
+    // resume:true without journalDir, caps without governance, governance
+    // without a governor), 'journal: runId must match ' — the filename-safety
+    // assert (assertSafeRunId, via makeRunId inside runPlan) fires on a
     // PlanSchema-valid plan whose id is journal-unsafe ('bad/id'): the id
     // would become `<runId>.ndjson`, so the defect is still the plan INPUT,
-    // not a runtime failure — and messages starting 'topoOrder: ' (the
-    // kernel manifest's dependency-cycle throw, review-debt #84): a CYCLIC
-    // PLAN FILE is an invalid plan, not a runtime crash, so it maps to the
-    // documented usage path (exit 2) instead of a narrated exit 1. Any other
-    // throw (a journal open/write failure, …) stays a RUNTIME throw →
-    // propagates to the caller's catch → narrated exit 1.
+    // not a runtime failure — and 'topoOrder: ' (the kernel manifest's
+    // dependency-cycle throw, review-debt #84): a CYCLIC PLAN FILE is an
+    // invalid plan, not a runtime crash, so it maps to the documented usage
+    // path (exit 2) instead of a narrated exit 1. Any other throw (a journal
+    // open/write failure, …) stays a RUNTIME throw → propagates to the
+    // caller's catch → narrated exit 1.
     const message = messageOf(err);
     if (
+      err instanceof GovernanceOptInRefusedError ||
       message.startsWith('runPlan: ') ||
       message.startsWith('journal: runId must match ') ||
       message.startsWith('topoOrder: ')

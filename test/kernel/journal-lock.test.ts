@@ -21,6 +21,7 @@ import { createInterface } from 'node:readline';
 import type { LockOptions } from 'proper-lockfile';
 import { afterEach, expect, test, vi } from 'vitest';
 import { z } from 'zod';
+import { PlanLockRefusedError } from '../../src/kernel/errors.js';
 import { createGovernor } from '../../src/kernel/governor.js';
 import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
@@ -397,6 +398,51 @@ test(
   2 * CHILD_STEP_MS,
 );
 
+// The refusal CLASS (ADR-0003 §2.9): the CLI maps a lock refusal to exit 3
+// by class (transient — never the permanent-usage 2), so the throw itself
+// must carry PlanLockRefusedError on every refusal path, message unchanged.
+test('a live same-host holder refuses with the typed lock-refusal error', async () => {
+  const dir = await directory();
+  const owner = await acquirePlanLock(dir, 'locked', 'owner');
+  try {
+    const refusal = await acquirePlanLock(dir, 'locked', 'contender').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(PlanLockRefusedError);
+    expect((refusal as Error).message).toBe("journal: plan locked by 'owner'");
+    expect((await record(dir)).runId).toBe('owner'); // the record is untouched
+  } finally {
+    await owner.release();
+  }
+});
+
+test('a foreign-host record refuses with the typed error, judged before any probe', async () => {
+  const dir = await directory();
+  // Built as data: a foreign host's liveness evidence is unverifiable from
+  // here, so only its release tombstone is reclaimable — the host judgment
+  // precedes the socket probe and no second host is needed.
+  await writeFile(
+    join(dir, 'locked.lock.json'),
+    JSON.stringify({
+      nonce: randomUUID(),
+      socketPath: '/nonexistent/cq-j-lock.sock',
+      pid: 1,
+      host: 'some-other-host',
+      bootId: 'boot-other',
+      runId: 'foreign',
+    }),
+  );
+  const refusal = await acquirePlanLock(dir, 'locked', 'contender').then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(refusal).toBeInstanceOf(PlanLockRefusedError);
+  expect((refusal as Error).message).toBe(
+    "journal: plan locked by foreign host 'some-other-host' run 'foreign'",
+  );
+});
+
 // Enclosure: owner write-ahead then parent recovery.
 test(
   'SIGKILL recovery charges an unresolved durable reservation and quarantines its job',
@@ -624,8 +670,8 @@ test('a stale guard lease taken over cannot let its displaced holder publish ove
   const seedNonce = String((await record(dir)).nonce);
   const gate = gateNextClaim();
   const displaced = acquirePlanLock(dir, 'locked', 'displaced').then(
-    () => 'acquired',
-    (error: unknown) => (error as Error).message,
+    () => 'acquired' as const,
+    (error: unknown) => error,
   );
   let owner: Awaited<ReturnType<typeof acquirePlanLock>> | undefined;
   try {
@@ -640,8 +686,11 @@ test('a stale guard lease taken over cannot let its displaced holder publish ove
     const ownedInode = await stat(join(dir, 'locked.lock.json'));
     gate.resume();
     // The seed's claim is taken by a live, unreleased owner: refuse, never
-    // replace (the canonical record was never touched, inode included).
-    expect(await displaced).toContain("plan locked by 'owner'");
+    // replace (the canonical record was never touched, inode included). The
+    // refusal carries the typed class (ADR-0003 §2.9).
+    const displacedOutcome = await displaced;
+    expect(displacedOutcome).toBeInstanceOf(PlanLockRefusedError);
+    expect((displacedOutcome as Error).message).toContain("plan locked by 'owner'");
     expect(await record(dir)).toEqual(owned);
     const after = await stat(join(dir, 'locked.lock.json'));
     expect({ dev: after.dev, ino: after.ino }).toEqual({

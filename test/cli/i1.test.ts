@@ -38,7 +38,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { exitCodeForOpResult, exitCodeForRunReport } from '../../src/cli/exit.js';
 import { parseFlags, runCli, type RunCliOptions } from '../../src/cli/main.js';
 import { narrate, type CliIo } from '../../src/cli/output.js';
-import { openRunLog } from '../../src/kernel/journal.js';
+import { acquirePlanLock, openRunLog } from '../../src/kernel/journal.js';
 import { JournalEventSchema, PlanSchema, RunReportSchema } from '../../src/kernel/schema.js';
 import type { OpResult, RunReport } from '../../src/kernel/types.js';
 import { get, list } from '../../src/registry/index.js';
@@ -1278,6 +1278,37 @@ describe('run-plan through the governed kernel', () => {
 
     const machine = await capture([...argv, '--json']);
     expect(machine).toEqual({ code: 1, out: '', err: '' });
+  });
+
+  test('a held plan lock is TRANSIENT: the typed refusal exits 3, not usage 2 (ADR-0003 §2.9)', async () => {
+    // A lock refusal is neither an input defect nor the run's own failure:
+    // the holder may release, abort or die, so automation must retry. The
+    // CLI maps the PlanLockRefusedError CLASS to 3 (2 would read as a
+    // permanent usage error automation would never retry; 1 as the run's
+    // failure). The holder is a real in-process lock over the same journal
+    // dir, so the record's socket probe sees it alive; the message is the
+    // narration contract, the class is the datum.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    await mkdir(journalDir, { recursive: true });
+    const holder = await acquirePlanLock(journalDir, 'i1-plan', 'holder-run');
+    const argv = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+    ];
+    try {
+      const human = await capture(argv);
+      expect(human.code).toBe(3);
+      expect(human.out).toBe('');
+      expect(human.err).toMatch(/plan locked by 'holder-run'/);
+      expect(human.err).not.toMatch(/invalid input/);
+
+      const machine = await capture([...argv, '--json']);
+      expect(machine).toEqual({ code: 3, out: '', err: '' });
+    } finally {
+      await holder.release();
+    }
   });
 
   test('duplicate job ids: PlanSchema-valid file, kernel input-class throw → exit 2', async () => {
