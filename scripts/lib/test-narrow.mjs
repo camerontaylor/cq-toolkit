@@ -277,6 +277,39 @@ export const signalExit = (signal) => 128 + (constants.signals[signal] ?? 1);
 const EXIT_TIMEOUT = 124;
 
 /**
+ * How long a repeat of a terminal signal is still the immediate duplicate:
+ * one terminal interrupt reaches the niced runner twice (the terminal
+ * signals the whole foreground group, and the un-niced parent relays), a
+ * few milliseconds apart. Only a repeat arriving after this window is a
+ * human's second Ctrl-C.
+ */
+export const INTERRUPT_GRACE_MS = 1_000;
+
+/**
+ * The response to one received terminal signal while the runner holds the
+ * lock, from the per-signal time its first copy was relayed. The first copy
+ * of a signal is relayed to the child group gracefully; a repeat inside the
+ * grace window is the parent relay's duplicate and is absorbed. A repeat
+ * AFTER the window means the graceful relay went unheeded: it escalates to
+ * the group sweep (SIGKILL of the verified identity, bounded wait) instead
+ * of waiting out the run/build timeout (#283). With no live child the
+ * runner finishes at once.
+ * @param {{
+ *   childLive: boolean,
+ *   signal: string,
+ *   relayedAt: Record<string, number | undefined>,
+ *   now: number,
+ * }} input
+ * @returns {'relay' | 'absorb' | 'escalate' | 'finish'}
+ */
+export function interruptAction({ childLive, signal, relayedAt, now }) {
+  if (!childLive) return 'finish';
+  const first = relayedAt[signal];
+  if (first === undefined) return 'relay';
+  return now - first >= INTERRUPT_GRACE_MS ? 'escalate' : 'absorb';
+}
+
+/**
  * The verdict on a finished vitest run. A pass must prove itself: a report,
  * every selected file in it, nothing unselected, and in EVERY selected file
  * at least one executed test — skipped and todo tests (all of a file's,

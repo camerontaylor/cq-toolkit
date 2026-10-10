@@ -47,6 +47,7 @@ import {
   NICE_INCREMENT,
   RUN_TIMEOUT_MS,
   USAGE,
+  interruptAction,
   loggedVitestArgs,
   missingManifestEntries,
   parseArgs,
@@ -92,7 +93,8 @@ if (getPriority() < NICE_INCREMENT) {
       env: { ...process.env, [REEXEC_MARK]: '1' },
     });
     // A terminal signal reaches both processes (same group); the niced one
-    // relays each signal to its vitest group once, so the duplicate is moot.
+    // relays each signal once and absorbs this immediate duplicate inside
+    // its interrupt grace window (only a repeat after the window escalates).
     for (const signal of SIGNALS) process.on(signal, () => niced.kill(signal));
     niced.on('error', (error) => {
       emit({ result: 'error', exit: 1, reason: `cannot re-exec under nice: ${error.message}` });
@@ -125,7 +127,8 @@ let child = null;
 let childDone = false;
 let childIdentity = null;
 let interruptedBy = null;
-const relayed = new Set();
+/** Per signal: when its first copy was relayed (interruptAction's input). */
+const relayedAt = Object.create(null);
 
 /** Signal the current child's whole process group (vitest's pool workers, the build's tsc). */
 const signalChild = (signal) => {
@@ -217,15 +220,34 @@ process.on('exit', (code) => {
   }
   releaseLock();
 });
+// Terminal signals: the first copy of each is relayed to the child group
+// gracefully; the immediate duplicate (terminal broadcast + the un-niced
+// parent's relay) is absorbed; a repeat after the grace window means the
+// graceful relay went unheeded, so the group is swept NOW — SIGKILL of the
+// verified identity, bounded — instead of waiting out the run/build
+// timeout (#283). The sweep never signals an unverifiable group.
 for (const signal of SIGNALS) {
   process.on(signal, () => {
-    if (child === null || childDone) {
+    const action = interruptAction({
+      childLive: child !== null && !childDone,
+      signal,
+      relayedAt,
+      now: Date.now(),
+    });
+    if (action === 'finish') {
       finish({ result: 'interrupted', exit: signalExit(signal), reason: signal });
     }
     interruptedBy ??= signal;
-    if (relayed.has(signal)) return;
-    relayed.add(signal);
-    signalChild(signal); // the code awaiting the child finishes
+    if (action === 'relay') {
+      relayedAt[signal] = Date.now();
+      signalChild(signal); // the code awaiting the child finishes
+      return;
+    }
+    if (action === 'escalate') {
+      say(`repeated ${signal}: SIGKILL of process group ${child.pid}`);
+      sweepChild();
+    }
+    // 'absorb': the parent relay's duplicate of the same interrupt
   });
 }
 
