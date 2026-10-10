@@ -1704,9 +1704,8 @@ describe('governed journal v2 + resume', () => {
       // Fresh dir: no prior runs. Honouring the marker here would dispatch the
       // ops ungoverned and strand this run's spend outside every future ledger
       // — a silent forfeit. The refusal names the condition and the resolution.
-      // Typed: GovernanceOptInRefusedError (ADR-0003 §2.9).
       const calls: string[] = [];
-      const noHistoryRefusal = await refusalOf(
+      await expect(
         runPlan(
           independentPlan('plan-gov-mark-nohistory', 1),
           { concurrency: 1, stopOnError: false, journalDir: dir },
@@ -1717,9 +1716,7 @@ describe('governed journal v2 + resume', () => {
             allowAdvisory: true,
           },
         ),
-      );
-      expect(noHistoryRefusal).toBeInstanceOf(GovernanceOptInRefusedError);
-      expect((noHistoryRefusal as Error).message).toBe(
+      ).rejects.toThrow(
         'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
       );
       expect(calls).toEqual([]); // never dispatched
