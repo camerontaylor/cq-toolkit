@@ -152,7 +152,10 @@ export const WorkerErrorClassSchema: z.ZodType<WorkerErrorClass> = z.enum([
 
 export const ProviderSignalsSchema: z.ZodType<ProviderSignals> = z
   .object({
-    retryAfterMs: z.number().exactOptional(),
+    // Issue #242: a retry delay is never negative — the same tightening the
+    // window rows below received (PR #238 review round 2), applied to the
+    // top-level field. Both producers floor at 0.
+    retryAfterMs: z.number().nonnegative().exactOptional(),
     windows: z
       .array(
         z
