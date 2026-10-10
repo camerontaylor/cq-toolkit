@@ -32,7 +32,8 @@ approval has been verified and recorded; installation does not authorize spend.
 
 Rollback: stop queue-host timer and wait for its exact active reviews first; migrate
 latest state back while both runners are stopped; remove worker-host inert marker
-and recreate schedule only after queue-host is provably stopped. Unload worker-host's
+and recreate schedule only after queue-host is provably stopped (worker-host runner on the
+candidate code with its spool settings — CUTOVER-COMMANDS.md "Rollback"). Unload worker-host's
 com.crq.fleet-reader launchd job BEFORE restoring worker-host summaries, then restore
 its retained watchdog script/plist and bootstrap com.crq.watchdog. Stop the queue-host
 record service; mark queue-host inert. Never run both queue runners.

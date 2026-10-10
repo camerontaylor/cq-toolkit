@@ -1215,6 +1215,10 @@ class Spool:
         # removed (owner D4: no fallback): refuse the spool rather than ignore the key
         self.refused = ("config promotion.signer.spool.legacy_shell is not supported: the dedicated forced-command "
                         "key is the only transport (owner decision D4) — remove it") if "legacy_shell" in cfg else None
+        if self.host and not self.refused and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*",
+                                                               self.host):
+            self.refused = (f"promotion.signer.spool.ssh_alias must be a literal user@host (ssh runs with -F none), "
+                            f"got {self.host!r}")
 
     @staticmethod
     def _id(iid: str) -> str:
@@ -1229,11 +1233,14 @@ class Spool:
         if self.refused:
             raise SpoolUnreachable(self.refused)
         if self.key:
-            auth = ["-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
+            # -F none: no ssh_config identities, Match/ProxyCommand or ControlMaster. A shared master
+            # opened with a general key would silently ignore -i and bypass the forced command.
+            auth = ["-F", "none", "-i", os.path.expanduser(self.key), "-o", "IdentitiesOnly=yes",
+                    "-o", "IdentityAgent=none", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
         else:
             raise SpoolUnreachable("no dedicated spool key configured (promotion.signer.spool.ssh_key) — refusing "
                                    "to use a general-purpose ssh identity")
-        cmd = ["ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
+        cmd = ["/usr/bin/ssh", *auth, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5",
                "-o", "ServerAliveCountMax=2", self.host, remote]
         try:
             p = subprocess.run(cmd, input=data if data is not None else b"", capture_output=True, timeout=45)

@@ -132,8 +132,9 @@ SCAN_ALLOWLIST_PATHS = [r"(^|/)\.git/", r"(^|/)node_modules/", r"(^|/)dist/", r"
                         r"(^|/)\.DS_Store$", r"^policy/denylist/patterns\.yml$"]
 
 # The spool lives on queue-host local disk (FHS variable-state dir). crq reaches
-# it from worker-host over `ssh -o BatchMode=yes queue-host` — push-only transport,
-# no listener on queue-host; contract semantics unchanged (signer/README.md).
+# it over ssh with the dedicated forced-command key (loopback on queue-host after
+# W0; see README "Transport isolation") — push-only transport, no listener;
+# contract semantics unchanged (signer/README.md).
 SPOOL = Path("/var/lib/crq-spool")
 REQUESTS = SPOOL / "requests"  # operator-owned; signer only unlinks here
 RESULTS = SPOOL / "results"    # crq-owned, files 0644

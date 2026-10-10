@@ -1,7 +1,9 @@
 # Prepared handover command sheet
 
-Prepared for candidate 946a96b5847f033de7763aeff8c062930553ad6b. Execute
-sections in order, inspecting each result. This is a command sheet, not an
+Candidate: the reviewed head that contains this sheet (it carries the `-F none`
+spool transport; 946a96b does not); record the exact SHA in
+state/implementation-deployment.json. Execute sections in order, inspecting each
+result. This is a command sheet, not an
 automatic deployment script. worker-host remains owner until section 4 completes.
 Repair remains disabled. No tests, probes, or credential output are permitted.
 
@@ -23,6 +25,32 @@ promotion stays fail-closed; no user identity or plain-shell fallback.
 ssh queue-host 'git -C /home/operator/repos/coderabbit-queue rev-parse HEAD'
 ssh queue-host 'systemctl --user is-active crq-tick.timer crq-tick.service crq-repair.service crq-repair.path crq-repair.timer crq-watchdog.timer crq-records.service'
 ssh queue-host 'test -f /home/operator/repos/coderabbit-queue/state/runner-disabled'
+```
+
+Ordering: cut over only after cq-toolkit `origin/main` carries
+`policy/promotion-reviewer.json` (the bootstrap promotion is cut by the
+user-mode worker-host runner and promoted by main's pre-PR-B gate). Before that the
+candidate halts promotion (`signer_unconfigured`); after it the worker-host runner's
+User statuses are refused by the gate, so do not leave worker-host running past it.
+
+Deliver the candidate. The queue-host checkout's `origin` is the bundle path
+`/tmp/crq-implementation-20261009.bundle`; `config.json` there is generated, so
+discard it before moving the checkout, then re-render it:
+
+```sh
+git -C /srv/operator/repos/worktrees/crq-implementation-20261009 bundle create /tmp/crq-implementation-20261009.bundle impl/crq-review-repair-20261009
+scp /tmp/crq-implementation-20261009.bundle queue-host:/tmp/crq-implementation-20261009.bundle
+ssh queue-host 'cd /home/operator/repos/coderabbit-queue && git fetch origin && git restore config.json && test -z "$(git status --porcelain)" && git merge --ff-only origin/impl/crq-review-repair-20261009 && python3 ops/prepare-host.py'
+ssh queue-host 'cd /home/operator/repos/coderabbit-queue && python3 -c "import json;s=json.load(open(\"config.json\"))[\"promotion\"][\"signer\"];print(s[\"app_login\"],s[\"reviewer_bot_id\"],s[\"spool\"][\"ssh_alias\"],s[\"spool\"][\"ssh_key\"])"'
+# expect: cq-promotion-reviewer[bot] 339373542 operator@127.0.0.1 ~/.ssh/crq-spool-ed25519
+```
+
+`prepare-host.py` renders from the committed `HEAD:config.json`, so re-running
+it is idempotent. Verify the spool with crq's exact argv:
+
+```sh
+ssh queue-host '/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@127.0.0.1 exist promo-0000000000'   # promo-0000000000 0
+ssh queue-host '/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@127.0.0.1 id'   # spool-shell: operation refused, exit 2
 ```
 
 Expected: delivered reviewed head, every unit inactive, marker present. Inspect
@@ -130,3 +158,15 @@ watchdog artifacts and bootstrap its plist. Prove queue-host inert with no activ
 owned jobs before removing worker-host's marker and recreating the retained schedule
 definition. Never use the original snapshot over newer queue state without
 explicit reconciliation. Repair remains disabled on both hosts.
+
+Once cq-toolkit `main` carries the reviewer policy, a worker-host runner on old code
+(`da295ce`) can no longer promote (its mode detection predates the policy file).
+Before removing worker-host's marker, move its runner checkout to this candidate or
+later (identity pins, `-F none`, policy-file mode), then set
+`promotion.signer.spool` to `operator@queue-host.local.example.invalid` +
+`~/.ssh/crq-spool-ed25519` (LAN only; the committed default is queue-host loopback)
+and verify from worker-host itself:
+
+```sh
+/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@queue-host.local.example.invalid exist promo-0000000000   # promo-0000000000 0
+```

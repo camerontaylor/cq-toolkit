@@ -17,10 +17,13 @@ for unit in units:
         sys.exit('refusing to prepare over an active CRQ unit: ' + unit)
 sys.path.insert(0, str(root))
 from crq_repair import atomic
-config = json.loads((root / 'config.json').read_text())
+# Render from the COMMITTED config: the working-tree copy is this script's own output.
+config = json.loads(subprocess.run(['git', '-C', str(root), 'show', 'HEAD:config.json'],
+                                   capture_output=True, text=True, check=True).stdout)
 config.update(clone='/home/operator/repos/crq-toolkit-runtime', worktree_root='/home/operator/repos/worktrees',
               timeout_bin='/usr/bin/timeout', paseo_hosts=['worker-host.tailnet.example:6767', '127.0.0.1:6767'])
 config['promotion']['record_url_template'] = 'http://queue-host.tailnet.example:6778/promotion/{item}'
+config['promotion']['signer']['spool'].update(ssh_alias='operator@127.0.0.1', ssh_key='~/.ssh/crq-spool-ed25519')
 config['repair'].update(enabled=False, spend_authorization=None,
                        cq_bin='/home/operator/repos/crq-toolkit-runtime/dist/cli.js', paseo_host='127.0.0.1:6767')
 atomic(root / 'config.json', config)

@@ -31,14 +31,14 @@
     "allowed_reviewers": [],
     "resolver": "conductor (acceptance conductor reviewer-example)",
     "signer": {
-      "app_login": null,
-      "reviewer_bot_id": null,
+      "app_login": "cq-promotion-reviewer[bot]",
+      "reviewer_bot_id": 339373542,
       "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
       "spool": {
         "dir": "/var/lib/crq-spool",
-        "ssh_alias": "queue-host",
+        "ssh_alias": "operator@127.0.0.1",
         "ssh_key": null,
-        "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; set ssh_key at the flip"
+        "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; the queue-host host config sets ssh_key (ops/prepare-host.py). ssh_alias is a literal user@host (ssh runs with -F none); crq runs on queue-host, so the spool is reached over loopback sshd (never the Tailscale SSH address)"
       }
     },
     "signer_stall_min": 90,

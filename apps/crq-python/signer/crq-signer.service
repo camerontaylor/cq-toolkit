@@ -26,7 +26,7 @@ Restart=always
 RestartSec=10
 Environment=HOME=/home/crq
 Environment=PATH=/usr/bin
-Umask=022
+UMask=022
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

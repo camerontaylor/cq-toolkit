@@ -39,9 +39,10 @@ by operator); `results/` and `ledger/` crq-owned 0755 (files 0644). The
 signer NEVER writes under `requests/` except renaming a request aside to
 claim it and unlinking the consumed file.
 
-**Transport (v1 amendment, D4):** crq runs on worker-host; the spool lives on
-queue-host. crq reaches it only via ssh with a **dedicated spool key** (config:
-key path + host alias) whose queue-host `authorized_keys` entry forces
+**Transport (v1 amendment, D4):** the spool lives on queue-host (crq ran on
+worker-host at design time; after W0 it runs on queue-host too). crq reaches it only
+via ssh with a **dedicated spool key** (config: key path + literal
+`user@host`) whose queue-host `authorized_keys` entry forces
 `spool-shell` — whatever holds that key can do exactly the spool verbs
 (`put` / `snapshot` / `withdraw` / `read` / `exist`), never a shell, never
 a forward — so a key stored on agent-readable worker-host is harmless by
@@ -52,8 +53,25 @@ root-owned at `/opt/cq-reviewer/spool-shell`, validates every id against
 the contract charset, word-splits `SSH_ORIGINAL_COMMAND` without eval, and
 exposes a closed verb set. Push-only: nothing listens on queue-host. An ssh
 failure is **unknown**, never a signal: no new request, no withdrawal, not
-counted as signer-down; after 30 minutes of ssh failure crq alerts "queue-host
-unreachable" separately from "signer down".
+counted as signer-down; after 30 minutes of ssh failure crq alerts
+"<ssh_alias> unreachable" separately from "signer down".
+
+**Transport isolation (2026-10-10 install finding).** crq runs ssh with
+`-F none` plus `IdentitiesOnly`, no agent and no `ControlMaster`, and
+`ssh_alias` is a literal `user@host`. Two paths otherwise bypass the
+forced command: a shared ControlMaster session opened with a general key
+ignores `-i`, and queue-host's Tailscale SSH address (`queue-host.example.invalid`,
+100.x) authenticates by tailnet identity and never reads `authorized_keys`.
+After W0, crq runs on queue-host and reaches the spool over loopback sshd as
+`operator@127.0.0.1` (not `localhost`: queue-host's known_hosts holds a stale
+`localhost` key, and BatchMode fails closed on it) with a queue-host-resident
+dedicated key (`~/.ssh/crq-spool-ed25519`, comment `crq-spool@queue-host`). The
+worker-host key (`crq-spool@worker-host`, to `operator@queue-host.local.example.invalid`,
+LAN only) stays authorized for a rollback to a worker-host runner. On queue-host the
+forced command is a protocol and locking adapter (verb framing,
+`.transport.lock`), not a privilege boundary: operator is in `crq-spool` and
+can write `requests/` directly. Outcomes stay unforgeable because the signer
+re-derives every decision itself.
 
 Budget split: the signer self-caps at **≤2 CLI starts per rolling hour, 1
 in flight** (single-threaded by construction); the **steward owns the shared
@@ -252,22 +270,27 @@ commits only.
   `install -d -o root -g crq-spool -m 2775 /var/lib/crq-spool/requests`,
   `install -d -o crq -g crq -m 755 /var/lib/crq-spool/results
   /var/lib/crq-spool/ledger`. Verify an end-to-end request round-trip at S2.
-- **Spool transport key (D4, S2, owner):** generate a dedicated keypair —
-  on worker-host, `ssh-keygen -t ed25519 -f ~/.ssh/crq-spool-ed25519 -N '' -C
-  crq-spool@worker-host` (0600, OUTSIDE any git working tree — crq's config dir
+- **Spool transport key (D4, S2):** generate a dedicated keypair on the
+  host that runs crq — on queue-host (post-W0) `ssh-keygen -t ed25519 -f
+  ~/.ssh/crq-spool-ed25519 -N '' -C crq-spool@queue-host`, and for a worker-host
+  rollback the same with `-C crq-spool@worker-host` on worker-host (0600, OUTSIDE any git working tree — crq's config dir
   is its checkout, so a key there is one `git add -A` from being committed;
   the private key lives where crq's config points and can only ever run
   `spool-shell`) — and append to operator's
   `~/.ssh/authorized_keys` on queue-host EXACTLY this line shape (never a
   general-purpose key entry):
-  `command="/opt/cq-reviewer/spool-shell",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,restrict <key-type> <base64 public key> crq-spool@worker-host`
-  crq's config then names the key path and a host alias
-  (`promotion.signer.spool.ssh_key` + `.ssh_alias`). Owner D4 confirms the
+  `command="/opt/cq-reviewer/spool-shell",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,restrict <key-type> <base64 public key> crq-spool@<host>`
+  crq's config then names the key path and a literal `user@host`
+  (`promotion.signer.spool.ssh_key` + `.ssh_alias`; queue-host:
+  `operator@127.0.0.1`, worker-host rollback: `operator@queue-host.local.example.invalid`).
+  Owner D4 confirms the
   forced-command key is the DEFAULT and the ONLY supported transport:
   plain operator ssh is not a supported configuration, and crq's config
-  fails closed when the key or alias is unset. Verify:
-  `ssh -i <key> <alias> exist` round-trips and `ssh -i <key> <alias>`
-  (no verb) fails with "no command".
+  fails closed when the key or alias is unset. Verify with crq's exact argv
+  (`crq.py` `Spool._ssh`): `ssh -F none -i <key> -o IdentitiesOnly=yes -o
+  IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes
+  <user@host> exist promo-0000000000` prints `promo-0000000000 0`, and the
+  same with `id` (or no verb) fails `spool-shell: operation refused`, exit 2.
 - `/opt/cq-reviewer/bin/coderabbit` — installed and authenticated as crq at
   S1 (record: 2026-10-08, owner-confirmed). The S2 install step verifies it
   lives at this path; if the owner placed it elsewhere, move it here or
@@ -289,7 +312,7 @@ commits only.
 | Rate limited | `outcome=rate_limited`, `wait_minutes`; `ledger/backoff.json` (`reason:"rate_limit"` — extends the steward's cooldown); daemon self-cooldowns |
 | Deferred on the 2/h self-cap | request left UNCLAIMED (no status, no id burned); `ledger/backoff.json` refreshed each poll with `reason:"budget"` (steward cooldown untouched); `defer-budget` in the audit log |
 | Auth failure | `outcome=auth`, no final status; re-run `coderabbit auth login` as crq |
-| queue-host unreachable | crq alerts once after 30 min of ssh failure (distinct from signer-down); check `ssh -o BatchMode=yes queue-host true`, then `systemctl status crq-signer` on queue-host |
+| spool unreachable | crq alerts "<ssh_alias> unreachable" once after 30 min of ssh failure (distinct from signer-down); rerun the exact-argv `exist` check above, then `systemctl status crq-signer` on queue-host |
 | Signer wedged/down | steward alerts after 30m unclaimed; `journalctl -u crq-signer`, `systemctl status crq-signer` |
 | Full event trail | audit log `/home/crq/.local/state/crq-signer/audit.log` (accept, validate-reject, claim, post, result, override) |
 
@@ -398,7 +421,8 @@ pre-P0 agent could have planted):
 These real PR-A artifacts were recovered from local branch
 `identity/cq-reviewer-signer` at `f43b48f`. Earlier missing-source statements
 referred to the deployed/main checkout and `/opt` installation, not repository
-history. No daemon, transport or keys have been installed by this implementation.
+history. (At recovery nothing was installed; installed, S2-probed and activated
+on queue-host 2026-10-10 — see DEPLOY.md.)
 The actual unit is `crq-signer.service`; no invented `cq-reviewer.service` is needed.
 
 Transport now uses isolated stdlib Python, accepts the same five verbs and exact
@@ -438,7 +462,8 @@ The owner supplies custody key/metadata, dedicated transport key and restricted
 `authorized_keys`, installation grants (S2-a), and actual creator evidence (S2-b).
 Never send private key/token contents to the conductor. Existing binary provenance,
 root ownership and package-integrity evidence are required before enablement.
-S2-b remains a separately authorized action: ALL new probes are suspended.
+S2-b was owner-authorized and observed 2026-10-10 (DEPLOY.md); further probes
+remain owner-authorized actions.
 An installation or code review does not produce S2 evidence. Runtime repair
 remains disabled; this signer only consumes requests already quota-reserved by crq.
 
