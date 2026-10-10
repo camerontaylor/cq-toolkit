@@ -218,6 +218,7 @@ export const STRUCTURAL_EXCLUDED_LOGINS: readonly string[] = Object.freeze([
   'cq-automation[bot]',
   'cq-verdict[bot]',
   'cq-promoter[bot]',
+  'cq-promotion-reviewer[bot]',
 ]);
 
 /**

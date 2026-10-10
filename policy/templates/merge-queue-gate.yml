@@ -3,16 +3,32 @@
 # review, never merely because the queue went green. It promotes a gated
 # sha only when ALL hold:
 #   - REVIEW: the newest `crq/promotion-review` commit status on the sha
-#     that an ALLOWED reviewer posted is `success`, and its description
+#     that the PINNED reviewer posted is `success`, and its description
 #     binds the reviewed range as `main=<40-hex>` (that base must be main
-#     or an ancestor of main, so main..sha was reviewed). Allowed reviewers
-#     are USER accounts named in `vars.CQ_PROMOTION_REVIEWERS` (comma list;
-#     blank = the repository owner). A status posted by GITHUB_TOKEN or any
-#     App is a Bot and is ignored, so a PR head's workflow cannot forge it.
-#     A description starting `override` is the owner's override, logged.
-#     The review is re-read immediately before the push: unless that same
-#     review is still the newest allowed one (and `success`), the gate
-#     promotes nothing.
+#     or an ancestor of main, so main..sha was reviewed). The pinned
+#     reviewer is the promotion reviewer App's bot user, matched by ALL
+#     THREE of creator.type == "Bot", creator.login and creator.id match
+#     policy/promotion-reviewer.json at the trust ref (a status carries no app id, so
+#     the bot user is the identity: the `[bot]` login suffix is reserved for
+#     Apps and slugs are globally unique, and the numeric id survives even
+#     a hypothetical slug reuse). The identity comes ONLY from the owner's
+#     registration record
+#     (toolkit-research/plans/app-registration-session-20261004.md), pinned
+#     as the protected policy/promotion-reviewer.json which BOTH steps read
+#     at GITHUB_SHA: a missing, invalid or mismatched file makes BOTH steps
+#     refuse fail-closed ("invalid policy/promotion-reviewer.json") — never
+#     a public-API lookup by guessed name, since a stranger's public App can
+#     own any name. The file is a reviewed protected path, not a repo
+#     variable: changing it takes a reviewed promotion, while an admin
+#     token can edit a repo variable without review. Any other
+#     creator — the repository owner's own User login, GITHUB_TOKEN, and
+#     every App including cq-verdict[bot] — is untrusted, and a
+#     crq/promotion-review status from one turns the run into a red
+#     refusal when no trusted review exists. A description starting
+#     `override` is the owner's override (posted through the signer's
+#     crq-override tool), logged. The review is re-read immediately before
+#     the push: unless that same review is still the newest trusted one
+#     (and `success`), the gate promotes nothing.
 #   - I4: every required check on the gate's wait list SUCCEEDED on the sha
 #     (a skipped, cancelled or missing required check is never a pass).
 #   - GUARDS: the sha is on merge-queue's first-parent line (its tip or an
@@ -32,15 +48,20 @@
 # critical/major finding is unaddressed), ends green with an "awaiting
 # promotion review" summary and promotes nothing; so does a sha already in
 # main. A red run means a human must act: a review status from a
-# non-allowed creator, a reviewed sha whose required checks failed, were
+# non-pinned creator, a reviewed sha whose required checks failed, were
 # skipped or cancelled, or never reported in time, a reviewed sha off the
 # queue, a review base main does not contain, or a diverged main.
 #
-# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): while the batch policy holds,
-# cq-gate (gate.yml) runs REPORT-ONLY, so this gate is the one component
-# that advances main. C2 must first teach cq-gate the promotion-review
-# signal. It reads the repository-level PROMOTE_SECRET: once the owner
-# moves that secret into environment `promote`, this gate fails closed.
+# SOLE PROMOTER UNTIL C2 (W1.10; ADR-0004 D-H.3.1): cq-gate (gate.yml)
+# runs REPORT-ONLY — it has not been armed to promote (its promote switch
+# ships 'false' in #294) — so this gate
+# is the one component that advances main, and the cq/promoted replay
+# marker only records cq-gate promotions once armed. The C2 cutover
+# checklist (docs/promotion-policy.md) freezes promotion, bootstraps the
+# marker, adds the refs/heads/cq/* ruleset, flips cq-gate's switch, and
+# deletes this workflow — the two gates never both push. It reads the
+# repository-level PROMOTE_SECRET: once the owner moves that secret into
+# environment `promote`, this gate fails closed.
 #
 # Instantiate (each token below is written in double braces in the body):
 #   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with
@@ -54,6 +75,9 @@
 #                       names, e.g. static,denylist
 #   GATE_TIMEOUT_MIN -> minutes to wait for the checks before refusing
 #                       (default 20)
+#   Reviewer identity is read from policy/promotion-reviewer.json at GITHUB_SHA
+#   through the Contents API in each trust-filter step. The source is reviewed
+#   policy, not a repo variable or a workflow literal.
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — inputs reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -104,17 +128,16 @@ jobs:
     env:
       # The review read, shared by the review step and the pre-push re-read
       # so both apply the SAME trust filter. Input: the slurped pages of
-      # the sha's statuses; $allowed: the reviewer list. Every
-      # crq/promotion-review status; the newest one an allowed USER posted
-      # is the review (a later failure — a blocking finding — overrides an
-      # earlier success).
+      # the sha's statuses; $bot_login/$bot_id: the pinned reviewer. Every
+      # crq/promotion-review status; the newest one the pinned BOT USER
+      # posted (type, login AND numeric id — see the header) is the review
+      # (a later failure — a blocking finding — overrides an earlier
+      # success).
       REVIEW_JQ: |
         add // [] | map(select(.context == "crq/promotion-review")
           | {id, state, description, created_at,
-             login: .creator.login, type: .creator.type})
-        | ($allowed | split(",") | map(gsub("^\\s+|\\s+$"; ""))
-          | map(select(length > 0))) as $ok
-        | def trusted: .type == "User" and (.login as $l | any($ok[]; . == $l));
+             login: .creator.login, type: .creator.type, cid: .creator.id})
+        | def trusted: .type == "Bot" and .login == $bot_login and .cid == $bot_id;
         {review: (map(select(trusted)) | max_by([.created_at, .id])),
          others: (map(select(trusted | not)) | length)}
     steps:
@@ -128,8 +151,6 @@ jobs:
         env:
           SHA_INPUT: ${{ inputs.sha || '' }}
           STATUS_SHA: ${{ github.event.sha || '' }}
-          REVIEWERS_VAR: ${{ vars.CQ_PROMOTION_REVIEWERS }}
-          OWNER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -161,15 +182,21 @@ jobs:
               echo "## merge-queue-gate: \`${sha}\` is already in main" >> "$GITHUB_STEP_SUMMARY"
               exit 0;;
           esac
-          reviewers="${REVIEWERS_VAR:-${OWNER}}"
-          # Every page of the sha's statuses through the job's REVIEW_JQ.
+          # Every page of the sha's statuses through the job's REVIEW_JQ,
+          # trusting only the reviewer identity read from policy at the trust ref (login + numeric id).
+          reviewer_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${GITHUB_SHA}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at trust ref ${GITHUB_SHA}"; exit 1; }
+          reviewer_login="$(jq -r .login <<<"${reviewer_json}")"
+          reviewer_id="$(jq -r .id <<<"${reviewer_json}")"
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses?per_page=100" |
-            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
+            jq -s --arg bot_login "${reviewer_login}" \
+              --argjson bot_id "${reviewer_id}" "${REVIEW_JQ}")"
           others="$(jq -r '.others' <<<"${rows}")"
           if jq -e '.review == null' <<<"${rows}" >/dev/null; then
             if [ "${GITHUB_EVENT_NAME}" = status ] || [ "${others}" -gt 0 ]; then
-              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from an allowed reviewer (${reviewers})"
+              echo "refusing: ${sha} carries ${others} crq/promotion-review status(es), none from the reviewer recorded at the trust ref"
               exit 1
             fi
             await "no crq/promotion-review status"
@@ -179,7 +206,7 @@ jobs:
           login="$(jq -r '.review.login' <<<"${rows}")"
           echo "review: ${review_state} by ${login}: ${description}"
           [ "${others}" -eq 0 ] ||
-            echo "note: ${others} crq/promotion-review status(es) from non-allowed creators ignored"
+            echo "note: ${others} crq/promotion-review status(es) from creators other than the pinned reviewer ignored"
           if [ "${review_state}" != success ]; then
             await "the newest review is ${review_state} (${description})"
           fi
@@ -313,8 +340,6 @@ jobs:
       - name: Fast-forward promote the gated sha to main (guarded)
         if: steps.review.outputs.promote == 'true'
         env:
-          REVIEWERS_VAR: ${{ vars.CQ_PROMOTION_REVIEWERS }}
-          OWNER: ${{ github.repository_owner }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -354,10 +379,35 @@ jobs:
           # meanwhile must stop this promotion. Only the very review
           # verified above, still the newest trusted one, may promote; a
           # newer success review wakes its own gate run.
-          reviewers="${REVIEWERS_VAR:-${OWNER}}"
+          reviewer_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${GITHUB_SHA}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at trust ref ${GITHUB_SHA}"; exit 1; }
+          reviewer_login="$(jq -r .login <<<"${reviewer_json}")"
+          reviewer_id="$(jq -r .id <<<"${reviewer_json}")"
+          # Identity revalidation before the push: this run's trust policy is
+          # the one at GITHUB_SHA (run start), but an identity-rotation batch
+          # can have promoted while this run waited for checks. Re-read the
+          # pinned identity from CURRENT origin/main (fresh from the fetch
+          # above) and require it to equal the run-start identity, else refuse
+          # fail-closed — the next queue push re-runs the gate entirely under
+          # the rotated identity, so a revoked identity can never promote a
+          # later sha through a run pinned to the old one. The push below
+          # leases main at ${main_now} (--force-with-lease, same transport),
+          # so this check and the push are atomic together: main cannot move
+          # between the check and the push without rejecting the promotion.
+          main_now="$(git rev-parse origin/main)"
+          reviewer_json_main="$(gh api "repos/${GITHUB_REPOSITORY}/contents/policy/promotion-reviewer.json?ref=${main_now}" | jq -r .content | base64 -d)"
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' <<<"${reviewer_json_main}" >/dev/null || {
+            echo "refusing: invalid policy/promotion-reviewer.json at main ${main_now}"; exit 1; }
+          if [ "$(jq -r .login <<<"${reviewer_json_main}")" != "${reviewer_login}" ] ||
+            [ "$(jq -r .id <<<"${reviewer_json_main}")" != "${reviewer_id}" ]; then
+            echo "refusing: the pinned reviewer identity changed between ${GITHUB_SHA} and main ${main_now} — rerunning under the rotated identity"
+            exit 1
+          fi
           rows="$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/commits/${SHA}/statuses?per_page=100" |
-            jq -s --arg allowed "${reviewers}" "${REVIEW_JQ}")"
+            jq -s --arg bot_login "${reviewer_login}" \
+              --argjson bot_id "${reviewer_id}" "${REVIEW_JQ}")"
           now_id="$(jq -r '.review.id // "none"' <<<"${rows}")"
           now_state="$(jq -r '.review.state // "none"' <<<"${rows}")"
           if [ "${now_id}" != "${REVIEW_ID}" ] || [ "${now_state}" != success ]; then
@@ -370,9 +420,14 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Fast-forward only: no --force, so the server rejects any update
-          # that is not a fast-forward of main (a concurrent promotion).
-          if ! git push origin "${SHA}:refs/heads/main"; then
+          # Fast-forward only: the update stays a pure fast-forward of main
+          # (no --force), and the --force-with-lease pins main to the exact
+          # commit this run revalidated the pinned identity against, so a
+          # rotation landing on main after that check rejects the push (the
+          # branch below then distinguishes a superseding promotion from a
+          # real failure). A concurrent promotion is a rejection, not a
+          # silent race.
+          if ! git push --force-with-lease="refs/heads/main:${main_now}" origin "${SHA}:refs/heads/main"; then
             git fetch origin main
             if git merge-base --is-ancestor "${SHA}" origin/main; then
               echo "no-op: main reached ${SHA} during the push (already promoted)"

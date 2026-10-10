@@ -39,7 +39,19 @@ files themselves.
    (`# instantiated from policy/templates/<file> — edit the template, not this file`).
    The `{{COMMANDS...}}` slot in `required-check.md` is hand-replaced with your
    own ordered run-steps; no placeholder is substituted there.
-3. **Register every required check in all three places** — they are unlinked,
+3. **Provision your own reviewer identity at `policy/promotion-reviewer.json`.**
+   `merge-queue-gate` trusts a `crq/promotion-review` status only from the bot
+   user this file pins, read at `GITHUB_SHA` in each trust step — the file is
+   the trust root, and a missing, invalid or mismatched one refuses
+   fail-closed. Commit yours from YOUR promotion-review App's registration
+   record (never a public-API lookup by guessed name — a stranger's public App
+   can own any name), with exactly this shape:
+   `{ "schemaVersion": 1, "login": "<your-bot>[bot]", "id": <numeric bot id>,
+"type": "Bot", "record": "<source record reference>" }`. The file is a
+   protected path: changing the pinned identity takes a reviewed promotion.
+   A signer/crq deployment that posts the statuses must be configured with
+   the same identity and validate this file on `main` before it activates.
+4. **Register every required check in all three places** — they are unlinked,
    and updating fewer than all three leaves the check advisory or dangles a
    branch-protection wait:
    - `REQUIRED_WORKFLOW_CHECKS` in `scripts/denylist-scan` (the I4 policy
@@ -47,10 +59,10 @@ files themselves.
    - the gate's wait list (`{{GATE_CHECKS}}` in `merge-queue-gate.yml`),
    - branch protection required status contexts on **both** branches
      (`merge-queue` and `main`).
-4. **Never edit an instantiated workflow directly.** Edit the template and
+5. **Never edit an instantiated workflow directly.** Edit the template and
    re-instantiate — the bootstrap rule in `templates/README.md` is what keeps
    the repo from drifting from its own policy.
-5. **Configure repo settings the templates cannot.** Disable squash and
+6. **Configure repo settings the templates cannot.** Disable squash and
    rebase merges (I3 is merge-commits-only); branch protection and the
    promote PAT are out-of-band by design.
 

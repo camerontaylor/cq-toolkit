@@ -211,6 +211,23 @@ describe('same-account independent-agent acceptance', () => {
       ).reason,
     ).toBe('no_acceptable_review');
 
+    // The promotion reviewer App posts commit statuses only (PR-B); its bot
+    // login is structurally excluded, so its attestation never counts.
+    const reviewerReview = authorReview(agentMarker('PASS'), {
+      authorLogin: 'cq-promotion-reviewer[bot]',
+    });
+    expect(
+      classifyPr(
+        candidate({
+          authorLogin: 'cq-promotion-reviewer[bot]',
+          headRefOid: 'a'.repeat(40),
+          reviews: [reviewerReview],
+        }),
+        PENDING_MS,
+        enabled,
+      ).reason,
+    ).toBe('no_acceptable_review');
+
     expect(
       reviewed([authorReview(agentMarker('PASS'))], {
         ...enabled,

@@ -301,6 +301,7 @@ const STRUCTURAL_EXCLUDED = new Set([
   'cq-automation[bot]',
   'cq-verdict[bot]',
   'cq-promoter[bot]',
+  'cq-promotion-reviewer[bot]',
 ]);
 const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
 
