@@ -16,16 +16,26 @@
 #                              environment secrets) holding the loop's
 #                              GitHub credential (the loop posts review
 #                              replies and resolves threads as its user;
-#                              gh rides it as GH_TOKEN). RECOMMENDED: the
-#                              registered cq-automation App's installation
-#                              token over a human/role PAT — an App
-#                              identity keeps the loop's effects
-#                              attributable and review-independent
-#                              (doctrine I2), revokes independently, and
-#                              needs no long-lived repo-scope secret.
-#                              FALLBACK that satisfies the same code
-#                              today (the GH_TOKEN env indirection): a
-#                              PAT with repo scope on the target repo.
+#                              gh rides it as GH_TOKEN). RECOMMENDED END
+#                              STATE: the registered cq-automation App's
+#                              installation token (attribution and
+#                              review independence per doctrine I2,
+#                              revocability, no long-lived repo-scope
+#                              secret). A STATIC installation-token
+#                              secret does NOT support the schedule:
+#                              installation tokens are short-lived and
+#                              the workflow consumes GH_TOKEN directly
+#                              with nothing to re-mint. The App identity
+#                              therefore REQUIRES a refresh path — an
+#                              external process re-mints and updates
+#                              this secret before each expiry (per-run
+#                              minting here would be a separately
+#                              scoped BEHAVIOR change, out of scope).
+#                              WORKING identity until then: a long-lived
+#                              PAT with repo scope on the target repo,
+#                              accepting the I2/revocability tradeoffs
+#                              (the GH_TOKEN env indirection drives the
+#                              same code either way; see ../README.md).
 #                              Instantiated files reference it as
 #                              `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
