@@ -267,7 +267,7 @@ import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
 import {
-  compileOutputSchemaFault,
+  compileOutputSchema,
   uncompilableSchemaVerdict,
   validateStructured,
 } from '../common/structured.js';
@@ -472,9 +472,9 @@ export class ClaudeAgentDriver implements Driver {
     // provider/harness failure from a request-setup rejection. No record
     // exists yet (none is created): zero usage, no denials, no sessionId.
     if (opInvocation.outputSchema !== undefined) {
-      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
-      if (schemaFault !== undefined) {
-        return uncompilableSchemaVerdict('claude-agent', schemaFault);
+      const compiled = compileOutputSchema(opInvocation.outputSchema);
+      if ('fault' in compiled) {
+        return uncompilableSchemaVerdict('claude-agent', compiled.fault);
       }
     }
 

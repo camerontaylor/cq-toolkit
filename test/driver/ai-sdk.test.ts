@@ -379,6 +379,42 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('I8 precedence: an already-aborted signal outranks an uncompilable outputSchema (PR #241)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-i8-'));
+    try {
+      let modelCalls = 0;
+      const driver = new AiSdkDriver({
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: async () => {
+                modelCalls += 1;
+                return textResult('must never run');
+              },
+            }),
+        },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const controller = new AbortController();
+      controller.abort();
+      const result = await driver.run(
+        invocation({
+          outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
+        }),
+        { signal: controller.signal },
+      );
+      // The governed cancellation outranks the schema fault: the run settles
+      // the plain abort verdict, never the LOCAL output-invalid one.
+      expect(result.stopReason).toBe('aborted');
+      expect(result.errorClass).toBeUndefined();
+      expect(result.error).toBeUndefined();
+      expect(modelCalls).toBe(0); // the scripted model was never called
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('omits run from the model surface when CQ policy withholds it', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
     try {

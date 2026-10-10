@@ -280,7 +280,7 @@ import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import {
-  compileOutputSchemaFault,
+  compileOutputSchema,
   uncompilableSchemaVerdict,
   validateStructured,
 } from '../common/structured.js';
@@ -532,9 +532,9 @@ export class SubprocessDriver implements Driver {
     // from a request-setup rejection. No record exists yet (none is created):
     // zero usage, no denials, no sessionId.
     if (opInvocation.outputSchema !== undefined) {
-      const schemaFault = compileOutputSchemaFault(opInvocation.outputSchema);
-      if (schemaFault !== undefined) {
-        return uncompilableSchemaVerdict('subprocess', schemaFault);
+      const compiled = compileOutputSchema(opInvocation.outputSchema);
+      if ('fault' in compiled) {
+        return uncompilableSchemaVerdict('subprocess', compiled.fault);
       }
     }
 
