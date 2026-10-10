@@ -53,7 +53,8 @@
 # queue, a review base main does not contain, or a diverged main.
 #
 # SOLE PROMOTER UNTIL C2 (W1.10; ADR-0004 D-H.3.1): cq-gate (gate.yml)
-# runs REPORT-ONLY — its CQ_GATE_PROMOTES switch is 'false' — so this gate
+# runs REPORT-ONLY — it has not been armed to promote (its promote switch
+# ships 'false' in #294) — so this gate
 # is the one component that advances main, and the cq/promoted replay
 # marker only records cq-gate promotions once armed. The C2 cutover
 # checklist (docs/promotion-policy.md) freezes promotion, bootstraps the
