@@ -89,7 +89,7 @@ credential in `CQ_ADVERSARIAL_SECOND_TOKEN` with permission to review its PRs.
 Its scratch-administration credential — scratch repository Variables
 read/write plus the environments-list read the profile checks perform — is
 the dedicated **cq-adversarial-scratch** App's identity (owner decision
-2026-10-11; ADR-0004 note N18): the App is installed on the scratch repository
+2026-10-11; ADR-0004 note N19): the App is installed on the scratch repository
 only, never on cq-toolkit, with Actions read/write and Administration
 read-only and nothing else. The workflow mints a scratch-repo installation
 token per run from the `CQ_ADVERSARIAL_APP_KEY` environment secret and the
@@ -98,7 +98,7 @@ token expires with nothing to re-mint it, and dispatch-only drills need no
 refresh path when they mint per run. Until the App is registered the mint
 step is skipped and the interim `CQ_ADVERSARIAL_PROFILE_TOKEN` PAT drives the
 same runner. The primary and outsider identities stay the two interim PATs
-until the runner's preflight learns to verify non-human identities — N18
+until the runner's preflight learns to verify non-human identities — N19
 records that rework as the prerequisite for revoking those PATs at C3 — and
 all three interim names are gone at C3 either way. GitHub's repository
 Actions variable API expresses the §3.1 keys; environment overrides are

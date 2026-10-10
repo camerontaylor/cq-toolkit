@@ -152,7 +152,7 @@ permanently, outside the interim set
 `drill`). **Open:** before C3, the owner decides whether D-D.2 gains an
 explicit exception for the drill PAT, or C3 also revokes it and the drill
 moves to non-human authentication. Resolved for the `adversarial-scratch`
-environment by N18 (2026-10-11): non-human credentials, no exception; the
+environment by N19 (2026-10-11): non-human credentials, no exception; the
 `drill` environment's question remains open.
 
 ### N9 — ADR-0004 D-B, D-C.4 and D-E: npm commands after the move to pnpm
@@ -291,7 +291,7 @@ untrusted-producer class; D-A.2's push exclusion is for privileged or
 deciding jobs, which `cq-signal` is not — and every verdict is still
 recomputed from the API by `head_sha`.
 
-### N18 — ADR-0004 D-D.2, D-I and N8: the `adversarial-scratch` environment moves to a scratch App identity
+### N19 — ADR-0004 D-D.2, D-I and N8: the `adversarial-scratch` environment moves to a scratch App identity
 
 D-I's environment list (`cq-verdict`, `promote`, `automation`, `drill`)
 omits the `adversarial-scratch` environment the settings template declares,

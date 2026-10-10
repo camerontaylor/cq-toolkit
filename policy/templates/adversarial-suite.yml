@@ -3,7 +3,7 @@
 # The script checks owner/admin authority, outsider trust, applies the selected
 # scratch repository variables, then reads them back. No scheduled trigger.
 #
-# Credential identity (ADR-0004 note N18): the scratch-administration
+# Credential identity (ADR-0004 note N19): the scratch-administration
 # credential is the dedicated cq-adversarial-scratch App, installed on the
 # scratch repository ONLY (never this repository) with Actions read/write and
 # Administration read. The job mints a scratch-repo installation token per run

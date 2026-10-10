@@ -93,7 +93,7 @@ it('leaves credential checks to the runner so a missing credential still yields 
   // A credential guard before the runner would exit with no evidence file;
   // the runner's preflight records the same failure per row (Codex P2, #247).
   // The one allowed credential reference before the runner step is the
-  // scratch App mint (ADR-0004 note N18): it is variable-gated, so a missing
+  // scratch App mint (ADR-0004 note N19): it is variable-gated, so a missing
   // App skips it and the runner still runs and records BLOCKED evidence.
   for (const path of [
     'policy/templates/adversarial-suite.yml',
@@ -119,7 +119,7 @@ it('leaves credential checks to the runner so a missing credential still yields 
         : beforeRunner.slice(0, mintStart) + beforeRunner.slice(nextStep);
     expect(rest, path).not.toMatch(/GH_TOKEN|secrets\.|gh api/);
     // The runner consumes the minted token with the interim PAT as fallback:
-    // either identity drives the same code (ADR-0004 note N18).
+    // either identity drives the same code (ADR-0004 note N19).
     expect(text, path).toContain(
       'CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || secrets.CQ_ADVERSARIAL_PROFILE_TOKEN }}',
     );

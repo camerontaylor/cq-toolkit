@@ -4,7 +4,7 @@
 - **Date:** 2026-09-24
 - **Related:** [ADR-0002 Annex B](0002-annex-b-config.md) (secret keys and their environments)
 
-Post-acceptance notes N7, N8, N9, N16, N17 and N18 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N7, N8, N9, N16, N17 and N19 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## Context
 
@@ -213,7 +213,7 @@ This binds every consumer: the gate, `self-merge-prs`/`classifyPr`, `self-review
 
   > Narrowed: D-I's list also covers the `adversarial-scratch` environment the
   > settings template declares, whose credential identity is decided by
-  > post-acceptance note N18 in the [ADR index](README.md#post-acceptance-notes).
+  > post-acceptance note N19 in the [ADR index](README.md#post-acceptance-notes).
 
 - **Repository Actions event policy** (`POST/GET /repos/{owner}/{repo}/actions/policies`, proven available and enforced on a user-owned public repo): an explicit `restrict_action_events` allow-list naming exactly the events the shipped workflows use:
   - `push`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `workflow_run`, `workflow_dispatch`, `schedule`;
