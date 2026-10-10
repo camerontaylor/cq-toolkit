@@ -117,6 +117,29 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
+  // Delta review (PR #305 r2): a raw newline can split the userinfo before
+  // redaction runs, and the first pattern (whitespace-free span) let the
+  // credentials survive. The span now admits whitespace, capped, so the
+  // wrapped URL is scrubbed whole but a distant stray `@` cannot drag a
+  // large unrelated block into one match.
+  test('boundedErrorText redacts a URL whose userinfo is split across a newline', () => {
+    expect(boundedErrorText('connect failed:\nhttps://user:\npass@example.test/db')).toBe(
+      'connect failed:\n[redacted]',
+    );
+    // Greedy span resolution: an `@` inside a wrapped password must not leave
+    // a credential fragment behind.
+    expect(boundedErrorText('GET https://user:\npa@ss@example.test/db failed')).toBe(
+      'GET [redacted] failed',
+    );
+  });
+
+  test('boundedErrorText does not swallow a large unrelated text block after the userinfo span cap', () => {
+    // The stray `@` sits beyond the 200-char span cap, so nothing matches and
+    // the block — credentials-free — stays verbatim.
+    const far = `https://user:\n${'x'.repeat(300)}\n@host.example.test`;
+    expect(boundedErrorText(far)).toBe(far);
+  });
+
   test('boundedErrorText keeps credential-free URLs visible, even with @ in the path', () => {
     expect(boundedErrorText('see https://example.com/a@b for details')).toBe(
       'see https://example.com/a@b for details',
