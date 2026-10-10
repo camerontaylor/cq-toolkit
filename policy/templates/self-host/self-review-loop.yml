@@ -12,10 +12,19 @@
 #   SELFHOST_TOKEN          -> NAME of the `automation` ENVIRONMENT
 #                              secret (never a repository secret: GitHub
 #                              applies environment protection only to
-#                              environment secrets) holding a PAT
-#                              with repo scope on the target repo (the loop
-#                              posts review replies and resolves threads as
-#                              its user; gh rides it as GH_TOKEN).
+#                              environment secrets) holding the loop's
+#                              GitHub credential (the loop posts review
+#                              replies and resolves threads as its user;
+#                              gh rides it as GH_TOKEN). RECOMMENDED: the
+#                              registered cq-automation App's installation
+#                              token over a human/role PAT — an App
+#                              identity keeps the loop's effects
+#                              attributable and review-independent
+#                              (doctrine I2), revokes independently, and
+#                              needs no long-lived repo-scope secret.
+#                              FALLBACK that satisfies the same code
+#                              today (the GH_TOKEN env indirection): a
+#                              PAT with repo scope on the target repo.
 #                              Instantiated files reference it as
 #                              `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that

@@ -75,17 +75,29 @@ Decision 8): the jobs that read them declare `environment: automation`, so a
 dispatch from any other ref fails at job admission, before a secret is
 exposed.
 
-| token                     | secret holds                                                                                                                                                                                                                                                                                                                                  |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                           |
+| token                     | secret holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{SELFHOST_TOKEN}}`      | the loop's GitHub credential. RECOMMENDED: the registered automation GitHub App's installation token (this repository's App: cq-automation — see the identity note below). Documented FALLBACK: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                           |
 
 Both are step-scoped in the workflows: they reach only the run step, never
 `pnpm install`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
 non-required automation jobs skip successfully; required I4 checks are separate
-and never use this optional skip. A classic PAT with the blanket `repo` scope is the documented
-FALLBACK, not the recommendation — it reaches every repo the account can
-touch, so grant it only where fine-grained PATs are unavailable.
+and never use this optional skip. A classic PAT with the blanket `repo` scope is the
+last-resort FALLBACK — it reaches every repo the account can touch, so grant
+it only where fine-grained PATs are unavailable.
+
+### The loop's identity: prefer the registered automation App
+
+The recommendation for the `{{SELFHOST_TOKEN}}` value is the registered
+automation GitHub App's installation token (this repository's App:
+cq-automation), not a human or role PAT: an App identity keeps the loop's
+replies, reviews and fix pushes attributable and review-independent
+(doctrine I2), revokes independently of every human credential, and avoids
+a long-lived repo-scope secret — installation tokens are short-lived. It
+stays a recommendation, not a requirement: the workflows consume the
+credential only through the `GH_TOKEN` env indirection, so a PAT satisfies
+the same code today, with the PAT ladder above as the working fallback.
 
 ## Standing requirements (Rule / Why / Enforcement)
 
