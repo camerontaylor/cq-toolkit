@@ -11,10 +11,11 @@
 // runGate end-to-end over a fake gh (a route table, every argv recorded), a
 // fake acceptance and policy diff, a fake clock, and either fake git or —
 // for the real promotion — the real hardened helpers over a temp repository
-// pushing to a local bare remote (including a queue rewound between the
-// gate's read and its leased push). mainWith: the push credential is out of
+// pushing to a local bare remote. mainWith: the push credential is out of
 // the env before any gh/git child runs, and `--push` without it is refused
-// before any read.
+// before any read. PR-C: the subject is the newest reviewed sha (the walk),
+// selectPromotionReview pins the reviewer by type+login+id, and the push
+// sends ONLY main.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,8 +27,9 @@ import type { RangeCommit } from '../../src/ops/ratchet/git.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import type { AcceptanceInput, AcceptanceResult } from '../../src/selfhost/acceptance.js';
 import {
+  BANNED_REVIEWER_IDS,
+  BANNED_REVIEWER_LOGINS,
   POLL_MS,
-  QUEUE_BRANCH,
   checkClosure,
   checkVerifiedRun,
   mainWith,
@@ -35,6 +37,7 @@ import {
   realGateGit,
   remoteUrlFor,
   runGate,
+  selectPromotionReview,
   selectVerdict,
   toMergedPr,
   verifierRanAt,
@@ -42,6 +45,7 @@ import {
   type GateDeps,
   type GateGit,
   type MergedPr,
+  type ReviewerWant,
   type VerdictWant,
 } from '../../src/selfhost/promote-gate.js';
 
@@ -55,6 +59,24 @@ const X = sha('f');
 // The trust checkout is main's head: the gate refuses a trust ref that trails main.
 const TRUST = MAIN;
 const REPO_ID = 42;
+
+// The pinned reviewer of the test world: a fixture identity, deliberately
+// not any real App (identity values live in the registration record).
+const REVIEWER: ReviewerWant = { login: 'promo-review-fixture[bot]', id: 4242424242 };
+
+/** A trusted promotion-review status (creator = REVIEWER, success binding base). */
+const promoReview = (
+  base: string,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  context: 'crq/promotion-review',
+  id: 900,
+  state: 'success',
+  description: `reviewed main=${base} crq#promo-0000000000`,
+  created_at: '2026-09-01T00:00:00Z',
+  creator: { login: REVIEWER.login, id: REVIEWER.id, type: 'Bot' },
+  ...over,
+});
 
 const pr = (over: Partial<MergedPr> = {}): MergedPr => ({
   number: 7,
@@ -431,6 +453,80 @@ describe('checkVerifiedRun', () => {
   });
 });
 
+describe('selectPromotionReview', () => {
+  test('a trusted success is selected with its bound base', () => {
+    const r = selectPromotionReview([promoReview(MAIN)], REVIEWER);
+    expect(r.state).toBe('success');
+    expect(r.winner).toBe(900);
+    expect(r.base).toBe(MAIN);
+    expect(r.others).toBe(0);
+  });
+
+  test('wrong id, string-typed id, wrong login, and a User creator are untrusted (others)', () => {
+    for (const creator of [
+      { login: REVIEWER.login, id: REVIEWER.id + 1, type: 'Bot' },
+      { login: REVIEWER.login, id: String(REVIEWER.id), type: 'Bot' },
+      { login: 'other[bot]', id: REVIEWER.id, type: 'Bot' },
+      { login: 'camerontaylor', id: 1, type: 'User' },
+    ]) {
+      const r = selectPromotionReview([promoReview(MAIN, { id: 901, creator })], REVIEWER);
+      expect(r.state, JSON.stringify(creator)).toBe('missing');
+      expect(r.others, JSON.stringify(creator)).toBe(1);
+    }
+  });
+
+  test('a foreign context is filtered before the trust split and never counts', () => {
+    const r = selectPromotionReview(
+      [
+        {
+          context: 'other-context',
+          state: 'success',
+          creator: { login: 'x', id: 1, type: 'User' },
+        },
+      ],
+      REVIEWER,
+    );
+    expect(r.state).toBe('missing');
+    expect(r.others).toBe(0);
+  });
+
+  test('newest trusted wins: a later failure overrides an earlier success', () => {
+    const r = selectPromotionReview(
+      [
+        promoReview(MAIN),
+        promoReview(MAIN, {
+          id: 901,
+          state: 'failure',
+          created_at: '2026-09-01T00:01:00Z',
+          description: 'blocked: 2 major main=' + MAIN,
+        }),
+      ],
+      REVIEWER,
+    );
+    expect(r.state).toBe('failure');
+    expect(r.winner).toBe(901);
+    expect(r.base).toBeNull();
+  });
+
+  test('a pending trusted review is pending; a success without a main= binding is a failure', () => {
+    expect(
+      selectPromotionReview(
+        [promoReview(MAIN, { state: 'pending', description: 'reviewing' })],
+        REVIEWER,
+      ).state,
+    ).toBe('pending');
+    expect(
+      selectPromotionReview([promoReview(MAIN, { description: 'reviewed crq#x' })], REVIEWER).state,
+    ).toBe('failure');
+  });
+
+  test('empty input is missing with no others', () => {
+    const r = selectPromotionReview([], REVIEWER);
+    expect(r.state).toBe('missing');
+    expect(r.others).toBe(0);
+  });
+});
+
 describe('parseGateArgs / remoteUrlFor', () => {
   const base = [
     '--repo=/tmp/trust',
@@ -438,6 +534,8 @@ describe('parseGateArgs / remoteUrlFor', () => {
     `--repositoryId=${String(REPO_ID)}`,
     `--trustRef=${TRUST}`,
     '--defaultBranch=main',
+    `--reviewerBotLogin=${REVIEWER.login}`,
+    `--reviewerBotId=${String(REVIEWER.id)}`,
   ];
 
   test('defaults and full form', () => {
@@ -446,6 +544,7 @@ describe('parseGateArgs / remoteUrlFor', () => {
       name: 'r',
       verdictAppId: null,
       verifiedWorkflows: ['ci.yml', 'denylist.yml'],
+      reviewer: REVIEWER,
       timeoutMin: 20,
       push: false,
     });
@@ -460,6 +559,7 @@ describe('parseGateArgs / remoteUrlFor', () => {
     ).toMatchObject({
       verdictAppId: 123,
       verifiedWorkflows: ['ci.yml'],
+      reviewer: REVIEWER,
       timeoutMin: 5,
       push: true,
     });
@@ -476,6 +576,33 @@ describe('parseGateArgs / remoteUrlFor', () => {
     expect(() => parseGateArgs([...base, '--verdictAppId=0x1'])).toThrow(/positive integer/);
     expect(() => parseGateArgs([...base, '--verifiedWorkflows=../x.yml'])).toThrow(/workflow file/);
     expect(() => parseGateArgs([...base, '--push=yes'])).toThrow(/unknown argument/);
+    // The reviewer pin is required and fails closed: missing, malformed, or
+    // a banned (stranger's) identity refuses before any read.
+    expect(() => parseGateArgs(base.slice(0, 5))).toThrow(/--reviewerBotLogin is required/);
+    expect(() =>
+      parseGateArgs(base.slice(0, 5).concat([`--reviewerBotLogin=${REVIEWER.login}`])),
+    ).toThrow(/--reviewerBotId is required/);
+    expect(() =>
+      parseGateArgs([
+        ...base.slice(0, 5),
+        '--reviewerBotLogin=camerontaylor',
+        `--reviewerBotId=${String(REVIEWER.id)}`,
+      ]),
+    ).toThrow(/pinnable bot login/);
+    expect(() =>
+      parseGateArgs([
+        ...base.slice(0, 5),
+        `--reviewerBotLogin=${BANNED_REVIEWER_LOGINS[0]}`,
+        `--reviewerBotId=${String(REVIEWER.id)}`,
+      ]),
+    ).toThrow(/pinnable bot login/);
+    expect(() =>
+      parseGateArgs([
+        ...base.slice(0, 5),
+        `--reviewerBotLogin=${REVIEWER.login}`,
+        `--reviewerBotId=${String(BANNED_REVIEWER_IDS[0])}`,
+      ]),
+    ).toThrow(/banned identity/);
   });
 
   test('remoteUrlFor', () => {
@@ -491,6 +618,8 @@ interface World {
   tip: string;
   main: string;
   prs: Map<string, unknown[]>;
+  /** Promotion-review statuses per commit sha (the PR-C walk reads these). */
+  statuses: Map<string, unknown[]>;
   checkRuns: unknown[][];
   measureRuns: unknown[];
   verifiedRuns: Map<string, unknown[]>;
@@ -500,6 +629,12 @@ interface World {
   dispatchCode: number;
   /** Called on each check-runs read (lets a test publish the verdict later). */
   onCheckRuns?: (n: number) => void;
+  /** Called on each statuses read (the walk and the pre-push re-read). */
+  onStatuses?: (n: number) => void;
+  /** The cq/promoted replay marker's sha; undefined = ref absent. */
+  promoted?: string | undefined;
+  /** When set, the marker ref read fails with this stderr (fail-closed). */
+  promotedError?: string;
 }
 
 const ok = (value: unknown): GhResult => ({
@@ -510,6 +645,7 @@ const ok = (value: unknown): GhResult => ({
 
 function fakeGh(world: World, calls: string[][]): GhFn {
   let checkReads = 0;
+  let statusReads = 0;
   return (args) => {
     calls.push(args);
     const path = args[0] === 'api' && args[1] === '-X' ? (args[3] ?? '') : (args[1] ?? '');
@@ -527,8 +663,21 @@ function fakeGh(world: World, calls: string[][]): GhFn {
     if (q === 'repos/o/r/git/ref/heads/main') {
       return Promise.resolve(ok({ object: { sha: world.main, type: 'commit' } }));
     }
+    if (q === 'repos/o/r/git/ref/heads/cq/promoted') {
+      if (world.promotedError !== undefined)
+        return Promise.resolve({ code: 1, stdout: '', stderr: world.promotedError });
+      if (world.promoted === undefined)
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' });
+      return Promise.resolve(ok({ object: { sha: world.promoted, type: 'commit' } }));
+    }
     let m = /^repos\/o\/r\/commits\/([0-9a-f]{40})\/pulls$/.exec(q);
     if (m !== null) return Promise.resolve(ok([world.prs.get(m[1] ?? '') ?? []]));
+    m = /^repos\/o\/r\/commits\/([0-9a-f]{40})\/statuses$/.exec(q);
+    if (m !== null) {
+      world.onStatuses?.(statusReads);
+      statusReads += 1;
+      return Promise.resolve(ok([world.statuses.get(m[1] ?? '') ?? []]));
+    }
     if (q === 'repos/o/r') return Promise.resolve(ok({ owner: { id: 1 } }));
     if (/^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
       return Promise.resolve(
@@ -619,6 +768,13 @@ function world(tip = M1, main = MAIN, over: Partial<World> = {}): World {
         ],
       ],
     ]),
+    // The default world's tip carries a trusted success bound to main: the
+    // normal "batch tip reviewed, ready to promote" shape.
+    statuses: new Map([[tip, [promoReview(main)]]]),
+    // The bootstrap invariant: the cq/promoted marker exists (== the main
+    // at cutover). The gate refuses while it is missing — fail-closed — so
+    // every fixture bootstraps it; tests exercise absence explicitly.
+    promoted: main,
     checkRuns: [[verdictRow(tip, main)]],
     measureRuns: [],
     verifiedRuns: new Map([
@@ -645,8 +801,6 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
-    // The pre-push queue re-read: the fake world's remote still serves the tip.
-    lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? M1 : null),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -721,6 +875,7 @@ const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({
   defaultBranch: 'main',
   verdictAppId: 500,
   verifiedWorkflows: ['ci.yml', 'denylist.yml'],
+  reviewer: REVIEWER,
   timeoutMin: 20,
   push: false,
   pushToken: null,
@@ -1002,7 +1157,7 @@ describe('runGate', () => {
     expect(reads).toBe(2);
     expect(r.report.join('\n')).toMatch(/recheck before push:/);
     expect(r.report.at(-1)).toMatch(
-      /newest valid cq\/ratchet verdict on the tip is not success|no longer green after the acceptance pass/,
+      /newest valid cq\/ratchet verdict on the subject is not success|no longer green after the acceptance pass/,
     );
   });
 
@@ -1030,7 +1185,9 @@ describe('runGate', () => {
     );
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
-    expect(r.report.at(-1)).toMatch(/newest valid cq\/ratchet verdict on the tip is not success/);
+    expect(r.report.at(-1)).toMatch(
+      /newest valid cq\/ratchet verdict on the subject is not success/,
+    );
     expect(h.sleeps).toEqual([]);
   });
 
@@ -1078,7 +1235,7 @@ describe('runGate', () => {
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('would-promote');
     expect(dispatches(h.calls)).toHaveLength(1);
-    expect(r.report.join('\n')).toMatch(/waiting \(no completed cq-measure push run on tip\)/);
+    expect(r.report.join('\n')).toMatch(/waiting \(no completed cq-measure push run on subject\)/);
   });
 
   test('timeout refuses', async () => {
@@ -1166,7 +1323,7 @@ describe('runGate', () => {
     expect(h.sleeps).toEqual([POLL_MS]);
   });
 
-  test('the push leases main on the step-1 read and omits the equal-OID merge-queue refspec (D-K.6)', async () => {
+  test('the push always leases all three refs: main, the replay marker, and the queue', async () => {
     const h = harness(world());
     const seen: unknown[] = [];
     h.deps.git = fakeGit({
@@ -1177,36 +1334,221 @@ describe('runGate', () => {
     });
     const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
     expect(r.verdict).toBe('promoted');
-    // The pre-push ls-remote still shows the queue at the tip (the normal
-    // case), so ONLY main is sent — by construction, not by git's
-    // equal-OID skip.
-    expect(seen).toEqual([
-      {
-        updates: [{ refspec: `${M1}:refs/heads/main`, expected: MAIN }],
-        token: 't',
-      },
-    ]);
-  });
-
-  test('a queue that moved before the push adds its refspec as a pure lease', async () => {
-    const h = harness(world());
-    const seen: unknown[] = [];
-    h.deps.git = fakeGit({
-      lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? H1 : null), // the queue is elsewhere now
-      pushAtomic: (_repo, _url, updates, _token) => {
-        seen.push({ updates });
-        return Promise.resolve({ ok: true, output: '' });
-      },
-    });
-    await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    // luna round 4: the queue ref is leased at the run-start tip EVEN when
+    // it equals the tip (an up-to-date ref passes; any movement rejects the
+    // whole push), and the cq/promoted marker MUST move with the promotion
+    // (leased at its own read: the bootstrap marker is main).
     expect(seen).toEqual([
       {
         updates: [
           { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+          { refspec: `${M1}:refs/heads/cq/promoted`, expected: MAIN },
           { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
         ],
+        token: 't',
       },
     ]);
+    expect(r.report.join('\n')).toMatch(
+      new RegExp(`push: main at ${M1} \\(reviewed sha, base ${MAIN}\\)`),
+    );
+  });
+
+  test('a replay marker naming the subject blocks selection (stateful refusal)', async () => {
+    // Break-glass rewind to exactly the review base: base === main holds,
+    // the success is still newest-trusted — but the cq/promoted marker at
+    // the subject refuses the replay statelessly-unreachable case.
+    const h = harness(world(M1, MAIN, { promoted: M1 }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(r.report.join('\n')).toMatch(new RegExp(`already promoted \\(cq/promoted at ${M1}\\)`));
+    expect(h.acceptanceInputs).toEqual([]);
+  });
+
+  test('a missing replay marker refuses (bootstrap required; deletion never re-enables replay)', async () => {
+    const h = harness(world(M1, MAIN, { promoted: undefined }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/replay marker is absent/);
+    expect(h.acceptanceInputs).toEqual([]);
+  });
+
+  test('an unreadable replay marker fails closed', async () => {
+    const h = harness(world(M1, MAIN, { promotedError: 'HTTP 500: kaboom' }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/gate error: gh exit 1: HTTP 500/);
+  });
+
+  test('a tip ahead of the reviewed sha promotes the SUBJECT and leaves the queue alone', async () => {
+    // main <- M1 (reviewed) <- T2 (not yet reviewed): the walk selects M1,
+    // closure and every check judge main..M1, and the push sends M1:main.
+    // The unreviewed T2 is never promoted and merge-queue is never written.
+    const t2 = sha('2');
+    const h = harness(
+      world(t2, MAIN, {
+        prs: new Map([
+          [
+            M1,
+            [
+              {
+                number: 7,
+                merge_commit_sha: M1,
+                base: { ref: 'merge-queue' },
+                merged_at: '2026-09-01T00:00:00Z',
+                head: { sha: H1, repo: { id: REPO_ID } },
+              },
+            ],
+          ],
+        ]),
+        statuses: new Map([
+          [t2, [promoReview(MAIN, { state: 'pending', id: 901, description: 'reviewing' })]],
+          [M1, [promoReview(MAIN)]],
+        ]),
+        checkRuns: [[verdictRow(M1, MAIN)]],
+        verifiedRuns: new Map([
+          ['ci.yml', [greenRun('ci.yml', M1)]],
+          ['denylist.yml', [greenRun('denylist.yml', M1)]],
+        ]),
+      }),
+    );
+    h.deps.git = fakeGit({
+      revParse: (_r, rev) =>
+        Promise.resolve(
+          rev === 'refs/remotes/origin/merge-queue' ? t2 : rev.startsWith('refs/') ? MAIN : rev,
+        ),
+      // The fake graph is main <- M1 <- t2: the queue advanced one batch past
+      // the reviewed sha. Without this edge the gate's diverged-refusal check
+      // (isAncestor(main, tip)) would refuse the very scenario under test.
+      isAncestor: (_r, a, b) => Promise.resolve(a === b || (a === MAIN && (b === M1 || b === t2))),
+      firstParentRange: (_r, _from, to) => Promise.resolve(to === t2 ? [t2, M1] : [M1]),
+      rangeCommits: (_r, _from, to) => Promise.resolve(to === M1 ? ONE : []),
+    });
+    const seen: unknown[] = [];
+    const innerPush = h.deps.git.pushAtomic;
+    h.deps.git = {
+      ...h.deps.git,
+      pushAtomic: (repo, url, updates, token) => {
+        seen.push(updates);
+        return innerPush(repo, url, updates, token);
+      },
+    };
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(r.subject).toBe(M1);
+    expect(r.tip).toBe(t2);
+    // The queue refspec is ALWAYS leased at the run-start tip (luna round
+    // 4 — even off-tip it can never land; --atomic would refuse main with
+    // it), and the cq/promoted marker moves with the promotion (leased at
+    // its read: the bootstrap marker is main).
+    expect(seen).toEqual([
+      [
+        { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+        { refspec: `${M1}:refs/heads/cq/promoted`, expected: MAIN },
+        { refspec: `${t2}:refs/heads/merge-queue`, expected: t2 },
+      ],
+    ]);
+    const text = r.report.join('\n');
+    expect(text).toMatch(new RegExp(`subject: reviewed sha ${M1} .* queue tip ${t2} waits`));
+    expect(h.acceptanceInputs).toEqual([
+      { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
+      { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
+    ]);
+  });
+
+  test('a success bound to an older base is not selectable (rewind replay refused)', async () => {
+    // Break-glass rewind: main sits at MAIN while the reviewed M1 (whose
+    // success binds base=M1, the rewind target) is still on the queue. The
+    // exact-base binding refuses to replay the older review; nothing is
+    // judged and nothing promotes.
+    const h = harness(
+      world(M1, MAIN, {
+        statuses: new Map([[M1, [promoReview(M1)]]]),
+      }),
+    );
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(r.report.join('\n')).toMatch(
+      new RegExp(`success base ${M1} is not the current main ${MAIN}`),
+    );
+    expect(h.acceptanceInputs).toEqual([]);
+    expect(h.policyInputs).toEqual([]);
+  });
+
+  test('the selected promotion review is re-read before the push; a stale one refuses', async () => {
+    for (const [name, later] of [
+      [
+        'a newer trusted failure',
+        { state: 'failure', description: `blocked: 2 major main=${MAIN}` },
+      ],
+      ['a malformed success', { description: 'reviewed crq#x' }],
+    ] as const) {
+      let pushed = false;
+      const w = world();
+      w.onStatuses = (n) => {
+        if (n === 1) w.statuses = new Map([[M1, [promoReview(MAIN, { id: 901, ...later })]]]);
+      };
+      const h = harness(w);
+      h.deps.git = fakeGit({
+        pushAtomic: () => {
+          pushed = true;
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      });
+      const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+      expect(r.verdict, name).toBe('refused');
+      expect(pushed, name).toBe(false);
+      expect(r.report.at(-1), name).toMatch(/changed since selection/);
+    }
+  });
+
+  test('an unchanged promotion review passes the pre-push re-read and promotes', async () => {
+    let pushed = false;
+    const h = harness(world());
+    h.deps.git = fakeGit({
+      pushAtomic: () => {
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(pushed).toBe(true);
+  });
+
+  test('no reviewed commit on the queue is an awaiting (green), with no judging reads', async () => {
+    const h = harness(world(M1, MAIN, { statuses: new Map([[M1, []]]) }));
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(h.acceptanceInputs).toEqual([]);
+    expect(h.policyInputs).toEqual([]);
+    expect(dispatches(h.calls)).toEqual([]);
+  });
+
+  test('untrusted promotion-review statuses on the tip with no trusted review refuse', async () => {
+    const h = harness(
+      world(M1, MAIN, {
+        statuses: new Map([
+          [
+            M1,
+            [
+              promoReview(MAIN, {
+                id: 902,
+                creator: { login: 'camerontaylor', id: 1, type: 'User' },
+                state: 'success',
+              }),
+            ],
+          ],
+        ]),
+      }),
+    );
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(
+      /crq\/promotion-review status\(es\) from creators other than the pinned reviewer/,
+    );
   });
 
   test('a rejected push refuses with the porcelain output', async () => {
@@ -1278,6 +1620,8 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     git(trust, ['update-ref', 'refs/remotes/origin/main', main]);
     git(trust, ['update-ref', 'refs/remotes/origin/merge-queue', tip]);
     git(trust, ['push', '-q', remote, `${main}:refs/heads/main`, `${tip}:refs/heads/merge-queue`]);
+    // C2-cutover bootstrap: the replay marker starts at the cutover main.
+    git(trust, ['push', '-q', remote, `${main}:refs/heads/cq/promoted`]);
     return { trust, remote, main, head, tip };
   }
 
@@ -1300,7 +1644,7 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     return w;
   }
 
-  test('promotes tip onto main with the queue pinned at the tip by the step-1 read', async () => {
+  test('promotes the reviewed sha onto main with only the main refspec (real git)', async () => {
     const { trust, remote, main, head, tip } = setup('ok');
     const h = harness(prWorld(tip, main, head));
     h.deps.git = realGateGit;
@@ -1314,9 +1658,11 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
         remoteUrl: remote,
       }),
     );
-    expect(r.report.at(-1)).toBe(`push: main at ${tip} (merge-queue was read at ${tip})`);
+    expect(r.report.at(-1)).toBe(`push: main at ${tip} (reviewed sha, base ${main})`);
     expect(r.verdict).toBe('promoted');
     expect(git(remote, ['rev-parse', 'main'])).toBe(tip);
+    // The queue is NEVER written by the gate (PR-C): the setup's push put it
+    // at the tip and the promotion leaves it exactly there.
     expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(tip);
     expect(h.acceptanceInputs).toEqual([
       { pr: 7, subject: head, base: 'merge-queue', state: 'merged' },
@@ -1324,20 +1670,52 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     ]);
   });
 
-  test('a queue rewound to an ancestor before the push is refused; main unchanged', async () => {
+  test('a main moved since the step-1 read is refused by the lease; nothing promotes', async () => {
     const { trust, remote, main, head, tip } = setup('rewind');
     const h = harness(prWorld(tip, main, head));
-    // Break-glass rewinds merge-queue to the PR head (an ancestor of the
-    // tip) after the gate's step-1 read, observed by the pre-push ls-remote
-    // (the same transport the push uses). The push then carries the queue
-    // refspec as a pure lease at the tip: git refuses it against the rewound
-    // ref, and --atomic refuses main with it — a dropped merge is never
-    // silently re-promoted.
+    // Break-glass rewinds MAIN to the PR head after the gate's step-1 read.
+    // The push's main lease (expected = the read main) no longer matches the
+    // remote, so --atomic refuses: a rewound main is never jumped over, and
+    // the reviewed sha is re-judged against the new main on the next sweep
+    // (its base is then not contained in main → awaiting, still no move).
     h.deps.git = {
       ...realGateGit,
-      lsRemoteRef: (repo, url, ref, token) => {
+      pushAtomic: (repo, url, updates, token) => {
+        git(remote, ['update-ref', 'refs/heads/main', head]);
+        return realGateGit.pushAtomic(repo, url, updates, token);
+      },
+    };
+    const r = await runGate(
+      h.deps,
+      cfg({
+        repo: trust,
+        trustRef: main,
+        push: true,
+        pushToken: 'tok',
+        remoteUrl: remote,
+      }),
+    );
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/atomic leased push was rejected/);
+    expect(git(remote, ['rev-parse', 'main'])).toBe(head);
+    expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(tip);
+  });
+
+  test('a queue rewound to an ancestor before the push is refused; main unchanged', async () => {
+    const { trust, remote, main, head, tip } = setup('queue-rewind');
+    const h = harness(prWorld(tip, main, head));
+    // Break-glass rewinds merge-queue to the PR head (an ancestor of the
+    // tip) between the gate's step-1 read and the push itself. The push
+    // ALWAYS carries the queue refspec leased at the run-start tip (luna
+    // round 4 — leased even when the observation still served the tip):
+    // git refuses it against the rewound ref, and --atomic refuses main
+    // with it — a dropped merge (the subject among it) is never silently
+    // re-promoted off a stale queue read.
+    h.deps.git = {
+      ...realGateGit,
+      pushAtomic: (repo, url, updates, token) => {
         git(remote, ['update-ref', 'refs/heads/merge-queue', head]);
-        return realGateGit.lsRemoteRef(repo, url, ref, token);
+        return realGateGit.pushAtomic(repo, url, updates, token);
       },
     };
     const r = await runGate(
@@ -1364,6 +1742,8 @@ describe('mainWith (the CLI seam)', () => {
     `--repositoryId=${String(REPO_ID)}`,
     `--trustRef=${TRUST}`,
     '--defaultBranch=main',
+    `--reviewerBotLogin=${REVIEWER.login}`,
+    `--reviewerBotId=${String(REVIEWER.id)}`,
   ];
   const TOKEN = 'ghp_PROMOTETOKEN0123456789';
 

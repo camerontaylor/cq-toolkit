@@ -1,6 +1,7 @@
 # cq-gate — the P1 promotion job (ADR-0004 D-K; W1.10): promotes the
-# merge-queue tip to main when every commit in main..tip is admitted by the
-# closure rule and every admitted PR's verdicts and acceptance hold.
+# REVIEWED sha to main when every commit in main..subject is admitted by the
+# closure rule, every admitted PR's verdicts and acceptance hold, and the
+# pinned reviewer's promotion review of the range is a success (PR-C).
 #
 # Carrier (P1): `workflow_run` on `ci` and `cq-measure` for merge-queue push
 # runs, a `schedule` sweep (every 15 minutes — it bounds promotion latency
@@ -14,28 +15,46 @@
 #     branch `merge-queue` and repository id. It carries NO data forward: a
 #     junk trigger fails `wake` and never enters the `promote` group.
 #   - `decide` resolves its own subject: the gate CLI reads the merge-queue
-#     tip and main itself (D-K.3), never from the event. Its code is the
+#     tip and main itself, walks the queue's first-parent line to the newest
+#     commit carrying a trusted promotion-review success bound into main
+#     (the SUBJECT), and never reads either from the event. Its code is the
 #     toolkit built from the trust ref (`github.sha`, the default-branch tip)
 #     with `pnpm install --frozen-lockfile --ignore-scripts`. The head is
-#     only git objects plus API data (check runs, PRs, reviews): nothing the
-#     queue authored runs here, and no PR artifact is read.
+#     only git objects plus API data (commit statuses, check runs, PRs,
+#     reviews): nothing the queue authored runs here, and no PR artifact is
+#     read.
+#   - The promotion review is trusted from the pinned reviewer ONLY:
+#     creator.type "Bot" AND the recorded bot login AND its numeric id
+#     (the protected policy/promotion-reviewer.json, validated by the CLI
+#     and read from the trust checkout) — a commit
+#     status carries no app id, so the bot user is the identity. Any other
+#     creator's crq/promotion-review status on the tip, with no trusted
+#     review anywhere, is a RED refusal; with a reviewed subject below it,
+#     it is inert noise (the subject is what promotes, never the tip).
 #   - Every read uses this job's GITHUB_TOKEN. The promotion credential
 #     reaches only the gate step, where the CLI puts it in a step-scoped
 #     GIT_CONFIG_* extra-header for the one atomic push (Decision 13).
 #   - `decide` is the SOLE member of concurrency group `promote`, and runs in
 #     environment `promote` (main-only branch policy).
 #
-# C1 (ADR-0004 D-H.3.1): this gate runs ALONGSIDE merge-queue-gate.yml.
-#
-# REPORT-ONLY under the batch promotion policy (docs/promotion-policy.md):
-# promotion to main requires a CodeRabbit promotion review of the batch,
-# which only merge-queue-gate.yml checks today. So this gate runs the CLI
-# WITHOUT `--push`: it judges the queue tip and reports `would-promote`,
-# `noop` or `refused` in the step summary, and never advances main. Its
-# verdict is advisory, so a refusal is not a red run (cq-accept's rule):
-# the job fails only when the gate crashed. Before C2 retires
-# merge-queue-gate.yml, the gate CLI must learn the promotion-review signal
-# and the reviewed-sha subject; then `--push` and red-on-refused return.
+# PROMOTES — one promoter at a time: REPORT-ONLY UNTIL C2. The CLI runs
+# WITHOUT `--push` while merge-queue-gate.yml is the sole promoter (its
+# base rule: the recorded review base contained in main; this gate's, when
+# armed: the recorded base equal to main). The single explicit switch is
+# CQ_GATE_PROMOTES below: the C2 cutover checklist
+# (docs/promotion-policy.md) freezes promotion, bootstraps the cq/promoted
+# replay marker, adds the refs/heads/cq/* ruleset, flips this switch to
+# `true` by a reviewed promotion, deletes merge-queue-gate.yml, and
+# unfreezes — the two gates never both push. When armed, the CLI runs WITH
+# `--push` and promotes the reviewed SUBJECT by a single main-refspec
+# fast-forward leased at the main it read — the queue is never written, so
+# a tip ahead of the reviewed sha simply waits for its own review. Green
+# verdicts: `promoted`, `noop` (the queue holds nothing beyond main),
+# `awaiting` (no reviewed commit yet — the normal state between batches),
+# `would-promote` (a dry run). A `refused` verdict is a RED run (the gate
+# judged and said no: closure, acceptance, policy, verdict, verified-run or
+# foreign-signal refusals need a human); the job also stays red when the
+# gate itself crashed.
 #
 # Credential (Decision 7): a promoter-App installation token when
 # `vars.CQ_PROMOTER_APP_CLIENT_ID` is set; otherwise the interim
@@ -44,9 +63,9 @@
 #
 # Instantiate (each token below is written in double braces in the body):
 #   GATE_WORKFLOWS   -> comma list of workflow FILE names whose merge-queue
-#                       push runs must have succeeded on the tip (the gate
-#                       reads them by workflow path, never by check name),
-#                       e.g. ci.yml,denylist.yml
+#                       push runs must have succeeded on the SUBJECT (the
+#                       gate reads them by workflow path, never by check
+#                       name), e.g. ci.yml,denylist.yml
 #   GATE_TIMEOUT_MIN -> minutes the gate waits for verdicts and those runs
 #                       before refusing (default 20). CEILING: the wait
 #                       plus checkout, install and build must stay under
@@ -55,6 +74,13 @@
 #                       enforces this for the instance). Above that the
 #                       runner may kill `decide` mid-wait: still no
 #                       promotion (fails closed), but the report is lost.
+#   (The pinned reviewer identity is NOT a token: `decide` reads the
+#   protected `policy/promotion-reviewer.json` from the trust checkout —
+#   the same file the merge-queue gate reads at GITHUB_SHA and the signer
+#   and crq validate on main — checks its JSON types BEFORE extracting
+#   (number id > 0, string login, type Bot, schemaVersion 1), and passes
+#   the login/id to the CLI, which still validates the pair and refuses
+#   banned or malformed identities.)
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — values reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -247,6 +273,12 @@ jobs:
           TRUST: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          # C2 SWITCH (single, explicit): 'false' = report-only while
+          # merge-queue-gate.yml is the sole promoter. The cutover
+          # checklist flips this ONE value to 'true' by a reviewed
+          # promotion (template + render in the same commit) — never
+          # before the freeze/bootstrap/ruleset steps.
+          CQ_GATE_PROMOTES: 'false'
         run: |
           set -euo pipefail
           [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
@@ -266,6 +298,25 @@ jobs:
           fi
           [[ "$DEFAULT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || {
             echo "refusing: default branch '$DEFAULT_BRANCH'"; exit 1; }
+          # The pinned reviewer identity comes from the protected
+          # policy/promotion-reviewer.json at the TRUST ref (GITHUB_SHA) —
+          # the same source the merge-queue gate reads and the signer and
+          # crq validate on main; never a workflow literal or repo
+          # variable. Fail closed on a missing/malformed file: the CLI
+          # re-validates the pair (shape, banned identities) regardless.
+          REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
+          # JSON types are checked BEFORE any jq -r extraction: -r renders
+          # every value as a string, so a string-typed id would pass the
+          # numeric regex below unchecked. The predicate is byte-identical
+          # to merge-queue-gate.yml's — ONE definition of a valid pin; keep
+          # the two in lockstep when either changes.
+          jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' \
+            <<<"${REVIEWER_JSON}" >/dev/null || {
+            echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin (number id > 0, string login, record string)'; exit 1; }
+          REVIEWER_LOGIN="$(jq -r '.login' <<<"${REVIEWER_JSON}")"
+          REVIEWER_ID="$(jq -r '.id' <<<"${REVIEWER_JSON}")"
+          [[ "$REVIEWER_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || {
+            echo "refusing: policy promotion-reviewer login '$REVIEWER_LOGIN'"; exit 1; }
           args=(
             --repo=trust
             --repository="$REPO"
@@ -274,7 +325,12 @@ jobs:
             --defaultBranch="$DEFAULT_BRANCH"
             --verifiedWorkflows={{GATE_WORKFLOWS}}
             --timeoutMin={{GATE_TIMEOUT_MIN}}
+            --reviewerBotLogin="$REVIEWER_LOGIN"
+            --reviewerBotId="$REVIEWER_ID"
           )
+          if [ "${CQ_GATE_PROMOTES}" = 'true' ]; then
+            args+=(--push)
+          fi
           if [ -n "$VERDICT_APP_ID" ]; then
             args+=(--verdictAppId="$VERDICT_APP_ID")
           fi
@@ -289,7 +345,7 @@ jobs:
              and (.[0].status != "ok" or
                ((.[0].value | type) == "object"
                 and (.[0].value.verdict
-                  | IN("promoted", "would-promote", "noop", "refused"))
+                  | IN("promoted", "would-promote", "noop", "awaiting", "refused"))
                 and (.[0].value.report | type) == "array"
                 and all(.[0].value.report[]; type == "string")))' \
             "${RUNNER_TEMP}/gate.json" >/dev/null 2>&1; then
@@ -316,7 +372,11 @@ jobs:
               + "\n\n```text\n"
               + ($report | gsub("`{3,}"; "` ` `"))
               + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
-          # Report-only (batch policy, see the header): every verdict is
-          # advisory and lives in the summary above. Red only when the gate
-          # itself crashed (no ok result).
-          jq -e '.status == "ok"' "${RUNNER_TEMP}/gate.json" >/dev/null
+          # Red policy follows the switch: report-only (pre-C2) every ok
+          # verdict is advisory — the summary above is the product, and only
+          # a crashed gate is red. With CQ_GATE_PROMOTES=true a refused
+          # verdict is a RED run (the gate judged and said no — a human
+          # looks), and a crashed gate stays red.
+          jq -e --arg promoting "${CQ_GATE_PROMOTES}" \
+            '.status == "ok" and ($promoting != "true" or .value.verdict != "refused")' \
+            "${RUNNER_TEMP}/gate.json" >/dev/null
