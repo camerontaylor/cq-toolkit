@@ -826,6 +826,107 @@ ${script}`;
   );
 });
 
+// The resolve step's commit→PR lookup is a REST list (30 per page by
+// default), so it reads EVERY page (#280; the repo rule that REST lists
+// paginate — as cq-policy and cq-verify have done since 26150b1) and fails
+// closed on an API error: a partial read must never drop the PR whose head
+// is the subject, nor let an errored lookup pass as "nothing to judge".
+describe('cq-accept resolve reads every page of the commit→PR list (#280)', () => {
+  const SHA = '0123456789abcdef0123456789abcdef01234567';
+
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: a match on a later page is judged; ambiguity or an API error fails the step',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('resolve') ?? '',
+        'Verify the trigger and resolve the targets',
+      );
+      // The commit→PR list is answered ONLY in its paginated form, as two
+      // pages (PULLS_PAGE2 defaults to an empty page). PULLS_FAIL makes the
+      // list call an API error.
+      const shell = `gh() {
+  [ "$1" = api ] || return 9
+  local pg='' data
+  if [ "$2" = --paginate ]; then pg=1; shift; fi
+  case "$pg:$2" in
+    ":repos/o/r/actions/runs/$RUN_ID") data="$RUN_DATA";;
+    "1:repos/o/r/commits/${SHA}/pulls?per_page=100")
+      [ -z "\${PULLS_FAIL:-}" ] || return 22
+      printf '%s\\n' "$PULLS_DATA" "\${PULLS_PAGE2:-[]}"
+      return 0;;
+    *) return 9;;
+  esac
+  printf '%s\\n' "$data"
+}
+${script}`;
+      const valid = {
+        path: '.github/workflows/cq-signal.yml',
+        event: 'pull_request',
+        head_branch: 'feature',
+        head_repository: { id: 42 },
+        head_sha: SHA,
+      };
+      const pull = (base: string, over: Record<string, unknown> = {}) => ({
+        number: 7,
+        state: 'open',
+        head: { sha: SHA, repo: { id: 42 } },
+        base: { ref: base },
+        ...over,
+      });
+      const dir = mkdtempSync(join(tmpdir(), 'cq-accept-pages-'));
+      const outputPath = join(dir, 'github-output');
+      const check = (pulls: unknown[], extra: Record<string, string> = {}) => {
+        rmSync(outputPath, { force: true });
+        const r = spawnSync('bash', ['-c', shell], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            EVENT: 'workflow_run',
+            RUN_ID: '123',
+            RUN_DATA: JSON.stringify(valid),
+            PULLS_DATA: JSON.stringify(pulls),
+            REPO: 'o/r',
+            REPO_ID: '42',
+            GITHUB_OUTPUT: outputPath,
+            ...extra,
+          },
+        });
+        return {
+          ...r,
+          outputs: existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : '',
+        };
+      };
+      try {
+        // The PR on the SECOND page is judged anyway: every page is read,
+        // so the target is emitted and judge locks pr-7.
+        const paged = check([pull('other')], {
+          PULLS_PAGE2: JSON.stringify([pull('merge-queue')]),
+        });
+        expect(paged.status, paged.stderr + paged.stdout).toBe(0);
+        expect(paged.outputs).toBe(`targets=[{"pr":7,"subject":"${SHA}"}]\nlock=pr-7\n`);
+        // The one match split across the two pages is still one match.
+        const split = check([], { PULLS_PAGE2: JSON.stringify([pull('merge-queue')]) });
+        expect(split.status, split.stderr + split.stdout).toBe(0);
+        expect(split.outputs).toBe(`targets=[{"pr":7,"subject":"${SHA}"}]\nlock=pr-7\n`);
+        // Two matches across the pages refuse: the slurped array is one.
+        const ambiguous = check([pull('merge-queue')], {
+          PULLS_PAGE2: JSON.stringify([pull('merge-queue', { number: 8 })]),
+        });
+        expect(ambiguous.status, ambiguous.stdout).toBe(1);
+        expect(ambiguous.outputs).toBe('');
+        // An API error fails closed: the step refuses, no targets are
+        // emitted, judge never runs.
+        const failed = check([pull('merge-queue')], { PULLS_FAIL: '1' });
+        expect(failed.status, failed.stdout).not.toBe(0);
+        expect(failed.outputs).toBe('');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 // W1.10 fresh-review fix — the post step's stale-verdict guard and the
 // sweep's "unchanged" dedupe, run for real (bash + jq, `gh` stubbed and its
 // argv and POSTed payloads recorded). Every row we post carries its SNAPSHOT
