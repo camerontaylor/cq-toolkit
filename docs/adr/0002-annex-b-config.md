@@ -6,7 +6,7 @@
   [approval-token annex](0003-approval-token.md), the [journal annex](0003-journal-migration.md),
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
-Post-acceptance notes N3, N4 and N15 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N3, N4, N15 and N18 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.
@@ -219,6 +219,10 @@ built-in default  →  project env (CQ_*, optionally seeded by the bundled profi
 
 > Narrowed: the CQ secret is env-only (no SDK typed option); see post-acceptance note N4 in the
 > [ADR index](README.md#post-acceptance-notes).
+
+> Decided: `_URL` is not a secret suffix — the credential-URL screen covers URL values carrying
+> credentials, so the suffix list above stays without `_URL` and the code omits it too; see
+> post-acceptance note N18 in the [ADR index](README.md#post-acceptance-notes).
 
 **The rule is by name.** A name is secret iff it ends with one of the existing `SECRET_ENV_SUFFIXES`
 (`_API_KEY _TOKEN _AUTH_TOKEN _SECRET _KEY _PASSWORD _CREDENTIALS PRIVATE_KEY`,

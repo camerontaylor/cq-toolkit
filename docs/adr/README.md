@@ -64,7 +64,7 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17), each set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N18), each set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
@@ -288,3 +288,28 @@ The trigger changes nothing about trust: `cq-signal` remains a wake-up only
 untrusted-producer class; D-A.2's push exclusion is for privileged or
 deciding jobs, which `cq-signal` is not — and every verdict is still
 recomputed from the API by `head_sha`.
+
+### N18 — Annex B §B.5: `_URL` is not a secret suffix
+
+Row 6b of issue #291 recorded that the code's `SECRET_ENV_SUFFIXES`
+included `_URL`, which §B.5's suffix list omits. Decided by the owner
+(2026-10-11): **`_URL` is not a secret suffix**; §B.5's omission stands.
+A URL value is not a secret because the credential-URL screen already
+covers the dangerous case by VALUE, independent of the name: a
+passthrough variable whose value is a URL carrying userinfo, a query or a
+fragment is refused (`credentialUrl` in
+[`src/config/resolve.ts`](../../src/config/resolve.ts), the screen §B.5
+describes as `*_URL` names carrying userinfo), foreign base-URL values
+are validated credential-free (`validForeignBaseUrl`), and
+`DATABASE_URL` stays denied by name. Neither code copy of the suffix
+list carries `_URL` any more, so code and annex agree:
+`SECRET_ENV_SUFFIXES`
+([`src/driver/error-text.ts`](../../src/driver/error-text.ts), redaction)
+and the mirrored `secretSuffixes` in
+[`src/config/resolve.ts`](../../src/config/resolve.ts) (`isSecret`,
+journalling and the passthrough refusal). Consequences: a plain
+`_URL`-suffixed value is no longer blanket-redacted from error text, and
+a credential-free foreign base URL is journalled by value. This
+supersedes the open state N15 left: N15 aligned §B.4/§B.6/§B.9 and
+deliberately left "the annex-B `_URL` secret-suffix question" out of
+scope pending this decision.

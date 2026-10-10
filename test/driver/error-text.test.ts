@@ -53,4 +53,38 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.CQ_TEST_KEY = prior;
     }
   });
+
+  // Issue #291 row 6b (owner decision): `_URL` is not a secret suffix, so a
+  // plain URL-valued var is no longer blanket-redacted. A URL value carrying
+  // embedded credentials is handled by the credential-URL screen at the env
+  // boundary (src/config/resolve.ts), not by this redaction.
+  test('boundedErrorText no longer redacts a plain _URL-suffixed value', () => {
+    const prior = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_URL = 'https://example.test/api';
+    try {
+      expect(boundedErrorText('endpoint https://example.test/api failed')).toBe(
+        'endpoint https://example.test/api failed',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = prior;
+    }
+  });
+
+  test('boundedErrorText still redacts a credential-suffixed var even when a _URL var is set', () => {
+    const priorKey = process.env.CQ_TEST_TOKEN;
+    const priorUrl = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_TOKEN = 'token-value-1234';
+    process.env.CQ_TEST_URL = 'https://example.test/api';
+    try {
+      expect(boundedErrorText('token-value-1234 at https://example.test/api')).toBe(
+        '[redacted] at https://example.test/api',
+      );
+    } finally {
+      if (priorKey === undefined) delete process.env.CQ_TEST_TOKEN;
+      else process.env.CQ_TEST_TOKEN = priorKey;
+      if (priorUrl === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = priorUrl;
+    }
+  });
 });

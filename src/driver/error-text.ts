@@ -11,6 +11,10 @@
 // substring replace would shred unrelated words that merely contain the
 // value — a match is bounded by non-identifier characters instead.
 const MAX_ERROR_CHARS = 500;
+// `_URL` is deliberately absent (owner decision, issue #291 row 6b): a plain
+// URL value is not a secret. URLs carrying embedded credentials are screened
+// by VALUE — the config resolver's credential-URL screen — not blanket-
+// redacted by name.
 const SECRET_ENV_SUFFIXES = [
   '_API_KEY',
   '_TOKEN',
@@ -19,7 +23,6 @@ const SECRET_ENV_SUFFIXES = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
-  '_URL',
   'PRIVATE_KEY',
 ];
 

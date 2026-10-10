@@ -52,6 +52,9 @@ export interface ResolveConfigOptions {
 }
 
 const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
+// Mirrors SECRET_ENV_SUFFIXES in src/driver/error-text.ts; `_URL` is
+// deliberately absent (owner decision, issue #291 row 6b) — a URL value
+// carrying credentials is refused by the credential-URL screen below.
 const secretSuffixes = [
   '_API_KEY',
   '_TOKEN',
@@ -60,7 +63,6 @@ const secretSuffixes = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
-  '_URL',
   'PRIVATE_KEY',
 ];
 const deniedPassthrough = new Set([
