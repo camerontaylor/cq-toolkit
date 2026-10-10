@@ -1,6 +1,12 @@
 # CRQ implementation status and file leases
 
-Sole conductor/integrator: 00000000-0000-4000-8000-000000000002.
+Sole conductor/integrator: 00000000-0000-4000-8000-000000000003 (owner-delegated maintainer,
+full authorization 2026-10-10; previous conductor 20d7d77e is no longer live).
+
+**Deployed 2026-10-10:** queue-host is the sole runner at 2696601 (cutover 11:52Z; first tick 12:00Z);
+worker-host inert (schedule schedule-example deleted, watchdog booted out, marker set, rollback set retained).
+Signer installed/active at 2696601; promotion mode `signer` (policy on cq-toolkit main 361a337).
+Evidence: state/implementation-deployment.json, toolkit-research plans/s2-signer-install-record-20261010.md.
 Owner authorization: W0–W5, local ops commits and safe single-runner queue-host handover.
 Baseline: clean main da295ce; legacy addressing; worker-host schedule schedule-example;
 no owned test jobs. Live checkout remains main da295ce until handover.
