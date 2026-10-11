@@ -85,10 +85,20 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
         return None
     at = _time(now)
     excluded = {_path(p) for p in excluded_paths}
-    active = [i for i in queue.get("items", []) if i.get("kind") == "coverage"
-              and i.get("state") not in ("done", "skipped")]
+    outstanding = [i for i in queue.get("items", []) if i.get("kind") == "coverage"
+                   and i.get("state") not in ("done", "skipped")]
+    # A counted cycle is persisted only after terminal review success. Repair
+    # debt must retain its own paths without holding the global review slot.
+    # Missing completion evidence and unknown states remain fail-closed.
+    repair_debt = [i for i in outstanding
+                   if i.get("state") in ("repairing", "repair_failed")
+                   and any(c.get("run_id") in ledger["runs"] and c.get("completed_at")
+                           for c in i.get("cycles", []))]
+    for item in repair_debt:
+        excluded.update(_path(p) for p in item.get("coverage_paths", []))
+    active = [i for i in outstanding if i not in repair_debt]
     # One outstanding coverage item prevents repeated enrollment and respects
-    # backoff/blocked work. The conductor retries that item through normal gates.
+    # backoff/blocked work. Completed repair debt is retained, not resolved here.
     if active:
         return None
     choices = []
@@ -102,7 +112,7 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
             if not file.get("now") or not file.get("synthetic_added"):
                 continue
             path = _path(file["now"])
-            if path in excluded:
+            if path in excluded or _path(file["path"]) in excluded:
                 continue
             entry = ledger["paths"].get(path, {})
             last = entry.get("last_reviewed_at")

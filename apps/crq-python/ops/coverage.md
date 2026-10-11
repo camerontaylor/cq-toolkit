@@ -64,7 +64,12 @@ with deterministic path/source ties. The bounded region is one parent directory
 from one merged source. Synthetic scope includes old rename aliases. Default
 24-hour freshness prevents repeatedly reviewing a just-completed region; lower
 the bound explicitly if continuous repeat coverage is desired. Existing pending,
-reviewing, deferred, or blocked coverage suppresses new enrollment. Retry pending
+reviewing, deferred, or blocked coverage suppresses new enrollment. A `repairing`
+or `repair_failed` item with a persisted completed cycle credited in the terminal
+review ledger does not hold that global review slot. Its own `coverage_paths`
+remain excluded until reconciliation, while unrelated regions remain eligible.
+Missing completion evidence and unknown states still suppress enrollment. This
+neither resolves findings nor alters repair jobs. Retry pending
 coverage through the fallback path after ordinary work, and retire stale items
 explicitly before recutting. Completed/skipped IDs remain sticky; fresh cuts get
 a unique suffix. Sources without fresh tip measurements produce no candidates.
