@@ -14,20 +14,28 @@
 # ladder (a wedged governed job is escalated by the ladder instead of
 # stalling the slot).
 #
-# Instantiate (each token below is written in double braces in the body):
-#   SELFHOST_TOKEN          -> NAME of the `automation` ENVIRONMENT
-#                              secret (never a repository secret: GitHub
-#                              applies environment protection only to
-#                              environment secrets) holding a PAT
-#                              with repo scope on the target repo (the
-#                              dispatch merges PRs as its user; gh rides it
-#                              as GH_TOKEN). Instantiated files reference it
-#                              as `${{ secrets.<name> }}` — a name, never a
-#                              value; a template or instantiation that
-#                              embeds a token value is a denylist-class bug.
-#   SELFHOST_DRIVER_KEY     -> Reserved only for adopter documentation; this
-#                              merge template does not dispatch conflict
-#                              agents, so it declares no driver secret.
+# Instantiate: the body carries NO token in double braces — the merge
+# dispatch's GitHub credential carries no placeholder (the mint below names
+# the App key and client id literally, so each adopter sets them under these
+# names).
+#
+# CREDENTIAL IDENTITY — per-run mint, no fallback. The dispatch's GitHub
+# credential is the registered cq-automation App, minted PER RUN by the job
+# below from the `automation` environment secret CQ_AUTOMATION_APP_KEY (the
+# App private key) plus the repository variable CQ_AUTOMATION_APP_CLIENT_ID
+# (its client id), scoped to this repository only. This is the per-run-mint
+# pattern of PR #307 (policy/templates/adversarial-suite.yml), shipped for
+# the review loop in PR #313; it supersedes the static-credential identity
+# note, whose refresh path a per-run mint no longer needs. The mint step is
+# variable-gated, and the run step SKIPS HONESTLY (exit 0, a documented
+# no-op) when no token was minted — never a PAT, never the runner's
+# GITHUB_TOKEN, and never a silent promotion of an interim credential. The
+# minted token is step-scoped to the run step and never reaches pnpm
+# install. On this repository only, the App needs Pull requests write (list,
+# read, merge) and Contents write (the `cq-state` settle-state branch).
+#
+# SELFHOST_DRIVER_KEY is intentionally absent: this merge template does not
+# dispatch conflict agents, so it declares no driver secret.
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
 #                              carries THIS repo's two literal crons
@@ -35,7 +43,7 @@
 #                              BY HAND with their model provider's off-peak
 #                              window. No placeholder text is substituted.
 # ENVIRONMENT (W1.10 Decision 8): the job runs in environment `automation`
-# (main-only branch policy), which holds SELFHOST_TOKEN's secret, so a
+# (main-only branch policy), which holds the App key the mint reads, so a
 # dispatch from any other ref fails at job admission, before the secret is
 # exposed.
 # No ${{ }} expression is ever interpolated into a run: script in this
@@ -155,12 +163,35 @@ jobs:
           key: self-merge-prs-state-${{ github.run_id }}
           restore-keys: |
             self-merge-prs-state-
+      # Per-run mint, no PAT fallback: the dispatch's GitHub credential is the
+      # cq-automation App's installation token, minted here from the
+      # `automation` secret CQ_AUTOMATION_APP_KEY plus the
+      # CQ_AUTOMATION_APP_CLIENT_ID repository variable. `owner` is the
+      # repository owner; `repositories` is THIS repository only. The App asks
+      # for only the permissions the dispatch needs — Pull requests write (list,
+      # read, merge) and Contents write (the `cq-state` settle-state branch).
+      # Deliberately NO workflows/checks/statuses write. The mint step is
+      # variable-gated; an empty client-id variable skips it and the run step
+      # below skips honestly.
+      - name: Mint the cq-automation App token (per run)
+        id: self-merge-app
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
+          permission-pull-requests: write
+          permission-contents: write
       - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
         env:
           # Step-scoped on purpose (the live-review.yml round-3
           # discipline): the token must never reach pnpm install's lifecycle
-          # scripts — it reaches ONLY this step.
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # scripts — it reaches ONLY this step. Its sole source is the
+          # per-run mint above (never a PAT, never the runner's GITHUB_TOKEN).
+          GH_TOKEN: ${{ steps.self-merge-app.outputs.token }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
@@ -178,16 +209,19 @@ jobs:
           # exits 1. pipefail below turns that throw into a red step
           # despite tee.
           set -euo pipefail
-          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the secret asserts: a delayed fire with rotated/absent secrets is a scheduling fact (honest no-op), not a credential failure.
+          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the credential assert: a delayed fire with an unminted/rotated token is a scheduling fact (honest no-op), not a credential failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
             exit 0
           fi
-          # Self-host automation is optional. A repository without its automation token
-          # is not broken: the non-required job skips honestly. Required I4 checks
-          # never use this workflow and therefore never inherit this skip.
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
+          # Self-host automation is optional. A repository without its
+          # cq-automation App minted (the client-id variable unset, or a
+          # failed mint) is not broken: the non-required job skips honestly.
+          # The credential's ONLY source is the per-run mint above — there is
+          # no PAT fallback. Required I4 checks never use this workflow and
+          # therefore never inherit this skip.
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not minted — set the CQ_AUTOMATION_APP_CLIENT_ID repository variable and the CQ_AUTOMATION_APP_KEY environment secret (cq-automation App); skipping optional self-host automation' >&2; exit 0; }
           # Bash ARRAY, never a string: the expansions stay single words
           # even if a future value carries spaces (an unquoted $ARGS
           # word-splits).

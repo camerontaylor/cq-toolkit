@@ -29,29 +29,25 @@
 # workflows, so its checks would never run. The job runs in environment
 # `automation` (main-only branch policy).
 #
-# Interim fallback (W1.10 fix round): the automation credential is REQUIRED.
-# `{{INTERIM_SECRET}}` is used only while the explicit opt-in variable
-# `{{INTERIM_FALLBACK}}` is non-empty — an unset automation secret alone
-# never silently promotes the interim PAT into the automation identity.
+# CREDENTIAL IDENTITY — per-run mint, no fallback. The sync PR's automation
+# credential is the registered cq-automation App, minted PER RUN by the job
+# from the `automation` environment secret CQ_AUTOMATION_APP_KEY (the App
+# private key) plus the repository variable CQ_AUTOMATION_APP_CLIENT_ID (its
+# client id), scoped to this repository only. This is the per-run-mint
+# pattern of PR #307 (policy/templates/adversarial-suite.yml), shipped for
+# the review loop in PR #313; it replaces the interim PAT pair
+# (`CQ_AUTOMATION_TOKEN`/`PROMOTE_TOKEN`) and its explicit opt-in variable
+# outright. No PAT fallback exists: an empty client-id variable skips the
+# mint, and the sync PR then refuses ("sync not armed") rather than promoting
+# an interim credential into the automation identity. The minted token is
+# step-scoped to the triage step. On this repository only, the App needs Pull
+# requests read/write (list + open the sync PR).
 #
-# Instantiate (each token below is written in double braces in the body):
-#   AUTOMATION_SECRET -> NAME of the secret holding the automation
-#                        credential (Pull requests read/write, Contents
-#                        read), e.g. CQ_AUTOMATION_TOKEN in `automation`.
-#   INTERIM_SECRET    -> NAME of the secret used when AUTOMATION_SECRET is
-#                        empty AND the opt-in below is set (the interim
-#                        fallback until the automation credential is
-#                        provisioned), e.g. PROMOTE_TOKEN.
-#                        Set it to the same name as AUTOMATION_SECRET to
-#                        have no fallback.
-#   INTERIM_FALLBACK  -> NAME of the repo VARIABLE that arms the interim
-#                        fallback when non-empty, e.g.
-#                        CQ_AUTOMATION_INTERIM_FALLBACK. Unset/empty means
-#                        no fallback: the sync PR then refuses with
-#                        "sync not armed" until AUTOMATION_SECRET exists.
-# Instantiated files reference both as `${{ secrets.<name> }}` — names,
-# never values. Drop the result into .github/workflows/. Edit the template,
-# not the instantiation.
+# Instantiate: the body carries NO token in double braces — the sync PR's
+# automation credential carries no placeholder (the mint below names the App
+# key and client id literally, so each adopter sets them under these names).
+# Drop the result into .github/workflows/. Edit the template, not the
+# instantiation.
 name: sync-merge-queue
 
 on:
@@ -86,10 +82,33 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # Per-run mint, no PAT fallback: the sync PR's automation credential is
+      # the cq-automation App's installation token, minted here from the
+      # `automation` secret CQ_AUTOMATION_APP_KEY plus the
+      # CQ_AUTOMATION_APP_CLIENT_ID repository variable. `owner` is the
+      # repository owner; `repositories` is THIS repository only (never any
+      # other). The App asks for only the permission the sync PR uses (list +
+      # open); reads and the gate dispatches keep the job's own GITHUB_TOKEN.
+      # Deliberately NO workflows/checks/statuses write. The mint step is
+      # variable-gated; an empty client-id variable skips it and the sync PR
+      # refuses ("sync not armed") rather than promoting an interim PAT.
+      - name: Mint the cq-automation App token (per run)
+        id: sync-app
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
+          permission-pull-requests: write
       - name: Triage main vs merge-queue (API only, zero clone)
         env:
           GH_TOKEN: ${{ github.token }}
-          AUTOMATION_TOKEN: ${{ secrets.{{AUTOMATION_SECRET}} || (vars.{{INTERIM_FALLBACK}} != '' && secrets.{{INTERIM_SECRET}} || '') }}
+          # The per-run minted App token (its only source — never a PAT,
+          # never the runner's GITHUB_TOKEN). It reaches ONLY this step.
+          AUTOMATION_TOKEN: ${{ steps.sync-app.outputs.token }}
           REPO_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
@@ -123,7 +142,7 @@ jobs:
 
           open_sync_pr() {
             if [ -z "${AUTOMATION_TOKEN}" ]; then
-              echo "sync not armed: no automation credential — set the automation secret in environment automation (the interim fallback additionally needs a non-empty {{INTERIM_FALLBACK}} variable and the interim secret present)"
+              echo "sync not armed: no automation credential — set the CQ_AUTOMATION_APP_CLIENT_ID repository variable and the CQ_AUTOMATION_APP_KEY environment secret (cq-automation App)"
               exit 1
             fi
             # Reuse an open same-repo sync PR (head main, base merge-queue):

@@ -23,8 +23,8 @@ template, not this file` provenance header.
 2. Build from source: both workflows run `pnpm install --frozen-lockfile`
    then `pnpm run build` and invoke the built entries — the adoption is the SOURCE, never a published
    tarball.
-3. Configure the credentials (below): the review loop mints its own App token
-   per run; `self-merge-prs` reads one environment secret. Confirm the driver binding in
+3. Configure the credentials (below): both workflows mint the `cq-automation`
+   App's installation token per run — no stored GitHub credential. Confirm the driver binding in
    `src/selfhost/config.ts` (`SelfhostDefaults`) names YOUR provider and its
    served model id — this repo's instantiation uses the ai-sdk route against
    the Z.AI GLM coding endpoint with the served id `glm-5.3-flash`.
@@ -76,24 +76,21 @@ Decision 8): the jobs that read them declare `environment: automation`, so a
 dispatch from any other ref fails at job admission, before a secret is
 exposed.
 
-| credential                    | where it lives      | what it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CQ_AUTOMATION_APP_KEY`       | `automation` SECRET | the `cq-automation` App's private key. The review loop's privileged job mints an installation token from it per run, scoped to this repository only. LITERAL name (the mint step names it).                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `CQ_AUTOMATION_APP_CLIENT_ID` | repository VARIABLE | the `cq-automation` App's client id, paired with the key. The mint step is variable-gated: with the variable unset the step is skipped and the loop refuses to start (fail-closed). LITERAL name.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `{{SELFHOST_TOKEN}}`          | `automation` SECRET | `self-merge-prs`'s GitHub credential (that template does not mint per run — that change is out of scope here). Recommended END STATE: the registered automation App's installation token (this repository's App: cq-automation) — but see the identity note below: a static installation-token secret does not support the schedule without a refresh path. Working identity until then: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, merge PRs, and Contents write for the `cq-state` settle-state branch. Referenced by the workflow as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}`     | `automation` SECRET | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| credential                    | where it lives      | what it holds                                                                                                                                                                                                                                                |
+| ----------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CQ_AUTOMATION_APP_KEY`       | `automation` SECRET | the `cq-automation` App's private key. BOTH privileged jobs mint an installation token from it per run, scoped to this repository only. LITERAL name (each mint step names it).                                                                              |
+| `CQ_AUTOMATION_APP_CLIENT_ID` | repository VARIABLE | the `cq-automation` App's client id, paired with the key. Each mint step is variable-gated: with the variable unset the step is skipped and the workflow handles the missing credential honestly (the loop refuses, the merge dispatch skips). LITERAL name. |
+| `{{SELFHOST_DRIVER_KEY}}`     | `automation` SECRET | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                          |
 
 Every credential is step-scoped and never reaches `pnpm install`'s
 lifecycle scripts: the App private key is provided only to the mint step
 (via `private-key`), and the minted installation token is provided only to
-the run step. A missing `{{SELFHOST_TOKEN}}` makes
-`self-merge-prs` skip successfully; required I4 checks are separate and never
-use this optional skip. The review loop does NOT skip on a missing credential:
-with no `CQ_AUTOMATION_APP_CLIENT_ID` variable (or a failed mint) it refuses
-to start, because the schedule has no fallback identity. For
-`{{SELFHOST_TOKEN}}`, a classic PAT with the blanket `repo` scope is the
-last-resort FALLBACK — it reaches every repo the account can touch, so grant
-it only where fine-grained PATs are unavailable.
+the run step. A missing credential is handled honestly by each workflow — the
+review loop REFUSES to start (exit 1), `self-merge-prs` SKIPS successfully
+(exit 0, a documented no-op); required I4 checks are separate and never use
+this optional skip. There is NO PAT fallback and no classic-token
+last resort: the mint is the only credential source, so a failed or skipped
+mint can never promote an interim human token into the automation identity.
 
 ### The review loop's identity: the App, minted per run
 
@@ -117,27 +114,23 @@ loop step asserts the minted token with a message naming both the variable and
 the secret — rather than posting as a human or the runner. The `GH_TOKEN` env
 indirection still drives the same code, but its only source is the mint.
 
-### The merge dispatch's identity: the App is the end state, the PAT is the working identity
+### The merge dispatch's identity: the App, minted per run
 
-`self-merge-prs` is unchanged by the review-loop mint. The recommended END
-STATE for its `{{SELFHOST_TOKEN}}` value is the same registered automation
-App's installation token, not a human or role PAT: an App identity keeps the
-merges attributable and revokes independently of every human credential. But
-installation tokens are short-lived, and that workflow consumes `GH_TOKEN`
-directly per run with nothing to re-mint — a STATIC installation-token secret
-does NOT support ongoing scheduled runs. Its App identity therefore still
-REQUIRES a refresh path:
+`self-merge-prs` mints the same `cq-automation` App's installation token per
+run — the pattern shipped for the review loop — from `CQ_AUTOMATION_APP_KEY`
+(environment secret) plus `CQ_AUTOMATION_APP_CLIENT_ID` (repository
+variable), scoped to this repository only, requesting only Pull requests
+write (list, read, merge) and Contents write (the `cq-state` settle-state
+branch). The per-run mint removes the static-token refresh problem outright,
+so its identity is the App, never a human or role PAT: merges stay
+attributable, revoke independently of every human credential, and no
+long-lived repo-scope secret exists.
 
-- an external process (cron/hook) re-mints the installation token and
-  updates the `automation` environment secret before each expiry, or
-- the workflow mints its own token per run — the pattern now shipped for the
-  review loop; applying it to `self-merge-prs` is out of scope for this PR.
-
-Until one exists, the WORKING identity is the long-lived PAT — prefer the
-fine-grained, target-repository-only PAT described in the table above; the
-classic blanket-`repo` PAT stays the last-resort fallback. That trades the
-I2/attribution and revocability benefits above, and the `GH_TOKEN` env
-indirection is what lets either identity drive the same code.
+Unlike the review loop, the merge dispatch SKIPS HONESTLY (exit 0, a
+documented no-op) when no token was minted — the non-required job is optional
+and a repository without its automation configured is not broken. There is no
+PAT fallback: the mint is the only credential source, and the `GH_TOKEN` env
+indirection drives the same code with the minted token only.
 
 ## Standing requirements (Rule / Why / Enforcement)
 
@@ -222,7 +215,7 @@ adopter owns it by hand.
   classify→merge window remains; `src/selfhost/state-branch.ts` owns the
   store. A refusal shows as a `cq merge-time recheck refused pr N: …`
   needs-human row, and a later run merges the PR once it qualifies.
-  `self-merge-prs`'s `{{SELFHOST_TOKEN}}` needs Contents write to update
+  `self-merge-prs`'s minted App token needs Contents write to update
   `cq-state` (the review loop's minted token requests Contents write for its
   review-fix pushes, not settle state).
   Restricting that branch to the automation identity is a MANUAL ruleset
@@ -263,15 +256,15 @@ adopter owns it by hand.
 ### Secret step-scoping
 
 - Rule: no credential reaches `pnpm install`'s lifecycle scripts; the App
-  private key is confined to the mint step (`private-key`), the minted token
-  and `{{SELFHOST_TOKEN}}` to their run steps — and each presence is asserted
-  before any effect (the review loop's minted token; `self-merge-prs`'s
-  `{{SELFHOST_TOKEN}}`).
+  private key is confined to the mint step (`private-key`), each minted token
+  to its run step — and each presence is handled honestly before any effect
+  (the review loop's minted token asserts and refuses; `self-merge-prs`'s
+  asserts and skips).
 - Why: the run step executes repo code; a credential that rode an earlier
   step's lifecycle scripts could leak into execution the review never saw.
-- Enforcement: the workflow YAML structure itself — the review loop mints in
-  its own step and both tokens are step-scoped `env:` keys on the run step
-  only, and each run block opens with its `test -n` presence asserts.
+- Enforcement: the workflow YAML structure itself — each workflow mints in
+  its own step and the minted token is a step-scoped `env:` key on the run
+  step only, and each run block opens with its `test -n` presence check.
 
 ## The evidence convention
 
