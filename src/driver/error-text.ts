@@ -83,6 +83,7 @@ const SECRET_KEY_WORDS = new Set([
   'apikey',
   'accesskey',
   'auth',
+  'credential',
   'credentials',
   'signature',
   'sig',

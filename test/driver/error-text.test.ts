@@ -319,6 +319,8 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       'https://example.test/api?access%5Ftoken=secret',
       'https://example.test/api?%74oken=secret',
       'https://example.test/api?a=1&%61ccesskey=secret',
+      'https://example.test/?credential=secret',
+      'https://example.test/?credentials=secret',
       'https://example.test/api#access%5Ftoken=secret',
       'https://example.test/api;a=1;token=secret',
       'https://example.test/api?a=1;token=secret',
