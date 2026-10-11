@@ -443,4 +443,41 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       expect(redactSensitiveText(text)).toBe(text);
     }
   });
+
+  // Fresh-review round 2 (KiBl): a run of slashes at the authority start is
+  // WHATWG's slash-run form, not a path, so the credential still scrubs.
+  test('redactSensitiveText redacts a slash-run authority', () => {
+    expect(redactSensitiveText('///user:pass@example.test/x')).toBe('[redacted]');
+    expect(redactSensitiveText('////user:pass@h/x')).toBe('[redacted]');
+    expect(redactSensitiveText('GET ///user:pass@example.test/x failed')).toBe(
+      'GET [redacted] failed',
+    );
+  });
+
+  // Fresh-review round 2 (KiBk): a nested `scheme://` or `//` credential URL
+  // inside a path segment or a parameter VALUE redacts the whole outer
+  // candidate — over-redaction of the outer prefix is the accepted direction.
+  test('redactSensitiveText redacts a nested credential URL inside a path or value', () => {
+    for (const url of [
+      'https://proxy.test/?target=https://user:pass@example.test/x',
+      'https://proxy.test/fwd?to=//user:pass@private.test/y',
+      'https://h/https://user:pass@x/z',
+      'https://h/p#t=https://user:pass@x/z',
+    ]) {
+      expect(redactSensitiveText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+  });
+
+  test('redactSensitiveText keeps credential-free nested paths and values visible', () => {
+    for (const text of [
+      'https://example.test?email=user@host',
+      'https://example.test/api?page=2',
+      'https://h/a@b',
+      'https://example.test/api?sort=key',
+      'https://example.test?redirect=//example.test/path',
+      'https://example.test/api?a=b/c',
+    ]) {
+      expect(redactSensitiveText(text)).toBe(text);
+    }
+  });
 });

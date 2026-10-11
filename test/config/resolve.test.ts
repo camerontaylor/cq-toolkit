@@ -379,6 +379,43 @@ describe('pure configuration resolution', () => {
         ).toThrow(/cannot be passed through/);
       }
     });
+
+    // Fresh-review round 2 (KiBl): a leading slash run is WHATWG's slash-run
+    // form, so every leading slash is stripped before the authority check.
+    it('refuses protocol-relative values with a leading slash run (KiBl)', () => {
+      for (const value of ['///user:pass@example.test/x', '////user:pass@x/y']) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+      for (const value of ['//example.test/path', 'https://example.test/metrics']) {
+        expect(
+          entryValue(
+            'run.envPassthrough',
+            resolve({
+              env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+            }),
+          ),
+        ).toEqual(['SAFE_ENDPOINT']);
+      }
+    });
+
+    // Fresh-review round 2 (KiBn): WHATWG strips tab/newline/CR before parsing,
+    // so a scheme split by one still resolves to a credential URL.
+    it('refuses a tab- or newline-split scheme (KiBn)', () => {
+      for (const value of [
+        `ht\ntps://user:pass@example.test/x`,
+        'ht\ttps://user:pass@example.test/x',
+      ]) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
   });
 
   it('journals a credential-free foreign base URL by value, not as secret presence', () => {

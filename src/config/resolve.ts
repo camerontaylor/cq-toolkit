@@ -174,13 +174,16 @@ function validForeignBaseUrl(value: string): boolean {
 }
 
 function credentialUrl(raw: string | undefined): boolean {
-  // Structural credential-URL screen (fail closed; order matters). URL
-  // consumers commonly trim, so screen the trimmed value. Protocol-relative
-  // values (`//user:pass@host/path`) carry no scheme for the test below, so
-  // they are refused FIRST by their userinfo-shaped authority — and by any
-  // query or fragment after the `//`, matching the scheme-shaped path below
-  // (which refuses ANY query/fragment, not only secret-keyed ones). A Windows
-  // drive path (`C:\cache#v1`) is a filename whose `#` is not a URL
+  // Structural credential-URL screen (fail closed; order matters). The value is
+  // normalized the way a parser reads it: WHATWG-ignored tab/newline/CR are
+  // removed (the outer C0/space goes with the trim) and a leading slash run is
+  // collapsed to its remainder, so a scheme split by a tab/newline and a
+  // `///user:pass@host` form are judged as the forms a parser will see.
+  // Protocol-relative values (`//user:pass@host/path`) carry no scheme for the
+  // test below, so they are refused FIRST by their userinfo-shaped authority —
+  // and by any query or fragment after the slashes, matching the scheme-shaped
+  // path below (which refuses ANY query/fragment, not only secret-keyed ones).
+  // A Windows drive path (`C:\cache#v1`) is a filename whose `#` is not a URL
   // fragment; a query marker is never a Windows filename character, so a
   // drive-shaped value WITH a query is still screened as a URL.
   // Scheme-shaped values parse via `new URL`: userinfo, query or fragment
@@ -192,11 +195,12 @@ function credentialUrl(raw: string | undefined): boolean {
   // at all (WHATWG reads the whole body as an opaque path) and `urn:…` values
   // are opaque by construction. Over-refusal at config time (`mailto:user@…`,
   // `urn:isbn:…`) is the accepted direction.
-  const value = raw?.trim();
+  const value = raw?.replace(/[\t\n\r]/g, '').trim();
   if (!value) return false;
-  if (value.startsWith('//')) {
-    const authority = value.slice(2).split(/[/?#]/, 1)[0] ?? '';
-    return authority.includes('@') || /[?#]/.test(value.slice(2));
+  if (/^\/{2,}/.test(value)) {
+    const remainder = value.replace(/^\/+/, '');
+    const authority = remainder.split(/[/?#]/, 1)[0] ?? '';
+    return authority.includes('@') || /[?#]/.test(remainder);
   }
   if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;

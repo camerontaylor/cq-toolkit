@@ -47,6 +47,14 @@
 // credential-free block in. Contiguous authority userinfo needs no probe: it
 // is unbounded.
 //
+// Two sideways shapes are covered beside the main candidate: a slash run at the
+// authority start (`///user:pass@host`) stays in the authority rather than
+// opening a path, and a NESTED `scheme://` or `//` credential URL inside a path
+// segment or a parameter VALUE is tracked alongside the outer candidate — a raw
+// `@` in that nested authority marks the whole outer candidate sensitive, so
+// `?target=https://user:pass@host` scrubs entire (over-redaction of the outer
+// prefix is the accepted direction).
+//
 // The env-value pass below is unchanged: env-NAME driven, exact-value and
 // whole-token, and it runs on the full text after the scanner.
 const MAX_ERROR_CHARS = 500;
@@ -117,6 +125,9 @@ type UriState =
   | 'fragment';
 
 type ParameterState = 'off' | 'name' | 'value';
+
+/** Nested-URL substate, tracked only inside PATH/QUERY/FRAGMENT. */
+type InnerState = 'none' | 'slash' | 'scheme' | 'auth';
 
 interface WrapProbe {
   /** Original URL start; a hit redacts from here. */
@@ -192,6 +203,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   let state: UriState = 'text';
   let candidateStart = 0;
   let authorityStart = 0;
+  let authorityEmpty = false;
   let special = false;
   let sensitive = false;
   let scheme = '';
@@ -206,6 +218,10 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   let escapeActive = false;
   let escapeDigits = 0;
   let escapeValue = 0;
+
+  let inner: InnerState = 'none';
+  let innerScheme = '';
+  let innerSchemeOverflow = false;
 
   const clearName = (): void => {
     parameter = 'off';
@@ -283,6 +299,66 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     if (parameter === 'name') noteNameCharacter(code);
   };
 
+  const resetInner = (): void => {
+    inner = 'none';
+    innerScheme = '';
+    innerSchemeOverflow = false;
+  };
+
+  /**
+   * Nested-URL tracking, active only in PATH/QUERY/FRAGMENT: a `scheme://` or
+   * `//` credential URL inside a path segment or a parameter VALUE must still
+   * redact. A raw `@` in the nested authority marks the OUTER candidate
+   * sensitive, so the whole outer candidate redacts (over-redaction of the
+   * outer prefix is the accepted direction). Transitions back to `none`
+   * re-handle the code unit, exactly like the outer machine. The single-slash
+   * and slashless nested forms are deliberately not tracked: the outer
+   * machine covers those forms when the URL is the candidate itself.
+   */
+  const trackInner = (index: number, code: number): void => {
+    if (inner === 'auth') {
+      if (code === 0x40) {
+        // `@`
+        sensitive = true;
+        return;
+      }
+      if (code !== 0x2f && code !== 0x3f && code !== 0x23) return;
+      inner = 'none';
+    }
+    if (inner === 'slash') {
+      if (code === 0x2f) {
+        inner = 'auth';
+        return;
+      }
+      inner = 'none';
+    }
+    if (inner === 'scheme') {
+      if (isSchemeCharacter(code)) {
+        if (innerSchemeOverflow || innerScheme.length >= MAX_SCHEME_CHARS)
+          innerSchemeOverflow = true;
+        else innerScheme += String.fromCharCode(code).toLowerCase();
+        return;
+      }
+      if (code === 0x3a && !innerSchemeOverflow) {
+        // `:` — the nested authority follows.
+        inner = 'auth';
+        return;
+      }
+      inner = 'none';
+    }
+    const previous = index === 0 ? -1 : text.charCodeAt(index - 1);
+    if (continuesToken(previous)) return;
+    if (code === 0x2f) {
+      inner = 'slash';
+      return;
+    }
+    if (isAsciiLetter(code)) {
+      inner = 'scheme';
+      innerScheme = String.fromCharCode(code).toLowerCase();
+      innerSchemeOverflow = false;
+    }
+  };
+
   /**
    * Record a span, coalescing any overlaps. The finalisation-order invariant
    * above means the merged predecessor is always the newest recorded span (and
@@ -305,14 +381,21 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     candidateStart = index;
     sensitive = false;
     clearName();
+    resetInner();
   };
 
   const enterAuthority = (index: number): void => {
     state = 'auth';
     authorityStart = index;
+    authorityEmpty = true;
   };
 
   const advanceAuthority = (code: number): void => {
+    // A run of slashes at the authority start (`///user:pass@host`, WHATWG's
+    // slash-run form) is still the authority, not a path: skip it while the
+    // authority is empty so the credential is not dropped.
+    if (authorityEmpty && (code === 0x2f || (special && code === 0x5c))) return;
+    authorityEmpty = false;
     if (code === 0x40) {
       // `@` — userinfo, with no length limit and no required host.
       sensitive = true;
@@ -367,7 +450,8 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     noteParameterCharacter(code);
   };
 
-  const advancePath = (code: number): void => {
+  const advancePath = (index: number, code: number): void => {
+    trackInner(index, code);
     if (code === 0x3f) {
       state = 'query';
       startName();
@@ -385,7 +469,8 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     noteParameterCharacter(code);
   };
 
-  const advanceQueryOrFragment = (code: number): void => {
+  const advanceQueryOrFragment = (index: number, code: number): void => {
+    trackInner(index, code);
     if (code === 0x23) {
       // `#` starts (or restarts, in a fragment) the parameter list.
       state = 'fragment';
@@ -410,6 +495,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     state = 'text';
     sensitive = false;
     clearName();
+    resetInner();
     if (credential) pushSpan(start, end);
     if (endedInAuthority && whitespaceEnded && end - authority <= WRAP_AUTHORITY_CHARS) {
       probes.push({ start, authority, special: probeSpecial, tail: false });
@@ -509,9 +595,9 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       return;
     }
     if (state === 'auth') advanceAuthority(code);
-    else if (state === 'path') advancePath(code);
+    else if (state === 'path') advancePath(index, code);
     else if (state === 'opaque') advanceOpaque(code);
-    else advanceQueryOrFragment(code);
+    else advanceQueryOrFragment(index, code);
   };
 
   for (let i = 0; i <= length; i += 1) {
