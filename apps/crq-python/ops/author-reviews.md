@@ -66,45 +66,53 @@ consumed `author_failed` terminal.
 ## Review deadline wrapper (a wall-clock guard, NOT a hard budget)
 
 The review child runs `timeout --foreground --kill-after=60 <review_timeout_min>m
-coderabbit review ...`. GNU `timeout` semantics, verified against coreutils
+coderabbit review ...`, and the runner writes `review.pid` BEFORE spawning it
+with `run_id`, a valid detached `pid`/`pgid`/`sid` and the `group_owner` protocol
+marker (`foreground-v1`). GNU `timeout` semantics, verified against coreutils
 9.11: WITHOUT `--foreground`, timeout moves the managed command into a NEW
 process group whose pgid is the wrapper's own pid, so `review.pid`'s runner pgid
-(written BEFORE the child is spawned) would NOT cover the running review; a
-runner killed between Popen and the `cli_pid` write would leave the recorded group
-empty while the review lives in an unrecorded group (a false "gone"). WITH
-`--foreground` the whole review (wrapper + direct child) stays in the runner's own
-group, so the pre-recorded pgid always covers a live review. This requires GNU
-coreutils `timeout` (already required by `--kill-after`).
+(written before the child is spawned) does NOT cover the running review; a runner
+killed between Popen and the `cli_pid` write leaves the recorded group empty while
+the review lives in an unrecorded group (a false "gone"). WITH `--foreground` the
+whole review (wrapper + direct child) stays in the runner's own group, so the
+pre-recorded pgid always covers a live review. This requires GNU coreutils
+`timeout` (already required by `--kill-after`).
 
 Deadline semantics: SIGTERM at `review_timeout_min`, then SIGKILL 60s later;
 `timeout` reports exit 124 on either, which the child records as `timed_out`.
-`--foreground` signals the DIRECT child only, so a descendant that detaches into
-its own session/group is not killed by the wrapper; such a group retains capacity
-fail-closed (owner disposition). This is a review wall-clock guard. It is NOT a
-repair hard-budget or a spend proof, and no such proof is claimed here.
+`--foreground` signals the DIRECT child only. A descendant that creates its OWN
+session/group escapes both the deadline and the group probe: that is an explicit,
+UNTRACKED residual, not a retained-capacity guarantee (proving ownership of an
+escaped group would need cgroups/units, which are out of this scope). This is a
+review wall-clock guard. It is NOT a repair hard-budget or a spend proof, and no
+such proof is claimed here.
 
 ## Crash recovery (fail closed, shared by author and natural runs)
 
-Before harvesting, a detached review is probed by runner pid, CLI pid AND the
-recorded process group (`timeout --foreground` keeps them in one group). The
-decision is shared by author and natural runs and is consulted even when a
-terminal `exit.json` exists:
+Before harvesting, a detached review is probed by runner pid, CLI pid and every
+process group that can own it, and the decision is consulted even when a terminal
+`exit.json` exists. No absence is ever asserted without proof:
 
-- a matching runner/CLI process or a NON-EMPTY recorded process group is live →
-  retain, the item stays `reviewing`. A terminal artifact plus a live group WAITS;
-  it is never released over a possibly-live process (a merely re-used pgid
-  therefore retains until owner disposition: the deliberate fail-closed choice);
-- terminal exit evidence present and nothing alive → harvest normally;
-- no terminal evidence and a VALID run-bound identity (a positive integer pid AND
-  pgid) with nothing alive → `gone` (an author run becomes `author_failed`);
-- no terminal evidence and no valid identity (absent, empty, malformed, or a
-  missing pgid) → AMBIGUOUS: retain capacity and require owner disposition. There
-  is no TTL that can release a live or unverifiable run. This replaces the old
-  60s "just launched" release window for BOTH kinds.
+- MANAGED identity (`group_owner: foreground-v1`): the runner's own group owns the
+  whole review.
+- LEGACY identity (a valid pid+pgid with NO marker, i.e. a pre-upgrade launch):
+  BOTH the recorded runner group AND the recorded `cli_pid` AS a group are probed
+  (GNU timeout's default wrapper group, even after the timeout pid itself dies).
+  A legacy pidfile with no `cli_pid` is incomplete ownership evidence.
+- a matching runner/CLI process or ANY probed group live → retain; the item stays
+  `reviewing`, and a terminal artifact plus a live group WAITS (never released
+  over a possibly-live process);
+- RETAIN (ambiguous, owner disposition, never a TTL release): a missing/malformed
+  identity, ANY missing exit artifact (a crash without terminal evidence never
+  asserts absence), or a legacy launch with incomplete ownership evidence. This
+  replaces the old 60s "just launched" release window for BOTH kinds;
+- HARVEST (the only release): a terminal `exit.json`, a valid run-bound identity,
+  COMPLETE ownership evidence (managed, or legacy with both groups known and
+  empty) and nothing alive.
 
-For author runs, a `gone` run is a DISTINCT terminal (`author_failed`) with no
-automatic retry; the start stays consumed. Non-author runs keep their existing
-interrupted-then-backoff behaviour.
+A run that is merely unverifiable is retained, never converted to a terminal; the
+only author terminal states are the consumed dispatch outcomes above. A `crq tick
+--dry-run` performs no harvest mutation and appends no events.
 
 
 ## External observation (mechanism only; exact use needs desk approval)

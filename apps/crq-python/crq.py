@@ -785,7 +785,8 @@ def cmd_review_child(run_id: str) -> int:
     meta = json.loads((rdir / "meta.json").read_text())
     cmd = review_wrapper_argv(meta["cmd"], CONFIG["review_timeout_min"])
     pidfile = rdir / "review.pid"
-    identity = {"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}
+    identity = {"run_id": run_id, "pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(),
+                "sid": os.getsid(0), "group_owner": author_quota.GROUP_OWNER_MARKER}
     repair_tick.atomic(pidfile, identity)
     with (rdir / "review.ndjson").open("w") as out, (rdir / "stderr.log").open("w") as err:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
@@ -844,34 +845,25 @@ def group_alive(pgid: Optional[int]) -> bool:
 def run_liveness(rdir: Path, item: Dict[str, Any], r: Dict[str, Any], has_exit: bool) -> str:
     """Shared detached-review liveness for author AND natural runs.
 
-    Probes the recorded runner pid, the CLI pid and the recorded process group.
-    Because `timeout --foreground` keeps the review in the runner's own group and
-    the pgid is written to review.pid BEFORE the child is spawned, the group probe
-    covers the spawn-before-cli_pid window (a live review whose cli_pid was never
-    persisted). Malformed/absent identity is unverifiable, never a release."""
+    Probes the recorded runner pid, the CLI pid and every process group that can
+    own the review:
+      * the runner's own group (the MANAGED protocol: `timeout --foreground` keeps
+        the whole review in it, and the pidfile carries GROUP_OWNER_MARKER);
+      * for a LEGACY launch (no marker) with a recorded cli_pid, the wrapper's own
+        group, whose pgid IS that cli_pid under GNU timeout's default. A legacy
+        identity whose wrapper group is unknown is unverifiable and never released.
+    """
     pidfile = read_pidfile(rdir)
+    kind = author_quota.identity_kind(pidfile)
     pid = ident_pid((pidfile or {}).get("pid")) or ident_pid(r.get("pid"))
     cli = ident_pid((pidfile or {}).get("cli_pid"))
     runner_alive = bool(pid) and pid_alive(pid) and r["run_id"] in proc_cmdline(pid)
     cli_alive = bool(cli) and pid_alive(cli) and "coderabbit" in proc_cmdline(cli)
-    return author_quota.run_state(has_exit=has_exit, pidfile=pidfile, runner_alive=runner_alive,
-                                  cli_alive=cli_alive,
-                                  group_alive=group_alive((pidfile or {}).get("pgid")))
-
-
-def author_interrupted(item: Dict[str, Any], r: Dict[str, Any]) -> None:
-    """Distinct terminal: a provably gone author run left no exit evidence. The
-    start stays consumed; there is NO automatic retry — owner disposition."""
-    a = item.get("author") or {}
-    item.setdefault("attempts", []).append(
-        {"run_id": r["run_id"], "outcome": "interrupted", "counted": False, "at": iso(),
-         "head": a.get("head"), "base": a.get("base"),
-         "message": "author run terminated without terminal evidence (provably gone)"})
-    item["run"] = None
-    item["state"] = author_quota.AUTHOR_FAILED
-    item["last_error"] = ("author run interrupted without terminal evidence (provably gone); "
-                          "no automatic retry — owner disposition required")
-    event("author_interrupted", item=item["id"], run=r["run_id"])
+    runner_group_alive = group_alive((pidfile or {}).get("pgid"))
+    wrapper_group_alive = group_alive(cli) if (kind == "legacy" and cli) else None
+    return author_quota.run_state(has_exit=has_exit, identity=kind, runner_alive=runner_alive,
+                                  cli_alive=cli_alive, runner_group_alive=runner_group_alive,
+                                  wrapper_group_alive=wrapper_group_alive)
 
 
 def author_dispatch_failed(item: Dict[str, Any], r: Dict[str, Any], o: str, cls: Dict[str, Any],
@@ -901,21 +893,21 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                                else "detached review still alive")
         return None
     if state == "ambiguous":
-        # Fail closed: identity unverifiable. Retain capacity; NEVER a TTL
-        # release, and never release a possibly-live review.
-        item["wait_reason"] = ("author: run identity unverifiable — capacity retained, owner disposition required"
+        # Fail closed: retain capacity and require owner disposition. This covers
+        # a missing/malformed identity, a MISSING exit artifact (absence is never
+        # asserted), and a legacy launch with incomplete ownership evidence. No
+        # TTL release. The event is suppressed on a dry run.
+        if not dry:
+            event("review_ambiguous", item=item["id"], run=r["run_id"])
+        item["wait_reason"] = ("author: run not releasable (unverifiable identity, missing exit, or "
+                               "incomplete legacy ownership) — capacity retained, owner disposition required"
                                if item["kind"] == author_quota.AUTHOR_KIND
-                               else "run identity unverifiable — capacity retained, owner disposition required")
-        event("review_ambiguous", item=item["id"], run=r["run_id"])
+                               else "run not releasable (unverifiable identity, missing exit, or incomplete "
+                                    "legacy ownership) — capacity retained, owner disposition required")
         return None
-    # state == "harvest": terminal exit evidence present, nothing alive.
-    # state == "gone": no exit, a VALID identity, and nothing alive.
-    if not has_exit and item["kind"] == author_quota.AUTHOR_KIND:
-        if dry:
-            return f"would mark author run {r['run_id']} interrupted (provably gone, no exit)"
-        author_interrupted(item, r)
-        return f"{item['id']}: author run interrupted without terminal evidence (no retry) → {item['state']}"
-    exit_code = json.loads(exitf.read_text())["exit"] if has_exit else None
+    # state == "harvest": terminal exit evidence + valid identity + complete
+    # ownership evidence + nothing alive.
+    exit_code = json.loads(exitf.read_text())["exit"]
     if dry:
         return f"would harvest {r['run_id']}"
     meta = json.loads((rdir / "meta.json").read_text())

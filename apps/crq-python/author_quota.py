@@ -191,26 +191,53 @@ def _valid_identity(pidfile: Any) -> bool:
     return positive(pidfile.get("pid")) and positive(pidfile.get("pgid"))
 
 
-def run_state(*, has_exit: bool, pidfile: Optional[Dict[str, Any]], runner_alive: bool,
-              cli_alive: bool, group_alive: bool) -> str:
+# Marker written into review.pid by a runner that spawns the wrapper with
+# `timeout --foreground`, so the runner's OWN process group owns the whole review.
+GROUP_OWNER_MARKER = "foreground-v1"
+
+
+def identity_kind(pidfile: Any) -> str:
+    """Classify a recorded run identity:
+
+      ``managed`` — a valid pid+pgid carrying GROUP_OWNER_MARKER: the runner's own
+                    group owns the whole review (the supported ownership protocol);
+      ``legacy``  — a valid pid+pgid with no marker (a pre-upgrade launch), whose
+                    wrapper ran in its OWN process group (pgid = the recorded
+                    cli_pid under GNU timeout's default);
+      ``invalid`` — absent, empty, malformed, or missing a positive pid/pgid.
+    """
+    if not _valid_identity(pidfile):
+        return "invalid"
+    return "managed" if pidfile.get("group_owner") == GROUP_OWNER_MARKER else "legacy"
+
+
+def run_state(*, has_exit: bool, identity: str, runner_alive: bool, cli_alive: bool,
+              runner_group_alive: bool, wrapper_group_alive: Optional[bool]) -> str:
     """Fail-closed liveness decision for a detached review (author AND natural).
 
-      ``alive``     — a matching runner/CLI process or a non-empty recorded
-                      process group is live. This is checked even when a terminal
-                      exit artifact exists, so a lingering detached/reused group
-                      keeps its capacity (terminal artifact + live group waits).
-      ``harvest``   — terminal exit evidence present and nothing alive.
-      ``gone``      — no terminal evidence, a VALID run-bound pid+pgid identity,
-                      and nothing alive.
-      ``ambiguous`` — no terminal evidence and no valid identity (missing,
-                      empty, malformed, or missing pgid): retain capacity and
-                      require owner disposition. NEVER a TTL release.
-    """
-    if runner_alive or cli_alive or group_alive:
+      ``alive``     — any matching runner/CLI process or any probed process group
+                      is live. Checked even when a terminal exit artifact exists.
+      ``harvest``   — a terminal exit artifact, a VALID run-bound identity, COMPLETE
+                      ownership evidence and nothing alive.
+      ``ambiguous`` — RETAIN capacity (never a TTL release). Covers a missing/
+                      malformed identity, any missing exit artifact, and a legacy
+                      launch whose wrapper group is unknown.
+
+    No absence is ever asserted without proof: a missing-exit crash always retains
+    (owner disposition), because an escaped descendant group cannot be assumed
+    absent. Release requires a valid identity AND complete ownership evidence:
+    the MANAGED protocol (a foreground marker) or, for a legacy launch, BOTH the
+    recorded runner group AND the recorded cli_pid AS a group (GNU timeout's
+    default wrapper group, even after the timeout pid itself dies)."""
+    if runner_alive or cli_alive or runner_group_alive or wrapper_group_alive:
         return "alive"
-    if has_exit:
-        return "harvest"
-    return "gone" if _valid_identity(pidfile) else "ambiguous"
+    if identity == "invalid":
+        return "ambiguous"
+    if not has_exit:
+        return "ambiguous"  # no terminal evidence: never assert absence
+    if identity == "legacy" and wrapper_group_alive is None:
+        return "ambiguous"  # incomplete legacy ownership evidence
+    return "harvest"
 
 
 # ------------------------------------------------------- external observation
