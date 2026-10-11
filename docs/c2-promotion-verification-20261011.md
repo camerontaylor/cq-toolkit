@@ -3,7 +3,7 @@
 Dated handover record for the C2 cutover, per
 `plans/c2-cutover-plan-20261011.md` step 7 (toolkit-research). Every fact
 below was re-verified live from the GitHub API and remote refs at the time
-of writing (2026-10-11 ~17:20 AEDT). This file is an ordinary
+of writing (2026-10-11, after the step-6 `noop` certification). This file is an ordinary
 non-protected documentation change: it touches no protected path, and its
 merge through the queue is the first promotion carried by the ARMED
 `cq-gate` (`gate.yml`, workflow ID 368318299).
