@@ -259,7 +259,12 @@ jobs:
           # Mon–Fri peak = deepseek → DEEPSEEK_API_KEY. The env NAMES are
           # fixed (what the drivers read); only the SECRET names are the
           # adopter's placeholders. The key the SELECTED window does not need
-          # may be absent — asserted below, before any effect.
+          # may be absent — asserted below, before any effect. These two ARE
+          # this repo's bindings: an adopter who re-points
+          # SelfhostDefaults.driver / SelfhostPeak.driver at another
+          # in-process provider (openai, anthropic — driverKeyEnv names
+          # theirs) must export THAT key env here from its own secret;
+          # --print-driver-key-env reports the name this clock requires.
           ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}
           DEEPSEEK_API_KEY: ${{ secrets.{{SELFHOST_PEAK_DRIVER_KEY}} }}
           # gh resolves the repo from the environment (effects never pass

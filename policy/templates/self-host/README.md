@@ -34,6 +34,10 @@ template, not this file` provenance header.
 4. Provision BOTH provider keys (below) — one per window — and edit
    `SelfhostPeak` in the toolkit if your provider's peak window differs. The
    schedule itself is all-hours; no cron or YAML window needs to move with it.
+   If you re-point `SelfhostDefaults.driver` or `SelfhostPeak.driver` at
+   another in-process provider (`openai`, `anthropic`), export THAT provider's
+   key env in the run step from your own secret — the toolkit's `driverKeyEnv`
+   names it, and `--print-driver-key-env` reports the one this clock requires.
 
 ## The two entry commands
 
