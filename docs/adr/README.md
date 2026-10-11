@@ -364,8 +364,10 @@ carrying userinfo, a query or a fragment is refused (`credentialUrl` in
 describes as `*_URL` names carrying userinfo), foreign base-URL values are
 validated credential-free (`validForeignBaseUrl`), and `DATABASE_URL` stays
 denied by name. So a credential-free `_URL` name no longer refuses its own
-passthrough, and a credential-free foreign base URL is journalled by value
-instead of presence-only.
+passthrough, and a foreign `_URL` value is journalled by value only when it
+parses with `new URL()` as an absolute http(s) URL with empty userinfo and no
+query or fragment; otherwise the journal keeps name-based redaction (secret
+presence).
 
 **Diagnostics deliberately diverge.** Redaction for persisted error text
 KEEPS `_URL` in `SECRET_ENV_SUFFIXES`

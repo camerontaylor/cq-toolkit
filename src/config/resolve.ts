@@ -151,6 +151,21 @@ function ownVerifiedRealpaths(
   return copy;
 }
 
+function isSafeJournalableUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
 function validForeignBaseUrl(value: string): boolean {
   if (!/^https:\/\/[^/?#@]+(?:\/[^?#]*)?$/.test(value)) return false;
   try {
@@ -727,9 +742,14 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     if (/^cq_/i.test(name) && !name.startsWith('CQ_'))
       throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
-    if (isSecret(name, platform) && nonblank(envValue(env, name, platform)) !== undefined) {
-      if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
-      else credentials[name] = 'set';
+    const value = envValue(env, name, platform);
+    const isUrl = (platform === 'win32' ? name.toUpperCase() : name).endsWith('_URL');
+    if (value !== undefined && nonblank(value) !== undefined) {
+      // Journal safety is independent of the passthrough refusal screen.
+      if (isSecret(name, platform) || (isUrl && !isSafeJournalableUrl(value))) {
+        if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
+        else credentials[name] = 'set';
+      } else if (isUrl && !name.startsWith('CQ_')) foreign[name] = value;
     }
     if (name.startsWith('CQ_') && name !== 'CQ_PROFILE' && !registryByEnv.has(name))
       unknownNames.push(name);

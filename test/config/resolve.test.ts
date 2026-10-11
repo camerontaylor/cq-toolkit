@@ -244,10 +244,10 @@ describe('pure configuration resolution', () => {
   });
 
   // Issue #291 row 6b (owner ruling 2026-10-11, ADR N20): `_URL` is not a
-  // secret suffix for config resolution, journaling and passthrough. The
-  // dangerous case is covered BY VALUE by the credential-URL screen
-  // (`credentialUrl`), independent of the name, so a credential-free `_URL`
-  // name is passable. Diagnostics redaction deliberately diverges and keeps
+  // secret suffix for config resolution and passthrough. Journaling separately
+  // requires clean absolute http(s) URLs before recording their values.
+  // The credential-URL passthrough screen (`credentialUrl`) is unchanged.
+  // Diagnostics redaction deliberately diverges and keeps
   // `_URL` (see test/driver/error-text.test.ts) so URL values never reach
   // persisted error text.
   it('treats _URL names as non-secret: credential-free values pass the passthrough screen', () => {
@@ -282,6 +282,51 @@ describe('pure configuration resolution', () => {
     const config = resolve({ env: { ANTHROPIC_BASE_URL: 'https://example.test/api' } });
     expect(config.foreign).toEqual({ ANTHROPIC_BASE_URL: 'https://example.test/api' });
     expect(config.credentials).toEqual({});
+  });
+
+  it.each([
+    '//user:pass@example.test/path',
+    '/metrics?api_key=secret',
+    'https://example.test/metrics?token=1',
+    'https://user:pass@example.test/metrics',
+    'https://example.test/metrics#secret',
+    'ftp://example.test/metrics',
+  ])('journals an unsafe _URL value as secret presence: %s', (value) => {
+    const config = resolve({ env: { METRICS_URL: value } });
+    expect(config.credentials).toEqual({ METRICS_URL: 'set' });
+    expect(config.foreign).not.toHaveProperty('METRICS_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
+  });
+
+  it.each(['https://example.test/metrics', 'http://example.test/metrics'])(
+    'journals a clean absolute _URL value by value: %s',
+    (value) => {
+      const config = resolve({ env: { METRICS_URL: value } });
+      expect(config.foreign).toEqual({ METRICS_URL: value });
+      expect(config.credentials).toEqual({});
+    },
+  );
+
+  it('keeps scheme-relative credential _URL passthrough allowed while journaling presence only', () => {
+    const config = resolve({
+      env: {
+        CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
+        METRICS_URL: '//user:pass@example.test/path',
+      },
+    });
+    expect(entryValue('run.envPassthrough', config)).toEqual(['METRICS_URL']);
+    expect(config.credentials).toEqual({ METRICS_URL: 'set' });
+    expect(JSON.stringify(config)).not.toContain('//user:pass@example.test/path');
+  });
+
+  it('classifies Windows _URL journal names case-insensitively', () => {
+    const config = resolve({
+      env: { metrics_url: '/metrics?api_key=secret' },
+      platform: 'win32',
+    });
+    expect(config.credentials).toEqual({ metrics_url: 'set' });
+    expect(config.foreign).not.toHaveProperty('metrics_url');
+    expect(JSON.stringify(config)).not.toContain('/metrics?api_key=secret');
   });
 
   it('requires expanded, caller-verified paths outside the workspace', () => {
