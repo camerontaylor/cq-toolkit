@@ -5,8 +5,8 @@
 #
 # Credential identity (ADR-0004 note N19): the scratch-administration
 # credential is the dedicated cq-adversarial-scratch App, installed on the
-# scratch repository ONLY (never this repository) with Variables read/write,
-# Environments read, and Administration read. The job mints a scratch-repo
+# scratch repository ONLY (never this repository) with Variables read/write and
+# Environments read. The job mints a scratch-repo
 # installation token per run from CQ_ADVERSARIAL_APP_KEY and the
 # CQ_ADVERSARIAL_APP_CLIENT_ID variable: a static installation token expires
 # with nothing to re-mint it, and dispatch-only drills need no refresh path
@@ -104,7 +104,6 @@ jobs:
           private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}
           permission-variables: write
           permission-environments: read
-          permission-administration: read
       - name: Apply and verify scratch profile; collect row evidence
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}

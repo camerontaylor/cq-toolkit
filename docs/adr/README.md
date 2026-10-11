@@ -317,9 +317,9 @@ write`, and the automation App is the merger/propose/reply identity the
   (`cq-adversarial-scratch`), installed on the scratch repository
   (`camerontaylor/cq-scratch-v11-adversarial`) **only, never on cq-toolkit**,
   with the least privilege its probes need: **Variables read/write**
-  (repository and environment variables), **Environments read** and
-  **Administration read-only** (the preflight's environments-list read),
-  nothing else.
+  (repository and environment variables) and **Environments read**
+  (the per-environment variable reads); the environments-list read needs
+  only repository read access, nothing else.
 - **Per-run minting, not a static installation token.** As with the
   `cq-verdict`/`promote`/`automation` environments, the environment secret
   holds the App's private key (`CQ_ADVERSARIAL_APP_KEY`), the App's client id

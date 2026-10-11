@@ -115,7 +115,7 @@ it('leaves credential checks to the runner so a missing credential still yields 
     expect(mint, path).toContain('continue-on-error: true');
     expect(mint, path).toContain('permission-variables: write');
     expect(mint, path).toContain('permission-environments: read');
-    expect(mint, path).toContain('permission-administration: read');
+    expect(mint, path).not.toContain('permission-administration');
     expect(mint, path).not.toContain('permission-actions');
     expect(mint, path).not.toMatch(/GH_TOKEN|gh api/);
     const rest =

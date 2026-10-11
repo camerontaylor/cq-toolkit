@@ -90,9 +90,9 @@ Its scratch-administration credential — scratch repository Variables
 read/write plus the environments-list read the profile checks perform — is
 the dedicated **cq-adversarial-scratch** App's identity (owner decision
 2026-10-11; ADR-0004 note N19): the App is installed on the scratch repository
-only, never on cq-toolkit, with Variables read/write, Environments read, and
-Administration read-only and nothing else. The workflow mints a scratch-repo installation
-token per run from the `CQ_ADVERSARIAL_APP_KEY` environment secret and the
+only, never on cq-toolkit, with Variables read/write and Environments read,
+nothing else. The workflow mints a scratch-repo installation token per run
+from the `CQ_ADVERSARIAL_APP_KEY` environment secret and the
 `CQ_ADVERSARIAL_APP_CLIENT_ID` repository variable; a static installation
 token expires with nothing to re-mint it, and dispatch-only drills need no
 refresh path when they mint per run. Until the App is registered the mint
