@@ -5,15 +5,21 @@
 #
 # Credential identity (ADR-0004 note N19): the scratch-administration
 # credential is the dedicated cq-adversarial-scratch App, installed on the
-# scratch repository ONLY (never this repository) with Actions read/write and
-# Administration read. The job mints a scratch-repo installation token per run
-# from CQ_ADVERSARIAL_APP_KEY and the CQ_ADVERSARIAL_APP_CLIENT_ID variable:
-# a static installation token expires with nothing to re-mint it, and
-# dispatch-only drills need no refresh path when they mint per run. Until the
-# App is registered the mint step is skipped and the interim
-# CQ_ADVERSARIAL_PROFILE_TOKEN PAT drives the same runner — the env
-# indirection lets either identity drive the same code. The primary
-# (CQ_ADVERSARIAL_TOKEN) and outsider (CQ_ADVERSARIAL_SECOND_TOKEN) identities
+# scratch repository ONLY (never this repository) with Variables read/write,
+# Environments read, and Administration read. The job mints a scratch-repo
+# installation token per run from CQ_ADVERSARIAL_APP_KEY and the
+# CQ_ADVERSARIAL_APP_CLIENT_ID variable: a static installation token expires
+# with nothing to re-mint it, and dispatch-only drills need no refresh path
+# when they mint per run. Until the App is registered the mint step is
+# skipped and the interim CQ_ADVERSARIAL_PROFILE_TOKEN PAT drives the same
+# runner — the env indirection lets either identity drive the same code.
+# The mint step continues on error so a failed mint never aborts the job
+# before the runner records per-row BLOCKED evidence; the interim PAT
+# fallback applies only while the client id is empty (App not yet
+# registered) — once the client id is set, a failed mint yields an empty
+# token and the runner's preflight records BLOCKED evidence (exit 3).
+# The primary (CQ_ADVERSARIAL_TOKEN) and outsider
+# (CQ_ADVERSARIAL_SECOND_TOKEN) identities
 # stay the two interim PATs until the runner's preflight learns to verify
 # non-human identities; all three interim names are gone at C3.
 name: adversarial-suite
@@ -88,6 +94,7 @@ jobs:
       - name: Mint the scratch App token (when the App is registered)
         id: adversarial-app
         if: vars.CQ_ADVERSARIAL_APP_CLIENT_ID != ''
+        continue-on-error: true
         # v3.2.0, immutable commit pin (repo policy)
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
@@ -95,7 +102,8 @@ jobs:
           repositories: cq-scratch-v11-adversarial
           client-id: ${{ vars.CQ_ADVERSARIAL_APP_CLIENT_ID }}
           private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}
-          permission-actions: write
+          permission-variables: write
+          permission-environments: read
           permission-administration: read
       - name: Apply and verify scratch profile; collect row evidence
         env:
@@ -105,7 +113,11 @@ jobs:
           ROWS: ${{ inputs.rows }}
           GH_TOKEN: ${{ secrets.CQ_ADVERSARIAL_TOKEN }}
           CQ_ADVERSARIAL_SECOND_TOKEN: ${{ secrets.CQ_ADVERSARIAL_SECOND_TOKEN }}
-          CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || secrets.CQ_ADVERSARIAL_PROFILE_TOKEN }}
+          # App token when minted; interim PAT only while the client id is
+          # empty (App not yet registered); empty when the App is armed and
+          # minting failed — the runner's preflight then records per-row
+          # BLOCKED evidence and exits 3.
+          CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || (vars.CQ_ADVERSARIAL_APP_CLIENT_ID == '' && secrets.CQ_ADVERSARIAL_PROFILE_TOKEN) || '' }}
         run: |
           set -euo pipefail
           node scripts/adversarial-suite.mjs \

@@ -112,16 +112,22 @@ it('leaves credential checks to the runner so a missing credential still yields 
     expect(mint, path).toContain('uses: actions/create-github-app-token@');
     expect(mint, path).toContain("if: vars.CQ_ADVERSARIAL_APP_CLIENT_ID != ''");
     expect(mint, path).toContain('private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}');
+    expect(mint, path).toContain('continue-on-error: true');
+    expect(mint, path).toContain('permission-variables: write');
+    expect(mint, path).toContain('permission-environments: read');
+    expect(mint, path).toContain('permission-administration: read');
+    expect(mint, path).not.toContain('permission-actions');
     expect(mint, path).not.toMatch(/GH_TOKEN|gh api/);
     const rest =
       nextStep === -1
         ? beforeRunner.slice(0, mintStart)
         : beforeRunner.slice(0, mintStart) + beforeRunner.slice(nextStep);
     expect(rest, path).not.toMatch(/GH_TOKEN|secrets\.|gh api/);
-    // The runner consumes the minted token with the interim PAT as fallback:
-    // either identity drives the same code (ADR-0004 note N19).
+    // The runner consumes the minted token with the interim PAT as fallback
+    // only while the App is unregistered; an armed-but-failed mint yields an
+    // empty token whose preflight records BLOCKED evidence (Codex P2).
     expect(text, path).toContain(
-      'CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || secrets.CQ_ADVERSARIAL_PROFILE_TOKEN }}',
+      "CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || (vars.CQ_ADVERSARIAL_APP_CLIENT_ID == '' && secrets.CQ_ADVERSARIAL_PROFILE_TOKEN) || '' }}",
     );
   }
 });

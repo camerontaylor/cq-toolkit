@@ -64,7 +64,7 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17), each set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19), each set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
@@ -316,9 +316,10 @@ write`, and the automation App is the merger/propose/reply identity the
   able to ride it. The drills get a **dedicated scratch App**
   (`cq-adversarial-scratch`), installed on the scratch repository
   (`camerontaylor/cq-scratch-v11-adversarial`) **only, never on cq-toolkit**,
-  with the least privilege its probes need: **Actions read/write**
-  (repository and environment Actions variables) and **Administration
-  read-only** (the preflight's environments-list read), nothing else.
+  with the least privilege its probes need: **Variables read/write**
+  (repository and environment variables), **Environments read** and
+  **Administration read-only** (the preflight's environments-list read),
+  nothing else.
 - **Per-run minting, not a static installation token.** As with the
   `cq-verdict`/`promote`/`automation` environments, the environment secret
   holds the App's private key (`CQ_ADVERSARIAL_APP_KEY`), the App's client id
@@ -332,7 +333,8 @@ write`, and the automation App is the merger/propose/reply identity the
 - **The three PAT names are interim, gone at C3.** The settings template
   moves all three to `interimSecrets`. `CQ_ADVERSARIAL_PROFILE_TOKEN` is
   consumed only until the App is registered (the mint step is
-  variable-gated and falls back to it).
+  variable-gated and falls back to it only while the client id is empty;
+  an armed-but-failed mint yields BLOCKED evidence, never the interim PAT).
   `CQ_ADVERSARIAL_TOKEN` and `CQ_ADVERSARIAL_SECOND_TOKEN` stay interim
   because their consumers — the runner's preflight, which verifies two
   distinct human-type identities (the owner-admin primary and the
