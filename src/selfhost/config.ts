@@ -208,9 +208,19 @@ export function driverKeyEnv(driver: ModelSpec): string | undefined {
     case 'zai':
     case 'ai-sdk':
       return 'ZAI_API_KEY';
+    // The remaining in-process ai-sdk handles (defaultProviders()): an
+    // adopter who re-points SelfhostDefaults.driver / SelfhostPeak.driver at
+    // one of these gets the right key name, not an empty handshake.
     case 'deepseek':
       return 'DEEPSEEK_API_KEY';
+    case 'openai':
+      return 'OPENAI_API_KEY';
+    case 'anthropic':
+      return 'ANTHROPIC_API_KEY';
     default:
+      // A handle this map does not know (a host-CLI lane, a typo): the caller
+      // must read undefined as "cannot vouch" and refuse, never as "no key
+      // needed".
       return undefined;
   }
 }

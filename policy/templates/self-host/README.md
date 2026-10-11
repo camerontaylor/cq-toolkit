@@ -172,8 +172,12 @@ adopter owns it by hand.
   all-hours cron removes the old start exclusion, and its run-step assert
   derives the required key name from the SAME function
   (`--print-driver-key-env`). `main()` also refuses to start when the
-  selected key is missing. Adopters move peak window, drivers and keys
-  together — `manual:`.
+  selected key is missing, and the entry threads ONE clock read through both
+  the preflight and the sweep, so a boundary-straddling run cannot check one
+  window's key and dispatch through the other. A `--dry-run` posts and
+  dispatches nothing, so neither the handshake nor `main()` demands a
+  provider key for it. Adopters move peak window, drivers and keys together
+  — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 

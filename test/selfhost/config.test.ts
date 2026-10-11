@@ -121,6 +121,10 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     expect(driverKeyEnv({ provider: 'deepseek', model: 'deepseek-flash' })).toBe(
       'DEEPSEEK_API_KEY',
     );
+    // The other in-process ai-sdk handles an adopter may re-point at: the
+    // handshake must name their key, not an empty string.
+    expect(driverKeyEnv({ provider: 'openai', model: 'gpt-5' })).toBe('OPENAI_API_KEY');
+    expect(driverKeyEnv({ provider: 'anthropic', model: 'claude-x' })).toBe('ANTHROPIC_API_KEY');
     // An unknown provider cannot be credential-checked: the caller must read
     // undefined as "cannot vouch", never as "no key needed".
     expect(driverKeyEnv({ provider: 'mystery', model: 'x' })).toBeUndefined();

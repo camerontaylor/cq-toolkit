@@ -247,6 +247,16 @@ export interface SelfReviewLoopCfg {
    * exactly like maxUsd: the remaining tokens are carried forward, each fix
    * run's token rollup decrementing them. Programmatic only — no CLI flag. */
   maxTokens?: number;
+  /**
+   * The run's SINGLE start instant (epoch ms). The ENTRY captures it ONCE
+   * (before its credential preflight) and threads it here, so the peak-window
+   * decision, the sweep's driver, and the journal stamp all read the SAME
+   * clock value — a sweep can never preflight one provider and then select
+   * the other because the wall clock crossed 06:00/10:00 UTC in between.
+   * Absent → the entry reads deps.nowMs() (the value tests and direct
+   * callers get).
+   */
+  startedAtMs?: number;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
@@ -504,7 +514,11 @@ export async function runSelfReviewLoop(
     };
   }
 
-  const stamp = deps.nowMs();
+  // THE run's start instant: the ENTRY's single clock read when it threaded
+  // one through (main() captures it before the credential preflight), so the
+  // peak-window decision and this stamp are the same value. A direct caller
+  // (tests, embeddings) falls back to one read here.
+  const stamp = cfg.startedAtMs ?? deps.nowMs();
   // THE run's driver, resolved ONCE from the run's start stamp: the peak
   // switch lives in config.ts (resolveSelfhostDriver) and every PR's loop
   // dispatches through the SAME provider this run's start instant selected
@@ -817,16 +831,22 @@ export async function main(
       );
     }
     const repoRoot = process.cwd();
+    // ONE clock read for the whole run: the credential preflight below, the
+    // peak-window driver the sweep selects, and the per-run journal stamp all
+    // resolve from THIS instant. Two reads could straddle the 06:00/10:00 UTC
+    // boundary and check one provider's key while dispatching through the
+    // other (which the workflow deliberately leaves unset off its window).
+    const startedAtMs = deps.nowMs();
     // FAIL-CLOSED DRIVER CREDENTIAL (peak-aware): resolve the driver for
-    // THIS run and refuse BEFORE any effect when the selected provider's key
-    // env is absent — a missing key must never let a sweep start and then
+    // THIS instant and refuse BEFORE any effect when the selected provider's
+    // key env is absent — a missing key must never let a sweep start and then
     // dispatch with no credential. The workflow asserts the same fact via
     // --print-driver-key-env; both call the same resolveSelfhostDriver /
     // driverKeyEnv, so they cannot disagree on WHICH key. A dry run posts and
     // dispatches nothing, so it needs no provider key (its gh reads ride
     // GH_TOKEN).
     if (!parsed.dryRun) {
-      const driver = resolveSelfhostDriver(deps.nowMs());
+      const driver = resolveSelfhostDriver(startedAtMs);
       const keyEnv = driverKeyEnv(driver);
       if (keyEnv === undefined || (process.env[keyEnv] ?? '') === '') {
         throw new Error(
@@ -838,6 +858,7 @@ export async function main(
       owner,
       repo,
       repoRoot,
+      startedAtMs,
       responderLogin: parsed.responderLogin ?? null,
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),

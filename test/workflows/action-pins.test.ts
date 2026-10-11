@@ -227,6 +227,9 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     // requires exactly that one — no window arithmetic in YAML.
     expect(text).toContain('node dist/selfhost/self-review-loop.js --print-driver-key-env');
     expect(text).toMatch(/REQUIRED_KEY=\$\(.*\)\n\s*test -n "\$\(printenv "\$REQUIRED_KEY"\)"/);
+    // A dry run posts and dispatches nothing, so it needs no provider key —
+    // the handshake is skipped for it (matching main()'s exemption).
+    expect(text).toContain('if [ "$DRY_RUN" != "true" ]; then');
     // D11b: the usage-report wiring — the entry's artifact path and the
     // always() upload (an over-budget run is exactly the tuning evidence).
     expect(text).toContain('SWEEP_USAGE_OUT');
