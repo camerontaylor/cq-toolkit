@@ -233,6 +233,10 @@ jobs:
           # Top-level PR comments (POST issues/{n}/comments) — replyAndResolve's
           # whole-PR-feedback path (src/plans/review-loop.ts).
           permission-issues: write
+          # Deliberately NO workflows: write — a review fix touching
+          # .github/workflows/** fails honestly at the push stage and degrades
+          # to needs-human rather than letting scheduled repo-driven code
+          # rewrite this workflow's own definition.
       - name: Review loop over this repo's open PRs (dist/selfhost/self-review-loop.js)
         env:
           # The per-run minted App token (step-scoped on purpose: the token
