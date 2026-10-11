@@ -3,7 +3,7 @@
 Pattern: available for instantiation from phase 1. In this repo, the
 unfiltered push/pull_request CI workflow's static job is the current test
 enforcer and runs the `test:unit` and `test:e2e` lanes on every PR and
-push (except the machine-written `cq-state` ledger branch); the `merge-queue-gate` workflow runs no tests. Affected-test
+push (except the machine-written `cq-state` ledger branch); the retired `merge-queue-gate` template's workflow ran no tests. Affected-test
 selection remains a proposal for a later policy decision. The measured
 suite is minutes-sized on the recorded host, so selection is useful as an
 advisory developer optimization.
@@ -24,8 +24,8 @@ fixture coupling, global setup, behavior fixed by config or data files —
 mean a change can break a test that no file-graph mapping would select.
 That is why the unfiltered push/pull_request CI static job is the safety net:
 it runs the full suite on merge-queue pushes (and on every PR head), and it,
-not the reduced-selection job, enforces completeness. The `merge-queue-gate`
-workflow runs no tests. Reduced selection is a per-PR convenience.
+not the reduced-selection job, enforces completeness. The retired `merge-queue-gate`
+template's workflow ran no tests. Reduced selection is a per-PR convenience.
 
 ## The I4 interplay
 
@@ -105,5 +105,5 @@ see the I4 interplay above):
 
 On merge-queue pushes, the unfiltered push/pull_request CI static job remains
 the test enforcer and the safety net the blind spot section requires; the
-`merge-queue-gate` workflow itself runs no tests. Any future full-suite
+retired `merge-queue-gate` template's workflow itself ran no tests. Any future full-suite
 fallback must be added there deliberately, not assumed from this template.

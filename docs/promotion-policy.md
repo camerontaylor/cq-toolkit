@@ -40,7 +40,7 @@ the owner's registration record, `app-registration-session-20261004.md` @ `d8f13
 
 ## What promotes
 
-`merge-queue-gate` fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
+`cq-gate` (`gate.yml`, armed) fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
 now. Merges that land after the cut wait for the next batch. The gate promotes the SHA only when:
 
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
@@ -62,23 +62,23 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
    through a merge's second parent), `main` is an ancestor of it, and `<base>` is in `main`. A
    base that `main` does not contain would leave unreviewed commits in `main..sha`.
 
-The crq status event wakes the gate. A dispatch of `merge-queue-gate` with a `sha` re-runs it.
-Gate runs serialize per target SHA, so a tip dispatch never displaces a queued promotion of a
-reviewed SHA.
+The crq status event wakes the gate. A dispatch of `gate.yml` with `--ref main` and no
+`sha` input is only a nudge: the gate resolves the subject itself. Gate runs serialize
+in the single `promote` concurrency group, so a tip dispatch never displaces a pending
+promotion of a reviewed sha.
 
-One promoter at a time. `merge-queue-gate` is the sole promoter: its base rule is that the
-recorded review base is **contained in `main`** (an ancestor — the batch may sit behind later
-promotions). `cq-gate` (`gate.yml`) runs **report-only until C2** — its single explicit
-`CQ_GATE_PROMOTES` switch is `'false'`, so it promotes nothing while `merge-queue-gate`
-exists. `cq-gate` has nonetheless learned the signal: its subject is the newest queue commit
-carrying a trusted success whose recorded base **equals** the current `main` (a review of an
-older range can only exist below a rewound `main` and is never selected), every check
-(closure, policy, verdict, verified runs) judges `main..<subject>`, and its verdicts are
-`promoted`/`noop`/`awaiting` (no reviewed commit yet), green, with `refused` red — or, while
-report-only, advisory in the step summary. A tip ahead of the reviewed sha simply waits for
-its own review. The two gates have different base rules on purpose: `merge-queue-gate`'s
-ancestor rule promotes any reviewed batch behind `main`, while `cq-gate`'s equality rule
-promotes exactly the batch cut from the current `main`.
+One promoter at a time. `cq-gate` is the sole promoter, armed: its single explicit
+`CQ_GATE_PROMOTES` switch is `'true'`, so it runs WITH `--push`. Its base rule is that
+the recorded review base **equals the current `main`** (a review of an older range can
+only exist below a rewound `main` and is never selected). Its subject is the newest queue
+commit carrying a trusted success; every check (closure, policy, verdict, verified runs)
+judges `main..<subject>`, and its verdicts are `promoted`/`noop`/`awaiting` (no reviewed
+commit yet), green, with `refused` red. A tip ahead of the reviewed sha simply waits for
+its own review. The old `merge-queue-gate.yml` is retired at the C2 cutover (2026-10-11):
+its instance entry is deleted, its rendered workflow is gone, and its template is kept
+as an adopter-only template — it is no longer a promoter anywhere. (`merge-queue-gate`'s
+ancestor rule promoted any reviewed batch behind `main`; `cq-gate`'s equality rule
+promotes exactly the batch cut from the current `main`.)
 
 **Stateful replay refusal (arms with `cq-gate`).** Each `cq-gate` promotion moves the
 `cq/promoted` ref to the promoted subject in the same atomic, leased push as `main`.
@@ -91,22 +91,40 @@ never has to cover `merge-queue-gate` promotions.
 
 ### C2 cutover checklist
 
-1. **Freeze promotion:** pause crq promotion items and disable `merge-queue-gate.yml`
-   (disable the workflow), then **drain it**: cancel any in-flight or queued runs and confirm
-   none remain — `gh run list --all --workflow merge-queue-gate.yml --status in_progress` and
-   `--status queued` must both come back empty (`--all` is required: without it the filter
-   cannot see a disabled workflow) — before touching the marker in step 2; no gate may push
-   from here until step 6.
-2. **Bootstrap the replay marker:** `git push origin <main>:refs/heads/cq/promoted` — the
-   marker starts at the then-current `main`.
-3. Owner settings step: a ruleset protecting `refs/heads/cq/*` from deletion and
-   non-fast-forward updates.
-4. **Arm `cq-gate`:** flip its single `CQ_GATE_PROMOTES` switch to `'true'` (template +
-   re-render, one reviewed promotion).
-5. Delete `merge-queue-gate.yml` (and drop its required-check entries); `cq-gate` is the sole
-   promoter from here on.
-6. **Unfreeze:** resume crq promotion items. The two gates never both pushed, so the marker
-   only ever records `cq-gate` promotions.
+The executable order (the plan is the source of truth; this checklist records it):
+
+0. **Hold unrelated merges; disable + drain the NEW gate.** Unrelated queue merges and
+   manual promotions stop. The new `gate.yml` workflow is disabled on GitHub and drained
+   (every non-completed run cancelled, all three run inventories empty) while the old gate
+   and crq keep operating for delivery.
+1. **The one flip+delete PR (this change).** Flip `CQ_GATE_PROMOTES` to `'true'`, delete
+   the old rendered workflow and its instance entry (template kept adopter-only), remove
+   the old dispatch from sync, re-render, add the marker ruleset to settings-as-code only,
+   and update this policy, the doctrine, and the retired-workflow consumers — flip and
+   deletion together, no unrelated change.
+2. **Deliver it through the LAST old-gate promotion.** Merge the PR, cut the batch, run
+   the full signer review, and let the old gate push `S` (dispatching it with the `sha`
+   input if needed).
+3. **Hard freeze: stop ceres tick, pause, inert marker, disable + drain BOTH gates.**
+   The crq tick timer stops (after the active service finishes), crq pauses, the
+   runner-disabled marker lands, and both gate workflows are disabled and drained.
+4. **Bootstrap `refs/heads/cq/promoted` at `S` once** — a guarded fast-forward that
+   requires the marker's absence; never reset or delete it to make the procedure pass.
+5. **OWNER applies the `cq-c2-replay-marker` ruleset** — deletion + non_fast_forward on
+   `refs/heads/cq/*`, no bypass actors; ordinary fast-forwards by the promoter credential
+   keep working.
+6. **Enable the new gate, resume ceres, certify a completed `noop`** at equal refs (a
+   green `noop` alone never certifies promotion — the completed run does).
+7. **First new-gate promotion via an ordinary non-protected docs PR**, with exact-head
+   independent acceptance and green required CI, dispatched with `--ref main` and no `sha`
+   input.
+8. **crq retry repair selects `gate.yml` (no `sha` input)** once the old workflow is gone
+   — the old workflow is selected only while it still exists on fetched `main`.
+
+Safety invariants: the new workflow stays disabled from step 0 until step 6, so the step-1
+flip cannot arm a second active promoter; no old-gate push after bootstrap; never rewind
+`main` to undo the delivery; after the first new-gate promotion `cq/promoted` is a replay
+high-water mark that is never rewound or deleted.
 
 ## Accepted limit
 

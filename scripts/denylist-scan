@@ -169,8 +169,8 @@ const REQUIRED_WORKFLOW_CHECKS = [
   { workflow: 'ci.yml', check: 'static' },
   // H4 (PR-105 round-2): the ratchet is a required check — the I4 leg now
   // polices ratchet.yml the same way (both triggers top-level, zero filter
-  // keys, a job named exactly 'ratchet'), and merge-queue-gate.yml waits for
-  // it before promoting.
+  // keys, a job named exactly 'ratchet'). (The retired merge-queue-gate.yml
+  // template's wait list once covered it before promoting; retired at C2.)
   { workflow: 'ratchet.yml', check: 'ratchet' },
 ];
 // Trigger-filter keys banned by invariant I4 inside a REQUIRED workflow's
@@ -1230,7 +1230,8 @@ function selfTestWorkflowI4() {
   // name — this is what keeps the denylist.yml-presence requirement alive:
   // denylist.yml is the required file the list carries.
   // merge-queue-gate.yml deliberately is NOT in the list (queue mechanics
-  // filter their triggers by design and get the sanity check only).
+  // filter their triggers by design and get the sanity check only) — and since
+  // the C2 retirement it has no rendered workflow at all (adopter-only template).
   // Once per file: a file carrying several pairs is reported missing once.
   for (const workflow of new Set(REQUIRED_WORKFLOW_CHECKS.map((p) => p.workflow))) {
     if (!workflows.includes(workflow)) {

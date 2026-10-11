@@ -36,6 +36,14 @@
       ]
     },
     {
+      "name": "cq-c2-replay-marker",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": { "ref_name": { "include": ["refs/heads/cq/*"], "exclude": [] } },
+      "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }],
+      "bypass_actors": []
+    },
+    {
       "name": "cq-r2-merge-queue",
       "target": "branch",
       "enforcement": "active",

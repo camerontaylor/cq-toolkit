@@ -9,8 +9,8 @@
 //      promotion-adjacent credential or dispatch one; the carriers that are
 //      not dispatch (`push`, `schedule`, `workflow_run`, `status`) carry no
 //      dispatcher-chosen ref, so their disjuncts admit them without the ref
-//      clause (merge-queue-gate's `status` disjunct also filters the
-//      context and state; its dispatch disjunct is `!= 'status'` + ref).
+//      clause (the retired merge-queue-gate template's `status` disjunct also
+//      filters the context and state; its dispatch disjunct is `!= 'status'` + ref).
 //   2. `gate.yml`'s `wake` job consumes exactly ONE field of the
 //      `workflow_run` payload — the run id — and re-reads everything else
 //      from the API by that id (path, event, branch, head repository id,
@@ -31,6 +31,10 @@ const bothCopies = (template: string, instance = template): Array<[string, strin
     `.github/workflows/${instance}`,
     readFileSync(join(ROOT, '.github/workflows', instance), 'utf8'),
   ],
+];
+
+const templateOnly = (template: string): Array<[string, string]> => [
+  [`policy/templates/${template}`, readFileSync(join(ROOT, 'policy/templates', template), 'utf8')],
 ];
 
 const instanceOnly = (name: string): Array<[string, string]> => [
@@ -81,7 +85,7 @@ const jobId: Readonly<Record<string, string>> = {
 };
 
 const sources: Record<string, Array<[string, string]>> = {
-  'merge-queue-gate.yml': bothCopies('merge-queue-gate.yml'),
+  'merge-queue-gate.yml': templateOnly('merge-queue-gate.yml'),
   'sync-merge-queue.yml': bothCopies('sync-merge-queue.yml'),
   'init-merge-queue.yml': bothCopies('init-merge-queue.yml'),
   'self-merge-prs.yml': bothCopies('self-host/self-merge-prs.yml', 'self-merge-prs.yml'),

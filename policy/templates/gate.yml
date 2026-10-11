@@ -37,16 +37,15 @@
 #   - `decide` is the SOLE member of concurrency group `promote`, and runs in
 #     environment `promote` (main-only branch policy).
 #
-# PROMOTES — one promoter at a time: REPORT-ONLY UNTIL C2. The CLI runs
-# WITHOUT `--push` while merge-queue-gate.yml is the sole promoter (its
-# base rule: the recorded review base contained in main; this gate's, when
-# armed: the recorded base equal to main). The single explicit switch is
-# CQ_GATE_PROMOTES below: the C2 cutover checklist
-# (docs/promotion-policy.md) freezes promotion, bootstraps the cq/promoted
-# replay marker, adds the refs/heads/cq/* ruleset, flips this switch to
-# `true` by a reviewed promotion, deletes merge-queue-gate.yml, and
-# unfreezes — the two gates never both push. When armed, the CLI runs WITH
-# `--push` and promotes the reviewed SUBJECT by a single main-refspec
+# PROMOTES — one promoter at a time: cq-gate is the SOLE promoter and
+# runs WITH `--push` (CQ_GATE_PROMOTES below is 'true'). The old
+# merge-queue-gate.yml is retired at the C2 cutover (2026-10-11): its
+# instance entry is deleted and its template is kept adopter-only (see
+# docs/promotion-policy.md). The switch flip was delivered by the C2
+# flip+delete PR while this workflow was disabled on GitHub (drained from
+# step 0 until the enable step), so the flip could not arm a second active
+# promoter — the two gates never both push. The CLI promotes the reviewed
+# SUBJECT by a single main-refspec
 # fast-forward leased at the main it read — the queue is never written, so
 # a tip ahead of the reviewed sha simply waits for its own review. Green
 # verdicts: `promoted`, `noop` (the queue holds nothing beyond main),
@@ -273,12 +272,13 @@ jobs:
           TRUST: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
-          # C2 SWITCH (single, explicit): 'false' = report-only while
-          # merge-queue-gate.yml is the sole promoter. The cutover
-          # checklist flips this ONE value to 'true' by a reviewed
-          # promotion (template + render in the same commit) — never
-          # before the freeze/bootstrap/ruleset steps.
-          CQ_GATE_PROMOTES: 'false'
+          # C2 SWITCH (single, explicit): 'true' = armed; cq-gate is the
+          # sole promoter and runs WITH `--push`. Flipped to 'true' by the
+          # C2 flip+delete PR (template + render in the same commit) while
+          # this workflow was disabled on GitHub — per
+          # docs/promotion-policy.md — never before the
+          # freeze/bootstrap/ruleset steps.
+          CQ_GATE_PROMOTES: 'true'
         run: |
           set -euo pipefail
           [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
@@ -307,9 +307,9 @@ jobs:
           REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
           # JSON types are checked BEFORE any jq -r extraction: -r renders
           # every value as a string, so a string-typed id would pass the
-          # numeric regex below unchecked. The predicate is byte-identical
-          # to merge-queue-gate.yml's — ONE definition of a valid pin; keep
-          # the two in lockstep when either changes.
+          # numeric regex below unchecked. The predicate matches the retired
+          # merge-queue-gate.yml template's (frozen at the C2 cutover) — ONE
+          # definition of a valid pin.
           jq -e 'type == "object" and .schemaVersion == 1 and (.login | type == "string" and endswith("[bot]")) and (.id | type == "number" and . > 0) and .type == "Bot" and (.record | type == "string" and length > 0)' \
             <<<"${REVIEWER_JSON}" >/dev/null || {
             echo 'refusing: policy promotion-reviewer is not a schemaVersion-1 Bot pin (number id > 0, string login, record string)'; exit 1; }
@@ -372,11 +372,11 @@ jobs:
               + "\n\n```text\n"
               + ($report | gsub("`{3,}"; "` ` `"))
               + "\n```"' "${RUNNER_TEMP}/gate.json" >> "$GITHUB_STEP_SUMMARY"
-          # Red policy follows the switch: report-only (pre-C2) every ok
-          # verdict is advisory — the summary above is the product, and only
-          # a crashed gate is red. With CQ_GATE_PROMOTES=true a refused
-          # verdict is a RED run (the gate judged and said no — a human
-          # looks), and a crashed gate stays red.
+          # Red policy follows the switch: with CQ_GATE_PROMOTES=true a
+          # refused verdict is a RED run (the gate judged and said no — a
+          # human looks), and a crashed gate stays red. (Pre-C2, report-only,
+          # every ok verdict was advisory — the summary above was the
+          # product, and only a crashed gate was red.)
           jq -e --arg promoting "${CQ_GATE_PROMOTES}" \
             '.status == "ok" and ($promoting != "true" or .value.verdict != "refused")' \
             "${RUNNER_TEMP}/gate.json" >/dev/null

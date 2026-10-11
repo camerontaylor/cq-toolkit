@@ -1,4 +1,4 @@
-# Template: merge-queue-gate — the BATCH PROMOTER (docs/promotion-policy.md):
+# Template: merge-queue-gate — the BATCH PROMOTER (docs/promotion-policy.md) (RETIRED at the C2 cutover 2026-10-11: adopter-only, no longer instantiated in this repo — see docs/promotion-policy.md):
 # fast-forwards main (I3) to a merge-queue commit that carries a promotion
 # review, never merely because the queue went green. It promotes a gated
 # sha only when ALL hold:

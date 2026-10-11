@@ -14,7 +14,8 @@
 //   2. The persist-credentials split: generated ci.yml, denylist.yml, and
 //      install-matrix.yml run repo code, so their checkouts must drop
 //      the token (`persist-credentials: false`); the queue-mechanics
-//      workflows (init-merge-queue.yml, merge-queue-gate.yml) keep the
+//      the queue-mechanics workflow (init-merge-queue.yml; the retired
+//      merge-queue-gate.yml template keeps the same shape adopter-only) keeps the
 //      promote PAT by design and must not declare the key at all — their
 //      policy note says so beside the pin (the gate's note mentions the
 //      word "persist-credentials" in prose, so the assertion is on the KEY,
@@ -165,13 +166,19 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
   });
 
   it('queue-mechanics workflows keep the promote PAT (no persist-credentials key)', () => {
-    for (const name of ['init-merge-queue.yml', 'merge-queue-gate.yml']) {
+    // init-merge-queue.yml pushes with the promote PAT, so the checkout keeps its
+    // persisted credential BY DEFAULT — the pin comment says why. The
+    // policy assertion is that the file does NOT DECLARE the key (which would
+    // have to be `true` to matter, and `false` would break the push); the
+    // prose comment mentioning the word is not a declaration. (The retired
+    // merge-queue-gate.yml template keeps the same shape adopter-only.)
+    for (const name of ['init-merge-queue.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
-      // These two push with the promote PAT, so the checkout keeps its
+      // This pushes with the promote PAT, so the checkout keeps its
       // persisted credential BY DEFAULT — the pin comment says why. The
-      // policy assertion is that neither file DECLARES the key (which would
+      // policy assertion is that the file does NOT DECLARE the key (which would
       // have to be `true` to matter, and `false` would break the push); the
-      // gate's prose comment mentioning the word is not a declaration.
+      // file's prose comment mentioning the word is not a declaration.
       expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(
         /^\s+["']?persist-credentials["']?\s*:/m,
       );
