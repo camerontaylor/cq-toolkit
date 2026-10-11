@@ -53,8 +53,11 @@ export interface ResolveConfigOptions {
 
 const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
 // Mirrors SECRET_ENV_SUFFIXES in src/driver/error-text.ts; `_URL` is
-// deliberately absent (owner decision, issue #291 row 6b) — a URL value
-// carrying credentials is refused by the credential-URL screen below.
+// deliberately absent (owner decision, issue #291 row 6b, ADR note N18) —
+// a plain URL value is not a secret. A URL value carrying credentials is
+// refused by the structural credential-URL screen below (protocol-relative
+// first, then scheme-shaped via `new URL`, opaque fail-closed on a raw
+// `@`, any query/fragment refused).
 const secretSuffixes = [
   '_API_KEY',
   '_TOKEN',
@@ -171,16 +174,33 @@ function validForeignBaseUrl(value: string): boolean {
 }
 
 function credentialUrl(raw: string | undefined): boolean {
-  // URL consumers commonly trim, and the parser admits special schemes with
-  // missing slashes, so screen every scheme-shaped value. A Windows drive
-  // path (`C:\cache#v1`) is a filename whose `#` is not a URL fragment.
-  // A query marker is never a Windows filename character: screen it as a URL.
+  // Structural credential-URL screen (fail closed; order matters). URL
+  // consumers commonly trim, so screen the trimmed value. Protocol-relative
+  // values (`//user:pass@host/path`) carry no scheme for the test below, so
+  // they are refused FIRST by their userinfo-shaped authority. A Windows
+  // drive path (`C:\cache#v1`) is a filename whose `#` is not a URL
+  // fragment; a query marker is never a Windows filename character, so a
+  // drive-shaped value WITH a query is still screened as a URL.
+  // Scheme-shaped values parse via `new URL`: userinfo, query, or fragment
+  // present refuses, as does a value that fails to parse. A scheme-shaped
+  // value that parses to an opaque/authority-less URL (empty host, no
+  // userinfo, no query/fragment) but carries a raw `@` — e.g. a `jdbc:`
+  // connection string — is refused too: there is no authority to inspect,
+  // so the `@` is the only signal. Over-refusal at config time (e.g.
+  // `mailto:user@host`) is the acceptable direction.
   const value = raw?.trim();
-  if (!value || !/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  if (!value) return false;
+  if (value.startsWith('//')) {
+    const authority = value.slice(2).split(/[/?#]/, 1)[0] ?? '';
+    return authority.includes('@');
+  }
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;
   try {
     const parsed = new URL(value);
-    return Boolean(parsed.username || parsed.password || parsed.search || parsed.hash);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return true;
+    if (!parsed.host && value.includes('@')) return true;
+    return false;
   } catch {
     return true;
   }

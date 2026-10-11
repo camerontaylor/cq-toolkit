@@ -274,6 +274,51 @@ describe('pure configuration resolution', () => {
     ).toThrow(/cannot be passed through/);
   });
 
+  // PR #305 structural screen: protocol-relative, opaque, and signed
+  // query/fragment values are refused by VALUE at the passthrough boundary.
+  describe('structural credential-URL screen (PR #305)', () => {
+    it('refuses protocol-relative and opaque credential-bearing values', () => {
+      for (const value of [
+        '//user:pass@example.test/path',
+        'jdbc:oracle:thin:scott/tiger@//db.example.test/service',
+        'postgres://user:pass@db.example.test/metrics',
+      ]) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
+
+    it('refuses signed query/fragment values while keeping the strict gate', () => {
+      for (const value of [
+        'https://example.test/api?token=secret',
+        'https://example.test/api#access_token=xyz',
+      ]) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
+
+    it('still passes credential-free URLs through the screen', () => {
+      expect(
+        entryValue(
+          'run.envPassthrough',
+          resolve({
+            env: {
+              CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT',
+              SAFE_ENDPOINT: 'https://example.test/metrics',
+            },
+          }),
+        ),
+      ).toEqual(['SAFE_ENDPOINT']);
+    });
+  });
+
   it('journals a credential-free foreign base URL by value, not as secret presence', () => {
     const config = resolve({ env: { ANTHROPIC_BASE_URL: 'https://example.test/api' } });
     expect(config.foreign).toEqual({ ANTHROPIC_BASE_URL: 'https://example.test/api' });

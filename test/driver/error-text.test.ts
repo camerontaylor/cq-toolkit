@@ -166,4 +166,43 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       'see https://example.com/a@b for details',
     );
   });
+
+  // Structural scrub (PR #305): every URL-standard userinfo form `new URL()`
+  // accepts is scrubbed by VALUE — slashless, single-slash, protocol-relative,
+  // non-special-scheme, over-long, and opaque forms alike.
+  test('boundedErrorText redacts all URL-standard userinfo forms', () => {
+    for (const url of [
+      'https:user:pass@example.test/x',
+      'https:/user:pass@example.test/x',
+      '//user:pass@example.test/path',
+      'postgres://u:p@h/d',
+      'jdbc:oracle:thin:scott/tiger@//db.example.test/service',
+      `https://user:${'x'.repeat(201)}@example.test/db`,
+    ]) {
+      expect(boundedErrorText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+  });
+
+  // Structural scrub (PR #305): a URL-like span whose query/fragment carries
+  // a secret-looking KEY is scrubbed whole; a non-secret query stays visible.
+  test('boundedErrorText redacts secret-keyed query/fragment spans only', () => {
+    for (const url of [
+      'https://example.test/api?token=secret',
+      'https://example.test/api#access_token=xyz',
+    ]) {
+      expect(boundedErrorText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+  });
+
+  test('boundedErrorText keeps non-secret query URLs, plain URLs, and bare emails visible', () => {
+    expect(boundedErrorText('see https://example.test/api?page=2 for details')).toBe(
+      'see https://example.test/api?page=2 for details',
+    );
+    expect(boundedErrorText('see https://example.test/api for details')).toBe(
+      'see https://example.test/api for details',
+    );
+    expect(boundedErrorText('contact user@example.test for access')).toBe(
+      'contact user@example.test for access',
+    );
+  });
 });
