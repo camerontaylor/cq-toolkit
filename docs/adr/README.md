@@ -388,13 +388,19 @@ denied by name. So a credential-free `_URL` name no longer refuses its own
 passthrough, and a foreign `_URL` value is journalled by value only when it
 parses with `new URL()` as an absolute http(s) URL with empty userinfo and no
 query or fragment; otherwise the journal keeps name-based redaction (secret
-presence).
+presence). The non-secret treatment is value-gated: passthrough is allowed and
+the value journalled only when `isSafeJournalableUrl(value)` holds, and every
+other `_URL` value is classified secret exactly as before the ruling
+(passthrough refused, journal records presence); `_URL` suffix matching is
+case-insensitive on all platforms.
 
 **Diagnostics deliberately diverge.** Redaction for persisted error text
 KEEPS `_URL` in `SECRET_ENV_SUFFIXES`
 ([`src/driver/error-text.ts`](../../src/driver/error-text.ts)): a `_URL` env
 value echoed by a vendor SDK must never reach a persisted `WorkerResult.error`
-or journal record, so URL values stay redacted by name there. The two suffix
+or journal record, so URL values stay redacted by name there. `_URL` suffix
+matching is case-insensitive there too, so a lowercase or win32 `metrics_url`
+cannot dodge the redaction. The two suffix
 lists now diverge on purpose, and the old "one suffix list drives naming,
 redaction, journalling and the `vars.*` refusal, and they cannot drift apart"
 formulation of §B.5 is **superseded** by this note; truth for each list lives

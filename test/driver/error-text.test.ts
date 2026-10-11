@@ -54,12 +54,12 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N20): the suffix lists
-  // DIVERGE deliberately. Config resolution, journaling and passthrough drop
-  // `_URL` (a credential-free URL is not a secret there; the credential-URL
-  // value screen covers credential-bearing values), but diagnostics redaction
-  // KEEPS `_URL` so a URL value can never reach persisted error text. This
-  // pins the divergence on the exact value config now accepts.
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N21): the suffix lists
+  // DIVERGE deliberately. Config resolution, journaling and passthrough treat a
+  // `_URL` name as non-secret only for a clean absolute http(s) URL, but
+  // diagnostics redaction KEEPS `_URL` (case-insensitively) so a URL value can
+  // never reach persisted error text. This pins the divergence on the exact
+  // value config now accepts.
   test('boundedErrorText still redacts a _URL-suffixed value by name (deliberate divergence)', () => {
     const prior = process.env.CQ_TEST_URL;
     process.env.CQ_TEST_URL = 'https://example.test/metrics';
@@ -87,6 +87,21 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.CQ_TEST_TOKEN = priorKey;
       if (priorUrl === undefined) delete process.env.CQ_TEST_URL;
       else process.env.CQ_TEST_URL = priorUrl;
+    }
+  });
+
+  // Round 3 (Codex P1 L0_a): classification is case-folded, so a lowercase or
+  // win32-spelled `metrics_url` cannot dodge the redaction.
+  test('boundedErrorText redacts a lowercase _URL-suffixed env name', () => {
+    const prior = process.env.metrics_url;
+    process.env.metrics_url = 'https://user:pass@example.test/x';
+    try {
+      expect(boundedErrorText('failed at https://user:pass@example.test/x')).toBe(
+        'failed at [redacted]',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.metrics_url;
+      else process.env.metrics_url = prior;
     }
   });
 });

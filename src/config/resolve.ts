@@ -107,9 +107,26 @@ function nonblank(value: string | undefined): string | undefined {
   return value === undefined || value.trim() === '' ? undefined : value.trim();
 }
 
-function isSecret(name: string, platform: 'posix' | 'win32' = 'posix'): boolean {
+/**
+ * The platform-folded `secretSuffixes` check. `_URL` is absent from that list
+ * and is handled by `isSecret`, which is value-aware.
+ */
+function hasSecretSuffix(name: string, platform: 'posix' | 'win32' = 'posix'): boolean {
   const classifiedName = platform === 'win32' ? name.toUpperCase() : name;
   return secretSuffixes.some((suffix) => classifiedName.endsWith(suffix));
+}
+
+/**
+ * A `_URL` name is non-secret only for a value `isSafeJournalableUrl` accepts
+ * (the unified owner ruling, ADR N21). Every other `_URL` value, and every call
+ * that passes no value, is secret exactly as before the ruling. The `_URL`
+ * check is case-insensitive on all platforms; the remaining suffixes keep the
+ * platform-folded comparison.
+ */
+function isSecret(name: string, platform: 'posix' | 'win32' = 'posix', value?: string): boolean {
+  if (name.toUpperCase().endsWith('_URL'))
+    return !(value !== undefined && isSafeJournalableUrl(value));
+  return hasSecretSuffix(name, platform);
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -225,11 +242,12 @@ function isConfigAbsolute(value: string, platform: 'posix' | 'win32'): boolean {
   );
 }
 
-function unsafePassthrough(
-  name: string,
-  env: Readonly<Record<string, string | undefined>>,
-  platform: 'posix' | 'win32',
-): boolean {
+/**
+ * Passthrough hazards that are dangerous by NAME alone. `_URL` is deliberately
+ * absent: its danger is value-gated (ADR N21), so it is judged against the real
+ * environment by `unsafePassthrough`, never by a names-only screen.
+ */
+function unsafePassthroughName(name: string): boolean {
   const upper = name.toUpperCase();
   return (
     !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
@@ -239,9 +257,26 @@ function unsafePassthrough(
     upper.startsWith('AWS_') ||
     upper.startsWith('AZURE_') ||
     upper.startsWith('GOOGLE_') ||
-    upper.startsWith('GCP_') ||
-    isSecret(upper) ||
-    credentialUrl(envValue(env, name, platform))
+    upper.startsWith('GCP_')
+  );
+}
+
+function unsafePassthrough(
+  name: string,
+  env: Readonly<Record<string, string | undefined>>,
+  platform: 'posix' | 'win32',
+): boolean {
+  // The secret-suffix comparison stays case-folded (the `upper` spelling), so a
+  // lowercase `gh_token` cannot dodge it on any platform.
+  const upper = name.toUpperCase();
+  const value = envValue(env, name, platform);
+  return (
+    unsafePassthroughName(name) ||
+    // A `_URL` name is secret (and so refused) unless its value is a clean
+    // absolute http(s) URL; `credentialUrl` alone misses opaque-pathname
+    // credential carriers such as `jar:https://user:pass@host/a.jar!/entry`.
+    isSecret(upper, platform, value) ||
+    credentialUrl(value)
   );
 }
 
@@ -344,7 +379,13 @@ function parse(
       throw new Error(`${key.env}: structurally excluded bot identity`);
     if (
       key.id === 'run.envPassthrough' &&
-      unique.some((name) => unsafePassthrough(name, {}, platform))
+      unique.some(
+        (name) =>
+          unsafePassthroughName(name) ||
+          // `_URL` is value-gated (ADR N21): it is screened against the real
+          // environment once the value is known, not by this names-only screen.
+          hasSecretSuffix(name.toUpperCase()),
+      )
     )
       throw new Error(`${key.env}: policy and secret variables cannot be passed through`);
     if (
@@ -743,10 +784,12 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
       throw new Error(`${name}: expected canonical CQ_* spelling`);
     if (name.startsWith('CQ_APPROVAL_KEY')) throw new Error(`${name}: reserved and denied`);
     const value = envValue(env, name, platform);
-    const isUrl = (platform === 'win32' ? name.toUpperCase() : name).endsWith('_URL');
+    const isUrl = name.toUpperCase().endsWith('_URL');
     if (value !== undefined && nonblank(value) !== undefined) {
-      // Journal safety is independent of the passthrough refusal screen.
-      if (isSecret(name, platform) || (isUrl && !isSafeJournalableUrl(value))) {
+      // The value-aware `_URL` classification (ADR N21) is independent of the
+      // passthrough refusal screen: an unsafe `_URL` value is secret (presence),
+      // a clean absolute http(s) one is journalled by value.
+      if (isSecret(name, platform, value)) {
         if (name.startsWith('CQ_')) secrets[name] = { layer: 'env', set: true };
         else credentials[name] = 'set';
       } else if (isUrl && !name.startsWith('CQ_')) foreign[name] = value;
@@ -767,7 +810,9 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
   for (const name of FOREIGN_ENV_NAMES) {
     const value = envValue(env, name, platform);
     if (nonblank(value) === undefined) continue;
-    if (isSecret(name)) credentials[name] = 'set';
+    // The value-aware `_URL` rule applies here too, so a clean foreign base URL
+    // stays journalled by value (base URLs are validated separately below).
+    if (isSecret(name, platform, value)) credentials[name] = 'set';
     else foreign[name] = value!;
   }
   for (const name of [

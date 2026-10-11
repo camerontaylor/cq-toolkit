@@ -243,13 +243,12 @@ describe('pure configuration resolution', () => {
     ).toThrow(/cannot be passed through/);
   });
 
-  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N20): `_URL` is not a
-  // secret suffix for config resolution and passthrough. Journaling separately
-  // requires clean absolute http(s) URLs before recording their values.
-  // The credential-URL passthrough screen (`credentialUrl`) is unchanged.
-  // Diagnostics redaction deliberately diverges and keeps
-  // `_URL` (see test/driver/error-text.test.ts) so URL values never reach
-  // persisted error text.
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N21): a `_URL` name is
+  // non-secret only when its value is a clean absolute http(s) URL. Journaling
+  // and passthrough both follow that single value-gated rule; the credential-URL
+  // screen (`credentialUrl`) is unchanged. Diagnostics redaction deliberately
+  // diverges and keeps `_URL` case-insensitively (see test/driver/error-text.test.ts)
+  // so URL values never reach persisted error text.
   it('treats _URL names as non-secret: credential-free values pass the passthrough screen', () => {
     expect(
       entryValue(
@@ -307,16 +306,17 @@ describe('pure configuration resolution', () => {
     },
   );
 
-  it('keeps scheme-relative credential _URL passthrough allowed while journaling presence only', () => {
-    const config = resolve({
-      env: {
-        CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
-        METRICS_URL: '//user:pass@example.test/path',
-      },
-    });
-    expect(entryValue('run.envPassthrough', config)).toEqual(['METRICS_URL']);
+  it('refuses a scheme-relative credential _URL passthrough while journaling presence only', () => {
+    const value = '//user:pass@example.test/path';
+    expect(() =>
+      resolve({
+        env: { CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL', METRICS_URL: value },
+      }),
+    ).toThrow(/cannot be passed through/);
+    const config = resolve({ env: { METRICS_URL: value } });
     expect(config.credentials).toEqual({ METRICS_URL: 'set' });
-    expect(JSON.stringify(config)).not.toContain('//user:pass@example.test/path');
+    expect(config.foreign).not.toHaveProperty('METRICS_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
   });
 
   it('classifies Windows _URL journal names case-insensitively', () => {
@@ -327,6 +327,37 @@ describe('pure configuration resolution', () => {
     expect(config.credentials).toEqual({ metrics_url: 'set' });
     expect(config.foreign).not.toHaveProperty('metrics_url');
     expect(JSON.stringify(config)).not.toContain('/metrics?api_key=secret');
+  });
+
+  // Round 3 (Codex P1s Lq9P, L0_a): the unified value-gated rule applies to the
+  // passthrough screen and to every platform's name spelling.
+  it('refuses a scheme-shaped _URL value whose credentials hide in an opaque pathname', () => {
+    const value = 'jar:https://user:pass@example.test/archive.jar!/entry';
+    expect(() =>
+      resolve({
+        env: { CQ_RUN_ENV_PASSTHROUGH: 'ARTIFACT_URL', ARTIFACT_URL: value },
+      }),
+    ).toThrow(/cannot be passed through/);
+    const config = resolve({ env: { ARTIFACT_URL: value } });
+    expect(config.credentials).toEqual({ ARTIFACT_URL: 'set' });
+    expect(config.foreign).not.toHaveProperty('ARTIFACT_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
+  });
+
+  it('applies the value-gated _URL rule to lowercase names on both platforms', () => {
+    const value = '//user:pass@example.test/path';
+    for (const platform of ['posix', 'win32'] as const) {
+      expect(() =>
+        resolve({
+          env: { CQ_RUN_ENV_PASSTHROUGH: 'metrics_url', metrics_url: value },
+          platform,
+        }),
+      ).toThrow(/cannot be passed through/);
+      const config = resolve({ env: { metrics_url: value }, platform });
+      expect(config.credentials).toEqual({ metrics_url: 'set' });
+      expect(config.foreign).not.toHaveProperty('metrics_url');
+      expect(JSON.stringify(config)).not.toContain(value);
+    }
   });
 
   it('requires expanded, caller-verified paths outside the workspace', () => {

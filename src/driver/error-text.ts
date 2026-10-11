@@ -32,10 +32,14 @@ export function describeError(err: unknown): string {
 export function redactSensitiveText(text: string): string {
   let out = text;
   for (const [name, value] of Object.entries(process.env)) {
+    // Environment names are case-insensitive (win32) or may simply be spelled
+    // in lowercase by an operator; classify case-folded so `metrics_url`
+    // cannot dodge the redaction.
+    const classified = name.toUpperCase();
     if (
       value !== undefined &&
       value.length >= 4 &&
-      SECRET_ENV_SUFFIXES.some((suffix) => name.endsWith(suffix))
+      SECRET_ENV_SUFFIXES.some((suffix) => classified.endsWith(suffix))
     ) {
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       out = out.replace(
