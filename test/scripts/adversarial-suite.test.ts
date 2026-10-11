@@ -92,6 +92,9 @@ it('rejects an unsupported option such as --row instead of defaulting to every r
 it('leaves credential checks to the runner so a missing credential still yields BLOCKED evidence', () => {
   // A credential guard before the runner would exit with no evidence file;
   // the runner's preflight records the same failure per row (Codex P2, #247).
+  // The one allowed credential reference before the runner step is the
+  // scratch App mint (ADR-0004 note N19): it is variable-gated, so a missing
+  // App skips it and the runner still runs and records BLOCKED evidence.
   for (const path of [
     'policy/templates/adversarial-suite.yml',
     '.github/workflows/adversarial-suite.yml',
@@ -100,8 +103,31 @@ it('leaves credential checks to the runner so a missing credential still yields 
     expect(text, path).toContain('node scripts/adversarial-suite.mjs');
     const runnerStep = text.indexOf('      - name: Apply and verify scratch profile');
     expect(runnerStep, path).toBeGreaterThan(0);
-    expect(text.slice(text.indexOf('    steps:'), runnerStep), path).not.toMatch(
-      /GH_TOKEN|secrets\.|gh api/,
+    const beforeRunner = text.slice(text.indexOf('    steps:'), runnerStep);
+    const mintStart = beforeRunner.indexOf('      - name: Mint the scratch App token');
+    expect(mintStart, path).toBeGreaterThan(0);
+    const nextStep = beforeRunner.indexOf('      - name:', mintStart + 1);
+    const mint =
+      nextStep === -1 ? beforeRunner.slice(mintStart) : beforeRunner.slice(mintStart, nextStep);
+    expect(mint, path).toContain('uses: actions/create-github-app-token@');
+    expect(mint, path).toContain("if: vars.CQ_ADVERSARIAL_APP_CLIENT_ID != ''");
+    expect(mint, path).toContain('private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}');
+    expect(mint, path).toContain('continue-on-error: true');
+    expect(mint, path).toContain('permission-variables: write');
+    expect(mint, path).toContain('permission-environments: read');
+    expect(mint, path).not.toContain('permission-administration');
+    expect(mint, path).not.toContain('permission-actions');
+    expect(mint, path).not.toMatch(/GH_TOKEN|gh api/);
+    const rest =
+      nextStep === -1
+        ? beforeRunner.slice(0, mintStart)
+        : beforeRunner.slice(0, mintStart) + beforeRunner.slice(nextStep);
+    expect(rest, path).not.toMatch(/GH_TOKEN|secrets\.|gh api/);
+    // The runner consumes the minted token with the interim PAT as fallback
+    // only while the App is unregistered; an armed-but-failed mint yields an
+    // empty token whose preflight records BLOCKED evidence (Codex P2).
+    expect(text, path).toContain(
+      "CQ_ADVERSARIAL_PROFILE_TOKEN: ${{ steps.adversarial-app.outputs.token || (vars.CQ_ADVERSARIAL_APP_CLIENT_ID == '' && secrets.CQ_ADVERSARIAL_PROFILE_TOKEN) || '' }}",
     );
   }
 });
