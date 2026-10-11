@@ -1,17 +1,18 @@
 # Template: self-review-loop — the adoptable scheduled review-loop
 # automation: the toolkit, built from source, runs its OWN review loop
-# (runReviewLoop over the frozen SelfhostDefaults) against the ADOPTING
-# repository's open PRs — fetch → classify → respond → resolve, one
-# ≤20-minute scheduled run per slot. Wiring, secrets, the cron-window rule,
-# the budget caps, and the I2 single-identity caveat: README.md in this
-# directory (policy/templates/self-host/). The trusted build and the
+# (runReviewLoop over the frozen SelfhostDefaults, driver peak-aware from
+# the run's clock) against the ADOPTING repository's open PRs — fetch →
+# classify → respond → resolve, one ≤20-minute scheduled run per slot.
+# Wiring, secrets, the peak-window rule, the budget caps, and the I2
+# single-identity caveat: README.md in this directory
+# (policy/templates/self-host/). The trusted build and the
 # privileged loop are intentionally split: secret-bearing effects are
 # isolated to the main-only privileged job below.
 #
-# Instantiate: the body writes SELFHOST_DRIVER_KEY in double braces; the
-# loop's GitHub credential carries NO placeholder (the mint below names the
-# App key and client id literally, so each adopter sets them under these
-# names).
+# Instantiate: the body writes SELFHOST_DRIVER_KEY and
+# SELFHOST_PEAK_DRIVER_KEY in double braces; the loop's GitHub credential
+# carries NO placeholder (the mint below names the App key and client id
+# literally, so each adopter sets them under these names).
 #
 # CREDENTIAL IDENTITY — per-run mint, no fallback. The loop's GitHub
 # credential is the registered cq-automation App, minted PER RUN by the
@@ -31,15 +32,23 @@
 # (top-level PR comments, which ride the issues collection).
 #   SELFHOST_DRIVER_KEY     -> NAME of the `automation` ENVIRONMENT
 #                              secret (never a repository secret) holding
-#                              the model provider API key (the fix workers'
-#                              driver through the ai-sdk route).
-#   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
-#                              convention from ../README.md): the template
-#                              carries THIS repo's three literal crons
-#                              (exclude the Z.ai GLM peak, 06:00–10:00 UTC
-#                              Mon–Fri, plus 20 minutes of start headroom);
-#                              an adopter replaces them BY HAND with THEIR
-#                              provider's peak exclusion and run headroom. No
+#                              the OFF-PEAK model provider API key (the fix
+#                              workers' driver through the ai-sdk route).
+#   SELFHOST_PEAK_DRIVER_KEY -> NAME of the `automation` ENVIRONMENT secret
+#                              (likewise never a repository secret) holding
+#                              the PEAK model provider's API key. The run
+#                              step exports BOTH keys unconditionally and
+#                              each provider factory reads its own; WHICH one
+#                              a run needs is a runtime decision (below).
+#   (peak window)           -> CODE, not cron: the schedule runs ALL DAY and
+#                              the peak switch lives in the toolkit
+#                              (src/selfhost/config.ts: SelfhostPeak +
+#                              resolveSelfhostDriver — 06:00–10:00 UTC
+#                              Mon–Fri). An adopter edits THAT window (and
+#                              the two driver specs) rather than the crons;
+#                              the run step derives the required key name
+#                              from the same function, so no YAML window
+#                              arithmetic has to move with it. No
 #                              placeholder text is substituted.
 # ENVIRONMENT (W1.10 Decision 8): the privileged job runs in environment
 # `automation` (main-only branch policy), which holds both secrets; the
@@ -52,18 +61,18 @@ name: self-review-loop
 
 on:
   schedule:
-    # OWNER-MANDATED WINDOW: exclude the Z.ai GLM peak, 06:00–10:00
-    # UTC Mon–Fri (14:00–18:00 Asia/Singapore, ~3× quota consumption).
-    # Reserve the documented ≤20-minute run BEFORE the peak: no weekday
-    # start from 05:40 inclusive to 10:00 exclusive. Three cron lines keep
-    # the 15-minute cadence outside that interval: 00:00–05:30 and
-    # 10:00–23:45 on weekdays, all day on weekends. The run-step guard
-    # enforces the same bounds for delayed fires and manual dispatches.
-    # HAND-REPLACED for adopters: align provider peak, run headroom,
-    # cron expressions, and guard together.
-    - cron: '*/15 0-4,10-23 * * 1-5'
-    - cron: '0,15,30 5 * * 1-5'
-    - cron: '*/15 * * * 0,6'
+    # ALL-HOURS CADENCE (owner directive 2026-10-12): the loop no longer
+    # stands down during the Z.ai GLM peak (06:00–10:00 UTC Mon–Fri,
+    # 14:00–18:00 Asia/Singapore). One every-15-minutes cron, every day; the
+    # MODEL switches per run instead of the schedule: the toolkit resolves
+    # the driver from the run's UTC start instant
+    # (src/selfhost/config.ts resolveSelfhostDriver) — the frozen
+    # zai/glm-5.3-flash off-peak, deepseek/deepseek-flash inside the
+    # documented peak window. Delayed fires and manual dispatches resolve at
+    # their OWN start, never at the slot's nominal time. HAND-REPLACED for
+    # adopters: the window and the two driver specs live in the toolkit, not
+    # here — only the cadence is cron.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       max_usd:
@@ -243,11 +252,16 @@ jobs:
           # must never reach pnpm install's lifecycle scripts — it reaches
           # ONLY this step).
           GH_TOKEN: ${{ steps.self-review-app.outputs.token }}
-          # The fix workers' driver (ai-sdk, served model id): without it
-          # the loop's dispatches cannot run — asserted below, before any
-          # effect. The env NAME is fixed (`ZAI_API_KEY`, what the drivers
-          # read); only the SECRET name is the adopter's placeholder.
+          # Both fix-worker driver keys ride the step unconditionally: the
+          # toolkit (resolveSelfhostDriver) picks the driver from the run's
+          # UTC clock and each provider factory reads ITS OWN key by name at
+          # dispatch time. Off-peak = zai → ZAI_API_KEY; the 06:00–10:00 UTC
+          # Mon–Fri peak = deepseek → DEEPSEEK_API_KEY. The env NAMES are
+          # fixed (what the drivers read); only the SECRET names are the
+          # adopter's placeholders. The key the SELECTED window does not need
+          # may be absent — asserted below, before any effect.
           ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}
+          DEEPSEEK_API_KEY: ${{ secrets.{{SELFHOST_PEAK_DRIVER_KEY}} }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
@@ -275,27 +289,24 @@ jobs:
           # PRs; only a whole-run throw (bad args, a failed listing) exits
           # 1. pipefail below turns that throw into a red step despite tee.
           set -euo pipefail
-          # Peak-window fail-closed guard: reserve the documented
-          # ≤20-minute run before the 06:00–10:00 UTC Mon–Fri GLM peak.
-          # Refuse starts from 05:40 inclusive to 10:00 exclusive, including
-          # delayed fires and manual dispatches; exit 0 is an honest no-op.
-          # Runs BEFORE secret asserts so rotated/absent secrets during the
-          # exclusion are a scheduling fact, not a credential failure.
-          # Adopters must align provider peak, run headroom, and cron.
-          # %u is weekday 1–7 (Mon–Sun); %H%M is the UTC start time.
-          DOW=$(date -u +%u)
-          HM=$(date -u +%H%M)
-          if [ "$DOW" -le 5 ] && [ "$((10#$HM))" -ge 540 ] && [ "$((10#$HM))" -lt 1000 ]; then
-            echo 'outside the scheduled automation window (Z.ai GLM peak plus 20-minute headroom: starts 05:40–10:00 UTC Mon–Fri excluded); refusing to initiate operations' >&2
-            exit 0
-          fi
           # FAIL-CLOSED credential assert, no PAT fallback: GH_TOKEN is only
           # the per-run mint above, so an empty value means the
           # CQ_AUTOMATION_APP_CLIENT_ID repository variable is unset (the
           # mint step is variable-gated) or the mint produced no token.
           # Refuse before any effect and name the missing pieces.
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not minted — set the CQ_AUTOMATION_APP_CLIENT_ID repository variable and the CQ_AUTOMATION_APP_KEY environment secret (cq-automation App); refusing to start' >&2; exit 1; }
-          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
+          # FAIL-CLOSED, PEAK-AWARE provider-key assert: the loop runs all day,
+          # so WHICH key it needs depends on the run's UTC clock — and the
+          # toolkit owns that decision. Ask it (`--print-driver-key-env`
+          # prints the env name for the driver the CURRENT clock selects:
+          # ZAI_API_KEY off-peak, DEEPSEEK_API_KEY inside the 06:00–10:00 UTC
+          # Mon–Fri peak) and require exactly that key. Both keys are exported
+          # above; the one for the OTHER window may be absent. A missing key
+          # refuses the run instead of dispatching with no credential, and no
+          # window arithmetic lives in this YAML (the same resolveSelfhostDriver
+          # also drives the run's own preflight).
+          REQUIRED_KEY=$(node dist/selfhost/self-review-loop.js --print-driver-key-env)
+          test -n "$(printenv "$REQUIRED_KEY")" || { echo "$REQUIRED_KEY not set — the fix workers' selected provider cannot dispatch; refusing to start" >&2; exit 1; }
           # Review-fix pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git
           # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.

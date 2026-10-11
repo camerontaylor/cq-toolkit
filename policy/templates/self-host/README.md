@@ -24,11 +24,16 @@ template, not this file` provenance header.
    then `pnpm run build` and invoke the built entries — the adoption is the SOURCE, never a published
    tarball.
 3. Configure the credentials (below): the review loop mints its own App token
-   per run; `self-merge-prs` reads one environment secret. Confirm the driver binding in
-   `src/selfhost/config.ts` (`SelfhostDefaults`) names YOUR provider and its
-   served model id — this repo's instantiation uses the ai-sdk route against
-   the Z.AI GLM coding endpoint with the served id `glm-5.3-flash`.
-4. Hand-replace the cron window (below) with your provider's off-peak window.
+   per run; `self-merge-prs` reads one environment secret. Confirm the two driver bindings in
+   `src/selfhost/config.ts` name YOUR providers and their served model ids —
+   `SelfhostDefaults.driver` is the OFF-PEAK binding and `SelfhostPeak.driver`
+   the peak one, selected by `SelfhostPeak.window` (all three are frozen
+   data). This repo's instantiation uses the ai-sdk route against the Z.AI
+   GLM coding endpoint (served id `glm-5.3-flash`) off-peak and DeepSeek's
+   flash model (served id `deepseek-flash`) inside the peak window.
+4. Provision BOTH provider keys (below) — one per window — and edit
+   `SelfhostPeak` in the toolkit if your provider's peak window differs. The
+   schedule itself is all-hours; no cron or YAML window needs to move with it.
 
 ## The two entry commands
 
@@ -76,12 +81,13 @@ Decision 8): the jobs that read them declare `environment: automation`, so a
 dispatch from any other ref fails at job admission, before a secret is
 exposed.
 
-| credential                    | where it lives      | what it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CQ_AUTOMATION_APP_KEY`       | `automation` SECRET | the `cq-automation` App's private key. The review loop's privileged job mints an installation token from it per run, scoped to this repository only. LITERAL name (the mint step names it).                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `CQ_AUTOMATION_APP_CLIENT_ID` | repository VARIABLE | the `cq-automation` App's client id, paired with the key. The mint step is variable-gated: with the variable unset the step is skipped and the loop refuses to start (fail-closed). LITERAL name.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `{{SELFHOST_TOKEN}}`          | `automation` SECRET | `self-merge-prs`'s GitHub credential (that template does not mint per run — that change is out of scope here). Recommended END STATE: the registered automation App's installation token (this repository's App: cq-automation) — but see the identity note below: a static installation-token secret does not support the schedule without a refresh path. Working identity until then: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, merge PRs, and Contents write for the `cq-state` settle-state branch. Referenced by the workflow as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}`     | `automation` SECRET | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| credential                     | where it lives      | what it holds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CQ_AUTOMATION_APP_KEY`        | `automation` SECRET | the `cq-automation` App's private key. The review loop's privileged job mints an installation token from it per run, scoped to this repository only. LITERAL name (the mint step names it).                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `CQ_AUTOMATION_APP_CLIENT_ID`  | repository VARIABLE | the `cq-automation` App's client id, paired with the key. The mint step is variable-gated: with the variable unset the step is skipped and the loop refuses to start (fail-closed). LITERAL name.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `{{SELFHOST_TOKEN}}`           | `automation` SECRET | `self-merge-prs`'s GitHub credential (that template does not mint per run — that change is out of scope here). Recommended END STATE: the registered automation App's installation token (this repository's App: cq-automation) — but see the identity note below: a static installation-token secret does not support the schedule without a refresh path. Working identity until then: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, merge PRs, and Contents write for the `cq-state` settle-state branch. Referenced by the workflow as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}`      | `automation` SECRET | the OFF-PEAK model provider API key driving review-loop fix workers through the ai-sdk route (read as `ZAI_API_KEY`). Used when the run's UTC start is outside the peak window. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                     |
+| `{{SELFHOST_PEAK_DRIVER_KEY}}` | `automation` SECRET | the PEAK model provider API key (read as `DEEPSEEK_API_KEY` for this repo's DeepSeek binding). Used when the run's UTC start is inside the peak window. BOTH keys are exported to the run step unconditionally — each provider reads its own — and the run step requires ONLY the selected one, so the key for the other window may be absent.                                                                                                                                                                                                                                                                                     |
 
 Every credential is step-scoped and never reaches `pnpm install`'s
 lifecycle scripts: the App private key is provided only to the mint step
@@ -145,25 +151,29 @@ Every standing requirement of the automation, with its enforcing artifact
 named. A requirement no automation enforces is marked `manual:` — the
 adopter owns it by hand.
 
-### The cron window
+### The peak window and the model switch
 
-- Rule: schedule starts only OUTSIDE your model provider's peak window
-  **and the preceding run headroom**. Subtract the job timeout or documented
-  maximum run duration from the peak start. Align the cron expressions and
-  run-step guard to those bounds; refuse delayed or manual starts inside
-  them, exiting 0 as an honest no-op.
-- Why: this repo's review loop excludes the 06:00–10:00 UTC Monday–Friday
-  Z.ai GLM peak (14:00–18:00 Asia/Singapore, ~3x quota consumption).
-  Its documented ≤20-minute run reserves 20 minutes before 06:00, so starts
-  from **05:40 inclusive to 10:00 exclusive** are refused on weekdays.
-  The three crons are `*/15 0-4,10-23 * * 1-5`, `0,15,30 5 * * 1-5`, and
-  `*/15 * * * 0,6`: the final pre-peak weekday slot is 05:30, weekdays resume
-  at 10:00, and weekends run all day. The merge-dispatch sibling still
-  carries the older, narrower 15:00–01:00 UTC window and is out of scope.
-- Enforcement: the review-loop template's three literal cron expressions
-  plus its fail-closed UTC weekday/time guard enforce the same start
-  exclusion for scheduled, delayed, and manual fires. Adopters must change
-  provider peak, run headroom, cron, and guard together — `manual:`.
+- Rule: the schedule runs all day; the MODEL changes at the peak boundary.
+  Keep your provider's peak window and the two driver bindings in the
+  toolkit (`SelfhostPeak` → `resolveSelfhostDriver` in
+  `src/selfhost/config.ts`), not in cron. Resolve the driver from the run's
+  own UTC start so delayed fires and manual dispatches behave like scheduled
+  ones, and fail closed when the SELECTED window's key is absent.
+- Why: this repo's review loop no longer stands down during the
+  06:00–10:00 UTC Monday–Friday Z.ai GLM peak (14:00–18:00 Asia/Singapore,
+  ~3x quota consumption). It runs every 15 minutes, every day
+  (`*/15 * * * *`), and switches provider for the peak: off-peak
+  `zai/glm-5.3-flash` (with `ZAI_API_KEY`), peak `deepseek/deepseek-flash`
+  (with `DEEPSEEK_API_KEY`). Peak runs therefore spend the paid DeepSeek key;
+  the sweep token cap still bounds a run. The merge-dispatch sibling keeps
+  the older, narrower 15:00–01:00 UTC window and is out of scope.
+- Enforcement: the frozen `SelfhostPeak` window + `resolveSelfhostDriver`
+  decide the driver inside the toolkit; the review-loop template's single
+  all-hours cron removes the old start exclusion, and its run-step assert
+  derives the required key name from the SAME function
+  (`--print-driver-key-env`). `main()` also refuses to start when the
+  selected key is missing. Adopters move peak window, drivers and keys
+  together — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 

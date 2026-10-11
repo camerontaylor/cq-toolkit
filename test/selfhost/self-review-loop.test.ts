@@ -86,7 +86,7 @@ import {
 } from '../../src/selfhost/self-review-loop.js';
 import type { SweepUsagePrRow } from '../../src/selfhost/self-review-loop.js';
 import type { runReviewLoop } from '../../src/plans/review-loop.js';
-import { SelfhostDefaults } from '../../src/selfhost/config.js';
+import { SelfhostDefaults, SelfhostPeak } from '../../src/selfhost/config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -298,7 +298,9 @@ describe('runSelfReviewLoop — real run', () => {
     if (first === undefined) throw new Error('the first loop call never happened');
     // Identity passthrough (the round-3 deployment requirement).
     expect(first.responderLogin).toBeNull(); // baseCfg default; overridden in the next test
-    // The frozen driver binding, never a vendor choice invented here.
+    // The off-peak driver (this fixture clock, Tue 2023-11-14T22:13:20Z, is
+    // outside the peak window): resolved from the run's start stamp, never a
+    // vendor choice invented here.
     expect(first.driver).toEqual(SelfhostDefaults.driver);
     expect(first.owner).toBe(OWNER);
     expect(first.repo).toBe(REPO);
@@ -322,6 +324,30 @@ describe('runSelfReviewLoop — real run', () => {
     // The wall-clock ladder rides every loop (KyE / #137): the frozen
     // default, wrapped in the LIMITS half's one-field shape.
     expect(first.limits).toEqual({ perJobWallClockMs: SelfhostDefaults.perJobWallClockMs });
+  });
+
+  test('the run start stamp selects the driver: a peak clock dispatches the peak provider', async () => {
+    const calls: RecordedCall[] = [];
+    const journalRoot = tempJournalRoot();
+    const gh = fakeGh([pullRow(7), pullRow(11)]);
+    const summary = await runSelfReviewLoop(
+      {
+        ...baseDeps(
+          gh,
+          fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+        ),
+        // 2026-10-12T07:00:00Z — a Monday inside the 06:00–10:00 UTC peak.
+        nowMs: () => Date.parse('2026-10-12T07:00:00Z'),
+      },
+      baseCfg({ journalRoot }),
+    );
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 11]);
+    // ONE clock read decides the driver for the whole sweep: every loop's
+    // opts carry the same resolved peak driver.
+    expect(calls.map((call) => call.opts.driver)).toEqual([
+      SelfhostPeak.driver,
+      SelfhostPeak.driver,
+    ]);
   });
 
   test('responderLogin and maxUsd overrides reach the loop opts; the clock is read per PR', async () => {
@@ -1026,5 +1052,104 @@ describe('main — usage reporting', () => {
       sweepUsage: buildSweepUsage(SelfhostDefaults.maxTokens, []),
       error: 'stdout failed',
     });
+  });
+});
+
+describe('main — peak-aware driver credential (fail closed)', () => {
+  const originalArgv = process.argv;
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    process.argv = originalArgv;
+  });
+
+  const at = (iso: string): number => Date.parse(iso);
+
+  test('--print-driver-key-env prints the key env the CURRENT clock selects', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    // Peak (Mon 2026-10-12T07:00Z) → the DeepSeek key …
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T07:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockClear();
+    // … and every off-peak instant (same day, noon UTC) → the Z.AI key.
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('ZAI_API_KEY\n');
+  });
+
+  test('a PEAK run refuses before any effect when DEEPSEEK_API_KEY is absent', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    // The off-peak key is present but NOT the selected one: the preflight
+    // must require the key belonging to the window, not any provider key.
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T07:00:00Z'),
+      }),
+    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+  });
+
+  test('an OFF-PEAK run conversely refuses when ZAI_API_KEY is absent', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T12:00:00Z'),
+      }),
+    ).rejects.toThrow('requires ZAI_API_KEY');
+  });
+
+  test('a dry run dispatches nothing and needs no provider key', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
+    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    // stdout is spied to keep the payload out of the report; the mock MUST
+    // invoke the write callback, which main() awaits (a no-op mock would
+    // hang the run).
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(
+        (
+          _chunk: string | Uint8Array,
+          encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+          callback?: (error?: Error | null) => void,
+        ) => {
+          const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+          done?.(null);
+          return true;
+        },
+      );
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T07:00:00Z'),
+      }),
+    ).resolves.toBeUndefined();
+    expect(write).toHaveBeenCalled();
   });
 });

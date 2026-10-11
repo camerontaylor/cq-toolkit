@@ -117,7 +117,7 @@
       "reviewers": [],
       "prevent_self_review": false,
       "wait_timer": 0,
-      "secrets": ["CQ_AUTOMATION_APP_KEY", "Z_AI_API_KEY"],
+      "secrets": ["CQ_AUTOMATION_APP_KEY", "Z_AI_API_KEY", "DEEPSEEK_API_KEY"],
       "interimSecrets": ["CQ_AUTOMATION_TOKEN", "GH_TOKEN"],
       "variables": ["CQ_AUTOMATION_APP_CLIENT_ID"]
     },
