@@ -110,6 +110,22 @@ class PromotionRetryTest(unittest.TestCase):
         self.assertIn("promotion_dispatch", kinds)
         self.assertTrue(any("merge-queue-gate.yml" in line and "dispatched" in line for line in log))
 
+    def test_both_workflows_present_prefers_old_gate(self):
+        self.mock_wf.side_effect = lambda rev, name: True
+        q = make_queue()
+        log = crq.promotion_tick(q, False)
+        gh = self.gh_calls()
+        self.assertEqual(len(gh), 1)
+        self.assertEqual(gh[0].args[0],
+                         ["gh", "workflow", "run", "merge-queue-gate.yml", "--repo", crq.REPO,
+                          "--ref", "main", "-f", f"sha={BATCH}"])
+        self.assertIn("dispatched", q["items"][0])
+        dispatched_events = [c for c in self.mock_event.call_args_list
+                             if c.args[0] == "promotion_dispatch"]
+        self.assertEqual(len(dispatched_events), 1)
+        self.assertEqual(dispatched_events[0].kwargs.get("workflow"), "merge-queue-gate.yml")
+        self.assertTrue(any("merge-queue-gate.yml" in line and "dispatched" in line for line in log))
+
     def test_gate_yml_without_sha(self):
         self.mock_wf.side_effect = lambda rev, name: name == "gate.yml"
         q = make_queue()
