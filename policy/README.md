@@ -40,7 +40,7 @@ files themselves.
    The `{{COMMANDS...}}` slot in `required-check.md` is hand-replaced with your
    own ordered run-steps; no placeholder is substituted there.
 3. **Provision your own reviewer identity at `policy/promotion-reviewer.json`.**
-   `merge-queue-gate` trusts a `crq/promotion-review` status only from the bot
+   `cq-gate` (`gate.yml`, armed) trusts a `crq/promotion-review` status only from the bot
    user this file pins, read at `GITHUB_SHA` in each trust step — the file is
    the trust root, and a missing, invalid or mismatched one refuses
    fail-closed. Commit yours from YOUR promotion-review App's registration
@@ -56,7 +56,8 @@ files themselves.
    branch-protection wait:
    - `REQUIRED_WORKFLOW_CHECKS` in `scripts/denylist-scan` (the I4 policy
      data: workflow file ↔ producing job name),
-   - the gate's wait list (`{{GATE_CHECKS}}` in `merge-queue-gate.yml`),
+   - the gate's wait list (the retired `merge-queue-gate.yml` template's `{{GATE_CHECKS}}`, adopter-only;
+     `gate.yml` reads the `cq/*` verdicts by app and its `{{GATE_WORKFLOWS}}` runs by workflow path),
    - branch protection required status contexts on **both** branches
      (`merge-queue` and `main`).
 5. **Never edit an instantiated workflow directly.** Edit the template and
@@ -67,8 +68,8 @@ files themselves.
    promote PAT are out-of-band by design.
 
 The template files, in dependency order: `init-merge-queue.yml` (bootstrap the
-queue branch), `merge-queue-gate.yml` (the only component that advances
-`main`, behind the required-check wait and merge-base guards),
+queue branch), `gate.yml` (`cq-gate`, armed — the only component that advances
+`main`), `merge-queue-gate.yml` (retired at C2, adopter-only template),
 `sync-merge-queue.yml` (keep the branches level, never write `main`),
 `required-check.md` (the I4 pattern), `affected-tests.md` (reduced-test
 selection and its blind spot), `ratchet.yml` + `ratchet-propose.yml` (the

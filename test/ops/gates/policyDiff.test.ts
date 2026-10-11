@@ -48,6 +48,7 @@ import {
   type PolicyDiffOutcome,
 } from '../../../src/ops/gates/policyDiff.js';
 import type { ProtectedPathsPosture } from '../../../src/ops/gates/policyConfig.js';
+import { producersOf, scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
 import { registry } from '../../../src/ops/gates/registry.js';
 
 // Git-heavy suite: explicit budgets for hooks and tests (verifyRatchet's idiom).
@@ -1655,11 +1656,23 @@ describe("the toolkit's own policy list", () => {
     requiredChecks: string[];
   };
 
-  test('requiredChecks equals the merge-queue gate wait list', () => {
-    const gate = readFileSync(join(REPO_ROOT, '.github/workflows/merge-queue-gate.yml'), 'utf8');
-    const waitList = /checks="\$\(echo '([^']*)'/.exec(gate)?.[1];
-    expect(waitList).toBeDefined();
-    expect(list.requiredChecks).toEqual(waitList!.split(','));
+  // Retired at C2: the old gate's wait-list file is gone. requiredChecks keeps
+  // its teeth by naming checks the retained CI workflows actually produce.
+  test('requiredChecks are produced by the retained CI workflows', () => {
+    const producers: Record<string, string> = {
+      static: 'ci.yml',
+      denylist: 'denylist.yml',
+      ratchet: 'ratchet.yml',
+    };
+    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'ratchet', 'static']);
+    for (const check of list.requiredChecks) {
+      const file = producers[check];
+      expect(file, `${check}: has a retained producer`).toBeDefined();
+      const scan = scanWorkflow(readFileSync(join(REPO_ROOT, '.github/workflows', file!), 'utf8'));
+      expect(scan.ok, `${file}: scans ok`).toBe(true);
+      if (!scan.ok) continue;
+      expect(producersOf(scan, check), `${check}: produced by retained ${file}`).toContain(check);
+    }
   });
 
   test('every protectedPaths source compiles and matches a tracked file', () => {

@@ -1,8 +1,7 @@
 // Slice C — the merge-queue gate's fail-closed mechanics, tested over the
-// generated workflow (.github/workflows/merge-queue-gate.yml) and its source
-// of truth (policy/templates/merge-queue-gate.yml). The extracted programs
-// and guards are byte-compared across both files; after that identity check,
-// the real awk matrix and shell guard run once against the shared copy.
+// retired template (policy/templates/merge-queue-gate.yml, adopter-only since
+// the C2 cutover deleted the generated workflow). The real awk matrix and
+// shell guard run once against the template copy.
 //
 // Pinned here:
 //   1. The awk verdict program (extracted verbatim from each file and run as
@@ -30,8 +29,8 @@ import { parseDocument } from 'yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
+// The retired template (adopter-only): the generated workflow was deleted at C2.
 const GATE_FILES = [
-  { label: 'generated', path: join(ROOT, '.github/workflows/merge-queue-gate.yml') },
   { label: 'template', path: join(ROOT, 'policy/templates/merge-queue-gate.yml') },
 ];
 
@@ -59,9 +58,8 @@ function extractFailClosedSnippet(text: string): string {
   return lines.slice(start, start + 7).join('\n');
 }
 
-// One gate's check list is quoted differently per file ('static,denylist'
-// generated, '{{GATE_CHECKS}}' template); normalize it so one snippet runner
-// serves both. Plain string surgery (no regex: a literal `$(` inside a
+// The template's check list is the `{{GATE_CHECKS}}` token (adopters fill it at
+// instantiation); normalize it so one snippet runner serves the file. Plain string surgery (no regex: a literal `$(` inside a
 // RegExp literal is an end-of-input anchor, and escaping it trips
 // no-useless-escape), then wrap with set -euo pipefail like the real step.
 function scriptFor(text: string, list: string): string {
@@ -137,7 +135,7 @@ const VERDICT_CASES: ReadonlyArray<{ name: string; rows: string; expected: strin
   },
 ];
 
-describe('merge-queue-gate: fail-closed mechanics (generated file and template in lockstep)', () => {
+describe('merge-queue-gate: fail-closed mechanics (retired template, adopter-only)', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'gate-mechanics-'));
   afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -148,42 +146,8 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     return { label, text, progFile };
   });
 
-  // Identity lockstep: the behavioral matrix below can only catch drift the
-  // cases exercise — these string-identity checks catch ALL drift.
-  it('extracted program and guard snippet are byte-identical across the files', () => {
-    const [generated, template] = gates;
-    if (generated === undefined || template === undefined)
-      throw new Error('both workflow sources are required');
-    expect(
-      extractAwkProgram(generated.text),
-      'the files drifted outside the behavioral cases: the awk verdict program',
-    ).toBe(extractAwkProgram(template.text));
-    // Each file quotes its check list differently ('static,denylist,ratchet'
-    // generated — whatever the wait list currently holds — and
-    // '{{GATE_CHECKS}}' template) — the sanctioned token-level divergence of
-    // the instantiation (the whole-file lockstep is template-render.test.ts).
-    // Normalize BOTH to a placeholder before comparing; ANY other drift still
-    // fails. The generated list is matched by SHAPE, and
-    // only as the `echo` argument (`(echo )'[a-z]+(?:,[a-z]+)*'` — a bare `tr ','` must
-    // NOT match, whose comma is in the class but is not the wait list), so a
-    // future wait-list change ('static,denylist,ratchet' was the second
-    // entry) cannot re-break the identity assertion — only real drift can.
-    // The template placeholder keeps its exact-match replacement
-    // ('{{GATE_CHECKS}}' is uppercase and braced, outside the shape).
-    const normalize = (text: string): string =>
-      extractFailClosedSnippet(text)
-        .replace(/(echo )'[a-z]+(?:,[a-z]+)*'/, `$1'<LIST>'`)
-        .replace(`'{{GATE_CHECKS}}'`, `'<LIST>'`);
-    expect(
-      normalize(generated.text),
-      'the files drifted outside the behavioral cases: the fail-closed guard snippet',
-    ).toBe(normalize(template.text));
-  });
-
-  // The identity assertion above proves both sources are byte-identical.
-  // Execute the matrix and guard once against that shared copy: 9 awk + 2
-  // bash instead of repeating the same programs for the template copy.
-  // Three observed runs took 34.26–46.61s; 100s is over 2× the slowest
+  // Execute the matrix and guard once against the template copy: 9 awk + 2
+  // bash. Three observed runs took 34.26–46.61s; 100s is over 2× the slowest
   // run while still bounding the 9-awk process matrix against a stall.
   it('runs the exact verdict matrix through the shared awk program', { timeout: 100_000 }, () => {
     const { label, progFile } = gates[0]!;
@@ -253,24 +217,23 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
       });
     }
 
-    // Identity lockstep: the presence checks above can pass with a one-file
-    // revert; the promotion run script itself must be byte-identical.
-    it('the promotion step run script is byte-identical across the files (identity lockstep)', () => {
-      const [generated, template] = gates;
-      if (generated === undefined || template === undefined)
-        throw new Error('both workflow sources are required');
-      const gen = extractPromotionScript(generated.text);
-      const tmpl = extractPromotionScript(template.text);
-      expect(gen, 'the promotion step drifted between template and instantiation').toBe(tmpl);
-      expect(gen, 'the promotion step must carry no template tokens').not.toContain('{{');
+    // The template carries the `{{GATE_CHECKS}}` token by design (adopters fill
+    // it at instantiation); the promotion run script itself must carry no other
+    // template tokens. GitHub `${{ }}` expressions are not tokens (the `$`).
+    it('the promotion step run script carries no template tokens (identity lockstep)', () => {
+      const [sole] = gates;
+      if (sole === undefined) throw new Error('the template source is required');
+      const script = extractPromotionScript(sole.text);
+      expect(script, 'the promotion step must carry no template tokens').not.toMatch(
+        /(?<!\$)\{\{[A-Z]/,
+      );
     });
   });
 });
 
-describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files in lockstep)', () => {
-  // REVIEW_JQ verbatim from each file. The jq program is token-free ($bot_login
-  // and $bot_id arrive as jq variables from the step that runs it), so the
-  // extraction is byte-identical across the generated file and the template.
+describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, template only)', () => {
+  // REVIEW_JQ verbatim from the retired template. The jq program is token-free
+  // ($bot_login and $bot_id arrive as jq variables from the step that runs it).
   const extractReviewJq = (text: string): string => {
     const lines = text.split(/\r?\n/);
     const start = lines.findIndex((line) => line.trim().startsWith('REVIEW_JQ:'));
@@ -335,14 +298,9 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
       ),
     ) as Record<string, unknown>;
 
-  it('REVIEW_JQ is byte-identical and each trust step consumes the identity source', () => {
-    const [generated, template] = sources;
-    if (generated === undefined || template === undefined)
-      throw new Error('both workflow sources are required');
-    expect(
-      extractReviewJq(generated.text),
-      'the trust filter drifted between template and instantiation',
-    ).toBe(extractReviewJq(template.text));
+  it('each trust step consumes the identity source', () => {
+    const [sole] = sources;
+    if (sole === undefined) throw new Error('the template source is required');
     const identity = JSON.parse(
       readFileSync(join(ROOT, 'policy/promotion-reviewer.json'), 'utf8'),
     ) as { login: string; id: number; type: string; schemaVersion: number };
@@ -393,10 +351,20 @@ describe('merge-queue-gate: the pinned-reviewer trust filter (REVIEW_JQ, files i
     ) as {
       schemaVersion: number;
       instances: Array<{ workflow: string; tokens: Record<string, string> }>;
+      adopterOnly: Array<{ template: string; reason: string }>;
     };
+    // Retired at C2: no instance renders this workflow any more; the template
+    // survives only in adopterOnly.
     const gate = manifest.instances.find((entry) => entry.workflow === 'merge-queue-gate.yml');
-    expect(gate?.tokens['REVIEWER_BOT_LOGIN']).toBeUndefined();
-    expect(gate?.tokens['REVIEWER_BOT_ID']).toBeUndefined();
+    expect(gate, 'the retired workflow is no longer instantiated').toBeUndefined();
+    expect(
+      manifest.adopterOnly.map((entry) => entry.template),
+      'the retired template is retained adopter-only',
+    ).toContain('merge-queue-gate.yml');
+    for (const entry of manifest.instances) {
+      expect(entry.tokens['REVIEWER_BOT_LOGIN']).toBeUndefined();
+      expect(entry.tokens['REVIEWER_BOT_ID']).toBeUndefined();
+    }
     const protectedPaths = JSON.parse(
       readFileSync(join(ROOT, 'policy/protected-paths.json'), 'utf8'),
     ) as { protectedPaths: string[] };
