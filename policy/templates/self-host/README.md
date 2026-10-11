@@ -112,7 +112,10 @@ There is no PAT fallback: the schedule has no second identity. An empty
 `CQ_AUTOMATION_APP_CLIENT_ID` variable or a failed mint refuses the run — the
 loop step asserts the minted token with a message naming both the variable and
 the secret — rather than posting as a human or the runner. The `GH_TOKEN` env
-indirection still drives the same code, but its only source is the mint.
+indirection still drives the same code, but its only source is the mint. The
+mint also carries a fail-closed scope guard (`github.event.repository.name !=
+''`): `owner` without `repositories` would mint an installation-wide token, so
+the step never runs unless the repository name is present.
 
 ### The merge dispatch's identity: the App, minted per run
 
@@ -120,9 +123,10 @@ indirection still drives the same code, but its only source is the mint.
 run — the pattern shipped for the review loop — from `CQ_AUTOMATION_APP_KEY`
 (environment secret) plus `CQ_AUTOMATION_APP_CLIENT_ID` (repository
 variable), scoped to this repository only, requesting only Pull requests
-write (list, read, merge) and Contents write (the `cq-state` settle-state
-branch). The per-run mint removes the static-token refresh problem outright,
-so its identity is the App, never a human or role PAT: merges stay
+write (list, read, merge), Contents write (the `cq-state` settle-state
+branch) and Issues read (the PR's top-level conversation comments the
+classifier reads). The per-run mint removes the static-token refresh problem
+outright, so its identity is the App, never a human or role PAT: merges stay
 attributable, revoke independently of every human credential, and no
 long-lived repo-scope secret exists.
 

@@ -431,7 +431,9 @@ plus the repository variable `CQ_AUTOMATION_APP_CLIENT_ID`, scoped to this
 repository only:
 
 - `self-merge-prs` — Pull requests write, Contents write (the `cq-state`
-  settle-state branch); the tokenless path SKIPS honestly (exit 0);
+  settle-state branch), Issues read (the PR's top-level conversation comments
+  the classifier reads, which ride the issues collection); the tokenless path
+  SKIPS honestly (exit 0);
 - `sync-merge-queue` — Pull requests write; the tokenless path REFUSES
   ("sync not armed", exit 1);
 - `init-merge-queue` — Contents write; an empty mint falls back to the job's
@@ -443,7 +445,10 @@ No mint requests Workflows/Checks/Statuses write (D-D.2: the automation App
 has none, and repo-driven code must not rewrite its own definition or satisfy
 a verdict), and there is NO App-to-PAT fallback in any of them: the mint is
 the credential's only source, so a failed or skipped mint can never promote
-an interim human token into the automation identity. The
+an interim human token into the automation identity. Each mint also carries a
+fail-closed scope guard (`github.event.repository.name != ''`): `owner`
+without `repositories` would mint an installation-wide token, so the step
+never runs unless the repository name is present. The
 `{{AUTOMATION_SECRET}}`/`{{INTERIM_SECRET}}`/`{{INTERIM_FALLBACK}}` and
 `{{SELFHOST_TOKEN}}` placeholders are retired from `instances.json` and the
 templates; the templates and their `render-templates` instances are edited

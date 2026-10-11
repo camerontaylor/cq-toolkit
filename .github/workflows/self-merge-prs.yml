@@ -32,7 +32,8 @@
 # GITHUB_TOKEN, and never a silent promotion of an interim credential. The
 # minted token is step-scoped to the run step and never reaches pnpm
 # install. On this repository only, the App needs Pull requests write (list,
-# read, merge) and Contents write (the `cq-state` settle-state branch).
+# read, merge), Contents write (the `cq-state` settle-state branch) and Issues
+# read (the PR's top-level conversation comments — the issues collection).
 #
 # SELFHOST_DRIVER_KEY is intentionally absent: this merge template does not
 # dispatch conflict agents, so it declares no driver secret.
@@ -169,13 +170,18 @@ jobs:
       # CQ_AUTOMATION_APP_CLIENT_ID repository variable. `owner` is the
       # repository owner; `repositories` is THIS repository only. The App asks
       # for only the permissions the dispatch needs — Pull requests write (list,
-      # read, merge) and Contents write (the `cq-state` settle-state branch).
+      # read, merge), Contents write (the `cq-state` settle-state branch) and
+      # Issues read (the top-level conversation comments the classifier reads).
       # Deliberately NO workflows/checks/statuses write. The mint step is
       # variable-gated; an empty client-id variable skips it and the run step
       # below skips honestly.
       - name: Mint the cq-automation App token (per run)
         id: self-merge-app
-        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != ''
+        # Fail-closed scope guard: `owner` WITHOUT `repositories` mints an
+        # installation-wide token, so never mint unless the repository name is
+        # non-empty (belt-and-braces — the repository object is present on
+        # every trigger this workflow uses).
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != '' && github.event.repository.name != ''
         # v3.2.0, immutable commit pin (repo policy)
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
@@ -185,6 +191,12 @@ jobs:
           private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
           permission-pull-requests: write
           permission-contents: write
+          # The classifier reads the PR's top-level conversation comments —
+          # `GET /issues/{pr}/comments` in src/ops/review/fetchReviewState.ts,
+          # which rides the ISSUES collection, not pull requests. Without it
+          # that read 403s and every candidate is excluded `fetch-failed`
+          # (a green run that merges nothing) — see src/selfhost/candidates.ts.
+          permission-issues: read
       - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
         env:
           # Step-scoped on purpose (the live-review.yml round-3
