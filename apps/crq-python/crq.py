@@ -866,6 +866,12 @@ def policy_at(rev: str) -> bool:
     return run(["git", "cat-file", "-e", f"{rev}:docs/promotion-policy.md"], cwd=CLONE, check=False).returncode == 0
 
 
+def workflow_at(rev: str, name: str) -> bool:
+    """True when the promotion gate workflow `name` exists on fetched `rev`."""
+    return run(["git", "cat-file", "-e", f"{rev}:.github/workflows/{name}"], cwd=CLONE,
+               check=False).returncode == 0
+
+
 def promotion_gate_live() -> bool:
     """The gate only exists once #269's policy is on main; before that a
     promotion review would spend quota on nothing."""
@@ -1091,13 +1097,55 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
             item = None
         else:
             since = (now() - parse_iso(item["success_at"])).total_seconds() / 60
-            if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched") and not dry:
-                if PROMO.get("post_status"):
-                    run(["gh", "workflow", "run", "merge-queue-gate.yml", "--repo", REPO, "--ref", "main",
-                         "-f", f"sha={item['batch_sha']}"], check=False, timeout=60)
-                item["dispatched"] = iso()
-                event("promotion_dispatch", item=item["id"], sha=item["batch_sha"])
-                log.append(f"promotion: main not at {item['batch_sha'][:10]} {since:.0f}m after success → gate dispatched")
+            if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched"):
+                # C2 cutover: the old gate is dispatched while it still exists on
+                # fetched main; once deleted, gate.yml (no sha input) takes over.
+                if workflow_at("origin/main", "merge-queue-gate.yml"):
+                    wf = "merge-queue-gate.yml"
+                elif workflow_at("origin/main", "gate.yml"):
+                    wf = "gate.yml"
+                else:
+                    wf = None
+                if wf is not None:
+                    if not dry:
+                        st.pop("gate_absent_alerted", None)
+                else:
+                    if not dry and not st.get("gate_absent_alerted"):
+                        st["gate_absent_alerted"] = iso()
+                        signer_alert(q, item, f"no promotion gate workflow on origin/main "
+                                              f"(merge-queue-gate.yml and gate.yml both absent) — refusing "
+                                              f"to dispatch for batch {item['batch_sha'][:10]}", log)
+                    log.append(f"promotion: no gate workflow on origin/main → refusing dispatch "
+                               f"for {item['batch_sha'][:10]}")
+                    return log
+                if wf == "merge-queue-gate.yml":
+                    cmd = ["gh", "workflow", "run", "merge-queue-gate.yml", "--repo", REPO, "--ref",
+                           "main", "-f", f"sha={item['batch_sha']}"]
+                else:
+                    cmd = ["gh", "workflow", "run", "gate.yml", "--repo", REPO, "--ref", "main"]
+                if not PROMO.get("post_status"):
+                    log.append(f"promotion: post_status off → no gate nudge "
+                               f"(would dispatch {wf} for {item['batch_sha'][:10]})")
+                    return log
+                if dry:
+                    log.append(f"promotion: would dispatch {wf} for {item['batch_sha'][:10]} "
+                               f"({since:.0f}m after success)")
+                    return log
+                r = run(cmd, check=False, timeout=60)
+                if r.returncode == 0:
+                    item["dispatched"] = iso()
+                    event("promotion_dispatch", item=item["id"], sha=item["batch_sha"], workflow=wf)
+                    log.append(f"promotion: main not at {item['batch_sha'][:10]} {since:.0f}m after success "
+                               f"→ {wf} dispatched")
+                else:
+                    event("promotion_dispatch_failed", item=item["id"], sha=item["batch_sha"],
+                          workflow=wf, exit=r.returncode, stderr=(r.stderr or "")[:300])
+                    log.append(f"promotion: {wf} dispatch failed (exit {r.returncode}): "
+                               f"{(r.stderr or '').strip()[:200]} — will retry")
+                    if not item.get("dispatch_alerted"):
+                        item["dispatch_alerted"] = iso()
+                        signer_alert(q, item, f"gate dispatch failed ({wf} exit {r.returncode}) for batch "
+                                              f"{item['batch_sha'][:10]} — will retry", log)
             return log
     if item and item["state"] == "findings":
         if not is_ancestor(item["base_sha"], main):
