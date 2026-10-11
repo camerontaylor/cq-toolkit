@@ -60,7 +60,6 @@ const secretSuffixes = [
   '_KEY',
   '_PASSWORD',
   '_CREDENTIALS',
-  '_URL',
   'PRIVATE_KEY',
 ];
 const deniedPassthrough = new Set([

@@ -53,4 +53,40 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.CQ_TEST_KEY = prior;
     }
   });
+
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N20): the suffix lists
+  // DIVERGE deliberately. Config resolution, journaling and passthrough drop
+  // `_URL` (a credential-free URL is not a secret there; the credential-URL
+  // value screen covers credential-bearing values), but diagnostics redaction
+  // KEEPS `_URL` so a URL value can never reach persisted error text. This
+  // pins the divergence on the exact value config now accepts.
+  test('boundedErrorText still redacts a _URL-suffixed value by name (deliberate divergence)', () => {
+    const prior = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_URL = 'https://example.test/metrics';
+    try {
+      expect(boundedErrorText('endpoint https://example.test/metrics failed')).toBe(
+        'endpoint [redacted] failed',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = prior;
+    }
+  });
+
+  test('boundedErrorText still redacts a credential-suffixed var even when a _URL var is set', () => {
+    const priorKey = process.env.CQ_TEST_TOKEN;
+    const priorUrl = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_TOKEN = 'token-value-1234';
+    process.env.CQ_TEST_URL = 'https://example.test/metrics';
+    try {
+      expect(boundedErrorText('token-value-1234 at https://example.test/metrics')).toBe(
+        '[redacted] at [redacted]',
+      );
+    } finally {
+      if (priorKey === undefined) delete process.env.CQ_TEST_TOKEN;
+      else process.env.CQ_TEST_TOKEN = priorKey;
+      if (priorUrl === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = priorUrl;
+    }
+  });
 });

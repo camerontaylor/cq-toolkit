@@ -243,6 +243,47 @@ describe('pure configuration resolution', () => {
     ).toThrow(/cannot be passed through/);
   });
 
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N20): `_URL` is not a
+  // secret suffix for config resolution, journaling and passthrough. The
+  // dangerous case is covered BY VALUE by the credential-URL screen
+  // (`credentialUrl`), independent of the name, so a credential-free `_URL`
+  // name is passable. Diagnostics redaction deliberately diverges and keeps
+  // `_URL` (see test/driver/error-text.test.ts) so URL values never reach
+  // persisted error text.
+  it('treats _URL names as non-secret: credential-free values pass the passthrough screen', () => {
+    expect(
+      entryValue(
+        'run.envPassthrough',
+        resolve({
+          env: {
+            CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
+            METRICS_URL: 'https://example.test/metrics',
+          },
+        }),
+      ),
+    ).toEqual(['METRICS_URL']);
+    expect(resolve({ env: { METRICS_URL: 'https://example.test/metrics' } }).credentials).toEqual(
+      {},
+    );
+  });
+
+  it('still refuses a _URL passthrough name whose value carries credentials', () => {
+    expect(() =>
+      resolve({
+        env: {
+          CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
+          METRICS_URL: 'https://user:pass@example.test',
+        },
+      }),
+    ).toThrow(/cannot be passed through/);
+  });
+
+  it('journals a credential-free foreign base URL by value, not as secret presence', () => {
+    const config = resolve({ env: { ANTHROPIC_BASE_URL: 'https://example.test/api' } });
+    expect(config.foreign).toEqual({ ANTHROPIC_BASE_URL: 'https://example.test/api' });
+    expect(config.credentials).toEqual({});
+  });
+
   it('requires expanded, caller-verified paths outside the workspace', () => {
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '<x>' } })).toThrow(
       /expected an expanded absolute path/,
