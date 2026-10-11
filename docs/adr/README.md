@@ -445,10 +445,16 @@ No mint requests Workflows/Checks/Statuses write (D-D.2: the automation App
 has none, and repo-driven code must not rewrite its own definition or satisfy
 a verdict), and there is NO App-to-PAT fallback in any of them: the mint is
 the credential's only source, so a failed or skipped mint can never promote
-an interim human token into the automation identity. Each mint also carries a
-fail-closed scope guard (`github.event.repository.name != ''`): `owner`
-without `repositories` would mint an installation-wide token, so the step
-never runs unless the repository name is present. The
+an interim human token into the automation identity. The two tokenless
+outcomes are distinct and both fail closed: an UNSET
+`CQ_AUTOMATION_APP_CLIENT_ID` variable skips the mint step and the workflow
+takes its documented tokenless path (loop refuses, sync refuses, init's push
+fails, the two optional dispatches skip); a SET variable with an absent,
+rotated or malformed `CQ_AUTOMATION_APP_KEY` fails the mint step itself
+(`private-key` is required) — a loud red run, never a silent no-op. Each mint
+also carries a fail-closed scope guard (`github.event.repository.name != ''`):
+`owner` without `repositories` would mint an installation-wide token, so the
+step never runs unless the repository name is present. The
 `{{AUTOMATION_SECRET}}`/`{{INTERIM_SECRET}}`/`{{INTERIM_FALLBACK}}` and
 `{{SELFHOST_TOKEN}}` placeholders are retired from `instances.json` and the
 templates; the templates and their `render-templates` instances are edited

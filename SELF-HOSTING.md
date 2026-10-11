@@ -208,9 +208,15 @@ Owner steps, in order (the RS-11 wizard outline):
    particular, provision `CQ_AUTOMATION_APP_KEY` in `automation` now, before
    step 3: every automation job mints the `cq-automation` App's installation
    token per run from that key plus `CQ_AUTOMATION_APP_CLIENT_ID`, so there
-   is no stored automation PAT to provision. Skip this and step 3 disarms
-   sync (the behind/diverged sync PR fails with "sync not armed"), init
-   fails with no checkout credential, and the scheduled dispatches no-op.
+   is no stored automation PAT to provision. The two failure modes are
+   distinct and both fail closed. With `CQ_AUTOMATION_APP_CLIENT_ID` also
+   unset (step 1 skipped), the mint step is skipped and each job takes its
+   documented tokenless path: sync refuses ("sync not armed"), init fails
+   with no checkout credential, and the scheduled dispatches skip honestly.
+   With the variable set but the App key absent, rotated or malformed, the
+   mint step itself FAILS (`private-key` is required), so the job goes RED —
+   a loud, fail-closed outcome, never a silent no-op. Provision both halves
+   before enabling the schedules.
    **Hazard in this step's window (before step 3 arms the trust set): do
    not break-glass push to `main`.** A break-glass push leaves `main` with
    commits `merge-queue` lacks (un-ancestored), so every promotion refuses

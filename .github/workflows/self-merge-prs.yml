@@ -27,8 +27,10 @@
 # pattern of PR #307 (policy/templates/adversarial-suite.yml), shipped for
 # the review loop in PR #313; it supersedes the static-credential identity
 # note, whose refresh path a per-run mint no longer needs. The mint step is
-# variable-gated, and the run step SKIPS HONESTLY (exit 0, a documented
-# no-op) when no token was minted — never a PAT, never the runner's
+# variable-gated: with `CQ_AUTOMATION_APP_CLIENT_ID` unset it is skipped and
+# the run step SKIPS HONESTLY (exit 0, a documented no-op); with the variable
+# set but the App key absent, rotated or malformed the mint step itself FAILS
+# (a red run). Never a PAT, never the runner's
 # GITHUB_TOKEN, and never a silent promotion of an interim credential. The
 # minted token is step-scoped to the run step and never reaches pnpm
 # install. On this repository only, the App needs Pull requests write (list,
@@ -174,7 +176,8 @@ jobs:
       # Issues read (the top-level conversation comments the classifier reads).
       # Deliberately NO workflows/checks/statuses write. The mint step is
       # variable-gated; an empty client-id variable skips it and the run step
-      # below skips honestly.
+      # below skips honestly (a set variable with an absent/rotated/malformed
+      # App key fails THIS step — a red run, never a silent no-op).
       - name: Mint the cq-automation App token (per run)
         id: self-merge-app
         # Fail-closed scope guard: `owner` WITHOUT `repositories` mints an
@@ -221,7 +224,7 @@ jobs:
           # exits 1. pipefail below turns that throw into a red step
           # despite tee.
           set -euo pipefail
-          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the credential assert: a delayed fire with an unminted/rotated token is a scheduling fact (honest no-op), not a credential failure.
+          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the credential assert: a delayed fire with an unminted token is a scheduling fact (honest no-op), not a credential failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2

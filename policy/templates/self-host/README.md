@@ -85,10 +85,14 @@ exposed.
 Every credential is step-scoped and never reaches `pnpm install`'s
 lifecycle scripts: the App private key is provided only to the mint step
 (via `private-key`), and the minted installation token is provided only to
-the run step. A missing credential is handled honestly by each workflow — the
-review loop REFUSES to start (exit 1), `self-merge-prs` SKIPS successfully
-(exit 0, a documented no-op); required I4 checks are separate and never use
-this optional skip. There is NO PAT fallback and no classic-token
+the run step. The two failure modes are distinct and both fail closed. An
+UNSET `CQ_AUTOMATION_APP_CLIENT_ID` variable skips the mint step, and the
+workflow then takes its documented tokenless path — the review loop REFUSES
+to start (exit 1), `self-merge-prs` SKIPS successfully (exit 0, a documented
+no-op); required I4 checks are separate and never use this optional skip. A
+SET variable with an absent, rotated or malformed `CQ_AUTOMATION_APP_KEY`
+FAILS the mint step (`private-key` is required), so the job goes red loudly —
+never a silent no-op. There is NO PAT fallback and no classic-token
 last resort: the mint is the only credential source, so a failed or skipped
 mint can never promote an interim human token into the automation identity.
 
@@ -108,10 +112,12 @@ review-independent (doctrine I2), revokes independently of every human
 credential, and avoids a long-lived repo-scope secret — and minting per run
 removes the static-token refresh problem (#303) outright.
 
-There is no PAT fallback: the schedule has no second identity. An empty
-`CQ_AUTOMATION_APP_CLIENT_ID` variable or a failed mint refuses the run — the
-loop step asserts the minted token with a message naming both the variable and
-the secret — rather than posting as a human or the runner. The `GH_TOKEN` env
+There is no PAT fallback: the schedule has no second identity. With an empty
+`CQ_AUTOMATION_APP_CLIENT_ID` variable the mint step is skipped and the loop
+REFUSES to run — the loop step asserts the minted token with a message naming
+both the variable and the secret — rather than posting as a human or the
+runner; with the variable set but the App key absent, rotated or malformed the
+mint step itself FAILS (a red run). The `GH_TOKEN` env
 indirection still drives the same code, but its only source is the mint. The
 mint also carries a fail-closed scope guard (`github.event.repository.name !=
 ''`): `owner` without `repositories` would mint an installation-wide token, so
