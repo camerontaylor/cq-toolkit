@@ -64,7 +64,7 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N20), each set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N21), each set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
@@ -369,3 +369,46 @@ or the runner's `GITHUB_TOKEN`. The mint requests only Pull requests write
 (review replies, thread resolves), Contents write (review-fix pushes) and
 Issues write (top-level PR comments). `self-merge-prs` keeps
 `{{SELFHOST_TOKEN}}`; its mint is out of scope here.
+
+### N21 — Annex B §B.5 and N15: `_URL` is not a secret suffix for config resolution, journaling and passthrough — diagnostics keep name-based redaction
+
+Row 6b of issue #291 recorded that the code's config suffix list included
+`_URL`, which §B.5's accepted suffix list (`_API_KEY _TOKEN _AUTH_TOKEN
+_SECRET _KEY _PASSWORD _CREDENTIALS PRIVATE_KEY`) omits.
+
+**Owner ruling (2026-10-11).** `_URL` is **not** a secret suffix for config
+resolution, journaling and passthrough. A URL value is not a secret because
+the credential-URL screen already covers the dangerous case by VALUE,
+independent of the name: a passthrough variable whose value is a URL
+carrying userinfo, a query or a fragment is refused (`credentialUrl` in
+[`src/config/resolve.ts`](../../src/config/resolve.ts), the screen §B.5
+describes as `*_URL` names carrying userinfo), foreign base-URL values are
+validated credential-free (`validForeignBaseUrl`), and `DATABASE_URL` stays
+denied by name. So a credential-free `_URL` name no longer refuses its own
+passthrough, and a foreign `_URL` value is journalled by value only when it
+parses with `new URL()` as an absolute http(s) URL with empty userinfo and no
+query or fragment; otherwise the journal keeps name-based redaction (secret
+presence). The non-secret treatment is value-gated: passthrough is allowed and
+the value journalled only when `isSafeJournalableUrl(value)` holds, and every
+other `_URL` value is classified secret exactly as before the ruling
+(passthrough refused, journal records presence); `_URL` suffix matching is
+case-insensitive on all platforms.
+
+**Diagnostics deliberately diverge.** Redaction for persisted error text
+KEEPS `_URL` in `SECRET_ENV_SUFFIXES`
+([`src/driver/error-text.ts`](../../src/driver/error-text.ts)): a `_URL` env
+value echoed by a vendor SDK must never reach a persisted `WorkerResult.error`
+or journal record, so URL values stay redacted by name there. `_URL` suffix
+matching is case-insensitive there too, so a lowercase or win32 `metrics_url`
+cannot dodge the redaction. The two suffix
+lists now diverge on purpose, and the old "one suffix list drives naming,
+redaction, journalling and the `vars.*` refusal, and they cannot drift apart"
+formulation of §B.5 is **superseded** by this note; truth for each list lives
+at the two source files above.
+
+**Supersession.** This ruling supersedes the N18 draft of parked PR #305
+(never merged), which removed `_URL` from **both** lists so code and §B.5
+agreed on eight suffixes. The narrow ruling keeps the diagnostics list at
+nine entries. It also closes the `_URL` question N15 deliberately left open:
+N15 aligned §B.4/§B.6/§B.9 and kept "the annex-B `_URL` secret-suffix
+question" out of its scope pending this decision.

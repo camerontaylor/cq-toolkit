@@ -53,4 +53,55 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.CQ_TEST_KEY = prior;
     }
   });
+
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N21): the suffix lists
+  // DIVERGE deliberately. Config resolution, journaling and passthrough treat a
+  // `_URL` name as non-secret only for a clean absolute http(s) URL, but
+  // diagnostics redaction KEEPS `_URL` (case-insensitively) so a URL value can
+  // never reach persisted error text. This pins the divergence on the exact
+  // value config now accepts.
+  test('boundedErrorText still redacts a _URL-suffixed value by name (deliberate divergence)', () => {
+    const prior = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_URL = 'https://example.test/metrics';
+    try {
+      expect(boundedErrorText('endpoint https://example.test/metrics failed')).toBe(
+        'endpoint [redacted] failed',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = prior;
+    }
+  });
+
+  test('boundedErrorText still redacts a credential-suffixed var even when a _URL var is set', () => {
+    const priorKey = process.env.CQ_TEST_TOKEN;
+    const priorUrl = process.env.CQ_TEST_URL;
+    process.env.CQ_TEST_TOKEN = 'token-value-1234';
+    process.env.CQ_TEST_URL = 'https://example.test/metrics';
+    try {
+      expect(boundedErrorText('token-value-1234 at https://example.test/metrics')).toBe(
+        '[redacted] at [redacted]',
+      );
+    } finally {
+      if (priorKey === undefined) delete process.env.CQ_TEST_TOKEN;
+      else process.env.CQ_TEST_TOKEN = priorKey;
+      if (priorUrl === undefined) delete process.env.CQ_TEST_URL;
+      else process.env.CQ_TEST_URL = priorUrl;
+    }
+  });
+
+  // Round 3 (Codex P1 L0_a): classification is case-folded, so a lowercase or
+  // win32-spelled `metrics_url` cannot dodge the redaction.
+  test('boundedErrorText redacts a lowercase _URL-suffixed env name', () => {
+    const prior = process.env.metrics_url;
+    process.env.metrics_url = 'https://user:pass@example.test/x';
+    try {
+      expect(boundedErrorText('failed at https://user:pass@example.test/x')).toBe(
+        'failed at [redacted]',
+      );
+    } finally {
+      if (prior === undefined) delete process.env.metrics_url;
+      else process.env.metrics_url = prior;
+    }
+  });
 });

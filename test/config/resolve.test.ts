@@ -243,6 +243,123 @@ describe('pure configuration resolution', () => {
     ).toThrow(/cannot be passed through/);
   });
 
+  // Issue #291 row 6b (owner ruling 2026-10-11, ADR N21): a `_URL` name is
+  // non-secret only when its value is a clean absolute http(s) URL. Journaling
+  // and passthrough both follow that single value-gated rule; the credential-URL
+  // screen (`credentialUrl`) is unchanged. Diagnostics redaction deliberately
+  // diverges and keeps `_URL` case-insensitively (see test/driver/error-text.test.ts)
+  // so URL values never reach persisted error text.
+  it('treats _URL names as non-secret: credential-free values pass the passthrough screen', () => {
+    expect(
+      entryValue(
+        'run.envPassthrough',
+        resolve({
+          env: {
+            CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
+            METRICS_URL: 'https://example.test/metrics',
+          },
+        }),
+      ),
+    ).toEqual(['METRICS_URL']);
+    expect(resolve({ env: { METRICS_URL: 'https://example.test/metrics' } }).credentials).toEqual(
+      {},
+    );
+  });
+
+  it('still refuses a _URL passthrough name whose value carries credentials', () => {
+    expect(() =>
+      resolve({
+        env: {
+          CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL',
+          METRICS_URL: 'https://user:pass@example.test',
+        },
+      }),
+    ).toThrow(/cannot be passed through/);
+  });
+
+  it('journals a credential-free foreign base URL by value, not as secret presence', () => {
+    const config = resolve({ env: { ANTHROPIC_BASE_URL: 'https://example.test/api' } });
+    expect(config.foreign).toEqual({ ANTHROPIC_BASE_URL: 'https://example.test/api' });
+    expect(config.credentials).toEqual({});
+  });
+
+  it.each([
+    '//user:pass@example.test/path',
+    '/metrics?api_key=secret',
+    'https://example.test/metrics?token=1',
+    'https://user:pass@example.test/metrics',
+    'https://example.test/metrics#secret',
+    'ftp://example.test/metrics',
+  ])('journals an unsafe _URL value as secret presence: %s', (value) => {
+    const config = resolve({ env: { METRICS_URL: value } });
+    expect(config.credentials).toEqual({ METRICS_URL: 'set' });
+    expect(config.foreign).not.toHaveProperty('METRICS_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
+  });
+
+  it.each(['https://example.test/metrics', 'http://example.test/metrics'])(
+    'journals a clean absolute _URL value by value: %s',
+    (value) => {
+      const config = resolve({ env: { METRICS_URL: value } });
+      expect(config.foreign).toEqual({ METRICS_URL: value });
+      expect(config.credentials).toEqual({});
+    },
+  );
+
+  it('refuses a scheme-relative credential _URL passthrough while journaling presence only', () => {
+    const value = '//user:pass@example.test/path';
+    expect(() =>
+      resolve({
+        env: { CQ_RUN_ENV_PASSTHROUGH: 'METRICS_URL', METRICS_URL: value },
+      }),
+    ).toThrow(/cannot be passed through/);
+    const config = resolve({ env: { METRICS_URL: value } });
+    expect(config.credentials).toEqual({ METRICS_URL: 'set' });
+    expect(config.foreign).not.toHaveProperty('METRICS_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
+  });
+
+  it('classifies Windows _URL journal names case-insensitively', () => {
+    const config = resolve({
+      env: { metrics_url: '/metrics?api_key=secret' },
+      platform: 'win32',
+    });
+    expect(config.credentials).toEqual({ metrics_url: 'set' });
+    expect(config.foreign).not.toHaveProperty('metrics_url');
+    expect(JSON.stringify(config)).not.toContain('/metrics?api_key=secret');
+  });
+
+  // Round 3 (Codex P1s Lq9P, L0_a): the unified value-gated rule applies to the
+  // passthrough screen and to every platform's name spelling.
+  it('refuses a scheme-shaped _URL value whose credentials hide in an opaque pathname', () => {
+    const value = 'jar:https://user:pass@example.test/archive.jar!/entry';
+    expect(() =>
+      resolve({
+        env: { CQ_RUN_ENV_PASSTHROUGH: 'ARTIFACT_URL', ARTIFACT_URL: value },
+      }),
+    ).toThrow(/cannot be passed through/);
+    const config = resolve({ env: { ARTIFACT_URL: value } });
+    expect(config.credentials).toEqual({ ARTIFACT_URL: 'set' });
+    expect(config.foreign).not.toHaveProperty('ARTIFACT_URL');
+    expect(JSON.stringify(config)).not.toContain(value);
+  });
+
+  it('applies the value-gated _URL rule to lowercase names on both platforms', () => {
+    const value = '//user:pass@example.test/path';
+    for (const platform of ['posix', 'win32'] as const) {
+      expect(() =>
+        resolve({
+          env: { CQ_RUN_ENV_PASSTHROUGH: 'metrics_url', metrics_url: value },
+          platform,
+        }),
+      ).toThrow(/cannot be passed through/);
+      const config = resolve({ env: { metrics_url: value }, platform });
+      expect(config.credentials).toEqual({ metrics_url: 'set' });
+      expect(config.foreign).not.toHaveProperty('metrics_url');
+      expect(JSON.stringify(config)).not.toContain(value);
+    }
+  });
+
   it('requires expanded, caller-verified paths outside the workspace', () => {
     expect(() => resolve({ env: { CQ_DRIVER_SESSIONS_DIR: '<x>' } })).toThrow(
       /expected an expanded absolute path/,
