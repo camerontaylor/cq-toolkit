@@ -16,6 +16,9 @@ coverage/
 # commit) ---
 .selfhost/
 
+# --- test runtime state (test:narrow's vitest cache; never commit) ---
+.vitest/
+
 # --- agent scratch (runtime tooling; never commit) ---
 # .zcode/ and .paseo/ are pure runtime agent scratch — ignored wholesale.
 .zcode/
