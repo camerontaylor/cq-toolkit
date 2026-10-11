@@ -59,7 +59,7 @@ const SECRET_ENV_SUFFIXES = [
 // A URL whose userinfo is present (user[:password]@) embeds a credential
 // in the value itself. Two forms: the AUTHORITY form has two tiers, WRAPPED
 // FIRST, and the OPAQUE form has a single whitespace-free tier. The
-// AUTHORITY form (`scheme://` or scheme-less `//`) keeps the span /`-free,
+// AUTHORITY form (`scheme://` or scheme-less `//`) keeps the span `/`-free,
 // so a credential-free URL whose only `@` sits in the path does not match;
 // its wrapped span admits whitespace (a raw newline can split the userinfo
 // before redaction runs) and is capped at 200 chars purely as the
@@ -72,6 +72,12 @@ const SECRET_ENV_SUFFIXES = [
 // userinfo longer than the wrap cap (which the wrapped tier cannot span) —
 // a long tunnel/DSN token — and cannot swallow unrelated text (it stops at
 // the first whitespace or the `@`).
+// Every pre-`@` span also excludes `?` and `#`: per RFC 3986 the authority
+// ends at `?` or `#`, and an opaque path ends at `?`, so real userinfo can
+// never contain them. Excluding them cannot miss a credential, and it stops
+// `?email=user@example.test` inside a query from being misread as userinfo
+// (the whole URL stays visible). The post-`@` tail is unrestricted, so a
+// path/query/fragment still redacts as one span.
 // The OPAQUE form (`scheme:` with zero or one slash — never two, guarded by
 // the `(?!\/\/)` lookahead so `scheme://` values stay on the authority
 // form) admits `/` in the span for opaque paths (`jdbc:…:user/pass@//host`)
@@ -80,7 +86,7 @@ const SECRET_ENV_SUFFIXES = [
 // as a scheme (`Error: contact user@host`). A newline-split OPAQUE userinfo
 // therefore escapes (residual risk accepted).
 const CREDENTIAL_URL_PATTERN =
-  /(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)(?:[^/<>"'`]{0,200}|[^\s/<>"'`]+)@[^\s<>"'`]*|[a-z][a-z0-9+.-]*:(?!\/\/)(?:\/)?(?:(?!:\/\/)[^\s<>"'`])+@[^\s<>"'`]*/gi;
+  /(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)(?:[^/?#<>"'`]{0,200}|[^\s/?#<>"'`]+)@[^\s<>"'`]*|[a-z][a-z0-9+.-]*:(?!\/\/)(?:\/)?(?:(?!:\/\/)[^\s?#<>"'`])+@[^\s<>"'`]*/gi;
 // A URL-like span whose query/fragment carries a secret-looking KEY
 // embeds a credential in the value itself (e.g. a signed `?token=` or
 // `#access_token=` echoed by a driver). The whole span is scrubbed; a

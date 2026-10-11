@@ -214,6 +214,15 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     );
   });
 
+  // Round-3 fix (PR #305): every pre-`@` span stops at `?`/`#` (RFC 3986 —
+  // the authority ends there), so an email inside a query is not misread as
+  // userinfo and the whole URL stays visible.
+  test('boundedErrorText keeps an email inside a query string visible', () => {
+    expect(boundedErrorText('fetch https://example.test?email=user@example.test failed')).toBe(
+      'fetch https://example.test?email=user@example.test failed',
+    );
+  });
+
   // Round-2 fix (PR #305): the opaque `scheme:` form is whitespace-free, so a
   // prose label before a bare email is not mistaken for an opaque scheme.
   // Only a contiguous `scheme:user@host` matches the opaque form.
