@@ -103,8 +103,14 @@ jobs:
           repositories: cq-scratch-v11-adversarial
           client-id: ${{ vars.CQ_ADVERSARIAL_APP_CLIENT_ID }}
           private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}
-          permission-variables: write
-          permission-environments: read
+          # Deliberately NO permission-* inputs: `variables` is not in the
+          # GitHub app-permissions API schema, so naming it would risk the
+          # whole token request being rejected. The token instead inherits
+          # the grants of the cq-adversarial-scratch App installation
+          # itself, registered with exactly Variables read/write and
+          # Environments read — and nothing else (no contents, no
+          # administration) — so the forbid-actions/administration intent
+          # is enforced by the App registration, not the request.
       - name: Apply and verify scratch profile; collect row evidence
         env:
           SCRATCH_REPOSITORY: ${{ inputs.repository }}

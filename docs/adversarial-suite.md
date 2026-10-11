@@ -93,7 +93,11 @@ the dedicated **cq-adversarial-scratch** App's identity (owner decision
 only, never on cq-toolkit, with Variables read/write and Environments read,
 nothing else. The workflow mints a scratch-repo installation token per run
 from the `CQ_ADVERSARIAL_APP_KEY` environment secret and the
-`CQ_ADVERSARIAL_APP_CLIENT_ID` repository variable; a static installation
+`CQ_ADVERSARIAL_APP_CLIENT_ID` repository variable; the mint names no
+`permission-*` inputs (the app-permissions API has no `variables` entry), so
+the token inherits exactly the App registration's grants above — the
+registration, not the request, is what forbids Actions and administration.
+A static installation
 token expires with nothing to re-mint it, and dispatch-only drills need no
 refresh path when they mint per run. Until the App is registered the mint
 step is skipped and the interim `CQ_ADVERSARIAL_PROFILE_TOKEN` PAT drives the

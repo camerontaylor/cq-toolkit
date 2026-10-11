@@ -113,10 +113,12 @@ it('leaves credential checks to the runner so a missing credential still yields 
     expect(mint, path).toContain("if: vars.CQ_ADVERSARIAL_APP_CLIENT_ID != ''");
     expect(mint, path).toContain('private-key: ${{ secrets.CQ_ADVERSARIAL_APP_KEY }}');
     expect(mint, path).toContain('continue-on-error: true');
-    expect(mint, path).toContain('permission-variables: write');
-    expect(mint, path).toContain('permission-environments: read');
-    expect(mint, path).not.toContain('permission-administration');
-    expect(mint, path).not.toContain('permission-actions');
+    // No permission-* inputs at all: `variables` is not in the GitHub
+    // app-permissions API schema, so the token must INHERIT the
+    // cq-adversarial-scratch App installation's own grants (registered
+    // with exactly Variables rw + Environments read) instead of naming
+    // them here.
+    expect(mint, path).not.toMatch(/^\s+permission-[\w-]+:/m);
     expect(mint, path).not.toMatch(/GH_TOKEN|gh api/);
     const rest =
       nextStep === -1
