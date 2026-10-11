@@ -24,6 +24,7 @@ import time
 import status_summary
 import repair_tick
 import coverage
+import author_quota
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -656,6 +657,27 @@ def plan_merged(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
             "label": f"post-merge synthetic review ({n} PR-touched paths, pre-merge → merge-queue)", "notes": []}
 
 
+def object_present(sha: str) -> bool:
+    return run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=CLONE, check=False).returncode == 0
+
+
+def plan_author(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
+    """Author review plan. The binding's base/head are immutable commits; verify
+    both are present in the clone (fetching if needed) before a worktree is cut,
+    so an unpushed head WAITS (NotReady) instead of crashing the tick."""
+    plan = author_quota.plan(item)
+    if dry:
+        return plan
+    if not (object_present(plan["base"]) and object_present(plan["head"])):
+        fetch()
+        if not (object_present(plan["base"]) and object_present(plan["head"])):
+            raise NotReady(f"author binding not fetchable ({plan['base'][:10]}..{plan['head'][:10]})")
+    if not run(["git", "diff", "--name-only", plan["base"], plan["head"]], cwd=CLONE,
+               check=False).stdout.strip():
+        raise NothingToReview("author binding has an empty diff")
+    return plan
+
+
 # ----------------------------------------------------------- launching
 
 
@@ -691,6 +713,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
         meta["coverage_sha"] = item.get("coverage_sha")
         meta["coverage_paths"] = item.get("coverage_paths")
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        a = item.get("author") or {}
+        meta["author"] = {k: a.get(k) for k in ("request_id", "base", "head", "target", "cycle")}
     repair_tick.atomic(rdir / "meta.json", meta)
     item["state"] = "reviewing"
     item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
@@ -699,10 +724,25 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     # Reserve identity/quota BEFORE any child or remote status mutation. A
     # crash leaves a known run to reconcile, never a pending item to redispatch.
     save_queue(q)
-    with (rdir / "runner.log").open("a") as output:
-        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
-                                cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                start_new_session=True)
+    try:
+        with (rdir / "runner.log").open("a") as output:
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_review", run_id],
+                                    cwd=ROOT, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                    start_new_session=True)
+    except OSError as exc:
+        # A failed spawn is a CONSUMED, DISTINCT terminal admission: the start
+        # was already persisted above, so no automatic retry can double-spend it.
+        # Only author items get this terminal here; every other kind keeps the
+        # previous (raise) behaviour.
+        if item["kind"] != author_quota.AUTHOR_KIND:
+            raise
+        item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"],
+                       "launch_pending": False, "spawn_failed_at": iso(), "error": str(exc)[:200]}
+        item["state"] = author_quota.AUTHOR_FAILED
+        item["last_error"] = f"author spawn failed (no retry): {exc}"[:300]
+        event("spawn_failed", item=item["id"], run=run_id, error=str(exc)[:200])
+        save_queue(q)
+        return run_id
     item["run"].update(pid=proc.pid, launch_pending=False)
     save_queue(q)
     event("review_started", item=item["id"], run=run_id, base=plan["base"], head=plan["head"], label=plan["label"])
@@ -745,6 +785,52 @@ def review_alive(rdir: Path, r: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def author_group_alive(pgid: Optional[int]) -> bool:
+    """True when the recorded process group may still have members. Fail closed:
+    only a proved-empty group returns False, so a live child is never released."""
+    if not pgid:
+        return False
+    if pgid == os.getpgrp():
+        return True  # cannot attribute our own group → treat as alive (fail closed)
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def author_run_liveness(rdir: Path, item: Dict[str, Any], r: Dict[str, Any]) -> str:
+    """Probe a detached author run. The runner pid, the CLI pid AND the recorded
+    process group are checked, so the spawn-before-PID-persist window (a live CLI
+    whose cli_pid was not yet written) still counts as alive."""
+    pf = rdir / "review.pid"
+    pidfile = json.loads(pf.read_text()) if pf.exists() else None
+    pid = (pidfile or {}).get("pid") or r.get("pid")
+    cli = (pidfile or {}).get("cli_pid")
+    runner_alive = bool(pid) and pid_alive(pid) and r["run_id"] in proc_cmdline(pid)
+    cli_alive = bool(cli) and pid_alive(cli) and "coderabbit" in proc_cmdline(cli)
+    return author_quota.run_state(has_exit=False, pidfile=pidfile, runner_alive=runner_alive,
+                                  cli_alive=cli_alive,
+                                  group_alive=author_group_alive((pidfile or {}).get("pgid")))
+
+
+def author_interrupted(item: Dict[str, Any], r: Dict[str, Any]) -> None:
+    """Distinct terminal: a provably gone author run left no exit evidence. The
+    start stays consumed; there is NO automatic retry — owner disposition."""
+    a = item.get("author") or {}
+    item.setdefault("attempts", []).append(
+        {"run_id": r["run_id"], "outcome": "interrupted", "counted": False, "at": iso(),
+         "head": a.get("head"), "base": a.get("base"),
+         "message": "author run terminated without terminal evidence (provably gone)"})
+    item["run"] = None
+    item["state"] = author_quota.AUTHOR_FAILED
+    item["last_error"] = ("author run interrupted without terminal evidence (provably gone); "
+                          "no automatic retry — owner disposition required")
+    event("author_interrupted", item=item["id"], run=r["run_id"])
+
+
 # ----------------------------------------------------------- harvesting
 
 
@@ -753,6 +839,19 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     rdir = RUNS / r["run_id"]
     exitf = rdir / "exit.json"
     if not exitf.exists():
+        if item["kind"] == author_quota.AUTHOR_KIND:
+            state = author_run_liveness(rdir, item, r)
+            if state in ("alive", "ambiguous"):
+                # Fail closed: a live or unverifiable author run retains its
+                # capacity (never a TTL release) and needs owner disposition.
+                item["wait_reason"] = ("author: run alive" if state == "alive" else
+                                       "author: run identity unverifiable — capacity retained, "
+                                       "owner disposition required")
+                return None
+            if dry:
+                return f"would mark author run {r['run_id']} interrupted (provably gone, no exit)"
+            author_interrupted(item, r)
+            return f"{item['id']}: author run interrupted without terminal evidence (no retry) → {item['state']}"
         if review_alive(rdir, r):
             return None
         exit_code = None  # provably gone without an exit status → interrupted
@@ -779,6 +878,13 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
                   "pr_head": meta.get("pr_head", meta["head"]),
                   "dirty_diff": "clean tree", "ndjson": str(rdir / "review.ndjson"),
                   "findings": cls["findings"], "severity_counts": cls["severity_counts"], "completed_at": iso()}
+        if item["kind"] == author_quota.AUTHOR_KIND:
+            # Genuine cycle evidence, but NEVER repair debt and NEVER promoted
+            # coverage credit: author_cycles is not scanned by repair_tick.backfill,
+            # and a branch-only review earns no coverage path credit.
+            author_quota.record_cycle(item, record)
+            item["state"] = "done"
+            return f"{item['id']}: completed ({cls['findings']} findings) [author: no repair/coverage credit]"
         item.setdefault("cycles", []).append(record)
         terminal_paths = []
         for line in (rdir / "review.ndjson").read_text().splitlines():
@@ -1927,9 +2033,13 @@ def plan_promotion(item: Dict[str, Any]) -> Dict[str, Any]:
 
 def rank(item: Dict[str, Any]) -> int:
     """0 open PR cycles · 1 open-PR deltas (both awaiting merge) · 2 newly merged
-    follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog."""
+    follow-ups (merged-tier or post-merge delta) · 3 seeded merged backlog ·
+    4 author items and lowest-priority coverage (author dispatches; coverage is
+    only reached by the fallback)."""
     if item["kind"] == "coverage":
         return coverage.COVERAGE_RANK
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        return author_quota.AUTHOR_RANK
     if item["kind"] in ("open", "promotion"):
         return 0
     if item["kind"] == "delta":
@@ -2204,6 +2314,11 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                     break
                 if item["kind"] == "promotion":
                     plan = plan_promotion(item)
+                elif item["kind"] == author_quota.AUTHOR_KIND:
+                    # Author items bind their own base/head/target: no PR, no
+                    # active-agent quiet gate. Global pause/cooldown/hourly/
+                    # inflight gates and the pre-upload secret scan still apply.
+                    plan = plan_author(item, dry)
                 elif item["kind"] == "merged":
                     plan = plan_merged(item, dry)
                 else:
@@ -2285,9 +2400,14 @@ def write_status(q: Dict[str, Any]) -> None:
             i_extra = (f"{(i.get('reviewed_sha') or i['base_sha'])[:10]}..{i['batch_sha'][:10]} ({i.get('merges', '?')} merges) "
                        f"main={i['base_sha'][:10]}"
                        f"{f'; {unresolved} blocking unresolved' if unresolved else ''}")
+        elif i["kind"] == author_quota.AUTHOR_KIND:
+            a = i.get("author") or {}
+            cyc = f"{len(i.get('author_cycles', []))}/1"
+            i_extra = (f"author cycle {a.get('cycle')}: {(a.get('base') or '')[:10]}.."
+                       f"{(a.get('head') or '')[:10]} → {a.get('target')}")
         else:
             cyc = f"{len(i.get('cycles', []))}/1"
-        extra = i_extra if i["kind"] == "promotion" else ""
+        extra = i_extra if i["kind"] in ("promotion", author_quota.AUTHOR_KIND) else ""
         if i["kind"] == "merged" and i.get("measure"):
             m = i["measure"]
             extra = f"survival {m['survival']} ({m['surviving']}/{m['added']}), focus {m['focus']}"
@@ -2399,7 +2519,8 @@ def cmd_init(force: bool) -> None:
                 "owed_per_audit": s["owed_per_audit"], "merge_commit": info["mergeCommit"]["oid"],
                 "merged_at": info["mergedAt"], "state": "pending", "cycles": [], "attempts": [], "notes": []}
         items.append(item)
-    q = {"created_at": iso(), "items": items, "starts": [], "paused": False}
+    q = {"created_at": iso(), "items": items, "starts": [], "paused": False,
+         "author_requests": {}, "author_observations": []}
     save_queue(q)
     cmd_measure()
     print(f"initialised {len(items)} items")
@@ -2542,6 +2663,59 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
     print(f"{action} ok")
 
 
+def is_regular_file(path: str) -> bool:
+    p = Path(path)
+    try:
+        return p.is_file() and not p.is_symlink()
+    except OSError:
+        return False
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def enroll_author(request_id: str, base: str, head: str, target: str, cycle: int) -> None:
+    """Supported author enrollment: create a PENDING author item in the queue.
+    Never dispatches — the locked natural tick launches it when eligible."""
+    q = load_queue()
+    try:
+        res = author_quota.enroll(q, request_id=request_id, base=base, head=head, target=target,
+                                  cycle=cycle, at=iso())
+    except author_quota.AuthorRefused as exc:
+        sys.exit(f"author-enroll refused: {exc}")
+    if res["created"]:
+        event("author_enrolled", item=res["item"]["id"], request=request_id, base=base, head=head,
+              target=target, cycle=cycle)
+    save_queue(q)
+    write_status(q)
+    print(res["message"])
+
+
+def author_observe(manifest_path: str) -> None:
+    """Charge a genuinely evidenced historical author invocation to the rolling
+    hour (reserved=false). Append-only; never fabricates a counted cycle. Its
+    exact use requires desk approval (see ops/author-reviews.md)."""
+    q = load_queue()
+    manifest = json.loads(Path(manifest_path).read_text())
+    try:
+        obs = author_quota.normalize_observation(manifest, now=now())
+        author_quota.verify_artifacts(obs, is_regular=is_regular_file, digest_of=sha256_file)
+        res = author_quota.charge_observation(q, obs, at=iso())
+    except author_quota.AuthorRefused as exc:
+        sys.exit(f"author-observe refused: {exc}")
+    if res["charged"]:
+        event("author_observed", request=obs["request_id"], started_at=obs["started_at"],
+              artifacts=[a["path"] for a in obs["artifacts"]])
+    save_queue(q)
+    write_status(q)
+    print(res["message"])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="crq")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2558,6 +2732,16 @@ def main() -> int:
     p.add_argument("item")
     p.add_argument("--ignore-quiet", action="store_true", help="skip the quiet-window gate (active agents still block)")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("author-enroll", help="enroll ONE author CLI cycle into the locked natural tick; "
+                                             "creates a PENDING item and never dispatches")
+    p.add_argument("--request-id", required=True)
+    p.add_argument("--base", required=True, help="immutable base commit sha")
+    p.add_argument("--head", required=True, help="immutable reviewed head commit sha")
+    p.add_argument("--target", required=True, help="target ref, e.g. origin/merge-queue")
+    p.add_argument("--cycle", type=int, required=True, help="author cycle number (1 or 2)")
+    p = sub.add_parser("author-observe", help="charge a genuinely evidenced historical author invocation to the "
+                                              "rolling hour (reserved=false); desk approval required before use")
+    p.add_argument("manifest", help="observation manifest JSON (binding, started_at, artifact digests)")
     sub.add_parser("status")
     sub.add_parser("summary", help="refresh only the home-resident fleet summary; no ticks or reviews")
     p = sub.add_parser("synth")
@@ -2628,6 +2812,10 @@ def main() -> int:
         with_lock(admin, args.cmd, None, f"{args.sha} {args.reason}")
     elif args.cmd == "promotion-resolve":
         with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
+    elif args.cmd == "author-enroll":
+        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle)
+    elif args.cmd == "author-observe":
+        with_lock(author_observe, args.manifest)
     else:
         with_lock(admin, args.cmd, getattr(args, "item", None), getattr(args, "reason", None))
     return 0
