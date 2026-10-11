@@ -222,6 +222,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   let inner: InnerState = 'none';
   let innerScheme = '';
   let innerSchemeOverflow = false;
+  let innerAuthEmpty = false;
 
   const clearName = (): void => {
     parameter = 'off';
@@ -303,6 +304,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     inner = 'none';
     innerScheme = '';
     innerSchemeOverflow = false;
+    innerAuthEmpty = false;
   };
 
   /**
@@ -310,13 +312,19 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
    * `//` credential URL inside a path segment or a parameter VALUE must still
    * redact. A raw `@` in the nested authority marks the OUTER candidate
    * sensitive, so the whole outer candidate redacts (over-redaction of the
-   * outer prefix is the accepted direction). Transitions back to `none`
-   * re-handle the code unit, exactly like the outer machine. The single-slash
-   * and slashless nested forms are deliberately not tracked: the outer
-   * machine covers those forms when the URL is the candidate itself.
+   * outer prefix is the accepted direction). A slash run at the nested
+   * authority start is skipped like the outer machine's, and transitions back
+   * to `none` re-handle the code unit. The single-slash and slashless nested
+   * forms are deliberately not tracked: the outer machine covers those forms
+   * when the URL is the candidate itself.
    */
   const trackInner = (index: number, code: number): void => {
     if (inner === 'auth') {
+      // A slash run at the NESTED authority start (`///user:pass@host`,
+      // `scheme:///user@host`) is skipped exactly like the outer machine's, so
+      // the credential is not dropped at the first slash.
+      if (innerAuthEmpty && code === 0x2f) return;
+      innerAuthEmpty = false;
       if (code === 0x40) {
         // `@`
         sensitive = true;
@@ -328,6 +336,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     if (inner === 'slash') {
       if (code === 0x2f) {
         inner = 'auth';
+        innerAuthEmpty = true;
         return;
       }
       inner = 'none';
@@ -342,6 +351,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       if (code === 0x3a && !innerSchemeOverflow) {
         // `:` — the nested authority follows.
         inner = 'auth';
+        innerAuthEmpty = true;
         return;
       }
       inner = 'none';

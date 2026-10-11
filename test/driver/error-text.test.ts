@@ -480,4 +480,25 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       expect(redactSensitiveText(text)).toBe(text);
     }
   });
+
+  // Fresh-review round 3: a slash RUN at the NESTED authority start is skipped
+  // exactly like the outer machine's, so the third slash no longer sends the
+  // inner state back to `none` before the credential's `@`.
+  test('redactSensitiveText redacts a slash run at a nested authority start', () => {
+    for (const url of [
+      'https://proxy.test/?target=///user:pass@example.test/x',
+      'https://proxy.test/?t=////u@x/y',
+      'https://proxy.test/?t=https:///user@x',
+    ]) {
+      expect(redactSensitiveText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+    // The covered nested forms and a credential-free nested slash run are
+    // unchanged.
+    expect(redactSensitiveText('fetch https://proxy.test/?t=https://user:pass@x failed')).toBe(
+      'fetch [redacted] failed',
+    );
+    expect(redactSensitiveText('https://proxy.test/?redirect=///example.test/path')).toBe(
+      'https://proxy.test/?redirect=///example.test/path',
+    );
+  });
 });
