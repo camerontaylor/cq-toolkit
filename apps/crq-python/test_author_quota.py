@@ -1,14 +1,20 @@
 """Narrow isolated tests for supported author enrollment and shared-quota
-admission. No live queue/state, no models, no processes, no Git: every queue is a
-plain dict in a temp dir and every launch/git/coverage/repair effect is mocked."""
+admission. No live queue/state, no models, no Git: every queue is a plain dict in
+a temp dir and every launch/git/coverage/repair effect is mocked. One class spawns
+a real, harmless `timeout`+`sleep` wrapper (never the model CLI) to regression-test
+the GNU timeout process-group requirement."""
 import copy
 import datetime as dt
 import fcntl
 import importlib.machinery
 import importlib.util
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,7 +117,6 @@ class LaunchTest(unittest.TestCase):
         self.state = self.root / "state"
         self.runs = self.state / "runs"
         self.runs.mkdir(parents=True)
-        self.saved = []
         for name, value in (("ROOT", self.root), ("STATE", self.state), ("RUNS", self.runs),
                             ("QUEUE", self.state / "queue.json"),
                             ("CONFIG", {"max_starts_per_hour": 5, "max_inflight": 2, "repair": {}})):
@@ -132,7 +137,7 @@ class LaunchTest(unittest.TestCase):
              mock.patch.object(crq.subprocess, "Popen", **popen):
             crq.launch(q, item, author_quota.plan(item))
 
-    def test_launch_shares_starts_inflight_and_carries_no_credits_flag(self):
+    def test_author_launch_uses_committed_and_shares_starts_inflight(self):
         q = empty_queue()
         item = author_item(q)
         self._launch(q, item, {"return_value": SimpleNamespace(pid=4242)})
@@ -143,9 +148,22 @@ class LaunchTest(unittest.TestCase):
         meta = json.loads((self.runs / item["run"]["run_id"] / "meta.json").read_text())
         self.assertEqual(meta["author"], {"request_id": REQ, "base": BASE, "head": HEAD,
                                           "target": "origin/merge-queue", "cycle": 1})
-        self.assertEqual(meta["cmd"], ["coderabbit", "review", "--agent", "--base-commit", BASE])
+        self.assertEqual(meta["cmd"],
+                         ["coderabbit", "review", "--agent", "--committed", "--base-commit", BASE])
         self.assertNotIn("--use-credits", meta["cmd"])
         self.assertNotIn("--credits", meta["cmd"])
+
+    def test_natural_launch_cmd_is_unchanged(self):
+        q = empty_queue()
+        item = {"id": "pr1", "pr": 1, "kind": "open", "state": "pending", "cycles": [], "attempts": []}
+        q["items"].append(item)
+        plan = {"base": BASE, "head": HEAD, "target": "origin/merge-queue", "cycle": 1,
+                "branch": "b", "notes": [], "label": "l"}
+        with mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+             mock.patch.object(crq.subprocess, "Popen", return_value=SimpleNamespace(pid=7)):
+            crq.launch(q, item, plan)
+        meta = json.loads((self.runs / item["run"]["run_id"] / "meta.json").read_text())
+        self.assertEqual(meta["cmd"], ["coderabbit", "review", "--agent", "--base-commit", BASE])
 
     def test_secret_scan_refusal_blocks_before_spawn_and_consumes_no_start(self):
         q = empty_queue()
@@ -207,51 +225,81 @@ class CrashRecoveryTest(unittest.TestCase):
         self.remove.start()
         self.addCleanup(self.remove.stop)
 
-    def _item(self, q, run_id, pidfile=None):
+    def _item(self, q, run_id, *, pidfile_text=None, has_exit=False):
         item = author_item(q)
         item["state"] = "reviewing"
         item["run"] = {"run_id": run_id, "pid": None, "started_at": crq.iso()}
         rdir = self.runs / run_id
         rdir.mkdir(parents=True)
-        if pidfile is not None:
-            (rdir / "review.pid").write_text(json.dumps(pidfile))
+        if pidfile_text is not None:
+            (rdir / "review.pid").write_text(pidfile_text)
+        if has_exit:
+            (rdir / "exit.json").write_text(json.dumps({"exit": 0, "ended_at": crq.iso(),
+                                                        "timed_out": False}))
         return item, rdir
 
     def test_run_state_matrix_is_fail_closed(self):
         rs = author_quota.run_state
-        self.assertEqual(rs(has_exit=True, pidfile=None, runner_alive=False, cli_alive=False,
+        good = {"pid": 111, "pgid": 222}
+        self.assertEqual(rs(has_exit=True, pidfile=good, runner_alive=False, cli_alive=False,
                             group_alive=False), "harvest")
-        self.assertEqual(rs(has_exit=False, pidfile={"pid": 1}, runner_alive=True, cli_alive=False,
+        # a live process or group keeps capacity EVEN with terminal evidence
+        self.assertEqual(rs(has_exit=True, pidfile=good, runner_alive=False, cli_alive=False,
+                            group_alive=True), "alive")
+        self.assertEqual(rs(has_exit=False, pidfile=good, runner_alive=True, cli_alive=False,
                             group_alive=False), "alive")
-        self.assertEqual(rs(has_exit=False, pidfile={"pid": 1}, runner_alive=False, cli_alive=False,
-                            group_alive=True), "alive")  # live GROUP keeps it alive
-        self.assertEqual(rs(has_exit=False, pidfile=None, runner_alive=False, cli_alive=False,
-                            group_alive=False), "ambiguous")
-        self.assertEqual(rs(has_exit=False, pidfile={"pid": 1}, runner_alive=False, cli_alive=False,
+        self.assertEqual(rs(has_exit=False, pidfile=good, runner_alive=False, cli_alive=False,
                             group_alive=False), "gone")
+        # "gone" needs BOTH a positive pid AND a positive pgid
+        for bad in (None, {}, {"pid": 111}, {"pgid": 222}, {"pid": "111", "pgid": 222},
+                    {"pid": 0, "pgid": 222}, {"pid": True, "pgid": 222}, []):
+            with self.subTest(pidfile=bad):
+                self.assertEqual(rs(has_exit=False, pidfile=bad, runner_alive=False, cli_alive=False,
+                                    group_alive=False), "ambiguous")
 
     def test_missing_pid_retains_capacity_never_ttl_releases(self):
         q = empty_queue()
         item, _ = self._item(q, "author-run-missing")
-        with mock.patch.object(crq, "author_group_alive", return_value=False):
+        with mock.patch.object(crq, "group_alive", return_value=False):
             self.assertIsNone(crq.harvest_review(q, item, False))
         self.assertEqual(item["state"], "reviewing")
         self.assertIn("owner disposition", item["wait_reason"])
 
+    def test_malformed_or_empty_pidfile_retains_without_exception(self):
+        for n, text in enumerate(("{not json", "[]", "{}", '{"pid": 111}', '{"pid": 0, "pgid": 222}')):
+            with self.subTest(text=text):
+                q = empty_queue()
+                item, _ = self._item(q, f"author-run-bad-{n}", pidfile_text=text)
+                with mock.patch.object(crq, "pid_alive", return_value=False), \
+                     mock.patch.object(crq, "group_alive", return_value=False):
+                    self.assertIsNone(crq.harvest_review(q, item, False))
+                self.assertEqual(item["state"], "reviewing")
+
     def test_live_pgid_retains_capacity(self):
         q = empty_queue()
-        item, _ = self._item(q, "author-run-live", pidfile={"pid": 111, "pgid": 222})
+        item, _ = self._item(q, "author-run-live", pidfile_text='{"pid": 111, "pgid": 222}')
         with mock.patch.object(crq, "pid_alive", return_value=False), \
-             mock.patch.object(crq, "author_group_alive", return_value=True):
+             mock.patch.object(crq, "group_alive", return_value=True):
             self.assertIsNone(crq.harvest_review(q, item, False))
         self.assertEqual(item["state"], "reviewing")
         self.assertIn("alive", item["wait_reason"])
 
+    def test_terminal_artifact_with_live_group_still_waits(self):
+        q = empty_queue()
+        item, rdir = self._item(q, "author-run-exit-live",
+                                pidfile_text='{"pid": 111, "pgid": 222}', has_exit=True)
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=True):
+            self.assertIsNone(crq.harvest_review(q, item, False))
+        self.assertEqual(item["state"], "reviewing")
+        self.assertTrue((rdir / "exit.json").exists())     # not consumed
+        self.assertEqual(item["attempts"], [])
+
     def test_provably_gone_is_a_distinct_terminal_with_no_retry(self):
         q = empty_queue()
-        item, _ = self._item(q, "author-run-gone", pidfile={"pid": 111, "pgid": 222})
+        item, _ = self._item(q, "author-run-gone", pidfile_text='{"pid": 111, "pgid": 222}')
         with mock.patch.object(crq, "pid_alive", return_value=False), \
-             mock.patch.object(crq, "author_group_alive", return_value=False):
+             mock.patch.object(crq, "group_alive", return_value=False):
             msg = crq.harvest_review(q, item, False)
         self.assertIsNotNone(msg)
         self.assertEqual(item["state"], author_quota.AUTHOR_FAILED)
@@ -259,9 +307,9 @@ class CrashRecoveryTest(unittest.TestCase):
         self.assertFalse(item["attempts"][-1]["counted"])
 
     def test_group_probe_is_fail_closed(self):
-        self.assertTrue(crq.author_group_alive(None) is False)
-        self.assertTrue(crq.author_group_alive(0) is False)
-        self.assertTrue(crq.author_group_alive(crq.os.getpgrp()) is True)
+        self.assertFalse(crq.group_alive(None))
+        self.assertFalse(crq.group_alive(0))
+        self.assertTrue(crq.group_alive(crq.os.getpgrp()))
 
 
 class HarvestTest(unittest.TestCase):
@@ -276,22 +324,27 @@ class HarvestTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _completed_run(self, run_id):
+    def _run_dir(self, run_id, exit_code=0):
         rdir = self.runs / run_id
         rdir.mkdir(parents=True)
         (rdir / "meta.json").write_text(json.dumps({"run_id": run_id, "cycle": 1, "base": BASE,
                                                     "head": HEAD, "worktree": "/w", "wt_branch": "crq/w"}))
         (rdir / "review.ndjson").write_text("")
-        (rdir / "exit.json").write_text(json.dumps({"exit": 0, "ended_at": crq.iso(), "timed_out": False}))
+        (rdir / "exit.json").write_text(json.dumps({"exit": exit_code, "ended_at": crq.iso(),
+                                                    "timed_out": exit_code == 124}))
         return rdir
+
+    def _item(self, q, run_id):
+        item = author_item(q)
+        item["state"] = "reviewing"
+        item["run"] = {"run_id": run_id, "pid": None, "started_at": crq.iso()}
+        return item
 
     def test_completed_author_harvest_keeps_evidence_without_repair_or_coverage(self):
         q = empty_queue()
-        item = author_item(q)
         rid = "author-run-ok"
-        self._completed_run(rid)
-        item["state"] = "reviewing"
-        item["run"] = {"run_id": rid, "pid": 1, "started_at": crq.iso()}
+        self._run_dir(rid)
+        item = self._item(q, rid)
         cls = {"outcome": "completed", "counted": True, "findings": 2,
                "severity_counts": {"major": 2}, "message": None}
         with mock.patch.object(crq, "classify", return_value=cls), \
@@ -307,11 +360,122 @@ class HarvestTest(unittest.TestCase):
         self.assertNotIn("coverage", q)
         self.assertIn("no repair/coverage credit", msg)
 
+    def test_every_noncompleted_author_outcome_is_a_consumed_terminal(self):
+        for o in ("rate_limited", "action_required", "auth", "error", "interrupted",
+                  "skipped", "too_large"):
+            with self.subTest(outcome=o):
+                q = empty_queue()
+                rid = "author-run-" + o
+                self._run_dir(rid, exit_code=1)
+                item = self._item(q, rid)
+                cls = {"outcome": o, "counted": False, "findings": 0, "severity_counts": {},
+                       "message": "boom"}
+                with mock.patch.object(crq, "classify", return_value=cls):
+                    crq.harvest_review(q, item, False)
+                self.assertEqual(item["state"], author_quota.AUTHOR_FAILED)
+                self.assertNotEqual(item["state"], "pending")     # never auto-retried
+                self.assertIsNone(item["run"])
+                self.assertIsNone(item.get("not_before"))
+                self.assertFalse(item["attempts"][-1]["counted"])
+                self.assertIn("no automatic retry", item["last_error"])
+                if o == "rate_limited":
+                    self.assertIsNotNone(q.get("cooldown_until"))  # global cooldown preserved
+                if o in ("action_required", "auth"):
+                    self.assertTrue(q.get("paused"))               # global pause preserved
+
     def test_author_cycles_are_not_repair_backfill_input(self):
         item = {"kind": "author", "author_cycles": [{"run_id": "r"}]}
         # repair_tick.backfill scans item['cycles'] only; author evidence lives
         # elsewhere, so no repair job can ever be derived from it.
         self.assertEqual(item.get("cycles", []), [])
+
+
+class WrapperGroupTest(unittest.TestCase):
+    """Real (harmless) subprocess regression for the GNU timeout process group.
+
+    `timeout --foreground` keeps the whole review (wrapper + direct child) in the
+    runner's OWN process group, recorded in review.pid BEFORE the child is
+    spawned. A runner killed between Popen(wrapper) and the cli_pid write must
+    therefore leave the recorded group LIVE, so the shared liveness path retains
+    capacity instead of a false "gone". No model CLI is involved; only `sleep`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.runs = Path(self.tmp.name) / "runs"
+        self.runs.mkdir(parents=True)
+        self.pgids = []
+        self.addCleanup(self._cleanup_groups)
+        for name, value in (("RUNS", self.runs), ("save_queue", mock.Mock()), ("event", mock.Mock()),
+                            ("remove_worktree", mock.Mock())):
+            p = mock.patch.object(crq, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _cleanup_groups(self):
+        for pg in self.pgids:
+            try:
+                crq.os.killpg(pg, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def test_wrapper_argv_requires_foreground(self):
+        argv = crq.review_wrapper_argv(["coderabbit", "review"], 75)
+        self.assertIn("--foreground", argv)
+        self.assertIn("--kill-after=60", argv)
+        self.assertIn("75m", argv)
+        self.assertEqual(argv[-2:], ["coderabbit", "review"])
+
+    def test_runner_killed_before_cli_pid_keeps_the_recorded_group_live(self):
+        if subprocess.run(["timeout", "--foreground", "5m", "true"],
+                          capture_output=True).returncode != 0:
+            self.skipTest("timeout --foreground unavailable on this host")
+        rid = "author-run-wrapper"
+        rdir = self.runs / rid
+        rdir.mkdir(parents=True)
+        (rdir / "meta.json").write_text(json.dumps({"run_id": rid, "cycle": 1, "base": BASE,
+                                                    "head": HEAD, "worktree": "/w", "wt_branch": "crq/w"}))
+        runner = self.runs / "runner.py"
+        runner.write_text(
+            "import json, os, subprocess, sys, time\n"
+            "outfile, argv = sys.argv[1], json.loads(sys.argv[2])\n"
+            "p = subprocess.Popen(argv, stdin=subprocess.DEVNULL)\n"
+            "open(outfile, 'w').write(json.dumps({'pid': os.getpid(), 'ppid': os.getppid(),\n"
+            "                                     'pgid': os.getpgrp(), 'sid': os.getsid(0)}))\n"
+            "time.sleep(60)\n")
+        # The wrapper argv is the REAL construction under test (fixture command).
+        argv = crq.review_wrapper_argv(["sleep", "60"], 5)
+        proc = subprocess.Popen([sys.executable, str(runner), str(rdir / "review.pid"), json.dumps(argv)],
+                                start_new_session=True)
+        self.pgids.append(proc.pid)  # the runner's own group (start_new_session)
+        try:
+            for _ in range(200):
+                if (rdir / "review.pid").exists():
+                    break
+                time.sleep(0.05)
+            self.assertTrue((rdir / "review.pid").exists())
+            os.kill(proc.pid, signal.SIGKILL)  # crash mid-review: cli_pid never written
+            proc.wait()
+            pidfile = json.loads((rdir / "review.pid").read_text())
+            self.assertNotIn("cli_pid", pidfile)              # the exact window
+            self.assertFalse((rdir / "exit.json").exists())
+            self.assertTrue(crq.group_alive(pidfile["pgid"]))  # wrapper+child still live in the group
+            q = empty_queue()
+            item = self._item(q, rid)
+            self.assertIsNone(crq.harvest_review(q, item, False))  # retained, never "gone"
+            self.assertEqual(item["state"], "reviewing")
+        finally:
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+
+    def _item(self, q, rid):
+        item = author_item(q)
+        item["state"] = "reviewing"
+        item["run"] = {"run_id": rid, "pid": None, "started_at": crq.iso()}
+        return item
 
 
 class TickTest(unittest.TestCase):
@@ -368,12 +532,10 @@ class TickTest(unittest.TestCase):
         self.assertTrue(any("hourly cap" in line for line in log))
 
     def test_inflight_cap_is_shared(self):
-        self.q["items"].append({"id": "pr9", "pr": 9, "kind": "open", "state": "reviewing",
-                                "cycles": [], "attempts": [],
-                                "run": {"run_id": "r", "pid": None, "started_at": crq.iso()}})
-        self.q["items"].append({"id": "pr8", "pr": 8, "kind": "open", "state": "reviewing",
-                                "cycles": [], "attempts": [],
-                                "run": {"run_id": "s", "pid": None, "started_at": crq.iso()}})
+        for n in (9, 8):
+            self.q["items"].append({"id": f"pr{n}", "pr": n, "kind": "open", "state": "reviewing",
+                                    "cycles": [], "attempts": [],
+                                    "run": {"run_id": f"r{n}", "pid": None, "started_at": crq.iso()}})
         author_item(self.q)
         with mock.patch.object(crq, "launch") as launch:
             log = crq.tick()
@@ -403,6 +565,31 @@ class TickTest(unittest.TestCase):
         self.assertEqual(started, [item["id"]])
         coverage.assert_not_called()
 
+    def test_selective_start_of_an_author_item_is_refused(self):
+        item = author_item(self.q)
+        self.q["items"].append({"id": "promo-1", "kind": "promotion", "state": "pending",
+                                "base_sha": BASE, "batch_sha": HEAD, "order": 0})
+        with mock.patch.object(crq, "launch") as launch:
+            log = crq.tick(False, item["id"])
+        launch.assert_not_called()                         # never dispatches
+        self.assertTrue(any("selective start refused" in line for line in log))
+        self.assertEqual(item["state"], "pending")         # still queued, untouched
+
+    def test_selective_author_start_does_not_bypass_the_hourly_cap(self):
+        item = author_item(self.q)
+        self.q["starts"] = [crq.iso() for _ in range(5)]
+        with mock.patch.object(crq, "launch") as launch:
+            log = crq.tick(False, item["id"])
+        launch.assert_not_called()
+        self.assertTrue(any("hourly cap" in line for line in log))
+
+    def test_selective_author_dry_run_shows_the_plan_but_never_launches(self):
+        item = author_item(self.q)
+        with mock.patch.object(crq, "launch") as launch:
+            log = crq.tick(True, item["id"])
+        launch.assert_not_called()
+        self.assertTrue(any("DRY-RUN would start" in line for line in log))
+
 
 class ObservationTest(unittest.TestCase):
     def _manifest(self, **over):
@@ -427,8 +614,20 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(crq.starts_last_hour(q), 1)
         self.assertFalse(q["author_observations"][0]["reserved"])
         again = author_quota.charge_observation(q, obs, at=crq.iso(now))
-        self.assertFalse(again["charged"])                  # idempotent
+        self.assertFalse(again["charged"])                  # identical is idempotent
         self.assertEqual(len(q["starts"]), 1)
+
+    def test_same_key_different_binding_or_artifacts_refuses(self):
+        q = empty_queue()
+        manifest, now = self._manifest()
+        obs = author_quota.normalize_observation(manifest, now=now)
+        author_quota.charge_observation(q, obs, at=crq.iso(now))
+        before = copy.deepcopy(q)
+        for clash in ({**obs, "head": "c" * 40},
+                      {**obs, "artifacts": [{"path": "/tmp/other.ndjson", "sha256": "d" * 64}]}):
+            with self.subTest(clash=clash.get("head")), self.assertRaises(author_quota.AuthorRefused):
+                author_quota.charge_observation(q, clash, at=crq.iso(now))
+        self.assertEqual(q, before)
 
     def test_reserved_true_future_and_stale_refuse(self):
         for over in ({"reserved": True},
@@ -438,8 +637,14 @@ class ObservationTest(unittest.TestCase):
             with self.subTest(over=over), self.assertRaises(author_quota.AuthorRefused):
                 author_quota.normalize_observation(manifest, now=now)
 
+    def test_timestamp_grammar_is_strict_no_truncation(self):
+        for bad in ("2026-10-11T16:09:57.123Z", "2026-10-11T16:09:57+00:00",
+                    "2026-10-11T16:09:57", "2026-10-11T16:09:57Zjunk", "2026-10-11 16:09:57Z"):
+            manifest, now = self._manifest(started_at=bad)
+            with self.subTest(bad=bad), self.assertRaises(author_quota.AuthorRefused):
+                author_quota.normalize_observation(manifest, now=now)
+
     def test_artifacts_require_regular_files_with_matching_digests(self):
-        q = empty_queue()
         manifest, now = self._manifest()
         obs = author_quota.normalize_observation(manifest, now=now)
         with self.assertRaises(author_quota.AuthorRefused):

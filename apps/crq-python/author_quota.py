@@ -52,6 +52,9 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # A ref/revstring a reviewer may name. Deliberately not the full git rev-parse
 # grammar: the tick verifies resolvability against the clone before launching.
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+# Strict UTC timestamp: exactly YYYY-MM-DDTHH:MM:SSZ. No fractional seconds, no
+# offset, and no silent truncation of a longer value.
+TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 MAX_CYCLE = 2
 OBSERVATION_WINDOW = dt.timedelta(hours=1)
 
@@ -70,12 +73,13 @@ def _sha(name: str, value: Any) -> str:
 
 
 def _timestamp(name: str, value: Any) -> dt.datetime:
-    if not isinstance(value, str):
-        raise AuthorRefused(f"{name} must be an ISO-8601 UTC timestamp")
+    if not isinstance(value, str) or not TS_RE.match(value):
+        raise AuthorRefused(f"{name} must be an exact ISO-8601 UTC timestamp YYYY-MM-DDTHH:MM:SSZ "
+                            f"(no fractional seconds or offset)")
     try:
-        t = dt.datetime.strptime(value.replace(".000", "")[:20].rstrip("Z") + "Z", "%Y-%m-%dT%H:%M:%SZ")
+        t = dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
-        raise AuthorRefused(f"{name} must be an ISO-8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)")
+        raise AuthorRefused(f"{name} is not a valid UTC timestamp")
     return t.replace(tzinfo=dt.timezone.utc)
 
 
@@ -176,24 +180,37 @@ def record_cycle(item: Dict[str, Any], record: Dict[str, Any]) -> None:
 # ----------------------------------------------------------- crash recovery
 
 
+def _valid_identity(pidfile: Any) -> bool:
+    """A run-bound identity: a dict with positive integer pid AND pgid. Anything
+    else ({}, a bare pid, strings, a non-dict) is unverifiable, never evidence of
+    absence."""
+    if not isinstance(pidfile, dict):
+        return False
+    def positive(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return positive(pidfile.get("pid")) and positive(pidfile.get("pgid"))
+
+
 def run_state(*, has_exit: bool, pidfile: Optional[Dict[str, Any]], runner_alive: bool,
               cli_alive: bool, group_alive: bool) -> str:
-    """Fail-closed liveness decision for a detached author run before harvest.
+    """Fail-closed liveness decision for a detached review (author AND natural).
 
-      ``harvest``   — terminal exit evidence is present (exit.json)
-      ``alive``     — a matching runner/CLI process or the recorded process group
-                      is live (covers the spawn-before-PID-persist window)
-      ``gone``      — the run is provably terminated and left no exit evidence
-      ``ambiguous`` — no pidfile and nothing verifiable; retain capacity, never a
-                      TTL release
+      ``alive``     — a matching runner/CLI process or a non-empty recorded
+                      process group is live. This is checked even when a terminal
+                      exit artifact exists, so a lingering detached/reused group
+                      keeps its capacity (terminal artifact + live group waits).
+      ``harvest``   — terminal exit evidence present and nothing alive.
+      ``gone``      — no terminal evidence, a VALID run-bound pid+pgid identity,
+                      and nothing alive.
+      ``ambiguous`` — no terminal evidence and no valid identity (missing,
+                      empty, malformed, or missing pgid): retain capacity and
+                      require owner disposition. NEVER a TTL release.
     """
-    if has_exit:
-        return "harvest"
     if runner_alive or cli_alive or group_alive:
         return "alive"
-    if not pidfile:
-        return "ambiguous"
-    return "gone"
+    if has_exit:
+        return "harvest"
+    return "gone" if _valid_identity(pidfile) else "ambiguous"
 
 
 # ------------------------------------------------------- external observation
@@ -254,13 +271,22 @@ def charge_observation(q: Dict[str, Any], observation: Dict[str, Any], *, at: st
     hour, explicitly ``reserved=false``.
 
     Append-only: it never fabricates a counted cycle and never touches items or
-    history. Idempotent on (request_id, started_at)."""
+    history. An identical (request_id, started_at) is idempotent; the SAME key
+    with a DIFFERENT binding or artifacts refuses (never a silent overwrite)."""
     log = q.setdefault("author_observations", [])
     key = (observation["request_id"], observation["started_at"])
-    if any((o.get("request_id"), o.get("started_at")) == key for o in log):
-        return {"charged": False,
-                "message": f"observation {observation['request_id']} at {observation['started_at']} "
-                           f"already recorded (idempotent)"}
+    for o in log:
+        if (o.get("request_id"), o.get("started_at")) != key:
+            continue
+        same = (all(o.get(k) == observation[k] for k in ("base", "head", "target", "cycle"))
+                and o.get("artifacts") == observation["artifacts"])
+        if same:
+            return {"charged": False,
+                    "message": f"observation {observation['request_id']} at {observation['started_at']} "
+                               f"already recorded (idempotent)"}
+        raise AuthorRefused(
+            f"observation {observation['request_id']} at {observation['started_at']} is already recorded "
+            f"with a different binding/artifacts; refusing to overwrite history")
     log.append({"observed_at": at, "reserved": False, "request_id": observation["request_id"],
                 "base": observation["base"], "head": observation["head"],
                 "target": observation["target"], "cycle": observation["cycle"],

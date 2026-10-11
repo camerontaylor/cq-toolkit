@@ -702,12 +702,18 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         event("blocked", item=item["id"], reason=item["last_error"])
         return run_id
     wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
+    cli_cmd = ["coderabbit", "review", "--agent"]
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        # Author cycles review the COMMITTED base..head (the original manual cycle 1
+        # form) on a clean worktree, never uncommitted working-tree edits. The
+        # natural argv is deliberately unchanged.
+        cli_cmd.append("--committed")
     meta = {"run_id": run_id, "item_id": item["id"], "pr": item["pr"], "kind": item["kind"],
             "label": plan["label"], "cycle": plan["cycle"], "base": plan["base"], "head": plan["head"],
             "pr_head": plan.get("pr_head", plan["head"]), "review_pin": plan.get("review_pin", plan["base"]),
             "target": plan["target"], "pr_branch": plan["branch"], "worktree": str(wt), "wt_branch": wbranch,
             "dirty_diff": "clean tree", "started_at": iso(),
-            "cmd": ["coderabbit", "review", "--agent", "--base-commit", plan["base"]]}
+            "cmd": [*cli_cmd, "--base-commit", plan["base"]]}
     if item["kind"] in ("merged", "coverage"):
         meta["planned_paths"] = (item.get("measure") or {}).get("synthetic_paths")
         meta["reviewed_tip"] = (item.get("measure") or {}).get("merge_queue")
@@ -749,13 +755,35 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     return run_id
 
 
+def review_wrapper_argv(cli_cmd: List[str], tmo_min: int) -> List[str]:
+    """The review deadline wrapper (GNU coreutils `timeout`).
+
+    `--foreground` is REQUIRED and is the whole point. Verified against coreutils
+    9.11: WITHOUT it, timeout moves the managed command into a NEW process group
+    whose pgid is the wrapper's own pid, so `review.pid`'s runner pgid (written
+    BEFORE the child is spawned) does NOT cover the running review; a runner
+    killed between Popen and the cli_pid write leaves the recorded group empty
+    while the review lives in an unrecorded group (a false "gone"). WITH
+    `--foreground` the wrapper keeps the command in the runner's OWN group, so
+    the pre-recorded pgid always covers a live review.
+
+    Deadline semantics (a review wall-clock guard, NOT a repair hard-budget or a
+    spend proof): SIGTERM at `tmo_min`, then SIGKILL `--kill-after=60`s later;
+    `timeout` reports exit 124 on either, which the child records as
+    `timed_out`. `--foreground` signals the DIRECT child only, so a descendant
+    that detaches into its own session/group is not killed here; such a group
+    retains capacity fail-closed (owner disposition) instead of being released.
+    """
+    return [CONFIG.get("timeout_bin", "timeout"), "--foreground", "--kill-after=60",
+            f"{tmo_min}m", *cli_cmd]
+
+
 def cmd_review_child(run_id: str) -> int:
     """Detached child: run the CLI once, record exit status. Never retries."""
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     rdir = RUNS / run_id
     meta = json.loads((rdir / "meta.json").read_text())
-    tmo = CONFIG["review_timeout_min"]
-    cmd = [CONFIG.get("timeout_bin", "timeout"), "--kill-after=60", f"{tmo}m", *meta["cmd"]]
+    cmd = review_wrapper_argv(meta["cmd"], CONFIG["review_timeout_min"])
     pidfile = rdir / "review.pid"
     identity = {"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp(), "sid": os.getsid(0)}
     repair_tick.atomic(pidfile, identity)
@@ -771,29 +799,41 @@ def proc_cmdline(pid: int) -> str:
     return run(["ps", "-o", "command=", "-p", str(pid)], check=False, timeout=20).stdout.strip()
 
 
-def review_alive(rdir: Path, r: Dict[str, Any]) -> Optional[str]:
-    """Liveness probe for a detached review: returns why it counts as alive,
-    or None when it is provably gone (no matching runner or CLI process)."""
+def ident_pid(value: Any) -> Optional[int]:
+    """A positive integer pid/pgid, or None. Guards os.kill against bools/strs."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def read_pidfile(rdir: Path) -> Optional[Dict[str, Any]]:
+    """The recorded run identity dict, or None when absent/malformed/foreign.
+    Never raises: an unreadable pidfile is unverifiable evidence, not a crash."""
     pf = rdir / "review.pid"
-    pids = json.loads(pf.read_text()) if pf.exists() else {"pid": r.get("pid")}
-    if pids.get("pid") and pid_alive(pids["pid"]) and r["run_id"] in proc_cmdline(pids["pid"]):
-        return f"runner pid {pids['pid']} alive"
-    if pids.get("cli_pid") and pid_alive(pids["cli_pid"]) and "coderabbit" in proc_cmdline(pids["cli_pid"]):
-        return f"CLI pid {pids['cli_pid']} alive (runner gone)"
-    if not pf.exists() and (now() - parse_iso(r["started_at"])).total_seconds() < 60:
-        return "just launched (no pidfile yet)"
-    return None
-
-
-def author_group_alive(pgid: Optional[int]) -> bool:
-    """True when the recorded process group may still have members. Fail closed:
-    only a proved-empty group returns False, so a live child is never released."""
-    if not pgid:
-        return False
-    if pgid == os.getpgrp():
-        return True  # cannot attribute our own group → treat as alive (fail closed)
+    if not pf.exists():
+        return None
     try:
-        os.killpg(pgid, 0)
+        loaded = json.loads(pf.read_text())
+    except (ValueError, OSError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def group_alive(pgid: Optional[int]) -> bool:
+    """True unless the recorded process group is PROVED empty (fail closed).
+
+    `timeout --foreground` keeps the whole review in the runner's own group, so a
+    non-empty group means a review process is still live. Anything other than a
+    proved-empty group (a non-positive pgid, our own group, a permission error,
+    an unknown failure) counts as alive and retains capacity. A merely re-used
+    pgid can therefore retain an item until owner disposition: the deliberate
+    fail-closed choice, never a silent release of a possibly-live review.
+    """
+    pid = ident_pid(pgid)
+    if not pid:
+        return False
+    if pid == os.getpgrp():
+        return True
+    try:
+        os.killpg(pid, 0)
         return True
     except ProcessLookupError:
         return False
@@ -801,19 +841,22 @@ def author_group_alive(pgid: Optional[int]) -> bool:
         return True
 
 
-def author_run_liveness(rdir: Path, item: Dict[str, Any], r: Dict[str, Any]) -> str:
-    """Probe a detached author run. The runner pid, the CLI pid AND the recorded
-    process group are checked, so the spawn-before-PID-persist window (a live CLI
-    whose cli_pid was not yet written) still counts as alive."""
-    pf = rdir / "review.pid"
-    pidfile = json.loads(pf.read_text()) if pf.exists() else None
-    pid = (pidfile or {}).get("pid") or r.get("pid")
-    cli = (pidfile or {}).get("cli_pid")
+def run_liveness(rdir: Path, item: Dict[str, Any], r: Dict[str, Any], has_exit: bool) -> str:
+    """Shared detached-review liveness for author AND natural runs.
+
+    Probes the recorded runner pid, the CLI pid and the recorded process group.
+    Because `timeout --foreground` keeps the review in the runner's own group and
+    the pgid is written to review.pid BEFORE the child is spawned, the group probe
+    covers the spawn-before-cli_pid window (a live review whose cli_pid was never
+    persisted). Malformed/absent identity is unverifiable, never a release."""
+    pidfile = read_pidfile(rdir)
+    pid = ident_pid((pidfile or {}).get("pid")) or ident_pid(r.get("pid"))
+    cli = ident_pid((pidfile or {}).get("cli_pid"))
     runner_alive = bool(pid) and pid_alive(pid) and r["run_id"] in proc_cmdline(pid)
     cli_alive = bool(cli) and pid_alive(cli) and "coderabbit" in proc_cmdline(cli)
-    return author_quota.run_state(has_exit=False, pidfile=pidfile, runner_alive=runner_alive,
+    return author_quota.run_state(has_exit=has_exit, pidfile=pidfile, runner_alive=runner_alive,
                                   cli_alive=cli_alive,
-                                  group_alive=author_group_alive((pidfile or {}).get("pgid")))
+                                  group_alive=group_alive((pidfile or {}).get("pgid")))
 
 
 def author_interrupted(item: Dict[str, Any], r: Dict[str, Any]) -> None:
@@ -831,6 +874,19 @@ def author_interrupted(item: Dict[str, Any], r: Dict[str, Any]) -> None:
     event("author_interrupted", item=item["id"], run=r["run_id"])
 
 
+def author_dispatch_failed(item: Dict[str, Any], r: Dict[str, Any], o: str, cls: Dict[str, Any],
+                           why: Optional[str] = None) -> None:
+    """Every attempted author dispatch ends in a distinct CONSUMED terminal with
+    NO automatic retry. Global rate-limit cooldown / auth pause are set by the
+    caller and preserved; only the item's retry is suppressed."""
+    detail = why or f"author review {o} (not counted)"
+    suffix = "" if why else (f": {cls.get('message')}" if cls.get("message") else "")
+    item["state"] = author_quota.AUTHOR_FAILED
+    item["last_error"] = f"{detail}{suffix}; no automatic retry — owner disposition required"[:300]
+    item["run"] = None
+    event("author_failed", item=item["id"], run=r["run_id"], outcome=o)
+
+
 # ----------------------------------------------------------- harvesting
 
 
@@ -838,25 +894,28 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
     r = item["run"]
     rdir = RUNS / r["run_id"]
     exitf = rdir / "exit.json"
-    if not exitf.exists():
-        if item["kind"] == author_quota.AUTHOR_KIND:
-            state = author_run_liveness(rdir, item, r)
-            if state in ("alive", "ambiguous"):
-                # Fail closed: a live or unverifiable author run retains its
-                # capacity (never a TTL release) and needs owner disposition.
-                item["wait_reason"] = ("author: run alive" if state == "alive" else
-                                       "author: run identity unverifiable — capacity retained, "
-                                       "owner disposition required")
-                return None
-            if dry:
-                return f"would mark author run {r['run_id']} interrupted (provably gone, no exit)"
-            author_interrupted(item, r)
-            return f"{item['id']}: author run interrupted without terminal evidence (no retry) → {item['state']}"
-        if review_alive(rdir, r):
-            return None
-        exit_code = None  # provably gone without an exit status → interrupted
-    else:
-        exit_code = json.loads(exitf.read_text())["exit"]
+    has_exit = exitf.exists()
+    state = run_liveness(rdir, item, r, has_exit)
+    if state == "alive":
+        item["wait_reason"] = ("author: run alive" if item["kind"] == author_quota.AUTHOR_KIND
+                               else "detached review still alive")
+        return None
+    if state == "ambiguous":
+        # Fail closed: identity unverifiable. Retain capacity; NEVER a TTL
+        # release, and never release a possibly-live review.
+        item["wait_reason"] = ("author: run identity unverifiable — capacity retained, owner disposition required"
+                               if item["kind"] == author_quota.AUTHOR_KIND
+                               else "run identity unverifiable — capacity retained, owner disposition required")
+        event("review_ambiguous", item=item["id"], run=r["run_id"])
+        return None
+    # state == "harvest": terminal exit evidence present, nothing alive.
+    # state == "gone": no exit, a VALID identity, and nothing alive.
+    if not has_exit and item["kind"] == author_quota.AUTHOR_KIND:
+        if dry:
+            return f"would mark author run {r['run_id']} interrupted (provably gone, no exit)"
+        author_interrupted(item, r)
+        return f"{item['id']}: author run interrupted without terminal evidence (no retry) → {item['state']}"
+    exit_code = json.loads(exitf.read_text())["exit"] if has_exit else None
     if dry:
         return f"would harvest {r['run_id']}"
     meta = json.loads((rdir / "meta.json").read_text())
@@ -914,19 +973,31 @@ def harvest_review(q: Dict[str, Any], item: Dict[str, Any], dry: bool) -> Option
         mins = cls.get("wait_minutes") or q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]
         q["cooldown_until"] = iso(now() + dt.timedelta(minutes=mins + 2))
         q["rl_backoff_min"] = min(240, (q.get("rl_backoff_min") or CONFIG["rate_limit_default_backoff_min"]) * 2)
-        item["state"] = "pending"
         item["last_error"] = f"rate limited ({cls.get('message')}); not counted"
+        if item["kind"] == author_quota.AUTHOR_KIND:
+            author_dispatch_failed(item, r, o, cls,
+                                   why=f"rate limited ({cls.get('message')}); global cooldown until {q['cooldown_until']}")
+            return f"{item['id']}: rate limited → global cooldown until {q['cooldown_until']}; author terminal (no retry)"
+        item["state"] = "pending"
         return f"{item['id']}: rate limited → global cooldown until {q['cooldown_until']}"
     if o in ("action_required", "auth"):
         q["paused"] = True
         q["pause_reason"] = f"{o} on {r['run_id']}: {cls.get('message')} — owner action needed (never --use-credits)"
-        item["state"] = "pending"
         item["last_error"] = q["pause_reason"]
         event("queue_paused", reason=q["pause_reason"])
+        if item["kind"] == author_quota.AUTHOR_KIND:
+            author_dispatch_failed(item, r, o, cls, why=f"{o} → queue PAUSED ({q['pause_reason']})")
+            return f"{item['id']}: {o} → queue PAUSED; author terminal (no retry)"
+        item["state"] = "pending"
         return f"{item['id']}: {o} → queue PAUSED"
-    # error / interrupted / skipped: item-level backoff, never counted
+    # error / interrupted / skipped / too_large: item-level backoff, never counted
     item["failures"] = item.get("failures", 0) + 1
     item["last_error"] = f"{o}: {cls.get('message')}"
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        # An attempted author dispatch is always a consumed terminal: the generic
+        # pending/backoff retry path below must never apply to it.
+        author_dispatch_failed(item, r, o, cls)
+        return f"{item['id']}: {o} (not counted) → {item['state']} (author, no retry)"
     if item["kind"] == "promotion" and o in ("skipped", "too_large"):
         item["state"] = "split_needed"  # promotion_tick re-cuts a smaller prefix (never reported as success)
     elif item["kind"] == "promotion":  # retried, never blocked: promotion must not stall on a flaky run
@@ -2294,6 +2365,16 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 continue
             if item["state"] != "pending":
                 continue
+            if only and item["kind"] == author_quota.AUTHOR_KIND and not dry:
+                # Author enrollment is PENDING NATURAL-ONLY by design. A selective
+                # `crq start <author-id>` would dispatch the author item while a
+                # pending promotion/ordinary item is skipped by the `only` filter,
+                # bypassing the priority order, so it is refused. The natural tick
+                # (no `only`) is unaffected. An explicit --dry-run may still show
+                # the plan; it never launches.
+                log.append(f"{item['id']}: selective start refused — author items start only "
+                           f"from the natural tick (pending natural-only)")
+                break
             if item.get("not_before") and parse_iso(item["not_before"]) > now():
                 item["wait_reason"] = f"backoff until {item['not_before']}"
                 continue
