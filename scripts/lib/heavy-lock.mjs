@@ -17,7 +17,9 @@
 // `exit` handler):
 //   - acquire = atomically mkdir LOCK_PATH (never replace an existing directory),
 //     then initialize owner.json via a token-specific temp file + rename inside
-//     the directory we created, checking its identity and initialization grace.
+//     the directory we created, checking its identity (dev/ino of a directory
+//     handle held open for the initialization, never a creation time: #288) and
+//     initialization grace.
 //     A paused creator cannot publish into another holder's directory. Later
 //     record writes verify our token before
 //     writing the temp file and again before renaming it into place;
@@ -251,18 +253,34 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
     // If paused before recording identity, the empty directory could already
     // have passed the legacy grace and been reclaimed. Never initialize then.
     if (deps.now() - createdAt >= MISSING_OWNER_MS) return false;
+    // Identity of the directory this mkdir created, held open across the whole
+    // initialization: the handle pins the inode, so the kernel can neither free
+    // nor reuse it while we compare dev/ino against `statSync(path)`. That pin
+    // is what makes dev/ino a stable identity here.
+    //
+    // Creation time is deliberately NOT part of it (#288): on filesystems
+    // without birth-time support `birthtimeMs` falls back to `ctimeMs`, and
+    // ctime advances when we write our record inside the directory, so a
+    // birth-time comparison revokes the identity of the very mkdir that won —
+    // nobody can then publish, and every waiter reclaims the ownerless
+    // directory only to lose it the same way.
+    let handle = null;
+    try {
+      handle = fs.openSync(path, 'r');
+    } catch (error) {
+      if (error.code === 'ENOENT') return false; // reclaimed between mkdir and open
+      // A platform that will not open a directory (Windows): keep the plain
+      // stat identity, still fail-closed against a replaced path.
+    }
     // Initialization failures leave the directory for the legacy grace/reclaim
     // path; never remove a path whose owner token we have not published.
     try {
-      const created = fs.statSync(path);
+      const created = handle === null ? fs.statSync(path) : fs.fstatSync(handle);
       const ownsInitialization = () => {
         if (deps.now() - createdAt >= MISSING_OWNER_MS) return false;
         const current = fs.statSync(path);
         return (
-          current.dev === created.dev &&
-          current.ino === created.ino &&
-          current.birthtimeMs === created.birthtimeMs &&
-          readOwner(path, fs) === null
+          current.dev === created.dev && current.ino === created.ino && readOwner(path, fs) === null
         );
       };
       record = {
@@ -281,6 +299,10 @@ export async function acquireLock({ path = LOCK_PATH, maxWaitMs, info, deps: ove
     } catch (error) {
       if (error.code === 'ENOENT') return false;
       throw error;
+    } finally {
+      // Publication is done (or refused): drop the pin, and with it the only
+      // thing keeping this inode out of the allocator's reach.
+      if (handle !== null) fs.closeSync(handle);
     }
   };
 
