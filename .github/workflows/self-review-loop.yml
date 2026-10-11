@@ -9,41 +9,31 @@
 # privileged loop are intentionally split: secret-bearing effects are
 # isolated to the main-only privileged job below.
 #
-# Instantiate (each token below is written in double braces in the body):
-#   SELFHOST_TOKEN          -> NAME of the `automation` ENVIRONMENT
-#                              secret (never a repository secret: GitHub
-#                              applies environment protection only to
-#                              environment secrets) holding the loop's
-#                              GitHub credential (the loop posts review
-#                              replies and resolves threads as its user;
-#                              gh rides it as GH_TOKEN). RECOMMENDED END
-#                              STATE: the registered cq-automation App's
-#                              installation token (attribution and
-#                              review independence per doctrine I2,
-#                              revocability, no long-lived repo-scope
-#                              secret). A STATIC installation-token
-#                              secret does NOT support the schedule:
-#                              installation tokens are short-lived and
-#                              the workflow consumes GH_TOKEN directly
-#                              with nothing to re-mint. The App identity
-#                              therefore REQUIRES a refresh path — an
-#                              external process re-mints and updates
-#                              this secret before each expiry (per-run
-#                              minting here would be a separately
-#                              scoped BEHAVIOR change, out of scope).
-#                              WORKING identity until then: a long-lived
-#                              PAT with repo scope on the target repo,
-#                              accepting the I2/revocability tradeoffs
-#                              (the GH_TOKEN env indirection drives the
-#                              same code either way; see ../README.md).
-#                              Instantiated files reference it as
-#                              `${{ secrets.<name> }}` — a name, never a
-#                              value; a template or instantiation that
-#                              embeds a token value is a denylist-class bug.
+# Instantiate: the body writes SELFHOST_DRIVER_KEY in double braces; the
+# loop's GitHub credential carries NO placeholder (the mint below names the
+# App key and client id literally, so each adopter sets them under these
+# names).
+#
+# CREDENTIAL IDENTITY — per-run mint, no fallback. The loop's GitHub
+# credential is the registered cq-automation App, minted PER RUN by the
+# privileged job from the `automation` environment secret
+# CQ_AUTOMATION_APP_KEY (the App private key) plus the repository variable
+# CQ_AUTOMATION_APP_CLIENT_ID (its client id), scoped to this repository
+# only. This is the per-run-mint pattern of PR #307
+# (policy/templates/adversarial-suite.yml); it supersedes the PR #303
+# identity note, which deferred per-run minting as a separately scoped
+# behavior change. FAIL-CLOSED: the schedule has no fallback identity, so an
+# empty client-id variable or a failed mint refuses the run. The mint step
+# is variable-gated, and the loop step asserts the minted token before any
+# effect (exit 1) — never a PAT, never the runner's GITHUB_TOKEN. The minted
+# token is step-scoped to the loop step and never reaches pnpm install. On
+# this repository only, the App needs Pull requests write (review replies
+# and thread resolves), Contents write (review-fix pushes) and Issues write
+# (top-level PR comments, which ride the issues collection).
 #   SELFHOST_DRIVER_KEY     -> NAME of the `automation` ENVIRONMENT
-#                              secret (likewise never a repository secret)
-#                              holding the model provider API key (the fix
-#                              workers' driver through the ai-sdk route).
+#                              secret (never a repository secret) holding
+#                              the model provider API key (the fix workers'
+#                              driver through the ai-sdk route).
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
 #                              carries THIS repo's three literal crons
@@ -155,7 +145,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Privileged lane: only this job receives the self-host token and provider
+  # Privileged lane: only this job receives the minted App token and provider
   # key. The token is scoped to the loop step; checkout credentials never
   # persist into the worker.
   self-review-privileged:
@@ -220,11 +210,40 @@ jobs:
           key: self-review-loop-state-${{ github.run_id }}
           restore-keys: |
             self-review-loop-state-
+      # Per-run mint, FAIL-CLOSED (no PAT fallback): the schedule has no
+      # fallback identity, so an empty client-id variable skips this step and
+      # the loop step's assert below refuses the run. `owner` is the
+      # repository owner; `repositories` is THIS repository only (never the
+      # scratch repo or any other). The App asks for only the permissions the
+      # loop uses.
+      - name: Mint the cq-automation App token (per run)
+        id: self-review-app
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
+          # Review replies (POST pulls/{n}/comments) and thread resolves
+          # (resolveReviewThread) — src/ops/review/replyAndResolve.ts.
+          permission-pull-requests: write
+          # Review-fix pushes to the PR head branch — the loop's `git push`.
+          permission-contents: write
+          # Top-level PR comments (POST issues/{n}/comments) — replyAndResolve's
+          # whole-PR-feedback path (src/plans/review-loop.ts).
+          permission-issues: write
+          # Deliberately NO workflows: write — a review fix touching
+          # .github/workflows/** fails honestly at the push stage and degrades
+          # to needs-human rather than letting scheduled repo-driven code
+          # rewrite this workflow's own definition.
       - name: Review loop over this repo's open PRs (dist/selfhost/self-review-loop.js)
         env:
-          # Step-scoped on purpose: the token must never reach pnpm install's
-          # lifecycle scripts — it reaches ONLY this step.
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # The per-run minted App token (step-scoped on purpose: the token
+          # must never reach pnpm install's lifecycle scripts — it reaches
+          # ONLY this step).
+          GH_TOKEN: ${{ steps.self-review-app.outputs.token }}
           # The fix workers' driver (ai-sdk, served model id): without it
           # the loop's dispatches cannot run — asserted below, before any
           # effect. The env NAME is fixed (`ZAI_API_KEY`, what the drivers
@@ -235,6 +254,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           # Env-indirection doctrine: inputs reach the script as env vars,
           # never as interpolated text. Both are '' on schedule events.
+          # The mint action reports the App's slug — the responder identity
+          # derives from it (`<slug>[bot]`): installation tokens are NOT
+          # supported by `GET /user`, so the login must never be looked up
+          # with the minted token.
+          APP_SLUG: ${{ steps.self-review-app.outputs.app-slug }}
           MAX_USD: ${{ inputs.max_usd }}
           DRY_RUN: ${{ inputs.dry_run }}
           # Where the entry writes the machine-readable sweep token-usage
@@ -266,17 +290,23 @@ jobs:
             echo 'outside the scheduled automation window (Z.ai GLM peak plus 20-minute headroom: starts 05:40–10:00 UTC Mon–Fri excluded); refusing to initiate operations' >&2
             exit 0
           fi
-          # Self-host automation is optional. A repository without its automation token
-          # is not broken: the non-required job skips honestly. Required I4 checks
-          # never use this workflow and therefore never inherit this skip.
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
+          # FAIL-CLOSED credential assert, no PAT fallback: GH_TOKEN is only
+          # the per-run mint above, so an empty value means the
+          # CQ_AUTOMATION_APP_CLIENT_ID repository variable is unset (the
+          # mint step is variable-gated) or the mint produced no token.
+          # Refuse before any effect and name the missing pieces.
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not minted — set the CQ_AUTOMATION_APP_CLIENT_ID repository variable and the CQ_AUTOMATION_APP_KEY environment secret (cq-automation App); refusing to start' >&2; exit 1; }
           test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
           # Review-fix pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git
           # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
           git config --global user.name 'cq-automation'
           git config --global user.email 'cq-automation@users.noreply.github.com'
-          LOGIN=$(gh api user -q .login)
+          # Installation tokens cannot call `GET /user` — the responder login
+          # comes from the mint step's app-slug output (asserted like the
+          # token: empty slug means the mint did not run).
+          test -n "$APP_SLUG" || { echo 'app slug not minted — the cq-automation App token mint did not run; refusing to start' >&2; exit 1; }
+          LOGIN="${APP_SLUG}[bot]"
           # Bash ARRAY, never a string: the expansions stay single words even
           # if a future value carries spaces (an unquoted $ARGS word-splits).
           ARGS=(--repo "$GH_REPO" --responder-login "$LOGIN")

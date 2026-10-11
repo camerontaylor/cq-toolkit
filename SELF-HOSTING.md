@@ -194,7 +194,10 @@ Owner steps, in order (the RS-11 wizard outline):
 
 1. Register the three Apps (`cq-verdict`, `cq-promoter`, `cq-automation`),
    install them on this repository only, and set the four App variables
-   (each id together with its client id).
+   (each id together with its client id) — including the repository
+   variable `CQ_AUTOMATION_APP_CLIENT_ID` (the `cq-automation` App's
+   client id): `self-review-loop`'s mint step is gated on it and fails
+   closed without it.
 2. Create the four environments with the `main`-only branch policy; put
    each App key and interim secret into its environment above. In
    particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
