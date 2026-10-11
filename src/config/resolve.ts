@@ -177,7 +177,9 @@ function credentialUrl(raw: string | undefined): boolean {
   // Structural credential-URL screen (fail closed; order matters). URL
   // consumers commonly trim, so screen the trimmed value. Protocol-relative
   // values (`//user:pass@host/path`) carry no scheme for the test below, so
-  // they are refused FIRST by their userinfo-shaped authority. A Windows
+  // they are refused FIRST by their userinfo-shaped authority — and by any
+  // query or fragment after the `//`, matching the scheme-shaped path below
+  // (which refuses ANY query/fragment, not only secret-keyed ones). A Windows
   // drive path (`C:\cache#v1`) is a filename whose `#` is not a URL
   // fragment; a query marker is never a Windows filename character, so a
   // drive-shaped value WITH a query is still screened as a URL.
@@ -192,7 +194,7 @@ function credentialUrl(raw: string | undefined): boolean {
   if (!value) return false;
   if (value.startsWith('//')) {
     const authority = value.slice(2).split(/[/?#]/, 1)[0] ?? '';
-    return authority.includes('@');
+    return authority.includes('@') || /[?#]/.test(value.slice(2));
   }
   if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
   if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;

@@ -184,11 +184,13 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
   });
 
   // Structural scrub (PR #305): a URL-like span whose query/fragment carries
-  // a secret-looking KEY is scrubbed whole; a non-secret query stays visible.
+  // a secret-looking KEY sitting at a parameter-name boundary is scrubbed
+  // whole; a non-secret query stays visible.
   test('boundedErrorText redacts secret-keyed query/fragment spans only', () => {
     for (const url of [
       'https://example.test/api?token=secret',
       'https://example.test/api#access_token=xyz',
+      'https://example.test/api?a=1&token=secret',
     ]) {
       expect(boundedErrorText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
     }
@@ -198,11 +200,37 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     expect(boundedErrorText('see https://example.test/api?page=2 for details')).toBe(
       'see https://example.test/api?page=2 for details',
     );
+    expect(boundedErrorText('see https://example.test/api?monkey=banana for details')).toBe(
+      'see https://example.test/api?monkey=banana for details',
+    );
+    expect(boundedErrorText('see https://example.test/api?sessionid=1 for details')).toBe(
+      'see https://example.test/api?sessionid=1 for details',
+    );
     expect(boundedErrorText('see https://example.test/api for details')).toBe(
       'see https://example.test/api for details',
     );
     expect(boundedErrorText('contact user@example.test for access')).toBe(
       'contact user@example.test for access',
     );
+  });
+
+  // Round-2 fix (PR #305): the opaque `scheme:` form is whitespace-free, so a
+  // prose label before a bare email is not mistaken for an opaque scheme.
+  // Only a contiguous `scheme:user@host` matches the opaque form.
+  test('boundedErrorText keeps a prose label before a bare email visible', () => {
+    expect(boundedErrorText('Error: contact user@example.test for access')).toBe(
+      'Error: contact user@example.test for access',
+    );
+  });
+
+  // Round-2 fix (PR #305): the URL regex passes scan only the leading
+  // URL_REDACT_SCAN_CHARS window, so a hostile multi-megabyte diagnostic
+  // cannot drive quadratic scans; a credential URL in the head is still
+  // redacted before the 500-char persistence bound.
+  test('boundedErrorText redacts a URL in the head of an over-long diagnostic', () => {
+    const bounded = boundedErrorText('https://user:pass@example.test/x' + 'y'.repeat(6000));
+    expect(bounded.startsWith('[redacted]')).toBe(true);
+    expect(bounded).not.toContain('user:pass@example.test');
+    expect(bounded.endsWith('[truncated]')).toBe(true);
   });
 });

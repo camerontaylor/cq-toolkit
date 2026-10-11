@@ -32,6 +32,15 @@
 // diagnostics stay usable. A credential-free URL — including one whose only
 // `@` sits in the path — is untouched.
 const MAX_ERROR_CHARS = 500;
+// The two URL regex passes below inspect only this many leading characters.
+// Redaction only shrinks text, so an output character's position never
+// exceeds its input position; anything the persisted MAX_ERROR_CHARS window
+// can display originates inside the first ~500 raw chars — far inside this
+// 4000-char scan window — so capping the regex input cannot leave visible
+// text unredacted. The cap bounds regex work to O(cap) per pass on hostile
+// multi-megabyte error text. The env-secret exact-value pass still runs on
+// the full text.
+const URL_REDACT_SCAN_CHARS = 4000;
 // `_URL` is deliberately absent from the suffix list (owner decision,
 // issue #291 row 6b): a plain URL value is not a secret. URLs that DO carry
 // credentials are scrubbed from text by VALUE (below), regardless of which
@@ -48,31 +57,39 @@ const SECRET_ENV_SUFFIXES = [
   'PRIVATE_KEY',
 ];
 // A URL whose userinfo is present (user[:password]@) embeds a credential
-// in the value itself. Two forms, each with two tiers, WRAPPED FIRST: the
-// AUTHORITY form (`scheme://` or scheme-less `//`) keeps the span `/`-free,
-// so a credential-free URL whose only `@` sits in the path does not match.
+// in the value itself. Two forms: the AUTHORITY form has two tiers, WRAPPED
+// FIRST, and the OPAQUE form has a single whitespace-free tier. The
+// AUTHORITY form (`scheme://` or scheme-less `//`) keeps the span /`-free,
+// so a credential-free URL whose only `@` sits in the path does not match;
+// its wrapped span admits whitespace (a raw newline can split the userinfo
+// before redaction runs) and is capped at 200 chars purely as the
+// anti-swallow bound for pathological cross-line content — a real wrapped
+// URL is short, and a >200-char userinfo with newlines inside is
+// pathological (residual risk accepted) — resolving greedily to the LAST
+// `@` within reach. The wrapped tier is tried FIRST because contiguous-first
+// would match the inner `@` of a wrapped password (`user:pa@`) and leave the
+// rest visible; the unbounded CONTIGUOUS fallback only needs to catch
+// userinfo longer than the wrap cap (which the wrapped tier cannot span) —
+// a long tunnel/DSN token — and cannot swallow unrelated text (it stops at
+// the first whitespace or the `@`).
 // The OPAQUE form (`scheme:` with zero or one slash — never two, guarded by
 // the `(?!\/\/)` lookahead so `scheme://` values stay on the authority
-// form) admits `/` in the span for opaque paths (`jdbc:…:user/pass@//host`).
-// In each form the wrapped span (whitespace allowed, e.g. a raw newline
-// splitting the userinfo) is capped at 200 chars purely as the anti-swallow
-// bound for pathological cross-line content — a real wrapped URL is short,
-// and a >200-char userinfo with newlines inside is pathological (residual
-// risk accepted) — and resolves greedily to the LAST `@` within reach. It
-// is tried FIRST because contiguous-first would match the inner `@` of a
-// wrapped password (`user:pa@`) and leave the rest visible; the unbounded
-// CONTIGUOUS fallback only needs to catch userinfo longer than the wrap
-// cap (which the wrapped tier cannot span) — a long tunnel/DSN token — and
-// cannot swallow unrelated text (it stops at the first whitespace or the
-// `@`).
+// form) admits `/` in the span for opaque paths (`jdbc:…:user/pass@//host`)
+// but is WHITESPACE-FREE: without a `://` authority there is no TLS-style
+// wrapped userinfo, and a whitespace-admitting span would read a prose label
+// as a scheme (`Error: contact user@host`). A newline-split OPAQUE userinfo
+// therefore escapes (residual risk accepted).
 const CREDENTIAL_URL_PATTERN =
-  /(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)(?:[^/<>"'`]{0,200}|[^\s/<>"'`]+)@[^\s<>"'`]*|[a-z][a-z0-9+.-]*:(?!\/\/)(?:\/)?(?:(?:(?!:\/\/)[^<>"'`]){0,200}|(?:(?!:\/\/)[^\s<>"'`])+)@[^\s<>"'`]*/gi;
+  /(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)(?:[^/<>"'`]{0,200}|[^\s/<>"'`]+)@[^\s<>"'`]*|[a-z][a-z0-9+.-]*:(?!\/\/)(?:\/)?(?:(?!:\/\/)[^\s<>"'`])+@[^\s<>"'`]*/gi;
 // A URL-like span whose query/fragment carries a secret-looking KEY
 // embeds a credential in the value itself (e.g. a signed `?token=` or
 // `#access_token=` echoed by a driver). The whole span is scrubbed; a
-// non-secret query (`?page=2`) does not match and stays visible.
+// non-secret query (`?page=2`) does not match and stays visible. The secret
+// word must sit at a parameter-name boundary (`(?<![a-z0-9])`/`(?![a-z0-9])`)
+// so a prose compound (`?monkey=`, `?keyword=`, `?sessionid=`) is not
+// mistaken for a secret key.
 const SECRET_QUERY_PATTERN =
-  /(?:[a-z][a-z0-9+.-]*:(?:\/\/|\/)?|\/\/)[^\s<>"'`]*[?#][^\s<>"'`]*(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|auth|credentials?|signature|sig|sign|jwt|session|key)\s*=[^\s<>"'`]*/gi;
+  /(?:[a-z][a-z0-9+.-]*:(?:\/\/|\/)?|\/\/)[^\s<>"'`]*[?#][^\s<>"'`]*(?<![a-z0-9])(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|auth|credentials?|signature|sig|sign|jwt|session|key)(?![a-z0-9])\s*=[^\s<>"'`]*/gi;
 
 /** The caught cause as plain message text (never a vendor class name). */
 export function describeError(err: unknown): string {
@@ -82,9 +99,14 @@ export function describeError(err: unknown): string {
 /** Redact environment secrets and credential-bearing URL values from text. */
 export function redactSensitiveText(text: string): string {
   // Value-based first: a credential-bearing URL is scrubbed wherever it
-  // appears, even when no env name classified it as a secret.
-  let out = text.replace(CREDENTIAL_URL_PATTERN, '[redacted]');
+  // appears, even when no env name classified it as a secret. The regex
+  // passes inspect only the leading URL_REDACT_SCAN_CHARS window (a no-op
+  // slice when the text is shorter); the env-secret exact-value pass below
+  // still runs on the full text.
+  const head = text.slice(0, URL_REDACT_SCAN_CHARS);
+  let out = head.replace(CREDENTIAL_URL_PATTERN, '[redacted]');
   out = out.replace(SECRET_QUERY_PATTERN, '[redacted]');
+  out += text.slice(URL_REDACT_SCAN_CHARS);
   for (const [name, value] of Object.entries(process.env)) {
     if (
       value !== undefined &&

@@ -291,6 +291,27 @@ describe('pure configuration resolution', () => {
       }
     });
 
+    it('refuses protocol-relative values carrying a query or fragment', () => {
+      for (const value of ['//example.test/api?token=secret', '//example.test/page#frag']) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+      expect(
+        entryValue(
+          'run.envPassthrough',
+          resolve({
+            env: {
+              CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT',
+              SAFE_ENDPOINT: '//example.test/path',
+            },
+          }),
+        ),
+      ).toEqual(['SAFE_ENDPOINT']);
+    });
+
     it('refuses signed query/fragment values while keeping the strict gate', () => {
       for (const value of [
         'https://example.test/api?token=secret',
