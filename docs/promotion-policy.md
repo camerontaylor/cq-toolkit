@@ -47,8 +47,8 @@ now. Merges that land after the cut wait for the next batch. The gate promotes t
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
    by all three of creator type `Bot`, login `cq-promotion-reviewer[bot]` and its numeric id
    `339373542`. The identity is not a workflow literal or repo variable: it lives in the
-   protected `policy/promotion-reviewer.json` (from the registration record @ `d8f132f`) — the
-   merge-queue gate reads it at `GITHUB_SHA`, the signer and crq validate it on `main`, and a
+   protected `policy/promotion-reviewer.json` (from the registration record @ `d8f132f`) —
+   `cq-gate` reads it at `GITHUB_SHA` (the retired merge-queue-gate read the same file), the signer and crq validate it on `main`, and a
    per-step lockstep test guarantees the gate actually consumes it; a missing, invalid or
    mismatched file leaves the gate refusing fail-closed. Any other creator — including
    the repository owner's own

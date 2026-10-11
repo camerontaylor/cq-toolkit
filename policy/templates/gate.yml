@@ -75,8 +75,8 @@
 #                       promotion (fails closed), but the report is lost.
 #   (The pinned reviewer identity is NOT a token: `decide` reads the
 #   protected `policy/promotion-reviewer.json` from the trust checkout —
-#   the same file the merge-queue gate reads at GITHUB_SHA and the signer
-#   and crq validate on main — checks its JSON types BEFORE extracting
+#   the same file the retired merge-queue-gate template read at GITHUB_SHA,
+#   and the signer and crq validate on main — checks its JSON types BEFORE extracting
 #   (number id > 0, string login, type Bot, schemaVersion 1), and passes
 #   the login/id to the CLI, which still validates the pair and refuses
 #   banned or malformed identities.)
@@ -300,9 +300,9 @@ jobs:
             echo "refusing: default branch '$DEFAULT_BRANCH'"; exit 1; }
           # The pinned reviewer identity comes from the protected
           # policy/promotion-reviewer.json at the TRUST ref (GITHUB_SHA) —
-          # the same source the merge-queue gate reads and the signer and
-          # crq validate on main; never a workflow literal or repo
-          # variable. Fail closed on a missing/malformed file: the CLI
+          # the same source the retired merge-queue-gate template read, and
+          # the signer and crq validate on main; never a workflow literal or
+          # repo variable. Fail closed on a missing/malformed file: the CLI
           # re-validates the pair (shape, banned identities) regardless.
           REVIEWER_JSON="$(cat trust/policy/promotion-reviewer.json)"
           # JSON types are checked BEFORE any jq -r extraction: -r renders
