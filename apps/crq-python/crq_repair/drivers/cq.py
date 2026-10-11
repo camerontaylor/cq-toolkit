@@ -22,6 +22,8 @@ def invoke(config, role, job, wt, directory):
                'driver': {'provider': provider, 'model': model}, 'harness': HARNESS,
                'budget': {'maxTokens': role.get('budget', {}).get('max_tokens', config['repair']['budget']['max_tokens']),
                           'wallClockMs': config['repair']['budget']['wall_clock_min'] * 60000}}
+    payload['item']['body'] += '\nMechanical evidence / judge rationale: ' + job.get('mechanical_evidence', '')
+    payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
     argv = ['node', config['repair']['cq_bin'], 'review.fixItem', '--json']

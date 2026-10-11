@@ -161,6 +161,49 @@ class BoundedRepairTest(unittest.TestCase):
             service.main([])
             dispatch.assert_not_called()
 
+    def test_process_preserves_finding_digest_and_delivers_snapshot(self):
+        _, job = self.prepare()
+        job['window'] = 'default'
+        role = {'driver': 'cq', 'model': 'zai/glm-5.3-flash'}
+        self.config['repair']['roles'] = {name: {'default': role} for name in
+                                         ('fixer', 'fixer_escalation', 'judge', 'judge_critical')}
+        report = {'stop': 'ok', 'changed': False, 'summary': 'No change warranted', 'commits': []}
+        with mock.patch.object(service, 'ROOT', self.root), \
+             mock.patch.object(service, 'git', side_effect=lambda wt, *args: SOURCE if args[0] == 'rev-parse' else ''), \
+             mock.patch.object(bounded, 'command', return_value=SimpleNamespace(returncode=0, stdout='first\nsecond\n')), \
+             mock.patch.object(service.cq, 'invoke', return_value=report) as invoke:
+            result = service.process(self.config, job, self.root)
+        sent = invoke.call_args.args[2]
+        self.assertEqual(bounded.identity(sent['finding']), self.evidence['finding_sha256'])
+        self.assertEqual(sent['source_snapshot']['source_sha'], SOURCE)
+        self.assertIn('mechanical_evidence', sent)
+        self.assertEqual(result['verdict'], 'NOT-FIXED')
+        self.assertEqual(result['source_sha'], SOURCE)
+
+    def test_cq_fixer_payload_contains_snapshot_and_mechanical_context(self):
+        _, job = self.prepare()
+        job['source_snapshot'] = {'source_sha': SOURCE, 'source': '2: pinned code'}
+        job['mechanical_evidence'] = 'Earlier verification failed'
+        self.config.update(repo='example/repo')
+        self.config['repair'].update(cq_bin='/unused/cli.js', budget={'max_tokens': 8000, 'wall_clock_min': 2})
+        response = SimpleNamespace(returncode=0, stdout='{"status":"ok","value":{"changed":false}}', stderr='')
+        with mock.patch.object(service.cq, 'command', return_value=response) as cmd:
+            service.cq.invoke(self.config, {'model': 'zai/glm-5.3-flash'}, job, self.root, self.root)
+        item_arg = next(arg for arg in cmd.call_args.args[0] if arg.startswith('--item='))
+        body = json.loads(item_arg.split('=', 1)[1])['body']
+        self.assertIn(SOURCE, body)
+        self.assertIn('2: pinned code', body)
+        self.assertIn('Earlier verification failed', body)
+
+    def test_harvest_refuses_wrong_prepared_source_binding(self):
+        job_id, job = self.prepare()
+        result = {'job': job_id, 'item': job['item'], 'verdict': 'NOT-FIXED',
+                  'reason': 'test', 'source_sha': HISTORICAL,
+                  'finding_sha256': job['finding_sha256'], 'origin_job': OLD}
+        atomic(self.root / 'state/repair' / job_id / 'result.json', result)
+        with self.assertRaisesRegex(ValueError, 'source/evidence binding'):
+            repair_tick.harvest(self.c, self.queue, self.queue['items'][0])
+
     def test_service_dispatches_one_selected_job_without_inbox_enumeration(self):
         job_id, job = self.prepare()
         self.config['repair'].update(enabled=True, spend_authorization='offline-test-fixture-only')

@@ -94,7 +94,7 @@ def process(config, job, wt):
         role = roles['fixer' if rung < 2 else 'fixer_escalation']
         attempt_dir = directory / ('A' + str(rung))
         current = copy.deepcopy(job)
-        current['finding']['body'] += '\nMechanical evidence / judge rationale: ' + evidence
+        current['mechanical_evidence'] = evidence
         try:
             if result.get('pending_judge'):
                 reason = result['pending_judge']['fixer_reason']
