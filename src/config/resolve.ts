@@ -55,9 +55,9 @@ const byId = new Map(CONFIG_REGISTRY.map((key) => [key.id, key]));
 // Mirrors SECRET_ENV_SUFFIXES in src/driver/error-text.ts; `_URL` is
 // deliberately absent (owner decision, issue #291 row 6b, ADR note N18) —
 // a plain URL value is not a secret. A URL value carrying credentials is
-// refused by the structural credential-URL screen below (protocol-relative
-// first, then scheme-shaped via `new URL`, opaque fail-closed on a raw
-// `@`, any query/fragment refused).
+// refused by the structural credential-URL screen below: protocol-relative
+// first, then scheme-shaped via `new URL` (userinfo or query or fragment, any
+// parse failure, and — owner ruling b — EVERY parsed empty-host scheme value).
 const secretSuffixes = [
   '_API_KEY',
   '_TOKEN',
@@ -183,13 +183,15 @@ function credentialUrl(raw: string | undefined): boolean {
   // drive path (`C:\cache#v1`) is a filename whose `#` is not a URL
   // fragment; a query marker is never a Windows filename character, so a
   // drive-shaped value WITH a query is still screened as a URL.
-  // Scheme-shaped values parse via `new URL`: userinfo, query, or fragment
-  // present refuses, as does a value that fails to parse. A scheme-shaped
-  // value that parses to an opaque/authority-less URL (empty host, no
-  // userinfo, no query/fragment) but carries a raw `@` — e.g. a `jdbc:`
-  // connection string — is refused too: there is no authority to inspect,
-  // so the `@` is the only signal. Over-refusal at config time (e.g.
-  // `mailto:user@host`) is the acceptable direction.
+  // Scheme-shaped values parse via `new URL`: userinfo, query or fragment
+  // present refuses, as does a value that fails to parse. In addition, EVERY
+  // scheme-shaped value that parses with an EMPTY host is refused (owner
+  // ruling b): a scheme with no authority is never passthrough-worthy, and an
+  // empty host is exactly how opaque credentials hide —
+  // `jdbc:sqlserver://localhost;user=sa;password=hunter2;` parses with no host
+  // at all (WHATWG reads the whole body as an opaque path) and `urn:…` values
+  // are opaque by construction. Over-refusal at config time (`mailto:user@…`,
+  // `urn:isbn:…`) is the accepted direction.
   const value = raw?.trim();
   if (!value) return false;
   if (value.startsWith('//')) {
@@ -201,8 +203,7 @@ function credentialUrl(raw: string | undefined): boolean {
   try {
     const parsed = new URL(value);
     if (parsed.username || parsed.password || parsed.search || parsed.hash) return true;
-    if (!parsed.host && value.includes('@')) return true;
-    return false;
+    return !parsed.host;
   } catch {
     return true;
   }

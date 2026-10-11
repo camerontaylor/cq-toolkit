@@ -338,6 +338,47 @@ describe('pure configuration resolution', () => {
         ),
       ).toEqual(['SAFE_ENDPOINT']);
     });
+
+    // Owner ruling (b): EVERY parsed empty-host scheme-shaped value is refused
+    // at passthrough. A semicolon-delimited SQL Server DSN parses with an
+    // EMPTY host (WHATWG reads the whole body as an opaque path) and a `urn:`
+    // name is opaque by construction, so neither can hand a value to a
+    // passthrough consumer; over-refusal is the accepted direction.
+    it('refuses every parsed empty-host scheme-shaped value (J4Hq)', () => {
+      for (const value of [
+        'jdbc:sqlserver://localhost;user=sa;password=hunter2;',
+        'urn:isbn:0451450523',
+      ]) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+      for (const value of ['https://example.test/metrics', '//example.test/path']) {
+        expect(
+          entryValue(
+            'run.envPassthrough',
+            resolve({
+              env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+            }),
+          ),
+        ).toEqual(['SAFE_ENDPOINT']);
+      }
+    });
+
+    // Thread input J4Hz: WHATWG accepts punctuation inside userinfo that the
+    // old pre-`@` span treated as a boundary; the screen sees the userinfo and
+    // refuses the value.
+    it('refuses userinfo carrying WHATWG-legal punctuation (J4Hz)', () => {
+      for (const value of ['https://user:pa"ss@example.test', "https://user:pa'ss@example.test"]) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+    });
   });
 
   it('journals a credential-free foreign base URL by value, not as secret presence', () => {
