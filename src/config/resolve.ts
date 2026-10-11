@@ -197,12 +197,23 @@ function credentialUrl(raw: string | undefined): boolean {
   // `urn:isbn:…`) is the accepted direction.
   const value = raw?.replace(/[\t\n\r]/g, '').trim();
   if (!value) return false;
-  if (/^\/{2,}/.test(value)) {
-    const remainder = value.replace(/^\/+/, '');
+  // A leading slash run (WHATWG's slash-run form, where `\` counts as `/` in
+  // special-URL context) is collapsed to its remainder before the authority
+  // checks; a Windows drive path starts with a letter plus a colon, so it is
+  // unaffected, and a single leading slash or backslash is not matched.
+  if (/^[\/\\]{2,}/.test(value)) {
+    const remainder = value.replace(/^[\/\\]+/, '');
     const authority = remainder.split(/[/?#]/, 1)[0] ?? '';
     return authority.includes('@') || /[?#]/.test(remainder);
   }
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  // A relative reference has no scheme and no `//` authority, so the child
+  // resolves it against its own base — which turns `/api?token=…` and
+  // `metrics#access_token=…` into credential-bearing URLs downstream. ANY
+  // query or fragment on a non-scheme value is therefore refused; over-refusal
+  // of `/docs?section=2` is the accepted direction, and a plain relative path
+  // or a bare word still passes. Drive-shaped values never reach here (a
+  // letter-plus-colon matches the scheme test).
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return /[?#]/.test(value);
   if (/^[A-Za-z]:(?:\\|\/(?!\/))/.test(value) && !value.includes('?')) return false;
   try {
     const parsed = new URL(value);

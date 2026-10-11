@@ -416,6 +416,49 @@ describe('pure configuration resolution', () => {
         ).toThrow(/cannot be passed through/);
       }
     });
+
+    // Fresh-review round 4 (KzpD): WHATWG reads a backslash as a slash in
+    // special-URL context, so a backslash slash run is normalized too.
+    it('refuses backslash slash-run forms (KzpD)', () => {
+      for (const value of ['\\\\user:pass@example.test/x', '/\\/user:pass@example.test/x']) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+      // A credential-free UNC path still passes the screen.
+      expect(
+        entryValue(
+          'run.envPassthrough',
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: '\\\\server\\share' },
+          }),
+        ),
+      ).toEqual(['SAFE_ENDPOINT']);
+    });
+
+    // Fresh-review round 4 (KzpI): a relative reference has no scheme, so the
+    // child resolves it against its base; ANY query or fragment is refused.
+    it('refuses relative references carrying a query or fragment (KzpI)', () => {
+      for (const value of ['/api?token=hunter2', 'metrics#access_token=xyz', '/docs?section=2']) {
+        expect(() =>
+          resolve({
+            env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+          }),
+        ).toThrow(/cannot be passed through/);
+      }
+      for (const value of ['/api/docs', 'metrics', 'relative/path']) {
+        expect(
+          entryValue(
+            'run.envPassthrough',
+            resolve({
+              env: { CQ_RUN_ENV_PASSTHROUGH: 'SAFE_ENDPOINT', SAFE_ENDPOINT: value },
+            }),
+          ),
+        ).toEqual(['SAFE_ENDPOINT']);
+      }
+    });
   });
 
   it('journals a credential-free foreign base URL by value, not as secret presence', () => {

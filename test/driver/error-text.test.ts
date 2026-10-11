@@ -121,27 +121,32 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  // Delta review (PR #305 r2): a raw newline can split the userinfo before
-  // redaction runs, and the first pattern (whitespace-free span) let the
-  // credentials survive. The span now admits whitespace, capped, so the
-  // wrapped URL is scrubbed whole but a distant stray `@` cannot drag a
-  // large unrelated block into one match.
+  // Delta review (PR #305 r2) + fresh-review round 4: WHATWG strips
+  // tab/newline/CR from the whole input before parsing, so a newline inside a
+  // candidate is TRANSPARENT. A newline-split userinfo is no longer split at
+  // all: the whole token is one candidate and redacts however long it is.
   test('boundedErrorText redacts a URL whose userinfo is split across a newline', () => {
+    // Parser-transparency reaches further than the URL: `failed:` plus the
+    // newline plus the URL is ONE opaque candidate (WHATWG strips the newline,
+    // leaving `failed:https://…`), so the prose word is swallowed too — the
+    // accepted over-redaction direction, and config-consistent (that opaque
+    // value has an empty host, which the config screen refuses).
     expect(boundedErrorText('connect failed:\nhttps://user:\npass@example.test/db')).toBe(
-      'connect failed:\n[redacted]',
+      'connect [redacted]',
     );
-    // Greedy span resolution: an `@` inside a wrapped password must not leave
-    // a credential fragment behind.
+    // An `@` inside the (formerly wrapped) password must not leave a fragment.
     expect(boundedErrorText('GET https://user:\npa@ss@example.test/db failed')).toBe(
       'GET [redacted] failed',
     );
   });
 
-  test('boundedErrorText does not swallow a large unrelated text block after the userinfo span cap', () => {
-    // The stray `@` sits beyond the 200-char span cap, so nothing matches and
-    // the block — credentials-free — stays verbatim.
+  test('redactSensitiveText redacts a newline-wrapped credential of any length', () => {
+    // Under parser-transparency this IS one URL with a 300-code-unit userinfo,
+    // so redacting it whole is correct; the old wrapped-window residual applied
+    // only to the newline split, which no longer splits anything.
     const far = `https://user:\n${'x'.repeat(300)}\n@host.example.test`;
-    expect(boundedErrorText(far)).toBe(far);
+    expect(redactSensitiveText(far)).toBe('[redacted]');
+    expect(boundedErrorText(far)).toBe('[redacted]');
   });
 
   // Delta review r3 (PR #305): the wrapped tier's cap must not also cap
@@ -383,14 +388,28 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     );
   });
 
-  // The scanner's lexical edges, pinned directly: ECMAScript whitespace ends a
-  // candidate, `+`/`-`/`.` are scheme characters, an opaque body starts
-  // parameter names at its `:`/`&`/`;` delimiters, and a special scheme skips
-  // a backslash run before the authority.
-  test('redactSensitiveText treats every ECMAScript whitespace as a token end', () => {
+  // The scanner's lexical edges, pinned directly: WHATWG-ignored tab/newline/CR
+  // are TRANSPARENT inside a candidate while every other ECMAScript whitespace
+  // ends it, `+`/`-`/`.` are scheme characters, an opaque body starts parameter
+  // names at its `:`/`&`/`;` delimiters, and a backslash counts as a slash.
+  test('redactSensitiveText skips WHATWG-ignored tab/newline/CR inside a candidate', () => {
+    // The whitespace is neither name data nor a token end, so a key split by
+    // one still reads as its literal form to any consumer.
+    for (const ignored of ['\t', '\n', '\r']) {
+      expect(
+        redactSensitiveText(`fetch https://example.test/?to${ignored}ken=hunter2 failed`),
+      ).toBe('fetch [redacted] failed');
+      // The URL token continues past it, so the separator is inside the span.
+      expect(redactSensitiveText(`fetch https://user:pass@example.test/x${ignored}failed`)).toBe(
+        'fetch [redacted]',
+      );
+    }
+    // A tab inside the scheme reassembles it, so the whole value redacts.
+    expect(redactSensitiveText('ht\ttps://user:pass@example.test/x')).toBe('[redacted]');
+  });
+
+  test('redactSensitiveText ends a candidate at every other ECMAScript whitespace', () => {
     for (const space of [
-      '\t',
-      '\r',
       '\u00a0',
       '\u1680',
       '\u2003',
@@ -429,11 +448,14 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     }
   });
 
-  test('redactSensitiveText bounds wrapped-authority recognition at 200 code units', () => {
-    const far = `https://${'x'.repeat(250)}\n@host.example.test`;
+  test('redactSensitiveText bounds a SPACE-split wrap probe at 200 code units', () => {
+    // A newline is transparent (WHATWG), so the 200-code-unit window now only
+    // bounds a space split, where it is effectively vestigial but harmless: a
+    // 250-code-unit authority does not register a probe and stays visible.
+    const far = `https://${'x'.repeat(250)} @host.example.test`;
     expect(redactSensitiveText(far)).toBe(far);
-    // A wrap probe that never sees an eligible `@` redacts nothing, and a run
-    // longer than the longest listed key word can never match.
+    // A probe that never sees an eligible `@` redacts nothing, and a run longer
+    // than the longest listed key word can never match.
     for (const text of [
       'https://a:b\n',
       'https://a:b\n/path',
@@ -499,6 +521,70 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
     );
     expect(redactSensitiveText('https://proxy.test/?redirect=///example.test/path')).toBe(
       'https://proxy.test/?redirect=///example.test/path',
+    );
+  });
+
+  // Fresh-review round 4 (KzpE): tab/newline/CR are transparent inside a
+  // candidate, so an opaque `@` after a newline now redacts from the SCHEME
+  // word. A real space still ends the candidate, so the space-separated prose
+  // variant is unchanged. Accepted over-redaction, config-consistent: the same
+  // string parses as an opaque scheme value, which the config screen refuses.
+  test('redactSensitiveText redacts an opaque @ reached across a newline', () => {
+    expect(redactSensitiveText('Error:\ncontact@user.example.test for access')).toBe(
+      '[redacted] for access',
+    );
+    for (const text of [
+      'Error:\ncontact user@example.test for access',
+      'Error: contact user@example.test for access',
+    ]) {
+      expect(redactSensitiveText(text)).toBe(text);
+    }
+  });
+
+  // Fresh-review round 4 (KzpG): a camelCase compound matches like its
+  // snake_case twin — the literal run is split at lower/digit -> Upper
+  // transitions and each piece is classified (`accessToken` -> `token`).
+  test('redactSensitiveText classifies camelCase secret-key compounds', () => {
+    for (const url of [
+      'https://example.test/?accessToken=hunter2',
+      'https://example.test/?authToken=hunter2',
+      'https://example.test/?sessionKey=1',
+    ]) {
+      expect(redactSensitiveText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+    for (const text of [
+      'https://example.test/?monkeyCamel=1',
+      'https://example.test/api?monkey=banana',
+    ]) {
+      expect(redactSensitiveText(text)).toBe(text);
+    }
+  });
+
+  // Fresh-review round 4 (KzpD): WHATWG reads a backslash as a slash in
+  // special-URL context, so a backslash slash-run is a credential URL too;
+  // a credential-free UNC path is not.
+  test('redactSensitiveText redacts backslash slash-run forms', () => {
+    expect(redactSensitiveText('\\\\user:pass@example.test/x')).toBe('[redacted]');
+    expect(redactSensitiveText('/\\/user:pass@example.test/x')).toBe('[redacted]');
+    expect(redactSensitiveText('fetch \\\\user:pass@example.test/x failed')).toBe(
+      'fetch [redacted] failed',
+    );
+    expect(redactSensitiveText('\\\\server\\share')).toBe('\\\\server\\share');
+  });
+
+  // Fresh-review round 4 (K6bB): the nested URL's own `?` hands the shared
+  // parameter-name machinery the nested query, so a secret-KEYED nested query
+  // redacts the whole outer candidate, while an email in a nested VALUE does
+  // not (a query `@` is not an authority).
+  test('redactSensitiveText classifies a nested credential query', () => {
+    for (const url of [
+      'https://proxy.test/?target=https://api.test/path?token=hunter2',
+      'https://proxy.test/?t=https://x/p#access_token=z',
+    ]) {
+      expect(redactSensitiveText(`fetch ${url} failed`)).toBe('fetch [redacted] failed');
+    }
+    expect(redactSensitiveText('https://proxy.test/?t=https://x/p?mail=user@example.test')).toBe(
+      'https://proxy.test/?t=https://x/p?mail=user@example.test',
     );
   });
 });

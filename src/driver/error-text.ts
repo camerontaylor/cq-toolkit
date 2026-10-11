@@ -19,41 +19,47 @@
 // untouched slices verbatim; a credential-free URL is left byte-for-byte.
 //
 // What the scanner recognizes. A candidate starts at a text boundary before
-// an ASCII `scheme:` or a literal `//`; only whitespace/EOF ends it, so
-// quotes, apostrophes, angle brackets and other punctuation INSIDE it are
-// ordinary characters (swallowing closing prose punctuation on a redacted URL
-// is preferable to leaking a credential suffix). A raw `@` in the authority
-// or in an opaque body marks the candidate sensitive — no length limit and no
-// required host — so a long contiguous tunnel/DSN token, an opaque JDBC form
-// (`jdbc:oracle:thin:scott/tiger@//db`), a scheme-less `//user:pass@host` and
-// the slashless/single-slash special forms all scrub whole. Parameter names
-// are percent-decoded exactly once (`+` decodes to a boundary) and classified
-// by whole ASCII-alphanumeric runs against the secret-key list, so
-// `access_token`, `%74oken`, `api-key` and `x.token` match while `monkey`,
-// `sessionid`, `keyword` and `xtoken` do not; commitment needs a raw `=`, and
-// a malformed percent escape fails closed. Values are never classified, so
-// `?sort=key` survives. The authority/path split keeps a credential-free URL
-// whose only `@` sits in the path untouched.
+// an ASCII `scheme:` or a literal `//` (or `\\`, WHATWG's slash-run form); only
+// real whitespace/EOF ends it, so quotes, apostrophes, angle brackets and other
+// punctuation INSIDE it are ordinary characters (swallowing closing prose
+// punctuation on a redacted URL is preferable to leaking a credential suffix).
+// WHATWG strips tab/newline/CR from the whole input before parsing, so inside a
+// candidate those three are TRANSPARENT — skipped entirely, neither name data
+// nor a token end — which is why `?to\nken=` still reads as `?token=`. A raw
+// `@` in the authority or in an opaque body marks the candidate sensitive — no
+// length limit and no required host — so a long contiguous tunnel/DSN token, an
+// opaque JDBC form (`jdbc:oracle:thin:scott/tiger@//db`), a scheme-less
+// `//user:pass@host` and the slashless/single-slash special forms all scrub
+// whole. Parameter names are percent-decoded exactly once (`+` decodes to a
+// boundary) and classified by whole ASCII-alphanumeric runs against the
+// secret-key list, plus the camelCase pieces of a literal run, so
+// `access_token`, `accessToken`, `%74oken`, `api-key` and `x.token` match while
+// `monkey`, `sessionid`, `keyword` and `xtoken` do not; commitment needs a raw
+// `=`, and a malformed percent escape fails closed. Values are never
+// classified, so `?sort=key` survives. The authority/path split keeps a
+// credential-free URL whose only `@` sits in the path untouched.
 //
-// A raw newline can split userinfo before redaction runs, so the scanner also
-// runs a bounded WRAP probe: when an authority ends at its FIRST whitespace no
-// more than 200 code units after the authority began, the probe watches for a
-// later eligible `@` — admitting whitespace, ending at `/`, `?`, `#`, a
-// special-scheme `\`, EOF or the 200-code-unit window — and on a hit redacts
-// from the original URL start through the token end. The probe keeps watching
-// after that tail closes, so a later eligible `@` in the same window merges
-// into the SAME span: the pinned `user:\npass@host` and the greedy last-`@`
-// case both scrub whole, while a stray `@` 300 code units away cannot drag a
-// credential-free block in. Contiguous authority userinfo needs no probe: it
-// is unbounded.
+// A space (or EOF) can still split userinfo before redaction runs, so the
+// scanner also runs a bounded WRAP probe: when an authority ends at its first
+// whitespace no more than 200 code units after the authority began, the probe
+// watches for a later eligible `@` — admitting whitespace, ending at `/`, `?`,
+// `#`, a special-scheme `\`, EOF or the 200-code-unit window — and on a hit
+// redacts from the original URL start through the token end. The probe keeps
+// watching after that tail closes, so a later eligible `@` in the same window
+// merges into the SAME span (the greedy last-`@` case). Since tab/newline/CR
+// are transparent, this window now bounds only SPACE splits, where it is
+// effectively vestigial but harmless; a newline can no longer split userinfo at
+// all, and contiguous authority userinfo was never bounded.
 //
-// Two sideways shapes are covered beside the main candidate: a slash run at the
-// authority start (`///user:pass@host`) stays in the authority rather than
-// opening a path, and a NESTED `scheme://` or `//` credential URL inside a path
-// segment or a parameter VALUE is tracked alongside the outer candidate — a raw
-// `@` in that nested authority marks the whole outer candidate sensitive, so
-// `?target=https://user:pass@host` scrubs entire (over-redaction of the outer
-// prefix is the accepted direction).
+// Sideways shapes are covered beside the main candidate: a slash run at the
+// authority start (`///user:pass@host`, `\\user:pass@host`) stays in the
+// authority rather than opening a path, and a NESTED `scheme://` or `//`
+// credential URL inside a path segment or a parameter VALUE is tracked
+// alongside the outer candidate — a raw `@` in that nested authority marks the
+// whole outer candidate sensitive (over-redaction of the outer prefix is the
+// accepted direction) and the nested URL's own `?`/`#` hands the shared
+// parameter-name machinery the nested query, so `?target=https://api.test/p?token=x`
+// scrubs entire too.
 //
 // The env-value pass below is unchanged: env-NAME driven, exact-value and
 // whole-token, and it runs on the full text after the scanner.
@@ -127,7 +133,7 @@ type UriState =
 type ParameterState = 'off' | 'name' | 'value';
 
 /** Nested-URL substate, tracked only inside PATH/QUERY/FRAGMENT. */
-type InnerState = 'none' | 'slash' | 'scheme' | 'auth';
+type InnerState = 'none' | 'slash' | 'scheme' | 'auth' | 'query';
 
 interface WrapProbe {
   /** Original URL start; a hit redacts from here. */
@@ -186,6 +192,30 @@ function hexValue(code: number): number {
 }
 
 /**
+ * Split a RAW (literal) name run at lower/digit -> Upper transitions and match
+ * each piece against the secret-word list, so a camelCase compound
+ * (`accessToken`) matches like its snake_case twin (`access_token`). Constant
+ * work: the raw run buffer is bounded by MAX_SECRET_KEY_CHARS.
+ */
+function matchCompoundRun(raw: string): boolean {
+  let pieceStart = 0;
+  for (let index = 1; index <= raw.length; index += 1) {
+    if (index < raw.length) {
+      const previous = raw.charCodeAt(index - 1);
+      const current = raw.charCodeAt(index);
+      const splits =
+        ((previous >= 0x61 && previous <= 0x7a) || (previous >= 0x30 && previous <= 0x39)) &&
+        current >= 0x41 &&
+        current <= 0x5a;
+      if (!splits) continue;
+    }
+    if (SECRET_KEY_WORDS.has(raw.slice(pieceStart, index).toLowerCase())) return true;
+    pieceStart = index;
+  }
+  return false;
+}
+
+/**
  * The source spans covered by credential-bearing URL candidates.
  *
  * One forward pass with a single index; each code unit advances the main state
@@ -213,6 +243,10 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   let parameter: ParameterState = 'off';
   let nameRun = '';
   let nameRunOverflow = false;
+  // A parallel buffer of the LITERAL (never percent-decoded) name characters,
+  // used only for camelCase compound matching.
+  let rawRun = '';
+  let rawRunOverflow = false;
   let nameMatched = false;
   let nameUncertain = false;
   let escapeActive = false;
@@ -228,6 +262,8 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     parameter = 'off';
     nameRun = '';
     nameRunOverflow = false;
+    rawRun = '';
+    rawRunOverflow = false;
     nameMatched = false;
     nameUncertain = false;
     escapeActive = false;
@@ -240,11 +276,17 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
     parameter = 'name';
   };
 
-  /** Close the current alphanumeric run; a whole-word match is remembered. */
+  /**
+   * Close the current alphanumeric runs; a whole-word match, or a camelCase
+   * piece of the literal run, is remembered until the `=` commits the name.
+   */
   const closeNameRun = (): void => {
     if (!nameRunOverflow && nameRun.length > 0 && SECRET_KEY_WORDS.has(nameRun)) nameMatched = true;
+    else if (!rawRunOverflow && rawRun.length > 0 && matchCompoundRun(rawRun)) nameMatched = true;
     nameRun = '';
     nameRunOverflow = false;
+    rawRun = '';
+    rawRunOverflow = false;
   };
 
   /** Feed one decoded name code unit (an octet from `%HH`, or a literal). */
@@ -255,6 +297,15 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       return;
     }
     closeNameRun();
+  };
+
+  /** Feed one literal name code unit; percent-decoded octets never reach here. */
+  const noteLiteral = (code: number): void => {
+    if (isAsciiAlphanumeric(code)) {
+      if (rawRunOverflow || rawRun.length >= MAX_SECRET_KEY_CHARS) rawRunOverflow = true;
+      else rawRun += String.fromCharCode(code);
+    }
+    noteDecoded(code);
   };
 
   /** Feed one raw name code unit; percent escapes decode exactly once. */
@@ -285,7 +336,8 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       return;
     }
     if (code === 0x3d) {
-      // `=` commits the name: a listed word, or a malformed escape, is enough.
+      // `=` commits the name: a listed word, a camelCase piece, or a malformed
+      // escape, is enough.
       closeNameRun();
       if (nameMatched || nameUncertain) sensitive = true;
       parameter = 'value';
@@ -293,7 +345,7 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       nameUncertain = false;
       return;
     }
-    noteDecoded(code);
+    noteLiteral(code);
   };
 
   const noteParameterCharacter = (code: number): void => {
@@ -314,27 +366,37 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
    * sensitive, so the whole outer candidate redacts (over-redaction of the
    * outer prefix is the accepted direction). A slash run at the nested
    * authority start is skipped like the outer machine's, and transitions back
-   * to `none` re-handle the code unit. The single-slash and slashless nested
-   * forms are deliberately not tracked: the outer machine covers those forms
-   * when the URL is the candidate itself.
+   * to `none` re-handle the code unit. The nested URL's own `?`/`#` starts a
+   * parameter name (`query`), so a secret-KEYED nested query scrubs too.
+   * `query` otherwise behaves like `none`, keeping a further nested URL in the
+   * value tracked. The single-slash and slashless nested forms are deliberately
+   * not tracked: the outer machine covers those forms when the URL is the
+   * candidate itself.
    */
   const trackInner = (index: number, code: number): void => {
     if (inner === 'auth') {
       // A slash run at the NESTED authority start (`///user:pass@host`,
-      // `scheme:///user@host`) is skipped exactly like the outer machine's, so
-      // the credential is not dropped at the first slash.
-      if (innerAuthEmpty && code === 0x2f) return;
+      // `scheme:///user@host`, `\\user:pass@host`) is skipped exactly like the
+      // outer machine's, so the credential is not dropped at the first slash.
+      if (innerAuthEmpty && (code === 0x2f || code === 0x5c)) return;
       innerAuthEmpty = false;
       if (code === 0x40) {
         // `@`
         sensitive = true;
         return;
       }
-      if (code !== 0x2f && code !== 0x3f && code !== 0x23) return;
+      if (code === 0x3f || code === 0x23) {
+        // The nested URL's own query/fragment: mark it and let the shared
+        // parameter-name machinery classify the nested params.
+        inner = 'query';
+        startName();
+        return;
+      }
+      if (code !== 0x2f) return;
       inner = 'none';
     }
     if (inner === 'slash') {
-      if (code === 0x2f) {
+      if (code === 0x2f || code === 0x5c) {
         inner = 'auth';
         innerAuthEmpty = true;
         return;
@@ -357,8 +419,15 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       inner = 'none';
     }
     const previous = index === 0 ? -1 : text.charCodeAt(index - 1);
+    if (code === 0x3f || code === 0x23) {
+      // A nested URL reached through its path (`scheme://host/path?token=…`)
+      // is in `none` by now, so the query start is handled here as well.
+      inner = 'query';
+      startName();
+      return;
+    }
     if (continuesToken(previous)) return;
-    if (code === 0x2f) {
+    if (code === 0x2f || code === 0x5c) {
       inner = 'slash';
       return;
     }
@@ -401,10 +470,12 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   };
 
   const advanceAuthority = (code: number): void => {
-    // A run of slashes at the authority start (`///user:pass@host`, WHATWG's
-    // slash-run form) is still the authority, not a path: skip it while the
-    // authority is empty so the credential is not dropped.
-    if (authorityEmpty && (code === 0x2f || (special && code === 0x5c))) return;
+    // A run of slashes at the authority start (`///user:pass@host`,
+    // `\\user:pass@host`) is still the authority, not a path: skip it while the
+    // authority is empty so the credential is not dropped. A backslash counts
+    // as a slash here because a protocol-relative candidate resolves against an
+    // https base, i.e. in special-URL context.
+    if (authorityEmpty && (code === 0x2f || code === 0x5c)) return;
     authorityEmpty = false;
     if (code === 0x40) {
       // `@` — userinfo, with no length limit and no required host.
@@ -541,6 +612,11 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
   };
 
   const advanceMain = (index: number, code: number): void => {
+    // WHATWG strips tab/newline/CR from the whole input before parsing, so a
+    // consumer reads `?to\nken=` as `?token=`. Inside a candidate they are
+    // therefore TRANSPARENT: skipped entirely, neither name data nor a token
+    // end (they are not counted as candidate content either).
+    if (state !== 'text' && (code === 0x09 || code === 0x0a || code === 0x0d)) return;
     if (isUrlWhitespace(code)) {
       if (state !== 'text') finishCandidate(index, true);
       return;
@@ -555,7 +631,9 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
         schemeOverflow = false;
         return;
       }
-      if (code === 0x2f) {
+      if (code === 0x2f || code === 0x5c) {
+        // `/` or `\`: WHATWG reads a backslash as a slash in special-URL
+        // context (a protocol-relative value resolves against an https base).
         startCandidate(index);
         state = 'slash1';
       }
@@ -579,7 +657,8 @@ function scanCredentialSpans(text: string): Array<[number, number]> {
       return;
     }
     if (state === 'slash1') {
-      if (code === 0x2f) {
+      if (code === 0x2f || code === 0x5c) {
+        // The second character of the slash-run form may be a backslash too.
         enterAuthority(index + 1);
         return;
       }
