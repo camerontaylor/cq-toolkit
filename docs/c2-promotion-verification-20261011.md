@@ -17,7 +17,8 @@ The one flip+delete PR (#310, branch `c2/flip-and-retire-old-gate`, head
 froze, the replay marker bootstrapped once, the owner applied the marker
 ruleset, and the new gate was enabled and certified with a completed
 `noop` at equal refs. From here `main` advances only by `cq-gate`'s
-single atomic, leased push of `main` + `refs/heads/cq/promoted`.
+single atomic, leased push of `main` + `refs/heads/cq/promoted` + the
+unchanged leased `refs/heads/merge-queue` refspec.
 
 ## Handover facts
 
@@ -51,5 +52,6 @@ single atomic, leased push of `main` + `refs/heads/cq/promoted`.
   selects `gate.yml` (no `sha` input) once the old workflow is absent
   (cutover plan step 8).
 - Every future promotion is `cq-gate`'s: subject-bound, base-equality,
-  verified-runs, marker-advancing, single atomic leased push — with the
-  red-on-refused policy that came with the flip.
+  verified-runs, marker-advancing, one atomic leased push of `main`, the
+  marker and the unchanged leased `refs/heads/merge-queue` refspec — with
+  the red-on-refused policy that came with the flip.
