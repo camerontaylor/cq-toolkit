@@ -250,6 +250,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           # Env-indirection doctrine: inputs reach the script as env vars,
           # never as interpolated text. Both are '' on schedule events.
+          # The mint action reports the App's slug — the responder identity
+          # derives from it (`<slug>[bot]`): installation tokens are NOT
+          # supported by `GET /user`, so the login must never be looked up
+          # with the minted token.
+          APP_SLUG: ${{ steps.self-review-app.outputs.app-slug }}
           MAX_USD: ${{ inputs.max_usd }}
           DRY_RUN: ${{ inputs.dry_run }}
           # Where the entry writes the machine-readable sweep token-usage
@@ -293,7 +298,11 @@ jobs:
           # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
           git config --global user.name 'cq-automation'
           git config --global user.email 'cq-automation@users.noreply.github.com'
-          LOGIN=$(gh api user -q .login)
+          # Installation tokens cannot call `GET /user` — the responder login
+          # comes from the mint step's app-slug output (asserted like the
+          # token: empty slug means the mint did not run).
+          test -n "$APP_SLUG" || { echo 'app slug not minted — the cq-automation App token mint did not run; refusing to start' >&2; exit 1; }
+          LOGIN="${APP_SLUG}[bot]"
           # Bash ARRAY, never a string: the expansions stay single words even
           # if a future value carries spaces (an unquoted $ARGS word-splits).
           ARGS=(--repo "$GH_REPO" --responder-login "$LOGIN")

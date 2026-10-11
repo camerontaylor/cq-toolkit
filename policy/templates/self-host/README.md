@@ -83,8 +83,10 @@ exposed.
 | `{{SELFHOST_TOKEN}}`          | `automation` SECRET | `self-merge-prs`'s GitHub credential (that template does not mint per run — that change is out of scope here). Recommended END STATE: the registered automation App's installation token (this repository's App: cq-automation) — but see the identity note below: a static installation-token secret does not support the schedule without a refresh path. Working identity until then: a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, merge PRs, and Contents write for the `cq-state` settle-state branch. Referenced by the workflow as `GH_TOKEN` (gh). |
 | `{{SELFHOST_DRIVER_KEY}}`     | `automation` SECRET | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
-Every credential is step-scoped: only the run step receives it, never
-`pnpm install`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes
+Every credential is step-scoped and never reaches `pnpm install`'s
+lifecycle scripts: the App private key is provided only to the mint step
+(via `private-key`), and the minted installation token is provided only to
+the run step. A missing `{{SELFHOST_TOKEN}}` makes
 `self-merge-prs` skip successfully; required I4 checks are separate and never
 use this optional skip. The review loop does NOT skip on a missing credential:
 with no `CQ_AUTOMATION_APP_CLIENT_ID` variable (or a failed mint) it refuses
@@ -260,9 +262,11 @@ adopter owns it by hand.
 
 ### Secret step-scoping
 
-- Rule: every credential reaches ONLY the run step — never `pnpm install`'s
-  lifecycle scripts — and its presence is asserted before any effect (the
-  review loop's minted token; `self-merge-prs`'s `{{SELFHOST_TOKEN}}`).
+- Rule: no credential reaches `pnpm install`'s lifecycle scripts; the App
+  private key is confined to the mint step (`private-key`), the minted token
+  and `{{SELFHOST_TOKEN}}` to their run steps — and each presence is asserted
+  before any effect (the review loop's minted token; `self-merge-prs`'s
+  `{{SELFHOST_TOKEN}}`).
 - Why: the run step executes repo code; a credential that rode an earlier
   step's lifecycle scripts could leak into execution the review never saw.
 - Enforcement: the workflow YAML structure itself — the review loop mints in
