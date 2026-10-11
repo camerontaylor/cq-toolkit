@@ -78,14 +78,16 @@ whole review (wrapper + direct child) stays in the runner's own group, so the
 pre-recorded pgid always covers a live review. This requires GNU coreutils
 `timeout` (already required by `--kill-after`).
 
-Deadline semantics: SIGTERM at `review_timeout_min`, then SIGKILL 60s later;
-`timeout` reports exit 124 on either, which the child records as `timed_out`.
-`--foreground` signals the DIRECT child only. A descendant that creates its OWN
-session/group escapes both the deadline and the group probe: that is an explicit,
-UNTRACKED residual, not a retained-capacity guarantee (proving ownership of an
-escaped group would need cgroups/units, which are out of this scope). This is a
-review wall-clock guard. It is NOT a repair hard-budget or a spend proof, and no
-such proof is claimed here.
+Deadline semantics: SIGTERM at `review_timeout_min` (GNU timeout then exits 124);
+`--kill-after=60` SIGKILLs the direct child 60s later (which can surface as 137).
+The child records `timed_out` for a wrapper exit in (124, 137); a 137 can ALSO be
+an external KILL, so the deadline is not independently proved as the cause and no
+timeout reason is inferred. `--foreground` signals the DIRECT child only. A
+descendant that creates its OWN session/group escapes both the deadline and the
+group probe: that is an explicit, UNTRACKED residual, not a retained-capacity
+guarantee (proving ownership of an escaped group would need cgroups/units, which
+are out of this scope). This is a review wall-clock guard. It is NOT a repair
+hard-budget or a spend proof, and no such proof is claimed here.
 
 ## Crash recovery (fail closed, shared by author and natural runs)
 

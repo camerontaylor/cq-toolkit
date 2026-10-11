@@ -180,15 +180,18 @@ def record_cycle(item: Dict[str, Any], record: Dict[str, Any]) -> None:
 # ----------------------------------------------------------- crash recovery
 
 
+def _positive(value: Any) -> bool:
+    """A positive, non-bool integer (a real pid/pgid/sid)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _valid_identity(pidfile: Any) -> bool:
     """A run-bound identity: a dict with positive integer pid AND pgid. Anything
     else ({}, a bare pid, strings, a non-dict) is unverifiable, never evidence of
     absence."""
     if not isinstance(pidfile, dict):
         return False
-    def positive(value: Any) -> bool:
-        return isinstance(value, int) and not isinstance(value, bool) and value > 0
-    return positive(pidfile.get("pid")) and positive(pidfile.get("pgid"))
+    return _positive(pidfile.get("pid")) and _positive(pidfile.get("pgid"))
 
 
 # Marker written into review.pid by a runner that spawns the wrapper with
@@ -196,19 +199,43 @@ def _valid_identity(pidfile: Any) -> bool:
 GROUP_OWNER_MARKER = "foreground-v1"
 
 
-def identity_kind(pidfile: Any) -> str:
+def identity_kind(pidfile: Any, *, run_id: Optional[str] = None,
+                  queue_pid: Optional[int] = None) -> str:
     """Classify a recorded run identity:
 
-      ``managed`` — a valid pid+pgid carrying GROUP_OWNER_MARKER: the runner's own
-                    group owns the whole review (the supported ownership protocol);
-      ``legacy``  — a valid pid+pgid with no marker (a pre-upgrade launch), whose
-                    wrapper ran in its OWN process group (pgid = the recorded
-                    cli_pid under GNU timeout's default);
-      ``invalid`` — absent, empty, malformed, or missing a positive pid/pgid.
-    """
+      ``managed`` — the MANAGED ownership protocol: GROUP_OWNER_MARKER, the CURRENT
+                    run id, and the detached session shape pid == pgid == sid (all
+                    positive);
+      ``legacy``  — a valid pid+pgid with NO marker (a pre-upgrade launch whose
+                    pidfile carries no run_id/sid), consistent with the persisted
+                    queue pid when that pid is known;
+      ``invalid`` — absent/empty/malformed, missing a positive pid/pgid, an UNKNOWN
+                    marker, a managed pidfile bound to another run, a managed
+                    pidfile without the detached session shape, or a legacy pidfile
+                    whose pid disagrees with the persisted pid.
+
+    ``run_id`` and ``queue_pid`` are the CURRENT item's values. A crash before the
+    queue pid is persisted leaves ``queue_pid`` None and does not invalidate a
+    valid managed run."""
     if not _valid_identity(pidfile):
         return "invalid"
-    return "managed" if pidfile.get("group_owner") == GROUP_OWNER_MARKER else "legacy"
+    pid = pidfile.get("pid")
+    marker = pidfile.get("group_owner")
+    if marker is None:
+        # Legacy pidfiles carry no run_id/sid. When the persisted queue pid is
+        # known it must agree with the recorded pid.
+        if _positive(queue_pid) and pid != queue_pid:
+            return "invalid"
+        return "legacy"
+    if marker != GROUP_OWNER_MARKER:
+        return "invalid"  # unknown marker: refuse to guess ownership
+    if run_id is not None and pidfile.get("run_id") != run_id:
+        return "invalid"  # foreign binding: this pidfile belongs to another run
+    if not (_positive(pidfile.get("sid")) and pid == pidfile.get("pgid") == pidfile.get("sid")):
+        return "invalid"  # not the managed detached session shape
+    if _positive(queue_pid) and pid != queue_pid:
+        return "invalid"
+    return "managed"
 
 
 def run_state(*, has_exit: bool, identity: str, runner_alive: bool, cli_alive: bool,

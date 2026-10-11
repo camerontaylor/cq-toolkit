@@ -768,11 +768,17 @@ def review_wrapper_argv(cli_cmd: List[str], tmo_min: int) -> List[str]:
     the pre-recorded pgid always covers a live review.
 
     Deadline semantics (a review wall-clock guard, NOT a repair hard-budget or a
-    spend proof): SIGTERM at `tmo_min`, then SIGKILL `--kill-after=60`s later;
-    `timeout` reports exit 124 on either, which the child records as
-    `timed_out`. `--foreground` signals the DIRECT child only, so a descendant
-    that detaches into its own session/group is not killed here; such a group
-    retains capacity fail-closed (owner disposition) instead of being released.
+    spend proof): SIGTERM at `tmo_min` (GNU timeout then exits 124), and
+    `--kill-after=60` SIGKILLs the direct child 60s later (which can surface as
+    137). The child records `timed_out` for a wrapper exit in (124, 137); a 137
+    can ALSO be an external KILL, so the deadline is not independently proved as
+    the cause and no timeout reason is inferred.
+
+    `--foreground` signals the DIRECT child only, and the group probe covers the
+    runner's own group: a descendant that creates its OWN session/group escapes
+    both the deadline and the probe and is an explicit UNTRACKED residual (not a
+    retained-capacity guarantee; proving ownership of an escaped group would need
+    cgroups/units, which are out of this scope).
     """
     return [CONFIG.get("timeout_bin", "timeout"), "--foreground", "--kill-after=60",
             f"{tmo_min}m", *cli_cmd]
@@ -792,7 +798,12 @@ def cmd_review_child(run_id: str) -> int:
         proc = subprocess.Popen(cmd, cwd=meta["worktree"], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
         repair_tick.atomic(pidfile, {**identity, "cli_pid": proc.pid})
         rc = proc.wait()
-    repair_tick.atomic(rdir / "exit.json", {"exit": rc, "ended_at": iso(), "timed_out": rc == 124})
+    # GNU timeout exits 124 when it sends TERM at the deadline; a `--kill-after`
+    # SIGKILL (or an external KILL) can surface as 137. Record both as timed_out
+    # WITHOUT inferring the cause: a 137 may be an external kill, so the deadline
+    # is not independently proved.
+    repair_tick.atomic(rdir / "exit.json",
+                       {"exit": rc, "ended_at": iso(), "timed_out": rc in (124, 137)})
     return 0
 
 
@@ -854,7 +865,7 @@ def run_liveness(rdir: Path, item: Dict[str, Any], r: Dict[str, Any], has_exit: 
         identity whose wrapper group is unknown is unverifiable and never released.
     """
     pidfile = read_pidfile(rdir)
-    kind = author_quota.identity_kind(pidfile)
+    kind = author_quota.identity_kind(pidfile, run_id=r.get("run_id"), queue_pid=r.get("pid"))
     pid = ident_pid((pidfile or {}).get("pid")) or ident_pid(r.get("pid"))
     cli = ident_pid((pidfile or {}).get("cli_pid"))
     runner_alive = bool(pid) and pid_alive(pid) and r["run_id"] in proc_cmdline(pid)

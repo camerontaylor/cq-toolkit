@@ -241,6 +241,12 @@ class CrashRecoveryTest(unittest.TestCase):
                                                         "timed_out": False}))
         return item, rdir
 
+    @staticmethod
+    def _managed(rid, **over):
+        pidfile = {"run_id": rid, "pid": 111, "pgid": 111, "sid": 111, "group_owner": MARKER}
+        pidfile.update(over)
+        return pidfile
+
     def test_run_state_matrix_is_fail_closed(self):
         rs = author_quota.run_state
         dead = dict(runner_alive=False, cli_alive=False, runner_group_alive=False)
@@ -269,12 +275,34 @@ class CrashRecoveryTest(unittest.TestCase):
         self.assertEqual(rs(has_exit=True, identity="legacy", wrapper_group_alive=True, **dead), "alive")
 
     def test_identity_kind(self):
-        good = {"pid": 111, "pgid": 222}
-        self.assertEqual(author_quota.identity_kind({**good, "group_owner": MARKER}), "managed")
-        self.assertEqual(author_quota.identity_kind(good), "legacy")
-        for bad in (None, {}, {"pid": 111}, {"pgid": 222}, {"pid": "1", "pgid": 222}, []):
-            with self.subTest(bad=bad):
-                self.assertEqual(author_quota.identity_kind(bad), "invalid")
+        managed = {"run_id": "r1", "pid": 111, "pgid": 111, "sid": 111, "group_owner": MARKER}
+        self.assertEqual(author_quota.identity_kind(managed, run_id="r1"), "managed")
+        self.assertEqual(author_quota.identity_kind(managed, run_id="r1", queue_pid=111), "managed")
+        # legacy: no marker, no run_id/sid needed; consistent queue pid is fine
+        self.assertEqual(author_quota.identity_kind({"pid": 111, "pgid": 222}), "legacy")
+        self.assertEqual(author_quota.identity_kind({"pid": 111, "pgid": 222}, queue_pid=111), "legacy")
+        bad = [
+            None, {}, {"pid": 111}, {"pgid": 222}, {"pid": "1", "pgid": 222}, [],
+            # managed but bound to another run
+            {**managed, "run_id": "other"},
+            # managed without a run_id
+            {k: v for k, v in managed.items() if k != "run_id"},
+            # unknown marker
+            {**managed, "group_owner": "foreground-v2"},
+            # not the detached session shape (pid != pgid, or missing/zero sid)
+            {**managed, "pgid": 222},
+            {**managed, "sid": 222},
+            {k: v for k, v in managed.items() if k != "sid"},
+            {**managed, "sid": 0},
+        ]
+        for pidfile in bad:
+            with self.subTest(pidfile=pidfile):
+                self.assertEqual(author_quota.identity_kind(pidfile, run_id="r1"), "invalid")
+        # legacy pidfile whose pid disagrees with the persisted queue pid
+        self.assertEqual(author_quota.identity_kind({"pid": 111, "pgid": 222}, queue_pid=999),
+                         "invalid")
+        # managed pidfile whose pid disagrees with the persisted queue pid
+        self.assertEqual(author_quota.identity_kind(managed, run_id="r1", queue_pid=999), "invalid")
 
     def test_missing_pid_retains_capacity_never_ttl_releases(self):
         q = empty_queue()
@@ -348,13 +376,54 @@ class CrashRecoveryTest(unittest.TestCase):
     def test_terminal_artifact_with_live_group_still_waits(self):
         q = empty_queue()
         item, rdir = self._item(q, "author-run-exit-live",
-                                pidfile={"pid": 111, "pgid": 222, "group_owner": MARKER}, has_exit=True)
+                                pidfile=self._managed("author-run-exit-live"), has_exit=True)
         with mock.patch.object(crq, "pid_alive", return_value=False), \
              mock.patch.object(crq, "group_alive", return_value=True):
             self.assertIsNone(crq.harvest_review(q, item, False))
         self.assertEqual(item["state"], "reviewing")
         self.assertTrue((rdir / "exit.json").exists())
         self.assertEqual(item["attempts"], [])
+
+    def test_foreign_or_missing_managed_run_id_with_exit_retains(self):
+        for n, over in enumerate(({"run_id": "some-other-run"},
+                                  {"run_id": None},
+                                  {"group_owner": "foreground-v2"},
+                                  {"pgid": 222},          # pid != pgid
+                                  {"sid": 222},           # sid != pid
+                                  {"sid": 0})):
+            with self.subTest(over=over):
+                q = empty_queue()
+                rid = f"author-run-foreign-{n}"
+                item, rdir = self._item(q, rid, pidfile=self._managed(rid, **over), has_exit=True)
+                with mock.patch.object(crq, "pid_alive", return_value=False), \
+                     mock.patch.object(crq, "group_alive", return_value=False):
+                    self.assertIsNone(crq.harvest_review(q, item, False))
+                self.assertEqual(item["state"], "reviewing")
+                self.assertTrue((rdir / "exit.json").exists())
+
+    def test_legacy_pid_inconsistent_with_queue_pid_retains(self):
+        q = empty_queue()
+        item, _ = self._item(q, "author-run-pid-mismatch", pidfile={"pid": 111, "pgid": 222},
+                             has_exit=True)
+        item["run"]["pid"] = 999  # persisted queue pid disagrees with the recorded pid
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=False):
+            self.assertIsNone(crq.harvest_review(q, item, False))
+        self.assertEqual(item["state"], "reviewing")
+
+    def test_managed_current_run_without_persisted_pid_stays_covered(self):
+        # A crash before the queue pid is persisted leaves run["pid"] = None; a
+        # valid managed current run must still classify as managed.
+        q = empty_queue()
+        item, rdir = self._item(q, "author-run-nopid", pidfile=self._managed("author-run-nopid"))
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=False):
+            self.assertEqual(crq.run_liveness(rdir, item, item["run"], False), "ambiguous")
+        # with terminal evidence it is releasable (harvest), not blocked
+        (rdir / "exit.json").write_text(json.dumps({"exit": 0, "ended_at": crq.iso(), "timed_out": False}))
+        with mock.patch.object(crq, "pid_alive", return_value=False), \
+             mock.patch.object(crq, "group_alive", return_value=False):
+            self.assertEqual(crq.run_liveness(rdir, item, item["run"], True), "harvest")
 
     def test_dry_run_harvest_appends_no_events(self):
         q = empty_queue()
@@ -389,8 +458,8 @@ class HarvestTest(unittest.TestCase):
         (rdir / "meta.json").write_text(json.dumps({"run_id": run_id, "cycle": 1, "base": BASE,
                                                     "head": HEAD, "worktree": "/w", "wt_branch": "crq/w"}))
         (rdir / "review.ndjson").write_text("")
-        (rdir / "review.pid").write_text(json.dumps({"run_id": run_id, "pid": 111, "pgid": 222,
-                                                     "group_owner": MARKER}))
+        (rdir / "review.pid").write_text(json.dumps({"run_id": run_id, "pid": 111, "pgid": 111,
+                                                     "sid": 111, "group_owner": MARKER}))
         (rdir / "exit.json").write_text(json.dumps({"exit": exit_code, "ended_at": crq.iso(),
                                                     "timed_out": exit_code == 124}))
         return rdir
@@ -539,12 +608,12 @@ class WrapperGroupTest(unittest.TestCase):
             self.skipTest("timeout --foreground unavailable on this host")
         rid = "author-run-managed"
         argv = crq.review_wrapper_argv(["sleep", "20"], 5)
-        proc, rdir = self._spawn_runner(rid, argv, {"group_owner": MARKER})
+        proc, rdir = self._spawn_runner(rid, argv, {"group_owner": MARKER, "run_id": rid})
         try:
             self._crash(proc)
             pidfile = json.loads((rdir / "review.pid").read_text())
             self.assertNotIn("cli_pid", pidfile)               # the exact window
-            self.assertEqual(author_quota.identity_kind(pidfile), "managed")
+            self.assertEqual(author_quota.identity_kind(pidfile, run_id=rid), "managed")
             self.assertTrue(crq.group_alive(pidfile["pgid"]))  # wrapper+child live in the group
             q = empty_queue()
             item = self._item(q, rid)
@@ -689,6 +758,41 @@ class TickTest(unittest.TestCase):
             log = crq.tick(True, item["id"])
         launch.assert_not_called()
         self.assertTrue(any("DRY-RUN would start" in line for line in log))
+
+
+class DeadlineClassifyTest(unittest.TestCase):
+    """cmd_review_child records timed_out for a wrapper exit in (124, 137) and
+    infers no cause: a 137 may be an external KILL, not the deadline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.runs = Path(self.tmp.name) / "runs"
+        self.runs.mkdir(parents=True)
+        for name, value in (("RUNS", self.runs),
+                            ("CONFIG", {"review_timeout_min": 75, "timeout_bin": "timeout"})):
+            p = mock.patch.object(crq, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _exit(self, rc):
+        rid = f"deadline-{rc}"
+        rdir = self.runs / rid
+        rdir.mkdir(parents=True)
+        (rdir / "meta.json").write_text(json.dumps({"run_id": rid, "cmd": ["coderabbit", "review"],
+                                                    "worktree": "/w"}))
+        with mock.patch.object(crq.subprocess, "Popen",
+                               return_value=SimpleNamespace(pid=5, wait=lambda: rc)):
+            crq.cmd_review_child(rid)
+        return json.loads((rdir / "exit.json").read_text())
+
+    def test_timed_out_covers_124_and_137_only(self):
+        for rc in (124, 137):
+            with self.subTest(rc=rc):
+                self.assertTrue(self._exit(rc)["timed_out"])
+        for rc in (0, 1, 143):
+            with self.subTest(rc=rc):
+                self.assertFalse(self._exit(rc)["timed_out"])
 
 
 class ObservationTest(unittest.TestCase):
