@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Detached repair drain. Never writes queue.json or calls GitHub/push."""
-import concurrent.futures
+import argparse
 import copy
 import datetime as dt
 import fcntl
@@ -10,6 +10,7 @@ import random
 from zoneinfo import ZoneInfo
 from crq_repair import atomic, command, git, utc, verify
 from crq_repair.drivers import cq, codex, paseo
+from crq_repair.bounded import select_job, source_snapshot
 
 ROOT = Path(__file__).resolve().parent
 
@@ -34,6 +35,9 @@ def mechanical(config, wt, base, commits, job, directory):
 
 def dispatch(config, role, job, wt, directory, judge=False):
     directory.mkdir(parents=True, exist_ok=True)
+    job = copy.deepcopy(job)
+    job['source_snapshot'] = source_snapshot(config, job)
+    atomic(directory / 'source-snapshot.json', job['source_snapshot'])
     if role['driver'] == 'cq':
         if judge:
             return cq.judge(config, role, job, wt, directory)
@@ -62,6 +66,8 @@ def process(config, job, wt):
     job['window'] = selected
     roles = {name: copy.deepcopy(values[selected]) for name, values in repair['roles'].items()}
     result = {'job': job['job'], 'item': job['item'], 'repair_base': job['repair_base'],
+              'source_sha': job['source_sha'], 'finding_sha256': job['finding_sha256'],
+              'origin_job': job['origin_job'],
               'verdict': 'FAILED', 'reason': '', 'commits': [], 'attempts': [], 'judge': None,
               'worktree': str(wt), 'started_at': utc(), 'window': selected}
     if result_path.exists():
@@ -207,11 +213,19 @@ def process_item(config, jobs):
             base = res['commits'][-1]
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Explicit one-job repair only; never drain the inbox')
+    parser.add_argument('--job')
+    parser.add_argument('--source-sha')
+    parser.add_argument('--finding-sha256')
+    args = parser.parse_args(argv)
     config = json.loads((ROOT / 'config.json').read_text())
     repair = config.get('repair', {})
     if not repair.get('enabled') or not repair.get('spend_authorization'):
         print('repair dispatch disabled: existing spend authorization not verified')
+        return
+    if not args.job or not args.source_sha or not args.finding_sha256:
+        print('repair dispatch disabled: explicit job/source/finding selection required; no automatic inbox drain')
         return
     # Validate all configured paid lanes before any A0 spend. Missing hard
     # budget support is an activation prerequisite, never a soft prompt promise.
@@ -231,14 +245,8 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        groups = {}
-        for path in sorted((directory / 'inbox').glob('*.json')):
-            job = json.loads(path.read_text())
-            groups.setdefault(job['item'], []).append(job)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=repair.get('max_concurrent', 3)) as executor:
-            futures = [executor.submit(process_item, config, jobs) for jobs in groups.values()]
-            for future in futures:
-                future.result()
+        job = select_job(ROOT, config, args.job, args.source_sha, args.finding_sha256)
+        process_item(config, [job])
 
 
 if __name__ == '__main__':

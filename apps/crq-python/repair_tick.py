@@ -4,6 +4,55 @@ import json
 from pathlib import Path
 import re
 from crq_repair import atomic, findings, git as wt_git, verify
+from crq_repair.bounded import identity, job_path, source_path, validate_revalidation
+
+
+def prepare_current_job(c, q, old_job_id, source_sha, evidence):
+    """Locked operator preparation, not dispatch or a historical-job disposition."""
+    old = json.loads(job_path(c.ROOT, old_job_id).read_text())
+    if old.get('job') != old_job_id:
+        raise ValueError('historical job identity mismatch')
+    validate_revalidation(c.CONFIG, old, source_sha, evidence)
+    item = next(i for i in q['items'] if i['id'] == old['item'])
+    old_record = item.get('repair_runs', {}).get(old['run'])
+    if not old_record or old_job_id not in old_record.get('jobs', []):
+        raise ValueError('historical finding lacks tick-owned repair evidence')
+    token = identity({'origin_job': old_job_id, 'source_sha': source_sha,
+                      'evidence': evidence})[:24]
+    run = 'revalidated-' + token
+    job_id = 'crq-' + run + '-F1'
+    existing = item.get('repair_runs', {}).get(run)
+    if existing:
+        return job_id
+    history = [r for i in q['items'] if i.get('pr') == item.get('pr')
+               for r in i.get('repair_runs', {}).values()]
+    count = sum(r.get('pin') == source_sha for r in history)
+    if count >= c.CONFIG['repair'].get('max_rounds_per_pin', 2):
+        raise ValueError('repair round ceiling reached for current source pin')
+    # Scan the FULL pinned file, not just the tip commit's changed lines.
+    # The same path-scoped denylist and gitleaks policy precedes any model use.
+    source_file = source_path(old['finding'])
+    text = c.run(['git', 'show', source_sha + ':' + source_file], cwd=c.CLONE).stdout
+    patch = 'diff --git a/' + source_file + ' b/' + source_file + '\n--- /dev/null\n+++ b/' + source_file + '\n'
+    patch += '@@ -0,0 +1,' + str(len(text.splitlines())) + ' @@\n'
+    patch += '\n'.join('+' + line for line in text.splitlines()) + '\n'
+    scan_path = c.STATE / 'repair/preparation' / (run + '-secret-scan.json')
+    scan_path.parent.mkdir(parents=True, exist_ok=True)
+    clean, _ = c.secret_scan_diff(patch, scan_path, base=None, head=source_sha)
+    if not clean:
+        raise ValueError('current-tip preparation secret scan failed')
+    job = {**old, 'job': job_id, 'run': run, 'cycle': None, 'kind': 'merged',
+           'repair_base': source_sha, 'branch': None, 'repair_round': count + 1,
+           'origin_job': old_job_id, 'source_sha': source_sha,
+           'finding_sha256': identity(old['finding']), 'revalidation': evidence,
+           'prior': None, 'recurrence': False}
+    atomic(job_path(c.ROOT, job_id), job)
+    item.setdefault('repair_runs', {})[run] = {
+        'jobs': [job_id], 'pin': source_sha, 'base': source_sha, 'branch': None,
+        'open_pr': False, 'round': count + 1, 'state': 'queued',
+        'origin_job': old_job_id, 'revalidation_sha256': identity(evidence)}
+    c.save_queue(q)
+    return job_id
 
 
 def own_range(c, q, base, head):
@@ -77,6 +126,9 @@ def harvest(c, q, item, dry=False):
             expected = json.loads((c.STATE / 'repair/inbox' / (job_id + '.json')).read_text())
             if result.get('job') != job_id or result.get('item') != item['id']:
                 raise ValueError('repair result identity mismatch')
+            if expected.get('source_sha') and any(result.get(k) != expected.get(k)
+                    for k in ('source_sha', 'finding_sha256', 'origin_job')):
+                raise ValueError('prepared repair result source/evidence binding mismatch')
             if result.get('verdict') == 'FIXED':
                 wt = Path(result['worktree']).resolve()
                 root = c.WT_ROOT.resolve()

@@ -187,6 +187,11 @@ def denylist_rules() -> List[Dict[str, str]]:
 def secret_scan(base: str, head: str, out: Path) -> Tuple[bool, Dict[str, Any]]:
     """Scan added AND removed lines of base..head. Never records matched content."""
     diff = git("diff", "--no-color", "--no-ext-diff", "--unified=0", base, head)
+    return secret_scan_diff(diff, out, base=base, head=head)
+
+
+def secret_scan_diff(diff: str, out: Path, *, base=None, head=None) -> Tuple[bool, Dict[str, Any]]:
+    """Use identical denylist/gitleaks policy for prepared source evidence."""
     rules = denylist_rules()
     compiled = [(r["id"], re.compile(r["regex"]), re.compile(r["path"]) if "path" in r else None) for r in rules]
     allow = [re.compile(p) for p in ALLOWLIST_PATHS]
@@ -2543,6 +2548,10 @@ def main() -> int:
     p = sub.add_parser("init")
     p.add_argument("--force", action="store_true")
     sub.add_parser("measure")
+    p = sub.add_parser("repair-prepare", help="prepare ONE new current-tip job from a revalidated historical finding; never dispatch")
+    p.add_argument("job")
+    p.add_argument("--source-sha", required=True)
+    p.add_argument("--revalidation", required=True, help="JSON evidence binding finding digest, source SHA/blob and named reviewer")
     p = sub.add_parser("tick")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("start", help="tick restricted to one item (still honours cap/cooldown/secret scan)")
@@ -2579,6 +2588,14 @@ def main() -> int:
         with_lock(cmd_init, args.force)
     elif args.cmd == "measure":
         with_lock(cmd_measure)
+    elif args.cmd == "repair-prepare":
+        def prepare():
+            evidence = json.loads(Path(args.revalidation).read_text())
+            job_id = repair_tick.prepare_current_job(sys.modules[__name__], load_queue(),
+                                                    args.job, args.source_sha, evidence)
+            event("repair_prepared", origin_job=args.job, job=job_id, source_sha=args.source_sha)
+            print(job_id)
+        with_lock(prepare)
     elif args.cmd in ("tick", "start"):
         only = getattr(args, "item", None)
         out = with_lock(tick, args.dry_run, only, getattr(args, "ignore_quiet", False))
