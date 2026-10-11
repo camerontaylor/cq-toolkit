@@ -99,13 +99,24 @@ describe('github-settings.json: the committed D13 target', () => {
     expect(TEMPLATE).toContain('"{{PROMOTER_APP_ID}}"');
   });
 
-  it('names exactly the three rulesets and five environments', () => {
+  it('names exactly the four rulesets and five environments', () => {
     const settings = target();
     expect(settings.rulesets.map((r) => r.name)).toEqual([
       'cq-r0-history',
       'cq-r1-main',
+      'cq-c2-replay-marker',
       'cq-r2-merge-queue',
     ]);
+    // C2 step 1: the replay-marker ruleset ships in settings-as-code only — the
+    // owner applies it from their terminal at step 5. Pin the exact payload.
+    const marker = settings.rulesets.find((r) => r.name === 'cq-c2-replay-marker') as RuleObject;
+    expect(marker.target).toBe('branch');
+    expect(marker.enforcement).toBe('active');
+    expect(marker.conditions).toEqual({
+      ref_name: { include: ['refs/heads/cq/*'], exclude: [] },
+    });
+    expect(marker.rules.map((r) => r.type)).toEqual(['deletion', 'non_fast_forward']);
+    expect(marker.bypass_actors).toEqual([]);
     expect(Object.keys(settings.environments).sort()).toEqual([
       'adversarial-scratch',
       'automation',
@@ -123,9 +134,13 @@ describe('github-settings.json: the committed D13 target', () => {
       { actor_id: PROMOTER, actor_type: 'Integration', bypass_mode: 'always' },
       { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
     ]);
-    const checks = params(settings.rulesets[2] as RuleObject, 'required_status_checks')[
-      'required_status_checks'
-    ] as { context: string; integration_id: number }[];
+    // By name, not index: the C2 marker ruleset sits at index 2 between the two
+    // legacy rulesets (the queue ruleset carries the required checks).
+    const r2 = settings.rulesets.find((r) => r.name === 'cq-r2-merge-queue') as RuleObject;
+    const checks = params(r2, 'required_status_checks')['required_status_checks'] as {
+      context: string;
+      integration_id: number;
+    }[];
     expect(checks.filter((c) => c.context.startsWith('cq/'))).toEqual([
       { context: 'cq/policy', integration_id: VERDICT },
       { context: 'cq/ratchet', integration_id: VERDICT },

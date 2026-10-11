@@ -170,7 +170,6 @@
             "pull_request_review_comment",
             "push",
             "schedule",
-            "status",
             "workflow_dispatch",
             "workflow_run"
           ]

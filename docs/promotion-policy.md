@@ -105,7 +105,7 @@ The executable order (the plan is the source of truth; this checklist records it
 2. **Deliver it through the LAST old-gate promotion.** Merge the PR, cut the batch, run
    the full signer review, and let the old gate push `S` (dispatching it with the `sha`
    input if needed).
-3. **Hard freeze: stop ceres tick, pause, inert marker, disable + drain BOTH gates.**
+3. **Hard freeze: stop the crq tick timer, pause, inert marker, disable + drain BOTH gates.**
    The crq tick timer stops (after the active service finishes), crq pauses, the
    runner-disabled marker lands, and both gate workflows are disabled and drained.
 4. **Bootstrap `refs/heads/cq/promoted` at `S` once** — a guarded fast-forward that
@@ -113,7 +113,7 @@ The executable order (the plan is the source of truth; this checklist records it
 5. **OWNER applies the `cq-c2-replay-marker` ruleset** — deletion + non_fast_forward on
    `refs/heads/cq/*`, no bypass actors; ordinary fast-forwards by the promoter credential
    keep working.
-6. **Enable the new gate, resume ceres, certify a completed `noop`** at equal refs (a
+6. **Enable the new gate, resume crq, certify a completed `noop`** at equal refs (a
    green `noop` alone never certifies promotion — the completed run does).
 7. **First new-gate promotion via an ordinary non-protected docs PR**, with exact-head
    independent acceptance and green required CI, dispatched with `--ref main` and no `sha`
