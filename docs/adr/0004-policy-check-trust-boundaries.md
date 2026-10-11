@@ -4,7 +4,7 @@
 - **Date:** 2026-09-24
 - **Related:** [ADR-0002 Annex B](0002-annex-b-config.md) (secret keys and their environments)
 
-Post-acceptance notes N7, N8, N9, N16 and N17 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N7, N8, N9, N16, N17 and N19 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## Context
 
@@ -210,6 +210,11 @@ This binds every consumer: the gate, `self-merge-prs`/`classifyPr`, `self-review
   - **R2** (`merge-queue`): required status checks `cq/policy`, `cq/ratchet` and `cq/acceptance`, each with expected source = verdict App, **plus "require a pull request"** (a cheap belt: a direct push of a commit already carrying verdicts would otherwise pass R2; the D-K.3 closure refuses it at the gate anyway). **No App bypass**; admin bypass only for break-glass.
 - **sync-merge-queue** goes **through a PR** (the automation App opens `sync/main→merge-queue`), so its merge commit is judged like any PR and admitted by the closure rule.
 - **Environments** `cq-verdict`, `promote`, `automation` and `drill`, each with the exact default-branch-only policy (D-D.1).
+
+  > Narrowed: D-I's list also covers the `adversarial-scratch` environment the
+  > settings template declares, whose credential identity is decided by
+  > post-acceptance note N19 in the [ADR index](README.md#post-acceptance-notes).
+
 - **Repository Actions event policy** (`POST/GET /repos/{owner}/{repo}/actions/policies`, proven available and enforced on a user-owned public repo): an explicit `restrict_action_events` allow-list naming exactly the events the shipped workflows use:
   - `push`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `workflow_run`, `workflow_dispatch`, `schedule`;
   - plus `pull_request_target` only if an informational job is opted in.

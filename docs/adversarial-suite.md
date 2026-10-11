@@ -86,14 +86,30 @@ release PRs #216, #228, or #229.
 The dispatch environment `adversarial-scratch` needs a primary credential in
 `CQ_ADVERSARIAL_TOKEN` scoped to the scratch repo and a **different account's**
 credential in `CQ_ADVERSARIAL_SECOND_TOKEN` with permission to review its PRs.
-It also needs `CQ_ADVERSARIAL_PROFILE_TOKEN`, an owner or installed App token
-with scratch repository Variables read/write and access to list environments
-and their variables; the outsider trust check reads `CQ_MERGE_TRUSTED_*` with
-it as well. GitHub's repository Actions variable API expresses the
-§3.1 keys; environment overrides are inspected and block the profile if found.
-The available owner credential created the repository and PR,
-but it is a broad owner credential and is not provisioned to the dispatch
-environment. None of these environment secrets is currently confirmed.
+Its scratch-administration credential — scratch repository Variables
+read/write plus the environments-list read the profile checks perform — is
+the dedicated **cq-adversarial-scratch** App's identity (owner decision
+2026-10-11; ADR-0004 note N19): the App is installed on the scratch repository
+only, never on cq-toolkit, with Variables read/write and Environments read,
+nothing else. The workflow mints a scratch-repo installation token per run
+from the `CQ_ADVERSARIAL_APP_KEY` environment secret and the
+`CQ_ADVERSARIAL_APP_CLIENT_ID` repository variable; a static installation
+token expires with nothing to re-mint it, and dispatch-only drills need no
+refresh path when they mint per run. Until the App is registered the mint
+step is skipped and the interim `CQ_ADVERSARIAL_PROFILE_TOKEN` PAT drives the
+same runner. The mint step continues on error so a failed mint never aborts
+the job before the runner records per-row BLOCKED evidence: the interim PAT
+fallback applies only while the client id is empty (App not yet registered),
+and once the client id is set a failed mint yields an empty token whose
+preflight records per-row BLOCKED evidence (exit 3), never PASS. The primary and outsider identities stay the two interim PATs
+until the runner's preflight learns to verify non-human identities — N19
+records that rework as the prerequisite for revoking those PATs at C3 — and
+all three interim names are gone at C3 either way. GitHub's repository
+Actions variable API expresses the §3.1 keys; environment overrides are
+inspected and block the profile if found. The available owner credential
+created the repository and PR, but it is a broad owner credential and is not
+provisioned to the dispatch environment. None of these environment secrets is
+currently confirmed.
 
 The scratch repository is public, so the second identity needs no access grant
 to read or review the fixture PR. The preflight still rejects a second identity
@@ -112,7 +128,10 @@ rather than the full default row set.
 
 The `adversarial-scratch` environment is declared in
 `policy/templates/github-settings.json` with a main-only deployment branch
-policy and a secret-name allowlist. A write collaborator can dispatch from any
+policy and a secret-name allowlist: the end-state `CQ_ADVERSARIAL_APP_KEY`
+plus three interim PAT names (`CQ_ADVERSARIAL_TOKEN`,
+`CQ_ADVERSARIAL_SECOND_TOKEN`, `CQ_ADVERSARIAL_PROFILE_TOKEN`), which drift
+reports as notices until C3 removes them. A write collaborator can dispatch from any
 branch, and that ref's copy of the workflow controls the shell, so the
 in-step ref check is not the boundary: the live environment must carry this
 policy (settings drift reports it otherwise), and an A14 test fails if a
