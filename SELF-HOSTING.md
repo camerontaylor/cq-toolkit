@@ -162,15 +162,17 @@ Interim credentials (reported by the drift check until C3):
 
 - `PROMOTE_TOKEN` — the promotion PAT. Read by the legacy
   `merge-queue-gate` (repository-level during C1) and by `cq-gate` only at
-  its push. While `CQ_AUTOMATION_TOKEN` is absent it is also the sync/init
-  fallback, but only with the explicit opt-in
-  (`CQ_AUTOMATION_INTERIM_FALLBACK` non-empty) — the fallback is never
-  silent — and opening the sync PR then needs Pull requests read/write.
-  Re-scope it to a fine-grained PAT with only Contents read/write, Workflows
-  write and Metadata read once `CQ_AUTOMATION_TOKEN` exists (owner step 2),
-  never before.
-- `CQ_AUTOMATION_TOKEN` — the sync PR, the init bootstrap and the baseline
-  proposals (Pull requests read/write, Contents write).
+  its push. It is no longer a sync/init fallback: `sync-merge-queue` and
+  `init-merge-queue` now mint the `cq-automation` App's token per run, and
+  the `CQ_AUTOMATION_INTERIM_FALLBACK` opt-in variable is retired. Re-scope it
+  to a fine-grained PAT with only Contents read/write, Workflows write and
+  Metadata read (owner step 2), never before.
+- `CQ_AUTOMATION_TOKEN` — retired as a runtime credential: no workflow reads
+  it any more. `sync-merge-queue`, `init-merge-queue`, `ratchet-propose`,
+  `self-merge-prs` and `self-review-loop` all mint the `cq-automation` App's
+  installation token per run from `CQ_AUTOMATION_APP_KEY` and the
+  `CQ_AUTOMATION_APP_CLIENT_ID` variable. The secret is revoked/deleted at C3
+  with the other interim PATs; until then the drift check still notices it.
 - `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
   Environments, Secrets, Actions: read) for the drift check.
 
@@ -196,17 +198,19 @@ Owner steps, in order (the RS-11 wizard outline):
    install them on this repository only, and set the four App variables
    (each id together with its client id) — including the repository
    variable `CQ_AUTOMATION_APP_CLIENT_ID` (the `cq-automation` App's
-   client id): `self-review-loop`'s mint step is gated on it and fails
-   closed without it.
+   client id): every automation mint step (`self-review-loop`,
+   `self-merge-prs`, `sync-merge-queue`, `init-merge-queue`,
+   `ratchet-propose`) is gated on it and handles its absence honestly
+   (the loop refuses, sync refuses, init fails loudly, and the two
+   optional dispatches skip).
 2. Create the four environments with the `main`-only branch policy; put
    each App key and interim secret into its environment above. In
-   particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
-   step 3: `sync-merge-queue` and `init-merge-queue` fall back to
-   `PROMOTE_TOKEN` only while it is a repository-level secret AND the
-   explicit opt-in variable `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty
-   (an `automation` job cannot read a secret held in `promote`). Skip this
-   and step 3 disarms sync (the behind/diverged sync PR fails with "sync
-   not armed"), and init fails with no checkout credential.
+   particular, provision `CQ_AUTOMATION_APP_KEY` in `automation` now, before
+   step 3: every automation job mints the `cq-automation` App's installation
+   token per run from that key plus `CQ_AUTOMATION_APP_CLIENT_ID`, so there
+   is no stored automation PAT to provision. Skip this and step 3 disarms
+   sync (the behind/diverged sync PR fails with "sync not armed"), init
+   fails with no checkout credential, and the scheduled dispatches no-op.
    **Hazard in this step's window (before step 3 arms the trust set): do
    not break-glass push to `main`.** A break-glass push leaves `main` with
    commits `merge-queue` lacks (un-ancestored), so every promotion refuses
