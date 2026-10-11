@@ -96,6 +96,7 @@ def coverage_candidate(queue, ledger, *, merge_queue_sha, ordinary_eligible,
                            for c in i.get("cycles", []))]
     for item in repair_debt:
         excluded.update(_path(p) for p in item.get("coverage_paths", []))
+        excluded.update(_path(p) for p in (item.get("measure") or {}).get("synthetic_paths", []))
     active = [i for i in outstanding if i not in repair_debt]
     # One outstanding coverage item prevents repeated enrollment and respects
     # backoff/blocked work. Completed repair debt is retained, not resolved here.

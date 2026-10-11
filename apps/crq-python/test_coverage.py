@@ -65,6 +65,16 @@ class CoverageRepairDebtTest(unittest.TestCase):
             {"path": AFFECTED, "now": UNRELATED, "synthetic_added": 10}]
         self.assertIsNone(candidate(q, min_age_hours=0))
 
+    def test_stored_repair_rename_alias_remains_reserved(self):
+        old_alias = "legacy/template.md"
+        for old_path, current in ((old_alias, UNRELATED), (UNRELATED, old_alias)):
+            with self.subTest(old_path=old_path, current=current):
+                q = queue()
+                q["items"][1]["measure"] = {"synthetic_paths": [AFFECTED, old_alias]}
+                q["items"][0]["measure"]["files"] = [
+                    {"path": old_path, "now": current, "synthetic_added": 10}]
+                self.assertIsNone(candidate(q, min_age_hours=0))
+
     def test_uncounted_failed_and_interrupted_reviews_do_not_release_slot(self):
         for counted, outcome in ((False, "completed"), (True, "error"),
                                  (True, "interrupted"), (True, "failed")):
