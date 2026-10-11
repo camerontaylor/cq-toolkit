@@ -64,7 +64,7 @@ something lands or which rule applies. The plan itself is not published.
 
 ## Post-acceptance notes
 
-Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19), each set rechecked
+Recorded 2026-10-08 (N1–N10) and 2026-10-11 (N11–N17, N19–N20), each set rechecked
 against `merge-queue` the same day. Each note names the accepted text, what
 changed or remains open, and where the current source of truth is.
 
@@ -329,7 +329,8 @@ write`, and the automation App is the merger/propose/reply identity the
   token expires with nothing to re-mint it; dispatch-only drills need no
   refresh path when they mint per run. (The self-review loop's identity
   note, PR #303, defers its per-run minting as a behavior change; here the
-  mint step ships with this change.)
+  mint step ships with this change. That deferral is now landed for the
+  review loop by N20.)
 - **The three PAT names are interim, gone at C3.** The settings template
   moves all three to `interimSecrets`. `CQ_ADVERSARIAL_PROFILE_TOKEN` is
   consumed only until the App is registered (the mint step is
@@ -348,3 +349,23 @@ write`, and the automation App is the merger/propose/reply identity the
 
 N8's open question is resolved for this environment (non-human credentials,
 no exception); the `drill` environment's question remains open.
+
+### N20 — ADR-0004 D-D.2: the self-review loop mints its `cq-automation` App token per run
+
+PR #303's self-review-loop identity note recorded the App as the recommended
+end state but deferred the per-run mint as a separately scoped behavior
+change: a static installation-token secret expires with nothing to re-mint
+it, so the loop ran on a long-lived PAT until a refresh path existed.
+
+**Change:** the loop's privileged job in
+[`policy/templates/self-host/self-review-loop.yml`](../../policy/templates/self-host/self-review-loop.yml)
+now mints a `cq-automation` installation token per run — the pattern PR #307
+shipped for the adversarial drills — from the `automation` environment secret
+`CQ_AUTOMATION_APP_KEY` and the `CQ_AUTOMATION_APP_CLIENT_ID` Actions
+variable, scoped to this repository only. It is fail-closed: the schedule has
+no fallback identity, so an empty client-id variable or a failed mint refuses
+the run (the loop step asserts the minted token) rather than posting as a PAT
+or the runner's `GITHUB_TOKEN`. The mint requests only Pull requests write
+(review replies, thread resolves), Contents write (review-fix pushes) and
+Issues write (top-level PR comments). `self-merge-prs` keeps
+`{{SELFHOST_TOKEN}}`; its mint is out of scope here.

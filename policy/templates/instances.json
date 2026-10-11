@@ -81,7 +81,6 @@
       "workflow": "self-review-loop.yml",
       "template": "self-host/self-review-loop.yml",
       "tokens": {
-        "SELFHOST_TOKEN": "GH_TOKEN",
         "SELFHOST_DRIVER_KEY": "Z_AI_API_KEY"
       }
     },
