@@ -51,8 +51,9 @@ parent: `merge-queue`; children: none (T5.2 branches from the promoted
   [docs/dod-evidence.md](docs/dod-evidence.md) (PR #201, `3edc4bb`); the soak
   criterion itself is a recorded **NOT MET** phase-4 deviation whose fix is
   owner action (`CQ_AUTOMATION_APP_KEY` + `CQ_AUTOMATION_APP_CLIENT_ID`; the
-  original `secrets.GH_TOKEN` fix is superseded — C3 T3 / PR #316, no workflow
-  reads `GH_TOKEN` any more).
+  original `secrets.GH_TOKEN` fix is superseded — C3 T3 / PR #316, no
+  _self-host_ workflow reads `GH_TOKEN` any more; the `drill` environment's
+  `GH_TOKEN` for `live-review` is separate and unaffected).
 
 ## Invariants exercised
 
@@ -261,8 +262,9 @@ commit as any code).
   process PRs — the soak is a recorded **NOT MET** phase-4 deviation
   ([SELF-HOSTING.md](SELF-HOSTING.md), [docs/dod-evidence.md](docs/dod-evidence.md)).
   **Correction (2026-10-14, C3 T3 / PR #316):** the original fix named here
-  was `secrets.GH_TOKEN`, which is superseded — no workflow reads it; both
-  scheduled workflows mint the `cq-automation` App token per run instead.
+  was `secrets.GH_TOKEN`, which is superseded — no _self-host_ workflow reads
+  it (the `drill` `GH_TOKEN` for `live-review` is unaffected); both scheduled
+  workflows mint the `cq-automation` App token per run instead.
 - **DoD 4 ADR**: flip ADR-0001 to accepted in the research repo (still
   `proposed`).
 - **Fixtures matrix (ws-j)**: the phase-4 exit gate recorded 2 FAIL rows and 1

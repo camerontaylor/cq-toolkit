@@ -26,7 +26,9 @@ promotion run.
 > from the `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
 > `CQ_AUTOMATION_APP_CLIENT_ID` repository variable, so the DoD-2 soak
 > follow-up is provisioning those two — **not** a `GH_TOKEN` PAT, which no
-> workflow reads. The historical NOT MET record and the red-run description
+> _self-host_ workflow reads (the `drill` environment's `GH_TOKEN` for
+> `live-review` is a separate, still-live credential and is not affected).
+> The historical NOT MET record and the red-run description
 > below stand as the phase-4 state; see
 > [ADR-0004 note N22](docs/adr/README.md#post-acceptance-notes) and
 > [`policy/templates/self-host/README.md`](policy/templates/self-host/README.md).
@@ -50,8 +52,9 @@ but a red run is not processing: no PR was classified, replied to, resolved,
 or merged by the automations. Every PR in the window was merged by the lane
 leader. Configuring `GH_TOKEN` (owner: phase 5) is the follow-up that lets
 the scheduled automations process PRs directly; it is recorded here rather
-than hidden. **(Superseded 2026-10-14: see the correction above — no workflow
-reads `GH_TOKEN`; provision `CQ_AUTOMATION_APP_KEY` +
+than hidden. **(Superseded 2026-10-14: see the correction above — no
+_self-host_ workflow reads `GH_TOKEN` (the `drill` `GH_TOKEN` for
+`live-review` is unaffected); provision `CQ_AUTOMATION_APP_KEY` +
 `CQ_AUTOMATION_APP_CLIENT_ID` instead.)**
 
 ## Queue promotions

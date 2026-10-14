@@ -119,7 +119,9 @@ be re-run and recorded. Evidence: [`SELF-HOSTING.md`](../SELF-HOSTING.md)
 §Soak, [`docs/dod-evidence.md`](dod-evidence.md) DoD 2.
 
 > **Superseded (2026-10-14, C3 T3 / PR #316).** Do **not** provision
-> `secrets.GH_TOKEN`: no workflow reads it. The scheduled workflows mint the
+> `secrets.GH_TOKEN` for these workflows: no _self-host_ workflow reads it
+> (the `drill` environment's `GH_TOKEN`, which `live-review` uses, is a
+> separate credential and is unaffected). The scheduled workflows mint the
 > registered `cq-automation` App's installation token per run from the
 > `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
 > `CQ_AUTOMATION_APP_CLIENT_ID` repository variable (ADR-0004 notes N20/N22;
