@@ -92,7 +92,7 @@ class FakeTransport implements CrqWireTransport {
       messageId: Number(message['message_id']),
       ackSequence: this.nextAck,
       reservationSequence: this.nextAck,
-      requestSha256: 'e'.repeat(64),
+      requestSha256: sentEnvelopeDigest(message),
       inputTokens: 1000,
       reservedOutputTokens: 8000,
       totalTokens: 9000,
@@ -131,6 +131,27 @@ const usage: CrqWireUsage = {
 
 /** Let the microtask queue drain, so a held reserve really reaches the transport. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** A genuine runtime guard: the fixture never casts the sent envelope. */
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The digest the fixture must ECHO: the digest of the envelope the wrapper actually
+ * SENT, read with a runtime guard (no cast, no coercion, no fixed literal).
+ */
+function sentEnvelopeDigest(message: Readonly<Record<string, unknown>>): string {
+  const envelope = message['envelope'];
+  if (!isRecord(envelope)) {
+    throw new CrqWireRefusal('the fixture requires an envelope object on the reserve frame');
+  }
+  const digest = envelope['digest'];
+  if (typeof digest !== 'string' || digest.length === 0) {
+    throw new CrqWireRefusal('the fixture requires a non-empty envelope digest');
+  }
+  return digest;
+}
 
 function wrapper(
   transport: FakeTransport,

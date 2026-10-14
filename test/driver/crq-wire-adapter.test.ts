@@ -114,7 +114,7 @@ class FakeTransport implements CrqWireTransport {
       messageId: Number(message['message_id']),
       ackSequence: this.reserved,
       reservationSequence: this.reserved,
-      requestSha256: 'e'.repeat(64),
+      requestSha256: sentEnvelopeDigest(message),
       inputTokens: 10,
       reservedOutputTokens: 4000,
       totalTokens: 4010,
@@ -325,6 +325,28 @@ const OUTCOME_KEYS = [
   'repair_of_ack_sequence',
 ];
 
+/** A genuine runtime guard: the fixture never casts the sent envelope. */
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The digest the fixture must ECHO: the digest of the envelope the adapter actually
+ * SENT, read with a runtime guard (no cast, no coercion, no fixed literal). A host
+ * acknowledgement that returns anything else is refused by the source binding.
+ */
+function sentEnvelopeDigest(message: Readonly<Record<string, unknown>>): string {
+  const envelope = message['envelope'];
+  if (!isRecord(envelope)) {
+    throw new CrqWireRefusal('the fixture requires an envelope object on the reserve frame');
+  }
+  const digest = envelope['digest'];
+  if (typeof digest !== 'string' || digest.length === 0) {
+    throw new CrqWireRefusal('the fixture requires a non-empty envelope digest');
+  }
+  return digest;
+}
+
 /**
  * A STRICT transport: it refuses an unknown field, a non-string session id or a
  * client-supplied wire ordinal, so a frame defect fails here instead of being
@@ -335,6 +357,8 @@ class StrictTransport implements CrqWireTransport {
   public outcomeCalls = 0;
   public lastOutcome: Readonly<Record<string, unknown>> | null = null;
   public holdNextReserve = false;
+  /** Deliberately return a WRONG digest so the source binding must refuse it. */
+  public mangleDigest = false;
   private release: (() => void) | null = null;
   private acks = 0;
 
@@ -370,7 +394,7 @@ class StrictTransport implements CrqWireTransport {
       messageId: Number(message['message_id']),
       ackSequence: this.acks,
       reservationSequence: this.acks,
-      requestSha256: 'e'.repeat(64),
+      requestSha256: this.mangleDigest ? 'f'.repeat(64) : sentEnvelopeDigest(message),
       inputTokens: 10,
       reservedOutputTokens: 4000,
       totalTokens: 4010,
@@ -434,6 +458,23 @@ describe('composed adapter: strict frames and the reserve-in-flight lock', () =>
     // resolved instance, so the string is refused before any wrap (no cast).
     const gateway: LanguageModel = 'anthropic/claude-sonnet-4';
     expect(() => adapter.wrapModel(gateway)).toThrow(/resolved language-model instance/);
+  });
+
+  it('refuses a host acknowledgement whose digest does not bind the sent envelope', async () => {
+    const transport = new StrictTransport();
+    transport.mangleDigest = true;
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      transport,
+    });
+    // A host ack that returns a different request digest must be REFUSED: the source
+    // binding is the only thing that ties the ack to the document the wire carried.
+    await expect(adapter.reserve(receiptFor(projectionWith(null)))).rejects.toThrow(
+      /canonical request digest/,
+    );
+    expect(transport.reserveCalls).toBe(1);
   });
 
   it('sends the exact strict reserve and outcome frames, with a STRING session id', async () => {
