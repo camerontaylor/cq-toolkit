@@ -84,7 +84,11 @@ export interface CrqWireTransport {
    */
   attestHost(): Promise<boolean>;
   /** `hello`: bind this activation's identity and learn the session id. */
-  hello(identity: CrqWireIdentity, provider: string, model: string): Promise<{ sessionId: string; remainingMilliseconds: number }>;
+  hello(
+    identity: CrqWireIdentity,
+    provider: string,
+    model: string,
+  ): Promise<{ sessionId: string; remainingMilliseconds: number }>;
   /** `reserve`: durably reserve one wire and return the host's acknowledgement. */
   reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }>;
   /** `outcome`: report the outcome of one acked wire call. */
@@ -125,25 +129,48 @@ export class CrqWireRefusal extends Error {}
 const HEX = /^[0-9a-f]*$/;
 
 /** Build the LOCKED 11-field C1 envelope, or refuse. The token claims are zeros. */
-export function bridgeEnvelope(encoder: CrqCanonicalEncoder, projection: Readonly<Record<string, unknown>>, provider: string, model: string): CrqBridgeEnvelope {
+export function bridgeEnvelope(
+  encoder: CrqCanonicalEncoder,
+  projection: Readonly<Record<string, unknown>>,
+  provider: string,
+  model: string,
+): CrqBridgeEnvelope {
   if (encoder.protocol !== 'crq/request-projection/v1') {
-    throw new CrqWireRefusal('the canonical encoder does not carry the request-projection protocol');
+    throw new CrqWireRefusal(
+      'the canonical encoder does not carry the request-projection protocol',
+    );
   }
   if (encoder.version !== 1) {
     throw new CrqWireRefusal('the canonical encoder is not protocol version 1');
   }
   const bytes = encoder.projectionHex(projection);
   const digest = encoder.projectionDigest(projection);
-  if (typeof bytes !== 'string' || bytes.length === 0 || bytes.length % 2 !== 0 || !HEX.test(bytes)) {
-    throw new CrqWireRefusal('the canonical projection bytes are not a bounded lowercase hex document');
+  if (
+    typeof bytes !== 'string' ||
+    bytes.length === 0 ||
+    bytes.length % 2 !== 0 ||
+    !HEX.test(bytes)
+  ) {
+    throw new CrqWireRefusal(
+      'the canonical projection bytes are not a bounded lowercase hex document',
+    );
   }
   if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
     throw new CrqWireRefusal('the canonical projection digest is not a 64-hex sha256');
   }
   return {
-    protocol: encoder.protocol, version: encoder.version, digest, bytes, projection: null, provider, model,
+    protocol: encoder.protocol,
+    version: encoder.version,
+    digest,
+    bytes,
+    projection: null,
+    provider,
+    model,
     // The sender's token numbers are NOT authority; they are zeros, never the local count.
-    countedInput: 0, reserveOutputTokens: 0, tokens: 0, cumulativeTokens: 0,
+    countedInput: 0,
+    reserveOutputTokens: 0,
+    tokens: 0,
+    cumulativeTokens: 0,
   };
 }
 
@@ -175,12 +202,16 @@ export class CrqWireWrapper {
   private async session(): Promise<string> {
     const { encoder, transport, identity, provider, model } = this.options;
     if (encoder === undefined || transport === undefined) {
-      throw new CrqWireRefusal('the CRQ wire requires an injected canonical encoder and an authenticated transport');
+      throw new CrqWireRefusal(
+        'the CRQ wire requires an injected canonical encoder and an authenticated transport',
+      );
     }
     if (this.sessionId !== null) return this.sessionId;
     const attested = await transport.attestHost();
     if (attested !== true) {
-      throw new CrqWireRefusal('the transport could not independently attest the host peer; refusing the wire');
+      throw new CrqWireRefusal(
+        'the transport could not independently attest the host peer; refusing the wire',
+      );
     }
     const ready = await transport.hello(identity, provider, model);
     if (typeof ready.sessionId !== 'string' || ready.sessionId.length === 0) {
@@ -202,19 +233,25 @@ export class CrqWireWrapper {
   enterRepairStage(): void {
     if (this.repairStageActive) return;
     if (this.repairStageCompleted) {
-      throw new CrqWireRefusal('a second completed repair stage is not permitted for this role attempt');
+      throw new CrqWireRefusal(
+        'a second completed repair stage is not permitted for this role attempt',
+      );
     }
     if (this.lastAck === null) {
       throw new CrqWireRefusal('no authoritative prior ack to repair; refusing the repair stage');
     }
     const status = this.outcomeStatus.get(this.lastAck.ackSequence);
     if (status === undefined) {
-      throw new CrqWireRefusal('the prior ack has no recorded outcome (pending or unaudited); refusing the repair stage');
+      throw new CrqWireRefusal(
+        'the prior ack has no recorded outcome (pending or unaudited); refusing the repair stage',
+      );
     }
     if (status !== 'completed') {
       // UNKNOWN or refused is TERMINAL: the host may refuse later, but a local repair entry on
       // an unknown outcome is already wrong - the accepted contract throws here.
-      throw new CrqWireRefusal(`the prior wire outcome is ${status}; a repair stage requires an ACCEPTED outcome`);
+      throw new CrqWireRefusal(
+        `the prior wire outcome is ${status}; a repair stage requires an ACCEPTED outcome`,
+      );
     }
     this.repairStageActive = true;
   }
@@ -241,7 +278,9 @@ export class CrqWireWrapper {
   private async reserveOnce(): Promise<CrqWireAck> {
     const { encoder, transport, identity, provider, model, projection } = this.options;
     if (encoder === undefined || transport === undefined) {
-      throw new CrqWireRefusal('the CRQ wire requires an injected canonical encoder and an authenticated transport');
+      throw new CrqWireRefusal(
+        'the CRQ wire requires an injected canonical encoder and an authenticated transport',
+      );
     }
     const sessionId = await this.session();
     // LOCAL GATE: a new send is refused locally unless the prior wire's outcome was ACCEPTED.
@@ -256,25 +295,45 @@ export class CrqWireWrapper {
     // the repair supersedes and repairs the wrapper's own last authoritative ack.
     const repairing = this.repairStageActive && this.lastAck !== null;
     const message = {
-      method: 'reserve', session_id: sessionId, message_id: messageId,
-      job: identity.job, source_sha: identity.sourceSha, finding_sha256: identity.findingSha256,
-      authorization_sha256: identity.authorizationSha256, role: identity.role, rung: identity.rung,
-      window: identity.window, driver: 'cq', provider, model,
+      method: 'reserve',
+      session_id: sessionId,
+      message_id: messageId,
+      job: identity.job,
+      source_sha: identity.sourceSha,
+      finding_sha256: identity.findingSha256,
+      authorization_sha256: identity.authorizationSha256,
+      role: identity.role,
+      rung: identity.rung,
+      window: identity.window,
+      driver: 'cq',
+      provider,
+      model,
       // The logical attempt identity is IMMUTABLE across retries of this wrapper.
       logical_attempt_id: `${identity.job}:${identity.role}:${String(identity.rung)}:${identity.window}`,
       supersedes_ack_sequence: supersedes,
       kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
-      envelope, wire_output_ceiling: envelope.countedInput + 1,
-      repair_of_ack_sequence: repairing ? this.lastAck?.ackSequence ?? null : null,
+      envelope,
+      wire_output_ceiling: envelope.countedInput + 1,
+      repair_of_ack_sequence: repairing ? (this.lastAck?.ackSequence ?? null) : null,
     };
     const reply = await transport.reserve(message);
     if (!('ackSequence' in reply)) {
-      throw new CrqWireRefusal(`the host refused the wire: ${String((reply as { refused: string }).refused)}`);
+      throw new CrqWireRefusal(
+        `the host refused the wire: ${String((reply as { refused: string }).refused)}`,
+      );
     }
-    if (reply.messageId !== messageId || typeof reply.ackSequence !== 'number' || reply.ackSequence < 1) {
+    if (
+      reply.messageId !== messageId ||
+      typeof reply.ackSequence !== 'number' ||
+      reply.ackSequence < 1
+    ) {
       throw new CrqWireRefusal('the host acknowledgement does not bind this message');
     }
-    if (typeof reply.remainingMilliseconds !== 'number' || !Number.isInteger(reply.remainingMilliseconds) || reply.remainingMilliseconds <= 0) {
+    if (
+      typeof reply.remainingMilliseconds !== 'number' ||
+      !Number.isInteger(reply.remainingMilliseconds) ||
+      reply.remainingMilliseconds <= 0
+    ) {
       throw new CrqWireRefusal('the host acknowledgement carries no usable remaining time');
     }
     this.messageId = messageId;
@@ -287,7 +346,13 @@ export class CrqWireWrapper {
    * reported: a retry reports its own ack, a JSON repair reports its own ack, and a
    * missing/unknown usage is reported as null so the host stops continuation.
    */
-  async outcome(kind: CrqWireOutcomeKind, usage: CrqWireUsage | null, stopReason: string | null, errorClass: string | null, repairOf: number | null = null): Promise<void> {
+  async outcome(
+    kind: CrqWireOutcomeKind,
+    usage: CrqWireUsage | null,
+    stopReason: string | null,
+    errorClass: string | null,
+    repairOf: number | null = null,
+  ): Promise<void> {
     const { transport } = this.options;
     if (transport === undefined) {
       throw new CrqWireRefusal('no authenticated transport is injected');
@@ -301,10 +366,18 @@ export class CrqWireWrapper {
     const identity = this.options.identity;
     this.messageId += 1;
     await transport.outcome({
-      method: 'outcome', session_id: this.sessionId, message_id: this.messageId,
-      job: identity.job, source_sha: identity.sourceSha, finding_sha256: identity.findingSha256,
-      authorization_sha256: identity.authorizationSha256, ack_sequence: ack,
-      outcome: kind, usage, stop_reason: stopReason, error_class: errorClass,
+      method: 'outcome',
+      session_id: this.sessionId,
+      message_id: this.messageId,
+      job: identity.job,
+      source_sha: identity.sourceSha,
+      finding_sha256: identity.findingSha256,
+      authorization_sha256: identity.authorizationSha256,
+      ack_sequence: ack,
+      outcome: kind,
+      usage,
+      stop_reason: stopReason,
+      error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
     this.outcomeStatus.set(ack, kind);

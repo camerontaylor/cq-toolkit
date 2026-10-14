@@ -56,7 +56,9 @@ class FakeTransport implements CrqWireTransport {
     return { sessionId: `session-${String(this.sessions)}`, remainingMilliseconds: 600_000 };
   }
 
-  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+  async reserve(
+    message: Readonly<Record<string, unknown>>,
+  ): Promise<CrqWireAck | { refused: string }> {
     this.calls.push('reserve');
     this.lastReserve = message;
     if (this.refuseNext) return { refused: 'the host refused the durable reservation' };
@@ -94,7 +96,10 @@ const usage: CrqWireUsage = {
   total: 950,
 };
 
-function wrapper(transport: FakeTransport, over: Partial<{ encoder: CrqCanonicalEncoder }> = {}): CrqWireWrapper {
+function wrapper(
+  transport: FakeTransport,
+  over: Partial<{ encoder: CrqCanonicalEncoder }> = {},
+): CrqWireWrapper {
   return new CrqWireWrapper({
     encoder: over.encoder ?? encoder,
     transport,
@@ -109,8 +114,17 @@ describe('bridgeEnvelope', () => {
   it('nests the locked 11-field envelope with zeroed sender claims', () => {
     const value = bridgeEnvelope(encoder, PROJECTION, 'zai', 'glm-5.3-flash');
     expect(Object.keys(value).sort()).toEqual([
-      'bytes', 'countedInput', 'cumulativeTokens', 'digest', 'model', 'projection',
-      'protocol', 'provider', 'reserveOutputTokens', 'tokens', 'version',
+      'bytes',
+      'countedInput',
+      'cumulativeTokens',
+      'digest',
+      'model',
+      'projection',
+      'protocol',
+      'provider',
+      'reserveOutputTokens',
+      'tokens',
+      'version',
     ]);
     expect(value.countedInput).toBe(0);
     expect(value.tokens).toBe(0);
@@ -119,19 +133,24 @@ describe('bridgeEnvelope', () => {
   });
 
   it('refuses a foreign protocol or version', () => {
-    expect(() => bridgeEnvelope({ ...encoder, protocol: 'crq/other/v1' }, PROJECTION, 'p', 'm'))
-      .toThrow(CrqWireRefusal);
-    expect(() => bridgeEnvelope({ ...encoder, version: 2 }, PROJECTION, 'p', 'm'))
-      .toThrow(CrqWireRefusal);
+    expect(() =>
+      bridgeEnvelope({ ...encoder, protocol: 'crq/other/v1' }, PROJECTION, 'p', 'm'),
+    ).toThrow(CrqWireRefusal);
+    expect(() => bridgeEnvelope({ ...encoder, version: 2 }, PROJECTION, 'p', 'm')).toThrow(
+      CrqWireRefusal,
+    );
   });
 
   it('refuses non-hex bytes or a malformed digest', () => {
-    expect(() => bridgeEnvelope({ ...encoder, projectionHex: () => 'zz' }, PROJECTION, 'p', 'm'))
-      .toThrow(CrqWireRefusal);
-    expect(() => bridgeEnvelope({ ...encoder, projectionHex: () => 'abc' }, PROJECTION, 'p', 'm'))
-      .toThrow(CrqWireRefusal);
-    expect(() => bridgeEnvelope({ ...encoder, projectionDigest: () => 'short' }, PROJECTION, 'p', 'm'))
-      .toThrow(CrqWireRefusal);
+    expect(() =>
+      bridgeEnvelope({ ...encoder, projectionHex: () => 'zz' }, PROJECTION, 'p', 'm'),
+    ).toThrow(CrqWireRefusal);
+    expect(() =>
+      bridgeEnvelope({ ...encoder, projectionHex: () => 'abc' }, PROJECTION, 'p', 'm'),
+    ).toThrow(CrqWireRefusal);
+    expect(() =>
+      bridgeEnvelope({ ...encoder, projectionDigest: () => 'short' }, PROJECTION, 'p', 'm'),
+    ).toThrow(CrqWireRefusal);
   });
 });
 
@@ -146,7 +165,9 @@ describe('CrqWireWrapper', () => {
     expect(transport.lastReserve?.['method']).toBe('reserve');
     expect(transport.lastReserve?.['job']).toBe(IDENTITY.job);
     expect(transport.lastReserve?.['supersedes_ack_sequence']).toBe(0);
-    expect(transport.lastReserve?.['envelope']).toMatchObject({ protocol: 'crq/request-projection/v1' });
+    expect(transport.lastReserve?.['envelope']).toMatchObject({
+      protocol: 'crq/request-projection/v1',
+    });
   });
 
   it('reuses one session across wires but supersedes the previous ack on a retry', async () => {
@@ -165,12 +186,18 @@ describe('CrqWireWrapper', () => {
   it('refuses without an injected encoder or transport', async () => {
     const transport = new FakeTransport();
     const noEncoder = new CrqWireWrapper({
-      transport, identity: IDENTITY, provider: 'zai', model: 'glm-5.3-flash',
+      transport,
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
       projection: () => PROJECTION,
     });
     await expect(noEncoder.reserve()).rejects.toThrow(CrqWireRefusal);
     const noTransport = new CrqWireWrapper({
-      encoder, identity: IDENTITY, provider: 'zai', model: 'glm-5.3-flash',
+      encoder,
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
       projection: () => PROJECTION,
     });
     await expect(noTransport.reserve()).rejects.toThrow(CrqWireRefusal);
@@ -209,7 +236,9 @@ describe('CrqWireWrapper', () => {
   it('reports usage for the acked wire and refuses an unreported outcome', async () => {
     const transport = new FakeTransport();
     const wire = wrapper(transport);
-    await expect(wire.outcome('completed', usage, 'end_turn', null)).rejects.toThrow(CrqWireRefusal);
+    await expect(wire.outcome('completed', usage, 'end_turn', null)).rejects.toThrow(
+      CrqWireRefusal,
+    );
     const ack = await wire.reserve();
     await wire.outcome('completed', usage, 'end_turn', null);
     expect(transport.outcomes).toHaveLength(1);
@@ -228,8 +257,12 @@ describe('CrqWireWrapper', () => {
   it('marks a judge role as the judge kind', async () => {
     const transport = new FakeTransport();
     const wire = new CrqWireWrapper({
-      encoder, transport, identity: { ...IDENTITY, role: 'judge' }, provider: 'zai',
-      model: 'glm-5.3-flash', projection: () => PROJECTION,
+      encoder,
+      transport,
+      identity: { ...IDENTITY, role: 'judge' },
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      projection: () => PROJECTION,
     });
     await wire.reserve();
     expect(transport.lastReserve?.['kind']).toBe('judge');
@@ -257,13 +290,13 @@ describe('CrqWireWrapper', () => {
     expect(() => wire.enterRepairStage()).toThrow(/no recorded outcome/);
   });
 
-  it('links the repair wire to the wrapper\'s own prior ack and refuses a second stage', async () => {
+  it("links the repair wire to the wrapper's own prior ack and refuses a second stage", async () => {
     const transport = new FakeTransport();
     const wire = wrapper(transport);
     const first = await wire.reserve();
     await wire.outcome('completed', usage, 'end_turn', null);
     wire.enterRepairStage();
-    wire.enterRepairStage();   // idempotent ONLY while the same stage is active
+    wire.enterRepairStage(); // idempotent ONLY while the same stage is active
     const repair = await wire.reserve();
     wire.exitRepairStage();
     expect(transport.lastReserve?.['kind']).toBe('repair');
