@@ -188,6 +188,34 @@
       },
       "mustContain": ["<think></think>"],
       "mustNotContain": ["<think>OLD-THOUGHT</think>"]
+    },
+    {
+      "name": "tool schema with safe integers renders exactly",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "read",
+            "inputSchema": { "type": "object", "properties": { "n": { "type": "string", "maxLength": 10 } } }
+          }
+        ],
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "mustContain": ["\"maxLength\": 10"],
+      "mustNotContain": []
     }
   ],
   "refuse": [
@@ -196,7 +224,8 @@
     { "name": "unknown provider option", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": { "zai": { "max_tokens": 10 } }, "maxOutputTokens": 64 } },
     { "name": "thinking disabled", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": { "zai": { "thinking": { "type": "disabled" } } }, "maxOutputTokens": 64 } },
     { "name": "responseFormat present without hosted transform", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": { "type": "json" }, "providerOptions": null, "maxOutputTokens": 64 } },
-    { "name": "maxOutputTokens not a safe positive integer", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 0 } }
+    { "name": "maxOutputTokens not a safe positive integer", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 0 } },
+    { "name": "non-integral float in tool schema (JS/Python formatting differ)", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": [{ "type": "function", "name": "f", "inputSchema": { "type": "number", "minimum": 0.5 } }], "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 } }
   ],
   "monotonic": [
     {
