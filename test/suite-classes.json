@@ -15,6 +15,7 @@
   "test/driver/acp.test.ts": "integration",
   "test/driver/ai-sdk-pre-request-ceiling.test.ts": "process",
   "test/driver/ai-sdk.test.ts": "process",
+  "test/driver/canonical-projection.test.ts": "pure",
   "test/driver/claude-agent.sdk-presence.test.ts": "process",
   "test/driver/claude-agent.test.ts": "process",
   "test/driver/error-text.test.ts": "process",
