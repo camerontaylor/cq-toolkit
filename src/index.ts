@@ -280,6 +280,30 @@ export {
 // price map behind the derived-only costUSD rule.
 export type { AiSdkDriverOptions, ProviderFactory } from './driver/ai-sdk/index.js';
 export { AiSdkDriver } from './driver/ai-sdk/index.js';
+// The strict pre-request ceiling's CANONICAL cross-language bridge — the one
+// surface an out-of-process wrapper/ledger needs: the durable pre-wire receipt
+// type the hook receives (`WireReservation`) and the `crq/request-projection/v1`
+// encoder that lets the ledger reconstruct and RE-DERIVE the counted projection
+// instead of trusting the sender's token counts. Re-export only, no logic. The
+// authenticated identity (job/source/finding/authorization/role/rung/window/
+// sequence) is deliberately NOT part of this surface: it is host state.
+export type {
+  PreRequestCeilingOptions,
+  StrictTokenCapability,
+  WireReservation,
+} from './driver/ai-sdk/pre-request-ceiling.js';
+export {
+  buildCountedProjection,
+  canonicalProjectionBytes,
+  canonicalProjectionBytesHex,
+  canonicalProjectionDigest,
+  canonicalProjectionDigestOf,
+  CanonicalProjectionUnrepresentableError,
+  CANONICAL_PROJECTION_DOMAIN,
+  CANONICAL_PROJECTION_PROTOCOL,
+  CANONICAL_PROJECTION_VERSION,
+  COUNTED_PROJECTION_FIELDS,
+} from './driver/ai-sdk/canonical-projection.js';
 export type { PerMillionRates, PriceTable } from './driver/pricing/index.js';
 export { computeCostUSD, priceOf } from './driver/pricing/index.js';
 export { PRICE_TABLE } from './driver/pricing/data.js';

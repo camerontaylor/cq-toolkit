@@ -133,17 +133,25 @@ abort settles `'aborted'`.
 `AiSdkDriverOptions.strictTokenReservationHook` (also
 `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`) is the durable
 pre-wire reservation point for an external ledger: it receives the resolved
-model identity and a TS-LOCAL `countableProjectionDigest` — sha256 over the
-countable projection only, EXCLUDING headers/abortSignal/includeRawChunks, so
-it is not a whole-wire digest. The hook is ABORT-AWARE: it races the run's live
-signal, so a hung hook settles the cancellation (keeping the local charge — no
-refund) instead of wedging the run, and no params reach the wire on abort. It
-is NOT the Python
-`token_guard.request_sha256` canonical sorted-ASCII form and is not
-interoperable with an external ledger; a shared cross-language canonical
-projection protocol does not exist and is an activation blocker for that
-bridge. With no hook the shared token allowance is enforced per-invocation
-only — a named gap, not a whole-job claim.
+model identity plus the CANONICAL cross-language projection of the counted
+snapshot — `canonicalProjectionDigest` (the protocol sha256), the exact
+`canonicalProjectionBytesHex` and `canonicalProjectionProtocol`. The projection
+excludes headers/credentials/abortSignal/includeRawChunks, and the authenticated
+identity (job/source/finding/authorization/role/rung/window/sequence) is NOT in
+it. The hook is ABORT-AWARE: it races the run's live signal, so a hung hook
+settles the cancellation (keeping the local charge — no refund) instead of
+wedging the run, and no params reach the wire on abort. A Python ledger strictly
+decodes those bytes, re-derives the digest and re-measures the request with its
+own trusted counter and the authorization caps; it never trusts the receipt's
+token counts. When a shared whole-job allowance rides the run and no hook is
+configured, the lane REFUSES (reason `whole-job-hook-absent`, kind `error`)
+rather than claim a per-invocation bound as a whole-job one. The
+`src/driver/ai-sdk/canonical-projection.ts` grammar is shared with Python
+`crq_repair/canonical.py`; the shared vectors live in
+`test/driver/canonical-projection-vectors.ts` and are identical to the Python
+CRQ vectors at union `a13c6e4c`, where the Python reproduction test passed under
+an independent runner. On this head the TypeScript side is NOT executed in-lane
+and the pair has no independent review, so no interoperability is claimed.
 The one driver-side temporal bound is the SDK call's per-request
 `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot

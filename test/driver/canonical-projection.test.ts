@@ -4,9 +4,13 @@
 // vectors.
 //
 // SCOPE OF EVIDENCE: these tests exercise the TypeScript encoder against vectors
-// that the SAME TypeScript implementation produced. They do NOT prove
-// cross-language equality — the Python reproduction test is authored but NOT RUN
-// in this lane — and no interoperability is claimed.
+// that the SAME TypeScript implementation produced. They do NOT, by themselves,
+// prove cross-language equality. The Python reproduction test
+// (test_canonical_projection.py) does reproduce these exact vectors — it ran OK
+// over the CRQ union a13c6e4c under an independent runner — but the TypeScript
+// side is NOT executed in this lane (execution is centralized on Neptune) and the
+// pair has no independent review of THIS head, so no interoperability is claimed
+// here.
 import { Buffer } from 'node:buffer';
 import { describe, expect, test } from 'vitest';
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider';
@@ -185,6 +189,49 @@ describe('counted projection shape', () => {
     const digest = canonicalProjectionDigest(buildCountedProjection(params));
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  test('the authenticated identity is NOT in the canonical document', () => {
+    // The canonical domain carries the counted fields ONLY. Job/source/finding/
+    // authorization/role/rung/window/sequence are host-bound identity: they must
+    // never reach the canonical bytes, so a reader cannot be fooled into treating
+    // a caller-supplied identity as authenticated.
+    const projection = buildCountedProjection({
+      prompt: 'hi',
+      job: 'crq-run-20260101T000000Z-F1',
+      source_sha: 'a'.repeat(40),
+      finding_sha256: 'b'.repeat(64),
+      authorization_digest: 'c'.repeat(64),
+      role: 'fixer',
+      rung: 2,
+      window: '2026-01-01T00:00:00Z/2026-01-01T00:10:00Z',
+      sequence: 7,
+    });
+    expect(Object.keys(projection).sort()).toEqual([...COUNTED_PROJECTION_FIELDS].sort());
+    const hex = canonicalProjectionBytesHex(projection);
+    for (const needle of [
+      'crq-run-20260101T000000Z-F1',
+      'a'.repeat(40),
+      'b'.repeat(64),
+      'c'.repeat(64),
+      'fixer',
+      'window',
+      'sequence',
+      'authorization',
+    ]) {
+      expect(hex).not.toContain(Buffer.from(needle, 'utf8').toString('hex'));
+    }
+  });
+
+  test('the domain tag is part of the document, so digests are domain-separated', () => {
+    const value = { prompt: 'hi' };
+    expect(canonicalProjectionBytesHex(value)).toContain(
+      Buffer.from(CANONICAL_PROJECTION_DOMAIN, 'utf8').toString('hex'),
+    );
+    const foreign = canonicalProjectionDigestOf(
+      canonicalProjectionBytes(value, 'crq/ledger-binding/v2'),
+    );
+    expect(foreign).not.toBe(canonicalProjectionDigest(value));
+  });
 });
 
 describe('strict refusals beyond JSON', () => {
@@ -214,6 +261,40 @@ describe('strict refusals beyond JSON', () => {
 
   test('a function value is refused', () => {
     expect(() => canonicalProjectionBytes({ fn: () => 1 })).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+  });
+
+  test('a symbol value is refused', () => {
+    expect(() => canonicalProjectionBytes(Symbol('nope'))).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+    expect(() => canonicalProjectionBytes({ sym: Symbol('nope') })).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+  });
+
+  test('binary buffers and typed arrays are refused (not silently framed as maps)', () => {
+    // Buffer.from([0]) is what the `bytes` vector descriptor builds; a Uint8Array
+    // is a non-plain object, and JSON.stringify would turn it into an object of
+    // numeric keys — a shape the other language would misread.
+    expect(() => canonicalProjectionBytes(Buffer.from([0]))).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+    expect(() => canonicalProjectionBytes(new Uint8Array([1, 2]))).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+  });
+
+  test('an array or object nested past the depth limit is refused', () => {
+    let tooDeep: unknown = 'bottom';
+    for (let i = 0; i <= 64; i += 1) tooDeep = [tooDeep];
+    expect(() => canonicalProjectionBytes(tooDeep)).toThrow(
+      CanonicalProjectionUnrepresentableError,
+    );
+    let objectDeep: unknown = 'bottom';
+    for (let i = 0; i <= 64; i += 1) objectDeep = { nested: objectDeep };
+    expect(() => canonicalProjectionBytes(objectDeep)).toThrow(
       CanonicalProjectionUnrepresentableError,
     );
   });

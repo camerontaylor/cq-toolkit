@@ -39,28 +39,51 @@
 // the bound silently. A capability that cannot faithfully bound a request
 // shape must THROW, never under-count — the throw is refused before the wire.
 //
-// SHARED WHOLE-JOB ALLOWANCE — BRIDGE IS EXPLICIT, AND INCOMPLETE. When the
-// governing gate supplies `RunOptions.reservation.tokens`, the cumulative
-// reservation over this run must fit inside it. That cumulative is
-// PER-INVOCATION: it is not reset mid-run, but a NEW invocation starts at zero,
-// so without an external ledger the allowance is consumed locally only. The
-// `onBeforeWireReserve` hook is the explicit, durable pre-wire reservation
-// point an out-of-process ledger (CRQ) must implement; it is exposed through
-// `AiSdkDriverOptions.strictTokenReservationHook` /
+// SHARED WHOLE-JOB ALLOWANCE — BRIDGE IS EXPLICIT AND CANONICAL. When the
+// governing gate supplies `RunOptions.reservation.tokens` the lane claims a
+// shared whole-job bound, so the cumulative reservation over this run must fit
+// inside it AND the lane must have somewhere durable to record it. The
+// `onBeforeWireReserve` hook is that durable pre-wire reservation point; it is
+// exposed through `AiSdkDriverOptions.strictTokenReservationHook` /
 // `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`, and its receipt
-// carries the model identity plus a TS-LOCAL `countableProjectionDigest`
-// (sha256 over the countable projection only, excluding headers/abortSignal).
-// That digest is NOT the Python `token_guard.request_sha256` canonical form
-// and is NOT a whole-wire digest, so an external ledger CANNOT bind it. A
-// shared cross-language canonical projection protocol does not exist and is an
-// ACTIVATION BLOCKER for the external bridge. The driver supplies NO hook by
-// default, so cross-invocation whole-job enforcement remains a NAMED GAP, not
-// a claim.
+// carries the resolved model identity plus the CANONICAL cross-language
+// projection digest (`canonicalProjectionDigest`), the exact canonical bytes
+// (`canonicalProjectionBytesHex`) and the protocol tag
+// (`canonicalProjectionProtocol`) — see canonical-projection.ts and its shared
+// byte+digest vectors. A receiving Python ledger reconstructs the projection
+// from those bytes with a strict decoder and re-derives the digest; it never
+// trusts the receipt's token counts. When a shared allowance is claimed but NO
+// hook is configured the lane REFUSES the run: a per-run, per-invocation check
+// is not a whole-job bound, and claiming one would be dishonest. With no shared
+// allowance the per-request ceiling still binds locally (that is a named
+// per-invocation bound, not a whole-job claim).
+//
+// THE IDENTITY SPLIT. The canonical document carries the COUNTED FIELDS ONLY.
+// The authenticated identity — job, source, finding, authorization digest, role,
+// rung, window and the wire sequence — is deliberately OUTSIDE the canonical
+// domain: the sequence is assigned by the durable host ledger under its lock and
+// returned to the caller, never proposed by the worker, and the rest is host
+// state bound by the authorization object. The driver therefore supplies
+// CONTENT identity (what was counted), never authority (who may spend).
+//
+// EVIDENCE BOUND. The shared vectors in test/driver/canonical-projection-vectors.ts
+// are identical field-for-field to the Python CRQ vectors at union a13c6e4c (26
+// positives + 13 refusals; same names, same bytesHex and sha256), and the Python
+// reproduction test PASSED there under an independent runner (543 tests, OK). On
+// THIS head the TypeScript side has NOT been executed in this lane (execution is
+// centralized on Neptune) and no independent review of the integrated pair has
+// happened, so this worktree claims no interoperability and no CI.
 import { wrapLanguageModel } from 'ai';
 import type { LanguageModel, LanguageModelMiddleware } from 'ai';
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider';
-import { createHash } from 'node:crypto';
 import type { ModelSpec, StrictTokenBudget } from '../types.js';
+import {
+  buildCountedProjection,
+  canonicalProjectionBytes,
+  canonicalProjectionDigestOf,
+  CanonicalProjectionUnrepresentableError,
+  CANONICAL_PROJECTION_PROTOCOL,
+} from './canonical-projection.js';
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
@@ -188,16 +211,15 @@ function failClosedReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
- * The driver's COUNTABLE PROJECTION — the deterministic serialization handed
- * to a capability's `count` and the byte stream the
- * `countableProjectionDigest` is taken over. It carries every tokenizable
- * field of the normalized request — prompt (system + messages + history),
- * tools, tool choice, response format, sampling/token settings and
- * providerOptions — in a fixed key order. It DELIBERATELY EXCLUDES `headers`
- * (credentials never enter the counted text, the digest, or any log),
- * `abortSignal` (non-serializable) and `includeRawChunks`: it is NOT a
- * whole-wire serialization. Throws {@link UnrepresentableRequestError} on a
- * shape JSON cannot represent.
+ * The TEXT handed to a capability's `count`: the countable fields of the
+ * normalized request as fixed-order JSON. It carries every tokenizable field —
+ * prompt (system + messages + history), tools, tool choice, response format,
+ * sampling/token settings and providerOptions. It DELIBERATELY EXCLUDES `headers`
+ * (credentials never enter the counted text or any log), `abortSignal`
+ * (non-serializable) and `includeRawChunks`: it is NOT a whole-wire
+ * serialization. The wire DIGEST is taken over the canonical projection instead
+ * (see canonical-projection.ts), not over this text. Throws
+ * {@link UnrepresentableRequestError} on a shape JSON cannot represent.
  */
 export function serializeRequestForCounting(params: LanguageModelV4CallOptions): string {
   const countable = {
@@ -255,8 +277,10 @@ export type PreRequestCeilingRefusalReason =
   | 'reservation-overflow'
   /** The cumulative reservation would exceed the shared whole-job allowance. */
   | 'whole-job-allowance'
-  /** The durable external reservation hook refused or failed. */
+  /** The durable external reservation hook refused or was not configured though a whole-job bound was claimed. */
   | 'reservation-not-written'
+  /** A shared whole-job allowance was claimed but no durable reservation hook exists. */
+  | 'whole-job-hook-absent'
   /** The prepared request changed after the durable reservation (defense in depth). */
   | 'request-mutated';
 
@@ -389,21 +413,26 @@ export interface WireReservation {
   /** The model id the run resolved (from the run's ModelSpec). */
   readonly model: string;
   /**
-   * TS-LOCAL COUNTABLE-PROJECTION sha256 (hex): the digest of this driver's
-   * countable projection only — the fixed-order JSON of prompt, tools,
-   * toolChoice, responseFormat, providerOptions and the sampling/token
-   * settings, UTF-8. It EXCLUDES headers, abortSignal and includeRawChunks:
-   * it is NOT a digest of the whole wire request and carries no credentials.
+   * THE canonical cross-language request-projection sha256 (hex) — the digest of
+   * the counted projection under the `crq/request-projection/v1` protocol, the
+   * SAME value a Python ledger computes for the same projection. It covers
+   * exactly the counted fields (prompt, tools, toolChoice, responseFormat,
+   * providerOptions, the sampling/token settings and the applied output ceiling)
+   * and EXCLUDES headers, credentials, abortSignal and includeRawChunks. An
+   * external ledger reconstructs the projection from `canonicalProjectionBytesHex`
+   * with a strict decoder and re-derives this digest; it never trusts
+   * `countedInput`/`tokens`/`cumulativeTokens`.
    *
-   * It is NOT the Python `token_guard.request_sha256` (canonical sorted-ASCII
-   * JSON), NOT a whole-wire digest, and NOT interoperable with any external
-   * ledger. A shared cross-language canonical projection protocol does not
-   * exist yet, so an external bridge CANNOT bind this value as a
-   * request_sha256 — that canonical protocol is an ACTIVATION BLOCKER for the
-   * external bridge. Use it only as a TS-local identity for the frozen
-   * snapshot the count was taken over.
+   * Interoperability is NOT yet claimed: the shared vectors are produced by this
+   * TypeScript implementation and the Python reproduction test is authored but
+   * NOT RUN, and the pair has no independent review.
    */
-  readonly countableProjectionDigest: string;
+  readonly canonicalProjectionDigest: string;
+  /** The exact canonical document bytes (lowercase hex) the digest is taken
+   *  over, so a receiver can strictly decode and re-derive rather than trust. */
+  readonly canonicalProjectionBytesHex: string;
+  /** The canonical protocol tag (`crq/request-projection/v1`). */
+  readonly canonicalProjectionProtocol: string;
 }
 
 /** Construction inputs for one run's ceiling. */
@@ -433,8 +462,10 @@ export interface PreRequestCeilingOptions {
    * instead of wedging the run, the local charge is kept (no refund), and no
    * params reach the wire on abort. The driver exposes it through
    * `AiSdkDriverOptions.strictTokenReservationHook`/
-   * `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`; when absent,
-   * cross-invocation whole-job enforcement is a named gap (see the header).
+   * `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`. When a shared
+   * whole-job allowance is supplied but this hook is absent the ceiling REFUSES
+   * (reason `whole-job-hook-absent`): a per-invocation check cannot honour a
+   * whole-job bound, so the lane never silently claims one.
    */
   readonly onBeforeWireReserve?: (reservation: WireReservation) => void | Promise<void>;
 }
@@ -500,6 +531,22 @@ export class PreRequestCeiling {
     if (signal !== undefined && signal.aborted) {
       throw abortRefusal(signal);
     }
+    // A claimed shared whole-job bound with NO durable hook is UNENFORCEABLE: a
+    // per-invocation cumulative check cannot bind across invocations, and the
+    // canonical pre-wire reservation (canonical-projection.ts + the operator's
+    // hook) is exactly the durable point that makes the claim real. Refuse
+    // BEFORE charging anything rather than silently downgrade a whole-job claim
+    // to a per-invocation one. This is a CONFIGURATION/INFRASTRUCTURE refusal —
+    // 'whole-job-hook-absent' is not a real cap, so it settles kind 'error',
+    // never 'budget'.
+    if (wholeJobTokenAllowance !== undefined && onBeforeWireReserve === undefined) {
+      throw this.refuse(
+        'whole-job-hook-absent',
+        `a shared whole-job token allowance (${wholeJobTokenAllowance}) was supplied but no durable reservation hook is configured; the lane cannot enforce a whole-job bound and refuses instead of claiming a per-invocation one`,
+        0,
+        0,
+      );
+    }
     // An existing ceiling must be a valid, honored cap that fits the reserve:
     // NaN/negative/fractional/Infinity must not slip past a `>` comparison.
     const existingCeiling = params.maxOutputTokens;
@@ -557,12 +604,23 @@ export class PreRequestCeiling {
     let wireRequest: LanguageModelV4CallOptions;
     let serialized: string;
     let counted: number;
+    let canonicalBytes: Buffer;
+    let canonicalDigest: string;
     try {
       wireRequest = snapshotPreparedRequest(prepared);
       serialized = serializeRequestForCounting(wireRequest);
       counted = capability.count(serialized);
+      // The canonical cross-language projection of the SAME frozen snapshot the
+      // count was taken over, encoded with the shared protocol. This is stricter
+      // than JSON: an integer-valued number beyond the safe range or a lone
+      // surrogate string refuses here rather than across the language boundary.
+      canonicalBytes = canonicalProjectionBytes(buildCountedProjection(wireRequest));
+      canonicalDigest = canonicalProjectionDigestOf(canonicalBytes);
     } catch (err) {
       if (err instanceof UnrepresentableRequestError) {
+        throw this.refuse('unrepresentable-request', err.message, 0, 0);
+      }
+      if (err instanceof CanonicalProjectionUnrepresentableError) {
         throw this.refuse('unrepresentable-request', err.message, 0, 0);
       }
       throw this.refuse(
@@ -633,7 +691,9 @@ export class PreRequestCeiling {
         reserveOutputTokens: budget.reserveOutputTokens,
         provider: modelSpec?.provider ?? '',
         model: modelSpec?.model ?? '',
-        countableProjectionDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+        canonicalProjectionDigest: canonicalDigest,
+        canonicalProjectionBytesHex: canonicalBytes.toString('hex'),
+        canonicalProjectionProtocol: CANONICAL_PROJECTION_PROTOCOL,
       };
       try {
         // Invoke the hook and race its settlement against the abort. A
@@ -658,12 +718,20 @@ export class PreRequestCeiling {
     }
     // POST-AWAIT REVALIDATION — defense in depth over the deep freeze. The
     // object about to be returned must still serialize BYTE-IDENTICALLY to the
-    // counted bytes and still carry a safe applied ceiling. Freeze should make
-    // this always hold; if it ever does not, the request is refused WITHOUT a
-    // refund (the local charge stays). There is no further await before return.
+    // counted bytes AND still re-encode to the SAME canonical document the
+    // receipt's digest was taken over, and must still carry a safe applied
+    // ceiling. Freeze should make this always hold; if it ever does not, the
+    // request is refused WITHOUT a refund (the local charge stays). There is no
+    // further await before return.
     let afterAwait: string;
+    let afterAwaitCanonical: string;
     try {
       afterAwait = serializeRequestForCounting(wireRequest);
+      // The digest the durable hook just recorded must describe EXACTLY the
+      // bytes that go to the wire, so re-encode the canonical projection of the
+      // SAME frozen snapshot and require byte identity.
+      const afterAwaitProjection = buildCountedProjection(wireRequest);
+      afterAwaitCanonical = canonicalProjectionBytes(afterAwaitProjection).toString('hex');
     } catch (err) {
       throw this.refuse(
         'request-mutated',
@@ -675,6 +743,7 @@ export class PreRequestCeiling {
     const finalCeiling = wireRequest.maxOutputTokens;
     if (
       afterAwait !== serialized ||
+      afterAwaitCanonical !== canonicalBytes.toString('hex') ||
       !Number.isSafeInteger(finalCeiling) ||
       (finalCeiling as number) < 1 ||
       (finalCeiling as number) > budget.reserveOutputTokens

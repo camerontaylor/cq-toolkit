@@ -20,6 +20,10 @@ import {
   UnrepresentableRequestError,
   wrapWithPreRequestCeiling,
 } from '../../src/driver/ai-sdk/pre-request-ceiling.js';
+import {
+  buildCountedProjection,
+  canonicalProjectionDigest,
+} from '../../src/driver/ai-sdk/canonical-projection.js';
 import type {
   PreRequestCeilingRefusalKind,
   PreRequestCeilingRefusalReason,
@@ -313,6 +317,59 @@ describe('PreRequestCeiling (unit)', () => {
     expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
   });
 
+  // -------------------------------------------------------------------------
+  // The CANONICAL projection is stricter than JSON. A request the counted JSON
+  // text can represent but the shared cross-language grammar cannot is refused
+  // BEFORE the commit, so it is never charged and the durable hook never runs.
+  // -------------------------------------------------------------------------
+
+  test('refuses an integer JSON can carry but the canonical grammar cannot, before charging', async () => {
+    const hookReceipts: WireReservation[] = [];
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: (receipt) => {
+        hookReceipts.push(receipt);
+      },
+    });
+    // 2**53 is a perfectly valid JSON number and JSON.stringify writes it, but
+    // it is NOT exactly representable as an integer in both languages, so the
+    // canonical encoder refuses instead of letting the two sides disagree.
+    const params = {
+      ...userPrompt('hi'),
+      providerOptions: invalidProviderOptions({ injected: { beyondSafe: 2 ** 53 } }),
+    };
+    expect(serializeRequestForCounting({ ...params, maxOutputTokens: 64 })).toContain(
+      '9007199254740992',
+    );
+    const err = await refusalFrom(() => ceiling.reserve(params));
+    expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
+    expect(err.kind).toBe('error');
+    expect(ceiling.requestCount).toBe(0);
+    expect(ceiling.reservedTokens).toBe(0);
+    expect(hookReceipts).toEqual([]);
+  });
+
+  test('refuses a lone-surrogate text that JSON would silently escape, before charging', async () => {
+    const hookReceipts: WireReservation[] = [];
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: (receipt) => {
+        hookReceipts.push(receipt);
+      },
+    });
+    const params = userPrompt('lone \uD800 surrogate');
+    // JSON.stringify escapes it, so the count succeeds; UTF-8 cannot encode it,
+    // so the canonical encoder must refuse rather than substitute U+FFFD.
+    expect(() => serializeRequestForCounting({ ...params, maxOutputTokens: 64 })).not.toThrow();
+    const err = await refusalFrom(() => ceiling.reserve(params));
+    expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
+    expect(ceiling.requestCount).toBe(0);
+    expect(ceiling.reservedTokens).toBe(0);
+    expect(hookReceipts).toEqual([]);
+  });
+
   test('refuses a cumulative reservation that exceeds the shared whole-job allowance', async () => {
     const params = userPrompt('hi');
     const perRequest =
@@ -322,6 +379,9 @@ describe('PreRequestCeiling (unit)', () => {
       budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
       capability: fakeCapability(),
       wholeJobTokenAllowance: perRequest,
+      // A claimed whole-job bound requires a durable hook (the lane refuses
+      // without one); this leg exercises the allowance check itself.
+      onBeforeWireReserve: () => {},
     });
     await ceiling.reserve(params); // fits exactly
     const err = await refusalFrom(() => ceiling.reserve(params));
@@ -329,6 +389,19 @@ describe('PreRequestCeiling (unit)', () => {
     // No refunds: the first reservation still stands.
     expect(ceiling.reservedTokens).toBe(perRequest);
     expect(ceiling.requestCount).toBe(1);
+  });
+
+  test('refuses a claimed whole-job allowance when no durable hook is configured', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      wholeJobTokenAllowance: 100_000,
+    });
+    const err = await refusalFrom(() => ceiling.reserve(userPrompt('hi')));
+    expect(reasonOfRefusal(err)).toBe('whole-job-hook-absent');
+    // The refusal is BEFORE the local commit: nothing was charged.
+    expect(ceiling.requestCount).toBe(0);
+    expect(ceiling.reservedTokens).toBe(0);
   });
 
   test('calls the durable hook AFTER the local commit, with model identity and a request digest', async () => {
@@ -355,7 +428,14 @@ describe('PreRequestCeiling (unit)', () => {
     expect(seen?.reserveOutputTokens).toBe(64);
     expect(seen?.provider).toBe('anthropic');
     expect(seen?.model).toBe('claude-test');
-    expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(seen?.canonicalProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(seen?.canonicalProjectionBytesHex).toMatch(/^[a-f0-9]+$/);
+    expect(seen?.canonicalProjectionProtocol).toBe('crq/request-projection/v1');
+    // The receipt digest BINDS the exact snapshot the count was taken over: it
+    // equals the canonical projection digest of the request that will be sent.
+    expect(seen?.canonicalProjectionDigest).toBe(
+      canonicalProjectionDigest(buildCountedProjection({ ...params, maxOutputTokens: 64 })),
+    );
     // The local charge was already committed when the hook ran.
     expect(reservedWhenCalled).toBe(counted + 64);
   });
@@ -586,6 +666,9 @@ describe('PreRequestCeiling (unit)', () => {
       'uncountable-request',
       'reservation-overflow',
       'reservation-not-written',
+      // A claimed whole-job bound with no durable hook is a CONFIGURATION
+      // failure, not a real cap: it must settle 'error', never 'budget'.
+      'whole-job-hook-absent',
       'request-mutated',
     ] as const) {
       expect(kindOf(reason)).toBe('error');
@@ -882,6 +965,10 @@ describe('ai-sdk driver strictTokenBudget', () => {
         },
         sessionsDir: join(scratch, 'sessions'),
         strictTokenCapability: () => fakeCapability(),
+        // A claimed shared whole-job bound REQUIRES a durable hook; without one
+        // the lane now refuses as a configuration error before charging. This
+        // leg exercises the allowance check itself, so it supplies one.
+        strictTokenReservationHook: () => {},
       });
       const result = await driver.run(
         invocation({
@@ -890,6 +977,41 @@ describe('ai-sdk driver strictTokenBudget', () => {
         { reservation: { id: 'r1', tokens: 1, overshootUsd: 0, class: 'hard' } },
       );
       expect(result.stopReason).toBe('budget');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a claimed shared whole-job reservation with NO durable hook settles error, not budget', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-nohook-'));
+    try {
+      let modelCalls = 0;
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({
+              modelId: 'claude-test',
+              doGenerate: () => {
+                modelCalls += 1;
+                return textResult('ok');
+              },
+            }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+        { reservation: { id: 'r1', tokens: 1, overshootUsd: 0, class: 'hard' } },
+      );
+      // A whole-job claim the lane cannot enforce is a CONFIGURATION failure:
+      // it settles the diagnostic 'error' verdict, never 'budget' (which ops
+      // surface as budget-exhausted, i.e. as a spender). The refusal is
+      // pre-wire, so the model is never called.
+      expect(result.stopReason).toBe('error');
+      expect(modelCalls).toBe(0);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -946,7 +1068,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
       expect(seen?.provider).toBe('anthropic');
       expect(seen?.model).toBe('claude-test');
       expect(seen?.reserveOutputTokens).toBe(64);
-      expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(seen?.canonicalProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -981,7 +1103,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
         }),
       );
       expect(result.stopReason).toBe('complete');
-      expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(seen?.canonicalProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
