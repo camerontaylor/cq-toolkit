@@ -440,7 +440,7 @@ export class ClaudeAgentDriver implements Driver {
     // `Budget.strictTokenBudget` request is refused before it either.
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-agent');
@@ -472,7 +472,7 @@ export class ClaudeAgentDriver implements Driver {
     // (which AWAITS `loadSdk`), so an abort that fired during setup never
     // dispatches and never creates a session record. The strict refusal
     // already ran at entry (no duplicate here).
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
 
@@ -1089,6 +1089,18 @@ function callSignal(governed: AbortSignal | undefined, extra: unknown): AbortSig
   if (governed === undefined) return perCall;
   if (perCall === undefined) return governed;
   return AbortSignal.any([governed, perCall]);
+}
+
+/**
+ * The LIVE aborted state of the run signal. Deliberately a function, never an
+ * inline `signal?.aborted === true` at a use site: the entry and late rechecks
+ * read the SAME RunOptions.signal through this boundary, so TypeScript cannot
+ * narrow the property to `false | undefined` after the entry check and reject
+ * the late recheck as an impossible comparison (the awaited setup between them
+ * may have aborted the signal).
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */

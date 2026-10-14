@@ -503,7 +503,7 @@ export class SubprocessDriver implements Driver {
     // `Budget.strictTokenBudget` request is refused before it either.
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'subprocess');
@@ -531,7 +531,7 @@ export class SubprocessDriver implements Driver {
     // entry; recheck the SAME live RunOptions.signal after lane setup, so an
     // abort that fired since entry never spawns and never creates a session
     // record. The strict refusal already ran at entry (no duplicate here).
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
 
@@ -1870,6 +1870,18 @@ function instantOfWallClock(
  */
 function isCodexBinary(binary: string): boolean {
   return /^codex/i.test(basename(binary));
+}
+
+/**
+ * The LIVE aborted state of the run signal. Deliberately a function, never an
+ * inline `signal?.aborted === true` at a use site: the entry and late rechecks
+ * read the SAME RunOptions.signal through this boundary, so TypeScript cannot
+ * narrow the property to `false | undefined` after the entry check and reject
+ * the late recheck as an impossible comparison (the setup between them may have
+ * aborted the signal asynchronously).
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */

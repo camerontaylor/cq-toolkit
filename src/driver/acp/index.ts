@@ -809,7 +809,7 @@ export class AcpDriver implements Driver {
     // `Budget.strictTokenBudget` request is refused before it either.
     // Cancellation outranks the strict refusal.
     const signal = options?.signal;
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
     assertStrictTokenBudgetSupported(opInvocation.budget, 'acp');
@@ -869,7 +869,7 @@ export class AcpDriver implements Driver {
     // (which AWAITS `resolveAcpCommand`), so an abort that fired during setup
     // leaves neither a dangling user turn, nor a session record, nor a spawn.
     // The strict refusal already ran at entry (no duplicate here).
-    if (signal?.aborted === true) {
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
 
@@ -2178,6 +2178,18 @@ async function persistObservation(
     };
     await store.appendMessage(record.sessionId, message);
   }
+}
+
+/**
+ * The LIVE aborted state of the run signal. Deliberately a function, never an
+ * inline `signal?.aborted === true` at a use site: the entry and late rechecks
+ * read the SAME RunOptions.signal through this boundary, so TypeScript cannot
+ * narrow the property to `false | undefined` after the entry check and reject
+ * the late recheck as an impossible comparison (the awaited setup between them
+ * may have aborted the signal).
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
