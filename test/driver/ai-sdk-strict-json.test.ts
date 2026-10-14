@@ -673,16 +673,24 @@ describe('strict-JSON strategy: the strict wire adapter', () => {
           stageCalls.exit += 1;
         },
       },
-      wrapModel: (model) =>
-        wrapLanguageModel({
-          model,
+      wrapModel: (inner) => {
+        // The lane hands a RESOLVED model, never a gateway id string — the same
+        // refusal the driver's own ceiling wrap applies. Narrow, never cast.
+        if (typeof inner === 'string') {
+          throw new Error('the adapter received a gateway model id, not a resolved model');
+        }
+        return wrapLanguageModel({
+          model: inner,
           middleware: {
-            transformParams: ({ params }) => {
+            // `transformParams` is a PromiseLike contract (the C1 fix pattern):
+            // the callback is async and returns the params unchanged.
+            transformParams: async ({ params }) => {
               events.push('adapter-wire');
               return params;
             },
           },
-        }),
+        });
+      },
     });
     const replies = [
       textResult('prose, not JSON'),
