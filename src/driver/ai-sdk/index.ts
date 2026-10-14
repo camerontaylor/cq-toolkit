@@ -366,6 +366,49 @@ export interface AiSdkDriverOptions {
    * run that will not attempt a repair.
    */
   strictTokenRepairStage?: StrictTokenRepairStage;
+  /**
+   * The operator-injected STRICT WIRE ADAPTER (owner-approved C7/C3/6fb seam):
+   * ONE cohesive object carrying the durable pre-wire reservation, the
+   * repair-stage lifecycle and the provider-wire wrapper, so a deployment wires
+   * them together instead of assembling loose pieces. It exists ONLY for
+   * strict-budget runs: an adapter configured while an invocation sets no
+   * `Budget.strictTokenBudget` REFUSES before the provider factory (never a
+   * silent no-op).
+   *
+   * COMPOSITION (owner ruling): the lane's resolved model is wrapped by
+   * `wrapModel` FIRST (INNER) and the strict pre-request ceiling wraps THAT
+   * (OUTER), so the adapter observes only REAL provider-wire outcomes — every SDK
+   * retry, tool step and repair send — and never a ceiling refusal or a refused
+   * no-send, while every attempt still reserves before the wire. `reserve` is the
+   * same durable pre-wire hook the standalone option provides and `repairStage`
+   * is the same stage contract, so the run uses the adapter's two.
+   *
+   * The adapter OWNS its acknowledgement and wire-outcome facts; the driver reads
+   * none of them and no receipt field changes. The standalone
+   * `strictTokenReservationHook` and `strictTokenRepairStage` options are
+   * preserved: supplying an adapter TOGETHER WITH either of them is allowed only
+   * when it is the IDENTICAL function/object — a divergent pair REFUSES at
+   * construction rather than silently picking one.
+   */
+  strictTokenWireAdapter?: StrictTokenWireAdapter;
+}
+
+/**
+ * The strict wire adapter the operator injects: the durable pre-wire reservation,
+ * the repair-stage lifecycle and the provider-wire wrapper as ONE object. It is
+ * declared here with the driver's EXISTING types so no adapter implementation
+ * module has to exist for this lane to typecheck.
+ */
+export interface StrictTokenWireAdapter {
+  /** The durable pre-wire reservation (the same contract as the hook option). */
+  readonly reserve: (reservation: WireReservation) => Promise<void>;
+  /** The same stage lifecycle the standalone option supplies. */
+  readonly repairStage: StrictTokenRepairStage;
+  /**
+   * Wraps the lane's RESOLVED model. Composed INNER to the strict ceiling, so it
+   * sees only actual provider-wire calls.
+   */
+  wrapModel(model: LanguageModel): LanguageModel;
 }
 
 /**
@@ -399,8 +442,33 @@ export class AiSdkDriver implements Driver {
     | undefined;
   /** The wrapper-owned repair-stage lifecycle; the driver only opens/closes it. */
   private readonly strictTokenRepairStage: StrictTokenRepairStage | undefined;
+  /** The operator's strict wire adapter (reserve + stage + model wrap), if any. */
+  private readonly strictTokenWireAdapter: StrictTokenWireAdapter | undefined;
 
   constructor(options: AiSdkDriverOptions = {}) {
+    // The adapter is ONE cohesive seam: a standalone hook or stage may accompany
+    // it only as the IDENTICAL function/object. A divergent pair refuses HERE,
+    // rather than letting a run silently pick one while the adapter observes a
+    // different reservation stream or stage than the one it acknowledges.
+    const adapter = options.strictTokenWireAdapter;
+    if (adapter !== undefined) {
+      if (
+        options.strictTokenReservationHook !== undefined &&
+        options.strictTokenReservationHook !== adapter.reserve
+      ) {
+        throw new Error(
+          'ai-sdk driver: strictTokenWireAdapter.reserve and strictTokenReservationHook are DIFFERENT functions — refusing rather than silently choosing one reservation path',
+        );
+      }
+      if (
+        options.strictTokenRepairStage !== undefined &&
+        options.strictTokenRepairStage !== adapter.repairStage
+      ) {
+        throw new Error(
+          'ai-sdk driver: strictTokenWireAdapter.repairStage and strictTokenRepairStage are DIFFERENT objects — refusing rather than silently choosing one repair stage',
+        );
+      }
+    }
     this.providers = options.providers ?? defaultProviders();
     // The effective config is stored as a deep-frozen STRUCTURED CLONE:
     // neither the caller's object (mutated after construction) nor the
@@ -415,8 +483,9 @@ export class AiSdkDriver implements Driver {
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
-    this.strictTokenReservationHook = options.strictTokenReservationHook;
-    this.strictTokenRepairStage = options.strictTokenRepairStage;
+    this.strictTokenReservationHook = options.strictTokenReservationHook ?? adapter?.reserve;
+    this.strictTokenRepairStage = options.strictTokenRepairStage ?? adapter?.repairStage;
+    this.strictTokenWireAdapter = adapter;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -438,6 +507,19 @@ export class AiSdkDriver implements Driver {
         denials: [],
         stopReason: 'aborted',
       };
+    }
+
+    // --- The strict WIRE ADAPTER belongs to the strict budget it was injected
+    // for: an invocation that sets NO `strictTokenBudget` must never run with an
+    // adapter silently ignored, so this REFUSES here — the same pre-provider-factory
+    // slot as the capability refusal above (no provider factory call, no env key
+    // read, no model resolution, no session state). Cancellation above still
+    // outranks it.
+    if (this.strictTokenWireAdapter !== undefined && strictBudget === undefined) {
+      throw new DispatchError(
+        'config',
+        'ai-sdk driver: strictTokenWireAdapter is configured but this invocation sets no Budget.strictTokenBudget — refusing before dispatch (the adapter exists only for strict-budget runs)',
+      );
     }
 
     // --- Strict pre-request ceiling capability, resolved + REFUSED BEFORE the
@@ -499,6 +581,17 @@ export class AiSdkDriver implements Driver {
     // claim from an invocation-local budget).
     if (strictBudget !== undefined && capability !== undefined) {
       const sharedTokenAllowance = options?.reservation?.tokens;
+      // COMPOSITION (owner ruling): the adapter wraps the lane's RESOLVED model
+      // INNER and the strict ceiling wraps that OUTER, so the adapter observes
+      // only REAL provider-wire calls — each SDK retry, tool step and repair send
+      // — and never a ceiling refusal or a refused no-send, while every attempt
+      // still reserves before the wire. The adapter's `reserve` and `repairStage`
+      // are already the effective ones here: the constructor captured them and
+      // refused any divergent standalone pairing.
+      const wireModel =
+        this.strictTokenWireAdapter === undefined
+          ? resolvedModel
+          : this.strictTokenWireAdapter.wrapModel(resolvedModel);
       const ceiling = new PreRequestCeiling({
         budget: strictBudget,
         capability,
@@ -510,7 +603,7 @@ export class AiSdkDriver implements Driver {
           ? { onBeforeWireReserve: this.strictTokenReservationHook }
           : {}),
       });
-      model = wrapWithPreRequestCeiling(resolvedModel, ceiling);
+      model = wrapWithPreRequestCeiling(wireModel, ceiling);
     }
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
