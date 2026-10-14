@@ -239,9 +239,7 @@ describe('strict-JSON strategy: the wire carries no hosted structured output', (
       const last = turns[turns.length - 1];
       expect(last?.role).toBe('user');
       expect(last?.content).toEqual([{ type: 'text', text: expectedContract() }]);
-      expect(last?.content).toEqual([
-        { type: 'text', text: expect.stringContaining(SCHEMA_JSON) },
-      ]);
+      expect(last?.content).toEqual([{ type: 'text', text: expect.stringContaining(SCHEMA_JSON) }]);
 
       // (3) The byte ceiling measured that text: the counted serialization
       // carries the JSON-escaped schema bytes the capability was handed.
@@ -316,8 +314,7 @@ describe('strict-JSON strategy: the repair is one extra CHARGED send', () => {
       // normalized text part whose bytes are the established repair wording plus
       // the contract (exact shape, exact types, exact bytes; no coercion).
       const expectedRepairText =
-        `Your previous reply did not satisfy the required JSON contract. ` +
-        expectedContract();
+        `Your previous reply did not satisfy the required JSON contract. ` + expectedContract();
       const repairTurns = promptTurns(sent(fx.wire, 1));
       const repairLast = repairTurns[repairTurns.length - 1];
       expect(repairLast?.role).toBe('user');
