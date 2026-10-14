@@ -476,13 +476,16 @@ export const FixReviewItemInputSchema: z.ZodType<FixReviewItemInput> = z
         // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
         // reaches every role that resolves to that lane — fixer, classifier
         // and judge alike. The durable reservation hook
-        // (lanes.aiSdk.strictTokenReservationHook) rides the same lane. Strict
-        // enforcement is still PER-INVOCATION: an op must carry
+        // (lanes.aiSdk.strictTokenReservationHook) rides the same lane and
+        // receives the canonical cross-language projection digest + bytes
+        // (crq/request-projection/v1). An op must carry
         // `budget.strictTokenBudget` to opt in, and today only review.fixItem
         // mirrors that field. A classify/judge op opts in by gaining the same
         // mirror and the operator injecting a capability for its model; with
-        // no injection the lane refuses pre-dispatch rather than guessing.
-        // This slice wires the fixer only.
+        // no injection the lane refuses pre-dispatch rather than guessing. When
+        // a shared whole-job allowance rides the run but no durable hook is
+        // configured, the lane refuses rather than claim a whole-job bound it
+        // cannot enforce. This slice wires the fixer only.
         strictTokenBudget: z
           .object({
             maxInputTokens: z.number().int().safe().positive(),
