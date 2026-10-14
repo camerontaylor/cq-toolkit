@@ -348,6 +348,35 @@ export interface AiSdkDriverOptions {
    * review.
    */
   strictTokenReservationHook?: (receipt: WireReservation) => void | Promise<void>;
+  /**
+   * The trusted, INVOCATION-scoped REPAIR-STAGE lifecycle (owner-approved C7/C3
+   * seam): the operator's wrapper opens a stage around the ONE bounded repair
+   * reask so its own pre-wire bookkeeping can treat that send as the successor
+   * of the prior acknowledged attempt. The wrapper owns the prior authoritative
+   * acknowledgement and every supersede fact; the driver only CALLS these two
+   * synchronous methods and never reads, mints or reports an acknowledgement, a
+   * sequence or an ordinal, and none of this reaches the canonical projection or
+   * the receipt. `enterRepairStage()` runs immediately before the repair send:
+   * a throw REFUSES the repair — no second send, no second reservation, no exit
+   * call — and settles a non-success verdict that is never reported as
+   * `output-invalid`. `exitRepairStage()` runs in a `finally`, exactly once per
+   * opened stage, after the repair send settles: a throw is never swallowed and
+   * never lets a result be accepted. ABSENT BY DEFAULT: without it the repair
+   * keeps its pre-existing local behaviour, and the stage is never opened for a
+   * run that will not attempt a repair.
+   */
+  strictTokenRepairStage?: StrictTokenRepairStage;
+}
+
+/**
+ * The repair-stage lifecycle the operator's trusted wrapper supplies. Both
+ * methods are SYNCHRONOUS and return void, and the object is deliberately opaque
+ * to the driver: the wrapper keeps the prior acknowledgement, the stage's
+ * identity and any supersede bookkeeping entirely on its own side.
+ */
+export interface StrictTokenRepairStage {
+  enterRepairStage(): void;
+  exitRepairStage(): void;
 }
 
 /**
@@ -368,6 +397,8 @@ export class AiSdkDriver implements Driver {
   private readonly strictTokenReservationHook:
     | ((receipt: WireReservation) => void | Promise<void>)
     | undefined;
+  /** The wrapper-owned repair-stage lifecycle; the driver only opens/closes it. */
+  private readonly strictTokenRepairStage: StrictTokenRepairStage | undefined;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -385,6 +416,7 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
+    this.strictTokenRepairStage = options.strictTokenRepairStage;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -1061,8 +1093,30 @@ export class AiSdkDriver implements Driver {
           strictJsonContract(outputSchema),
       },
     ];
+    // C7/C3 REPAIR STAGE (wrapper-owned, opaque here): the operator's stage is
+    // opened immediately before the repair send and closed ONCE at the end of
+    // this try/catch (the `finally` below), so it covers exactly this one repair
+    // attempt and is closed on every path — a normal verdict, a send failure or
+    // an abort. The driver reads nothing from the stage, mints no
+    // acknowledgement/sequence/ordinal, and puts nothing of it in the receipt or
+    // the canonical projection.
+    // `enterRepairStage()` must SUCCEED before the stage counts as opened: a
+    // refusal leaves `stageOpened` false, so the `finally` does NOT call
+    // `exitRepairStage()` for a stage that never opened. That refusal lands in
+    // THIS repair-failure corridor (not an abort shape, not a ceiling refusal,
+    // not a NoObjectGeneratedError), so it settles a classified non-success
+    // verdict and is never reported as `output-invalid`; no repair is sent, no
+    // second reservation is taken and no result is accepted. A refusal from
+    // `exitRepairStage()` is never swallowed: it replaces the pending verdict, so
+    // no result is accepted either.
+    const repairStage = this.strictTokenRepairStage;
+    let stageOpened = false;
     let repairUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     try {
+      if (repairStage !== undefined) {
+        repairStage.enterRepairStage();
+        stageOpened = true;
+      }
       const repair = await generateText({
         model,
         system,
@@ -1373,6 +1427,19 @@ export class AiSdkDriver implements Driver {
               return mainSignals !== undefined ? { providerSignals: mainSignals } : {};
             })()),
       };
+    } finally {
+      // EXPLICIT stage close, exactly once per OPENED stage: this runs for every
+      // path above (a returned verdict, a send failure, an abort). A refusal here
+      // is never swallowed — it replaces the pending verdict and propagates to the
+      // run-level catch, which settles a classified non-success verdict, so no
+      // result is accepted. `stageOpened` keeps the close off a stage that never
+      // opened because `enterRepairStage()` refused.
+      // DISCLOSED EVIDENCE NUANCE: because this close runs AFTER the
+      // repair-failure corridor, a close refusal's verdict comes from the
+      // run-level catch and carries the MAIN call's step usage only; the repair's
+      // tokens remain charged in the host ledger but are not folded into that one
+      // verdict. Every normal repair path still folds BOTH calls.
+      if (stageOpened && repairStage !== undefined) repairStage.exitRepairStage();
     }
   }
 
