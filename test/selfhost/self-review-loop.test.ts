@@ -86,7 +86,7 @@ import {
 } from '../../src/selfhost/self-review-loop.js';
 import type { SweepUsagePrRow } from '../../src/selfhost/self-review-loop.js';
 import type { runReviewLoop } from '../../src/plans/review-loop.js';
-import { SelfhostDefaults } from '../../src/selfhost/config.js';
+import { SelfhostDefaults, SelfhostPeak } from '../../src/selfhost/config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -298,7 +298,9 @@ describe('runSelfReviewLoop — real run', () => {
     if (first === undefined) throw new Error('the first loop call never happened');
     // Identity passthrough (the round-3 deployment requirement).
     expect(first.responderLogin).toBeNull(); // baseCfg default; overridden in the next test
-    // The frozen driver binding, never a vendor choice invented here.
+    // The off-peak driver (this fixture clock, Tue 2023-11-14T22:13:20Z, is
+    // outside the peak window): resolved from the run's start stamp, never a
+    // vendor choice invented here.
     expect(first.driver).toEqual(SelfhostDefaults.driver);
     expect(first.owner).toBe(OWNER);
     expect(first.repo).toBe(REPO);
@@ -322,6 +324,61 @@ describe('runSelfReviewLoop — real run', () => {
     // The wall-clock ladder rides every loop (KyE / #137): the frozen
     // default, wrapped in the LIMITS half's one-field shape.
     expect(first.limits).toEqual({ perJobWallClockMs: SelfhostDefaults.perJobWallClockMs });
+  });
+
+  test('the run start stamp selects the driver: a peak clock dispatches the peak provider', async () => {
+    const calls: RecordedCall[] = [];
+    const journalRoot = tempJournalRoot();
+    const gh = fakeGh([pullRow(7), pullRow(11)]);
+    const summary = await runSelfReviewLoop(
+      {
+        ...baseDeps(
+          gh,
+          fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+        ),
+        // 2026-10-12T07:00:00Z — a Monday inside the 06:00–10:00 UTC peak.
+        nowMs: () => Date.parse('2026-10-12T07:00:00Z'),
+      },
+      baseCfg({ journalRoot }),
+    );
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 11]);
+    // ONE clock read decides the driver for the whole sweep: every loop's
+    // opts carry the same resolved peak driver.
+    expect(calls.map((call) => call.opts.driver)).toEqual([
+      SelfhostPeak.driver,
+      SelfhostPeak.driver,
+    ]);
+  });
+
+  test('cfg.startedAtMs pins the driver and the journal stamp to ONE instant', async () => {
+    const calls: RecordedCall[] = [];
+    const journalRoot = tempJournalRoot();
+    const startedAt = Date.parse('2026-10-12T07:00:00Z'); // inside the peak
+    // A later read (what a second clock read would return) is OFF-peak: if the
+    // sweep read its own clock, both the driver and the stamp would flip.
+    const laterRead = Date.parse('2026-10-12T12:00:00Z');
+    let reads = 0;
+    const gh = fakeGh([pullRow(7)]);
+    const summary = await runSelfReviewLoop(
+      {
+        gh,
+        git: async (): Promise<GhResult> => ({ code: 0, stdout: '', stderr: '' }),
+        nowMs: () => {
+          reads += 1;
+          return laterRead;
+        },
+        loop: fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      },
+      baseCfg({ journalRoot, startedAtMs: startedAt }),
+    );
+    expect(summary.results.map((row) => row.pr)).toEqual([7]);
+    // The threaded instant drives BOTH the peak driver and the run stamp …
+    expect(calls[0]?.opts.driver).toEqual(SelfhostPeak.driver);
+    expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(startedAt)}`));
+    // … so the sweep reads no clock of its own for the stamp; the only read is
+    // the loop's own per-PR opts.nowMs snapshot.
+    expect(reads).toBe(1);
+    expect(calls[0]?.opts.nowMs).toBe(laterRead);
   });
 
   test('responderLogin and maxUsd overrides reach the loop opts; the clock is read per PR', async () => {
@@ -1026,5 +1083,227 @@ describe('main — usage reporting', () => {
       sweepUsage: buildSweepUsage(SelfhostDefaults.maxTokens, []),
       error: 'stdout failed',
     });
+  });
+});
+
+describe('main — peak-aware driver credential (fail closed)', () => {
+  const originalArgv = process.argv;
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    process.argv = originalArgv;
+  });
+
+  const at = (iso: string): number => Date.parse(iso);
+
+  test('--print-driver-key-env prints the key env the CURRENT clock selects', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    // Peak (Mon 2026-10-12T07:00Z) → the DeepSeek key …
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T07:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockClear();
+    // … and every off-peak instant (same day, noon UTC) → the Z.AI key.
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('ZAI_API_KEY\n');
+  });
+
+  test('a PEAK run refuses before any effect when DEEPSEEK_API_KEY is absent', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    // The off-peak key is present but NOT the selected one: the preflight
+    // must require the key belonging to the window, not any provider key.
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T07:00:00Z'),
+      }),
+    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+  });
+
+  test('an OFF-PEAK run conversely refuses when ZAI_API_KEY is absent', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T12:00:00Z'),
+      }),
+    ).rejects.toThrow('requires ZAI_API_KEY');
+  });
+
+  test('the reserved pre-peak headroom (05:40-06:00) demands the PEAK key too', async () => {
+    // A sweep starting at 05:45 can still be dispatching when 06:00 opens, and
+    // a run's driver is fixed at its start, so the headroom band selects the
+    // peak provider — the handshake and the preflight follow it.
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T05:45:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockRestore();
+    // … and a REAL run starting there refuses when only the off-peak key is set.
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T05:45:00Z'),
+      }),
+    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+  });
+
+  test('a pinned CQ_SELFHOST_NOW_MS drives the handshake AND the run', async () => {
+    // The workflow pins ONE epoch-ms per step so its two node processes (the
+    // --print-driver-key-env handshake and the run) cannot straddle a
+    // selection boundary. The injected clock here would pick the OTHER window,
+    // so a consulted clock would prove the pin was ignored.
+    const pinned = Date.parse('2026-10-12T07:00:00Z'); // peak
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', String(pinned));
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockRestore();
+    // … and the same pin decides the driver the sweep dispatches through.
+    const journalRoot = tempJournalRoot();
+    const calls: RecordedCall[] = [];
+    process.argv = [
+      'node',
+      'self-review-loop.js',
+      '--repo',
+      REPO_PATH,
+      '--journal-root',
+      journalRoot,
+    ];
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'peak-key');
+    await main({
+      ...baseDeps(
+        fakeGh([pullRow(7)]),
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(calls[0]?.opts.driver).toEqual(SelfhostPeak.driver);
+    expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(pinned)}`));
+  });
+
+  test('a malformed CQ_SELFHOST_NOW_MS fails loud instead of falling back', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', 'not-a-number');
+    await expect(
+      main(
+        baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+      ),
+    ).rejects.toThrow('CQ_SELFHOST_NOW_MS');
+  });
+
+  test('a dry run dispatches nothing and needs no provider key', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
+    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    // stdout is spied to keep the payload out of the report; the mock MUST
+    // invoke the write callback, which main() awaits (a no-op mock would
+    // hang the run).
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(
+        (
+          _chunk: string | Uint8Array,
+          encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+          callback?: (error?: Error | null) => void,
+        ) => {
+          const done = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+          done?.(null);
+          return true;
+        },
+      );
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T07:00:00Z'),
+      }),
+    ).resolves.toBeUndefined();
+    expect(write).toHaveBeenCalled();
+  });
+
+  test('main() threads ONE clock read: a boundary-straddling clock cannot pick two providers', async () => {
+    const journalRoot = tempJournalRoot();
+    process.argv = [
+      'node',
+      'self-review-loop.js',
+      '--repo',
+      REPO_PATH,
+      '--journal-root',
+      journalRoot,
+    ];
+    // The PEAK key is present, the OFF-PEAK key absent: a sweep that read its
+    // OWN clock after the preflight would pick zai (whose key is absent) even
+    // though the preflight checked deepseek.
+    vi.stubEnv('DEEPSEEK_API_KEY', 'peak-key');
+    vi.stubEnv('ZAI_API_KEY', '');
+    const peak = Date.parse('2026-10-12T06:00:00Z');
+    const offPeakLater = Date.parse('2026-10-12T11:00:00Z');
+    let reads = 0;
+    const calls: RecordedCall[] = [];
+    await main({
+      ...baseDeps(
+        fakeGh([pullRow(7)]),
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      nowMs: () => {
+        reads += 1;
+        return reads === 1 ? peak : offPeakLater;
+      },
+    });
+    // Two reads: the entry's single run instant, plus the loop's own per-PR
+    // opts.nowMs snapshot. The DRIVER and the run stamp both come from the
+    // FIRST (the threaded instant).
+    expect(reads).toBe(2);
+    expect(calls[0]?.opts.driver).toEqual(SelfhostPeak.driver);
+    expect(calls[0]?.opts.nowMs).toBe(offPeakLater);
+    expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(peak)}`));
   });
 });

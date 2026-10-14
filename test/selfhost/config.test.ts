@@ -12,10 +12,22 @@
 //      (ai-sdk/glm-5.3-flash — the conductor decision; anything else trips
 //      the served-model-mismatch guard), plus the branch conventions
 //      (merge-queue queue branch; main protected).
-//   3. parseSelfhostArgs overrides are honored and never touch the frozen
+//   3. The PEAK-AWARE switch (owner directive 2026-10-12): the frozen
+//      SelfhostPeak window (06:00–10:00 UTC Mon–Fri) + peak driver, the
+//      pure isSelfhostPeak/resolveSelfhostDriver clock decision at every
+//      boundary, and driverKeyEnv's provider → key-env map.
+//   4. parseSelfhostArgs overrides are honored and never touch the frozen
 //      defaults (parse returns fresh plain data).
 import { describe, expect, test } from 'vitest';
-import { parseSelfhostArgs, SelfhostDefaults } from '../../src/selfhost/config.js';
+import {
+  driverKeyEnv,
+  isSelfhostPeak,
+  isSelfhostPeakHeadroom,
+  parseSelfhostArgs,
+  resolveSelfhostDriver,
+  SelfhostDefaults,
+  SelfhostPeak,
+} from '../../src/selfhost/config.js';
 
 describe('SelfhostDefaults', () => {
   test('deep-frozen: a root write throws', () => {
@@ -51,6 +63,95 @@ describe('SelfhostDefaults', () => {
     // The repo's own merge conventions.
     expect(SelfhostDefaults.baseBranch).toBe('merge-queue');
     expect(SelfhostDefaults.protectedBranch).toBe('main');
+  });
+});
+
+describe('SelfhostPeak + the peak-aware driver resolution', () => {
+  test('deep-frozen: the window and the peak driver cannot be re-pointed at runtime', () => {
+    expect(Object.isFrozen(SelfhostPeak)).toBe(true);
+    expect(Object.isFrozen(SelfhostPeak.window)).toBe(true);
+    expect(Object.isFrozen(SelfhostPeak.driver)).toBe(true);
+    expect(() => {
+      SelfhostPeak.driver.model = 'glm-4.6';
+    }).toThrow();
+    expect(() => {
+      (SelfhostPeak.window.utcWeekdays as unknown as number[]).push(6);
+    }).toThrow();
+  });
+
+  test('the recorded values: weekday 06:00–10:00 UTC and the deepseek flash driver', () => {
+    expect(SelfhostPeak.window).toEqual({
+      utcWeekdays: [1, 2, 3, 4, 5],
+      startMinute: 360,
+      endMinute: 600,
+    });
+    // The reserved pre-peak dispatch headroom: the documented ≤20-minute
+    // scheduled run, so a sweep starting at 05:41 cannot dispatch Z.ai GLM
+    // work inside the ~3× peak quota window.
+    expect(SelfhostPeak.headroomMinutes).toBe(20);
+    // The SERVED id the DeepSeek endpoint echoes; requesting the
+    // `deepseek-chat` alias is served AS `deepseek-flash` and would trip the
+    // served-model identity guard.
+    expect(SelfhostPeak.driver).toEqual({ provider: 'deepseek', model: 'deepseek-flash' });
+    expect(SelfhostPeak.driver.model).not.toBe('deepseek-chat');
+  });
+
+  test('isSelfhostPeak: inclusive start, exclusive end, weekdays only (UTC)', () => {
+    const at = (iso: string): number => Date.parse(iso);
+    // 2026-10-12 is a Monday, 2026-10-16 a Friday, 17/18 the weekend.
+    expect(isSelfhostPeak(at('2026-10-12T05:59:59Z'))).toBe(false);
+    expect(isSelfhostPeak(at('2026-10-12T06:00:00Z'))).toBe(true);
+    expect(isSelfhostPeak(at('2026-10-12T09:59:59Z'))).toBe(true);
+    expect(isSelfhostPeak(at('2026-10-12T10:00:00Z'))).toBe(false);
+    expect(isSelfhostPeak(at('2026-10-16T07:00:00Z'))).toBe(true);
+    expect(isSelfhostPeak(at('2026-10-17T07:00:00Z'))).toBe(false);
+    expect(isSelfhostPeak(at('2026-10-18T07:00:00Z'))).toBe(false);
+  });
+
+  test('isSelfhostPeakHeadroom: the 20-minute band before the window, weekdays only', () => {
+    const at = (iso: string): number => Date.parse(iso);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:39:59Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:40:00Z'))).toBe(true);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:59:59Z'))).toBe(true);
+    // The window itself is NOT the headroom (the two predicates are disjoint).
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T06:00:00Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T10:00:00Z'))).toBe(false);
+    // Weekends never, even at the same clock time.
+    expect(isSelfhostPeakHeadroom(at('2026-10-17T05:45:00Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-18T05:45:00Z'))).toBe(false);
+  });
+
+  test('resolveSelfhostDriver: peak honours the reserved headroom; off-peak the frozen default', () => {
+    const at = (iso: string): number => Date.parse(iso);
+    // The headroom band selects the PEAK driver, so no Z.ai GLM dispatch can
+    // be issued once the peak opens (a run's driver is fixed at its start).
+    expect(resolveSelfhostDriver(at('2026-10-12T05:39:59Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:40:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:59:59Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T06:00:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T07:00:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T10:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T12:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    // Weekends: headroom and window both off.
+    expect(resolveSelfhostDriver(at('2026-10-17T05:45:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-17T07:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    // The entry tests' fixture clock (Tue 2023-11-14T22:13:20Z) is off-peak.
+    expect(resolveSelfhostDriver(1_700_000_000_000)).toEqual(SelfhostDefaults.driver);
+  });
+
+  test('driverKeyEnv: each provider handle maps to the env the ai-sdk lane reads', () => {
+    expect(driverKeyEnv({ provider: 'zai', model: 'glm-5.3-flash' })).toBe('ZAI_API_KEY');
+    expect(driverKeyEnv({ provider: 'ai-sdk', model: 'glm-5.3-flash' })).toBe('ZAI_API_KEY');
+    expect(driverKeyEnv({ provider: 'deepseek', model: 'deepseek-flash' })).toBe(
+      'DEEPSEEK_API_KEY',
+    );
+    // The other in-process ai-sdk handles an adopter may re-point at: the
+    // handshake must name their key, not an empty string.
+    expect(driverKeyEnv({ provider: 'openai', model: 'gpt-5' })).toBe('OPENAI_API_KEY');
+    expect(driverKeyEnv({ provider: 'anthropic', model: 'claude-x' })).toBe('ANTHROPIC_API_KEY');
+    // An unknown provider cannot be credential-checked: the caller must read
+    // undefined as "cannot vouch", never as "no key needed".
+    expect(driverKeyEnv({ provider: 'mystery', model: 'x' })).toBeUndefined();
   });
 });
 

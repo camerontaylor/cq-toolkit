@@ -14,11 +14,24 @@
 //     the loop's pushes under its stale name — renamed heads and failed
 //     revalidation reads are recorded rows, never dispatches;
 //   - each qualifying PR runs the SHIPPED runReviewLoop with the frozen
-//     SelfhostDefaults (driver model, maxTokens default) and the loop's own
-//     defaults UNCHANGED — in particular classifyConfig is never overridden,
+//     SelfhostDefaults (maxTokens default) and the loop's own defaults
+//     UNCHANGED — in particular classifyConfig is never overridden,
 //     so defaultLoopClassifyConfig's bot-authored-thread suppression stays
 //     ON (the skipResponderAuthoredThreads:false flip was the live drills'
 //     single-identity deviation, never a deployment setting);
+//   - the DRIVER is peak-aware (owner directive 2026-10-12): the run's
+//     start stamp decides the model ONCE via resolveSelfhostDriver — the
+//     frozen off-peak default (zai/glm-5.3-flash) outside the Z.ai GLM
+//     peak, the peak driver (deepseek/deepseek-flash) inside the documented
+//     06:00–10:00 UTC Mon–Fri window OR its reserved pre-peak headroom
+//     (05:40–06:00: a run starting there could still be executing when the
+//     peak opens, so it must not dispatch Z.ai GLM into it). The workflow
+//     pins that instant once per step (CQ_SELFHOST_NOW_MS) so the separate
+//     --print-driver-key-env handshake process and the run agree. main()
+//     refuses to start when the SELECTED provider's key env is absent (fail
+//     closed, before any effect), and exposes `--print-driver-key-env` so the
+//     workflow asserts the very same key rather than re-deriving the window
+//     in YAML;
 //   - the TOKEN cap is SWEEP-LEVEL: SelfhostDefaults.maxTokens (the served
 //     model is unpriced, so a default USD cap would trip the governor's DD-9
 //     unpriced-usage fail-loud) is carried forward across the PRs in listing
@@ -78,7 +91,13 @@ import { fetchReviewState } from '../ops/review/fetchReviewState.js';
 import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
 import { listOpenPrs } from './candidates.js';
-import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
+import {
+  defaultJournalRoot,
+  driverKeyEnv,
+  parseSelfhostArgs,
+  resolveSelfhostDriver,
+  SelfhostDefaults,
+} from './config.js';
 
 /**
  * Cap for a recorded failure message — an error (a GhError with its argv and
@@ -233,6 +252,16 @@ export interface SelfReviewLoopCfg {
    * exactly like maxUsd: the remaining tokens are carried forward, each fix
    * run's token rollup decrementing them. Programmatic only — no CLI flag. */
   maxTokens?: number;
+  /**
+   * The run's SINGLE start instant (epoch ms). The ENTRY captures it ONCE
+   * (before its credential preflight) and threads it here, so the peak-window
+   * decision, the sweep's driver, and the journal stamp all read the SAME
+   * clock value — a sweep can never preflight one provider and then select
+   * the other because the wall clock crossed 06:00/10:00 UTC in between.
+   * Absent → the entry reads deps.nowMs() (the value tests and direct
+   * callers get).
+   */
+  startedAtMs?: number;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
   /** Fetch + summarize only — resolve nothing, dispatch nothing. */
@@ -490,7 +519,18 @@ export async function runSelfReviewLoop(
     };
   }
 
-  const stamp = deps.nowMs();
+  // THE run's start instant: the ENTRY's single clock read when it threaded
+  // one through (main() captures it before the credential preflight), so the
+  // peak-window decision and this stamp are the same value. A direct caller
+  // (tests, embeddings) falls back to one read here.
+  const stamp = cfg.startedAtMs ?? deps.nowMs();
+  // THE run's driver, resolved ONCE from the run's start stamp: the peak
+  // switch lives in config.ts (resolveSelfhostDriver) and every PR's loop
+  // dispatches through the SAME provider this run's start instant selected
+  // — a delayed fire or a manual dispatch resolves at ITS OWN start, never
+  // at the slot's nominal time, and a sweep that straddles the window edge
+  // does not switch models mid-run.
+  const driver = resolveSelfhostDriver(stamp);
   // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
   // miss `<journalRoot>` does not exist, and the registry's first `withLock`
   // needs `<journalRoot>/worktree-registry.json.lock` — the lockfile layer
@@ -598,7 +638,7 @@ export async function runSelfReviewLoop(
       gh: deps.gh,
       git: deps.git,
       registry,
-      driver: SelfhostDefaults.driver,
+      driver,
       // classifyConfig deliberately ABSENT: defaultLoopClassifyConfig rides
       // unchanged (bot-authored suppression ON — see the module doc).
       responderLogin: cfg.responderLogin,
@@ -740,6 +780,43 @@ const writeSweepUsageFile = (
 };
 
 /**
+ * The peak-aware credential handshake the workflow's run step uses: print
+ * the env var the driver THIS clock selects reads its key from, then exit.
+ * The deployment asks the toolkit which credential the run needs instead of
+ * re-implementing the peak window in YAML — `resolveSelfhostDriver` stays
+ * the ONE decision point, here consumed a second time.
+ */
+const PRINT_DRIVER_KEY_ENV_FLAG = '--print-driver-key-env';
+
+/**
+ * Deployment wiring for the run's start instant: an epoch-ms the workflow
+ * pins ONCE per step so the `--print-driver-key-env` handshake (a separate
+ * process) and the run itself cannot straddle the 05:40/06:00/10:00
+ * selection boundary and disagree about which provider key is required.
+ * Plain wiring, not a secret; absent (a local run) falls back to the
+ * injected clock.
+ */
+const STARTED_AT_ENV = 'CQ_SELFHOST_NOW_MS';
+
+/**
+ * The run's start instant: the pinned epoch-ms when the deployment set one,
+ * else ONE `deps.nowMs()` read. A malformed pin THROWS: a bad clock must
+ * fail loud, never silently fall back to a different peak window than the
+ * handshake validated.
+ */
+function runStartInstant(deps: SelfReviewLoopDeps): number {
+  const raw = process.env[STARTED_AT_ENV];
+  if (raw === undefined || raw === '') return deps.nowMs();
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      `selfhost-review-loop: ${STARTED_AT_ENV} must be a non-negative safe integer epoch-ms — got ${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+/**
  * The CLI entry: parse args, resolve the repository (the --repo flag wins
  * over the GH_REPOSITORY env; absent from both → throw before running),
  * build the real runners, run, and print the compact JSON summary payload
@@ -758,6 +835,15 @@ export async function main(
     nowMs: () => Date.now(),
   },
 ): Promise<void> {
+  // KEY-NAME MODE, first and argument-exact: the workflow's run step asks
+  // which credential this run's clock requires (see
+  // PRINT_DRIVER_KEY_ENV_FLAG). An unknown provider prints an empty line —
+  // the caller's emptiness test then refuses (fail closed), never guesses.
+  const argv = process.argv.slice(2);
+  if (argv.length === 1 && argv[0] === PRINT_DRIVER_KEY_ENV_FLAG) {
+    process.stdout.write(`${driverKeyEnv(resolveSelfhostDriver(runStartInstant(deps))) ?? ''}\n`);
+    return;
+  }
   let usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
   let runError: string | undefined;
   try {
@@ -778,10 +864,37 @@ export async function main(
       );
     }
     const repoRoot = process.cwd();
+    // ONE clock read for the whole run: the credential preflight below, the
+    // peak-window driver the sweep selects, and the per-run journal stamp all
+    // resolve from THIS instant. Two reads could straddle the 06:00/10:00 UTC
+    // boundary and check one provider's key while dispatching through the
+    // other (which the workflow deliberately leaves unset off its window).
+    // The workflow PINS this instant per step (CQ_SELFHOST_NOW_MS), so the
+    // separate --print-driver-key-env handshake process and this run also
+    // agree.
+    const startedAtMs = runStartInstant(deps);
+    // FAIL-CLOSED DRIVER CREDENTIAL (peak-aware): resolve the driver for
+    // THIS instant and refuse BEFORE any effect when the selected provider's
+    // key env is absent — a missing key must never let a sweep start and then
+    // dispatch with no credential. The workflow asserts the same fact via
+    // --print-driver-key-env; both call the same resolveSelfhostDriver /
+    // driverKeyEnv, so they cannot disagree on WHICH key. A dry run posts and
+    // dispatches nothing, so it needs no provider key (its gh reads ride
+    // GH_TOKEN).
+    if (!parsed.dryRun) {
+      const driver = resolveSelfhostDriver(startedAtMs);
+      const keyEnv = driverKeyEnv(driver);
+      if (keyEnv === undefined || (process.env[keyEnv] ?? '') === '') {
+        throw new Error(
+          `selfhost-review-loop: the selected driver ${driver.provider}/${driver.model} requires ${keyEnv ?? 'a known provider key'} in the environment; refusing to start`,
+        );
+      }
+    }
     const summary = await runSelfReviewLoop(deps, {
       owner,
       repo,
       repoRoot,
+      startedAtMs,
       responderLogin: parsed.responderLogin ?? null,
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),

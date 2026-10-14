@@ -113,6 +113,167 @@ export const SelfhostDefaults: SelfhostDefaultsConfig = deepFreeze({
 });
 
 /**
+ * The PEAK-tariff switch's shape: the provider's documented peak window
+ * (UTC) and the driver to dispatch inside it. Plain data plus the pure
+ * clock functions below — the ONE place the scheduled runs' model is
+ * decided (owner directive 2026-10-12: the loop runs ALL DAY; during the
+ * Z.ai GLM peak it uses a different provider instead of standing down).
+ */
+export interface SelfhostPeakConfig {
+  /**
+   * The peak window in UTC: the weekdays it covers and its `[start, end)`
+   * minute bounds, minutes past 00:00 UTC. The clock comparison below is
+   * inclusive at `startMinute`, exclusive at `endMinute`.
+   */
+  window: {
+    /** UTC weekday numbers, 1=Mon … 7=Sun (the ISO numbering, NOT Date#getUTCDay's 0=Sun). */
+    utcWeekdays: readonly number[];
+    /** Peak start, minutes past 00:00 UTC (inclusive). */
+    startMinute: number;
+    /** Peak end, minutes past 00:00 UTC (exclusive). */
+    endMinute: number;
+  };
+  /**
+   * The PEAK-DISPATCH HEADROOM, minutes before `window.startMinute`: the
+   * documented maximum scheduled run duration, reserved so a sweep that
+   * STARTS just before the peak is dispatched through the PEAK driver
+   * instead of the off-peak one. Without it a delayed or manual run
+   * starting at 05:59 could keep dispatching off-peak (Z.ai GLM) work
+   * INSIDE the ~3× quota window, because a run's driver is fixed when the
+   * run starts. With it, every dispatch inside the window is the peak
+   * provider's. This reserves dispatch, never a start exclusion: the
+   * schedule still runs all day.
+   */
+  headroomMinutes: number;
+  /**
+   * The driver dispatched INSIDE the window — the same ModelSpec shape the
+   * frozen default carries, so `resolveSelfhostDriver` returns either one.
+   */
+  driver: ModelSpec;
+}
+
+/**
+ * The frozen peak switch. The window is the Z.ai GLM Coding Plan's peak
+ * hours — 14:00–18:00 Asia/Singapore on weekdays, when quota consumption
+ * multiplies (~3×) — written in UTC because every consumer reads a UTC
+ * clock: **06:00–10:00 UTC, Monday–Friday**. The peak driver is DeepSeek's
+ * served flash model: `deepseek-flash` is the id the endpoint ECHOES back
+ * (a `deepseek-chat` request is served as `deepseek-flash` and would fail
+ * the served-model identity guard), and the `deepseek` provider factory
+ * reads `DEEPSEEK_API_KEY` from the environment at dispatch time.
+ *
+ * IMMUTABLE BY CONSTRUCTION (deepFreeze), like every other shared default:
+ * a nested write throws instead of silently re-pointing a live run's model.
+ */
+export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
+  window: {
+    utcWeekdays: [1, 2, 3, 4, 5],
+    startMinute: 6 * 60,
+    endMinute: 10 * 60,
+  },
+  // The template's documented ≤20-minute scheduled run (the retired
+  // start-exclusion guard reserved exactly this band: no weekday start from
+  // 05:40 inclusive). 20 minutes covers the privileged job's 15-minute
+  // `timeout-minutes` with the documented bound's margin.
+  headroomMinutes: 20,
+  driver: { provider: 'deepseek', model: 'deepseek-flash' },
+});
+
+/**
+ * True when `nowMs` falls inside the frozen peak window (UTC). Pure: the
+ * caller supplies the clock, so the boundaries are unit-testable without a
+ * fake timer. Weekday-only, `[startMinute, endMinute)` — 06:00 through
+ * 09:59 inclusive, 10:00 exclusive, weekends never.
+ */
+export function isSelfhostPeak(nowMs: number): boolean {
+  return inUtcWeekdayBand(nowMs, SelfhostPeak.window.startMinute, SelfhostPeak.window.endMinute);
+}
+
+/**
+ * True when `nowMs` falls in the RESERVED PRE-PEAK HEADROOM — the
+ * `headroomMinutes` band immediately before the window, on the window's
+ * weekdays. A run starting here may still be executing when the peak
+ * begins, so `resolveSelfhostDriver` sends it through the PEAK driver: no
+ * off-peak (Z.ai GLM) dispatch can be issued inside the ~3× quota window.
+ * Disjoint from `isSelfhostPeak`; pure, like it. The band never wraps past
+ * midnight (a headroom wider than the window start clamps to 00:00).
+ */
+export function isSelfhostPeakHeadroom(nowMs: number): boolean {
+  return inUtcWeekdayBand(
+    nowMs,
+    SelfhostPeak.window.startMinute - SelfhostPeak.headroomMinutes,
+    SelfhostPeak.window.startMinute,
+  );
+}
+
+/**
+ * The shared comparison: peak weekdays and the `[fromMinute, toMinute)` UTC
+ * minute band (each clamped at 00:00 — a band never wraps past midnight).
+ * One implementation so the window and headroom predicates can never
+ * disagree about the weekday rule; the two CALLS keep the bands disjoint.
+ */
+function inUtcWeekdayBand(nowMs: number, fromMinute: number, toMinute: number): boolean {
+  const at = new Date(nowMs);
+  // Date#getUTCDay is 0=Sun … 6=Sat; the window is documented in the ISO
+  // numbering, so map Sunday to 7 before the membership test (a Sunday
+  // reading 0 must not accidentally match a 1–5 weekday list either way,
+  // but the mapping keeps the data and the code naming the same thing).
+  const raw = at.getUTCDay();
+  const weekday = raw === 0 ? 7 : raw;
+  if (!SelfhostPeak.window.utcWeekdays.includes(weekday)) return false;
+  const minute = at.getUTCHours() * 60 + at.getUTCMinutes();
+  return minute >= Math.max(0, fromMinute) && minute < Math.min(toMinute, 24 * 60);
+}
+
+/**
+ * THE one place the scheduled runs' driver is decided: inside the peak
+ * window — or its reserved pre-peak headroom, so a run that starts just
+ * before the peak cannot dispatch off-peak work inside it — the peak
+ * driver, otherwise the frozen off-peak default. The caller reads its clock
+ * ONCE (the entry reuses the run's start stamp), so every loop of a sweep
+ * dispatches through the same provider the run's start instant selected — a
+ * delayed fire or a manual dispatch resolves at ITS OWN start, never at the
+ * slot's nominal time.
+ */
+export function resolveSelfhostDriver(nowMs: number): ModelSpec {
+  return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs)
+    ? SelfhostPeak.driver
+    : SelfhostDefaults.driver;
+}
+
+/**
+ * The environment variable the selected driver's provider factory reads its
+ * API key from (the ai-sdk lane reads each provider's key AT CALL TIME — see
+ * `defaultProviders()` in src/driver/ai-sdk/index.ts). `undefined` when no
+ * key name is known: an unknown provider cannot be credential-checked, and a
+ * caller must treat that as "cannot vouch" rather than "no key needed".
+ */
+export function driverKeyEnv(driver: ModelSpec): string | undefined {
+  switch (driver.provider) {
+    // 'zai' is the normalised handle for the Z.ai coding endpoint;
+    // 'ai-sdk' is the deprecated driver-kind alias that resolves to the same
+    // factory (see the ai-sdk header), so both read the same key.
+    case 'zai':
+    case 'ai-sdk':
+      return 'ZAI_API_KEY';
+    // The remaining in-process ai-sdk handles (defaultProviders()): an
+    // adopter who re-points SelfhostDefaults.driver / SelfhostPeak.driver at
+    // one of these gets the right key name, not an empty handshake.
+    case 'deepseek':
+      return 'DEEPSEEK_API_KEY';
+    case 'openai':
+      return 'OPENAI_API_KEY';
+    case 'anthropic':
+      return 'ANTHROPIC_API_KEY';
+    default:
+      // A handle this map does not know (a host-CLI lane, a typo): the caller
+      // must read undefined as "cannot vouch" and refuse, never as "no key
+      // needed".
+      return undefined;
+  }
+}
+
+/**
  * The default journal root for a checkout: `<repoRoot>/.selfhost/journal` —
  * where the entry modules put per-run journals, dispatch logs, the worktree
  * registry, and the merge sessions dir when no `--journal-root` override was

@@ -191,36 +191,45 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     );
   });
 
-  it('both instantiated self-host workflows carry the automation-window guard', () => {
+  it('the merge-dispatch instantiation carries its automation-window guard', () => {
     // The window-end fail-closed guard: the UTC clock read plus the abort
     // line — a delayed fire must refuse to initiate operations, not run
-    // outside the scheduled window.
-    for (const name of ['self-review-loop.yml', 'self-merge-prs.yml']) {
-      const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
-      expect(text, `${name}: the window guard's UTC clock read`).toContain('date -u +%H%M');
-      expect(text, `${name}: the window guard's abort line`).toContain(
-        'outside the scheduled automation window',
-      );
-    }
+    // outside the scheduled window. The REVIEW loop's guard was retired by
+    // the 2026-10-12 all-hours + peak-aware-model change (its start
+    // exclusion no longer exists, so neither does the guard) and is covered
+    // by the peak-aware-selection test below.
+    const text = readFileSync(join(WORKFLOWS_DIR, 'self-merge-prs.yml'), 'utf8');
+    expect(text, `self-merge-prs.yml: the window guard's UTC clock read`).toContain(
+      'date -u +%H%M',
+    );
+    expect(text, `self-merge-prs.yml: the window guard's abort line`).toContain(
+      'outside the scheduled automation window',
+    );
   });
 
-  it('the self-review-loop instantiation carries the peak-aware window (D11a)', () => {
-    // OWNER-MANDATED WINDOW: any time EXCEPT the Z.ai GLM peak —
-    // 06:00–10:00 UTC Mon–Fri plus 20-minute headroom. Three crons keep
-    // the 15-minute cadence outside the start exclusion, and the
-    // retired 15:00–01:00 UTC window fully gone from the file.
+  it('the self-review-loop instantiation runs all day with peak-aware model selection (D11a)', () => {
+    // OWNER DIRECTIVE 2026-10-12: the loop runs EVERY 15 minutes, every day —
+    // the Z.ai GLM peak is no longer excluded. The MODEL switches instead of
+    // the schedule: the toolkit resolves the driver from the run's clock
+    // (src/selfhost/config.ts resolveSelfhostDriver).
     const text = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
-    expect(text).toContain("cron: '*/15 0-4,10-23 * * 1-5'");
-    expect(text).toContain("cron: '0,15,30 5 * * 1-5'");
-    expect(text).toContain("cron: '*/15 * * * 0,6'");
-    expect(text).not.toContain('15-23');
-    expect(text).not.toContain("cron: '0,15,30,45 5 * * 1-5'");
-    expect(text).not.toContain('15:00–01:00');
-    // The peak guard: weekday read plus 05:40 inclusive / 10:00 exclusive
-    // bounds reserve the documented 20-minute maximum run before peak.
-    expect(text).toContain('date -u +%u');
-    expect(text).toContain('-ge 540');
-    expect(text).toContain('-lt 1000');
+    expect(text).toContain("cron: '*/15 * * * *'");
+    // The three exclusion crons and the headroom guard are gone.
+    expect(text).not.toContain("cron: '*/15 0-4,10-23 * * 1-5'");
+    expect(text).not.toContain("cron: '0,15,30 5 * * 1-5'");
+    expect(text).not.toContain("cron: '*/15 * * * 0,6'");
+    expect(text).not.toContain('outside the scheduled automation window');
+    expect(text).not.toContain('date -u +%u');
+    // BOTH provider keys ride the loop step; each provider reads its own.
+    expect(text).toContain('ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}');
+    expect(text).toContain('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}');
+    // The fail-closed assert asks the toolkit WHICH key this clock needs and
+    // requires exactly that one — no window arithmetic in YAML.
+    expect(text).toContain('node dist/selfhost/self-review-loop.js --print-driver-key-env');
+    expect(text).toMatch(/REQUIRED_KEY=\$\(.*\)\n\s*test -n "\$\(printenv "\$REQUIRED_KEY"\)"/);
+    // A dry run posts and dispatches nothing, so it needs no provider key —
+    // the handshake is skipped for it (matching main()'s exemption).
+    expect(text).toContain('if [ "$DRY_RUN" != "true" ]; then');
     // D11b: the usage-report wiring — the entry's artifact path and the
     // always() upload (an over-budget run is exactly the tuning evidence).
     expect(text).toContain('SWEEP_USAGE_OUT');
@@ -243,56 +252,45 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     }
   });
 
-  it('the self-host driver-key env NAME is consistent within and across template/instantiation', () => {
-    // Batch-gate finding (VB4K #1): the templates declared env
-    // `Z_AI_API_KEY:` while their own guard asserted `$ZAI_API_KEY` (the name
-    // the drivers read), so an adopter's run refused to start. Pin the
-    // declaration and the assertion to the SAME key, and pin each template
-    // to its instantiation: the declaration NAME is fixed (`ZAI_API_KEY`);
-    // only the secret name is the `{{SELFHOST_DRIVER_KEY}}` placeholder.
-    const declared = (text: string): string | undefined =>
-      text.match(/^\s*([A-Z_]*AI_API_KEY):\s*\$\{\{\s*secrets\./m)?.[1];
-    const asserted = (text: string): string | undefined =>
-      text.match(/test -n "\$([A-Z_]*AI_API_KEY)"/)?.[1];
-    const pairs = ['self-review-loop.yml', 'self-merge-prs.yml'].map((name) => ({
-      name,
-      template: join(ROOT, `policy/templates/self-host/${name}`),
-      instantiated: join(WORKFLOWS_DIR, name),
-    }));
-    for (const { name, template, instantiated } of pairs) {
-      const templateText = readFileSync(template, 'utf8');
-      const instantiatedText = readFileSync(instantiated, 'utf8');
-      const templateDecl = declared(templateText);
-      const instantiatedDecl = declared(instantiatedText);
-      if (name === 'self-merge-prs.yml') {
-        expect(
-          templateDecl,
-          `${name}: disabled conflict stage must not declare driver key`,
-        ).toBeUndefined();
-        expect(
-          instantiatedDecl,
-          `${name}: disabled conflict stage must not declare driver key`,
-        ).toBeUndefined();
-        expect(
-          asserted(templateText),
-          `${name}: disabled conflict stage must not guard driver key`,
-        ).toBeUndefined();
-        expect(
-          asserted(instantiatedText),
-          `${name}: disabled conflict stage must not guard driver key`,
-        ).toBeUndefined();
-        continue;
-      }
-      expect(templateDecl, `${name}: template driver env declaration`).toBe('ZAI_API_KEY');
-      expect(instantiatedDecl, `${name}: instantiated driver env declaration`).toBe('ZAI_API_KEY');
-      expect(templateDecl, `${name}: template declaration must match its guard assert`).toBe(
-        asserted(templateText),
-      );
-      expect(
-        instantiatedDecl,
-        `${name}: instantiated declaration must match its guard assert`,
-      ).toBe(asserted(instantiatedText));
-      expect(instantiatedDecl, `${name}: template and instantiation must agree`).toBe(templateDecl);
-    }
+  it('the self-host driver-key env NAMES stay consistent within and across template/instantiation', () => {
+    // Batch-gate finding (VB4K #1): a template once declared env
+    // `Z_AI_API_KEY:` while its own guard asserted `$ZAI_API_KEY` (the name
+    // the drivers read), so an adopter's run refused to start. Pin every
+    // declaration NAME (fixed: what the drivers read) to its adopter secret
+    // placeholder, and pin each template to its instantiation. The review
+    // loop now exports BOTH provider keys and its run step requires the one
+    // the toolkit's peak-aware resolution selects (via
+    // --print-driver-key-env), so both names must be declared.
+    const declaredNames = (text: string): string[] =>
+      [...text.matchAll(/^ {10}([A-Z][A-Z0-9_]*_API_KEY):/gm)].map((match) => String(match[1]));
+    const templateText = readFileSync(
+      join(ROOT, 'policy/templates/self-host/self-review-loop.yml'),
+      'utf8',
+    );
+    const instantiatedText = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
+    expect(declaredNames(templateText), 'template driver env declarations').toEqual([
+      'ZAI_API_KEY',
+      'DEEPSEEK_API_KEY',
+    ]);
+    expect(declaredNames(instantiatedText), 'instantiated driver env declarations').toEqual([
+      'ZAI_API_KEY',
+      'DEEPSEEK_API_KEY',
+    ]);
+    // Each NAME pairs with the adopter's secret placeholder, verbatim.
+    expect(templateText).toContain('ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}');
+    expect(templateText).toContain('DEEPSEEK_API_KEY: ${{ secrets.{{SELFHOST_PEAK_DRIVER_KEY}} }}');
+    expect(instantiatedText).toContain('ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}');
+    expect(instantiatedText).toContain('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}');
+    // The disabled conflict stage (self-merge-prs) declares no driver key.
+    expect(
+      declaredNames(
+        readFileSync(join(ROOT, 'policy/templates/self-host/self-merge-prs.yml'), 'utf8'),
+      ),
+      'self-merge-prs template: no driver key',
+    ).toEqual([]);
+    expect(
+      declaredNames(readFileSync(join(WORKFLOWS_DIR, 'self-merge-prs.yml'), 'utf8')),
+      'self-merge-prs instantiation: no driver key',
+    ).toEqual([]);
   });
 });
