@@ -701,10 +701,7 @@ interface GlmProjectionFacts {
   readonly clearThinking: boolean;
 }
 
-function parseProjection(
-  input: unknown,
-  attestation: GlmHostedTransformAttestation | undefined,
-): GlmProjectionFacts {
+function parseProjection(input: unknown): GlmProjectionFacts {
   if (!isRecord(input)) throw new UnboundedGlmRequestShape('projection must be a JSON object');
   const messages = toProviderMessages(input.prompt);
   const tools = toFunctionTools(input.tools);
@@ -754,11 +751,8 @@ function parseProjection(
 }
 
 /** The exported render primitive: the CONSERVATIVE rendered prompt string. */
-export function renderGlmTextPrompt(
-  projection: unknown,
-  attestation?: GlmHostedTransformAttestation,
-): string {
-  const facts = parseProjection(projection, attestation);
+export function renderGlmTextPrompt(projection: unknown): string {
+  const facts = parseProjection(projection);
   return renderTemplate(facts.messages, facts.tools, facts.reasoningEffort, facts.clearThinking);
 }
 
@@ -766,11 +760,8 @@ export function renderGlmTextPrompt(
  * The exported shared-vector primitive: the PROVEN input-token upper bound for
  * the exact projection, or a refusal. Safe integer, never negative.
  */
-export function countGlmTextPromptBytes(
-  projection: unknown,
-  attestation?: GlmHostedTransformAttestation,
-): number {
-  const facts = parseProjection(projection, attestation);
+export function countGlmTextPromptBytes(projection: unknown): number {
+  const facts = parseProjection(projection);
   const rendered = renderTemplate(
     facts.messages,
     facts.tools,
@@ -831,7 +822,7 @@ export function createGlmTextCapability(
       } catch {
         throw new UnboundedGlmRequestShape('the projection is not parseable JSON');
       }
-      return countGlmTextPromptBytes(parsed, bound);
+      return countGlmTextPromptBytes(parsed);
     },
     withOutputCeiling(
       params: LanguageModelV4CallOptions,
