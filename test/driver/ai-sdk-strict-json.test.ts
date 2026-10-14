@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { wrapLanguageModel } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
+import { APICallError } from '@ai-sdk/provider';
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { z } from 'zod';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
@@ -143,6 +144,24 @@ function textResult(
   };
 }
 
+/** A scripted reply: a result, or an error the mock THROWS from that send. */
+type ScriptedReply = LanguageModelV4GenerateResult | { readonly throwError: unknown };
+
+function isThrowingReply(reply: ScriptedReply): reply is { readonly throwError: unknown } {
+  return 'throwError' in reply;
+}
+
+/** A retryable provider error (the SDK's own class; HTTP 503 -> 'transient'). */
+function retryableApiError(): APICallError {
+  return new APICallError({
+    message: 'endpoint hiccup',
+    url: 'https://example.invalid/v1/messages',
+    requestBodyValues: {},
+    statusCode: 503,
+    isRetryable: true,
+  });
+}
+
 interface Fixture {
   readonly driver: AiSdkDriver;
   /** Every set of params the MODEL actually received (one entry per send). */
@@ -157,7 +176,7 @@ interface Fixture {
  * crashing — the send COUNT is what the tests assert).
  */
 async function fixture(
-  replies: readonly LanguageModelV4GenerateResult[],
+  replies: readonly ScriptedReply[],
   options: {
     strict: boolean;
     stage?: StrictTokenRepairStage;
@@ -182,6 +201,9 @@ async function fixture(
       options.onSend?.(wire.length - 1);
       const reply = replies[Math.min(served, replies.length - 1)] ?? textResult('');
       served += 1;
+      // A scripted THROW is a real send failure: the driver sees it exactly as it
+      // sees a provider rejection.
+      if (isThrowingReply(reply)) throw reply.throwError;
       return reply;
     },
   });
@@ -651,6 +673,38 @@ describe('strict-JSON strategy: the repair-stage lifecycle', () => {
       expect(calls).toEqual({ enter: 0, exit: 0 });
       expect(result.stopReason).toBe('complete');
       expect(fx.wire).toHaveLength(1);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('a coincident send failure and close refusal keep BOTH causes, classified by the send', async () => {
+    const { stage, calls } = countingStage({ exit: true });
+    const replies: ScriptedReply[] = [
+      textResult('prose, not JSON', usageOf(100, 5)),
+      { throwError: retryableApiError() },
+    ];
+    const fx = await fixture(replies, { strict: true, stage });
+    try {
+      const result = await fx.driver.run(invocation());
+      // The stage opened and closed exactly once; the repair WAS sent and charged,
+      // and then the send failed.
+      expect(calls).toEqual({ enter: 1, exit: 1 });
+      expect(fx.wire).toHaveLength(2);
+      expect(fx.receipts).toHaveLength(2);
+      // No payload, and the CLASSIFICATION is the SEND error's (HTTP 503 ->
+      // 'transient') — never the close refusal's ('unknown').
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBe('transient');
+      // BOTH failures are visible in the persisted bounded text.
+      expect(result.error).toContain('endpoint hiccup');
+      expect(result.error).toContain('the repair stage close also refused');
+      expect(result.error).toContain('the repair stage could not be closed');
+      // The fold is main + OBSERVED repair usage: the thrown send completed no
+      // step, so nothing is invented for it.
+      expect(result.usage.input).toBe(100);
+      expect(result.usage.output).toBe(5);
     } finally {
       await fx.cleanup();
     }

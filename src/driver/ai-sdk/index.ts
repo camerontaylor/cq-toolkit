@@ -1205,9 +1205,18 @@ export class AiSdkDriver implements Driver {
     // main-only usage while a paid response existed.
     const repairStage = this.strictTokenRepairStage;
     let repairUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    // A close refusal that COINCIDES with a send failure is recorded here instead
+    // of being thrown: JavaScript gives a `finally`'s throw priority over the
+    // in-flight completion, so throwing it would ERASE the send cause the
+    // corridor classifies. `stageCloseRefused` is an explicit presence flag (not
+    // an `undefined` sentinel), so a stage that refuses by throwing `undefined`
+    // is still recorded as a refusal.
+    let stageCloseRefused = false;
+    let stageCloseFailure: unknown;
     try {
       if (repairStage !== undefined) repairStage.enterRepairStage();
       const sendRepair = async (): Promise<Awaited<ReturnType<typeof generateText>>> => {
+        let sendFailed = false;
         try {
           const repair = await generateText({
             model,
@@ -1245,12 +1254,33 @@ export class AiSdkDriver implements Driver {
           // nothing completed) is preserved as-is: nothing is invented.
           repairUsage = usageFromSdk(repair.usage);
           return repair;
+        } catch (err) {
+          // The SEND failed: remember that, and rethrow the SAME error object
+          // unchanged (same identity, same cause chain) so the corridor classifies
+          // this cause exactly as it does with no stage configured.
+          sendFailed = true;
+          throw err;
         } finally {
-          // EXPLICIT close, exactly once per opened stage, and never swallowed: a
-          // refusal here propagates into the repair-failure corridor, which
-          // aggregates main + the measured repair usage harvested above and
-          // accepts no result.
-          if (repairStage !== undefined) repairStage.exitRepairStage();
+          // EXPLICIT close, exactly once per opened stage.
+          if (repairStage !== undefined) {
+            if (sendFailed) {
+              // COINCIDENT failure: record the close refusal instead of throwing
+              // it — a `finally` throw would erase the send cause above — and let
+              // the send error keep propagating. Never thrown from here, so
+              // `no-unsafe-finally` stays satisfied.
+              try {
+                repairStage.exitRepairStage();
+              } catch (exitErr) {
+                stageCloseRefused = true;
+                stageCloseFailure = exitErr;
+              }
+            } else {
+              // The send RESOLVED: a close refusal replaces the pending result, so
+              // no result is accepted (unchanged), and the corridor still
+              // aggregates main + the measured repair usage harvested above.
+              repairStage.exitRepairStage();
+            }
+          }
         }
       };
       const repair = await sendRepair();
@@ -1511,6 +1541,13 @@ export class AiSdkDriver implements Driver {
           ...(errSignals !== undefined ? { providerSignals: errSignals } : {}),
         };
       }
+      // A COINCIDENT close refusal recorded above is appended to this verdict's
+      // bounded text. The send cause stays the CLASSIFIED one (`errorClass` below
+      // is unchanged), and the second failure stays visible in the persisted
+      // record instead of being erased by the `finally`'s throw precedence.
+      const stageCloseNote = stageCloseRefused
+        ? `; the repair stage close also refused: ${describeError(stageCloseFailure)}`
+        : '';
       return {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
         // Failed requests may contain unobserved spend; partial usage cannot price the run.
@@ -1521,7 +1558,7 @@ export class AiSdkDriver implements Driver {
         ...(!aborted
           ? {
               error: boundedErrorText(
-                `ai-sdk driver: structured output invalid and the repair attempt failed — ${rejection}; repair failure: ${describeError(err)}`,
+                `ai-sdk driver: structured output invalid and the repair attempt failed — ${rejection}; repair failure: ${describeError(err)}${stageCloseNote}`,
               ),
               errorClass: classifyRunFailure(err),
             }
