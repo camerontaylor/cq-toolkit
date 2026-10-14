@@ -69,17 +69,10 @@ describe('glm text capability — fail-closed by default', () => {
   });
 
   test('a mismatching attestation (wrong build/route) => ABSENT', () => {
+    expect(createGlmTextCapability(INPUT, { ...ATTESTATION, hostedBuild: '' })).toBeUndefined();
+    expect(createGlmTextCapability(INPUT, { ...ATTESTATION, model: 'glm-4.5' })).toBeUndefined();
     expect(
-      createGlmTextCapability(INPUT, { ...ATTESTATION, hostedBuild: '' }),
-    ).toBeUndefined();
-    expect(
-      createGlmTextCapability(INPUT, { ...ATTESTATION, model: 'glm-4.5' }),
-    ).toBeUndefined();
-    expect(
-      createGlmTextCapability(
-        { ...INPUT, endpoint: 'https://api.z.ai/api/paas/v4' },
-        ATTESTATION,
-      ),
+      createGlmTextCapability({ ...INPUT, endpoint: 'https://api.z.ai/api/paas/v4' }, ATTESTATION),
     ).toBeUndefined();
   });
 
@@ -198,7 +191,10 @@ describe('glm text capability — withOutputCeiling', () => {
     }
     expect(() =>
       capability.withOutputCeiling(
-        { prompt: [{ role: 'user', content: [{ type: 'text', text: 'q' }] }], maxOutputTokens: 128 },
+        {
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'q' }] }],
+          maxOutputTokens: 128,
+        },
         64,
       ),
     ).toThrow(UnboundedGlmRequestShape);
