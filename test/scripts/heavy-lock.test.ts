@@ -90,6 +90,166 @@ describe('acquireLock', () => {
     expect(fs.readdirSync(dir)).toEqual(['lock']);
   });
 
+  it('keeps initialization ownership when birthtime tracks ctime (#288)', async () => {
+    // Filesystems without birth-time support derive birthtime from ctime, so
+    // writing the record inside the directory advances it while dev and ino
+    // stay put. Identity must not depend on it: a birth-time comparison
+    // revokes the identity of the very mkdir that won, and the host lock
+    // livelocks behind its own ownerless directory.
+    let mutations = 0;
+    const identities: string[] = [];
+    const birthtimes: number[] = [];
+    const ctimeFs = {
+      ...fs,
+      writeFileSync: (
+        target: fs.PathOrFileDescriptor,
+        data: string,
+        options?: fs.WriteFileOptions,
+      ) => {
+        fs.writeFileSync(target, data, options);
+        if (String(target).startsWith(`${lock}/`)) mutations += 1;
+      },
+      rmSync: (target: fs.PathLike, options?: fs.RmOptions) => {
+        fs.rmSync(target, options);
+        if (String(target).startsWith(`${lock}/`)) mutations += 1;
+      },
+      statSync: (target: fs.PathLike) => {
+        const stat = fs.statSync(target);
+        if (String(target) !== lock) return stat;
+        // Every directory change moves the reported birthtime, as ctime does.
+        const birthtimeMs = stat.birthtimeMs + mutations * 1_000;
+        identities.push(`${stat.dev}:${stat.ino}`);
+        birthtimes.push(birthtimeMs);
+        return { ...stat, birthtimeMs };
+      },
+    } as typeof fs;
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { fs: ctimeFs, token: () => 'tok-bt', log: () => {} },
+    });
+    expect(got.acquired).toBe(true);
+    expect(readOwner(lock)).toMatchObject({ token: 'tok-bt', ...info });
+    expect(mutations).toBeGreaterThan(0); // the record really was written inside
+    expect(new Set(identities).size).toBe(1); // one directory throughout
+    expect(new Set(birthtimes).size).toBeGreaterThan(1); // birthtime moved anyway
+  });
+
+  it('refuses to publish into a directory that replaced ours', async () => {
+    // A reclaimer can move our ownerless directory aside between the mkdir and
+    // publication, so the path then names a different inode. dev and ino are
+    // the fail-closed identity: never write our record into the replacement,
+    // and never remove a path we do not own.
+    let stats = 0;
+    const replacedFs = {
+      ...fs,
+      statSync: (target: fs.PathLike) => {
+        const stat = fs.statSync(target);
+        if (String(target) !== lock) return stat;
+        // The directory we created is stat'ed first; the path changes hands
+        // before the initialization is published.
+        stats += 1;
+        return stats === 1 ? stat : { ...stat, ino: stat.ino + 1 };
+      },
+    } as typeof fs;
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: { fs: replacedFs, token: () => 'tok-r', log: () => {} },
+    });
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)).toBeNull(); // nothing published into the replacement
+    expect(fs.readdirSync(lock)).toEqual([]); // and no temp file left behind
+    expect(fs.existsSync(lock)).toBe(true); // a path we do not own is never removed
+  });
+
+  it('refuses a replacement that a delayed open would pin', async () => {
+    // The open identifies the descriptor, not the earlier mkdir: the path can
+    // be reclaimed and replaced in between. Pinning the replacement with a
+    // handle must never let this caller publish its record into it.
+    const moved = join(dir, 'moved-ownerless');
+    const openFs = {
+      ...fs,
+      openSync: (target: fs.PathLike, flags: fs.OpenMode) => {
+        if (String(target) === lock) {
+          fs.renameSync(lock, moved); // the ownerless directory is moved aside
+          fs.mkdirSync(lock); // and a fresh one takes the path
+        }
+        return fs.openSync(target, flags);
+      },
+    } as typeof fs;
+    const killed: number[] = [];
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: {
+        fs: openFs,
+        token: () => 'tok-open',
+        log: () => {},
+        killGroup: (pgid) => void killed.push(pgid),
+      },
+    });
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)).toBeNull();
+    expect(fs.readdirSync(lock)).toEqual([]); // the replacement got no record, no temp
+    expect(fs.existsSync(moved)).toBe(true); // the moved directory is never removed
+    expect(fs.readdirSync(moved)).toEqual([]); // and nothing is written into it
+    expect(killed).toEqual([]); // and nothing is signalled
+  });
+
+  it('refuses when a conforming reclaimer replaces the directory past the grace', async () => {
+    // A reclaimer may replace an ownerless directory only once
+    // MISSING_OWNER_MS has elapsed on it. A creator paused that long has lost
+    // its claim, so whenever its next filesystem touch lands it must refuse:
+    // the directory it reads is not necessarily the one it created.
+    const moved = join(dir, 'moved-ownerless');
+    let now = 1_000_000;
+    const mkdirAt = now;
+    let reclaimed = false;
+    const reclaimOnce = () => {
+      if (reclaimed) return;
+      reclaimed = true;
+      now += MISSING_OWNER_MS; // the pause outlasts the ownerless grace
+      fs.renameSync(lock, moved); // the reclaimer moves the ownerless directory
+      fs.mkdirSync(lock); // and the next creator's directory takes the path
+    };
+    const pausedFs = {
+      ...fs,
+      statSync: (target: fs.PathLike) => {
+        if (String(target) === lock) reclaimOnce();
+        return fs.statSync(target);
+      },
+      openSync: (target: fs.PathLike, flags: fs.OpenMode) => {
+        if (String(target) === lock) reclaimOnce();
+        return fs.openSync(target, flags);
+      },
+    } as typeof fs;
+    const killed: number[] = [];
+    const got = await acquireLock({
+      path: lock,
+      maxWaitMs: 0,
+      info,
+      deps: {
+        fs: pausedFs,
+        now: () => now,
+        token: () => 'tok-paused',
+        log: () => {},
+        killGroup: (pgid) => void killed.push(pgid),
+      },
+    });
+    expect(reclaimed).toBe(true);
+    expect(now - mkdirAt).toBeGreaterThanOrEqual(MISSING_OWNER_MS); // past the grace
+    expect(got.acquired).toBe(false);
+    expect(readOwner(lock)).toBeNull(); // never initialized
+    expect(fs.readdirSync(lock)).toEqual([]); // no record, no temp, in the replacement
+    expect(fs.existsSync(moved)).toBe(true); // the moved directory is never removed
+    expect(fs.readdirSync(moved)).toEqual([]);
+    expect(killed).toEqual([]);
+  });
+
   it.each(['EEXIST', 'ENOTEMPTY'])(
     'preserves the competing holder after an exclusive mkdir %s collision',
     async (code) => {
