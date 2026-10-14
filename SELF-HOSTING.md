@@ -19,11 +19,27 @@ carry into phase 5 (owner: phase-5 release follow-up — configure
 was merged through `merge-queue` and ff-promoted to `main` with a green
 promotion run.
 
+> **Correction (2026-10-14, C3 T3 / PR #316).** The follow-up named above is
+> superseded: the scheduled self-host workflows no longer read
+> `secrets.GH_TOKEN`. `self-review-loop` (PR #313) and `self-merge-prs` (C3
+> T3) mint the registered `cq-automation` App's installation token per run
+> from the `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
+> `CQ_AUTOMATION_APP_CLIENT_ID` repository variable, so the DoD-2 soak
+> follow-up is provisioning those two — **not** a `GH_TOKEN` PAT, which no
+> workflow reads. The historical NOT MET record and the red-run description
+> below stand as the phase-4 state; see
+> [ADR-0004 note N22](docs/adr/README.md#post-acceptance-notes) and
+> [`policy/templates/self-host/README.md`](policy/templates/self-host/README.md).
+
 The scheduled automations are optional non-required jobs: a missing `GH_TOKEN`
 makes them skip honestly, while required CI checks remain mandatory. W0.6
 also disables the self-host conflict stage, so DIRTY candidates are reported
 as needs-human rather than model-dispatched. Reviews are counted according to
 the trust rules; the former blanket `awaiting` premise was incorrect.
+_(Phase-4 state; superseded 2026-10-14 — the tokenless behaviour is now: the
+review loop refuses, `self-merge-prs` skips, `sync-merge-queue` refuses and
+`init-merge-queue` fails loudly; see the correction above and
+[`policy/templates/self-host/README.md`](policy/templates/self-host/README.md).)_
 
 Automation run note (T4.5): the scheduled `self-review-loop` and
 `self-merge-prs` runs currently exit red at their `GH_TOKEN` assert —
@@ -34,7 +50,9 @@ but a red run is not processing: no PR was classified, replied to, resolved,
 or merged by the automations. Every PR in the window was merged by the lane
 leader. Configuring `GH_TOKEN` (owner: phase 5) is the follow-up that lets
 the scheduled automations process PRs directly; it is recorded here rather
-than hidden.
+than hidden. **(Superseded 2026-10-14: see the correction above — no workflow
+reads `GH_TOKEN`; provision `CQ_AUTOMATION_APP_KEY` +
+`CQ_AUTOMATION_APP_CLIENT_ID` instead.)**
 
 ## Queue promotions
 

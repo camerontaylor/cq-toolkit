@@ -109,7 +109,7 @@ sign-off:
 - `plans/toolkit-v1-plan.md` §11 DoD table — record the release evidence links
   from [`RELEASE.md`](../RELEASE.md) and the npm listing.
 
-### 4. Configure `secrets.GH_TOKEN` on `cq-toolkit` (DoD 2 soak)
+### 4. (Superseded) Configure `secrets.GH_TOKEN` on `cq-toolkit` (DoD 2 soak)
 
 The scheduled `self-review-loop` / `self-merge-prs` workflows exit red at
 their `GH_TOKEN` assert, so the ws-k stage-2 soak is a recorded **NOT MET**
@@ -117,6 +117,15 @@ phase-4 deviation (0 PRs processed end-to-end). Set `secrets.GH_TOKEN` so the
 automations can classify/reply/resolve/merge PRs; the soak criterion can then
 be re-run and recorded. Evidence: [`SELF-HOSTING.md`](../SELF-HOSTING.md)
 §Soak, [`docs/dod-evidence.md`](dod-evidence.md) DoD 2.
+
+> **Superseded (2026-10-14, C3 T3 / PR #316).** Do **not** provision
+> `secrets.GH_TOKEN`: no workflow reads it. The scheduled workflows mint the
+> registered `cq-automation` App's installation token per run from the
+> `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
+> `CQ_AUTOMATION_APP_CLIENT_ID` repository variable (ADR-0004 notes N20/N22;
+> [`policy/templates/self-host/README.md`](../policy/templates/self-host/README.md)).
+> The DoD-2 soak re-run needs those two provisioned, and the automations then
+> either process PRs or fail loudly on a bad key — never a silent skip.
 
 ### 5. Fixtures driver-axis CI (matrix rows)
 
@@ -133,6 +142,6 @@ driver-side CI setup so those cells produce real scored rows; see
 - [ ] `@camerontaylor/cq-toolkit@1.0.0` on the npm registry (step 1).
 - [ ] fixtures flipped, green, merged, tagged `v1.0.0` (step 2).
 - [ ] research-repo status lines flipped (step 3).
-- [ ] `secrets.GH_TOKEN` set; soak re-run (step 4).
+- [ ] `CQ_AUTOMATION_APP_KEY` + `CQ_AUTOMATION_APP_CLIENT_ID` set (no `GH_TOKEN`); soak re-run (step 4).
 - [ ] fixtures driver-axis CI green (step 5).
 - [ ] release PR body / `RELEASE.md` "MISSING" rows reconciled.
