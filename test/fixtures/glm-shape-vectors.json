@@ -68,7 +68,7 @@
             "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } } }
           }
         ],
-        "toolChoice": "auto",
+        "toolChoice": { "type": "auto" },
         "responseFormat": null,
         "providerOptions": null,
         "maxOutputTokens": 64,

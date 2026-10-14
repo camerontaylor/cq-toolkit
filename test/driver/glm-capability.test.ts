@@ -70,7 +70,9 @@ describe('glm text capability — fail-closed by default', () => {
 
   test('a mismatching attestation (wrong build/route) => ABSENT', () => {
     expect(createGlmTextCapability(INPUT, { ...ATTESTATION, hostedBuild: '' })).toBeUndefined();
-    expect(createGlmTextCapability(INPUT, { ...ATTESTATION, model: 'glm-4.5' })).toBeUndefined();
+    // A wrong MODEL is exercised through the caller's INPUT (the API rejects a
+    // non-profile model string); the attestation's model literal is fixed.
+    expect(createGlmTextCapability({ ...INPUT, model: 'glm-4.5' }, ATTESTATION)).toBeUndefined();
     expect(
       createGlmTextCapability({ ...INPUT, endpoint: 'https://api.z.ai/api/paas/v4' }, ATTESTATION),
     ).toBeUndefined();
