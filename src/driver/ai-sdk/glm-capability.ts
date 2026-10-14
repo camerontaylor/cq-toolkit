@@ -193,6 +193,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * COMPACT stage-1 JSON — the pinned provider's `JSON.stringify` transform for a
+ * tool payload (no HTML escaping, no wide separators; this is the HTTP/provider
+ * serialization, NOT the Jinja template rendering). Numbers are restricted to
+ * safe integers so the Python mirror produces byte-identical output; any
+ * non-JSON value refuses.
+ */
+function compactJson(value: unknown): string {
+  let out: string | undefined;
+  try {
+    out = JSON.stringify(value, (_key, inner: unknown) => {
+      if (typeof inner === 'number') {
+        if (!Number.isSafeInteger(inner) || Object.is(inner, -0)) {
+          throw new UnboundedGlmRequestShape('a non-safe-integer number in a tool payload');
+        }
+        return inner;
+      }
+      if (typeof inner === 'bigint' || typeof inner === 'function' || typeof inner === 'symbol') {
+        throw new UnboundedGlmRequestShape('a non-JSON value in a tool payload');
+      }
+      return inner;
+    });
+  } catch (err) {
+    if (err instanceof UnboundedGlmRequestShape) throw err;
+    throw new UnboundedGlmRequestShape('a tool payload is not compact-JSON serializable');
+  }
+  if (out === undefined) throw new UnboundedGlmRequestShape('a tool payload is undefined');
+  return out;
+}
+
 function asArray(value: unknown, where: string): readonly unknown[] {
   if (!Array.isArray(value)) throw new UnboundedGlmRequestShape(`${where} must be an array`);
   return value;
@@ -363,8 +393,15 @@ function toProviderMessages(prompt: unknown): GlmProviderMessage[] {
             throw new UnboundedGlmRequestShape('tool text output value must be a string');
           }
           value = output.value;
-        } else if (type === 'json' || type === 'error-json' || type === 'content') {
-          value = jsonNoAscii(output.value);
+        } else if (type === 'json' || type === 'error-json') {
+          // COMPACT pinned-provider JSON (stage 1), NOT the Jinja template render.
+          value = compactJson(output.value);
+        } else if (type === 'content') {
+          // The pinned provider's `content` conversion can carry media parts this
+          // capability does not model; refuse rather than silently serialize.
+          throw new UnboundedGlmRequestShape(
+            "tool output type 'content' is not modelled (possible unmodelled media)",
+          );
         } else {
           throw new UnboundedGlmRequestShape(
             `tool output type '${String(type)}' is not a bounded text/json output`,
