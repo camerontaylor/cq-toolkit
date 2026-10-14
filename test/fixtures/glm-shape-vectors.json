@@ -596,7 +596,8 @@
         "responseFormat": null,
         "providerOptions": null,
         "maxOutputTokens": 64
-      }
+      },
+      "rawSerialized": "{\"prompt\":[{\"role\":\"tool\",\"content\":[{\"type\":\"tool-result\",\"toolCallId\":\"t1\",\"output\":{\"type\":\"error-json\",\"value\":{\"bad\":-0}}}]}],\"tools\":null,\"toolChoice\":null,\"responseFormat\":null,\"providerOptions\":null,\"maxOutputTokens\":64}"
     },
     {
       "name": "compact json tool result with unsafe integer",
