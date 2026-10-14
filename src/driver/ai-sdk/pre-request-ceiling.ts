@@ -325,7 +325,9 @@ export function isPreRequestCeilingRefusal(value: unknown): value is PreRequestC
  * so the caller's own abort cause survives without mutating it.
  */
 function abortRefusal(signal: AbortSignal): Error {
-  const cause = signal.reason;
+  // `AbortSignal.reason` is typed `any` by @types/node; bind it to an explicit
+  // `unknown` boundary (no suppression, no cast) before it reaches ErrorOptions.
+  const cause: unknown = signal.reason;
   const err = new Error(
     'ai-sdk driver: strict token ceiling cancelled before the wire send',
     cause === undefined ? undefined : { cause },
