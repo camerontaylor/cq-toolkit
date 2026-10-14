@@ -243,4 +243,32 @@ describe('CrqWireWrapper', () => {
     await wire.outcome('completed', usage, 'end_turn', null, ack.ackSequence);
     expect(transport.outcomes[1]?.['repair_of_ack_sequence']).toBe(ack.ackSequence);
   });
+
+  it('refuses to enter the repair stage with no prior authoritative ack', () => {
+    const wire = wrapper(new FakeTransport());
+    expect(() => wire.enterRepairStage()).toThrow(/no authoritative prior ack/);
+  });
+
+  it('refuses to enter the repair stage while the prior wire is unaudited', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    await wire.reserve();
+    expect(() => wire.enterRepairStage()).toThrow(/no recorded outcome/);
+  });
+
+  it('links the repair wire to the wrapper\'s own prior ack and refuses a second stage', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    const first = await wire.reserve();
+    await wire.outcome('completed', usage, 'end_turn', null);
+    wire.enterRepairStage();
+    wire.enterRepairStage();   // idempotent ONLY while the same stage is active
+    const repair = await wire.reserve();
+    wire.exitRepairStage();
+    expect(transport.lastReserve?.['kind']).toBe('repair');
+    expect(transport.lastReserve?.['repair_of_ack_sequence']).toBe(first.ackSequence);
+    expect(transport.lastReserve?.['supersedes_ack_sequence']).toBe(first.ackSequence);
+    expect(repair.ackSequence).not.toBe(first.ackSequence);
+    expect(() => wire.enterRepairStage()).toThrow(/second completed repair stage/);
+  });
 });

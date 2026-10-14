@@ -157,6 +157,11 @@ export class CrqWireWrapper {
   private sessionId: string | null = null;
   private messageId = 0;
   private lastAck: CrqWireAck | null = null;
+  /** Acks whose outcome this wrapper has already reported (the audited set). */
+  private readonly audited = new Set<number>();
+  /** The approved ONE bounded repair stage: active, or completed for this role attempt. */
+  private repairStageActive = false;
+  private repairStageCompleted = false;
 
   constructor(options: CrqWireWrapperOptions) {
     this.options = options;
@@ -186,7 +191,40 @@ export class CrqWireWrapper {
   }
 
   /**
-   * The pre-wire hook: the SDK calls this after its local conservative charge and
+   * Enter the ONE bounded repair stage for the current role attempt (approved additive seam).
+   *
+   * Throws (never silently ignores) when there is no authoritative prior ack, when that ack
+   * has no recorded outcome, or when the prior wire is still pending. Repeated calls are
+   * idempotent ONLY while the same stage is active; a second COMPLETED repair stage per
+   * admitted role attempt is refused. Nothing here is inferred from the next non-repair wire,
+   * and the host still validates repair_of/supersedes and assigns a NEW ack and debit.
+   */
+  enterRepairStage(): void {
+    if (this.repairStageActive) return;
+    if (this.repairStageCompleted) {
+      throw new CrqWireRefusal('a second completed repair stage is not permitted for this role attempt');
+    }
+    if (this.lastAck === null) {
+      throw new CrqWireRefusal('no authoritative prior ack to repair; refusing the repair stage');
+    }
+    if (!this.audited.has(this.lastAck.ackSequence)) {
+      throw new CrqWireRefusal('the prior ack has no recorded outcome (pending or unaudited); refusing the repair stage');
+    }
+    this.repairStageActive = true;
+  }
+
+  /**
+   * Leave the repair stage. The driver MUST call this in a try/finally, including on abort or
+   * error. It never refunds and never clears a terminal incident.
+   */
+  exitRepairStage(): void {
+    if (this.repairStageActive) {
+      this.repairStageActive = false;
+      this.repairStageCompleted = true;
+    }
+  }
+
+  /** The pre-wire hook: the SDK calls this after its local conservative charge and
    * BEFORE the wire. A throw refuses the request with no refund, which is the required
    * behavior for a missing, refused or unauthenticated acknowledgement.
    */
@@ -203,6 +241,9 @@ export class CrqWireWrapper {
     const envelope = bridgeEnvelope(encoder, projection(), provider, model);
     const messageId = this.messageId + 1;
     const supersedes = this.lastAck === null ? 0 : this.lastAck.ackSequence;
+    // Inside the repair stage the wrapper (never the driver) supplies the lifecycle link:
+    // the repair supersedes and repairs the wrapper's own last authoritative ack.
+    const repairing = this.repairStageActive && this.lastAck !== null;
     const message = {
       method: 'reserve', session_id: sessionId, message_id: messageId,
       job: identity.job, source_sha: identity.sourceSha, finding_sha256: identity.findingSha256,
@@ -210,8 +251,10 @@ export class CrqWireWrapper {
       window: identity.window, driver: 'cq', provider, model,
       // The logical attempt identity is IMMUTABLE across retries of this wrapper.
       logical_attempt_id: `${identity.job}:${identity.role}:${String(identity.rung)}:${identity.window}`,
-      supersedes_ack_sequence: supersedes, kind: identity.role.startsWith('judge') ? 'judge' : 'fixer',
-      envelope, wire_output_ceiling: envelope.countedInput + 1, repair_of_ack_sequence: null,
+      supersedes_ack_sequence: supersedes,
+      kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
+      envelope, wire_output_ceiling: envelope.countedInput + 1,
+      repair_of_ack_sequence: repairing ? this.lastAck?.ackSequence ?? null : null,
     };
     const reply = await transport.reserve(message);
     if (!('ackSequence' in reply)) {
@@ -226,6 +269,11 @@ export class CrqWireWrapper {
     this.messageId = messageId;
     this.lastAck = reply;
     return reply;
+  }
+
+  /** Record that this ack's outcome has been reported (the audited set the stage reads). */
+  private markAudited(ack: number): void {
+    this.audited.add(ack);
   }
 
   /**
@@ -250,5 +298,6 @@ export class CrqWireWrapper {
       outcome: kind, usage, stop_reason: stopReason, error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
+    this.markAudited(this.lastAck.ackSequence);
   }
 }
