@@ -96,6 +96,8 @@ class FakeTransport implements CrqWireTransport {
   public hellos = 0;
   public reserved = 0;
   public lastReserve: Readonly<Record<string, unknown>> | null = null;
+  /** Every OUTCOME frame the adapter actually SENT (one per reported wire). */
+  public outcomes: Readonly<Record<string, unknown>>[] = [];
 
   async attestHost(): Promise<boolean> {
     return this.attest;
@@ -123,11 +125,14 @@ class FakeTransport implements CrqWireTransport {
       remainingTokens: 100_000 - this.reserved * 4010,
       remainingMilliseconds: 590_000,
       attemptRef: Number(message['attempt_ref']),
-      wireOrdinal: String(message['wire_ordinal']),
+      // The HOST mints the wire ordinal from its OWN reservation sequence. The
+      // client frame carries no ordinal (and none is echoed from it).
+      wireOrdinal: `host-ordinal-${String(this.reserved)}`,
     };
   }
 
   async outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply> {
+    this.outcomes.push(message);
     return {
       method: 'outcome',
       outcome: reportedKind(message),
@@ -182,9 +187,13 @@ describe('composed strict lane + GLM text-only capability', () => {
 
     await composed.reserve(receiptFor(accepted));
     expect(transport.reserved).toBe(1);
-    expect(transport.lastReserve?.['canonical_projection_digest']).toBe(
-      receiptFor(accepted).canonicalProjectionDigest,
-    );
+    // The strict host schema carries the canonical digest NESTED in the envelope; the
+    // frame has no invented top-level digest field. Read the SENT value with the same
+    // runtime guard the ACK echo uses (no cast, no coercion).
+    const sent = transport.lastReserve;
+    if (sent === null) throw new Error('the fixture recorded no reserve frame');
+    expect(sentEnvelopeDigest(sent)).toBe(receiptFor(accepted).canonicalProjectionDigest);
+    expect(sent['canonical_projection_digest']).toBeUndefined();
     // The adapter without a transport still refuses every wire (fail closed).
     await expect(adapter.reserve(receiptFor(accepted))).rejects.toThrow(CrqWireRefusal);
     expect(transport.reserved).toBe(1);
