@@ -153,6 +153,20 @@ class FakeTransport implements CrqWireTransport {
   }
 }
 
+/**
+ * Narrow a wrapped model for the TEST: `LanguageModel` is a model instance OR a
+ * gateway id string, and the adapter only ever returns a wrapped instance. The
+ * runtime guard makes that explicit (no cast, no suppression, no signature change).
+ */
+function wrappedModel(model: LanguageModel) {
+  if (typeof model === 'string') {
+    throw new CrqWireRefusal(
+      'the adapter returned a gateway model id string instead of a wrapped model instance',
+    );
+  }
+  return model;
+}
+
 /** A model whose every ACTUAL dispatch is counted; the mock never throws. */
 function countingModel(counter: { fetches: number }): MockLanguageModelV4 {
   return new MockLanguageModelV4({
@@ -221,7 +235,7 @@ describe('composed strict lane + GLM text-only capability', () => {
       transport,
     });
     const counter = { fetches: 0 };
-    const wrapped = adapter.wrapModel(countingModel(counter));
+    const wrapped = wrappedModel(adapter.wrapModel(countingModel(counter)));
 
     // Positive control on the SAME composed object: a null responseFormat counts,
     // reserves and dispatches exactly once (so the negative leg is not accept-any).
@@ -254,7 +268,7 @@ describe('composed strict lane + GLM text-only capability', () => {
       transport,
     });
     const counter = { fetches: 0 };
-    const wrapped = adapter.wrapModel(countingModel(counter));
+    const wrapped = wrappedModel(adapter.wrapModel(countingModel(counter)));
     await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(
       /no acknowledged wire is pending/,
     );
@@ -286,7 +300,7 @@ describe('composed strict lane + GLM text-only capability', () => {
         };
       },
     });
-    const wrapped = adapter.wrapModel(model);
+    const wrapped = wrappedModel(adapter.wrapModel(model));
     await adapter.reserve(receiptFor(projectionWith(null)));
     // The transport answers `stopped: null` (a LYING/incorrectly permissive reply).
     // The LOCALLY computed unknown is its own refusal: no accepted payload escapes,
@@ -533,7 +547,7 @@ describe('composed adapter: strict frames and the reserve-in-flight lock', () =>
       transport,
     });
     const counter = { fetches: 0 };
-    const wrapped = adapter.wrapModel(countingModel(counter));
+    const wrapped = wrappedModel(adapter.wrapModel(countingModel(counter)));
     await adapter.reserve(receiptFor(projectionWith(null)));
     // The provider call happened (the charge is kept) and the outcome was reported
     // exactly once, but the host's terminal stop must reach the caller: a completed
@@ -562,7 +576,7 @@ describe('composed adapter: strict frames and the reserve-in-flight lock', () =>
     await adapter.reserve(receiptFor(projectionWith(null)));
     expect(transport.reserveCalls).toBe(1);
     const counter = { fetches: 0 };
-    await adapter.wrapModel(countingModel(counter)).doGenerate(PROMPT_CALL);
+    await wrappedModel(adapter.wrapModel(countingModel(counter))).doGenerate(PROMPT_CALL);
     expect(counter.fetches).toBe(1);
     expect(transport.outcomeCalls).toBe(1);
     // The outcome frame carries NO wire ordinal: the reserved ack's host ordinal
@@ -593,7 +607,7 @@ describe('composed adapter: strict frames and the reserve-in-flight lock', () =>
     expect(transport.reserveCalls).toBe(1);
     // Close the first wire's outcome so the adapter's state checks admit the next send.
     const counter = { fetches: 0 };
-    await adapter.wrapModel(countingModel(counter)).doGenerate(PROMPT_CALL);
+    await wrappedModel(adapter.wrapModel(countingModel(counter))).doGenerate(PROMPT_CALL);
     expect(counter.fetches).toBe(1);
     // The lock was released on the successful path: the next reserve reaches the host.
     await adapter.reserve(receiptFor(projectionWith(null)));
