@@ -434,6 +434,17 @@ export class ClaudeAgentDriver implements Driver {
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
+    // --- Governed cancellation + strict-budget honesty, ENTRY checks (I8):
+    // the run signal is read ONCE here. An already-cancelled invocation never
+    // reaches lane-specific setup (endpoint/key/`loadSdk`/workspace), and a
+    // `Budget.strictTokenBudget` request is refused before it either.
+    // Cancellation outranks the strict refusal.
+    const signal = options?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-agent');
+
     // --- Pre-dispatch validation: everything here throws BEFORE the agent
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
     // partial state). Provider first (pure), then the peer, then budget,
@@ -456,23 +467,14 @@ export class ClaudeAgentDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'claude-agent driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal
-    // the ONLY cancellation channel (seam v2). Checked BEFORE the dispatch
-    // (an already-cancelled invocation never dispatches — and never creates
-    // a session record), then wired to the SDK's cancellation root — the
-    // driver decides nothing about WHEN.
-    const signal = options?.signal;
+    // --- Governed-cancellation LATE recheck (I8): the signal was read at
+    // entry; recheck the SAME live RunOptions.signal after the lane setup
+    // (which AWAITS `loadSdk`), so an abort that fired during setup never
+    // dispatches and never creates a session record. The strict refusal
+    // already ran at entry (no duplicate here).
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
-
-    // --- Strict-budget honesty: this lane has no pre-request token ceiling,
-    // so a `Budget.strictTokenBudget` request must be REFUSED here (a
-    // pre-dispatch 'config' failure) rather than silently ignored. After the
-    // governed-cancellation check (I8), before any session, credential read or
-    // dispatch. Covers DIRECT construction; the factory's resolved-driver
-    // guard covers the factory path.
-    assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-agent');
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
     // document is caller-authored plain data — compile it BEFORE the agent

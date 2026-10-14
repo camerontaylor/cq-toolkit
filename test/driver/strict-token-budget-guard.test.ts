@@ -104,6 +104,11 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(DispatchError);
       expect(errorClassOf(err)).toBe('config');
+      // SPECIFIC guard phrase + lane: a lane-specific preflight failure
+      // (missing route key) can no longer masquerade as this refusal.
+      expect((err as Error).message).toContain('strictTokenBudget');
+      expect((err as Error).message).toContain('does not enforce a pre-request token ceiling');
+      expect((err as Error).message).toContain('subprocess');
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
@@ -121,6 +126,9 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(DispatchError);
       expect(errorClassOf(err)).toBe('config');
+      expect((err as Error).message).toContain('strictTokenBudget');
+      expect((err as Error).message).toContain('does not enforce a pre-request token ceiling');
+      expect((err as Error).message).toContain('claude-agent');
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
@@ -138,6 +146,9 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(DispatchError);
       expect(errorClassOf(err)).toBe('config');
+      expect((err as Error).message).toContain('strictTokenBudget');
+      expect((err as Error).message).toContain('does not enforce a pre-request token ceiling');
+      expect((err as Error).message).toContain('acp');
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
@@ -315,10 +326,6 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
 
   test('direct subprocess: aborted, seam untouched, no session store', async () => {
     const { root, sessionsDir } = await scratch();
-    // The lane resolves the route credential BEFORE the governed-cancellation
-    // check, so a route key must be present for the run to reach the cancel
-    // gate. A fake value injected here — never a real credential read.
-    vi.stubEnv('ANTHROPIC_API_KEY', 'offline-fake-key');
     try {
       const spy = seamSpy();
       const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
@@ -330,7 +337,40 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
-      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('direct claude-agent: aborted before endpoint/key/loadSdk, no session store', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const spy = seamSpy();
+      const driver = new ClaudeAgentDriver({ sdkLoader: spy.fn, sessionsDir });
+      const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
+        signal: preAborted().signal,
+      });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(spy.calls).toBe(0);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('direct acp: aborted before resolveAcpCommand, spawn untouched, no session store', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const spy = seamSpy();
+      const driver = new AcpDriver({ spawn: spy.fn, sessionsDir });
+      const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
+        signal: preAborted().signal,
+      });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(spy.calls).toBe(0);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -354,6 +394,47 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
       expect(result.usage).toEqual(ZERO);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('direct claude-agent: an abort DURING the async loadSdk still settles aborted (late recheck), no dispatch', async () => {
+    const { root, sessionsDir } = await scratch();
+    // The late recheck sits AFTER the awaited lane setup: reach loadSdk (a
+    // non-strict budget, so the entry guard is a no-op), abort while it is
+    // pending, then let it resolve to a valid module shape. The run must
+    // settle aborted with zero usage and no session instead of dispatching.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'offline-fake-key');
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => {
+          await gate;
+          return {
+            query: () => {},
+            tool: () => {},
+            createSdkMcpServer: () => {},
+          } as never;
+        },
+        sessionsDir,
+      });
+      const controller = new AbortController();
+      const pending = driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }, {}), {
+        signal: controller.signal,
+      });
+      // The run has synchronously reached the pending `await loadSdk()`.
+      await Promise.resolve();
+      controller.abort();
+      release();
+      const result = await pending;
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
       await rm(root, { recursive: true, force: true });
     }
   });

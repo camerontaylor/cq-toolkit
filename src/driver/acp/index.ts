@@ -803,6 +803,17 @@ export class AcpDriver implements Driver {
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
+    // --- Governed cancellation + strict-budget honesty, ENTRY checks (I8):
+    // the run signal is read ONCE here. An already-cancelled invocation never
+    // reaches lane-specific setup (`resolveAcpCommand`/env/workspace), and a
+    // `Budget.strictTokenBudget` request is refused before it either.
+    // Cancellation outranks the strict refusal.
+    const signal = options?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'acp');
+
     // --- Pre-dispatch validation: everything here throws BEFORE the
     // harness is spawned (and, except the sessionRef check, before any
     // session exists). Absent binary / unknown endpoint → the §3 throw
@@ -853,23 +864,14 @@ export class AcpDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'acp driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
-    // the ONLY cancellation channel (seam v2). Checked BEFORE the user-turn
-    // append AND before the spawn — the envNames hoist rationale applies
-    // identically: an already-cancelled invocation must leave neither a
-    // dangling user turn in the record nor a session record nor a spawn.
-    const signal = options?.signal;
+    // --- Governed-cancellation LATE recheck (I8): the signal was read at
+    // entry; recheck the SAME live RunOptions.signal after the lane setup
+    // (which AWAITS `resolveAcpCommand`), so an abort that fired during setup
+    // leaves neither a dangling user turn, nor a session record, nor a spawn.
+    // The strict refusal already ran at entry (no duplicate here).
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
-
-    // --- Strict-budget honesty: this lane has no pre-request token ceiling,
-    // so a `Budget.strictTokenBudget` request must be REFUSED here (a
-    // pre-dispatch 'config' failure) rather than silently ignored. After the
-    // governed-cancellation check (I8), before the user-turn append, any
-    // session or the spawn. Covers DIRECT construction; the factory's
-    // resolved-driver guard covers the factory path.
-    assertStrictTokenBudgetSupported(opInvocation.budget, 'acp');
 
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
     // the bound workspace when one is set, else in a fresh temp workspace —

@@ -497,6 +497,17 @@ export class SubprocessDriver implements Driver {
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
+    // --- Governed cancellation + strict-budget honesty, ENTRY checks (I8):
+    // the run signal is read ONCE here. An already-cancelled invocation never
+    // reaches lane-specific setup (route/key/env/workspace), and a
+    // `Budget.strictTokenBudget` request is refused before it either.
+    // Cancellation outranks the strict refusal.
+    const signal = options?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'subprocess');
+
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
     // spawned and (except routing/key checks) before any session exists.
     const route = routeFor(modelSpec, this.routingTable); // unknown provider → the config throw
@@ -516,23 +527,13 @@ export class SubprocessDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
-    // the ONLY cancellation channel (seam v2). Checked BEFORE the spawn (an
-    // already-cancelled invocation never spawns — and never creates a
-    // session record, never appends a dangling user turn), then forwarded
-    // to the ladder — the driver decides nothing about WHEN.
-    const signal = options?.signal;
+    // --- Governed-cancellation LATE recheck (I8): the signal was read at
+    // entry; recheck the SAME live RunOptions.signal after lane setup, so an
+    // abort that fired since entry never spawns and never creates a session
+    // record. The strict refusal already ran at entry (no duplicate here).
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
-
-    // --- Strict-budget honesty: this lane has no pre-request token ceiling,
-    // so a `Budget.strictTokenBudget` request must be REFUSED here (a
-    // pre-dispatch 'config' failure) rather than silently ignored. After the
-    // governed-cancellation check (I8: cancellation outranks), before any
-    // session, credential read or spawn. Covers DIRECT construction; the
-    // factory's resolved-driver guard covers the factory path.
-    assertStrictTokenBudgetSupported(opInvocation.budget, 'subprocess');
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
     // document is caller-authored plain data — compile it BEFORE the CLI is
