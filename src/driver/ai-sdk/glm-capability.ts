@@ -204,7 +204,16 @@ function jinjaTojson(value: unknown): string {
   if (typeof value === 'string') return escapeJinjaString(JSON.stringify(value));
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new UnboundedGlmRequestShape('a non-finite number in JSON');
+    // JS/Python number stringification differs for non-integers and edge
+    // values: JS `String(1.0)` is `1` while Python `json.dumps(1.0)` is `1.0`
+    // (+1 byte), and exponent forms differ. To stay a PYTHON-COMPATIBLE upper
+    // bound with no arbitrary padding, render ONLY safe integers and refuse
+    // every other numeric shape (floats, -0, non-finite, unsafe magnitudes).
+    if (!Number.isSafeInteger(value) || Object.is(value, -0)) {
+      throw new UnboundedGlmRequestShape(
+        'a non-integer/edge number cannot be bounded Python-compatibly',
+      );
+    }
     return String(value);
   }
   if (Array.isArray(value)) {
