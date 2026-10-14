@@ -257,6 +257,33 @@
       },
       "mustContain": ["\"maxLength\": 10"],
       "mustNotContain": []
+    },
+    {
+      "name": "BOM and NEL are preserved conservatively (JS trim would strip them, Python keeps)",
+      "projection": {
+        "prompt": [
+          {
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "\uFEFFlead\u0085trail\uFEFF" }]
+          },
+          { "role": "user", "content": [{ "type": "text", "text": "\uFEFFq\u0085" }] }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "mustContain": ["\uFEFFlead\u0085trail\uFEFF", "\uFEFFq\u0085"],
+      "mustNotContain": []
     }
   ],
   "refuse": [
@@ -305,7 +332,7 @@
       }
     },
     {
-      "name": "responseFormat present without hosted transform",
+      "name": "responseFormat present (publisher template renders no schema; no opaque transform accepted)",
       "projection": {
         "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
         "tools": null,
