@@ -333,7 +333,12 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(body).toContain('run-id: ${{ steps.run.outputs.run_id }}');
       expect(body).toContain('RATCHET_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}');
       expect(body).toMatch(/node scripts\/ratchet-propose\.mjs --measurement=/);
-      expect(body).toMatch(/CQ_AUTOMATION_TOKEN: \$\{\{ secrets\.CQ_AUTOMATION_TOKEN \}\}/);
+      // Per-run App mint (no stored token): the script's env var carries the
+      // minted installation token, never `secrets.CQ_AUTOMATION_TOKEN`.
+      expect(body).toMatch(/CQ_AUTOMATION_TOKEN: \$\{\{ steps\.propose-app\.outputs\.token \}\}/);
+      expect(body).toContain('client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}');
+      expect(body).toContain('private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}');
+      expect(body).not.toMatch(/secrets\.CQ_AUTOMATION_TOKEN\b/);
       expect(body).not.toMatch(/GITHUB_TOKEN:/);
     },
   );

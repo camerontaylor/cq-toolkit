@@ -367,8 +367,9 @@ no fallback identity, so an empty client-id variable or a failed mint refuses
 the run (the loop step asserts the minted token) rather than posting as a PAT
 or the runner's `GITHUB_TOKEN`. The mint requests only Pull requests write
 (review replies, thread resolves), Contents write (review-fix pushes) and
-Issues write (top-level PR comments). `self-merge-prs` keeps
-`{{SELFHOST_TOKEN}}`; its mint is out of scope here.
+Issues write (top-level PR comments). `self-merge-prs` kept
+`{{SELFHOST_TOKEN}}` at that point; its mint is out of scope here and lands
+in N22.
 
 ### N21 — Annex B §B.5 and N15: `_URL` is not a secret suffix for config resolution, journaling and passthrough — diagnostics keep name-based redaction
 
@@ -412,3 +413,58 @@ agreed on eight suffixes. The narrow ruling keeps the diagnostics list at
 nine entries. It also closes the `_URL` question N15 deliberately left open:
 N15 aligned §B.4/§B.6/§B.9 and kept "the annex-B `_URL` secret-suffix
 question" out of its scope pending this decision.
+
+### N22 — ADR-0004 D-D.2/D-D.3: every remaining automation consumer mints the `cq-automation` App token per run (C3 T3)
+
+N20 landed the per-run App mint for the review loop; PR #307 had already
+landed it for the adversarial drills. The remaining automation consumers
+still consumed stored credentials: `self-merge-prs` read the `GH_TOKEN`
+environment secret, and `sync-merge-queue`, `init-merge-queue` and
+`ratchet-propose` read the automation PAT `CQ_AUTOMATION_TOKEN` (with an
+`CQ_AUTOMATION_INTERIM_FALLBACK`-gated `PROMOTE_TOKEN` fallback for the
+first two). C3 (D-H.3) needs every runtime PAT dependency gone.
+
+**Change (T3, dormant-capable):** each of those four consumers now mints the
+registered `cq-automation` App's installation token PER RUN — the N20/PR #307
+pattern — from the `automation` environment secret `CQ_AUTOMATION_APP_KEY`
+plus the repository variable `CQ_AUTOMATION_APP_CLIENT_ID`, scoped to this
+repository only:
+
+- `self-merge-prs` — Pull requests write, Contents write (the `cq-state`
+  settle-state branch), Issues read (the PR's top-level conversation comments
+  the classifier reads, which ride the issues collection); the tokenless path
+  SKIPS honestly (exit 0);
+- `sync-merge-queue` — Pull requests write; the tokenless path REFUSES
+  ("sync not armed", exit 1);
+- `init-merge-queue` — Contents write; an empty mint falls back to the job's
+  own read-only `GITHUB_TOKEN` and the bootstrap push fails loudly;
+- `ratchet-propose` — Contents write + Pull requests write; the script's
+  tokenless gate stays a green no-op (exit 0).
+
+No mint requests Workflows/Checks/Statuses write (D-D.2: the automation App
+has none, and repo-driven code must not rewrite its own definition or satisfy
+a verdict), and there is NO App-to-PAT fallback in any of them: the mint is
+the credential's only source, so a failed or skipped mint can never promote
+an interim human token into the automation identity. The two tokenless
+outcomes are distinct and both fail closed: an UNSET
+`CQ_AUTOMATION_APP_CLIENT_ID` variable skips the mint step and the workflow
+takes its documented tokenless path (loop refuses, sync refuses, init's push
+fails, the two optional dispatches skip); a SET variable with an absent,
+rotated or malformed `CQ_AUTOMATION_APP_KEY` fails the mint step itself
+(`private-key` is required) — a loud red run, never a silent no-op. Each mint
+also carries a fail-closed scope guard (`github.event.repository.name != ''`):
+`owner` without `repositories` would mint an installation-wide token, so the
+step never runs unless the repository name is present. The
+`{{AUTOMATION_SECRET}}`/`{{INTERIM_SECRET}}`/`{{INTERIM_FALLBACK}}` and
+`{{SELFHOST_TOKEN}}` placeholders are retired from `instances.json` and the
+templates; the templates and their `render-templates` instances are edited
+together, and `test/workflows/automation-app-mint.test.ts` pins the family
+invariants.
+
+**Dormant-capable only.** No live settings, secret or key is touched: the
+`automation` environment already declares `CQ_AUTOMATION_APP_KEY` (secret)
+and `CQ_AUTOMATION_APP_CLIENT_ID` (variable) in
+[`github-settings.json`](../../policy/templates/github-settings.json), and
+the interim `CQ_AUTOMATION_TOKEN`/`GH_TOKEN` names stay in its
+`interimSecrets` allowlist (reported as drift notices) until the owner
+revokes them at C3/T7. This supersedes N20's `self-merge-prs` tail.

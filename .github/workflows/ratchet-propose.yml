@@ -19,12 +19,15 @@
 #     tip's committed baselines, so the proposal goes through the queue's
 #     checks like any PR (it previously targeted main and bypassed them).
 #
-# TOKEN DOCTRINE (scripts/ratchet-propose.mjs): the PR is authored with
-# CQ_AUTOMATION_TOKEN, never GITHUB_TOKEN — a GITHUB_TOKEN-authored PR
-# suppresses its own workflow runs, so its checks would never run. The
-# token lives behind `environment: automation`; W1.10 moves it into that
-# environment (default-branch-only policy) and replaces it with the
-# automation App (ADR-0004 D-D.3). A tokenless run is a green no-op.
+# TOKEN DOCTRINE (scripts/ratchet-propose.mjs): the PR is authored with the
+# automation credential, never GITHUB_TOKEN — a GITHUB_TOKEN-authored PR
+# suppresses its own workflow runs, so its checks would never run. That
+# credential is the registered cq-automation App, minted PER RUN by this job
+# from the `automation` environment secret CQ_AUTOMATION_APP_KEY plus the
+# repository variable CQ_AUTOMATION_APP_CLIENT_ID (the per-run-mint pattern of
+# PR #307; ADR-0004 D-D.3), so it lives behind `environment: automation`
+# (default-branch-only policy). No PAT fallback: an empty client-id variable
+# skips the mint and the script's tokenless gate makes the run a green no-op.
 name: ratchet-propose
 
 on:
@@ -116,8 +119,38 @@ jobs:
           run-id: ${{ steps.run.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/ratchet-propose
+      # Per-run mint, no PAT fallback: the proposal PR's credential is the
+      # cq-automation App's installation token, minted here from the
+      # `automation` secret CQ_AUTOMATION_APP_KEY plus the
+      # CQ_AUTOMATION_APP_CLIENT_ID repository variable. `owner` is the
+      # repository owner; `repositories` is THIS repository only. The App asks
+      # for only the permissions the proposal needs — Contents write (the
+      # proposal-branch push) and Pull requests write (create/edit the PR).
+      # Deliberately NO workflows/checks/statuses write. The mint step is
+      # variable-gated; an empty client-id variable skips it, the script's
+      # env is then empty, and its tokenless gate makes the run a green no-op.
+      - name: Mint the cq-automation App token (per run)
+        id: propose-app
+        # Fail-closed scope guard: `owner` WITHOUT `repositories` mints an
+        # installation-wide token, so never mint unless the repository name is
+        # non-empty (belt-and-braces — the repository object is present on
+        # every trigger this workflow uses).
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != '' && github.event.repository.name != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - name: Propose baseline tightening against merge-queue
         run: node scripts/ratchet-propose.mjs --measurement="${RUNNER_TEMP}/ratchet-propose/measurement.json"
         env:
-          CQ_AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN }}
+          # The per-run minted App token (env name is the script's contract;
+          # its only source is the mint above — never a PAT, never the
+          # runner's GITHUB_TOKEN; an empty value is the script's green
+          # no-op).
+          CQ_AUTOMATION_TOKEN: ${{ steps.propose-app.outputs.token }}
           RATCHET_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}

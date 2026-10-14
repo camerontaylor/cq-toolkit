@@ -54,4 +54,29 @@ describe('shipped self-host sandbox job boundary', () => {
     expect(yaml).not.toContain('{{SELFHOST_TOKEN}}');
     expect(yaml).not.toContain('secrets.GH_TOKEN');
   });
+
+  it.each([
+    ['template', resolve(process.cwd(), 'policy/templates/self-host/self-merge-prs.yml')],
+    ['instantiated', resolve(process.cwd(), '.github/workflows/self-merge-prs.yml')],
+  ])(
+    'the %s merge dispatch mints its own App token and skips honestly without one',
+    (_name, path) => {
+      const yaml = readFileSync(path, 'utf8');
+      // Per-run mint, no PAT fallback (the self-review-loop shape, with the
+      // merge dispatch's honest SKIP where the loop refuses).
+      expect(yaml).toContain(`uses: ${MINT_PIN}`);
+      expect(yaml).toContain('client-id: ${{ vars.CQ_AUTOMATION_APP_CLIENT_ID }}');
+      expect(yaml).toContain('private-key: ${{ secrets.CQ_AUTOMATION_APP_KEY }}');
+      expect(yaml).toContain('GH_TOKEN: ${{ steps.self-merge-app.outputs.token }}');
+      expect(yaml).not.toContain('{{SELFHOST_TOKEN}}');
+      expect(yaml).not.toContain('secrets.GH_TOKEN');
+      expect(yaml).not.toContain('CQ_AUTOMATION_INTERIM_FALLBACK');
+      // The tokenless path is an honest skip (exit 0) that names the missing
+      // variable and secret — never a silent no-op and never a PAT.
+      expect(yaml).toMatch(
+        /test -n "\$GH_TOKEN" \|\| \{ echo '[^']*CQ_AUTOMATION_APP_CLIENT_ID[^']*CQ_AUTOMATION_APP_KEY[^']*'[^}]*exit 0; \}/,
+      );
+      expect(yaml).toContain('skipping optional self-host automation');
+    },
+  );
 });

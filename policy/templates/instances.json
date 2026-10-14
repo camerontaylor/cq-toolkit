@@ -42,11 +42,7 @@
     {
       "workflow": "init-merge-queue.yml",
       "template": "init-merge-queue.yml",
-      "tokens": {
-        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
-        "INTERIM_SECRET": "PROMOTE_TOKEN",
-        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
-      }
+      "tokens": {}
     },
     {
       "workflow": "live-merge.yml",
@@ -73,9 +69,7 @@
     {
       "workflow": "self-merge-prs.yml",
       "template": "self-host/self-merge-prs.yml",
-      "tokens": {
-        "SELFHOST_TOKEN": "GH_TOKEN"
-      }
+      "tokens": {}
     },
     {
       "workflow": "self-review-loop.yml",
@@ -93,11 +87,7 @@
     {
       "workflow": "sync-merge-queue.yml",
       "template": "sync-merge-queue.yml",
-      "tokens": {
-        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
-        "INTERIM_SECRET": "PROMOTE_TOKEN",
-        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
-      }
+      "tokens": {}
     }
   ],
   "nonTemplated": [

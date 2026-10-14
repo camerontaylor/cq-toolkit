@@ -647,7 +647,7 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
   test('no promotion credential is reachable from an untrusted trigger', () => {
     /** The credentials that can promote, push as automation, or read settings. */
     const PROMOTION_CREDENTIALS =
-      /\bsecrets\.(PROMOTE_TOKEN|GH_TOKEN|CQ_AUTOMATION_TOKEN|CQ_DRILL_MERGE_TOKEN|CQ_SETTINGS_TOKEN|CQ_AUTOMATION_SECOND_TOKEN)\b/;
+      /\bsecrets\.(PROMOTE_TOKEN|GH_TOKEN|CQ_AUTOMATION_TOKEN|CQ_AUTOMATION_APP_KEY|CQ_DRILL_MERGE_TOKEN|CQ_SETTINGS_TOKEN|CQ_AUTOMATION_SECOND_TOKEN)\b/;
     const carriers: string[] = [];
     const exposed: string[] = [];
     for (const path of files) {

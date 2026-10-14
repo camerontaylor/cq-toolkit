@@ -19,11 +19,29 @@ carry into phase 5 (owner: phase-5 release follow-up — configure
 was merged through `merge-queue` and ff-promoted to `main` with a green
 promotion run.
 
+> **Correction (2026-10-14, C3 T3 / PR #316).** The follow-up named above is
+> superseded: the scheduled self-host workflows no longer read
+> `secrets.GH_TOKEN`. `self-review-loop` (PR #313) and `self-merge-prs` (C3
+> T3) mint the registered `cq-automation` App's installation token per run
+> from the `automation` environment secret `CQ_AUTOMATION_APP_KEY` plus the
+> `CQ_AUTOMATION_APP_CLIENT_ID` repository variable, so the DoD-2 soak
+> follow-up is provisioning those two — **not** a `GH_TOKEN` PAT, which no
+> _self-host_ workflow reads (the `drill` environment's `GH_TOKEN` for
+> `live-review` is a separate, still-live credential and is not affected).
+> The historical NOT MET record and the red-run description
+> below stand as the phase-4 state; see
+> [ADR-0004 note N22](docs/adr/README.md#post-acceptance-notes) and
+> [`policy/templates/self-host/README.md`](policy/templates/self-host/README.md).
+
 The scheduled automations are optional non-required jobs: a missing `GH_TOKEN`
 makes them skip honestly, while required CI checks remain mandatory. W0.6
 also disables the self-host conflict stage, so DIRTY candidates are reported
 as needs-human rather than model-dispatched. Reviews are counted according to
 the trust rules; the former blanket `awaiting` premise was incorrect.
+_(Phase-4 state; superseded 2026-10-14 — the tokenless behaviour is now: the
+review loop refuses, `self-merge-prs` skips, `sync-merge-queue` refuses and
+`init-merge-queue` fails loudly; see the correction above and
+[`policy/templates/self-host/README.md`](policy/templates/self-host/README.md).)_
 
 Automation run note (T4.5): the scheduled `self-review-loop` and
 `self-merge-prs` runs currently exit red at their `GH_TOKEN` assert —
@@ -34,7 +52,10 @@ but a red run is not processing: no PR was classified, replied to, resolved,
 or merged by the automations. Every PR in the window was merged by the lane
 leader. Configuring `GH_TOKEN` (owner: phase 5) is the follow-up that lets
 the scheduled automations process PRs directly; it is recorded here rather
-than hidden.
+than hidden. **(Superseded 2026-10-14: see the correction above — no
+_self-host_ workflow reads `GH_TOKEN` (the `drill` `GH_TOKEN` for
+`live-review` is unaffected); provision `CQ_AUTOMATION_APP_KEY` +
+`CQ_AUTOMATION_APP_CLIENT_ID` instead.)**
 
 ## Queue promotions
 
@@ -162,15 +183,17 @@ Interim credentials (reported by the drift check until C3):
 
 - `PROMOTE_TOKEN` — the promotion PAT. Read by the legacy
   `merge-queue-gate` (repository-level during C1) and by `cq-gate` only at
-  its push. While `CQ_AUTOMATION_TOKEN` is absent it is also the sync/init
-  fallback, but only with the explicit opt-in
-  (`CQ_AUTOMATION_INTERIM_FALLBACK` non-empty) — the fallback is never
-  silent — and opening the sync PR then needs Pull requests read/write.
-  Re-scope it to a fine-grained PAT with only Contents read/write, Workflows
-  write and Metadata read once `CQ_AUTOMATION_TOKEN` exists (owner step 2),
-  never before.
-- `CQ_AUTOMATION_TOKEN` — the sync PR, the init bootstrap and the baseline
-  proposals (Pull requests read/write, Contents write).
+  its push. It is no longer a sync/init fallback: `sync-merge-queue` and
+  `init-merge-queue` now mint the `cq-automation` App's token per run, and
+  the `CQ_AUTOMATION_INTERIM_FALLBACK` opt-in variable is retired. Re-scope it
+  to a fine-grained PAT with only Contents read/write, Workflows write and
+  Metadata read (owner step 2), never before.
+- `CQ_AUTOMATION_TOKEN` — retired as a runtime credential: no workflow reads
+  it any more. `sync-merge-queue`, `init-merge-queue`, `ratchet-propose`,
+  `self-merge-prs` and `self-review-loop` all mint the `cq-automation` App's
+  installation token per run from `CQ_AUTOMATION_APP_KEY` and the
+  `CQ_AUTOMATION_APP_CLIENT_ID` variable. The secret is revoked/deleted at C3
+  with the other interim PATs; until then the drift check still notices it.
 - `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
   Environments, Secrets, Actions: read) for the drift check.
 
@@ -196,17 +219,25 @@ Owner steps, in order (the RS-11 wizard outline):
    install them on this repository only, and set the four App variables
    (each id together with its client id) — including the repository
    variable `CQ_AUTOMATION_APP_CLIENT_ID` (the `cq-automation` App's
-   client id): `self-review-loop`'s mint step is gated on it and fails
-   closed without it.
+   client id): every automation mint step (`self-review-loop`,
+   `self-merge-prs`, `sync-merge-queue`, `init-merge-queue`,
+   `ratchet-propose`) is gated on it and handles its absence honestly
+   (the loop refuses, sync refuses, init fails loudly, and the two
+   optional dispatches skip).
 2. Create the four environments with the `main`-only branch policy; put
    each App key and interim secret into its environment above. In
-   particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
-   step 3: `sync-merge-queue` and `init-merge-queue` fall back to
-   `PROMOTE_TOKEN` only while it is a repository-level secret AND the
-   explicit opt-in variable `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty
-   (an `automation` job cannot read a secret held in `promote`). Skip this
-   and step 3 disarms sync (the behind/diverged sync PR fails with "sync
-   not armed"), and init fails with no checkout credential.
+   particular, provision `CQ_AUTOMATION_APP_KEY` in `automation` now, before
+   step 3: every automation job mints the `cq-automation` App's installation
+   token per run from that key plus `CQ_AUTOMATION_APP_CLIENT_ID`, so there
+   is no stored automation PAT to provision. The two failure modes are
+   distinct and both fail closed. With `CQ_AUTOMATION_APP_CLIENT_ID` also
+   unset (step 1 skipped), the mint step is skipped and each job takes its
+   documented tokenless path: sync refuses ("sync not armed"), init fails
+   with no checkout credential, and the scheduled dispatches skip honestly.
+   With the variable set but the App key absent, rotated or malformed, the
+   mint step itself FAILS (`private-key` is required), so the job goes RED —
+   a loud, fail-closed outcome, never a silent no-op. Provision both halves
+   before enabling the schedules.
    **Hazard in this step's window (before step 3 arms the trust set): do
    not break-glass push to `main`.** A break-glass push leaves `main` with
    commits `merge-queue` lacks (un-ancestored), so every promotion refuses

@@ -291,7 +291,9 @@ through an unredacted name.
 7. **Renames that must land with W3.6:**
    - `vars.CQ_DRILL_OWNER` → `CQTEST_DRILL_OWNER` (`live-merge.yml`);
    - the self-host `GH_REPOSITORY` fallback → `GH_REPO`;
-   - the template placeholders `{{SELFHOST_TOKEN}}`/`{{SELFHOST_DRIVER_KEY}}` now name environment secrets;
+   - the self-host template placeholder `{{SELFHOST_DRIVER_KEY}}` now names an environment secret
+     (`{{SELFHOST_TOKEN}}` is retired — every automation job mints the `cq-automation` App token per
+     run; see post-acceptance note N22 in the [ADR index](README.md#post-acceptance-notes));
    - the self-host workflows' `max_usd` dispatch input, when non-empty, is passed as
      `--max-usd "$MAX_USD" --opt-in selfhost.maxUsd`. The dispatcher typed it, so it is a named per-call value
      (§B.4 item 3c). Without this, a dispatch above the resolved `CQ_SELFHOST_MAX_USD` would now be refused.
