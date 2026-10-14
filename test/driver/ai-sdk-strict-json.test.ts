@@ -503,6 +503,10 @@ describe('strict-JSON strategy: the repair-stage lifecycle', () => {
       expect(result.stopReason).toBe('error');
       expect(result.errorClass).not.toBe('output-invalid');
       expect(result.structuredOutput).toBeUndefined();
+      // No repair send happened, so the verdict carries the MAIN call's measured
+      // usage only (the fixture's 100/5) — no repair spend is invented.
+      expect(result.usage.input).toBe(100);
+      expect(result.usage.output).toBe(5);
     } finally {
       await fx.cleanup();
     }
@@ -510,9 +514,10 @@ describe('strict-JSON strategy: the repair-stage lifecycle', () => {
 
   test('a refused exitRepairStage accepts no result even though the repair validated', async () => {
     const { stage, calls } = countingStage({ exit: true });
+    const validReply = JSON.stringify({ verdict: 'pass', note: 'validated but not accepted' });
     const replies = [
-      textResult('prose, not JSON'),
-      textResult(JSON.stringify({ verdict: 'pass', note: 'validated but not accepted' })),
+      textResult('prose, not JSON', usageOf(100, 5)),
+      textResult(validReply, usageOf(40, 7)),
     ];
     const fx = await fixture(replies, { strict: true, stage });
     try {
@@ -524,6 +529,11 @@ describe('strict-JSON strategy: the repair-stage lifecycle', () => {
       expect(fx.receipts).toHaveLength(2);
       expect(result.structuredOutput).toBeUndefined();
       expect(result.stopReason).toBe('error');
+      // The verdict still aggregates BOTH calls — the main response (100/5) plus
+      // the MEASURED repair response (40/7). A paid response is never reported as
+      // main-only usage, and the numbers are never invented.
+      expect(result.usage.input).toBe(140);
+      expect(result.usage.output).toBe(12);
     } finally {
       await fx.cleanup();
     }

@@ -1093,58 +1093,74 @@ export class AiSdkDriver implements Driver {
           strictJsonContract(outputSchema),
       },
     ];
-    // C7/C3 REPAIR STAGE (wrapper-owned, opaque here): the operator's stage is
-    // opened immediately before the repair send and closed ONCE at the end of
-    // this try/catch (the `finally` below), so it covers exactly this one repair
-    // attempt and is closed on every path — a normal verdict, a send failure or
-    // an abort. The driver reads nothing from the stage, mints no
-    // acknowledgement/sequence/ordinal, and puts nothing of it in the receipt or
-    // the canonical projection.
-    // `enterRepairStage()` must SUCCEED before the stage counts as opened: a
-    // refusal leaves `stageOpened` false, so the `finally` does NOT call
-    // `exitRepairStage()` for a stage that never opened. That refusal lands in
-    // THIS repair-failure corridor (not an abort shape, not a ceiling refusal,
-    // not a NoObjectGeneratedError), so it settles a classified non-success
-    // verdict and is never reported as `output-invalid`; no repair is sent, no
-    // second reservation is taken and no result is accepted. A refusal from
-    // `exitRepairStage()` is never swallowed: it replaces the pending verdict, so
-    // no result is accepted either.
+    // C7/C3 REPAIR STAGE (wrapper-owned, opaque here): the operator's stage wraps
+    // exactly this one repair wire attempt — opened immediately before the send
+    // and closed in a `finally` around that send, so it closes ONCE on every path
+    // (a resolved send, a send failure or an abort). The driver reads nothing from
+    // the stage, mints no acknowledgement/sequence/ordinal, and puts nothing of it
+    // in the receipt or the canonical projection.
+    // `enterRepairStage()` must SUCCEED before the send is reached: a refusal
+    // propagates before any second send or reservation, `exitRepairStage()` is
+    // never called, and the refusal lands in THIS repair-failure corridor (not an
+    // abort shape, not a ceiling refusal, not a NoObjectGeneratedError) as a
+    // classified non-success verdict never reported as `output-invalid`.
+    // A refusal from `exitRepairStage()` also lands in this corridor (never
+    // swallowed), so the verdict stays non-success and no result is accepted —
+    // and because the RESOLVED response's measured usage is harvested into
+    // `repairUsage` BEFORE the close can throw, that verdict still aggregates the
+    // main call plus the measured repair spend rather than falling back to
+    // main-only usage while a paid response existed.
     const repairStage = this.strictTokenRepairStage;
-    let stageOpened = false;
     let repairUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     try {
-      if (repairStage !== undefined) {
-        repairStage.enterRepairStage();
-        stageOpened = true;
-      }
-      const repair = await generateText({
-        model,
-        system,
-        messages: repairMessages,
-        // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
-        // bounded, unlike the main loop.
-        maxRetries: 0,
-        timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
-        ...(remainingTokens !== undefined
-          ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
-          : { stopWhen: [stepCountIs(1)] }),
-        onStepFinish: (step) => {
-          repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
-        },
-        // Tool-free: NO tools key at all.
-        ...(abortSignal !== undefined ? { abortSignal } : {}),
-        // NON-STRICT ONLY: the repair asks for the hosted structured response
-        // exactly as before. The strict lane omits it and parses the repair's
-        // TEXT locally (below), so no `responseFormat` reaches the wire on a
-        // repair either.
-        ...(textOnlyStructured
-          ? {}
-          : {
-              output: Output.object({
-                schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
-              }),
-            }),
-      });
+      if (repairStage !== undefined) repairStage.enterRepairStage();
+      const sendRepair = async (): Promise<Awaited<ReturnType<typeof generateText>>> => {
+        try {
+          const repair = await generateText({
+            model,
+            system,
+            messages: repairMessages,
+            // W3.4: the repair gets ZERO SDK retries and exactly ONE step —
+            // bounded, unlike the main loop.
+            maxRetries: 0,
+            timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
+            ...(remainingTokens !== undefined
+              ? { stopWhen: [tokenBudgetCondition(remainingTokens), stepCountIs(1)] }
+              : { stopWhen: [stepCountIs(1)] }),
+            onStepFinish: (step) => {
+              repairUsage = addUsage(repairUsage, usageFromSdk(step.usage));
+            },
+            // Tool-free: NO tools key at all.
+            ...(abortSignal !== undefined ? { abortSignal } : {}),
+            // NON-STRICT ONLY: the repair asks for the hosted structured response
+            // exactly as before. The strict lane omits it and parses the repair's
+            // TEXT locally (below), so no `responseFormat` reaches the wire on a
+            // repair either.
+            ...(textOnlyStructured
+              ? {}
+              : {
+                  output: Output.object({
+                    schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
+                  }),
+                }),
+          });
+          // Harvest the RESOLVED response's OWN usage BEFORE the stage close can
+          // throw. `repair.usage` is the SDK's aggregate over the repair's steps,
+          // so this RE-BASES the per-step fold instead of adding to it and cannot
+          // double count. A send that failed without a response never reaches this
+          // line, so its per-step fold (which may legitimately be zero because
+          // nothing completed) is preserved as-is: nothing is invented.
+          repairUsage = usageFromSdk(repair.usage);
+          return repair;
+        } finally {
+          // EXPLICIT close, exactly once per opened stage, and never swallowed: a
+          // refusal here propagates into the repair-failure corridor, which
+          // aggregates main + the measured repair usage harvested above and
+          // accepts no result.
+          if (repairStage !== undefined) repairStage.exitRepairStage();
+        }
+      };
+      const repair = await sendRepair();
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
       // The repair is a REAL model call with its OWN served-id observation,
       // judged ONCE for every repair-path verdict — not only the success
@@ -1427,19 +1443,6 @@ export class AiSdkDriver implements Driver {
               return mainSignals !== undefined ? { providerSignals: mainSignals } : {};
             })()),
       };
-    } finally {
-      // EXPLICIT stage close, exactly once per OPENED stage: this runs for every
-      // path above (a returned verdict, a send failure, an abort). A refusal here
-      // is never swallowed — it replaces the pending verdict and propagates to the
-      // run-level catch, which settles a classified non-success verdict, so no
-      // result is accepted. `stageOpened` keeps the close off a stage that never
-      // opened because `enterRepairStage()` refused.
-      // DISCLOSED EVIDENCE NUANCE: because this close runs AFTER the
-      // repair-failure corridor, a close refusal's verdict comes from the
-      // run-level catch and carries the MAIN call's step usage only; the repair's
-      // tokens remain charged in the host ledger but are not folded into that one
-      // verdict. Every normal repair path still folds BOTH calls.
-      if (stageOpened && repairStage !== undefined) repairStage.exitRepairStage();
     }
   }
 
