@@ -1182,6 +1182,61 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     ).rejects.toThrow('requires DEEPSEEK_API_KEY');
   });
 
+  test('a pinned CQ_SELFHOST_NOW_MS drives the handshake AND the run', async () => {
+    // The workflow pins ONE epoch-ms per step so its two node processes (the
+    // --print-driver-key-env handshake and the run) cannot straddle a
+    // selection boundary. The injected clock here would pick the OTHER window,
+    // so a consulted clock would prove the pin was ignored.
+    const pinned = Date.parse('2026-10-12T07:00:00Z'); // peak
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', String(pinned));
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockRestore();
+    // … and the same pin decides the driver the sweep dispatches through.
+    const journalRoot = tempJournalRoot();
+    const calls: RecordedCall[] = [];
+    process.argv = [
+      'node',
+      'self-review-loop.js',
+      '--repo',
+      REPO_PATH,
+      '--journal-root',
+      journalRoot,
+    ];
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'peak-key');
+    await main({
+      ...baseDeps(
+        fakeGh([pullRow(7)]),
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(calls[0]?.opts.driver).toEqual(SelfhostPeak.driver);
+    expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, `7-${String(pinned)}`));
+  });
+
+  test('a malformed CQ_SELFHOST_NOW_MS fails loud instead of falling back', async () => {
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    vi.stubEnv('CQ_SELFHOST_NOW_MS', 'not-a-number');
+    await expect(
+      main(
+        baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+      ),
+    ).rejects.toThrow('CQ_SELFHOST_NOW_MS');
+  });
+
   test('a dry run dispatches nothing and needs no provider key', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
     vi.stubEnv('ZAI_API_KEY', '');

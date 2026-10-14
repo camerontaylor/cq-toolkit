@@ -25,9 +25,11 @@
 //     peak, the peak driver (deepseek/deepseek-flash) inside the documented
 //     06:00–10:00 UTC Mon–Fri window OR its reserved pre-peak headroom
 //     (05:40–06:00: a run starting there could still be executing when the
-//     peak opens, so it must not dispatch Z.ai GLM into it). main() refuses
-//     to start when the SELECTED provider's key env is absent (fail closed,
-//     before any effect), and exposes `--print-driver-key-env` so the
+//     peak opens, so it must not dispatch Z.ai GLM into it). The workflow
+//     pins that instant once per step (CQ_SELFHOST_NOW_MS) so the separate
+//     --print-driver-key-env handshake process and the run agree. main()
+//     refuses to start when the SELECTED provider's key env is absent (fail
+//     closed, before any effect), and exposes `--print-driver-key-env` so the
 //     workflow asserts the very same key rather than re-deriving the window
 //     in YAML;
 //   - the TOKEN cap is SWEEP-LEVEL: SelfhostDefaults.maxTokens (the served
@@ -787,6 +789,34 @@ const writeSweepUsageFile = (
 const PRINT_DRIVER_KEY_ENV_FLAG = '--print-driver-key-env';
 
 /**
+ * Deployment wiring for the run's start instant: an epoch-ms the workflow
+ * pins ONCE per step so the `--print-driver-key-env` handshake (a separate
+ * process) and the run itself cannot straddle the 05:40/06:00/10:00
+ * selection boundary and disagree about which provider key is required.
+ * Plain wiring, not a secret; absent (a local run) falls back to the
+ * injected clock.
+ */
+const STARTED_AT_ENV = 'CQ_SELFHOST_NOW_MS';
+
+/**
+ * The run's start instant: the pinned epoch-ms when the deployment set one,
+ * else ONE `deps.nowMs()` read. A malformed pin THROWS: a bad clock must
+ * fail loud, never silently fall back to a different peak window than the
+ * handshake validated.
+ */
+function runStartInstant(deps: SelfReviewLoopDeps): number {
+  const raw = process.env[STARTED_AT_ENV];
+  if (raw === undefined || raw === '') return deps.nowMs();
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      `selfhost-review-loop: ${STARTED_AT_ENV} must be a non-negative safe integer epoch-ms — got ${JSON.stringify(raw)}`,
+    );
+  }
+  return value;
+}
+
+/**
  * The CLI entry: parse args, resolve the repository (the --repo flag wins
  * over the GH_REPOSITORY env; absent from both → throw before running),
  * build the real runners, run, and print the compact JSON summary payload
@@ -811,7 +841,7 @@ export async function main(
   // the caller's emptiness test then refuses (fail closed), never guesses.
   const argv = process.argv.slice(2);
   if (argv.length === 1 && argv[0] === PRINT_DRIVER_KEY_ENV_FLAG) {
-    process.stdout.write(`${driverKeyEnv(resolveSelfhostDriver(deps.nowMs())) ?? ''}\n`);
+    process.stdout.write(`${driverKeyEnv(resolveSelfhostDriver(runStartInstant(deps))) ?? ''}\n`);
     return;
   }
   let usage = buildSweepUsage(SelfhostDefaults.maxTokens, []);
@@ -839,7 +869,10 @@ export async function main(
     // resolve from THIS instant. Two reads could straddle the 06:00/10:00 UTC
     // boundary and check one provider's key while dispatching through the
     // other (which the workflow deliberately leaves unset off its window).
-    const startedAtMs = deps.nowMs();
+    // The workflow PINS this instant per step (CQ_SELFHOST_NOW_MS), so the
+    // separate --print-driver-key-env handshake process and this run also
+    // agree.
+    const startedAtMs = runStartInstant(deps);
     // FAIL-CLOSED DRIVER CREDENTIAL (peak-aware): resolve the driver for
     // THIS instant and refuse BEFORE any effect when the selected provider's
     // key env is absent — a missing key must never let a sweep start and then

@@ -188,8 +188,12 @@ adopter owns it by hand.
   through both the preflight and the sweep, so a boundary-straddling run
   cannot check one window's key and dispatch through the other. A
   `--dry-run` posts and dispatches nothing, so neither the handshake nor
-  `main()` demands a provider key for it. Adopters move peak window,
-  headroom, drivers and keys together — `manual:`.
+  `main()` demands a provider key for it. The run step also pins ONE run
+  instant per step (`export CQ_SELFHOST_NOW_MS="$(date -u +%s000)"`), read
+  by BOTH the `--print-driver-key-env` handshake process and the run, so the
+  two cannot straddle a selection boundary and disagree about which key is
+  required. Adopters move peak window, headroom, drivers and keys together
+  — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 

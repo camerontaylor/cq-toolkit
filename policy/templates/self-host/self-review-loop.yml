@@ -300,6 +300,15 @@ jobs:
           # PRs; only a whole-run throw (bad args, a failed listing) exits
           # 1. pipefail below turns that throw into a red step despite tee.
           set -euo pipefail
+          # ONE run instant for the WHOLE step: the key handshake below and
+          # the loop itself are separate node processes, so pin the epoch-ms
+          # once and let both read it (CQ_SELFHOST_NOW_MS, plain deployment
+          # wiring — not a secret). A step whose two processes straddled the
+          # 05:40/06:00/10:00 selection boundary could otherwise have the
+          # handshake require one window's key while the run selected the
+          # other. The pin is THIS step's start, never the slot's nominal
+          # time, so a delayed fire still resolves at its own start.
+          export CQ_SELFHOST_NOW_MS="$(date -u +%s000)"
           # FAIL-CLOSED credential assert, no PAT fallback: GH_TOKEN is only
           # the per-run mint above, so an empty value means the
           # CQ_AUTOMATION_APP_CLIENT_ID repository variable is unset (the

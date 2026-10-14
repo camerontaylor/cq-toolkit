@@ -1470,8 +1470,16 @@ describe('self-review-loop peak-aware model selection (D11)', () => {
       expect(text, `${file}: off-peak key declaration`).toContain('ZAI_API_KEY: ${{ secrets.');
       expect(text, `${file}: peak key declaration`).toContain('DEEPSEEK_API_KEY: ${{ secrets.');
       // … and the required one is derived from the toolkit's ONE decision
-      // point, so no window arithmetic lives in the YAML.
+      // point, so no window arithmetic lives in the YAML. The step also PINS
+      // one run instant so the handshake process and the run cannot straddle
+      // a selection boundary.
       expect(text, `${file}: key-name handshake`).toContain('--print-driver-key-env');
+      expect(text, `${file}: one pinned run instant`).toContain(
+        'export CQ_SELFHOST_NOW_MS="$(date -u +%s000)"',
+      );
+      expect(text, `${file}: the pin feeds both processes`).toMatch(
+        /export CQ_SELFHOST_NOW_MS=.*\n[\s\S]*--print-driver-key-env/,
+      );
     }
   });
 });
