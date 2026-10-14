@@ -317,13 +317,19 @@ export function isPreRequestCeilingRefusal(value: unknown): value is PreRequestC
 /**
  * An abort-shaped error (name `AbortError`) that the driver's cancellation
  * corridor (I8) settles as `stopReason: 'aborted'` — the ceiling never turns a
- * governed cancellation into a budget/infra refusal. The live `signal.reason`
- * is reused when it is an Error, so the caller's own abort cause survives.
+ * governed cancellation into a budget/infra refusal. A NEW error is always
+ * built (never the raw reason): `signal.reason` may be a generic/`TimeoutError`/
+ * frozen Error, and returning it unchanged would surface an `error` verdict
+ * when `RunOptions.signal` itself is not aborted (e.g. a governed step-timeout
+ * abort on the SDK's merged signal). The live reason is preserved as `cause`,
+ * so the caller's own abort cause survives without mutating it.
  */
 function abortRefusal(signal: AbortSignal): Error {
-  const reason = signal.reason;
-  if (reason instanceof Error) return reason;
-  const err = new Error('ai-sdk driver: strict token ceiling cancelled before the wire send');
+  const cause = signal.reason;
+  const err = new Error(
+    'ai-sdk driver: strict token ceiling cancelled before the wire send',
+    cause === undefined ? undefined : { cause },
+  );
   err.name = 'AbortError';
   return err;
 }

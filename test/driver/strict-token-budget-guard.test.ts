@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { assertStrictTokenBudgetSupported } from '../../src/driver/common/strict-budget.js';
@@ -315,6 +315,10 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
 
   test('direct subprocess: aborted, seam untouched, no session store', async () => {
     const { root, sessionsDir } = await scratch();
+    // The lane resolves the route credential BEFORE the governed-cancellation
+    // check, so a route key must be present for the run to reach the cancel
+    // gate. A fake value injected here — never a real credential read.
+    vi.stubEnv('ANTHROPIC_API_KEY', 'offline-fake-key');
     try {
       const spy = seamSpy();
       const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
@@ -326,6 +330,7 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
+      vi.unstubAllEnvs();
       await rm(root, { recursive: true, force: true });
     }
   });

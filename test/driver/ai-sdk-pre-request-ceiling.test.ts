@@ -645,6 +645,56 @@ describe('PreRequestCeiling (unit)', () => {
     expect((err as Error).name).toBe('AbortError');
     expect(ceiling.requestCount).toBe(1);
   });
+
+  test('a non-AbortError abort reason is normalized to AbortError with the reason as cause (never mutated)', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const reason = new Error('governor stopped the step');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const err = (await ceiling
+      .reserve({ ...userPrompt('hi'), abortSignal: controller.signal })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.name).toBe('AbortError');
+    expect(err.cause).toBe(reason);
+    // The reason itself is untouched (name/identity preserved).
+    expect(reason.name).toBe('Error');
+    expect(ceiling.requestCount).toBe(0);
+  });
+
+  test('a FROZEN abort reason is never mutated; the AbortError carries it as cause', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const reason = Object.freeze(new Error('frozen governor reason'));
+    const controller = new AbortController();
+    controller.abort(reason);
+    const err = (await ceiling
+      .reserve({ ...userPrompt('hi'), abortSignal: controller.signal })
+      .catch((e: unknown) => e)) as Error;
+    expect(Object.isFrozen(reason)).toBe(true);
+    expect(err.name).toBe('AbortError');
+    expect(err.cause).toBe(reason);
+  });
+
+  test('a TimeoutError-named abort reason (a governed step abort) still settles as an abort', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const reason = new Error('step timed out');
+    reason.name = 'TimeoutError';
+    const controller = new AbortController();
+    controller.abort(reason);
+    const err = (await ceiling
+      .reserve({ ...userPrompt('hi'), abortSignal: controller.signal })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.name).toBe('AbortError');
+    expect(err.cause).toBe(reason);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -951,6 +1001,35 @@ describe('ai-sdk driver strictTokenBudget', () => {
       });
       const controller = new AbortController();
       setTimeout(() => controller.abort(), 20);
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+        { signal: controller.signal },
+      );
+      expect(result.stopReason).toBe('aborted');
+      expect(result.error).toBeUndefined();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a mid-run governed abort with a NON-abort Error reason settles aborted, not error', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-abort-reason-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+        strictTokenReservationHook: () => new Promise<void>(() => {}),
+      });
+      const controller = new AbortController();
+      // A generic Error reason (not an AbortError): the ceiling must still
+      // normalize the cancellation and the run must settle 'aborted'.
+      setTimeout(() => controller.abort(new Error('governor stopped the run')), 20);
       const result = await driver.run(
         invocation({
           budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
