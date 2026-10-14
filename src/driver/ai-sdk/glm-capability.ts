@@ -451,20 +451,26 @@ function toFunctionTools(tools: unknown): GlmFunctionTool[] {
 /** The pinned tool_choice shape. */
 function renderToolChoice(toolChoice: unknown): string | undefined {
   if (toolChoice === null || toolChoice === undefined) return undefined;
-  if (typeof toolChoice === 'string') {
-    if (toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') {
-      return toolChoice;
+  // Normalized LanguageModelV4 tool choice is an OBJECT: {type:'auto'|'none'|
+  // 'required'} or {type:'tool', toolName}. A bare string is NOT normalized.
+  if (isRecord(toolChoice)) {
+    const keys = Object.keys(toolChoice);
+    const type = toolChoice.type;
+    if (type === 'auto' || type === 'none' || type === 'required') {
+      if (keys.length !== 1) {
+        throw new UnboundedGlmRequestShape(`tool_choice {type:'${type}'} carries unexpected keys`);
+      }
+      return type;
     }
-    throw new UnboundedGlmRequestShape(`tool_choice '${toolChoice}' is not auto/none/required`);
+    if (type === 'tool') {
+      if (keys.length !== 2 || typeof toolChoice.toolName !== 'string') {
+        throw new UnboundedGlmRequestShape("tool_choice {type:'tool'} must carry exactly toolName");
+      }
+      return `{"type": "function", "function": {"name": ${jinjaTojson(toolChoice.toolName)}}}`;
+    }
+    throw new UnboundedGlmRequestShape(`tool_choice type '${String(type)}' is not supported`);
   }
-  if (
-    isRecord(toolChoice) &&
-    toolChoice.type === 'tool' &&
-    typeof toolChoice.toolName === 'string'
-  ) {
-    return `{"type": "function", "function": {"name": ${jinjaTojson(toolChoice.toolName)}}}`;
-  }
-  throw new UnboundedGlmRequestShape('tool_choice is not a bounded choice');
+  throw new UnboundedGlmRequestShape('tool_choice is not a bounded normalized object');
 }
 
 /** The ZAI provider-options subset; unknown/cap-changing keys refuse. */

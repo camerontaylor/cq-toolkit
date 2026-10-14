@@ -365,6 +365,28 @@
         "providerOptions": null,
         "maxOutputTokens": 64
       }
+    },
+    {
+      "name": "toolChoice object with an unexpected key",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": { "type": "auto", "extra": 1 },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "toolChoice unsupported type",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": { "type": "random" },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
     }
   ],
   "monotonic": [
