@@ -638,7 +638,10 @@ export class PreRequestCeiling {
       try {
         // Invoke the hook and race its settlement against the abort. A
         // SYNCHRONOUS throw becomes a rejected promise here, handled uniformly.
-        await awaitWithAbort(Promise.resolve().then(() => onBeforeWireReserve(receipt)), signal);
+        await awaitWithAbort(
+          Promise.resolve().then(() => onBeforeWireReserve(receipt)),
+          signal,
+        );
       } catch (err) {
         // Cancellation outranks a hook failure: if the signal aborted, settle
         // the cancellation (the driver's I8 corridor), never a hook refusal.
