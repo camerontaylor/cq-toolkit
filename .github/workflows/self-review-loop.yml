@@ -45,8 +45,10 @@
 #                              the peak switch lives in the toolkit
 #                              (src/selfhost/config.ts: SelfhostPeak +
 #                              resolveSelfhostDriver — 06:00–10:00 UTC
-#                              Mon–Fri). An adopter edits THAT window (and
-#                              the two driver specs) rather than the crons;
+#                              Mon–Fri, plus its reserved 05:40–06:00
+#                              pre-peak dispatch headroom). An adopter edits
+#                              THAT window (and the headroom and the two
+#                              driver specs) rather than the crons;
 #                              the run step derives the required key name
 #                              from the same function, so no YAML window
 #                              arithmetic has to move with it. No
@@ -69,10 +71,14 @@ on:
     # the driver from the run's UTC start instant
     # (src/selfhost/config.ts resolveSelfhostDriver) — the frozen
     # zai/glm-5.3-flash off-peak, deepseek/deepseek-flash inside the
-    # documented peak window. Delayed fires and manual dispatches resolve at
-    # their OWN start, never at the slot's nominal time. HAND-REPLACED for
-    # adopters: the window and the two driver specs live in the toolkit, not
-    # here — only the cadence is cron.
+    # documented peak window OR its reserved pre-peak headroom (05:40–06:00,
+    # the documented ≤20-minute run: a sweep starting there could still be
+    # executing inside the peak, so it must not dispatch Z.ai GLM into it —
+    # a dispatch reservation, never a start exclusion). Delayed fires and
+    # manual dispatches resolve at their OWN start, never at the slot's
+    # nominal time. HAND-REPLACED for adopters: the window, headroom and the
+    # two driver specs live in the toolkit, not here — only the cadence is
+    # cron.
     - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
@@ -306,7 +312,8 @@ jobs:
           # toolkit owns that decision. Ask it (`--print-driver-key-env`
           # prints the env name for the driver the CURRENT clock selects:
           # ZAI_API_KEY off-peak, DEEPSEEK_API_KEY inside the 06:00–10:00 UTC
-          # Mon–Fri peak) and require exactly that key. Both keys are exported
+          # Mon–Fri peak or its 05:40–06:00 reserved headroom) and require
+          # exactly that key. Both keys are exported
           # above; the one for the OTHER window may be absent. A missing key
           # refuses the run instead of dispatching with no credential, and no
           # window arithmetic lives in this YAML (the same resolveSelfhostDriver

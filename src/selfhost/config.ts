@@ -134,6 +134,18 @@ export interface SelfhostPeakConfig {
     endMinute: number;
   };
   /**
+   * The PEAK-DISPATCH HEADROOM, minutes before `window.startMinute`: the
+   * documented maximum scheduled run duration, reserved so a sweep that
+   * STARTS just before the peak is dispatched through the PEAK driver
+   * instead of the off-peak one. Without it a delayed or manual run
+   * starting at 05:59 could keep dispatching off-peak (Z.ai GLM) work
+   * INSIDE the ~3× quota window, because a run's driver is fixed when the
+   * run starts. With it, every dispatch inside the window is the peak
+   * provider's. This reserves dispatch, never a start exclusion: the
+   * schedule still runs all day.
+   */
+  headroomMinutes: number;
+  /**
    * The driver dispatched INSIDE the window — the same ModelSpec shape the
    * frozen default carries, so `resolveSelfhostDriver` returns either one.
    */
@@ -159,6 +171,11 @@ export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
     startMinute: 6 * 60,
     endMinute: 10 * 60,
   },
+  // The template's documented ≤20-minute scheduled run (the retired
+  // start-exclusion guard reserved exactly this band: no weekday start from
+  // 05:40 inclusive). 20 minutes covers the privileged job's 15-minute
+  // `timeout-minutes` with the documented bound's margin.
+  headroomMinutes: 20,
   driver: { provider: 'deepseek', model: 'deepseek-flash' },
 });
 
@@ -169,6 +186,33 @@ export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
  * 09:59 inclusive, 10:00 exclusive, weekends never.
  */
 export function isSelfhostPeak(nowMs: number): boolean {
+  return inUtcWeekdayBand(nowMs, SelfhostPeak.window.startMinute, SelfhostPeak.window.endMinute);
+}
+
+/**
+ * True when `nowMs` falls in the RESERVED PRE-PEAK HEADROOM — the
+ * `headroomMinutes` band immediately before the window, on the window's
+ * weekdays. A run starting here may still be executing when the peak
+ * begins, so `resolveSelfhostDriver` sends it through the PEAK driver: no
+ * off-peak (Z.ai GLM) dispatch can be issued inside the ~3× quota window.
+ * Disjoint from `isSelfhostPeak`; pure, like it. The band never wraps past
+ * midnight (a headroom wider than the window start clamps to 00:00).
+ */
+export function isSelfhostPeakHeadroom(nowMs: number): boolean {
+  return inUtcWeekdayBand(
+    nowMs,
+    SelfhostPeak.window.startMinute - SelfhostPeak.headroomMinutes,
+    SelfhostPeak.window.startMinute,
+  );
+}
+
+/**
+ * The shared comparison: peak weekdays and the `[fromMinute, toMinute)` UTC
+ * minute band (each clamped at 00:00 — a band never wraps past midnight).
+ * One implementation so the window and headroom predicates can never
+ * disagree about the weekday rule; the two CALLS keep the bands disjoint.
+ */
+function inUtcWeekdayBand(nowMs: number, fromMinute: number, toMinute: number): boolean {
   const at = new Date(nowMs);
   // Date#getUTCDay is 0=Sun … 6=Sat; the window is documented in the ISO
   // numbering, so map Sunday to 7 before the membership test (a Sunday
@@ -178,19 +222,23 @@ export function isSelfhostPeak(nowMs: number): boolean {
   const weekday = raw === 0 ? 7 : raw;
   if (!SelfhostPeak.window.utcWeekdays.includes(weekday)) return false;
   const minute = at.getUTCHours() * 60 + at.getUTCMinutes();
-  return minute >= SelfhostPeak.window.startMinute && minute < SelfhostPeak.window.endMinute;
+  return minute >= Math.max(0, fromMinute) && minute < Math.min(toMinute, 24 * 60);
 }
 
 /**
  * THE one place the scheduled runs' driver is decided: inside the peak
- * window the peak driver, otherwise the frozen off-peak default. The caller
- * reads its clock ONCE (the entry reuses the run's start stamp), so every
- * loop of a sweep dispatches through the same provider the run's start
- * instant selected — a delayed fire or a manual dispatch resolves at ITS OWN
- * start, never at the slot's nominal time.
+ * window — or its reserved pre-peak headroom, so a run that starts just
+ * before the peak cannot dispatch off-peak work inside it — the peak
+ * driver, otherwise the frozen off-peak default. The caller reads its clock
+ * ONCE (the entry reuses the run's start stamp), so every loop of a sweep
+ * dispatches through the same provider the run's start instant selected — a
+ * delayed fire or a manual dispatch resolves at ITS OWN start, never at the
+ * slot's nominal time.
  */
 export function resolveSelfhostDriver(nowMs: number): ModelSpec {
-  return isSelfhostPeak(nowMs) ? SelfhostPeak.driver : SelfhostDefaults.driver;
+  return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs)
+    ? SelfhostPeak.driver
+    : SelfhostDefaults.driver;
 }
 
 /**

@@ -1152,6 +1152,36 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     ).rejects.toThrow('requires ZAI_API_KEY');
   });
 
+  test('the reserved pre-peak headroom (05:40-06:00) demands the PEAK key too', async () => {
+    // A sweep starting at 05:45 can still be dispatching when 06:00 opens, and
+    // a run's driver is fixed at its start, so the headroom band selects the
+    // peak provider — the handshake and the preflight follow it.
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T05:45:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockRestore();
+    // … and a REAL run starting there refuses when only the off-peak key is set.
+    process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    await expect(
+      main({
+        ...baseDeps(
+          fakeGh([]),
+          fakeLoop([], async () => fakeOutcome(1)),
+        ),
+        nowMs: () => at('2026-10-12T05:45:00Z'),
+      }),
+    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+  });
+
   test('a dry run dispatches nothing and needs no provider key', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
     vi.stubEnv('ZAI_API_KEY', '');

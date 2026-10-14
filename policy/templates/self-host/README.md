@@ -158,30 +158,38 @@ adopter owns it by hand.
 ### The peak window and the model switch
 
 - Rule: the schedule runs all day; the MODEL changes at the peak boundary.
-  Keep your provider's peak window and the two driver bindings in the
-  toolkit (`SelfhostPeak` → `resolveSelfhostDriver` in
-  `src/selfhost/config.ts`), not in cron. Resolve the driver from the run's
-  own UTC start so delayed fires and manual dispatches behave like scheduled
-  ones, and fail closed when the SELECTED window's key is absent.
+  Keep your provider's peak window, its pre-peak dispatch headroom and the
+  two driver bindings in the toolkit (`SelfhostPeak` →
+  `resolveSelfhostDriver` in `src/selfhost/config.ts`), not in cron. Resolve
+  the driver from the run's own UTC start so delayed fires and manual
+  dispatches behave like scheduled ones, and fail closed when the SELECTED
+  window's key is absent.
 - Why: this repo's review loop no longer stands down during the
   06:00–10:00 UTC Monday–Friday Z.ai GLM peak (14:00–18:00 Asia/Singapore,
   ~3x quota consumption). It runs every 15 minutes, every day
   (`*/15 * * * *`), and switches provider for the peak: off-peak
   `zai/glm-5.3-flash` (with `ZAI_API_KEY`), peak `deepseek/deepseek-flash`
-  (with `DEEPSEEK_API_KEY`). Peak runs therefore spend the paid DeepSeek key;
-  the sweep token cap still bounds a run. The merge-dispatch sibling keeps
-  the older, narrower 15:00–01:00 UTC window and is out of scope.
-- Enforcement: the frozen `SelfhostPeak` window + `resolveSelfhostDriver`
-  decide the driver inside the toolkit; the review-loop template's single
-  all-hours cron removes the old start exclusion, and its run-step assert
-  derives the required key name from the SAME function
-  (`--print-driver-key-env`). `main()` also refuses to start when the
-  selected key is missing, and the entry threads ONE clock read through both
-  the preflight and the sweep, so a boundary-straddling run cannot check one
-  window's key and dispatch through the other. A `--dry-run` posts and
-  dispatches nothing, so neither the handshake nor `main()` demands a
-  provider key for it. Adopters move peak window, drivers and keys together
-  — `manual:`.
+  (with `DEEPSEEK_API_KEY`). The peak selection also covers the reserved
+  **pre-peak headroom** (`SelfhostPeak.headroomMinutes`, 20 minutes — the
+  documented ≤20-minute scheduled run): a run's driver is fixed when it
+  starts, so a sweep starting at 05:41 could otherwise still be dispatching
+  Z.ai GLM work after 06:00; starting in that band is dispatched through the
+  peak provider instead. This reserves dispatch, never a start exclusion:
+  the loop still runs all day. Peak and headroom runs therefore spend the
+  paid DeepSeek key; the sweep token cap still bounds a run. The
+  merge-dispatch sibling keeps the older, narrower 15:00–01:00 UTC window
+  and is out of scope.
+- Enforcement: the frozen `SelfhostPeak` window + headroom and
+  `resolveSelfhostDriver` decide the driver inside the toolkit; the
+  review-loop template's single all-hours cron removes the old start
+  exclusion, and its run-step assert derives the required key name from the
+  SAME function (`--print-driver-key-env`). `main()` also refuses to start
+  when the selected key is missing, and the entry threads ONE clock read
+  through both the preflight and the sweep, so a boundary-straddling run
+  cannot check one window's key and dispatch through the other. A
+  `--dry-run` posts and dispatches nothing, so neither the handshake nor
+  `main()` demands a provider key for it. Adopters move peak window,
+  headroom, drivers and keys together — `manual:`.
 
 ### Budget caps and the wall-clock ladder (I9)
 

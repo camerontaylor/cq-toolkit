@@ -22,6 +22,7 @@ import { describe, expect, test } from 'vitest';
 import {
   driverKeyEnv,
   isSelfhostPeak,
+  isSelfhostPeakHeadroom,
   parseSelfhostArgs,
   resolveSelfhostDriver,
   SelfhostDefaults,
@@ -84,6 +85,10 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
       startMinute: 360,
       endMinute: 600,
     });
+    // The reserved pre-peak dispatch headroom: the documented ≤20-minute
+    // scheduled run, so a sweep starting at 05:41 cannot dispatch Z.ai GLM
+    // work inside the ~3× peak quota window.
+    expect(SelfhostPeak.headroomMinutes).toBe(20);
     // The SERVED id the DeepSeek endpoint echoes; requesting the
     // `deepseek-chat` alias is served AS `deepseek-flash` and would trip the
     // served-model identity guard.
@@ -103,14 +108,33 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     expect(isSelfhostPeak(at('2026-10-18T07:00:00Z'))).toBe(false);
   });
 
-  test('resolveSelfhostDriver: peak switches provider, outside it the frozen default', () => {
-    expect(resolveSelfhostDriver(Date.parse('2026-10-12T07:00:00Z'))).toEqual(SelfhostPeak.driver);
-    expect(resolveSelfhostDriver(Date.parse('2026-10-12T12:00:00Z'))).toEqual(
-      SelfhostDefaults.driver,
-    );
-    expect(resolveSelfhostDriver(Date.parse('2026-10-17T07:00:00Z'))).toEqual(
-      SelfhostDefaults.driver,
-    );
+  test('isSelfhostPeakHeadroom: the 20-minute band before the window, weekdays only', () => {
+    const at = (iso: string): number => Date.parse(iso);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:39:59Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:40:00Z'))).toBe(true);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T05:59:59Z'))).toBe(true);
+    // The window itself is NOT the headroom (the two predicates are disjoint).
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T06:00:00Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-12T10:00:00Z'))).toBe(false);
+    // Weekends never, even at the same clock time.
+    expect(isSelfhostPeakHeadroom(at('2026-10-17T05:45:00Z'))).toBe(false);
+    expect(isSelfhostPeakHeadroom(at('2026-10-18T05:45:00Z'))).toBe(false);
+  });
+
+  test('resolveSelfhostDriver: peak honours the reserved headroom; off-peak the frozen default', () => {
+    const at = (iso: string): number => Date.parse(iso);
+    // The headroom band selects the PEAK driver, so no Z.ai GLM dispatch can
+    // be issued once the peak opens (a run's driver is fixed at its start).
+    expect(resolveSelfhostDriver(at('2026-10-12T05:39:59Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:40:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T05:59:59Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T06:00:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T07:00:00Z'))).toEqual(SelfhostPeak.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T10:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-12T12:00:00Z'))).toEqual(SelfhostDefaults.driver);
+    // Weekends: headroom and window both off.
+    expect(resolveSelfhostDriver(at('2026-10-17T05:45:00Z'))).toEqual(SelfhostDefaults.driver);
+    expect(resolveSelfhostDriver(at('2026-10-17T07:00:00Z'))).toEqual(SelfhostDefaults.driver);
     // The entry tests' fixture clock (Tue 2023-11-14T22:13:20Z) is off-peak.
     expect(resolveSelfhostDriver(1_700_000_000_000)).toEqual(SelfhostDefaults.driver);
   });

@@ -23,10 +23,13 @@
 //     start stamp decides the model ONCE via resolveSelfhostDriver — the
 //     frozen off-peak default (zai/glm-5.3-flash) outside the Z.ai GLM
 //     peak, the peak driver (deepseek/deepseek-flash) inside the documented
-//     06:00–10:00 UTC Mon–Fri window. main() refuses to start when the
-//     SELECTED provider's key env is absent (fail closed, before any
-//     effect), and exposes `--print-driver-key-env` so the workflow asserts
-//     the very same key rather than re-deriving the window in YAML;
+//     06:00–10:00 UTC Mon–Fri window OR its reserved pre-peak headroom
+//     (05:40–06:00: a run starting there could still be executing when the
+//     peak opens, so it must not dispatch Z.ai GLM into it). main() refuses
+//     to start when the SELECTED provider's key env is absent (fail closed,
+//     before any effect), and exposes `--print-driver-key-env` so the
+//     workflow asserts the very same key rather than re-deriving the window
+//     in YAML;
 //   - the TOKEN cap is SWEEP-LEVEL: SelfhostDefaults.maxTokens (the served
 //     model is unpriced, so a default USD cap would trip the governor's DD-9
 //     unpriced-usage fail-loud) is carried forward across the PRs in listing
