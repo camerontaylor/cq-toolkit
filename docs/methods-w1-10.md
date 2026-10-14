@@ -226,12 +226,14 @@ Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
 
 - **The sync/init interim fallback is retired (C3 T3).** `sync-merge-queue`, `init-merge-queue`,
   `ratchet-propose`, `self-merge-prs` and `self-review-loop` now mint the `cq-automation` App's
-  installation token per run from `CQ_AUTOMATION_APP_KEY` plus `CQ_AUTOMATION_APP_CLIENT_ID`; no
-  workflow reads `CQ_AUTOMATION_TOKEN`/`PROMOTE_TOKEN` any more, and the
-  `CQ_AUTOMATION_INTERIM_FALLBACK` opt-in variable is retired (template + render + README +
-  workflow tests, kept dormant-capable — no live settings, secret or key change). The `automation`
-  environment secret names stay allowlisted as drift notices until the owner revokes them at
-  C3/T7.
+  installation token per run from `CQ_AUTOMATION_APP_KEY` plus `CQ_AUTOMATION_APP_CLIENT_ID`; the
+  retired `CQ_AUTOMATION_INTERIM_FALLBACK` opt-in variable is gone, and no workflow reads
+  `CQ_AUTOMATION_TOKEN` any more (template + render + README + workflow tests, kept dormant-capable
+  — no live settings, secret or key change). Two stored credentials are deliberately NOT in T3's
+  scope and stay interim: `PROMOTE_TOKEN` is still read by `gate.yml` only at its push, as the
+  promoter-App interim fallback (Decision 7), and `CQ_SETTINGS_TOKEN` is still read by
+  `settings-drift`. The `automation` environment secret names stay allowlisted as drift notices
+  until the owner revokes them at C3/T7.
 - **W1.2b follow-up F1 (settle-tuple GraphQL-only lag) — open, owned by W1.2b.**
   `merge-recheck.ts`'s I11 lag cross-check (`checkReviewDataLag`, g0) refuses when a non-PENDING
   REST review or REST conversation root is missing from the GraphQL snapshot, but the settle
