@@ -112,6 +112,10 @@ export function toWireUsage(usage: CrqWireUsage): CrqWireUsageWire {
  * accepted stage / new send on it. The echoed fields bind the frame to this wire.
  */
 export interface CrqWireOutcomeReply {
+  /** The reply's own frame name: the host echoes `outcome` (validated, never assumed). */
+  readonly method: 'outcome';
+  /** The outcome kind the host accepted for this frame; must echo the reported one. */
+  readonly outcome: CrqWireOutcomeKind;
   readonly stopped: string | null;
   readonly sessionId: string;
   readonly messageId: number;
@@ -473,6 +477,14 @@ export class CrqWireWrapper {
     });
     // Validate the terminal reply; a non-null `stopped` is terminal even for a
     // `completed` frame, so it can never confer a locally accepted status.
+    if (reply.method !== 'outcome') {
+      throw new CrqWireRefusal('the host outcome reply is not an outcome frame');
+    }
+    if (reply.outcome !== kind) {
+      throw new CrqWireRefusal(
+        'the host outcome reply does not echo the reported outcome kind',
+      );
+    }
     if (
       reply.sessionId !== this.sessionId ||
       reply.messageId !== messageId ||
@@ -482,5 +494,12 @@ export class CrqWireWrapper {
       throw new CrqWireRefusal('the host outcome reply does not bind this wire');
     }
     this.outcomeStatus.set(ack, reply.stopped === null ? kind : 'unknown');
+    // The host's terminal stop incident is surfaced to the CALLER rather than silently
+    // resolving: a non-null `stopped` (over-bound, missing usage) must never let an
+    // attempt settle as accepted. The status is already recorded, so the wire stays
+    // terminal and no second outcome is sent.
+    if (reply.stopped !== null) {
+      throw new CrqWireRefusal(`the host stopped this wire: ${reply.stopped}`);
+    }
   }
 }

@@ -11,6 +11,7 @@ import {
   type CrqCanonicalEncoder,
   type CrqWireAck,
   type CrqWireIdentity,
+  type CrqWireOutcomeKind,
   type CrqWireOutcomeReply,
   type CrqWireTransport,
   type CrqWireUsage,
@@ -110,6 +111,8 @@ class FakeTransport implements CrqWireTransport {
     this.calls.push('outcome');
     this.outcomes.push(message);
     return {
+      method: 'outcome',
+      outcome: reportedKind(message),
       stopped: this.stopNext,
       sessionId: String(message['session_id']),
       messageId: Number(message['message_id']),
@@ -117,6 +120,15 @@ class FakeTransport implements CrqWireTransport {
       ackSequence: Number(message['ack_sequence']),
     };
   }
+}
+
+/** The reported kind the fixture must ECHO, read with a runtime guard. */
+function reportedKind(message: Readonly<Record<string, unknown>>): CrqWireOutcomeKind {
+  const kind = message['outcome'];
+  if (kind !== 'completed' && kind !== 'refused' && kind !== 'unknown') {
+    throw new CrqWireRefusal('the fixture requires a reported outcome kind on the frame');
+  }
+  return kind;
 }
 
 const usage: CrqWireUsage = {
@@ -343,14 +355,18 @@ describe('CrqWireWrapper', () => {
     }
   });
 
-  it('treats a non-null stopped terminal reply as NOT accepted even for completed', async () => {
+  it('surfaces a non-null stopped terminal reply and refuses continuation even for completed', async () => {
     const transport = new FakeTransport();
     transport.stopNext = 'stop_budget_exhausted';
     const wire = wrapper(transport);
     await wire.reserve();
-    await wire.outcome('completed', usage, 'end_turn', null);
-    // The frame claimed completed, but the host's terminal reply stopped the attempt,
-    // so no locally accepted stage and no new send may be conferred.
+    // The host's terminal stop reaches the CALLER: silently resolving would let the
+    // attempt settle as accepted. The outcome was reported exactly once.
+    await expect(wire.outcome('completed', usage, 'end_turn', null)).rejects.toThrow(
+      /the host stopped this wire: stop_budget_exhausted/,
+    );
+    expect(transport.outcomes).toHaveLength(1);
+    // No accepted outcome was recorded: no repair stage, no next send.
     expect(() => wire.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
     await expect(wire.reserve()).rejects.toThrow(/no accepted outcome/);
   });

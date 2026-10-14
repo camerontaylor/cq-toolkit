@@ -305,16 +305,18 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
   };
 
   /**
-   * Report the outcome of the acknowledged wire EXACTLY ONCE. The pending ack is
-   * closed BEFORE the outcome await, so a failed outcome write leaves the wire
-   * terminal (no second report) and never re-uses the ack.
+   * Report the outcome of the acknowledged wire EXACTLY ONCE and return the host's
+   * terminal `stopped` reason. The pending ack is closed BEFORE the outcome await,
+   * so a failed outcome write leaves the wire terminal (no second report) and never
+   * re-uses the ack. A non-null `stopped` is the host's stop incident: the caller
+   * MUST surface it instead of settling the attempt.
    */
   async function reportOutcomeOnce(
     kind: CrqWireOutcomeKind,
     usage: CrqWireUsage | null,
     stopReason: string | null,
     errorClass: string | null,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const transport = requireTransport();
     if (pendingAck === null) {
       throw new CrqWireRefusal('no acknowledged wire call to report an outcome for');
@@ -348,9 +350,17 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
-    // Mandatory terminal-reply validation: the echoed fields must bind THIS wire,
-    // and a non-null `stopped` is terminal even for a `completed` frame, so it can
-    // never confer a locally accepted status (the next send stays refused).
+    // Mandatory terminal-reply validation: the reply must BE an outcome frame, echo
+    // the reported kind, bind THIS wire, and a non-null `stopped` is terminal even for
+    // a `completed` frame, so it can never confer a locally accepted status.
+    if (reply.method !== 'outcome') {
+      throw new CrqWireRefusal('the host outcome reply is not an outcome frame');
+    }
+    if (reply.outcome !== kind) {
+      throw new CrqWireRefusal(
+        'the host outcome reply does not echo the reported outcome kind',
+      );
+    }
     if (
       reply.sessionId !== sessionId ||
       reply.messageId !== outcomeMessageId ||
@@ -360,6 +370,7 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('the host outcome reply does not bind this wire');
     }
     outcomeStatus.set(ack, reply.stopped === null ? kind : 'unknown');
+    return reply.stopped;
   }
 
   const repairStage: StrictTokenRepairStage = {
@@ -413,7 +424,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         } catch (err) {
           sendInFlight = false;
           // Provider failure: one explicit unknown outcome; a failure of THIS write
-          // propagates with the pending ack already closed (no second report).
+          // propagates with the pending ack already closed (no second report). The
+          // ORIGINAL provider error is preserved: a host stop reported alongside a
+          // provider failure never replaces the provider's own error here.
           await reportOutcomeOnce('unknown', null, null, err instanceof Error ? err.name : 'unknown');
           throw err;
         }
@@ -422,7 +435,27 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         // A fully measured usage is `completed`; an incomplete one is `unknown`, so
         // the local gate stops the next send rather than inventing acceptance.
         const kind: CrqWireOutcomeKind = usage.total === null ? 'unknown' : 'completed';
-        await reportOutcomeOnce(kind, usage, result.finishReason?.unified ?? null, null);
+        const stopped = await reportOutcomeOnce(
+          kind,
+          usage,
+          result.finishReason?.unified ?? null,
+          null,
+        );
+        // A LOCALLY computed `unknown` (an incomplete measurement) is its own refusal:
+        // the attempt must NOT return an accepted payload, even when the injected
+        // transport wrongly answers `stopped: null`. The outcome was already reported
+        // exactly once and the charge is kept; no second outcome is sent.
+        if (kind !== 'completed') {
+          throw new CrqWireRefusal(
+            'the wire outcome is unknown: the attempt is not an accepted payload',
+          );
+        }
+        // The host's terminal stop incident OUTRANKS the provider's own successful
+        // reply: the charge is kept and the outcome is already closed, but the
+        // attempt must NOT settle as an accepted payload. No second outcome is sent.
+        if (stopped !== null) {
+          throw new CrqWireRefusal(`the host stopped this wire: ${stopped}`);
+        }
         return result;
       },
       // Streaming has no finish-time usage observation on this surface yet. The wire

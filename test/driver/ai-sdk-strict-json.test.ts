@@ -49,6 +49,15 @@ import {
   type GlmCapabilityInput,
   type GlmHostedTransformAttestation,
 } from '../../src/driver/ai-sdk/glm-capability.js';
+import { createCrqWireAdapter } from '../../src/driver/ai-sdk/crq-wire-adapter.js';
+import {
+  CrqWireRefusal,
+  type CrqWireAck,
+  type CrqWireIdentity,
+  type CrqWireOutcomeKind,
+  type CrqWireOutcomeReply,
+  type CrqWireTransport,
+} from '../../src/driver/ai-sdk/crq-wire-wrapper.js';
 import { toOutputSchema } from '../../src/driver/common/structured.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
@@ -872,6 +881,117 @@ describe('strict-JSON strategy: the GLM text-only capability on the driver path'
       // The refusal is the profile's OWN refusal, not a missing-field accident:
       // the unmodified document still counts.
       expect(() => glm.count(JSON.stringify({ ...projection, responseFormat: null }))).not.toThrow();
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. The host's terminal stop on the DRIVER path
+//
+// The adapter's outcome reply may carry a non-null `stopped` (an over-bound or
+// missing-usage incident) while the frame's kind was `completed`. The DRIVER must
+// not settle such an attempt as `complete`, and the payload must not be accepted.
+// ---------------------------------------------------------------------------
+
+const DRIVER_IDENTITY: CrqWireIdentity = {
+  job: 'crq-run-20261014T120000Z-F1',
+  sourceSha: 'a'.repeat(40),
+  findingSha256: 'b'.repeat(64),
+  authorizationSha256: 'c'.repeat(64),
+  role: 'fixer',
+  rung: 0,
+  window: 'default',
+};
+
+/** A genuine runtime guard: the fixture never casts the sent envelope. */
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A transport whose outcome reply reports the host's terminal stop. */
+class StoppingTransport implements CrqWireTransport {
+  public outcomes = 0;
+  private acks = 0;
+
+  async attestHost(): Promise<boolean> {
+    return true;
+  }
+
+  async hello(): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }> {
+    return { sessionId: 'stop-session', attemptRef: 3, remainingMilliseconds: 600_000 };
+  }
+
+  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+    const envelope = message['envelope'];
+    if (!isRecord(envelope)) {
+      throw new CrqWireRefusal('the fixture requires an envelope object');
+    }
+    const digest = envelope['digest'];
+    if (typeof digest !== 'string' || digest.length === 0) {
+      throw new CrqWireRefusal('the fixture requires an envelope digest');
+    }
+    this.acks += 1;
+    return {
+      method: 'reserved',
+      sessionId: String(message['session_id']),
+      messageId: Number(message['message_id']),
+      ackSequence: this.acks,
+      reservationSequence: this.acks,
+      requestSha256: digest,
+      inputTokens: 10,
+      reservedOutputTokens: 4000,
+      totalTokens: 4010,
+      cumulativeTokens: 4010,
+      remainingTokens: 100_000,
+      remainingMilliseconds: 590_000,
+      attemptRef: Number(message['attempt_ref']),
+      wireOrdinal: `host-ordinal-${String(this.acks)}`,
+    };
+  }
+
+  async outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply> {
+    this.outcomes += 1;
+    const kind = message['outcome'];
+    if (kind !== 'completed' && kind !== 'refused' && kind !== 'unknown') {
+      throw new CrqWireRefusal('the fixture requires a reported outcome kind');
+    }
+    const echoed: CrqWireOutcomeKind = kind;
+    return {
+      method: 'outcome',
+      outcome: echoed,
+      stopped: 'stop_over_bound',
+      sessionId: String(message['session_id']),
+      messageId: Number(message['message_id']),
+      attemptRef: Number(message['attempt_ref']),
+      ackSequence: Number(message['ack_sequence']),
+    };
+  }
+}
+
+describe('strict-JSON strategy: the host stop on the driver path', () => {
+  test('a host-stopped completed wire never settles the run as complete', async () => {
+    const transport = new StoppingTransport();
+    const adapter = createCrqWireAdapter({
+      identity: DRIVER_IDENTITY,
+      provider: 'anthropic',
+      model: 'claude-test',
+      transport,
+    });
+    const fx = await fixture([textResult(JSON.stringify({ verdict: 'pass', note: 'ok' }))], {
+      strict: true,
+      adapter,
+      capability: fakeCapability(),
+    });
+    try {
+      const result = await fx.driver.run(invocation());
+      // The host's terminal stop reached the caller: the run is NOT complete and no
+      // payload was accepted, while the single wire was reported exactly once.
+      expect(result.stopReason).not.toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      expect(transport.outcomes).toBe(1);
+      expect(fx.wire).toHaveLength(1);
     } finally {
       await fx.cleanup();
     }

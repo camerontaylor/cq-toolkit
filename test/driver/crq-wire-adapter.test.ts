@@ -21,6 +21,7 @@ import {
   CrqWireRefusal,
   type CrqWireAck,
   type CrqWireIdentity,
+  type CrqWireOutcomeKind,
   type CrqWireOutcomeReply,
   type CrqWireTransport,
 } from '../../src/driver/ai-sdk/crq-wire-wrapper.js';
@@ -128,6 +129,8 @@ class FakeTransport implements CrqWireTransport {
 
   async outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply> {
     return {
+      method: 'outcome',
+      outcome: reportedKind(message),
       stopped: null,
       sessionId: String(message['session_id']),
       messageId: Number(message['message_id']),
@@ -236,7 +239,7 @@ describe('composed strict lane + GLM text-only capability', () => {
     expect(transport.reserved).toBe(0);
   });
 
-  it('stops the next send after an incomplete usage is reported as unknown', async () => {
+  it('refuses the result of an incomplete measurement even when the reply claims no stop', async () => {
     const transport = new FakeTransport();
     const adapter = createCrqWireAdapter({
       identity: IDENTITY,
@@ -262,8 +265,15 @@ describe('composed strict lane + GLM text-only capability', () => {
     });
     const wrapped = adapter.wrapModel(model);
     await adapter.reserve(receiptFor(projectionWith(null)));
-    await wrapped.doGenerate(PROMPT_CALL);
+    // The transport answers `stopped: null` (a LYING/incorrectly permissive reply).
+    // The LOCALLY computed unknown is its own refusal: no accepted payload escapes,
+    // the charge is kept and the outcome was reported exactly once.
+    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(
+      /not an accepted payload/,
+    );
     expect(counter.fetches).toBe(1);
+    expect(transport.outcomes).toHaveLength(1);
+    expect(transport.outcomes[0]?.['outcome']).toBe('unknown');
     // An incomplete measurement is NOT acceptance: no repair stage, no new send.
     expect(() => adapter.repairStage.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
     await expect(adapter.reserve(receiptFor(projectionWith(null)))).rejects.toThrow(
@@ -325,6 +335,15 @@ const OUTCOME_KEYS = [
   'repair_of_ack_sequence',
 ];
 
+/** The reported kind the fixture must ECHO, read with a runtime guard. */
+function reportedKind(message: Readonly<Record<string, unknown>>): CrqWireOutcomeKind {
+  const kind = message['outcome'];
+  if (kind !== 'completed' && kind !== 'refused' && kind !== 'unknown') {
+    throw new CrqWireRefusal('the fixture requires a reported outcome kind on the frame');
+  }
+  return kind;
+}
+
 /** A genuine runtime guard: the fixture never casts the sent envelope. */
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -359,6 +378,8 @@ class StrictTransport implements CrqWireTransport {
   public holdNextReserve = false;
   /** Deliberately return a WRONG digest so the source binding must refuse it. */
   public mangleDigest = false;
+  /** The host's terminal stop reason for the next OUTCOME reply, when set. */
+  public stopNext: string | null = null;
   private release: (() => void) | null = null;
   private acks = 0;
 
@@ -411,7 +432,9 @@ class StrictTransport implements CrqWireTransport {
     this.lastOutcome = message;
     assertExactKeys(message, OUTCOME_KEYS, 'outcome');
     return {
-      stopped: null,
+      method: 'outcome',
+      outcome: reportedKind(message),
+      stopped: this.stopNext,
       sessionId: String(message['session_id']),
       messageId: Number(message['message_id']),
       attemptRef: Number(message['attempt_ref']),
@@ -473,6 +496,34 @@ describe('composed adapter: strict frames and the reserve-in-flight lock', () =>
     // binding is the only thing that ties the ack to the document the wire carried.
     await expect(adapter.reserve(receiptFor(projectionWith(null)))).rejects.toThrow(
       /canonical request digest/,
+    );
+    expect(transport.reserveCalls).toBe(1);
+  });
+
+  it('rejects the payload and blocks continuation when the host stops a completed wire', async () => {
+    const transport = new StrictTransport();
+    transport.stopNext = 'stop_over_bound';
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      transport,
+    });
+    const counter = { fetches: 0 };
+    const wrapped = adapter.wrapModel(countingModel(counter));
+    await adapter.reserve(receiptFor(projectionWith(null)));
+    // The provider call happened (the charge is kept) and the outcome was reported
+    // exactly once, but the host's terminal stop must reach the caller: a completed
+    // frame with a non-null stopped NEVER settles as an accepted payload.
+    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(
+      /the host stopped this wire: stop_over_bound/,
+    );
+    expect(counter.fetches).toBe(1);
+    expect(transport.outcomeCalls).toBe(1);
+    // No accepted outcome was recorded: no repair stage, no next send.
+    expect(() => adapter.repairStage.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
+    await expect(adapter.reserve(receiptFor(projectionWith(null)))).rejects.toThrow(
+      /no accepted outcome/,
     );
     expect(transport.reserveCalls).toBe(1);
   });
