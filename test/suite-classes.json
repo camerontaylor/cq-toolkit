@@ -19,6 +19,7 @@
   "test/driver/canonical-projection.test.ts": "pure",
   "test/driver/claude-agent.sdk-presence.test.ts": "process",
   "test/driver/claude-agent.test.ts": "process",
+  "test/driver/crq-wire-adapter.test.ts": "pure",
   "test/driver/crq-wire-wrapper.test.ts": "pure",
   "test/driver/error-text.test.ts": "process",
   "test/driver/factory.test.ts": "process",
