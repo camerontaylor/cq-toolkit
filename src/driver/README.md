@@ -118,6 +118,14 @@ ignores `Budget.wallClockMs` (the governor's ladder decides when to abort);
 `Budget.maxTokens` becomes a timer-free `stopWhen` condition over
 accumulated step usage; `maxAttempts` is the runner/governor's retry
 business (one attempt per run); `maxUsd` is caller-side derived accounting.
+`Budget.strictTokenBudget` (opt-in, separate — it does NOT redefine
+`maxTokens`) wraps the resolved model so every wire attempt counts the full
+request and reserves input + reserved output BEFORE the send. It requires an
+operator-injected `AiSdkDriverOptions.strictTokenCapability` (metering +
+output-ceiling code); there is NO built-in or provider-list capability, so a
+strict budget REFUSES pre-dispatch in production until a deployment injects a
+proven one (`pre-request-ceiling.ts` documents what a capability must
+account for). A refusal settles as `stopReason: 'budget'`.
 The one driver-side temporal bound is the SDK call's per-request
 `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot

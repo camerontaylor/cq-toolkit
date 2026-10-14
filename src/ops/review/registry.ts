@@ -467,6 +467,27 @@ export const FixReviewItemInputSchema: z.ZodType<FixReviewItemInput> = z
         maxTokens: z.number().int().positive().exactOptional(),
         wallClockMs: z.number().int().positive().exactOptional(),
         maxAttempts: z.number().int().positive().exactOptional(),
+        // The strict pre-request ceiling (opt-in). The review.fixItem lane is
+        // the in-process ai-sdk driver for the default providers, so it can
+        // carry the capability; both binds are required and positive — an
+        // absent capability keeps the legacy soft maxTokens semantics.
+        //
+        // JUDGE / CLASSIFIER PATH: the capability is injected on the ai-sdk
+        // LANE (DriverFactoryConfig.lanes.aiSdk.strictTokenCapability), so it
+        // reaches every role that resolves to that lane — fixer, classifier
+        // and judge alike. Strict enforcement is still PER-INVOCATION: an op
+        // must carry `budget.strictTokenBudget` to opt in, and today only
+        // review.fixItem mirrors that field. A classify/judge op opts in by
+        // gaining the same mirror and the operator injecting a capability for
+        // its model; with no injection the lane refuses pre-dispatch rather
+        // than guessing. This slice wires the fixer only.
+        strictTokenBudget: z
+          .object({
+            maxInputTokens: z.number().int().safe().positive(),
+            reserveOutputTokens: z.number().int().safe().positive(),
+          })
+          .strict()
+          .exactOptional(),
       })
       .strict()
       .exactOptional(),

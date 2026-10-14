@@ -88,12 +88,51 @@ export interface SandboxPolicy {
   level: SandboxLevel;
 }
 
+/**
+ * The opt-in STRICT pre-request token ceiling for an in-process lane that can
+ * intercept its own provider transport. Plain data, required in full when the
+ * capability is enabled — there is no default and no auto-enable, because a
+ * default would silently redefine the meaning of `Budget.maxTokens`.
+ *
+ * `maxTokens` (below) is soft, completed-step accounting: a lane folds the
+ * usage of finished steps and stops the loop once the fold crosses the cap.
+ * By the time it fires the request that crossed the cap was already sent.
+ * This capability is the other thing: a binding ceiling enforced BEFORE every
+ * wire send, evaluated over the FULL serialized request (system + tools +
+ * messages + prior history) plus the reserved output.
+ */
+export interface StrictTokenBudget {
+  /**
+   * Binding ceiling on the counted input of ONE serialized provider request.
+   * The lane counts the full request with its attested token-counting
+   * capability and REFUSES to send a request whose count exceeds this. The
+   * count is an exact tokenizer result or a proven conservative upper bound
+   * (never a `chars / 4` estimate); an unknown counting capability refuses
+   * the run before dispatch.
+   */
+  maxInputTokens: number;
+  /**
+   * Output/reasoning wire ceiling reserved for EVERY request and applied to
+   * the wire (the lane sets the provider's output-token field). It is added
+   * to the counted input to size the request's reservation. The lane must
+   * have an attested provider capability that the wire honors the ceiling;
+   * an unattested provider refuses the run before dispatch.
+   */
+  reserveOutputTokens: number;
+}
+
 /** Budget caps a caller attaches to one invocation. All optional; plain data. */
 export interface Budget {
   maxUsd?: number;
   maxTokens?: number;
   wallClockMs?: number;
   maxAttempts?: number;
+  /**
+   * Opt-in binding pre-request token ceiling (strict). Absent = the legacy
+   * soft `maxTokens` semantics, unchanged — enabling this does not redefine
+   * what `maxTokens` means.
+   */
+  strictTokenBudget?: StrictTokenBudget;
 }
 
 /** A JSON Schema (draft 2020-12) document, plain data. No external $ref; meta-schema URIs stripped. */

@@ -29,6 +29,14 @@
 //     passed ALWAYS: `stepCountIs(DEFAULT_MAX_STEPS)` bounds the tool loop
 //     even without a token cap (the SDK's own default is a single step,
 //     under which tool calls are never followed up).
+//   - Budget.strictTokenBudget (OPT-IN, separate from maxTokens) adds a
+//     BINDING pre-request ceiling: `pre-request-ceiling.ts` wraps the
+//     resolved model so every wire attempt counts the full request and
+//     reserves input + reserved output before the send. It requires an
+//     operator-injected `AiSdkDriverOptions.strictTokenCapability` (there is
+//     NO built-in/provider-list capability — production refuses a strict
+//     budget until a deployment injects a proven one). A refusal settles as
+//     stopReason 'budget'. It does NOT redefine maxTokens.
 //   - Budget.maxAttempts is the runner/governor's retry business; this
 //     driver makes exactly ONE attempt per run.
 //   - Budget.maxUsd is caller-side derived accounting (USD is never
@@ -219,6 +227,12 @@ import {
 } from '../common/structured.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
+import {
+  isPreRequestCeilingRefusal,
+  PreRequestCeiling,
+  wrapWithPreRequestCeiling,
+} from './pre-request-ceiling.js';
+import type { StrictTokenCapability } from './pre-request-ceiling.js';
 import type {
   Budget,
   Driver,
@@ -286,6 +300,16 @@ export interface AiSdkDriverOptions {
    * rides this seam. A lookup returning undefined keeps costUSD absent.
    */
   pricing?: (modelSpec: ModelSpec) => PerMillionRates | undefined;
+  /**
+   * Operator-supplied trusted capability for the strict pre-request ceiling
+   * (`Budget.strictTokenBudget`). ABSENT BY DEFAULT: production ships NO
+   * attested tokenizer/wire capability, so a strict budget REFUSES before
+   * dispatch unless a deployment injects one here. The capability is trusted
+   * code (metering + output-ceiling behavior), never a provider name, string
+   * or boolean — see `pre-request-ceiling.ts` for what it must account for.
+   * Tests inject a fake here; no production provider list exists.
+   */
+  strictTokenCapability?: (modelSpec: ModelSpec) => StrictTokenCapability | undefined;
 }
 
 /**
@@ -300,6 +324,9 @@ export class AiSdkDriver implements Driver {
   private readonly sandboxConfig: SandboxConfig | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined;
+  private readonly strictTokenCapability:
+    | ((modelSpec: ModelSpec) => StrictTokenCapability | undefined)
+    | undefined;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -315,6 +342,7 @@ export class AiSdkDriver implements Driver {
         : deepFreeze(structuredClone(options.sandboxConfig));
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
+    this.strictTokenCapability = options.strictTokenCapability;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -324,7 +352,34 @@ export class AiSdkDriver implements Driver {
     // --- Pre-dispatch validation: everything here throws BEFORE the model
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
     // partial state).
-    const model = this.resolveModel(modelSpec);
+    const resolvedModel = this.resolveModel(modelSpec);
+    // Strict pre-request ceiling (opt-in): the capability must be INJECTED
+    // (trusted operator code). There is no built-in provider list, so an
+    // unconfigured deployment — including production — REFUSES this run
+    // before dispatch rather than asserting an unproven capability.
+    const strictBudget = budget.strictTokenBudget;
+    let model: LanguageModel = resolvedModel;
+    if (strictBudget !== undefined) {
+      const capability = this.strictTokenCapability?.(modelSpec);
+      if (capability === undefined) {
+        throw new DispatchError(
+          'config',
+          `ai-sdk driver: strictTokenBudget is set but no trusted token capability is configured for model '${modelSpec.provider}/${modelSpec.model}' — refusing (inject AiSdkDriverOptions.strictTokenCapability; no built-in capability exists)`,
+        );
+      }
+      // The shared whole-job token allowance, when the governing gate supplied
+      // a reservation. Absent = per-request ceiling only; the lane makes no
+      // whole-job claim from an invocation-local budget.
+      const sharedTokenAllowance = options?.reservation?.tokens;
+      const ceiling = new PreRequestCeiling({
+        budget: strictBudget,
+        capability,
+        ...(sharedTokenAllowance !== undefined
+          ? { wholeJobTokenAllowance: sharedTokenAllowance }
+          : {}),
+      });
+      model = wrapWithPreRequestCeiling(resolvedModel, ceiling);
+    }
     const system = this.composeSystemPrompt(prompt);
     // Resolve policy before creating session/workspace state: malformed
     // sandbox configuration must fail before any partial run state exists.
@@ -654,6 +709,18 @@ export class AiSdkDriver implements Driver {
         ...(signals !== undefined ? { providerSignals: signals } : {}),
       };
     } catch (err) {
+      // The strict pre-request ceiling refused a wire send: an honest
+      // 'budget' verdict, not a driver failure. The completed steps' usage is
+      // kept (onStepFinish folded them); nothing was sent for the refused
+      // request.
+      if (isPreRequestCeilingRefusal(err)) {
+        return {
+          usage: stepUsage,
+          sessionId: record.sessionId,
+          denials,
+          stopReason: 'budget',
+        };
+      }
       // Mid-run failure: return an honest error verdict (never throw past
       // the seam — the frozen result carries the evidence gathered so far).
       // An abort-shaped failure is the governor's cancellation, not an
@@ -1053,6 +1120,19 @@ export class AiSdkDriver implements Driver {
       const aborted =
         signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
       const signals = providerSignalsFromError(err);
+      // The ceiling refused the REPAIR request before the wire send: the
+      // missing object is the cap's consequence, not a schema violation —
+      // settle the honest 'budget' verdict with the main call's spend.
+      if (!aborted && isPreRequestCeilingRefusal(err)) {
+        return {
+          ...(servedModel !== undefined ? { model: servedModel } : {}),
+          ...verdictExtras(totalUsage),
+          sessionId: record.sessionId,
+          denials,
+          stopReason: 'budget',
+          ...verdictSignals(),
+        };
+      }
       if (!aborted && NoObjectGeneratedError.isInstance(err)) {
         // The parse-miss error carries the repair's own response metadata:
         // the SAME identity judgment as the returned-repair paths (a
