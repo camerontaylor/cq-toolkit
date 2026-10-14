@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
+import { z } from 'zod';
 import { APICallError } from '@ai-sdk/provider';
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
@@ -19,11 +20,13 @@ import {
   wrapWithPreRequestCeiling,
 } from '../../src/driver/ai-sdk/pre-request-ceiling.js';
 import type {
+  PreRequestCeilingRefusalKind,
   PreRequestCeilingRefusalReason,
   StrictTokenCapability,
   WireReservation,
 } from '../../src/driver/ai-sdk/pre-request-ceiling.js';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
 import { createDriverFactory } from '../../src/driver/factory.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import type { OpInvocation } from '../../src/driver/types.js';
@@ -525,7 +528,7 @@ describe('PreRequestCeiling (unit)', () => {
         reasonOfRefusal(
           await refusalFrom(() => ceiling.reserve({ ...userPrompt('hi'), maxOutputTokens: bad })),
         ),
-      ).toBe('output-reserve');
+      ).toBe('output-ceiling-invalid');
     }
   });
 
@@ -559,6 +562,88 @@ describe('PreRequestCeiling (unit)', () => {
     expect(reasonOfRefusal(await refusalFrom(() => overflow.reserve(userPrompt('hi'))))).toBe(
       'reservation-overflow',
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Cancellation outranks the ceiling (V1GX) and the refusal discriminant (V1Gf)
+  // -------------------------------------------------------------------------
+
+  test('classifies ONLY the real caps as budget; every infra reason as error', () => {
+    const kindOf = (reason: PreRequestCeilingRefusalReason): PreRequestCeilingRefusalKind =>
+      new PreRequestCeilingRefusal(reason, 'probe', {
+        countedInput: 0,
+        reserved: 0,
+        cumulativeReserved: 0,
+      }).kind;
+    for (const reason of ['input-ceiling', 'output-reserve', 'whole-job-allowance'] as const) {
+      expect(kindOf(reason)).toBe('budget');
+    }
+    for (const reason of [
+      'output-ceiling-invalid',
+      'output-ceiling-not-applied',
+      'unrepresentable-request',
+      'uncountable-request',
+      'reservation-overflow',
+      'reservation-not-written',
+      'request-mutated',
+    ] as const) {
+      expect(kindOf(reason)).toBe('error');
+    }
+  });
+
+  test('a pre-aborted run signal refuses before counting or charging (no send)', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const err = await ceiling
+      .reserve({ ...userPrompt('hi'), abortSignal: controller.signal })
+      .catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(ceiling.requestCount).toBe(0);
+    expect(ceiling.reservedTokens).toBe(0);
+  });
+
+  test('an abort during a NEVER-SETTLING durable hook settles cancellation and keeps the charge', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: () => new Promise<void>(() => {}),
+    });
+    const controller = new AbortController();
+    const pending = ceiling.reserve({ ...userPrompt('hi'), abortSignal: controller.signal });
+    // Let the reserve reach its hook await, then fire the governor's abort.
+    await Promise.resolve();
+    controller.abort();
+    const err = await pending.catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    // No refund: the local charge committed before the hook still stands.
+    expect(ceiling.requestCount).toBe(1);
+    expect(ceiling.reservedTokens).toBeGreaterThan(0);
+  });
+
+  test('a hook that resolves AFTER abort cannot wire the request (late resolution ignored)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: () => gate,
+    });
+    const controller = new AbortController();
+    const pending = ceiling.reserve({ ...userPrompt('hi'), abortSignal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    // The orphaned hook settles only AFTER the abort: the race is already
+    // rejected, so no params are ever returned for the wire.
+    release();
+    const err = await pending.catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(ceiling.requestCount).toBe(1);
   });
 });
 
@@ -846,6 +931,127 @@ describe('ai-sdk driver strictTokenBudget', () => {
       );
       expect(result.stopReason).toBe('complete');
       expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a governed abort during a hung durable reservation hook settles aborted, not budget', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-hung-hook-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+        // A hook that NEVER settles: without abort-awareness the run hangs here.
+        strictTokenReservationHook: () => new Promise<void>(() => {}),
+      });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 20);
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+        { signal: controller.signal },
+      );
+      expect(result.stopReason).toBe('aborted');
+      expect(result.error).toBeUndefined();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a capability that cannot count the request settles a diagnostic error, not budget', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-infra-count-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () =>
+          fakeCapability({
+            count: () => {
+              throw new Error('unbounded multimodal input');
+            },
+          }),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBeDefined();
+      expect(result.error).toContain('infrastructure');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a durable hook failure settles a diagnostic error, not budget', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-infra-hook-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+        strictTokenReservationHook: () => {
+          throw new Error('ledger unavailable');
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBeDefined();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('an infrastructure refusal on the REPAIR request settles error, not budget', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-repair-infra-'));
+    try {
+      let countCalls = 0;
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            // Both the main call and the repair reply with non-JSON text, so the
+            // main call settles a structured miss and the repair is attempted.
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('not json') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () =>
+          fakeCapability({
+            count: (serialized) => {
+              countCalls += 1;
+              if (countCalls === 1) return Buffer.byteLength(serialized, 'utf8');
+              throw new Error('repair count unavailable');
+            },
+          }),
+      });
+      const result = await driver.run(
+        invocation({
+          outputSchema: toOutputSchema(
+            'conformance/repair-infra/v1',
+            z.object({ answer: z.string() }).strict(),
+          ),
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+      );
+      expect(countCalls).toBeGreaterThanOrEqual(2);
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).toBeDefined();
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

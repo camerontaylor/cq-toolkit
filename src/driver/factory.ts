@@ -22,10 +22,13 @@
 //     invocation, so the alias never reaches a lane or a journal. Removed
 //     next major.
 //   - WRAPPER ORDER, innermost first: the lane, then the reap-on-settle
-//     wrapper (when requested), then the served-model assertion outermost.
-//     Both inner wrappers forward the `RunOptions` second parameter
-//     unchanged (a dropping wrapper compiles and silently kills
-//     cancellation; conformance leg b-v catches that).
+//     wrapper (when requested), then the served-model assertion, then the
+//     strict-budget guard outermost (it refuses an unsupported-lane strict
+//     budget before ANY inner wrapper or the lane runs — a pre-aborted signal,
+//     however, settles 'aborted' first, before that refusal). Every wrapper
+//     forwards the `RunOptions` second parameter unchanged (a dropping wrapper
+//     compiles and silently kills cancellation; conformance leg b-v catches
+//     that).
 //   - SESSION RETENTION: 'keep' (the default) wraps nothing — session
 //     records are worker evidence. 'reap-on-settle' deletes, after the run
 //     settles WHATEVER the verdict, ONLY the FRESH record that run created:
@@ -350,6 +353,16 @@ export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
 }
 
 /**
+ * The LIVE aborted state of the run signal. Deliberately a function, never an
+ * inline `signal?.aborted === true` at the use site: the guard reads the state
+ * at RUN time (a signal aborted between resolve() and run() must still be seen),
+ * exactly like the lanes' own `signalAborted` lookups. No driver-owned clock.
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/**
  * Refuse a strict pre-request token budget on any resolved lane that does not
  * enforce it, BEFORE the lane runs (no session, no credential read, no spawn).
  * The lane id is bound at resolve time; the check reads the REAL invocation
@@ -358,10 +371,22 @@ export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
  * ai-sdk lane passes through: it enforces the ceiling itself and refuses when
  * no trusted capability is injected. `maxUsd` is untouched (advisory, as
  * before).
+ *
+ * CANCELLATION OUTRANKS THE STRICT CHECK (I8): a PRE-aborted signal settles the
+ * zero-usage 'aborted' verdict WITHOUT dispatching to the lane, matching every
+ * direct lane's abort-before-strict order — so the guard never turns a governed
+ * cancellation into a config refusal.
  */
 export function withStrictTokenBudgetGuard(driver: Driver, lane: LaneId): Driver {
   return {
     async run(invocation, options): Promise<WorkerResult> {
+      if (signalAborted(options?.signal)) {
+        return {
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'aborted',
+        };
+      }
       assertStrictTokenBudgetSupported(invocation.budget, lane);
       return driver.run(invocation, options);
     },

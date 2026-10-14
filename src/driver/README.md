@@ -125,13 +125,20 @@ operator-injected `AiSdkDriverOptions.strictTokenCapability` (metering +
 output-ceiling code); there is NO built-in or provider-list capability, so a
 strict budget REFUSES pre-dispatch in production until a deployment injects a
 proven one (`pre-request-ceiling.ts` documents what a capability must
-account for). A refusal settles as `stopReason: 'budget'`.
+account for). A refusal that means a REAL token cap (input ceiling, output
+reserve, shared whole-job allowance) settles as `stopReason: 'budget'`; a
+capability/serialization/durable-hook failure settles a diagnostic
+`stopReason: 'error'` (never misreported as budget-exhausted), and a governed
+abort settles `'aborted'`.
 `AiSdkDriverOptions.strictTokenReservationHook` (also
 `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`) is the durable
 pre-wire reservation point for an external ledger: it receives the resolved
 model identity and a TS-LOCAL `countableProjectionDigest` — sha256 over the
 countable projection only, EXCLUDING headers/abortSignal/includeRawChunks, so
-it is not a whole-wire digest. It is NOT the Python
+it is not a whole-wire digest. The hook is ABORT-AWARE: it races the run's live
+signal, so a hung hook settles the cancellation (keeping the local charge — no
+refund) instead of wedging the run, and no params reach the wire on abort. It
+is NOT the Python
 `token_guard.request_sha256` canonical sorted-ASCII form and is not
 interoperable with an external ledger; a shared cross-language canonical
 projection protocol does not exist and is an activation blocker for that

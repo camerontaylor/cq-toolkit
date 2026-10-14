@@ -299,3 +299,112 @@ describe('ai-sdk lane is unchanged by the guard', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Cancellation outranks the strict-budget gate (V1Gj)
+// ---------------------------------------------------------------------------
+
+describe('a pre-aborted signal settles aborted before the strict-budget gate', () => {
+  const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+  function preAborted(): AbortController {
+    const controller = new AbortController();
+    controller.abort();
+    return controller;
+  }
+
+  test('direct subprocess: aborted, seam untouched, no session store', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const spy = seamSpy();
+      const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
+      const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
+        signal: preAborted().signal,
+      });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(spy.calls).toBe(0);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('direct ai-sdk with a strict budget but NO capability: aborted, not a config throw', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const driver = new AiSdkDriver({
+        sessionsDir,
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult() }),
+        },
+        // deliberately NO strictTokenCapability: a strict budget alone would
+        // throw config, but the pre-aborted signal must win first.
+      });
+      const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
+        signal: preAborted().signal,
+      });
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('factory guard on subprocess: aborted before the strict assert, no inner dispatch', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const factory = createDriverFactory({
+        sessionsDir,
+        bindings: { fixer: { probe: 'subprocess' } },
+      });
+      const resolved = factory.resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'probe', model: 'claude-test' },
+      });
+      const result = await resolved.driver.run(
+        invocation({ provider: 'probe', model: 'claude-test' }),
+        { signal: preAborted().signal },
+      );
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(result.sessionId).toBeUndefined();
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('factory guard on ai-sdk: aborted before the strict assert, not a config throw', async () => {
+    const { root, sessionsDir } = await scratch();
+    try {
+      const factory = createDriverFactory({
+        sessionsDir,
+        lanes: {
+          aiSdk: {
+            providers: {
+              anthropic: () =>
+                new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult() }),
+            },
+          },
+        },
+      });
+      const resolved = factory.resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'anthropic', model: 'claude-test' },
+      });
+      expect(resolved.lane).toBe('ai-sdk');
+      const result = await resolved.driver.run(
+        invocation({ provider: 'anthropic', model: 'claude-test' }),
+        { signal: preAborted().signal },
+      );
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual(ZERO);
+      expect(existsSync(sessionsDir)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

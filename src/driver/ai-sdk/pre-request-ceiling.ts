@@ -225,12 +225,26 @@ export function serializeRequestForCounting(params: LanguageModelV4CallOptions):
   }
 }
 
+/**
+ * What a pre-wire refusal MEANS for the run's verdict:
+ *   - `budget` — a REAL token cap was exceeded (the request would genuinely
+ *     overspend the input ceiling, the output reserve, or the shared
+ *     whole-job allowance). Settles `stopReason: 'budget'`.
+ *   - `error`  — a local infrastructure/capability/serialization/durable-hook
+ *     failure. This is NOT budget exhaustion; hiding it as `'budget'` (which
+ *     ops surface as `budget-exhausted`) would misreport a broken hook or
+ *     capability as a spender. Settles a diagnostic `stopReason: 'error'`.
+ */
+export type PreRequestCeilingRefusalKind = 'budget' | 'error';
+
 /** Why a request was refused before the wire send. */
 export type PreRequestCeilingRefusalReason =
   /** The counted input of this request exceeds `maxInputTokens`. */
   | 'input-ceiling'
   /** The request would carry an output ceiling above `reserveOutputTokens`. */
   | 'output-reserve'
+  /** The request's own output ceiling is not a safe positive integer (a malformed request). */
+  | 'output-ceiling-invalid'
   /** The capability did not apply a valid output ceiling at or below the reserve. */
   | 'output-ceiling-not-applied'
   /** The request or its serialization cannot be represented/counted. */
@@ -247,12 +261,35 @@ export type PreRequestCeilingRefusalReason =
   | 'request-mutated';
 
 /**
+ * The ONLY reasons that mean a genuine token cap was exceeded. Every other
+ * reason is a local infrastructure failure and MUST settle an error verdict,
+ * never `budget` (V1Gf). Keep this the single source of truth: the class field
+ * and any caller test derive from it.
+ */
+const BUDGET_REFUSAL_REASONS: ReadonlySet<PreRequestCeilingRefusalReason> = new Set([
+  'input-ceiling',
+  'output-reserve',
+  'whole-job-allowance',
+]);
+
+/** The {@link PreRequestCeilingRefusalKind} a reason maps to. */
+function refusalKindOf(reason: PreRequestCeilingRefusalReason): PreRequestCeilingRefusalKind {
+  return BUDGET_REFUSAL_REASONS.has(reason) ? 'budget' : 'error';
+}
+
+/**
  * A pre-wire refusal from the ceiling. A plain `Error` subclass so the SDK's
  * retry classifier (`shouldRetry` accepts only retryable APICallErrors /
- * GatewayErrors) never retries it; the driver maps it to stopReason `budget`.
+ * GatewayErrors) never retries it; the driver maps a genuine cap
+ * ({@link kind} `'budget'`) to stopReason `budget`, and every local
+ * infrastructure/capability/serialization/durable-hook failure
+ * ({@link kind} `'error'`) to a diagnostic `stopReason: 'error'` — never
+ * hidden as budget-exhausted (V1Gf).
  */
 export class PreRequestCeilingRefusal extends Error {
   readonly reason: PreRequestCeilingRefusalReason;
+  /** Whether this refusal is a real budget cap or a local infrastructure failure. */
+  readonly kind: PreRequestCeilingRefusalKind;
   readonly countedInput: number;
   readonly reserved: number;
   readonly cumulativeReserved: number;
@@ -265,6 +302,7 @@ export class PreRequestCeilingRefusal extends Error {
     super(`ai-sdk driver: strict token ceiling refused the request (${reason}) — ${message}`);
     this.name = 'PreRequestCeilingRefusal';
     this.reason = reason;
+    this.kind = refusalKindOf(reason);
     this.countedInput = evidence.countedInput;
     this.reserved = evidence.reserved;
     this.cumulativeReserved = evidence.cumulativeReserved;
@@ -274,6 +312,49 @@ export class PreRequestCeilingRefusal extends Error {
 /** Narrowing guard for {@link PreRequestCeilingRefusal}. */
 export function isPreRequestCeilingRefusal(value: unknown): value is PreRequestCeilingRefusal {
   return value instanceof PreRequestCeilingRefusal;
+}
+
+/**
+ * An abort-shaped error (name `AbortError`) that the driver's cancellation
+ * corridor (I8) settles as `stopReason: 'aborted'` — the ceiling never turns a
+ * governed cancellation into a budget/infra refusal. The live `signal.reason`
+ * is reused when it is an Error, so the caller's own abort cause survives.
+ */
+function abortRefusal(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  const err = new Error('ai-sdk driver: strict token ceiling cancelled before the wire send');
+  err.name = 'AbortError';
+  return err;
+}
+
+/**
+ * Await `work`, but reject as soon as `signal` aborts (V1GX). The abort
+ * listener is ALWAYS removed, and a LATE rejection/resolution of `work` is
+ * consumed (never left unhandled, never returned to the wire): once the race
+ * settles on abort, an orphaned hook can no longer produce params for send.
+ */
+function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return work;
+  if (signal.aborted) {
+    // Consume any later rejection of the already-orphaned work.
+    void work.catch(() => {});
+    return Promise.reject(abortRefusal(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortRefusal(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +420,10 @@ export interface PreRequestCeilingOptions {
    * The explicit durable pre-wire reservation point. Called after every check
    * passes and AFTER the local charge is committed (so concurrent calls cannot
    * both pass the allowance check); a throw refuses the request but does NOT
-   * refund the local charge. The driver exposes it through
+   * refund the local charge. The hook is ABORT-AWARE: it races the run's live
+   * signal (`params.abortSignal`), so a hung hook settles the cancellation
+   * instead of wedging the run, the local charge is kept (no refund), and no
+   * params reach the wire on abort. The driver exposes it through
    * `AiSdkDriverOptions.strictTokenReservationHook`/
    * `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`; when absent,
    * cross-invocation whole-job enforcement is a named gap (see the header).
@@ -401,13 +485,20 @@ export class PreRequestCeiling {
   async reserve(params: LanguageModelV4CallOptions): Promise<LanguageModelV4CallOptions> {
     const { capability, budget, wholeJobTokenAllowance, onBeforeWireReserve, modelSpec } =
       this.options;
+    // CANCELLATION OUTRANKS THE CEILING (I8 / V1GX): an already-aborted run
+    // signal never counts, charges or sends — no spurious charge for an attempt
+    // the governor has already cancelled.
+    const signal = params.abortSignal;
+    if (signal !== undefined && signal.aborted) {
+      throw abortRefusal(signal);
+    }
     // An existing ceiling must be a valid, honored cap that fits the reserve:
     // NaN/negative/fractional/Infinity must not slip past a `>` comparison.
     const existingCeiling = params.maxOutputTokens;
     if (existingCeiling !== undefined) {
       if (!Number.isSafeInteger(existingCeiling) || existingCeiling < 1) {
         throw this.refuse(
-          'output-reserve',
+          'output-ceiling-invalid',
           `request output ceiling must be a safe positive integer, got ${String(existingCeiling)}`,
           0,
           0,
@@ -522,19 +613,30 @@ export class PreRequestCeiling {
     this.requestCountN += 1;
     // DURABLE PRE-WIRE RESERVATION (the shared-ledger bridge): after the local
     // charge, before the wire. Its failure refuses the request conservatively —
-    // the local charge is NOT refunded.
+    // the local charge is NOT refunded. The hook is ABORT-AWARE (V1GX): it races
+    // the run signal, so a hung hook cannot wedge the run after the governor has
+    // aborted; on abort the charge stands (no refund) and no params are returned
+    // to the wire. An orphaned late hook can never wire either.
     if (onBeforeWireReserve !== undefined) {
+      const receipt: WireReservation = {
+        tokens: reserved,
+        cumulativeTokens: cumulative,
+        countedInput: counted,
+        reserveOutputTokens: budget.reserveOutputTokens,
+        provider: modelSpec?.provider ?? '',
+        model: modelSpec?.model ?? '',
+        countableProjectionDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+      };
       try {
-        await onBeforeWireReserve({
-          tokens: reserved,
-          cumulativeTokens: cumulative,
-          countedInput: counted,
-          reserveOutputTokens: budget.reserveOutputTokens,
-          provider: modelSpec?.provider ?? '',
-          model: modelSpec?.model ?? '',
-          countableProjectionDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
-        });
+        // Invoke the hook and race its settlement against the abort. A
+        // SYNCHRONOUS throw becomes a rejected promise here, handled uniformly.
+        await awaitWithAbort(Promise.resolve().then(() => onBeforeWireReserve(receipt)), signal);
       } catch (err) {
+        // Cancellation outranks a hook failure: if the signal aborted, settle
+        // the cancellation (the driver's I8 corridor), never a hook refusal.
+        if (signal !== undefined && signal.aborted) {
+          throw abortRefusal(signal);
+        }
         throw this.refuse(
           'reservation-not-written',
           `the durable reservation hook failed: ${errorText(err)}`,
