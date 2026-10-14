@@ -160,7 +160,7 @@ describe('glm text capability — refuse unbounded shapes', () => {
     const capability = createGlmTextCapability(INPUT, ATTESTATION);
     if (capability === undefined) throw new Error('expected the capability to be present');
     const raw =
-      '{"prompt":[{"role":"tool","content":[{"type":"tool-result","toolCallId":"t1","output":{"type":"error-json","value":{"bad":-0}}}]}],"tools":null,"toolChoice":null,"responseFormat":null,"providerOptions":null,"maxOutputTokens":64}';
+      '{"prompt":[{"role":"tool","content":[{"type":"tool-result","toolCallId":"t1","output":{"type":"error-json","value":{"bad":-0.0}}}]}],"tools":null,"toolChoice":null,"responseFormat":null,"providerOptions":null,"maxOutputTokens":64}';
     const parsed: unknown = JSON.parse(raw);
     const bad = (() => {
       const prompt = (parsed as { prompt: unknown[] }).prompt;
