@@ -11,6 +11,7 @@ import {
   type CrqCanonicalEncoder,
   type CrqWireAck,
   type CrqWireIdentity,
+  type CrqWireOutcomeReply,
   type CrqWireTransport,
   type CrqWireUsage,
 } from '../../src/driver/ai-sdk/crq-wire-wrapper.js';
@@ -44,16 +45,23 @@ class FakeTransport implements CrqWireTransport {
   public mutateAck: ((ack: CrqWireAck) => CrqWireAck) | null = null;
   public lastReserve: Readonly<Record<string, unknown>> | null = null;
   public outcomes: Readonly<Record<string, unknown>>[] = [];
+  private attempts = 0;
+  public stopNext: string | null = null;
 
   async attestHost(): Promise<boolean> {
     this.calls.push('attest');
     return this.attestation;
   }
 
-  async hello(): Promise<{ sessionId: string; remainingMilliseconds: number }> {
+  async hello(): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }> {
     this.calls.push('hello');
     this.sessions += 1;
-    return { sessionId: `session-${String(this.sessions)}`, remainingMilliseconds: 600_000 };
+    this.attempts += 1;
+    return {
+      sessionId: `session-${String(this.sessions)}`,
+      attemptRef: this.attempts,
+      remainingMilliseconds: 600_000,
+    };
   }
 
   async reserve(
@@ -75,14 +83,23 @@ class FakeTransport implements CrqWireTransport {
       cumulativeTokens: this.nextAck * 9000,
       remainingTokens: 32000 - this.nextAck * 9000,
       remainingMilliseconds: 590_000,
+      attemptRef: Number(message['attempt_ref']),
+      wireOrdinal: String(message['wire_ordinal']),
     };
     this.nextAck += 1;
     return this.mutateAck === null ? base : this.mutateAck(base);
   }
 
-  async outcome(message: Readonly<Record<string, unknown>>): Promise<void> {
+  async outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply> {
     this.calls.push('outcome');
     this.outcomes.push(message);
+    return {
+      stopped: this.stopNext,
+      sessionId: String(message['session_id']),
+      messageId: Number(message['message_id']),
+      attemptRef: Number(message['attempt_ref']),
+      ackSequence: Number(message['ack_sequence']),
+    };
   }
 }
 
@@ -180,7 +197,7 @@ describe('CrqWireWrapper', () => {
     expect(retry.ackSequence).toBe(first.ackSequence + 1);
     expect(transport.lastReserve?.['message_id']).toBe(3);
     expect(transport.lastReserve?.['supersedes_ack_sequence']).toBe(first.ackSequence);
-    expect(String(transport.lastReserve?.['logical_attempt_id'])).toContain('fixer');
+    expect(Number(transport.lastReserve?.['attempt_ref'])).toBeGreaterThan(0);
   });
 
   it('refuses without an injected encoder or transport', async () => {
@@ -252,6 +269,64 @@ describe('CrqWireWrapper', () => {
     await wire.reserve();
     await wire.outcome('completed', null, 'end_turn', null);
     expect(transport.outcomes[0]?.['usage']).toBeNull();
+  });
+
+  it('sends the EXACT snake_case usage shape the strict host schema requires', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    await wire.reserve();
+    await wire.outcome('completed', usage, 'end_turn', null);
+    // Regression for the strict Python usage schema: camelCase keys on the wire
+    // would make the host refuse every outcome, so assert the exact key set and
+    // every value, and that no camelCase key survives.
+    const sent = transport.outcomes[0]?.['usage'];
+    expect(sent).toEqual({
+      actual_input: 900,
+      cache_hit: 0,
+      cache_miss: 900,
+      completion: 50,
+      visible: 40,
+      reasoning: 10,
+      total: 950,
+    });
+    expect(Object.keys(sent as object).sort()).toEqual([
+      'actual_input',
+      'cache_hit',
+      'cache_miss',
+      'completion',
+      'reasoning',
+      'total',
+      'visible',
+    ]);
+    for (const camel of ['actualInput', 'cacheHit', 'cacheMiss']) {
+      expect(Object.keys(sent as object)).not.toContain(camel);
+    }
+  });
+
+  it('treats a non-null stopped terminal reply as NOT accepted even for completed', async () => {
+    const transport = new FakeTransport();
+    transport.stopNext = 'stop_budget_exhausted';
+    const wire = wrapper(transport);
+    await wire.reserve();
+    await wire.outcome('completed', usage, 'end_turn', null);
+    // The frame claimed completed, but the host's terminal reply stopped the attempt,
+    // so no locally accepted stage and no new send may be conferred.
+    expect(() => wire.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
+    await expect(wire.reserve()).rejects.toThrow(/no accepted outcome/);
+  });
+
+  it('refuses a terminal reply that does not bind this wire', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    await wire.reserve();
+    const original = transport.outcome.bind(transport);
+    transport.outcome = async (message) => ({
+      ...(await original(message)),
+      ackSequence: 999_999,
+    });
+    await expect(wire.outcome('completed', usage, 'end_turn', null)).rejects.toThrow(
+      /does not bind this wire/,
+    );
   });
 
   it('marks a judge role as the judge kind', async () => {

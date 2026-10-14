@@ -51,6 +51,7 @@ import { canonicalProjectionDigestOf, CANONICAL_PROJECTION_PROTOCOL } from './ca
 import type { WireReservation } from './pre-request-ceiling.js';
 import {
   CrqWireRefusal,
+  toWireUsage,
   type CrqWireAck,
   type CrqWireIdentity,
   type CrqWireOutcomeKind,
@@ -113,10 +114,14 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
   const { identity, provider, model } = options;
 
   let sessionId: string | null = null;
+  /** The POSITIVE host-issued attempt reference (never client-manufactured). */
+  let attemptRef: number | null = null;
   let messageId = 0;
   let lastAck: CrqWireAck | null = null;
   /** The one ack whose outcome is pending; null when no wire is un-reported. */
   let pendingAck: number | null = null;
+  /** The OPAQUE host wire ordinal of the pending ack (never client-made). */
+  let pendingWireOrdinal: string | null = null;
   /** The PRIOR ack a pending repair supersedes (immutable per-wire context). */
   let pendingRepairOf: number | null = null;
   /** True while a provider attempt is in flight (serialize online wire calls). */
@@ -157,9 +162,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     return { protocol, bytesHex, digest };
   }
 
-  async function ensureSession(): Promise<string> {
+  async function ensureSession(): Promise<{ sessionId: string; attemptRef: number }> {
     const transport = requireTransport();
-    if (sessionId !== null) return sessionId;
+    if (sessionId !== null && attemptRef !== null) return { sessionId, attemptRef };
     const attested = await transport.attestHost();
     if (attested !== true) {
       throw new CrqWireRefusal('the transport could not independently attest the host peer; refusing');
@@ -168,11 +173,15 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     if (typeof ready.sessionId !== 'string' || ready.sessionId.length === 0) {
       throw new CrqWireRefusal('the host returned no session id');
     }
+    if (!Number.isSafeInteger(ready.attemptRef) || ready.attemptRef < 1) {
+      throw new CrqWireRefusal('the host returned no positive attempt reference');
+    }
     if (!Number.isSafeInteger(ready.remainingMilliseconds) || ready.remainingMilliseconds <= 0) {
       throw new CrqWireRefusal('the host returned no usable remaining time');
     }
     sessionId = ready.sessionId;
-    return sessionId;
+    attemptRef = ready.attemptRef;
+    return { sessionId, attemptRef };
   }
 
   const reserve = async (receipt: WireReservation): Promise<void> => {
@@ -185,7 +194,6 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('the receipt carries no usable reserved output ceiling');
     }
     const session = await ensureSession();
-    // LOCAL GATE: a new send requires the PRIOR wire's ACCEPTED (completed) outcome.
     if (lastAck !== null && outcomeStatus.get(lastAck.ackSequence) !== 'completed') {
       throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
     }
@@ -224,6 +232,8 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         tokens: 0,
         cumulativeTokens: 0,
       },
+      // The positive HOST-issued attempt reference; the host owns the wire ordinal.
+      attempt_ref: session.attemptRef,
       wire_output_ceiling: receipt.reserveOutputTokens,
       supersedes_ack_sequence: priorAck === null ? 0 : priorAck,
       kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
@@ -237,8 +247,14 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     if (reply.messageId !== nextMessageId) {
       throw new CrqWireRefusal('the host acknowledgement does not echo this message id');
     }
-    if (reply.sessionId !== session) {
+    if (reply.sessionId !== session.sessionId) {
       throw new CrqWireRefusal('the host acknowledgement does not bind this session');
+    }
+    if (reply.attemptRef !== session.attemptRef) {
+      throw new CrqWireRefusal('the host acknowledgement does not echo the attempt reference');
+    }
+    if (typeof reply.wireOrdinal !== 'string' || reply.wireOrdinal.length === 0) {
+      throw new CrqWireRefusal('the host acknowledgement carries no host wire ordinal');
     }
     if (reply.requestSha256 !== canonical.digest) {
       throw new CrqWireRefusal('the host acknowledgement does not echo the canonical request digest');
@@ -261,6 +277,7 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     messageId = nextMessageId;
     lastAck = reply;
     pendingAck = reply.ackSequence;
+    pendingWireOrdinal = reply.wireOrdinal;
     pendingRepairOf = repairing ? priorAck : null;
   };
 
@@ -280,14 +297,19 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('no acknowledged wire call to report an outcome for');
     }
     const ack = pendingAck;
+    const wireOrdinal = pendingWireOrdinal;
     const repairOf = pendingRepairOf;
     pendingAck = null;
+    pendingWireOrdinal = null;
     pendingRepairOf = null;
     messageId += 1;
-    await transport.outcome({
+    const outcomeMessageId = messageId;
+    const reply = await transport.outcome({
       method: 'outcome',
       session_id: sessionId,
-      message_id: messageId,
+      message_id: outcomeMessageId,
+      attempt_ref: attemptRef,
+      wire_ordinal: wireOrdinal,
       job: identity.job,
       source_sha: identity.sourceSha,
       finding_sha256: identity.findingSha256,
@@ -300,12 +322,24 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       model,
       ack_sequence: ack,
       outcome: kind,
-      usage,
+      // The EXACT snake_case host usage shape at the wire boundary.
+      usage: usage === null ? null : toWireUsage(usage),
       stop_reason: stopReason,
       error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
-    outcomeStatus.set(ack, kind);
+    // Mandatory terminal-reply validation: the echoed fields must bind THIS wire,
+    // and a non-null `stopped` is terminal even for a `completed` frame, so it can
+    // never confer a locally accepted status (the next send stays refused).
+    if (
+      reply.sessionId !== sessionId ||
+      reply.messageId !== outcomeMessageId ||
+      reply.attemptRef !== attemptRef ||
+      reply.ackSequence !== ack
+    ) {
+      throw new CrqWireRefusal('the host outcome reply does not bind this wire');
+    }
+    outcomeStatus.set(ack, reply.stopped === null ? kind : 'unknown');
   }
 
   const repairStage: StrictTokenRepairStage = {
@@ -363,10 +397,15 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         await reportOutcomeOnce(kind, usage, result.finishReason?.unified ?? null, null);
         return result;
       },
-      // Streaming has no finish-time usage observation on this surface yet: refuse
-      // BEFORE dispatch so a still-running stream is never returned after its
-      // outcome was declared done. (Local charge known, no send, no refund.)
-      wrapStream: () => {
+      // Streaming has no finish-time usage observation on this surface yet. The wire
+      // was already reserved (charged); report an explicit OUTCOME=refused with a
+      // no-send stop_reason — the host outcome enum has NO extra kind, and the C5
+      // known_no_send fact is host-side evidence, not a new wire enum. doStream is
+      // NEVER called and a still-running stream is never returned.
+      wrapStream: async () => {
+        if (pendingAck !== null) {
+          await reportOutcomeOnce('refused', null, 'no-send', null);
+        }
         throw new CrqWireRefusal('the CRQ wire adapter does not support streaming; refusing before dispatch');
       },
     };

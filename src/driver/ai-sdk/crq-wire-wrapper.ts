@@ -42,7 +42,7 @@ export interface CrqWireIdentity {
   readonly findingSha256: string;
   readonly authorizationSha256: string;
   readonly role: string;
-  readonly rung: number;
+  readonly rung: number | null;
   readonly window: string;
 }
 
@@ -50,6 +50,10 @@ export interface CrqWireIdentity {
 export interface CrqWireAck {
   readonly method: 'reserved';
   readonly sessionId: string;
+  /** The POSITIVE host-issued attempt reference this wire belongs to. */
+  readonly attemptRef: number;
+  /** The OPAQUE host-assigned wire ordinal (never client-manufactured). */
+  readonly wireOrdinal: string;
   readonly messageId: number;
   readonly ackSequence: number;
   readonly reservationSequence: number;
@@ -73,6 +77,48 @@ export interface CrqWireUsage {
   readonly total: number | null;
 }
 
+/**
+ * The EXACT wire shape of one usage record. The strict host schema uses snake_case
+ * (`actual_input`/`cache_hit`/`cache_miss`); the typed internal shape above is
+ * camelCase, so this mapper is applied at the WIRE boundary only.
+ */
+export interface CrqWireUsageWire {
+  readonly actual_input: number | null;
+  readonly cache_hit: number | null;
+  readonly cache_miss: number | null;
+  readonly completion: number | null;
+  readonly visible: number | null;
+  readonly reasoning: number | null;
+  readonly total: number | null;
+}
+
+/** Map the typed camelCase usage to the host's EXACT snake_case wire fields. */
+export function toWireUsage(usage: CrqWireUsage): CrqWireUsageWire {
+  return {
+    actual_input: usage.actualInput,
+    cache_hit: usage.cacheHit,
+    cache_miss: usage.cacheMiss,
+    completion: usage.completion,
+    visible: usage.visible,
+    reasoning: usage.reasoning,
+    total: usage.total,
+  };
+}
+
+/**
+ * The host's typed terminal reply to one outcome frame. `stopped` is the host's
+ * terminal signal: a non-null `stopped` means the role attempt STOPS even when the
+ * frame's outcome kind was `completed`, so the sender never confers a locally
+ * accepted stage / new send on it. The echoed fields bind the frame to this wire.
+ */
+export interface CrqWireOutcomeReply {
+  readonly stopped: string | null;
+  readonly sessionId: string;
+  readonly messageId: number;
+  readonly attemptRef: number;
+  readonly ackSequence: number;
+}
+
 export type CrqWireOutcomeKind = 'completed' | 'refused' | 'unknown';
 
 /** The authenticated transport callback. C4 owns its native implementation. */
@@ -88,11 +134,12 @@ export interface CrqWireTransport {
     identity: CrqWireIdentity,
     provider: string,
     model: string,
-  ): Promise<{ sessionId: string; remainingMilliseconds: number }>;
+  ): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }>;
   /** `reserve`: durably reserve one wire and return the host's acknowledgement. */
   reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }>;
-  /** `outcome`: report the outcome of one acked wire call. */
-  outcome(message: Readonly<Record<string, unknown>>): Promise<void>;
+  /** `outcome`: report the outcome of one acked wire call and return the host's
+   * typed terminal reply (non-null `stopped` is terminal even for `completed`). */
+  outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply>;
 }
 
 export interface CrqWireWrapperOptions {
@@ -182,6 +229,8 @@ export function bridgeEnvelope(
 export class CrqWireWrapper {
   private readonly options: CrqWireWrapperOptions;
   private sessionId: string | null = null;
+  /** The POSITIVE host-issued attempt reference bound at hello (never client-made). */
+  private attemptRef: number | null = null;
   private messageId = 0;
   private lastAck: CrqWireAck | null = null;
   /** Per-ack reported outcome status; only an ACCEPTED (completed) outcome is usable. */
@@ -217,7 +266,11 @@ export class CrqWireWrapper {
     if (typeof ready.sessionId !== 'string' || ready.sessionId.length === 0) {
       throw new CrqWireRefusal('the host returned no session id');
     }
+    if (!Number.isSafeInteger(ready.attemptRef) || ready.attemptRef < 1) {
+      throw new CrqWireRefusal('the host returned no positive attempt reference');
+    }
     this.sessionId = ready.sessionId;
+    this.attemptRef = ready.attemptRef;
     return this.sessionId;
   }
 
@@ -308,8 +361,10 @@ export class CrqWireWrapper {
       driver: 'cq',
       provider,
       model,
-      // The logical attempt identity is IMMUTABLE across retries of this wrapper.
-      logical_attempt_id: `${identity.job}:${identity.role}:${String(identity.rung)}:${identity.window}`,
+      // The logical attempt identity IS the host-issued positive attempt_ref;
+      // there is no client-manufactured logical_attempt_id and no wire_ordinal
+      // (the host owns the wire ordinal).
+      attempt_ref: this.attemptRef,
       supersedes_ack_sequence: supersedes,
       kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
       envelope,
@@ -324,6 +379,9 @@ export class CrqWireWrapper {
     }
     if (
       reply.messageId !== messageId ||
+      reply.attemptRef !== this.attemptRef ||
+      typeof reply.wireOrdinal !== 'string' ||
+      reply.wireOrdinal.length === 0 ||
       typeof reply.ackSequence !== 'number' ||
       reply.ackSequence < 1
     ) {
@@ -363,23 +421,42 @@ export class CrqWireWrapper {
     // Capture the EXACT ack this outcome belongs to BEFORE the await: an interleaved reserve
     // must never be able to change which ack gets its status recorded.
     const ack = this.lastAck.ackSequence;
+    const wireOrdinal = this.lastAck.wireOrdinal;
     const identity = this.options.identity;
     this.messageId += 1;
-    await transport.outcome({
+    const messageId = this.messageId;
+    const reply = await transport.outcome({
       method: 'outcome',
       session_id: this.sessionId,
-      message_id: this.messageId,
+      message_id: messageId,
+      attempt_ref: this.attemptRef,
+      wire_ordinal: wireOrdinal,
       job: identity.job,
       source_sha: identity.sourceSha,
       finding_sha256: identity.findingSha256,
       authorization_sha256: identity.authorizationSha256,
+      role: identity.role,
+      rung: identity.rung,
+      window: identity.window,
+      driver: 'cq',
       ack_sequence: ack,
       outcome: kind,
-      usage,
+      // The EXACT snake_case host usage shape at the wire boundary.
+      usage: usage === null ? null : toWireUsage(usage),
       stop_reason: stopReason,
       error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
-    this.outcomeStatus.set(ack, kind);
+    // Validate the terminal reply; a non-null `stopped` is terminal even for a
+    // `completed` frame, so it can never confer a locally accepted status.
+    if (
+      reply.sessionId !== this.sessionId ||
+      reply.messageId !== messageId ||
+      reply.attemptRef !== this.attemptRef ||
+      reply.ackSequence !== ack
+    ) {
+      throw new CrqWireRefusal('the host outcome reply does not bind this wire');
+    }
+    this.outcomeStatus.set(ack, reply.stopped === null ? kind : 'unknown');
   }
 }
