@@ -31,6 +31,9 @@ interface AcceptVector {
 interface RefuseVector {
   name: string;
   projection: unknown;
+  /** An explicit lossless serialization when `JSON.stringify` would normalize the
+   * shape (e.g. it turns `-0` into `0`, losing the sign the refusal depends on). */
+  rawSerialized?: string;
 }
 interface MonotonicVector {
   name: string;
@@ -146,11 +149,43 @@ describe('glm text capability — refuse unbounded shapes', () => {
       expect(() => countGlmTextPromptBytes(vector.projection)).toThrow(UnboundedGlmRequestShape);
       const capability = createGlmTextCapability(INPUT, ATTESTATION);
       if (capability === undefined) throw new Error('expected the capability to be present');
-      expect(() => capability.count(JSON.stringify(vector.projection))).toThrow(
-        UnboundedGlmRequestShape,
-      );
+      // Use an explicit lossless serialization when present (JSON.stringify
+      // normalizes -0 to 0, losing the very sign the refusal depends on).
+      const raw = vector.rawSerialized ?? JSON.stringify(vector.projection);
+      expect(() => capability.count(raw)).toThrow(UnboundedGlmRequestShape);
     });
   }
+
+  test('a losslessly serialized negative zero refuses; JSON.stringify normalization is a contrast', () => {
+    const capability = createGlmTextCapability(INPUT, ATTESTATION);
+    if (capability === undefined) throw new Error('expected the capability to be present');
+    const raw =
+      '{"prompt":[{"role":"tool","content":[{"type":"tool-result","toolCallId":"t1","output":{"type":"error-json","value":{"bad":-0}}}]}],"tools":null,"toolChoice":null,"responseFormat":null,"providerOptions":null,"maxOutputTokens":64}';
+    const parsed: unknown = JSON.parse(raw);
+    const bad = (() => {
+      const prompt = (parsed as { prompt: unknown[] }).prompt;
+      const content = (prompt[0] as { content: unknown[] }).content;
+      const output = (content[0] as { output: { value: { bad: unknown } } }).output;
+      return output.value.bad;
+    })();
+    // JSON.parse preserves the -0 token...
+    expect(Object.is(bad, -0)).toBe(true);
+    // ...so a lossless count refuses it, and the direct render refuses it too.
+    expect(() => capability.count(raw)).toThrow(UnboundedGlmRequestShape);
+    expect(() => countGlmTextPromptBytes(parsed)).toThrow(UnboundedGlmRequestShape);
+    // CONTRAST: JSON.stringify normalizes -0 to 0, and a genuine 0 is accepted —
+    // the refusal is about the sign, never about the normalized 0.
+    const normalized: unknown = JSON.parse(JSON.stringify(parsed));
+    const normalizedBad = (() => {
+      const prompt = (normalized as { prompt: unknown[] }).prompt;
+      const content = (prompt[0] as { content: unknown[] }).content;
+      const output = (content[0] as { output: { value: { bad: unknown } } }).output;
+      return output.value.bad;
+    })();
+    expect(Object.is(normalizedBad, 0)).toBe(true);
+    expect(Object.is(normalizedBad, -0)).toBe(false);
+    expect(() => capability.count(JSON.stringify(parsed))).not.toThrow();
+  });
 
   test('thinking.type disabled is refused even though the provider accepts it', () => {
     const projection = {
