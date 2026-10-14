@@ -136,6 +136,58 @@
       },
       "mustContain": ["😀", "<b>bold</b>", "& \"quote\""],
       "mustNotContain": []
+    },
+    {
+      "name": "tool description with HTML/quote chars is Jinja-JSON escaped (never shorter)",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "<script> & 'quoted' >",
+            "inputSchema": { "type": "object", "properties": { "a": { "type": "string" } } }
+          }
+        ],
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "mustContain": ["\\u003c", "\\u0026", "\\u0027", "\\u003e"],
+      "mustNotContain": ["<script>"]
+    },
+    {
+      "name": "clear_thinking clears a historical assistant think block",
+      "projection": {
+        "prompt": [
+          { "role": "assistant", "content": [{ "type": "reasoning", "text": "OLD-THOUGHT" }, { "type": "text", "text": "a" }] },
+          { "role": "user", "content": [{ "type": "text", "text": "u" }] }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": { "zai": { "thinking": { "clearThinking": true } } },
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "mustContain": ["<think></think>"],
+      "mustNotContain": ["<think>OLD-THOUGHT</think>"]
     }
   ],
   "refuse": [
