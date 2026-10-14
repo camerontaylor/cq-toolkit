@@ -42,6 +42,13 @@ import {
   buildCountedProjection,
   canonicalProjectionDigest,
 } from '../../src/driver/ai-sdk/canonical-projection.js';
+import {
+  GLM_TEXT_PROFILE,
+  UnboundedGlmRequestShape,
+  createGlmTextCapability,
+  type GlmCapabilityInput,
+  type GlmHostedTransformAttestation,
+} from '../../src/driver/ai-sdk/glm-capability.js';
 import { toOutputSchema } from '../../src/driver/common/structured.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
@@ -149,6 +156,8 @@ async function fixture(
     adapter?: StrictTokenWireAdapter;
     /** Overrides the injected capability (e.g. to record the ceiling's order). */
     capability?: StrictTokenCapability;
+    /** The provider key the mock model is registered under (default anthropic). */
+    providerName?: string;
     /** Runs while send `sendIndex` (0-based) is in flight, before it returns. */
     onSend?: (sendIndex: number) => void;
   },
@@ -195,7 +204,7 @@ async function fixture(
       }
     : {};
   const driver = new AiSdkDriver({
-    providers: { anthropic: () => model },
+    providers: { [options.providerName ?? 'anthropic']: () => model },
     sessionsDir: join(scratch, 'sessions'),
     ...strictOptions,
   });
@@ -775,5 +784,96 @@ describe('strict-JSON strategy: the strict wire adapter', () => {
           strictTokenRepairStage: adapter.repairStage,
         }),
     ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. The C2 GLM text-only capability composed ON THE DRIVER PATH
+//
+// The runner asked for the strict lane composed with the injected capability and
+// a non-null responseFormat pinned through the DRIVER, not only the module. The
+// REAL GLM profile is the injected capability here, so the run proves the driver's
+// own counted pipeline document is exactly what that profile accepts, and the
+// negative leg injects a hosted responseFormat (what `Output.object` would put on
+// the wire) into the SAME counted document. Nothing is smuggled: the driver never
+// emits `responseFormat`, and no arbitrary params ride outside the counted
+// projection.
+// ---------------------------------------------------------------------------
+
+describe('strict-JSON strategy: the GLM text-only capability on the driver path', () => {
+  const GLM_INPUT: GlmCapabilityInput = {
+    provider: 'zai',
+    model: 'glm-5.3-flash',
+    endpoint: 'https://api.z.ai/api/coding/paas/v4',
+  };
+  const GLM_ATTESTATION: GlmHostedTransformAttestation = {
+    provider: 'zai',
+    model: 'glm-5.3-flash',
+    endpoint: 'https://api.z.ai/api/coding/paas/v4',
+    hostedBuild: 'zai-coding-paas-v4-build-2026-10',
+    templateRevision: GLM_TEXT_PROFILE.publisherTemplate.revision,
+    tokenizerRevision: GLM_TEXT_PROFILE.publisherTokenizerRevision,
+    reasoningInclusiveMaxTokens: true,
+    noUnreservedHiddenGeneration: true,
+    provenance: 'offline test attestation',
+  };
+
+  test('the REAL GLM profile counts the driver counted projection and refuses a hosted responseFormat', async () => {
+    const glm = createGlmTextCapability(GLM_INPUT, GLM_ATTESTATION);
+    expect(glm).toBeDefined();
+    if (glm === undefined) throw new Error('expected the GLM capability to be present');
+    const counted: string[] = [];
+    const capability: StrictTokenCapability = {
+      provenance: glm.provenance,
+      // The REAL profile stays the counting authority; this only records the
+      // EXACT document the ceiling handed it.
+      count: (serialized) => {
+        counted.push(serialized);
+        return glm.count(serialized);
+      },
+      withOutputCeiling: (params, reserve) => glm.withOutputCeiling(params, reserve),
+    };
+    const fx = await fixture([textResult(JSON.stringify({ verdict: 'pass', note: 'ok' }))], {
+      strict: true,
+      providerName: 'zai',
+      capability,
+    });
+    try {
+      const result = await fx.driver.run(
+        invocation({ modelSpec: { provider: 'zai', model: 'glm-5.3-flash' } }),
+      );
+      // The real profile ACCEPTED the lane's own counted document, so the run
+      // really rode the GLM text-only bound (this is not an accept-any stub).
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ verdict: 'pass', note: 'ok' });
+      expect(counted.length).toBeGreaterThan(0);
+
+      // The wire carries no hosted structured response.
+      const params = sent(fx.wire, 0);
+      expect(params.responseFormat).toBeUndefined();
+
+      const document = counted[0] ?? '';
+      expect(document).not.toBe('');
+      const projection = JSON.parse(document) as Record<string, unknown>;
+      // The counted projection's responseFormat is null: the schema rides the
+      // counted prompt text, so there is no field to smuggle past the bound.
+      expect(projection['responseFormat']).toBeNull();
+      // ... and the SAME document is accepted when re-counted (base is proven).
+      expect(glm.count(document)).toBeGreaterThan(0);
+
+      // The negative leg on the driver's OWN document: injecting a non-null
+      // responseFormat (what the SDK's `Output.object` would put on the wire) is
+      // refused by the real profile before any dispatch could count it.
+      const withFormat = {
+        ...projection,
+        responseFormat: { type: 'json', schema: { type: 'object' } },
+      };
+      expect(() => glm.count(JSON.stringify(withFormat))).toThrow(UnboundedGlmRequestShape);
+      // The refusal is the profile's OWN refusal, not a missing-field accident:
+      // the unmodified document still counts.
+      expect(() => glm.count(JSON.stringify({ ...projection, responseFormat: null }))).not.toThrow();
+    } finally {
+      await fx.cleanup();
+    }
   });
 });

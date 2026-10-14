@@ -137,6 +137,7 @@ export type AiSdkLaneConfig = Pick<
   | 'sessionsDir'
   | 'strictTokenCapability'
   | 'strictTokenReservationHook'
+  | 'strictTokenWireAdapter'
 >;
 
 /** Factory configuration — plain data a deployment composes (never plan JSON). */
@@ -289,6 +290,11 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
           : {}),
         ...(cfg?.strictTokenReservationHook !== undefined
           ? { strictTokenReservationHook: cfg.strictTokenReservationHook }
+          : {}),
+        // The cohesive strict wire adapter carries its own reserve + repair stage,
+        // so the lane config injects the ONE object (never the loose pieces).
+        ...(cfg?.strictTokenWireAdapter !== undefined
+          ? { strictTokenWireAdapter: cfg.strictTokenWireAdapter }
           : {}),
         sessionsDir,
         ...harness,
