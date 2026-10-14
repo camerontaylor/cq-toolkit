@@ -118,6 +118,32 @@ ignores `Budget.wallClockMs` (the governor's ladder decides when to abort);
 `Budget.maxTokens` becomes a timer-free `stopWhen` condition over
 accumulated step usage; `maxAttempts` is the runner/governor's retry
 business (one attempt per run); `maxUsd` is caller-side derived accounting.
+`Budget.strictTokenBudget` (opt-in, separate — it does NOT redefine
+`maxTokens`) wraps the resolved model so every wire attempt counts the full
+request and reserves input + reserved output BEFORE the send. It requires an
+operator-injected `AiSdkDriverOptions.strictTokenCapability` (metering +
+output-ceiling code); there is NO built-in or provider-list capability, so a
+strict budget REFUSES pre-dispatch in production until a deployment injects a
+proven one (`pre-request-ceiling.ts` documents what a capability must
+account for). A refusal that means a REAL token cap (input ceiling, output
+reserve, shared whole-job allowance) settles as `stopReason: 'budget'`; a
+capability/serialization/durable-hook failure settles a diagnostic
+`stopReason: 'error'` (never misreported as budget-exhausted), and a governed
+abort settles `'aborted'`.
+`AiSdkDriverOptions.strictTokenReservationHook` (also
+`DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`) is the durable
+pre-wire reservation point for an external ledger: it receives the resolved
+model identity and a TS-LOCAL `countableProjectionDigest` — sha256 over the
+countable projection only, EXCLUDING headers/abortSignal/includeRawChunks, so
+it is not a whole-wire digest. The hook is ABORT-AWARE: it races the run's live
+signal, so a hung hook settles the cancellation (keeping the local charge — no
+refund) instead of wedging the run, and no params reach the wire on abort. It
+is NOT the Python
+`token_guard.request_sha256` canonical sorted-ASCII form and is not
+interoperable with an external ledger; a shared cross-language canonical
+projection protocol does not exist and is an activation blocker for that
+bridge. With no hook the shared token allowance is enforced per-invocation
+only — a named gap, not a whole-job claim.
 The one driver-side temporal bound is the SDK call's per-request
 `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot

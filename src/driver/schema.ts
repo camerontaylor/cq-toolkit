@@ -98,6 +98,17 @@ export const BudgetSchema: z.ZodType<Budget> = z
     maxTokens: z.number().exactOptional(),
     wallClockMs: z.number().exactOptional(),
     maxAttempts: z.number().exactOptional(),
+    // The strict pre-request ceiling (opt-in): both binds are required and
+    // positive when the capability is present — a zero/negative ceiling would
+    // disable or invert the bound it names, so the mirror refuses it at the
+    // boundary.
+    strictTokenBudget: z
+      .object({
+        maxInputTokens: z.number().int().safe().positive(),
+        reserveOutputTokens: z.number().int().safe().positive(),
+      })
+      .strict()
+      .exactOptional(),
   })
   .strict();
 

@@ -278,6 +278,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import {
   compileOutputSchema,
@@ -496,6 +497,17 @@ export class SubprocessDriver implements Driver {
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
+    // --- Governed cancellation + strict-budget honesty, ENTRY checks (I8):
+    // the run signal is read ONCE here. An already-cancelled invocation never
+    // reaches lane-specific setup (route/key/env/workspace), and a
+    // `Budget.strictTokenBudget` request is refused before it either.
+    // Cancellation outranks the strict refusal.
+    const signal = options?.signal;
+    if (signalAborted(signal)) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'subprocess');
+
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
     // spawned and (except routing/key checks) before any session exists.
     const route = routeFor(modelSpec, this.routingTable); // unknown provider → the config throw
@@ -515,13 +527,11 @@ export class SubprocessDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
 
-    // --- Governed cancellation (I8): the run's signal is RunOptions.signal,
-    // the ONLY cancellation channel (seam v2). Checked BEFORE the spawn (an
-    // already-cancelled invocation never spawns — and never creates a
-    // session record, never appends a dangling user turn), then forwarded
-    // to the ladder — the driver decides nothing about WHEN.
-    const signal = options?.signal;
-    if (signal?.aborted === true) {
+    // --- Governed-cancellation LATE recheck (I8): the signal was read at
+    // entry; recheck the SAME live RunOptions.signal after lane setup, so an
+    // abort that fired since entry never spawns and never creates a session
+    // record. The strict refusal already ran at entry (no duplicate here).
+    if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
 
@@ -1860,6 +1870,18 @@ function instantOfWallClock(
  */
 function isCodexBinary(binary: string): boolean {
   return /^codex/i.test(basename(binary));
+}
+
+/**
+ * The LIVE aborted state of the run signal. Deliberately a function, never an
+ * inline `signal?.aborted === true` at a use site: the entry and late rechecks
+ * read the SAME RunOptions.signal through this boundary, so TypeScript cannot
+ * narrow the property to `false | undefined` after the entry check and reject
+ * the late recheck as an impossible comparison (the setup between them may have
+ * aborted the signal asynchronously).
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
