@@ -49,6 +49,16 @@ function userPrompt(text: string) {
   return { prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text }] }] };
 }
 
+/** The mutable text part of a probe prompt (index-safe for the mutation tests). */
+function firstTextPart(params: { prompt: unknown }): { text: string } {
+  const prompt = params.prompt as Array<{ content: Array<{ text?: string }> }>;
+  const part = prompt[0]?.content[0];
+  if (part === undefined || typeof part.text !== 'string') {
+    throw new Error('probe prompt has no text part');
+  }
+  return part as { text: string };
+}
+
 function mockUsage(): LanguageModelV4GenerateResult['usage'] {
   return {
     inputTokens: { total: 20, noCache: 20, cacheRead: 0, cacheWrite: 0 },
@@ -328,7 +338,7 @@ describe('PreRequestCeiling (unit)', () => {
     expect(seen?.reserveOutputTokens).toBe(64);
     expect(seen?.provider).toBe('anthropic');
     expect(seen?.model).toBe('claude-test');
-    expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
     // The local charge was already committed when the hook ran.
     expect(reservedWhenCalled).toBe(counted + 64);
   });
@@ -345,6 +355,116 @@ describe('PreRequestCeiling (unit)', () => {
     expect(reasonOfRefusal(err)).toBe('reservation-not-written');
     expect(ceiling.requestCount).toBe(1);
     expect(ceiling.reservedTokens).toBeGreaterThan(0);
+  });
+
+  test('a delayed hook mutating nested prompt cannot change the returned/counted request', async () => {
+    const params = userPrompt('ORIGINAL-TEXT');
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: async () => {
+        firstTextPart(params).text = 'MUTATED-DURING-AWAIT';
+        await Promise.resolve();
+      },
+    });
+    const returned = await ceiling.reserve(params);
+    expect(JSON.stringify(returned)).not.toContain('MUTATED-DURING-AWAIT');
+    expect(JSON.stringify(returned.prompt)).toContain('ORIGINAL-TEXT');
+    expect(ceiling.reservedTokens).toBe(
+      Buffer.byteLength(serializeRequestForCounting(returned), 'utf8') + 64,
+    );
+  });
+
+  test('a delayed hook mutating the output cap cannot change the returned snapshot', async () => {
+    const params = userPrompt('hi');
+    const mutable = params as { maxOutputTokens?: number };
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: async () => {
+        mutable.maxOutputTokens = 1;
+        await Promise.resolve();
+      },
+    });
+    const returned = await ceiling.reserve(params);
+    expect(returned.maxOutputTokens).toBe(64);
+  });
+
+  test('a delayed hook mutating nested tools cannot change the returned/counted request', async () => {
+    const params = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }],
+      tools: [
+        {
+          type: 'function' as const,
+          name: 'read',
+          description: 'ORIGINAL-TOOL-DESC',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ],
+    };
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: async () => {
+        const tool = params.tools[0];
+        if (tool !== undefined) tool.description = 'MUTATED-TOOL-DESC';
+        await Promise.resolve();
+      },
+    });
+    const returned = await ceiling.reserve(params);
+    expect(JSON.stringify(returned.tools)).toContain('ORIGINAL-TOOL-DESC');
+    expect(JSON.stringify(returned.tools)).not.toContain('MUTATED-TOOL-DESC');
+    expect(ceiling.reservedTokens).toBe(
+      Buffer.byteLength(serializeRequestForCounting(returned), 'utf8') + 64,
+    );
+  });
+
+  test('a delayed hook mutating nested providerOptions cannot change the returned/counted request', async () => {
+    const params = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }],
+      providerOptions: { provider: { marker: 'ORIGINAL-OPT' } },
+    };
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      onBeforeWireReserve: async () => {
+        params.providerOptions.provider.marker = 'MUTATED-OPT';
+        await Promise.resolve();
+      },
+    });
+    const returned = await ceiling.reserve(params);
+    expect(JSON.stringify(returned.providerOptions)).toContain('ORIGINAL-OPT');
+    expect(JSON.stringify(returned.providerOptions)).not.toContain('MUTATED-OPT');
+    expect(ceiling.reservedTokens).toBe(
+      Buffer.byteLength(serializeRequestForCounting(returned), 'utf8') + 64,
+    );
+  });
+
+  test('the returned snapshot is frozen: counted fields cannot be mutated', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const returned = await ceiling.reserve(userPrompt('hi'));
+    expect(Object.isFrozen(returned)).toBe(true);
+    expect(Object.isFrozen(returned.prompt)).toBe(true);
+    expect(() => {
+      (returned as { maxOutputTokens?: number }).maxOutputTokens = 1;
+    }).toThrow();
+  });
+
+  test('refuses a request whose counted fields structuredClone cannot clone', async () => {
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+    });
+    const err = await refusalFrom(() =>
+      ceiling.reserve({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        providerOptions: { provider: { fn: () => 1 } },
+      }),
+    );
+    expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
   });
 
   test('concurrent reserves cannot overrun the shared allowance (commit precedes the await)', async () => {
@@ -677,7 +797,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
       expect(seen?.provider).toBe('anthropic');
       expect(seen?.model).toBe('claude-test');
       expect(seen?.reserveOutputTokens).toBe(64);
-      expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -712,7 +832,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
         }),
       );
       expect(result.stopReason).toBe('complete');
-      expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(seen?.countableProjectionDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

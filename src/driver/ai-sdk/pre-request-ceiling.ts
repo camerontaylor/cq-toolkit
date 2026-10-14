@@ -48,9 +48,14 @@
 // point an out-of-process ledger (CRQ) must implement; it is exposed through
 // `AiSdkDriverOptions.strictTokenReservationHook` /
 // `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`, and its receipt
-// carries the model identity plus the sha256 of the exact prepared request
-// (`token_guard.request_sha256`). The driver supplies NO hook by default, so
-// cross-invocation whole-job enforcement remains a NAMED GAP, not a claim.
+// carries the model identity plus a TS-LOCAL `countableProjectionDigest`
+// (sha256 over the countable projection only, excluding headers/abortSignal).
+// That digest is NOT the Python `token_guard.request_sha256` canonical form
+// and is NOT a whole-wire digest, so an external ledger CANNOT bind it. A
+// shared cross-language canonical projection protocol does not exist and is an
+// ACTIVATION BLOCKER for the external bridge. The driver supplies NO hook by
+// default, so cross-invocation whole-job enforcement remains a NAMED GAP, not
+// a claim.
 import { wrapLanguageModel } from 'ai';
 import type { LanguageModel, LanguageModelMiddleware } from 'ai';
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider';
@@ -104,6 +109,68 @@ export class UnrepresentableRequestError extends Error {
 }
 
 /**
+ * Recursively freeze a JSON-ish cloned value. Only the counted fields are run
+ * through this; `abortSignal` and `headers` stay live references (see
+ * {@link snapshotPreparedRequest}).
+ */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value as object)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+  }
+  return value;
+}
+
+/** The fields counted and therefore cloned + frozen into the snapshot. */
+const COUNTED_FIELDS = [
+  'prompt',
+  'tools',
+  'toolChoice',
+  'responseFormat',
+  'providerOptions',
+  'maxOutputTokens',
+  'temperature',
+  'topP',
+  'topK',
+  'presencePenalty',
+  'frequencyPenalty',
+  'stopSequences',
+  'seed',
+  'reasoning',
+] as const;
+
+/**
+ * A DETACHED, DEEP-FROZEN snapshot of the request that will be sent. The
+ * counted fields are deep-cloned and deep-frozen, so a caller mutating the
+ * original params (or the object `withOutputCeiling` returned) after `reserve`
+ * starts — including during the durable-hook await — cannot change what the
+ * wire receives under the already-taken count. `abortSignal` and `headers`
+ * keep their live REFERENCES (an AbortSignal is an event source, and headers
+ * are never counted or serialized — no credentials enter the digest); only the
+ * counted fields are cloned. A value `structuredClone` cannot clone refuses the
+ * request as unrepresentable.
+ */
+function snapshotPreparedRequest(params: LanguageModelV4CallOptions): LanguageModelV4CallOptions {
+  const source: Record<string, unknown> = {};
+  for (const key of COUNTED_FIELDS) {
+    const value = (params as unknown as Record<string, unknown>)[key];
+    if (value !== undefined) source[key] = value;
+  }
+  let cloned: Record<string, unknown>;
+  try {
+    cloned = structuredClone(source);
+  } catch (err) {
+    throw new UnrepresentableRequestError(err instanceof Error ? err.message : String(err));
+  }
+  deepFreeze(cloned);
+  // Spread the original first (keeps abortSignal/headers references and any
+  // uncounted fields), then overwrite the counted fields with the frozen clone.
+  return Object.freeze({ ...params, ...cloned }) as LanguageModelV4CallOptions;
+}
+
+/**
  * Replacer that fails closed on values JSON would silently drop (functions,
  * symbols) or cannot represent (bigint, non-finite numbers, cycles — cycles
  * make `JSON.stringify` throw anyway).
@@ -121,13 +188,16 @@ function failClosedReplacer(_key: string, value: unknown): unknown {
 }
 
 /**
- * The deterministic serialization handed to a capability's `count`. It carries
- * every tokenizable field of the normalized request — prompt (system +
- * messages + history), tools, tool choice, response format, sampling/token
- * settings and providerOptions — in a fixed key order. `headers` is
- * DELIBERATELY EXCLUDED (credentials never enter the counted text or any log),
- * as is the non-serializable `abortSignal`. Throws
- * {@link UnrepresentableRequestError} on a shape JSON cannot represent.
+ * The driver's COUNTABLE PROJECTION — the deterministic serialization handed
+ * to a capability's `count` and the byte stream the
+ * `countableProjectionDigest` is taken over. It carries every tokenizable
+ * field of the normalized request — prompt (system + messages + history),
+ * tools, tool choice, response format, sampling/token settings and
+ * providerOptions — in a fixed key order. It DELIBERATELY EXCLUDES `headers`
+ * (credentials never enter the counted text, the digest, or any log),
+ * `abortSignal` (non-serializable) and `includeRawChunks`: it is NOT a
+ * whole-wire serialization. Throws {@link UnrepresentableRequestError} on a
+ * shape JSON cannot represent.
  */
 export function serializeRequestForCounting(params: LanguageModelV4CallOptions): string {
   const countable = {
@@ -172,7 +242,9 @@ export type PreRequestCeilingRefusalReason =
   /** The cumulative reservation would exceed the shared whole-job allowance. */
   | 'whole-job-allowance'
   /** The durable external reservation hook refused or failed. */
-  | 'reservation-not-written';
+  | 'reservation-not-written'
+  /** The prepared request changed after the durable reservation (defense in depth). */
+  | 'request-mutated';
 
 /**
  * A pre-wire refusal from the ceiling. A plain `Error` subclass so the SDK's
@@ -228,11 +300,21 @@ export interface WireReservation {
   /** The model id the run resolved (from the run's ModelSpec). */
   readonly model: string;
   /**
-   * sha256 (hex) of the EXACT serialized prepared request the count was taken
-   * over — the `token_guard.request_sha256` an external ledger binds its
-   * reservation to. Computed after the output ceiling is applied.
+   * TS-LOCAL COUNTABLE-PROJECTION sha256 (hex): the digest of this driver's
+   * countable projection only — the fixed-order JSON of prompt, tools,
+   * toolChoice, responseFormat, providerOptions and the sampling/token
+   * settings, UTF-8. It EXCLUDES headers, abortSignal and includeRawChunks:
+   * it is NOT a digest of the whole wire request and carries no credentials.
+   *
+   * It is NOT the Python `token_guard.request_sha256` (canonical sorted-ASCII
+   * JSON), NOT a whole-wire digest, and NOT interoperable with any external
+   * ledger. A shared cross-language canonical projection protocol does not
+   * exist yet, so an external bridge CANNOT bind this value as a
+   * request_sha256 — that canonical protocol is an ACTIVATION BLOCKER for the
+   * external bridge. Use it only as a TS-local identity for the frozen
+   * snapshot the count was taken over.
    */
-  readonly requestDigest: string;
+  readonly countableProjectionDigest: string;
 }
 
 /** Construction inputs for one run's ceiling. */
@@ -368,11 +450,17 @@ export class PreRequestCeiling {
         0,
       );
     }
-    // Count the exact prepared request; the digest binds the receipt to it.
+    // Freeze a DETACHED snapshot of the request that will actually be sent,
+    // then count that exact snapshot. The snapshot is built and frozen BEFORE
+    // the durable-hook await, and it is what `reserve` returns, so no mutation
+    // of the original params (during the await or later) can change the wire
+    // payload under the taken count.
+    let wireRequest: LanguageModelV4CallOptions;
     let serialized: string;
     let counted: number;
     try {
-      serialized = serializeRequestForCounting(prepared);
+      wireRequest = snapshotPreparedRequest(prepared);
+      serialized = serializeRequestForCounting(wireRequest);
       counted = capability.count(serialized);
     } catch (err) {
       if (err instanceof UnrepresentableRequestError) {
@@ -444,7 +532,7 @@ export class PreRequestCeiling {
           reserveOutputTokens: budget.reserveOutputTokens,
           provider: modelSpec?.provider ?? '',
           model: modelSpec?.model ?? '',
-          requestDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+          countableProjectionDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
         });
       } catch (err) {
         throw this.refuse(
@@ -455,7 +543,37 @@ export class PreRequestCeiling {
         );
       }
     }
-    return prepared;
+    // POST-AWAIT REVALIDATION — defense in depth over the deep freeze. The
+    // object about to be returned must still serialize BYTE-IDENTICALLY to the
+    // counted bytes and still carry a safe applied ceiling. Freeze should make
+    // this always hold; if it ever does not, the request is refused WITHOUT a
+    // refund (the local charge stays). There is no further await before return.
+    let afterAwait: string;
+    try {
+      afterAwait = serializeRequestForCounting(wireRequest);
+    } catch (err) {
+      throw this.refuse(
+        'request-mutated',
+        `the prepared request became unserializable after the durable reservation: ${errorText(err)}`,
+        counted,
+        reserved,
+      );
+    }
+    const finalCeiling = wireRequest.maxOutputTokens;
+    if (
+      afterAwait !== serialized ||
+      !Number.isSafeInteger(finalCeiling) ||
+      (finalCeiling as number) < 1 ||
+      (finalCeiling as number) > budget.reserveOutputTokens
+    ) {
+      throw this.refuse(
+        'request-mutated',
+        'the prepared request changed after the durable reservation',
+        counted,
+        reserved,
+      );
+    }
+    return wireRequest;
   }
 
   private refuse(

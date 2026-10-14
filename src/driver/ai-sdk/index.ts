@@ -312,13 +312,16 @@ export interface AiSdkDriverOptions {
   strictTokenCapability?: (modelSpec: ModelSpec) => StrictTokenCapability | undefined;
   /**
    * The explicit durable PRE-WIRE reservation hook for the strict ceiling. It
-   * receives a receipt carrying the resolved model identity and the sha256 of
-   * the exact prepared request (`token_guard.request_sha256`), so an
-   * out-of-process ledger (CRQ) can bind its reservation. Called after the
-   * local conservative charge and before the wire send; a throw refuses the
-   * request without refunding the local charge. ABSENT BY DEFAULT: without it,
-   * the shared allowance is enforced per-invocation only — a named gap, never
-   * a whole-job claim.
+   * receives a receipt carrying the resolved model identity and a TS-LOCAL
+   * `countableProjectionDigest` (sha256 over the countable projection only —
+   * excludes headers/abortSignal/includeRawChunks; NOT the Python
+   * `token_guard.request_sha256` canonical form, NOT a whole-wire digest, NOT
+   * interoperable; a shared canonical projection protocol is an activation
+   * blocker for an external bridge). Called after the local conservative
+   * charge and before the wire send; a throw refuses the request without
+   * refunding the local charge. ABSENT BY DEFAULT: without it, the shared
+   * allowance is enforced per-invocation only — a named gap, never a
+   * whole-job claim.
    */
   strictTokenReservationHook?: (receipt: WireReservation) => void | Promise<void>;
 }

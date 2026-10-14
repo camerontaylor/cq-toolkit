@@ -129,10 +129,14 @@ account for). A refusal settles as `stopReason: 'budget'`.
 `AiSdkDriverOptions.strictTokenReservationHook` (also
 `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`) is the durable
 pre-wire reservation point for an external ledger: it receives the resolved
-model identity and the sha256 of the exact prepared request
-(`token_guard.request_sha256`) after the local conservative charge. With no
-hook the shared token allowance is enforced per-invocation only — a named
-gap, not a whole-job claim.
+model identity and a TS-LOCAL `countableProjectionDigest` — sha256 over the
+countable projection only, EXCLUDING headers/abortSignal/includeRawChunks, so
+it is not a whole-wire digest. It is NOT the Python
+`token_guard.request_sha256` canonical sorted-ASCII form and is not
+interoperable with an external ledger; a shared cross-language canonical
+projection protocol does not exist and is an activation blocker for that
+bridge. With no hook the shared token allowance is enforced per-invocation
+only — a named gap, not a whole-job claim.
 The one driver-side temporal bound is the SDK call's per-request
 `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot
