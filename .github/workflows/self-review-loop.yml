@@ -218,7 +218,11 @@ jobs:
       # loop uses.
       - name: Mint the cq-automation App token (per run)
         id: self-review-app
-        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != ''
+        # Fail-closed scope guard: `owner` WITHOUT `repositories` mints an
+        # installation-wide token, so never mint unless the repository name is
+        # non-empty (belt-and-braces — the repository object is present on
+        # every trigger this workflow uses).
+        if: vars.CQ_AUTOMATION_APP_CLIENT_ID != '' && github.event.repository.name != ''
         # v3.2.0, immutable commit pin (repo policy)
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
