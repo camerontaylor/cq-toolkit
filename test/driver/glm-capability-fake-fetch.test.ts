@@ -179,10 +179,11 @@ describe('glm capability — fake-fetch output-ceiling proof', () => {
     );
     await generateText({
       model,
-      prompt: [
-        { role: 'system', content: 'sys' },
-        { role: 'user', content: [{ type: 'text', text: 'ask' }] },
-      ],
+      // ai@7 forbids a `system` role inside the `prompt` array; use the
+      // supported `instructions` option, which still serializes as a system
+      // message on the wire.
+      instructions: 'sys',
+      prompt: 'ask',
     });
     const body = captured[0]?.body as { messages?: unknown };
     // PINNED-SERIALIZER EXPECTATION (not a renderer-own stage-1 self-check): the
