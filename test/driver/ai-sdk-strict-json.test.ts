@@ -26,7 +26,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { z } from 'zod';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
-import type { AiSdkDriverOptions } from '../../src/driver/ai-sdk/index.js';
+import type { AiSdkDriverOptions, StrictTokenRepairStage } from '../../src/driver/ai-sdk/index.js';
 import {
   serializeRequestForCounting,
   type StrictTokenCapability,
@@ -136,7 +136,12 @@ interface Fixture {
  */
 async function fixture(
   replies: readonly LanguageModelV4GenerateResult[],
-  options: { strict: boolean },
+  options: {
+    strict: boolean;
+    stage?: StrictTokenRepairStage;
+    /** Runs while send `sendIndex` (0-based) is in flight, before it returns. */
+    onSend?: (sendIndex: number) => void;
+  },
 ): Promise<Fixture & { cleanup: () => Promise<void> }> {
   const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-json-'));
   const wire: LanguageModelV4CallOptions[] = [];
@@ -146,6 +151,7 @@ async function fixture(
     modelId: 'claude-test',
     doGenerate: async (params) => {
       wire.push(params);
+      options.onSend?.(wire.length - 1);
       const reply = replies[Math.min(served, replies.length - 1)] ?? textResult('');
       served += 1;
       return reply;
@@ -157,6 +163,7 @@ async function fixture(
         strictTokenReservationHook: (receipt) => {
           receipts.push(receipt);
         },
+        ...(options.stage !== undefined ? { strictTokenRepairStage: options.stage } : {}),
       }
     : {};
   const driver = new AiSdkDriver({
@@ -229,6 +236,32 @@ function wireTextOf(turn: { role: string; content: unknown } | undefined): strin
     throw new Error('expected the content part to carry a text string');
   }
   return part.text;
+}
+
+/**
+ * A repair stage that counts its calls and can refuse either of them. Both
+ * methods are synchronous and return void, exactly as the driver's contract
+ * requires; the stage carries no acknowledgement, sequence or ordinal, because
+ * the driver never sees one.
+ */
+function countingStage(refuse: { enter?: boolean; exit?: boolean } = {}): {
+  readonly stage: StrictTokenRepairStage;
+  readonly calls: { enter: number; exit: number };
+} {
+  const calls = { enter: 0, exit: 0 };
+  return {
+    calls,
+    stage: {
+      enterRepairStage: () => {
+        calls.enter += 1;
+        if (refuse.enter === true) throw new Error('the prior wire acknowledgement is not durable');
+      },
+      exitRepairStage: () => {
+        calls.exit += 1;
+        if (refuse.exit === true) throw new Error('the repair stage could not be closed');
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +473,118 @@ describe('non-strict lanes keep the SDK structured-output path', () => {
       expect(JSON.stringify(promptTurns(params))).not.toContain('Reply with ONLY one JSON object');
       // No strict capability was injected, so no ceiling took a reservation.
       expect(fx.receipts).toHaveLength(0);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. The repair-stage lifecycle: wrapper-owned, the driver only opens/closes it
+// ---------------------------------------------------------------------------
+
+describe('strict-JSON strategy: the repair-stage lifecycle', () => {
+  test('a refused enterRepairStage sends nothing further, reserves nothing and never exits', async () => {
+    const { stage, calls } = countingStage({ enter: true });
+    const replies = [
+      textResult('prose, not JSON'),
+      textResult(JSON.stringify({ verdict: 'pass', note: 'never sent' })),
+    ];
+    const fx = await fixture(replies, { strict: true, stage });
+    try {
+      const result = await fx.driver.run(invocation());
+      expect(calls.enter).toBe(1);
+      // The stage never opened, so it is never closed.
+      expect(calls.exit).toBe(0);
+      // No second send and no second reservation: the repair was refused first.
+      expect(fx.wire).toHaveLength(1);
+      expect(fx.receipts).toHaveLength(1);
+      // A refusal is a non-success verdict and is NOT reported as a model outcome.
+      expect(result.stopReason).toBe('error');
+      expect(result.errorClass).not.toBe('output-invalid');
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('a refused exitRepairStage accepts no result even though the repair validated', async () => {
+    const { stage, calls } = countingStage({ exit: true });
+    const replies = [
+      textResult('prose, not JSON'),
+      textResult(JSON.stringify({ verdict: 'pass', note: 'validated but not accepted' })),
+    ];
+    const fx = await fixture(replies, { strict: true, stage });
+    try {
+      const result = await fx.driver.run(invocation());
+      expect(calls.enter).toBe(1);
+      expect(calls.exit).toBe(1);
+      // The repair WAS sent and charged; the close refusal still denies the result.
+      expect(fx.wire).toHaveLength(2);
+      expect(fx.receipts).toHaveLength(2);
+      expect(result.structuredOutput).toBeUndefined();
+      expect(result.stopReason).toBe('error');
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('an abort during the repair closes the stage exactly once and settles aborted', async () => {
+    const controller = new AbortController();
+    const { stage, calls } = countingStage();
+    const replies = [
+      textResult('prose, not JSON'),
+      textResult(JSON.stringify({ verdict: 'pass', note: 'arrived after the abort' })),
+    ];
+    const fx = await fixture(replies, {
+      strict: true,
+      stage,
+      // Abort WHILE the repair send is in flight: the mock still returns, so the
+      // driver observes the live signal on the resolve path.
+      onSend: (sendIndex) => {
+        if (sendIndex === 1) controller.abort();
+      },
+    });
+    try {
+      const result = await fx.driver.run(invocation(), { signal: controller.signal });
+      expect(calls.enter).toBe(1);
+      expect(calls.exit).toBe(1);
+      expect(fx.wire).toHaveLength(2);
+      expect(result.stopReason).toBe('aborted');
+      // A governed abort never accepts a payload.
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('a successful repair enters and exits the stage exactly once', async () => {
+    const { stage, calls } = countingStage();
+    const replies = [
+      textResult('prose, not JSON'),
+      textResult(JSON.stringify({ verdict: 'pass', note: 'repaired' })),
+    ];
+    const fx = await fixture(replies, { strict: true, stage });
+    try {
+      const result = await fx.driver.run(invocation());
+      expect(calls).toEqual({ enter: 1, exit: 1 });
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ verdict: 'pass', note: 'repaired' });
+      expect(fx.wire).toHaveLength(2);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('a run that needs no repair never opens the stage', async () => {
+    const { stage, calls } = countingStage();
+    const replies = [textResult(JSON.stringify({ verdict: 'pass', note: 'first try' }))];
+    const fx = await fixture(replies, { strict: true, stage });
+    try {
+      const result = await fx.driver.run(invocation());
+      expect(calls).toEqual({ enter: 0, exit: 0 });
+      expect(result.stopReason).toBe('complete');
+      expect(fx.wire).toHaveLength(1);
     } finally {
       await fx.cleanup();
     }
