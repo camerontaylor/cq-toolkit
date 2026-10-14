@@ -202,6 +202,35 @@ function promptTurns(
   return params.prompt as Array<{ role: string; content: unknown }>;
 }
 
+/**
+ * The ACTUAL text of a normalized V4 prompt turn, narrowed from `unknown` with
+ * runtime checks only — no cast, no `any`, no coercion. The wire shape is an
+ * array of exactly one plain object whose `type` is the literal 'text' and whose
+ * `text` is a string (the SDK normalizes a composed string turn into content
+ * parts). Anything else THROWS rather than degrading the caller's assertion, so
+ * a shape drift can never turn into a passing `[object Object]` comparison. The
+ * element binding mirrors the shipped `const element: unknown = value[i]` idiom
+ * (src/cli/output.ts, src/kernel/runner.ts), which keeps `Array.isArray`'s
+ * `any[]` from leaking.
+ */
+function wireTextOf(turn: { role: string; content: unknown } | undefined): string {
+  const content = turn?.content;
+  if (!Array.isArray(content) || content.length !== 1) {
+    throw new Error('expected the normalized turn to carry exactly one content part');
+  }
+  const part: unknown = content[0];
+  if (typeof part !== 'object' || part === null) {
+    throw new Error('expected the content part to be an object');
+  }
+  if (!('type' in part) || part.type !== 'text') {
+    throw new Error('expected the content part type to be text');
+  }
+  if (!('text' in part) || typeof part.text !== 'string') {
+    throw new Error('expected the content part to carry a text string');
+  }
+  return part.text;
+}
+
 // ---------------------------------------------------------------------------
 // 1. The strict lane emits no hosted structured response
 // ---------------------------------------------------------------------------
@@ -232,14 +261,14 @@ describe('strict-JSON strategy: the wire carries no hosted structured output', (
       // (2) The contract + schema are the LAST counted prompt turn. On the WIRE
       // the SDK has normalized a user turn's string content into V4 content
       // PARTS, so the exact part shape, its exact types and the exact text bytes
-      // are asserted (toEqual, no String() coercion and no cast); the schema
-      // JSON is inside that text, which the second assertion states on the WIRE
-      // value with an asymmetric matcher.
+      // are asserted with toEqual (no String() coercion, no cast), and the
+      // schema bytes are then asserted against the ACTUAL wire text the helper
+      // narrows out of that value.
       const turns = promptTurns(params);
       const last = turns[turns.length - 1];
       expect(last?.role).toBe('user');
       expect(last?.content).toEqual([{ type: 'text', text: expectedContract() }]);
-      expect(last?.content).toEqual([{ type: 'text', text: expect.stringContaining(SCHEMA_JSON) }]);
+      expect(wireTextOf(last)).toContain(SCHEMA_JSON);
 
       // (3) The byte ceiling measured that text: the counted serialization
       // carries the JSON-escaped schema bytes the capability was handed.
@@ -319,6 +348,7 @@ describe('strict-JSON strategy: the repair is one extra CHARGED send', () => {
       const repairLast = repairTurns[repairTurns.length - 1];
       expect(repairLast?.role).toBe('user');
       expect(repairLast?.content).toEqual([{ type: 'text', text: expectedRepairText }]);
+      expect(wireTextOf(repairLast)).toBe(expectedRepairText);
 
       // USAGE KEEPS BOTH CALLS: 100 + 40 in, 5 + 7 out.
       expect(result.usage.input).toBe(140);
