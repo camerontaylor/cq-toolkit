@@ -370,12 +370,47 @@ export class AiSdkDriver implements Driver {
   /** The frozen seam (v2): run one invocation to completion. */
   async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
+    const strictBudget = budget.strictTokenBudget;
+    // The run signal is read ONCE here; both the ENTRY and LATE checks read the
+    // SAME live RunOptions.signal through `signalAborted`.
+    const abortSignal = options?.signal;
+
+    // --- Governed cancellation (I8), ENTRY: the governor decides WHEN to
+    // abort; the driver only forwards its signal (no driver-owned clock). An
+    // already-aborted invocation never reaches the provider factory (an env
+    // key read / provider-model resolution), the prompt/policy/workspace setup
+    // or any session state.
+    if (signalAborted(abortSignal)) {
+      return {
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'aborted',
+      };
+    }
+
+    // --- Strict pre-request ceiling capability, resolved + REFUSED BEFORE the
+    // provider factory: the capability must be INJECTED (trusted operator
+    // code) and there is no built-in provider list, so an unconfigured
+    // deployment (including production) REFUSES this run before dispatch —
+    // specifically BEFORE any provider factory runs, reads its key env or
+    // resolves a model. Cancellation above outranks this refusal
+    // (signal-first). Resolved ONCE; the ceiling is built later from the SAME
+    // capability.
+    let capability: StrictTokenCapability | undefined;
+    if (strictBudget !== undefined) {
+      capability = this.strictTokenCapability?.(modelSpec);
+      if (capability === undefined) {
+        throw new DispatchError(
+          'config',
+          `ai-sdk driver: strictTokenBudget is set but no trusted token capability is configured for model '${modelSpec.provider}/${modelSpec.model}' — refusing (inject AiSdkDriverOptions.strictTokenCapability; no built-in capability exists)`,
+        );
+      }
+    }
 
     // --- Pre-dispatch validation: everything here throws BEFORE the model
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
     // partial state).
     const resolvedModel = this.resolveModel(modelSpec);
-    const strictBudget = budget.strictTokenBudget;
     let model: LanguageModel = resolvedModel;
     const system = this.composeSystemPrompt(prompt);
     // Resolve policy before creating session/workspace state: malformed
@@ -390,13 +425,13 @@ export class AiSdkDriver implements Driver {
         ? undefined
         : boundWorkspacePath(opInvocation.workspace, 'ai-sdk driver');
 
-    // --- Governed cancellation (I8): the governor decides WHEN to abort; ---
-    // the driver only forwards its signal. No driver-owned wall clock. The
-    // SOURCE is the seam-v2 RunOptions.signal — the ONLY cancellation
-    // channel. An already-aborted signal never dispatches and creates NO
-    // session state: zero usage, no denials, no sessionId (no record was
-    // created).
-    const abortSignal = options?.signal;
+    // --- Governed-cancellation LATE recheck (I8): the provider factory or the
+    // strict-capability callback above may have SYNCHRONOUSLY aborted the
+    // controller; recheck the SAME live abortSignal after provider/policy/
+    // workspace setup, so such an abort never dispatches or creates a session.
+    // The SOURCE is the seam-v2 RunOptions.signal — the ONLY cancellation
+    // channel (an already-aborted signal creates NO session state: zero usage,
+    // no denials, no sessionId).
     if (signalAborted(abortSignal)) {
       return {
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -405,24 +440,12 @@ export class AiSdkDriver implements Driver {
       };
     }
 
-    // --- Strict pre-request ceiling (opt-in, AFTER cancellation). The
-    // capability must be INJECTED (trusted operator code) — there is no
-    // built-in provider list, so an unconfigured deployment (including
-    // production) REFUSES this run before dispatch rather than asserting an
-    // unproven capability. Resolved AFTER the governed-cancellation check so a
-    // pre-aborted strict run settles 'aborted' (signal-first, matching the
-    // other lanes' abort-before-strict order), not a config throw.
-    if (strictBudget !== undefined) {
-      const capability = this.strictTokenCapability?.(modelSpec);
-      if (capability === undefined) {
-        throw new DispatchError(
-          'config',
-          `ai-sdk driver: strictTokenBudget is set but no trusted token capability is configured for model '${modelSpec.provider}/${modelSpec.model}' — refusing (inject AiSdkDriverOptions.strictTokenCapability; no built-in capability exists)`,
-        );
-      }
-      // The shared whole-job token allowance, when the governing gate supplied
-      // a reservation. Absent = per-request ceiling only; the lane makes no
-      // whole-job claim from an invocation-local budget.
+    // --- Strict pre-request ceiling wrap: the capability was validated above,
+    // so the ceiling is constructed here (once) over the resolved model. The
+    // shared whole-job token allowance rides only when the governing gate
+    // supplied a reservation; absent = per-request ceiling only (no whole-job
+    // claim from an invocation-local budget).
+    if (strictBudget !== undefined && capability !== undefined) {
       const sharedTokenAllowance = options?.reservation?.tokens;
       const ceiling = new PreRequestCeiling({
         budget: strictBudget,

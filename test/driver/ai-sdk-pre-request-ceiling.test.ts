@@ -2,6 +2,7 @@
 // — focused unit + driver tests with a fake model and an INJECTED capability.
 // No provider, no network. The driver ships NO built-in capability, so these
 // tests supply one explicitly; the "no injection => refuse" legs pin that.
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1131,6 +1132,49 @@ describe('ai-sdk driver strictTokenBudget', () => {
       expect(countCalls).toBeGreaterThanOrEqual(2);
       expect(result.stopReason).toBe('error');
       expect(result.errorClass).toBeDefined();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a provider factory that SYNCHRONOUSLY aborts mid-setup settles aborted (late recheck), no dispatch', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-midsetup-abort-'));
+    try {
+      const controller = new AbortController();
+      let factoryCalls = 0;
+      let generateCalls = 0;
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () => {
+            factoryCalls += 1;
+            // A SYNCHRONOUS provider-factory abort: the ENTRY check already
+            // passed, so only the LATE live recheck can catch this before the
+            // wire. The factory still resolves a model instance.
+            controller.abort();
+            return new MockLanguageModelV4({
+              modelId: 'claude-test',
+              doGenerate: () => {
+                generateCalls += 1;
+                return textResult('ok');
+              },
+            });
+          },
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+        { signal: controller.signal },
+      );
+      expect(factoryCalls).toBe(1);
+      expect(generateCalls).toBe(0);
+      expect(result.stopReason).toBe('aborted');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.error).toBeUndefined();
+      expect(existsSync(join(scratch, 'sessions'))).toBe(false);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
