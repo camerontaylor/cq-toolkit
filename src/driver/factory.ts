@@ -128,7 +128,11 @@ export type ClaudeAgentLaneConfig = Pick<
  */
 export type AiSdkLaneConfig = Pick<
   AiSdkDriverOptions,
-  'providers' | 'sandboxConfig' | 'sessionsDir' | 'strictTokenCapability'
+  | 'providers'
+  | 'sandboxConfig'
+  | 'sessionsDir'
+  | 'strictTokenCapability'
+  | 'strictTokenReservationHook'
 >;
 
 /** Factory configuration — plain data a deployment composes (never plan JSON). */
@@ -278,6 +282,9 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
         ...(cfg?.sandboxConfig !== undefined ? { sandboxConfig: cfg.sandboxConfig } : {}),
         ...(cfg?.strictTokenCapability !== undefined
           ? { strictTokenCapability: cfg.strictTokenCapability }
+          : {}),
+        ...(cfg?.strictTokenReservationHook !== undefined
+          ? { strictTokenReservationHook: cfg.strictTokenReservationHook }
           : {}),
         sessionsDir,
         ...harness,

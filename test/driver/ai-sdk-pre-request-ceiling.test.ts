@@ -21,8 +21,10 @@ import {
 import type {
   PreRequestCeilingRefusalReason,
   StrictTokenCapability,
+  WireReservation,
 } from '../../src/driver/ai-sdk/pre-request-ceiling.js';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { createDriverFactory } from '../../src/driver/factory.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
@@ -302,13 +304,16 @@ describe('PreRequestCeiling (unit)', () => {
     expect(ceiling.requestCount).toBe(1);
   });
 
-  test('calls the durable pre-wire reservation hook before committing', async () => {
-    const seen: Array<{ tokens: number; cumulativeTokens: number }> = [];
+  test('calls the durable hook AFTER the local commit, with model identity and a request digest', async () => {
+    let seen: WireReservation | undefined;
+    let reservedWhenCalled = -1;
     const ceiling = new PreRequestCeiling({
       budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
       capability: fakeCapability(),
-      onBeforeWireReserve: (reservation) => {
-        seen.push({ tokens: reservation.tokens, cumulativeTokens: reservation.cumulativeTokens });
+      modelSpec: { provider: 'anthropic', model: 'claude-test' },
+      onBeforeWireReserve: (receipt) => {
+        seen = receipt;
+        reservedWhenCalled = ceiling.reservedTokens;
       },
     });
     const params = userPrompt('hi');
@@ -317,10 +322,18 @@ describe('PreRequestCeiling (unit)', () => {
       'utf8',
     );
     await ceiling.reserve(params);
-    expect(seen).toEqual([{ tokens: counted + 64, cumulativeTokens: counted + 64 }]);
+    expect(seen?.tokens).toBe(counted + 64);
+    expect(seen?.cumulativeTokens).toBe(counted + 64);
+    expect(seen?.countedInput).toBe(counted);
+    expect(seen?.reserveOutputTokens).toBe(64);
+    expect(seen?.provider).toBe('anthropic');
+    expect(seen?.model).toBe('claude-test');
+    expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+    // The local charge was already committed when the hook ran.
+    expect(reservedWhenCalled).toBe(counted + 64);
   });
 
-  test('refuses when the durable reservation hook throws, and does not commit', async () => {
+  test('refuses when the durable hook throws, but keeps the local charge (no refund)', async () => {
     const ceiling = new PreRequestCeiling({
       budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
       capability: fakeCapability(),
@@ -330,8 +343,57 @@ describe('PreRequestCeiling (unit)', () => {
     });
     const err = await refusalFrom(() => ceiling.reserve(userPrompt('hi')));
     expect(reasonOfRefusal(err)).toBe('reservation-not-written');
-    expect(ceiling.reservedTokens).toBe(0);
-    expect(ceiling.requestCount).toBe(0);
+    expect(ceiling.requestCount).toBe(1);
+    expect(ceiling.reservedTokens).toBeGreaterThan(0);
+  });
+
+  test('concurrent reserves cannot overrun the shared allowance (commit precedes the await)', async () => {
+    const params = userPrompt('hi');
+    const perRequest =
+      Buffer.byteLength(serializeRequestForCounting({ ...params, maxOutputTokens: 64 }), 'utf8') +
+      64;
+    const ceiling = new PreRequestCeiling({
+      budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+      capability: fakeCapability(),
+      wholeJobTokenAllowance: perRequest,
+      // An async hook yields between the check and the wire; the local charge
+      // must already be committed so the second call sees it.
+      onBeforeWireReserve: async () => {
+        await Promise.resolve();
+      },
+    });
+    const results = await Promise.allSettled([ceiling.reserve(params), ceiling.reserve(params)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(ceiling.requestCount).toBe(1);
+    expect(ceiling.reservedTokens).toBe(perRequest);
+  });
+
+  test('refuses an applied output ceiling that is not a safe positive integer', async () => {
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      const ceiling = new PreRequestCeiling({
+        budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+        capability: fakeCapability({
+          withOutputCeiling: (params) => ({ ...params, maxOutputTokens: bad }),
+        }),
+      });
+      expect(reasonOfRefusal(await refusalFrom(() => ceiling.reserve(userPrompt('hi'))))).toBe(
+        'output-ceiling-not-applied',
+      );
+    }
+  });
+
+  test('refuses an original output ceiling that is not a safe positive integer', async () => {
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      const ceiling = new PreRequestCeiling({
+        budget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 },
+        capability: fakeCapability(),
+      });
+      expect(
+        reasonOfRefusal(
+          await refusalFrom(() => ceiling.reserve({ ...userPrompt('hi'), maxOutputTokens: bad })),
+        ),
+      ).toBe('output-reserve');
+    }
   });
 
   test('rejects unsafe-integer binds and counts, and overflow at every addition', async () => {
@@ -586,6 +648,71 @@ describe('ai-sdk driver strictTokenBudget', () => {
       const result = await driver.run(invocation({ budget: { maxTokens: 1 } }));
       expect(calls).toBe(1);
       expect(result.stopReason).toBe('budget');
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('the driver passes model identity and a request digest to the durable hook', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-hook-'));
+    try {
+      let seen: WireReservation | undefined;
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () =>
+            new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenCapability: () => fakeCapability(),
+        strictTokenReservationHook: (receipt) => {
+          seen = receipt;
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(seen?.provider).toBe('anthropic');
+      expect(seen?.model).toBe('claude-test');
+      expect(seen?.reserveOutputTokens).toBe(64);
+      expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('the factory lane config plumbs the capability and durable hook to the driver', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-factory-'));
+    try {
+      let seen: WireReservation | undefined;
+      const factory = createDriverFactory({
+        sessionsDir: join(scratch, 'sessions'),
+        lanes: {
+          aiSdk: {
+            providers: {
+              anthropic: () =>
+                new MockLanguageModelV4({ modelId: 'claude-test', doGenerate: textResult('ok') }),
+            },
+            strictTokenCapability: () => fakeCapability(),
+            strictTokenReservationHook: (receipt) => {
+              seen = receipt;
+            },
+          },
+        },
+      });
+      const { driver } = factory.resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'anthropic', model: 'claude-test' },
+      });
+      const result = await driver.run(
+        invocation({
+          budget: { strictTokenBudget: { maxInputTokens: 1_000_000, reserveOutputTokens: 64 } },
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(seen?.requestDigest).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

@@ -232,7 +232,7 @@ import {
   PreRequestCeiling,
   wrapWithPreRequestCeiling,
 } from './pre-request-ceiling.js';
-import type { StrictTokenCapability } from './pre-request-ceiling.js';
+import type { StrictTokenCapability, WireReservation } from './pre-request-ceiling.js';
 import type {
   Budget,
   Driver,
@@ -310,6 +310,17 @@ export interface AiSdkDriverOptions {
    * Tests inject a fake here; no production provider list exists.
    */
   strictTokenCapability?: (modelSpec: ModelSpec) => StrictTokenCapability | undefined;
+  /**
+   * The explicit durable PRE-WIRE reservation hook for the strict ceiling. It
+   * receives a receipt carrying the resolved model identity and the sha256 of
+   * the exact prepared request (`token_guard.request_sha256`), so an
+   * out-of-process ledger (CRQ) can bind its reservation. Called after the
+   * local conservative charge and before the wire send; a throw refuses the
+   * request without refunding the local charge. ABSENT BY DEFAULT: without it,
+   * the shared allowance is enforced per-invocation only — a named gap, never
+   * a whole-job claim.
+   */
+  strictTokenReservationHook?: (receipt: WireReservation) => void | Promise<void>;
 }
 
 /**
@@ -327,6 +338,9 @@ export class AiSdkDriver implements Driver {
   private readonly strictTokenCapability:
     | ((modelSpec: ModelSpec) => StrictTokenCapability | undefined)
     | undefined;
+  private readonly strictTokenReservationHook:
+    | ((receipt: WireReservation) => void | Promise<void>)
+    | undefined;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
@@ -343,6 +357,7 @@ export class AiSdkDriver implements Driver {
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
+    this.strictTokenReservationHook = options.strictTokenReservationHook;
   }
 
   /** The frozen seam (v2): run one invocation to completion. */
@@ -374,8 +389,12 @@ export class AiSdkDriver implements Driver {
       const ceiling = new PreRequestCeiling({
         budget: strictBudget,
         capability,
+        modelSpec,
         ...(sharedTokenAllowance !== undefined
           ? { wholeJobTokenAllowance: sharedTokenAllowance }
+          : {}),
+        ...(this.strictTokenReservationHook !== undefined
+          ? { onBeforeWireReserve: this.strictTokenReservationHook }
           : {}),
       });
       model = wrapWithPreRequestCeiling(resolvedModel, ceiling);

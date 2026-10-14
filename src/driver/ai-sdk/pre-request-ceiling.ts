@@ -45,13 +45,17 @@
 // PER-INVOCATION: it is not reset mid-run, but a NEW invocation starts at zero,
 // so without an external ledger the allowance is consumed locally only. The
 // `onBeforeWireReserve` hook is the explicit, durable pre-wire reservation
-// point an out-of-process ledger (CRQ) must implement; the driver ships NO
-// such bridge, so cross-invocation whole-job enforcement is a NAMED GAP, not a
-// claim.
+// point an out-of-process ledger (CRQ) must implement; it is exposed through
+// `AiSdkDriverOptions.strictTokenReservationHook` /
+// `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`, and its receipt
+// carries the model identity plus the sha256 of the exact prepared request
+// (`token_guard.request_sha256`). The driver supplies NO hook by default, so
+// cross-invocation whole-job enforcement remains a NAMED GAP, not a claim.
 import { wrapLanguageModel } from 'ai';
 import type { LanguageModel, LanguageModelMiddleware } from 'ai';
 import type { LanguageModelV4CallOptions } from '@ai-sdk/provider';
-import type { StrictTokenBudget } from '../types.js';
+import { createHash } from 'node:crypto';
+import type { ModelSpec, StrictTokenBudget } from '../types.js';
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
@@ -219,6 +223,16 @@ export interface WireReservation {
   readonly countedInput: number;
   /** The output/reasoning reserve applied to this request. */
   readonly reserveOutputTokens: number;
+  /** The provider handle the run resolved (from the run's ModelSpec). */
+  readonly provider: string;
+  /** The model id the run resolved (from the run's ModelSpec). */
+  readonly model: string;
+  /**
+   * sha256 (hex) of the EXACT serialized prepared request the count was taken
+   * over — the `token_guard.request_sha256` an external ledger binds its
+   * reservation to. Computed after the output ceiling is applied.
+   */
+  readonly requestDigest: string;
 }
 
 /** Construction inputs for one run's ceiling. */
@@ -228,6 +242,11 @@ export interface PreRequestCeilingOptions {
   /** The operator-injected trusted capability for the run's model. */
   readonly capability: StrictTokenCapability;
   /**
+   * The run's resolved model identity, carried into every receipt. Optional on
+   * the class so unit tests can omit it; the driver ALWAYS supplies it.
+   */
+  readonly modelSpec?: ModelSpec;
+  /**
    * The shared whole-job token allowance from the governing gate's reservation
    * (`RunOptions.reservation.tokens`), when one was supplied. The cumulative
    * reservation over this run must fit inside it. Absent = no shared
@@ -236,9 +255,12 @@ export interface PreRequestCeilingOptions {
   readonly wholeJobTokenAllowance?: number;
   /**
    * The explicit durable pre-wire reservation point. Called after every check
-   * passes and BEFORE the local commit; a throw refuses the request. The
-   * driver does NOT provide one, so cross-invocation whole-job enforcement is
-   * a named gap (see the header) unless a deployment wires its ledger here.
+   * passes and AFTER the local charge is committed (so concurrent calls cannot
+   * both pass the allowance check); a throw refuses the request but does NOT
+   * refund the local charge. The driver exposes it through
+   * `AiSdkDriverOptions.strictTokenReservationHook`/
+   * `DriverFactoryConfig.lanes.aiSdk.strictTokenReservationHook`; when absent,
+   * cross-invocation whole-job enforcement is a named gap (see the header).
    */
   readonly onBeforeWireReserve?: (reservation: WireReservation) => void | Promise<void>;
 }
@@ -287,22 +309,36 @@ export class PreRequestCeiling {
    * Count + reserve one request and return the params to send, with the
    * output wire ceiling applied. Throws {@link PreRequestCeilingRefusal}
    * BEFORE the underlying `doGenerate` (and therefore before the wire send).
-   * The reservation is committed only after every check — and the external
-   * reservation hook — passes; once committed it is never refunded, whatever
-   * the attempt's outcome.
+   *
+   * CONCURRENCY: every check and the final commit run synchronously, before
+   * the first `await` (the optional durable hook). Two concurrent `reserve`
+   * calls therefore cannot both observe stale totals — the second sees the
+   * first's committed charge. The hook runs AFTER the local commit and its
+   * failure is a conservative no-refund refusal.
    */
   async reserve(params: LanguageModelV4CallOptions): Promise<LanguageModelV4CallOptions> {
-    const { capability, budget, wholeJobTokenAllowance, onBeforeWireReserve } = this.options;
-    // Existing ceiling must already fit the reserve (a larger one would make
-    // the reservation understate the real output bound).
+    const { capability, budget, wholeJobTokenAllowance, onBeforeWireReserve, modelSpec } =
+      this.options;
+    // An existing ceiling must be a valid, honored cap that fits the reserve:
+    // NaN/negative/fractional/Infinity must not slip past a `>` comparison.
     const existingCeiling = params.maxOutputTokens;
-    if (existingCeiling !== undefined && existingCeiling > budget.reserveOutputTokens) {
-      throw this.refuse(
-        'output-reserve',
-        `request output ceiling ${existingCeiling} exceeds the reserved output ${budget.reserveOutputTokens}`,
-        0,
-        0,
-      );
+    if (existingCeiling !== undefined) {
+      if (!Number.isSafeInteger(existingCeiling) || existingCeiling < 1) {
+        throw this.refuse(
+          'output-reserve',
+          `request output ceiling must be a safe positive integer, got ${String(existingCeiling)}`,
+          0,
+          0,
+        );
+      }
+      if (existingCeiling > budget.reserveOutputTokens) {
+        throw this.refuse(
+          'output-reserve',
+          `request output ceiling ${existingCeiling} exceeds the reserved output ${budget.reserveOutputTokens}`,
+          0,
+          0,
+        );
+      }
     }
     // APPLY the output ceiling FIRST, then count the exact prepared params, so
     // a transformer that mutates tokenizable data is still counted.
@@ -317,19 +353,27 @@ export class PreRequestCeiling {
         0,
       );
     }
+    // The applied ceiling must be a REAL honored cap: a safe positive integer
+    // at or below the reserve. NaN/negative/fractional/Infinity are refused.
     const appliedCeiling = prepared.maxOutputTokens;
-    if (appliedCeiling === undefined || appliedCeiling > budget.reserveOutputTokens) {
+    if (
+      !Number.isSafeInteger(appliedCeiling) ||
+      (appliedCeiling as number) < 1 ||
+      (appliedCeiling as number) > budget.reserveOutputTokens
+    ) {
       throw this.refuse(
         'output-ceiling-not-applied',
-        `the capability did not apply an output ceiling at or below the reserve ${budget.reserveOutputTokens}`,
+        `the capability did not apply a safe positive output ceiling at or below the reserve ${budget.reserveOutputTokens} (got ${String(appliedCeiling)})`,
         0,
         0,
       );
     }
-    // Count the exact prepared request.
+    // Count the exact prepared request; the digest binds the receipt to it.
+    let serialized: string;
     let counted: number;
     try {
-      counted = capability.count(serializeRequestForCounting(prepared));
+      serialized = serializeRequestForCounting(prepared);
+      counted = capability.count(serialized);
     } catch (err) {
       if (err instanceof UnrepresentableRequestError) {
         throw this.refuse('unrepresentable-request', err.message, 0, 0);
@@ -383,7 +427,14 @@ export class PreRequestCeiling {
         reserved,
       );
     }
-    // DURABLE PRE-WIRE RESERVATION (the shared-ledger bridge), before commit.
+    // COMMIT the local charge FIRST (no refunds past this point), so a
+    // concurrent call cannot slip a second charge past the allowance check
+    // while this one awaits the durable hook.
+    this.cumulativeReservedN = cumulative;
+    this.requestCountN += 1;
+    // DURABLE PRE-WIRE RESERVATION (the shared-ledger bridge): after the local
+    // charge, before the wire. Its failure refuses the request conservatively —
+    // the local charge is NOT refunded.
     if (onBeforeWireReserve !== undefined) {
       try {
         await onBeforeWireReserve({
@@ -391,6 +442,9 @@ export class PreRequestCeiling {
           cumulativeTokens: cumulative,
           countedInput: counted,
           reserveOutputTokens: budget.reserveOutputTokens,
+          provider: modelSpec?.provider ?? '',
+          model: modelSpec?.model ?? '',
+          requestDigest: createHash('sha256').update(serialized, 'utf8').digest('hex'),
         });
       } catch (err) {
         throw this.refuse(
@@ -401,9 +455,6 @@ export class PreRequestCeiling {
         );
       }
     }
-    // COMMIT (no refunds past this point).
-    this.cumulativeReservedN = cumulative;
-    this.requestCountN += 1;
     return prepared;
   }
 
