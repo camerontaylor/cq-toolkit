@@ -3,11 +3,12 @@
 //
 // The shared shape vectors in test/fixtures/glm-shape-vectors.json are the
 // cross-language contract: the Python mirror computes the SAME rendered bound
-// over the SAME projections. NO hard-coded byte counts are asserted (a numeric
-// proof that was never executed would be fabricated) — the assertions are
-// structural (exact literal inclusion, refusal, monotonicity) plus the exact
-// rendered string this renderer produces.
+// over the SAME projections. expectedBytes/expectedRenderedSha256 are GENUINE
+// MEASURED values from an executed offline finite-fixture run (CQ 4d25 vs CRQ
+// 224682a) — NOT a fabricated proof and NOT a hosted/Jinja/tokenizer contract —
+// while the mustContain/mustNotContain arrays remain the structural checks.
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 import { Buffer } from 'node:buffer';
 import {
@@ -22,6 +23,8 @@ import type { GlmHostedTransformAttestation } from '../../src/driver/ai-sdk/glm-
 interface AcceptVector {
   name: string;
   projection: unknown;
+  expectedBytes: number;
+  expectedRenderedSha256?: string;
   mustContain: readonly string[];
   mustNotContain: readonly string[];
 }
@@ -101,6 +104,14 @@ describe('glm text capability — count is a proven render bound (no multiplier)
       if (capability === undefined) throw new Error('expected the capability to be present');
       const counted = capability.count(JSON.stringify(vector.projection));
       expect(counted).toBe(Buffer.byteLength(rendered, 'utf8'));
+      // MEASURED expectation (executed finite-fixture artifact, CQ 4d25 / CRQ
+      // 224682a): the numeric bound and, when present, the rendered sha256.
+      expect(counted).toBe(vector.expectedBytes);
+      if (vector.expectedRenderedSha256 !== undefined) {
+        expect(createHash('sha256').update(Buffer.from(rendered, 'utf8')).digest('hex')).toBe(
+          vector.expectedRenderedSha256,
+        );
+      }
       expect(Number.isSafeInteger(counted)).toBe(true);
     });
   }

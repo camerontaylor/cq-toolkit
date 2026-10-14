@@ -1,5 +1,5 @@
 {
-  "//": "Shared cross-language GLM-5.3-flash capability shape vectors. Consumed by BOTH the TS test (test/driver/glm-capability.test.ts) and the Python test (tests/test_glm_capability.py). NO hard-coded byte counts are stored here: each language computes the rendered bound independently and must agree; the stored expectations are STRUCTURAL (exact literal inclusions, refusal cases, monotonicity). This avoids fabricating a numeric proof that was never executed.",
+  "//": "Shared cross-language GLM-5.3-flash capability shape vectors, consumed by BOTH the TS test (test/driver/glm-capability.test.ts) and the Python mirror (tests/test_glm_capability.py). expectedBytes + expectedRenderedSha256 are GENUINE MEASURED values from an executed OFFLINE finite-fixture run: CQ head 4d25be9cf4821f2b5b38fc100434f04d67704f19 compiled renderer vs CRQ 224682a, byte-HEX and counts equal across both languages (original 9 accepts + 4 supplemental accepts; 9 + 6 refusals equal). Provenance is the finite local artifact c2-render-measurement-4d25be9.json (SHA 96ab54f4f7514312eacc5aca84813c3d73a10ab30cfbf5d17bc6d46cdbf38a7b) plus c2-additional-measurement-4d25be9.json. This is NOT a hosted/Jinja/tokenizer contract; the mustContain/mustNotContain arrays remain the structural checks.",
   "profile": {
     "provider": "zai",
     "model": "glm-5.3-flash",
@@ -24,6 +24,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 76,
+      "expectedRenderedSha256": "e9aa2e7fade2447a15374e04c1098c68bc0b10ca6b9eaeb0b10f5f54045504c5",
       "mustContain": [
         "[gMASK]<sop>",
         "<|system|>Reasoning Effort: Max",
@@ -53,6 +55,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 85,
+      "expectedRenderedSha256": "1af5b0a72b5c3f763d9e27a5712a1fe23d86f4fe27e5b89717cf4997532fe3b2",
       "mustContain": ["Reasoning Effort: Low", "<|system|>sys", "<|user|>q"],
       "mustNotContain": ["Reasoning Effort: Max"]
     },
@@ -81,6 +85,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 647,
+      "expectedRenderedSha256": "45d8314dbc8e88a2bad5deba11c5c2c04914f12d370d37f70820feebec6b0c7a",
       "mustContain": [
         "# Tools",
         "<tools>",
@@ -133,6 +139,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 253,
+      "expectedRenderedSha256": "6f26e6b88e61b29834f7ee3991b6b0020146a2dac8e4a84a7f9de1f0470dbf06",
       "mustContain": [
         "<think>thinking</think>",
         "calling read",
@@ -166,6 +174,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 107,
+      "expectedRenderedSha256": "d7ee3b8ed80921fa57ff57633371d248faf27850e58a13813f896d8df8461adb",
       "mustContain": ["😀", "<b>bold</b>", "& \"quote\""],
       "mustNotContain": []
     },
@@ -194,6 +204,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 684,
+      "expectedRenderedSha256": "33b9c5f3d579cf016fec9abd4222be43de5bbc6d8d7920948a60edaa6a5b32db",
       "mustContain": ["\\u003c", "\\u0026", "\\u0027", "\\u003e"],
       "mustNotContain": ["<script>"]
     },
@@ -224,6 +236,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 101,
+      "expectedRenderedSha256": "e30ea1e531ac73640e5d303e392b62c864a4e9363ba7e3a39ddcbd5ccd46f418",
       "mustContain": ["<think></think>"],
       "mustNotContain": ["<think>OLD-THOUGHT</think>"]
     },
@@ -255,6 +269,8 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 654,
+      "expectedRenderedSha256": "99800d52663c4dcc06a9cf1f6d8f9cc327de954525561210f61a47589fa1b328",
       "mustContain": ["\"maxLength\": 10"],
       "mustNotContain": []
     },
@@ -282,7 +298,157 @@
         "seed": null,
         "reasoning": null
       },
+      "expectedBytes": 122,
+      "expectedRenderedSha256": "2ac7c6d212609889d62c08648e3e161f5765641eca063dc4a027e762f848a3dd",
       "mustContain": ["\uFEFFlead\u0085trail\uFEFF", "\uFEFFq\u0085"],
+      "mustNotContain": []
+    },
+    {
+      "name": "compact stage-1 json tool result: unicode HTML safe integers and booleans",
+      "projection": {
+        "prompt": [
+          { "role": "user", "content": [{ "type": "text", "text": "q" }] },
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": {
+                  "type": "json",
+                  "value": { "a": "é<&'😀", "b": 2, "c": true, "d": null }
+                }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "expectedBytes": 159,
+      "expectedRenderedSha256": "f2a49e67ab0ad5a0b37bf36641000eaa2239521abb27c2f4e5445c9184993180",
+      "mustContain": [
+        "<|observation|>",
+        "<tool_response>{\"a\":\"é<&'😀\",\"b\":2,\"c\":true,\"d\":null}</tool_response>"
+      ],
+      "mustNotContain": []
+    },
+    {
+      "name": "compact stage-1 error-json result: nested object and array",
+      "projection": {
+        "prompt": [
+          { "role": "user", "content": [{ "type": "text", "text": "q" }] },
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": {
+                  "type": "error-json",
+                  "value": {
+                    "error": { "message": "坏 <b> &", "code": -7 },
+                    "items": [1, true, null, "é"]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "expectedBytes": 188,
+      "expectedRenderedSha256": "49e1da24bc05f6f7b980c4026298f318ae759e9ef01ac91a4f5d331d3c3ece4b",
+      "mustContain": [
+        "<tool_response>{\"error\":{\"message\":\"坏 <b> &\",\"code\":-7},\"items\":[1,true,null,\"é\"]}</tool_response>"
+      ],
+      "mustNotContain": []
+    },
+    {
+      "name": "normalized named toolChoice with exact local function tools",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "read",
+            "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } } }
+          }
+        ],
+        "toolChoice": { "type": "tool", "toolName": "read" },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "expectedBytes": 640,
+      "expectedRenderedSha256": "28091b72f7b3387cc3a5750706f0e255ebb6d731c4cc1030f8d953027cff0ee1",
+      "mustContain": ["# Tools", "\"name\": \"read\"", "<|user|>q"],
+      "mustNotContain": []
+    },
+    {
+      "name": "normalized required toolChoice and safe integer upper bound",
+      "projection": {
+        "prompt": [
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": { "type": "json", "value": { "safe": 9007199254740991 } }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": { "type": "required" },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64,
+        "temperature": null,
+        "topP": null,
+        "topK": null,
+        "presencePenalty": null,
+        "frequencyPenalty": null,
+        "stopSequences": null,
+        "seed": null,
+        "reasoning": null
+      },
+      "expectedBytes": 134,
+      "expectedRenderedSha256": "5e96ba6c74ab3db27a1cf54f90e612146c932d09fe3836dd1234acad619d6392",
+      "mustContain": ["<tool_response>{\"safe\":9007199254740991}</tool_response>"],
       "mustNotContain": []
     }
   ],
@@ -383,6 +549,119 @@
         "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
         "tools": null,
         "toolChoice": { "type": "random" },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "compact json tool result with fractional number",
+      "projection": {
+        "prompt": [
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": { "type": "json", "value": { "bad": 1.5 } }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "compact error-json tool result with negative zero",
+      "projection": {
+        "prompt": [
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": { "type": "error-json", "value": { "bad": -0.0 } }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "compact json tool result with unsafe integer",
+      "projection": {
+        "prompt": [
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": { "type": "json", "value": { "bad": 9007199254740992 } }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "named toolChoice with an unknown key",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": { "type": "tool", "toolName": "read", "extra": 1 },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "named toolChoice with non-string name",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": { "type": "tool", "toolName": 7 },
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "tool output content potentially carries unmodelled media",
+      "projection": {
+        "prompt": [
+          {
+            "role": "tool",
+            "content": [
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": {
+                  "type": "content",
+                  "value": [{ "type": "text", "text": "safe-looking" }]
+                }
+              }
+            ]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
         "responseFormat": null,
         "providerOptions": null,
         "maxOutputTokens": 64
