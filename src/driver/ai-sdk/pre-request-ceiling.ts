@@ -423,9 +423,10 @@ export interface WireReservation {
    * with a strict decoder and re-derives this digest; it never trusts
    * `countedInput`/`tokens`/`cumulativeTokens`.
    *
-   * Interoperability is NOT yet claimed: the shared vectors are produced by this
-   * TypeScript implementation and the Python reproduction test is authored but
-   * NOT RUN, and the pair has no independent review.
+   * Interoperability is NOT claimed from this head: the Python reproduction
+   * test passed over the CRQ union a13c6e4c, but the TypeScript side is not
+   * executed in this lane (execution is centralized on Neptune) and this pair
+   * has no independent review.
    */
   readonly canonicalProjectionDigest: string;
   /** The exact canonical document bytes (lowercase hex) the digest is taken
