@@ -53,11 +53,15 @@
 //
 // ------------------------------------------------------------------- status
 //
-// No interoperability claim is made. The shared byte+digest vectors are
-// produced by THIS implementation and the Python side reproduces them in a test
-// that is AUTHORED BUT NOT RUN in this lane, so cross-language equality is
-// UNPROVEN until that test executes. Source-level agreement is all that is
-// claimed here.
+// No interoperability claim is made HERE. The shared byte+digest vectors are
+// produced by THIS implementation and are byte-identical to the Python copy in
+// `crq_repair/canonical_vectors.json` (compared field for field at the CRQ union
+// a13c6e4c: 26 positives + 13 refusals, same names, order, bytesHex and sha256),
+// and the Python reproduction test (test_canonical_projection.py) PASSED over
+// that union under an independent runner, so the vector set has executed
+// Python-side equality. The TypeScript side is NOT executed in this lane
+// (execution is centralized on Neptune) and this pair has no independent review
+// of this head, so this worktree claims no interoperability and no CI.
 import { createHash } from 'node:crypto';
 
 export const CANONICAL_PROJECTION_MAGIC = 'CRQP';

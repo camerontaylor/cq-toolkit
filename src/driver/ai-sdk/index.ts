@@ -327,8 +327,10 @@ export interface AiSdkDriverOptions {
    * and no hook is configured, the lane REFUSES before dispatch (it will not
    * claim a whole-job bound it cannot enforce); with no shared allowance the
    * per-request ceiling still binds locally. Cross-language interoperability is
-   * not claimed until the shared vectors are reproduced by the Python side and
-   * independently reviewed.
+   * NOT claimed from this head: the Python reproduction test passed over the
+   * CRQ union a13c6e4c, but the TypeScript side is not executed in this lane
+   * (execution is centralized on Neptune) and this pair has no independent
+   * review.
    */
   strictTokenReservationHook?: (receipt: WireReservation) => void | Promise<void>;
 }
