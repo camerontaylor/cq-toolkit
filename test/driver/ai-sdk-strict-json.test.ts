@@ -22,11 +22,17 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
+import { wrapLanguageModel } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { z } from 'zod';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
-import type { AiSdkDriverOptions, StrictTokenRepairStage } from '../../src/driver/ai-sdk/index.js';
+import type {
+  AiSdkDriverOptions,
+  StrictTokenRepairStage,
+  StrictTokenWireAdapter,
+} from '../../src/driver/ai-sdk/index.js';
+import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import {
   serializeRequestForCounting,
   type StrictTokenCapability,
@@ -139,6 +145,10 @@ async function fixture(
   options: {
     strict: boolean;
     stage?: StrictTokenRepairStage;
+    /** Installs the adapter INSTEAD of the standalone hook/stage options. */
+    adapter?: StrictTokenWireAdapter;
+    /** Overrides the injected capability (e.g. to record the ceiling's order). */
+    capability?: StrictTokenCapability;
     /** Runs while send `sendIndex` (0-based) is in flight, before it returns. */
     onSend?: (sendIndex: number) => void;
   },
@@ -157,13 +167,31 @@ async function fixture(
       return reply;
     },
   });
+  // When an adapter is installed the fixture still records the ceiling's receipt
+  // stream: it wraps the adapter's OWN reserve (the adapter keeps its own
+  // observations), so a leg can assert both sides.
+  const providedAdapter = options.adapter;
+  const adapter: StrictTokenWireAdapter | undefined =
+    providedAdapter === undefined
+      ? undefined
+      : {
+          ...providedAdapter,
+          reserve: async (receipt) => {
+            receipts.push(receipt);
+            await providedAdapter.reserve(receipt);
+          },
+        };
   const strictOptions: Partial<AiSdkDriverOptions> = options.strict
     ? {
-        strictTokenCapability: () => fakeCapability(),
-        strictTokenReservationHook: (receipt) => {
-          receipts.push(receipt);
-        },
-        ...(options.stage !== undefined ? { strictTokenRepairStage: options.stage } : {}),
+        strictTokenCapability: () => options.capability ?? fakeCapability(),
+        ...(adapter !== undefined
+          ? { strictTokenWireAdapter: adapter }
+          : {
+              strictTokenReservationHook: (receipt) => {
+                receipts.push(receipt);
+              },
+              ...(options.stage !== undefined ? { strictTokenRepairStage: options.stage } : {}),
+            }),
       }
     : {};
   const driver = new AiSdkDriver({
@@ -261,6 +289,16 @@ function countingStage(refuse: { enter?: boolean; exit?: boolean } = {}): {
         if (refuse.exit === true) throw new Error('the repair stage could not be closed');
       },
     },
+  };
+}
+
+/** A minimal adapter for legs that only exercise wiring or a refusal. */
+function adapterOver(over: Partial<StrictTokenWireAdapter> = {}): StrictTokenWireAdapter {
+  return {
+    reserve: () => Promise.resolve(),
+    repairStage: { enterRepairStage: () => {}, exitRepairStage: () => {} },
+    wrapModel: (model) => model,
+    ...over,
   };
 }
 
@@ -598,5 +636,136 @@ describe('strict-JSON strategy: the repair-stage lifecycle', () => {
     } finally {
       await fx.cleanup();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. The strict wire adapter: one cohesive seam, composed INNER to the ceiling
+// ---------------------------------------------------------------------------
+
+describe('strict-JSON strategy: the strict wire adapter', () => {
+  test('an adapter supplies the reservation, the stage and the INNER model wrap', async () => {
+    const events: string[] = [];
+    const adapterReceipts: WireReservation[] = [];
+    const stageCalls = { enter: 0, exit: 0 };
+    const capability: StrictTokenCapability = {
+      provenance: 'test:order-probe',
+      count: (serialized) => {
+        events.push('ceiling-count');
+        return Buffer.byteLength(serialized, 'utf8');
+      },
+      withOutputCeiling: (params, reserveOutputTokens) => ({
+        ...params,
+        maxOutputTokens: reserveOutputTokens,
+      }),
+    };
+    const adapter = adapterOver({
+      reserve: (receipt) => {
+        events.push('adapter-reserve');
+        adapterReceipts.push(receipt);
+        return Promise.resolve();
+      },
+      repairStage: {
+        enterRepairStage: () => {
+          stageCalls.enter += 1;
+        },
+        exitRepairStage: () => {
+          stageCalls.exit += 1;
+        },
+      },
+      wrapModel: (model) =>
+        wrapLanguageModel({
+          model,
+          middleware: {
+            transformParams: ({ params }) => {
+              events.push('adapter-wire');
+              return params;
+            },
+          },
+        }),
+    });
+    const replies = [
+      textResult('prose, not JSON'),
+      textResult(JSON.stringify({ verdict: 'pass', note: 'repaired' })),
+    ];
+    const fx = await fixture(replies, { strict: true, adapter, capability });
+    try {
+      const result = await fx.driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ verdict: 'pass', note: 'repaired' });
+      // The adapter's OWN reserve and stage drove the run: two sends, two
+      // reservations, one stage open/close pair.
+      expect(adapterReceipts).toHaveLength(2);
+      expect(stageCalls).toEqual({ enter: 1, exit: 1 });
+      expect(fx.receipts).toHaveLength(2);
+      // The wrap is INNER: for the first send the ceiling counts and reserves
+      // BEFORE the adapter's wire middleware sees the call, so the adapter can
+      // never observe a ceiling refusal or a refused no-send.
+      expect(events.slice(0, 3)).toEqual(['ceiling-count', 'adapter-reserve', 'adapter-wire']);
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
+  test('an adapter with no strict budget refuses before the provider factory runs', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'aidrv-strict-adapter-off-'));
+    try {
+      let providerCalls = 0;
+      const driver = new AiSdkDriver({
+        providers: {
+          anthropic: () => {
+            providerCalls += 1;
+            return new MockLanguageModelV4({
+              modelId: 'claude-test',
+              doGenerate: textResult('ok'),
+            });
+          },
+        },
+        sessionsDir: join(scratch, 'sessions'),
+        strictTokenWireAdapter: adapterOver(),
+      });
+      let caught: unknown;
+      try {
+        await driver.run(invocation({ budget: {} }));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(caught)).toBe('config');
+      expect((caught as Error).message).toContain('strictTokenWireAdapter is configured');
+      // Nothing was dispatched: the provider factory never ran.
+      expect(providerCalls).toBe(0);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('a divergent adapter pairing refuses at construction; the identical one is accepted', () => {
+    const adapter = adapterOver();
+    // A DIFFERENT hook function is a divergence: refuse, never silently pick one.
+    expect(
+      () =>
+        new AiSdkDriver({
+          strictTokenWireAdapter: adapter,
+          strictTokenReservationHook: () => {},
+        }),
+    ).toThrow(/DIFFERENT functions/);
+    // A DIFFERENT stage object is a divergence too.
+    expect(
+      () =>
+        new AiSdkDriver({
+          strictTokenWireAdapter: adapter,
+          strictTokenRepairStage: { enterRepairStage: () => {}, exitRepairStage: () => {} },
+        }),
+    ).toThrow(/DIFFERENT objects/);
+    // The IDENTICAL function and object ARE the same seam: accepted.
+    expect(
+      () =>
+        new AiSdkDriver({
+          strictTokenWireAdapter: adapter,
+          strictTokenReservationHook: adapter.reserve,
+          strictTokenRepairStage: adapter.repairStage,
+        }),
+    ).not.toThrow();
   });
 });
