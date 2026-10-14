@@ -5,12 +5,13 @@
 // `wrapWithPreRequestCeiling`; the capability is our text-only GLM capability.
 //
 // Proves: (a) `max_tokens` reaches the wire equal to the reserved output on
-// every attempt INCLUDING an SDK retry (the middleware re-enters per attempt);
-// (b) the wire `messages` equal what our stage-1 renderer claims (hard equality
-// computed at run time, never a hard-coded number); (c) the reserved cap is a
-// positive safe integer <= the profile reserve.
+// every attempt INCLUDING an SDK retry and a two-step TOOL loop (the middleware
+// re-enters per step); (b) the wire `messages` match the PINNED serializer's
+// expectation (not a renderer-own self-check); (c) a structured/repair-shaped
+// request REFUSES before any wire contact (the publisher template renders no
+// schema instruction) — a NAMED activation blocker for strict structured jobs.
 import { describe, expect, test } from 'vitest';
-import { generateText } from 'ai';
+import { generateText, jsonSchema, Output, stepCountIs, tool } from 'ai';
 import { createZai } from '@ai-sdk/zai';
 import {
   PreRequestCeiling,
@@ -85,6 +86,29 @@ function successText(text: string): Response {
 
 function retryableFailure(): Response {
   return jsonResponse({ error: { message: 'endpoint hiccup', code: 'overloaded' } }, 503);
+}
+
+function toolCallResponse(id: string, name: string, args: unknown): Response {
+  return jsonResponse({
+    id: 'chatcmpl-test',
+    object: 'chat.completion',
+    created: 0,
+    model: GLM_TEXT_PROFILE.model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id, type: 'function', function: { name, arguments: JSON.stringify(args) } },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
+    usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+  });
 }
 
 function ceiling(): PreRequestCeiling {
@@ -169,5 +193,68 @@ describe('glm capability — fake-fetch output-ceiling proof', () => {
       { role: 'system', content: 'sys' },
       { role: 'user', content: 'ask' },
     ]);
+  });
+
+  test('a tool STEP reserves max_tokens on every step (two-step tool loop)', async () => {
+    const { fetch, captured } = fakeFetch([
+      () => toolCallResponse('call-1', 'lookup', { q: 'x' }),
+      () => successText('done'),
+    ]);
+    const model = wrapWithPreRequestCeiling(
+      createZai({ apiKey: 'fake-key', baseURL: GLM_TEXT_PROFILE.endpoint, fetch }).languageModel(
+        GLM_TEXT_PROFILE.model,
+      ),
+      ceiling(),
+    );
+    const result = await generateText({
+      model,
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'look' }] }],
+      tools: {
+        lookup: tool({
+          description: 'lookup',
+          inputSchema: jsonSchema({
+            type: 'object',
+            properties: { q: { type: 'string' } },
+            required: ['q'],
+          }),
+          execute: async () => ({ ok: true }),
+        }),
+      },
+      stopWhen: stepCountIs(2),
+    });
+    expect(result.text).toBe('done');
+    // The ceiling sees the NORMALIZED params.tools array and reserves on the
+    // tool step AND the follow-up step; max_tokens reaches the wire on both.
+    expect(captured.length).toBeGreaterThanOrEqual(2);
+    for (const request of captured) {
+      expect(request.body.max_tokens).toBe(64);
+    }
+  });
+
+  test('a structured/repair-shaped request REFUSES before the fetch (named activation blocker)', async () => {
+    const { fetch, captured } = fakeFetch([() => successText('never sent')]);
+    const model = wrapWithPreRequestCeiling(
+      createZai({ apiKey: 'fake-key', baseURL: GLM_TEXT_PROFILE.endpoint, fetch }).languageModel(
+        GLM_TEXT_PROFILE.model,
+      ),
+      ceiling(),
+    );
+    let thrown: unknown;
+    try {
+      await generateText({
+        model,
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'structured' }] }],
+        // Output.object sets a responseFormat, which the publisher template does
+        // not render and this capability therefore REFUSES.
+        output: Output.object({
+          schema: jsonSchema({ type: 'object', properties: { a: { type: 'string' } } }),
+        }),
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeDefined();
+    // Refused BEFORE any wire contact: NO metered structured/repair send occurs.
+    expect(captured).toHaveLength(0);
   });
 });
