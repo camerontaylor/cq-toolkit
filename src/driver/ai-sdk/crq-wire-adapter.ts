@@ -120,10 +120,12 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
   let lastAck: CrqWireAck | null = null;
   /** The one ack whose outcome is pending; null when no wire is un-reported. */
   let pendingAck: number | null = null;
-  /** The OPAQUE host wire ordinal of the pending ack (never client-made). */
-  let pendingWireOrdinal: string | null = null;
+  /** The OPAQUE host wire ordinal (never client-made) is validated on the reserved
+   * ack only: the strict OUTCOME client frame carries NO ordinal field. */
   /** The PRIOR ack a pending repair supersedes (immutable per-wire context). */
   let pendingRepairOf: number | null = null;
+  /** True while a durable reserve is in flight; no second reserve may interleave. */
+  let reserving = false;
   /** True while a provider attempt is in flight (serialize online wire calls). */
   let sendInFlight = false;
   const outcomeStatus = new Map<number, CrqWireOutcomeKind>();
@@ -179,6 +181,15 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     if (!Number.isSafeInteger(ready.remainingMilliseconds) || ready.remainingMilliseconds <= 0) {
       throw new CrqWireRefusal('the host returned no usable remaining time');
     }
+    // The hello ready MAY announce the first wire ordinal; it is informational only
+    // (the host ordinal is validated on each reserved ack) and is never echoed by
+    // the client in an OUTCOME frame.
+    if (
+      ready.wireOrdinal !== undefined &&
+      (typeof ready.wireOrdinal !== 'string' || ready.wireOrdinal.length === 0)
+    ) {
+      throw new CrqWireRefusal('the host session ready carries no usable wire ordinal');
+    }
     sessionId = ready.sessionId;
     attemptRef = ready.attemptRef;
     return { sessionId, attemptRef };
@@ -186,6 +197,12 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
 
   const reserve = async (receipt: WireReservation): Promise<void> => {
     const transport = requireTransport();
+    // The lock is taken BEFORE the first await: session establishment and the
+    // durable reserve are one critical section, so two interleaved reserves can
+    // never both pass the state checks and overwrite each other's ack.
+    if (reserving) {
+      throw new CrqWireRefusal('a durable reservation is already in flight; refusing a concurrent reserve');
+    }
     if (sendInFlight) {
       throw new CrqWireRefusal('a provider send is already in flight; refusing a concurrent reserve');
     }
@@ -193,92 +210,98 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     if (!Number.isSafeInteger(receipt.reserveOutputTokens) || receipt.reserveOutputTokens < 1) {
       throw new CrqWireRefusal('the receipt carries no usable reserved output ceiling');
     }
-    const session = await ensureSession();
-    if (lastAck !== null && outcomeStatus.get(lastAck.ackSequence) !== 'completed') {
-      throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
-    }
-    if (pendingAck !== null) {
-      throw new CrqWireRefusal('the previous acknowledged wire has not reported its outcome');
-    }
-    const nextMessageId = messageId + 1;
-    const priorAck = lastAck === null ? null : lastAck.ackSequence;
-    const repairing = repairStageActive && priorAck !== null;
-    const message = {
-      method: 'reserve',
-      session_id: session,
-      message_id: nextMessageId,
-      job: identity.job,
-      source_sha: identity.sourceSha,
-      finding_sha256: identity.findingSha256,
-      authorization_sha256: identity.authorizationSha256,
-      role: identity.role,
-      rung: identity.rung,
-      window: identity.window,
-      driver: 'cq',
-      provider,
-      model,
-      // The canonical document is the receipt's, VERBATIM (receiver strict decode
-      // + independent meter authority); diagnostics carry no authority.
-      envelope: {
-        protocol: canonical.protocol,
-        version: 1,
-        digest: canonical.digest,
-        bytes: canonical.bytesHex,
-        projection: null,
+    reserving = true;
+    try {
+      const session = await ensureSession();
+      if (lastAck !== null && outcomeStatus.get(lastAck.ackSequence) !== 'completed') {
+        throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
+      }
+      if (pendingAck !== null) {
+        throw new CrqWireRefusal('the previous acknowledged wire has not reported its outcome');
+      }
+      const nextMessageId = messageId + 1;
+      const priorAck = lastAck === null ? null : lastAck.ackSequence;
+      const repairing = repairStageActive && priorAck !== null;
+      const message = {
+        method: 'reserve',
+        session_id: session.sessionId,
+        message_id: nextMessageId,
+        job: identity.job,
+        source_sha: identity.sourceSha,
+        finding_sha256: identity.findingSha256,
+        authorization_sha256: identity.authorizationSha256,
+        role: identity.role,
+        rung: identity.rung,
+        window: identity.window,
+        driver: 'cq',
         provider,
         model,
-        countedInput: 0,
-        reserveOutputTokens: 0,
-        tokens: 0,
-        cumulativeTokens: 0,
-      },
-      // The positive HOST-issued attempt reference; the host owns the wire ordinal.
-      attempt_ref: session.attemptRef,
-      wire_output_ceiling: receipt.reserveOutputTokens,
-      supersedes_ack_sequence: priorAck === null ? 0 : priorAck,
-      kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
-      repair_of_ack_sequence: repairing ? priorAck : null,
-    };
-    const reply = await transport.reserve(message);
-    if (!('ackSequence' in reply)) {
-      throw new CrqWireRefusal(`the host refused the wire: ${String((reply as { refused: string }).refused)}`);
+        // The canonical document is the receipt's, VERBATIM (receiver strict decode
+        // + independent meter authority); diagnostics carry no authority.
+        envelope: {
+          protocol: canonical.protocol,
+          version: 1,
+          digest: canonical.digest,
+          bytes: canonical.bytesHex,
+          projection: null,
+          provider,
+          model,
+          countedInput: 0,
+          reserveOutputTokens: 0,
+          tokens: 0,
+          cumulativeTokens: 0,
+        },
+        // The positive HOST-issued attempt reference; the host owns the wire ordinal.
+        attempt_ref: session.attemptRef,
+        wire_output_ceiling: receipt.reserveOutputTokens,
+        supersedes_ack_sequence: priorAck === null ? 0 : priorAck,
+        kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
+        repair_of_ack_sequence: repairing ? priorAck : null,
+      };
+      const reply = await transport.reserve(message);
+      if (!('ackSequence' in reply)) {
+        throw new CrqWireRefusal(`the host refused the wire: ${reply.refused}`);
+      }
+      // Bind ONLY the typed ack contract (no invented fields, no casts).
+      if (reply.messageId !== nextMessageId) {
+        throw new CrqWireRefusal('the host acknowledgement does not echo this message id');
+      }
+      if (reply.sessionId !== session.sessionId) {
+        throw new CrqWireRefusal('the host acknowledgement does not bind this session');
+      }
+      if (reply.attemptRef !== session.attemptRef) {
+        throw new CrqWireRefusal('the host acknowledgement does not echo the attempt reference');
+      }
+      if (typeof reply.wireOrdinal !== 'string' || reply.wireOrdinal.length === 0) {
+        throw new CrqWireRefusal('the host acknowledgement carries no host wire ordinal');
+      }
+      if (reply.requestSha256 !== canonical.digest) {
+        throw new CrqWireRefusal(
+          'the host acknowledgement does not echo the canonical request digest',
+        );
+      }
+      if (!Number.isSafeInteger(reply.ackSequence) || reply.ackSequence < 1) {
+        throw new CrqWireRefusal('the host acknowledgement carries no positive ack sequence');
+      }
+      if (lastAck !== null && reply.ackSequence <= lastAck.ackSequence) {
+        throw new CrqWireRefusal('the host ack sequence is not monotonic');
+      }
+      if (!Number.isSafeInteger(reply.reservationSequence) || reply.reservationSequence < 1) {
+        throw new CrqWireRefusal('the host acknowledgement carries no positive reservation sequence');
+      }
+      if (lastAck !== null && reply.reservationSequence <= lastAck.reservationSequence) {
+        throw new CrqWireRefusal('the host reservation sequence is not monotonic');
+      }
+      if (!Number.isSafeInteger(reply.remainingMilliseconds) || reply.remainingMilliseconds <= 0) {
+        throw new CrqWireRefusal('the host acknowledgement carries no usable remaining time');
+      }
+      messageId = nextMessageId;
+      lastAck = reply;
+      pendingAck = reply.ackSequence;
+      pendingRepairOf = repairing ? priorAck : null;
+    } finally {
+      reserving = false;
     }
-    // Bind ONLY the typed ack contract (no invented fields, no casts).
-    if (reply.messageId !== nextMessageId) {
-      throw new CrqWireRefusal('the host acknowledgement does not echo this message id');
-    }
-    if (reply.sessionId !== session.sessionId) {
-      throw new CrqWireRefusal('the host acknowledgement does not bind this session');
-    }
-    if (reply.attemptRef !== session.attemptRef) {
-      throw new CrqWireRefusal('the host acknowledgement does not echo the attempt reference');
-    }
-    if (typeof reply.wireOrdinal !== 'string' || reply.wireOrdinal.length === 0) {
-      throw new CrqWireRefusal('the host acknowledgement carries no host wire ordinal');
-    }
-    if (reply.requestSha256 !== canonical.digest) {
-      throw new CrqWireRefusal('the host acknowledgement does not echo the canonical request digest');
-    }
-    if (!Number.isSafeInteger(reply.ackSequence) || reply.ackSequence < 1) {
-      throw new CrqWireRefusal('the host acknowledgement carries no positive ack sequence');
-    }
-    if (lastAck !== null && reply.ackSequence <= lastAck.ackSequence) {
-      throw new CrqWireRefusal('the host ack sequence is not monotonic');
-    }
-    if (!Number.isSafeInteger(reply.reservationSequence) || reply.reservationSequence < 1) {
-      throw new CrqWireRefusal('the host acknowledgement carries no positive reservation sequence');
-    }
-    if (lastAck !== null && reply.reservationSequence <= lastAck.reservationSequence) {
-      throw new CrqWireRefusal('the host reservation sequence is not monotonic');
-    }
-    if (!Number.isSafeInteger(reply.remainingMilliseconds) || reply.remainingMilliseconds <= 0) {
-      throw new CrqWireRefusal('the host acknowledgement carries no usable remaining time');
-    }
-    messageId = nextMessageId;
-    lastAck = reply;
-    pendingAck = reply.ackSequence;
-    pendingWireOrdinal = reply.wireOrdinal;
-    pendingRepairOf = repairing ? priorAck : null;
   };
 
   /**
@@ -297,10 +320,8 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('no acknowledged wire call to report an outcome for');
     }
     const ack = pendingAck;
-    const wireOrdinal = pendingWireOrdinal;
     const repairOf = pendingRepairOf;
     pendingAck = null;
-    pendingWireOrdinal = null;
     pendingRepairOf = null;
     messageId += 1;
     const outcomeMessageId = messageId;
@@ -309,7 +330,6 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       session_id: sessionId,
       message_id: outcomeMessageId,
       attempt_ref: attemptRef,
-      wire_ordinal: wireOrdinal,
       job: identity.job,
       source_sha: identity.sourceSha,
       finding_sha256: identity.findingSha256,
@@ -368,7 +388,15 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     },
   };
 
-  function wrapModel(inner: LanguageModel): LanguageModel {
+  function wrapModel(model: LanguageModel): LanguageModel {
+    // `ProviderFactory` resolves to a live model instance, never a gateway
+    // string; the runtime check makes that explicit (and narrows the type without
+    // a cast) — a string here would make the strict wire meaningless.
+    if (typeof model === 'string') {
+      throw new CrqWireRefusal(
+        'the strict wire adapter wraps a resolved language-model instance, not a gateway model id',
+      );
+    }
     const middleware: LanguageModelMiddleware = {
       // BELOW the ceiling: invoked only for an ACTUAL provider attempt.
       wrapGenerate: async ({ doGenerate }) => {
@@ -409,7 +437,7 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         throw new CrqWireRefusal('the CRQ wire adapter does not support streaming; refusing before dispatch');
       },
     };
-    return wrapLanguageModel({ model: inner, middleware });
+    return wrapLanguageModel({ model, middleware });
   }
 
   return {

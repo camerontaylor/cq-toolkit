@@ -4,6 +4,7 @@
 // Fakes only: a MockLanguageModelV4 counting dispatches, an in-memory transport and
 // the real (pure) GLM capability. Nothing here opens a socket, spawns a process,
 // reads a credential or reaches a provider.
+import type { LanguageModel } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { describe, expect, it } from 'vitest';
 
@@ -269,5 +270,218 @@ describe('composed strict lane + GLM text-only capability', () => {
       /no accepted outcome/,
     );
     expect(transport.reserved).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Strict FRAME regressions: a fake transport that validates the exact wire shape
+// (a loose transport that accepts anything masks an object-vs-string session id and
+// an extra client field), plus the deferred-reserve concurrency lock.
+// ---------------------------------------------------------------------------
+
+const RESERVE_KEYS = [
+  'method',
+  'session_id',
+  'message_id',
+  'job',
+  'source_sha',
+  'finding_sha256',
+  'authorization_sha256',
+  'role',
+  'rung',
+  'window',
+  'driver',
+  'provider',
+  'model',
+  'envelope',
+  'attempt_ref',
+  'wire_output_ceiling',
+  'supersedes_ack_sequence',
+  'kind',
+  'repair_of_ack_sequence',
+];
+
+/** The strict OUTCOME client frame: NO wire ordinal (the host owns it). */
+const OUTCOME_KEYS = [
+  'method',
+  'session_id',
+  'message_id',
+  'attempt_ref',
+  'job',
+  'source_sha',
+  'finding_sha256',
+  'authorization_sha256',
+  'role',
+  'rung',
+  'window',
+  'driver',
+  'provider',
+  'model',
+  'ack_sequence',
+  'outcome',
+  'usage',
+  'stop_reason',
+  'error_class',
+  'repair_of_ack_sequence',
+];
+
+/**
+ * A STRICT transport: it refuses an unknown field, a non-string session id or a
+ * client-supplied wire ordinal, so a frame defect fails here instead of being
+ * absorbed by a permissive fake.
+ */
+class StrictTransport implements CrqWireTransport {
+  public reserveCalls = 0;
+  public outcomeCalls = 0;
+  public lastOutcome: Readonly<Record<string, unknown>> | null = null;
+  public holdNextReserve = false;
+  private release: (() => void) | null = null;
+  private acks = 0;
+
+  async attestHost(): Promise<boolean> {
+    return true;
+  }
+
+  async hello(): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }> {
+    return { sessionId: 'strict-session', attemptRef: 7, remainingMilliseconds: 600_000 };
+  }
+
+  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+    this.reserveCalls += 1;
+    assertExactKeys(message, RESERVE_KEYS, 'reserve');
+    if (typeof message['session_id'] !== 'string' || message['session_id'] !== 'strict-session') {
+      throw new CrqWireRefusal(
+        `the strict host requires session_id to be the hello session STRING, got ${JSON.stringify(message['session_id'])}`,
+      );
+    }
+    if (message['wire_ordinal'] !== undefined) {
+      throw new CrqWireRefusal('the strict host refuses a client-supplied wire ordinal on reserve');
+    }
+    if (this.holdNextReserve) {
+      this.holdNextReserve = false;
+      await new Promise<void>((resolve) => {
+        this.release = resolve;
+      });
+    }
+    this.acks += 1;
+    return {
+      method: 'reserved',
+      sessionId: String(message['session_id']),
+      messageId: Number(message['message_id']),
+      ackSequence: this.acks,
+      reservationSequence: this.acks,
+      requestSha256: 'e'.repeat(64),
+      inputTokens: 10,
+      reservedOutputTokens: 4000,
+      totalTokens: 4010,
+      cumulativeTokens: 4010,
+      remainingTokens: 100_000,
+      remainingMilliseconds: 590_000,
+      attemptRef: Number(message['attempt_ref']),
+      wireOrdinal: 'host-ordinal-1',
+    };
+  }
+
+  async outcome(message: Readonly<Record<string, unknown>>): Promise<CrqWireOutcomeReply> {
+    this.outcomeCalls += 1;
+    this.lastOutcome = message;
+    assertExactKeys(message, OUTCOME_KEYS, 'outcome');
+    return {
+      stopped: null,
+      sessionId: String(message['session_id']),
+      messageId: Number(message['message_id']),
+      attemptRef: Number(message['attempt_ref']),
+      ackSequence: Number(message['ack_sequence']),
+    };
+  }
+
+  unblock(): void {
+    this.release?.();
+    this.release = null;
+  }
+}
+
+/** Refuse any field the strict host does not know, in either direction. */
+function assertExactKeys(
+  message: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  frame: string,
+): void {
+  const unknown = Object.keys(message).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new CrqWireRefusal(
+      `the strict host refuses unknown ${frame} fields: ${unknown.join(', ')}`,
+    );
+  }
+  for (const key of allowed) {
+    if (!(key in message)) {
+      throw new CrqWireRefusal(`the strict host requires the ${frame} field ${key}`);
+    }
+  }
+}
+
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+describe('composed adapter: strict frames and the reserve-in-flight lock', () => {
+  it('refuses a gateway model id string instead of wrapping it', () => {
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      transport: new StrictTransport(),
+    });
+    // `LanguageModel` is the model OR a gateway id string; the adapter needs the
+    // resolved instance, so the string is refused before any wrap (no cast).
+    const gateway: LanguageModel = 'anthropic/claude-sonnet-4';
+    expect(() => adapter.wrapModel(gateway)).toThrow(/resolved language-model instance/);
+  });
+
+  it('sends the exact strict reserve and outcome frames, with a STRING session id', async () => {
+    const transport = new StrictTransport();
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      transport,
+    });
+    await adapter.reserve(receiptFor(projectionWith(null)));
+    expect(transport.reserveCalls).toBe(1);
+    const counter = { fetches: 0 };
+    await adapter.wrapModel(countingModel(counter)).doGenerate(PROMPT_CALL);
+    expect(counter.fetches).toBe(1);
+    expect(transport.outcomeCalls).toBe(1);
+    // The outcome frame carries NO wire ordinal: the reserved ack's host ordinal
+    // is validated where the strict schema allows it, never echoed by the client.
+    expect(transport.lastOutcome?.['wire_ordinal']).toBeUndefined();
+    expect(Object.keys(transport.lastOutcome ?? {}).sort()).toEqual([...OUTCOME_KEYS].sort());
+  });
+
+  it('refuses a second reserve interleaved before the first host reserve resolves', async () => {
+    const transport = new StrictTransport();
+    transport.holdNextReserve = true;
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      transport,
+    });
+    const first = adapter.reserve(receiptFor(projectionWith(null)));
+    await flush();
+    // The first reserve is still awaiting the host: the lock must refuse a second
+    // one BEFORE it reaches the transport, so no ack can be overwritten.
+    await expect(adapter.reserve(receiptFor(projectionWith(null)))).rejects.toThrow(
+      /already in flight/,
+    );
+    expect(transport.reserveCalls).toBe(1);
+    transport.unblock();
+    await first;
+    expect(transport.reserveCalls).toBe(1);
+    // Close the first wire's outcome so the adapter's state checks admit the next send.
+    const counter = { fetches: 0 };
+    await adapter.wrapModel(countingModel(counter)).doGenerate(PROMPT_CALL);
+    expect(counter.fetches).toBe(1);
+    // The lock was released on the successful path: the next reserve reaches the host.
+    await adapter.reserve(receiptFor(projectionWith(null)));
+    expect(transport.reserveCalls).toBe(2);
   });
 });

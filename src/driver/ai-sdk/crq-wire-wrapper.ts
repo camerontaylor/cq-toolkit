@@ -134,7 +134,13 @@ export interface CrqWireTransport {
     identity: CrqWireIdentity,
     provider: string,
     model: string,
-  ): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }>;
+  ): Promise<{
+    sessionId: string;
+    attemptRef: number;
+    remainingMilliseconds: number;
+    /** Informational only: the host may announce the first wire ordinal at hello. */
+    readonly wireOrdinal?: string;
+  }>;
   /** `reserve`: durably reserve one wire and return the host's acknowledgement. */
   reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }>;
   /** `outcome`: report the outcome of one acked wire call and return the host's
@@ -373,9 +379,7 @@ export class CrqWireWrapper {
     };
     const reply = await transport.reserve(message);
     if (!('ackSequence' in reply)) {
-      throw new CrqWireRefusal(
-        `the host refused the wire: ${String((reply as { refused: string }).refused)}`,
-      );
+      throw new CrqWireRefusal(`the host refused the wire: ${reply.refused}`);
     }
     if (
       reply.messageId !== messageId ||
@@ -419,9 +423,10 @@ export class CrqWireWrapper {
       throw new CrqWireRefusal('no acknowledged wire call to report an outcome for');
     }
     // Capture the EXACT ack this outcome belongs to BEFORE the await: an interleaved reserve
-    // must never be able to change which ack gets its status recorded.
+    // must never be able to change which ack gets its status recorded. The host-owned wire
+    // ordinal is validated on the reserved ack only: the strict OUTCOME client frame has NO
+    // ordinal field, so sending one would fail the host's unknown-field gate.
     const ack = this.lastAck.ackSequence;
-    const wireOrdinal = this.lastAck.wireOrdinal;
     const identity = this.options.identity;
     this.messageId += 1;
     const messageId = this.messageId;
@@ -430,7 +435,6 @@ export class CrqWireWrapper {
       session_id: this.sessionId,
       message_id: messageId,
       attempt_ref: this.attemptRef,
-      wire_ordinal: wireOrdinal,
       job: identity.job,
       source_sha: identity.sourceSha,
       finding_sha256: identity.findingSha256,
