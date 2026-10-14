@@ -32,6 +32,26 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "minimum": 0,
           "type": "number"
         },
+        "strictTokenBudget": {
+          "additionalProperties": false,
+          "properties": {
+            "maxInputTokens": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            "reserveOutputTokens": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "maxInputTokens",
+            "reserveOutputTokens"
+          ],
+          "type": "object"
+        },
         "wallClockMs": {
           "type": "number"
         }
