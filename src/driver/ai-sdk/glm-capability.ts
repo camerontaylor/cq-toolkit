@@ -244,7 +244,8 @@ function visibleText(content: unknown, where: string): string {
   if (Array.isArray(content)) {
     let out = '';
     for (const item of content) {
-      if (!isRecord(item)) throw new UnboundedGlmRequestShape(`${where} content item must be a mapping`);
+      if (!isRecord(item))
+        throw new UnboundedGlmRequestShape(`${where} content item must be a mapping`);
       if (item.type === 'text') {
         if (typeof item.text !== 'string') {
           throw new UnboundedGlmRequestShape(`${where} text part carries no string text`);
@@ -253,7 +254,9 @@ function visibleText(content: unknown, where: string): string {
       } else {
         // image/video/audio (or anything else) is a modality this capability
         // does not bound — refuse rather than mis-count.
-        throw new UnboundedGlmRequestShape(`${where} content part '${String(item.type)}' is not text-only`);
+        throw new UnboundedGlmRequestShape(
+          `${where} content part '${String(item.type)}' is not text-only`,
+        );
       }
     }
     return out;
@@ -351,7 +354,9 @@ function toProviderMessages(prompt: unknown): GlmProviderMessage[] {
       }
       continue;
     }
-    throw new UnboundedGlmRequestShape(`prompt role '${String(role)}' is not system/user/assistant/tool`);
+    throw new UnboundedGlmRequestShape(
+      `prompt role '${String(role)}' is not system/user/assistant/tool`,
+    );
   }
   return out;
 }
@@ -395,7 +400,11 @@ function renderToolChoice(toolChoice: unknown): string | undefined {
     }
     throw new UnboundedGlmRequestShape(`tool_choice '${toolChoice}' is not auto/none/required`);
   }
-  if (isRecord(toolChoice) && toolChoice.type === 'tool' && typeof toolChoice.toolName === 'string') {
+  if (
+    isRecord(toolChoice) &&
+    toolChoice.type === 'tool' &&
+    typeof toolChoice.toolName === 'string'
+  ) {
     return `{"type": "function", "function": {"name": ${jinjaTojson(toolChoice.toolName)}}}`;
   }
   throw new UnboundedGlmRequestShape('tool_choice is not a bounded choice');
@@ -411,7 +420,8 @@ function validateZaiOptions(providerOptions: unknown): {
   readonly userId?: string;
 } {
   if (providerOptions === null || providerOptions === undefined) return {};
-  if (!isRecord(providerOptions)) throw new UnboundedGlmRequestShape('providerOptions must be a mapping');
+  if (!isRecord(providerOptions))
+    throw new UnboundedGlmRequestShape('providerOptions must be a mapping');
   // Only the pinned `zai` namespace is understood; anything else is unknown.
   const zai = providerOptions.zai;
   if (providerOptions.zai === undefined) {
@@ -436,7 +446,8 @@ function validateZaiOptions(providerOptions: unknown): {
     userId?: string;
   } = {};
   if (zai.doSample !== undefined) {
-    if (typeof zai.doSample !== 'boolean') throw new UnboundedGlmRequestShape('doSample must be a boolean');
+    if (typeof zai.doSample !== 'boolean')
+      throw new UnboundedGlmRequestShape('doSample must be a boolean');
     result.doSample = zai.doSample;
   }
   if (zai.thinking !== undefined) {
@@ -473,15 +484,18 @@ function validateZaiOptions(providerOptions: unknown): {
     result.reasoningEffort = effort;
   }
   if (zai.toolStream !== undefined) {
-    if (typeof zai.toolStream !== 'boolean') throw new UnboundedGlmRequestShape('toolStream must be a boolean');
+    if (typeof zai.toolStream !== 'boolean')
+      throw new UnboundedGlmRequestShape('toolStream must be a boolean');
     result.toolStream = zai.toolStream;
   }
   if (zai.requestId !== undefined) {
-    if (typeof zai.requestId !== 'string') throw new UnboundedGlmRequestShape('requestId must be a string');
+    if (typeof zai.requestId !== 'string')
+      throw new UnboundedGlmRequestShape('requestId must be a string');
     result.requestId = zai.requestId;
   }
   if (zai.userId !== undefined) {
-    if (typeof zai.userId !== 'string') throw new UnboundedGlmRequestShape('userId must be a string');
+    if (typeof zai.userId !== 'string')
+      throw new UnboundedGlmRequestShape('userId must be a string');
     result.userId = zai.userId;
   }
   return result;
@@ -621,7 +635,10 @@ interface GlmProjectionFacts {
   readonly responseFormatBytes: number;
 }
 
-function parseProjection(input: unknown, attestation: GlmHostedTransformAttestation | undefined): GlmProjectionFacts {
+function parseProjection(
+  input: unknown,
+  attestation: GlmHostedTransformAttestation | undefined,
+): GlmProjectionFacts {
   if (!isRecord(input)) throw new UnboundedGlmRequestShape('projection must be a JSON object');
   const messages = toProviderMessages(input.prompt);
   const tools = toFunctionTools(input.tools);
@@ -632,9 +649,22 @@ function parseProjection(input: unknown, attestation: GlmHostedTransformAttestat
   // HTTP field). It still must be a bounded shape.
   renderToolChoice(toolChoice);
   // Sampling knobs are HTTP fields, not prompt text; a bounded value is fine.
-  for (const key of ['temperature', 'topP', 'topK', 'presencePenalty', 'frequencyPenalty', 'seed', 'reasoning']) {
+  for (const key of [
+    'temperature',
+    'topP',
+    'topK',
+    'presencePenalty',
+    'frequencyPenalty',
+    'seed',
+    'reasoning',
+  ]) {
     const value = input[key];
-    if (value !== null && value !== undefined && typeof value !== 'number' && typeof value !== 'string') {
+    if (
+      value !== null &&
+      value !== undefined &&
+      typeof value !== 'number' &&
+      typeof value !== 'string'
+    ) {
       throw new UnboundedGlmRequestShape(`${key} carries an unbounded value`);
     }
   }
@@ -655,14 +685,25 @@ function parseProjection(input: unknown, attestation: GlmHostedTransformAttestat
       jinjaTojson(input.responseFormat),
     );
     if (!Number.isSafeInteger(responseFormatBytes) || responseFormatBytes < 0) {
-      throw new UnboundedGlmRequestShape('the attested responseFormat transform returned an unsafe byte count');
+      throw new UnboundedGlmRequestShape(
+        'the attested responseFormat transform returned an unsafe byte count',
+      );
     }
   }
-  return { messages, tools, reasoningEffort: options.reasoningEffort, clearThinking: options.thinking?.clearThinking === true, responseFormatBytes };
+  return {
+    messages,
+    tools,
+    reasoningEffort: options.reasoningEffort,
+    clearThinking: options.thinking?.clearThinking === true,
+    responseFormatBytes,
+  };
 }
 
 /** The exported render primitive: the exact rendered prompt string. */
-export function renderGlmTextPrompt(projection: unknown, attestation?: GlmHostedTransformAttestation): string {
+export function renderGlmTextPrompt(
+  projection: unknown,
+  attestation?: GlmHostedTransformAttestation,
+): string {
   const facts = parseProjection(projection, attestation);
   return renderTemplate(facts.messages, facts.tools, facts.reasoningEffort, facts.clearThinking);
 }
@@ -671,9 +712,17 @@ export function renderGlmTextPrompt(projection: unknown, attestation?: GlmHosted
  * The exported shared-vector primitive: the PROVEN input-token upper bound for
  * the exact projection, or a refusal. Safe integer, never negative.
  */
-export function countGlmTextPromptBytes(projection: unknown, attestation?: GlmHostedTransformAttestation): number {
+export function countGlmTextPromptBytes(
+  projection: unknown,
+  attestation?: GlmHostedTransformAttestation,
+): number {
   const facts = parseProjection(projection, attestation);
-  const rendered = renderTemplate(facts.messages, facts.tools, facts.reasoningEffort, facts.clearThinking);
+  const rendered = renderTemplate(
+    facts.messages,
+    facts.tools,
+    facts.reasoningEffort,
+    facts.clearThinking,
+  );
   const total = utf8Bytes(rendered) + facts.responseFormatBytes;
   if (!Number.isSafeInteger(total) || total < 0 || total > MAX_SAFE) {
     throw new UnboundedGlmRequestShape('the rendered bound exceeds the safe integer range');

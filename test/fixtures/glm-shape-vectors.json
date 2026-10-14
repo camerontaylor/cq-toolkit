@@ -24,7 +24,12 @@
         "seed": null,
         "reasoning": null
       },
-      "mustContain": ["[gMASK]<sop>", "<|system|>Reasoning Effort: Max", "<|user|>hello", "<|assistant|><think>"],
+      "mustContain": [
+        "[gMASK]<sop>",
+        "<|system|>Reasoning Effort: Max",
+        "<|user|>hello",
+        "<|assistant|><think>"
+      ],
       "mustNotContain": ["<|observation|>", "# Tools"]
     },
     {
@@ -76,7 +81,13 @@
         "seed": null,
         "reasoning": null
       },
-      "mustContain": ["# Tools", "<tools>", "\"name\": \"read\"", "</tools>", "<tool_call>{function-name}"],
+      "mustContain": [
+        "# Tools",
+        "<tools>",
+        "\"name\": \"read\"",
+        "</tools>",
+        "<tool_call>{function-name}"
+      ],
       "mustNotContain": []
     },
     {
@@ -89,13 +100,22 @@
             "content": [
               { "type": "reasoning", "text": "thinking" },
               { "type": "text", "text": "calling read" },
-              { "type": "tool-call", "toolCallId": "t1", "toolName": "read", "input": { "path": "a.txt" } }
+              {
+                "type": "tool-call",
+                "toolCallId": "t1",
+                "toolName": "read",
+                "input": { "path": "a.txt" }
+              }
             ]
           },
           {
             "role": "tool",
             "content": [
-              { "type": "tool-result", "toolCallId": "t1", "output": { "type": "text", "value": "file-body" } }
+              {
+                "type": "tool-result",
+                "toolCallId": "t1",
+                "output": { "type": "text", "value": "file-body" }
+              }
             ]
           }
         ],
@@ -113,13 +133,25 @@
         "seed": null,
         "reasoning": null
       },
-      "mustContain": ["<think>thinking</think>", "calling read", "<tool_call>read", "<arg_key>path</arg_key><arg_value>a.txt</arg_value>", "<|observation|>", "<tool_response>file-body</tool_response>"],
+      "mustContain": [
+        "<think>thinking</think>",
+        "calling read",
+        "<tool_call>read",
+        "<arg_key>path</arg_key><arg_value>a.txt</arg_value>",
+        "<|observation|>",
+        "<tool_response>file-body</tool_response>"
+      ],
       "mustNotContain": []
     },
     {
       "name": "astral + escaped HTML + JSON-string tool argument",
       "projection": {
-        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "emoji 😀 and <b>bold</b> & \"quote\"" }] }],
+        "prompt": [
+          {
+            "role": "user",
+            "content": [{ "type": "text", "text": "emoji 😀 and <b>bold</b> & \"quote\"" }]
+          }
+        ],
         "tools": null,
         "toolChoice": null,
         "responseFormat": null,
@@ -169,7 +201,13 @@
       "name": "clear_thinking clears a historical assistant think block",
       "projection": {
         "prompt": [
-          { "role": "assistant", "content": [{ "type": "reasoning", "text": "OLD-THOUGHT" }, { "type": "text", "text": "a" }] },
+          {
+            "role": "assistant",
+            "content": [
+              { "type": "reasoning", "text": "OLD-THOUGHT" },
+              { "type": "text", "text": "a" }
+            ]
+          },
           { "role": "user", "content": [{ "type": "text", "text": "u" }] }
         ],
         "tools": null,
@@ -198,7 +236,10 @@
             "type": "function",
             "name": "read",
             "description": "read",
-            "inputSchema": { "type": "object", "properties": { "n": { "type": "string", "maxLength": 10 } } }
+            "inputSchema": {
+              "type": "object",
+              "properties": { "n": { "type": "string", "maxLength": 10 } }
+            }
           }
         ],
         "toolChoice": null,
@@ -219,19 +260,110 @@
     }
   ],
   "refuse": [
-    { "name": "image part", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "image", "image": "x" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 } },
-    { "name": "hosted/provider tool", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": [{ "type": "provider", "id": "web_search" }], "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 } },
-    { "name": "unknown provider option", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": { "zai": { "max_tokens": 10 } }, "maxOutputTokens": 64 } },
-    { "name": "thinking disabled", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": { "zai": { "thinking": { "type": "disabled" } } }, "maxOutputTokens": 64 } },
-    { "name": "responseFormat present without hosted transform", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": { "type": "json" }, "providerOptions": null, "maxOutputTokens": 64 } },
-    { "name": "maxOutputTokens not a safe positive integer", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 0 } },
-    { "name": "non-integral float in tool schema (JS/Python formatting differ)", "projection": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }], "tools": [{ "type": "function", "name": "f", "inputSchema": { "type": "number", "minimum": 0.5 } }], "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 } }
+    {
+      "name": "image part",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "image", "image": "x" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "hosted/provider tool",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": [{ "type": "provider", "id": "web_search" }],
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "unknown provider option",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": { "zai": { "max_tokens": 10 } },
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "thinking disabled",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": { "zai": { "thinking": { "type": "disabled" } } },
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "responseFormat present without hosted transform",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": { "type": "json" },
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    },
+    {
+      "name": "maxOutputTokens not a safe positive integer",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 0
+      }
+    },
+    {
+      "name": "non-integral float in tool schema (JS/Python formatting differ)",
+      "projection": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }],
+        "tools": [
+          { "type": "function", "name": "f", "inputSchema": { "type": "number", "minimum": 0.5 } }
+        ],
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
+    }
   ],
   "monotonic": [
     {
       "name": "longer user text strictly increases the bound",
-      "smaller": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "a" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 },
-      "larger": { "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }] }], "tools": null, "toolChoice": null, "responseFormat": null, "providerOptions": null, "maxOutputTokens": 64 }
+      "smaller": {
+        "prompt": [{ "role": "user", "content": [{ "type": "text", "text": "a" }] }],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      },
+      "larger": {
+        "prompt": [
+          {
+            "role": "user",
+            "content": [{ "type": "text", "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
+          }
+        ],
+        "tools": null,
+        "toolChoice": null,
+        "responseFormat": null,
+        "providerOptions": null,
+        "maxOutputTokens": 64
+      }
     }
   ]
 }
