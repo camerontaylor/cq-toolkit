@@ -1153,7 +1153,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
             controller.abort();
             return new MockLanguageModelV4({
               modelId: 'claude-test',
-              doGenerate: () => {
+              doGenerate: async () => {
                 generateCalls += 1;
                 return textResult('ok');
               },

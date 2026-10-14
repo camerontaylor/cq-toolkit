@@ -497,17 +497,20 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
 });
 
 // ---------------------------------------------------------------------------
-// 6. Systematic entry-guard sweep (owner 15:30): ONE table over every lane
-//    (direct + factory) x (strict-capability refusal + pre-abort), with a
-//    recording+throwing setup seam proving ZERO setup side effect, the
-//    SPECIFIC guard/capability message, and no session store. Nonstrict
-//    controls per lane. The ai-sdk rows include the DEFAULT provider registry
-//    (not only a mock providers override). Every leg also pins
-//    ANTHROPIC_API_KEY to the empty string, so a reached credential/env setup
-//    would surface its own key error rather than the refusal phrase.
+// 6. ONE systematic entry-guard SUITE (owner 15:30): a 3-lane table for the
+//    UNSUPPORTED lanes (subprocess / claude-agent / acp) x (direct + factory)
+//    x (strict-capability refusal + pre-abort), PLUS explicit ai-sdk cases
+//    (injected mock provider factory: direct + factory; the DEFAULT registry:
+//    an honest key-guard pair) — not ai-sdk table rows. Every strict/pre-abort
+//    leg uses a REAL recording setup seam or inner-lane prototype.run spy
+//    proving ZERO setup side effect, asserts the SPECIFIC guard/capability
+//    message, and pins no session store. Nonstrict controls pin each lane's own
+//    setup fault/reach. Every leg pins ANTHROPIC_API_KEY to the empty string,
+//    so a reached credential/env setup would surface its own key error rather
+//    than the refusal phrase.
 // ---------------------------------------------------------------------------
 
-describe('entry guards precede every lane setup side effect (systematic sweep)', () => {
+describe('entry guards precede every lane setup side effect (systematic suite)', () => {
   const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const STRICT_BUDGET: OpInvocation['budget'] = {
     strictTokenBudget: { maxInputTokens: 1000, reserveOutputTokens: 64 },
