@@ -9,7 +9,7 @@ import { describe, expect, test } from 'vitest';
 import { generateText } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { APICallError } from '@ai-sdk/provider';
-import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
+import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   isPreRequestCeilingRefusal,
   PreRequestCeiling,
@@ -57,6 +57,19 @@ function firstTextPart(params: { prompt: unknown }): { text: string } {
     throw new Error('probe prompt has no text part');
   }
   return part as { text: string };
+}
+
+/**
+ * A deliberately JSON-INVALID providerOptions payload for the fail-closed
+ * legs only (a cycle, a bigint, a function). The RUNTIME guard — the
+ * fail-closed serializer or structuredClone — is what must reject it; this
+ * narrow, test-only assertion is how a JSON-invalid value reaches that guard.
+ * Never used for a fixture that is expected to serialize.
+ */
+function invalidProviderOptions(
+  value: unknown,
+): NonNullable<LanguageModelV4CallOptions['providerOptions']> {
+  return value as NonNullable<LanguageModelV4CallOptions['providerOptions']>;
 }
 
 function mockUsage(): LanguageModelV4GenerateResult['usage'] {
@@ -159,7 +172,7 @@ describe('serializeRequestForCounting', () => {
     expect(() =>
       serializeRequestForCounting({
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        providerOptions: { provider: cyclic },
+        providerOptions: invalidProviderOptions({ provider: cyclic }),
       }),
     ).toThrow(UnrepresentableRequestError);
   });
@@ -168,13 +181,13 @@ describe('serializeRequestForCounting', () => {
     expect(() =>
       serializeRequestForCounting({
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        providerOptions: { provider: { n: 1n } },
+        providerOptions: invalidProviderOptions({ provider: { n: 1n } }),
       }),
     ).toThrow(UnrepresentableRequestError);
     expect(() =>
       serializeRequestForCounting({
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        providerOptions: { provider: { fn: () => 1 } },
+        providerOptions: invalidProviderOptions({ provider: { fn: () => 1 } }),
       }),
     ).toThrow(UnrepresentableRequestError);
   });
@@ -191,7 +204,7 @@ describe('PreRequestCeiling (unit)', () => {
       withOutputCeiling: (params, reserveOutputTokens) => ({
         ...params,
         maxOutputTokens: reserveOutputTokens,
-        providerOptions: { injected: marker },
+        providerOptions: { injected: { marker } },
       }),
     });
     const ceiling = new PreRequestCeiling({
@@ -207,7 +220,7 @@ describe('PreRequestCeiling (unit)', () => {
       serializeRequestForCounting({
         ...params,
         maxOutputTokens: 64,
-        providerOptions: { injected: marker },
+        providerOptions: { injected: { marker } },
       }),
       'utf8',
     );
@@ -290,7 +303,7 @@ describe('PreRequestCeiling (unit)', () => {
     const err = await refusalFrom(() =>
       ceiling.reserve({
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        providerOptions: { provider: cyclic },
+        providerOptions: invalidProviderOptions({ provider: cyclic }),
       }),
     );
     expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
@@ -461,7 +474,7 @@ describe('PreRequestCeiling (unit)', () => {
     const err = await refusalFrom(() =>
       ceiling.reserve({
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
-        providerOptions: { provider: { fn: () => 1 } },
+        providerOptions: invalidProviderOptions({ provider: { fn: () => 1 } }),
       }),
     );
     expect(reasonOfRefusal(err)).toBe('unrepresentable-request');
