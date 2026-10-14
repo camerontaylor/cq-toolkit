@@ -47,6 +47,15 @@ class FakeTransport implements CrqWireTransport {
   public outcomes: Readonly<Record<string, unknown>>[] = [];
   private attempts = 0;
   public stopNext: string | null = null;
+  public holdNextReserve = false;
+  public reserveCalls = 0;
+  private releaseNext: (() => void) | null = null;
+
+  /** Release a reserve held by `holdNextReserve` (the deferred-concurrency gate). */
+  unblock(): void {
+    this.releaseNext?.();
+    this.releaseNext = null;
+  }
 
   async attestHost(): Promise<boolean> {
     this.calls.push('attest');
@@ -69,6 +78,13 @@ class FakeTransport implements CrqWireTransport {
   ): Promise<CrqWireAck | { refused: string }> {
     this.calls.push('reserve');
     this.lastReserve = message;
+    this.reserveCalls += 1;
+    if (this.holdNextReserve) {
+      this.holdNextReserve = false;
+      await new Promise<void>((resolve) => {
+        this.releaseNext = resolve;
+      });
+    }
     if (this.refuseNext) return { refused: 'the host refused the durable reservation' };
     const base: CrqWireAck = {
       method: 'reserved',
@@ -112,6 +128,9 @@ const usage: CrqWireUsage = {
   reasoning: 10,
   total: 950,
 };
+
+/** Let the microtask queue drain, so a held reserve really reaches the transport. */
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 function wrapper(
   transport: FakeTransport,
@@ -407,5 +426,25 @@ describe('CrqWireWrapper', () => {
     // The status belongs to ack 1; the NEW ack 2 is pending, so the stage must refuse it.
     expect(second.ackSequence).toBe(first.ackSequence + 1);
     expect(() => wire.enterRepairStage()).toThrow(/no recorded outcome/);
+  });
+
+  it('refuses a second reserve interleaved before the first host reserve resolves', async () => {
+    const transport = new FakeTransport();
+    transport.holdNextReserve = true;
+    const wire = wrapper(transport);
+    const first = wire.reserve();
+    await flush();
+    // The first reserve is still awaiting the host, so the second must be refused
+    // BEFORE it can reach the transport and race the ACK pairing.
+    await expect(wire.reserve()).rejects.toThrow(/already in flight/);
+    expect(transport.reserveCalls).toBe(1);
+    transport.unblock();
+    const ack = await first;
+    expect(transport.reserveCalls).toBe(1);
+    // Close the first wire's outcome so the local gate admits the next send.
+    await wire.outcome('completed', usage, 'end_turn', null);
+    const second = await wire.reserve();
+    expect(transport.reserveCalls).toBe(2);
+    expect(second.ackSequence).toBeGreaterThan(ack.ackSequence);
   });
 });

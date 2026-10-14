@@ -244,6 +244,8 @@ export class CrqWireWrapper {
   /** The approved ONE bounded repair stage: active, or completed for this role attempt. */
   private repairStageActive = false;
   private repairStageCompleted = false;
+  /** True while a durable reserve is in flight; no second ACK pairing may interleave. */
+  private reserving = false;
 
   constructor(options: CrqWireWrapperOptions) {
     this.options = options;
@@ -341,66 +343,84 @@ export class CrqWireWrapper {
         'the CRQ wire requires an injected canonical encoder and an authenticated transport',
       );
     }
-    const sessionId = await this.session();
-    // LOCAL GATE: a new send is refused locally unless the prior wire's outcome was ACCEPTED.
-    // An unknown, refused or still-pending prior wire is terminal for local continuation.
-    if (this.lastAck !== null && this.outcomeStatus.get(this.lastAck.ackSequence) !== 'completed') {
-      throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
+    // The lock is taken BEFORE the first await: session establishment and the durable
+    // reserve are ONE critical section, so two interleaved reserves can never both
+    // pass the local gate and race the ACK pairing (lastAck/messageId). A public or
+    // helper wrapper may be called from anywhere, so it never relies on its caller's
+    // discipline for this.
+    if (this.reserving) {
+      throw new CrqWireRefusal(
+        'a durable reservation is already in flight; refusing a concurrent reserve',
+      );
     }
-    const envelope = bridgeEnvelope(encoder, projection(), provider, model);
-    const messageId = this.messageId + 1;
-    const supersedes = this.lastAck === null ? 0 : this.lastAck.ackSequence;
-    // Inside the repair stage the wrapper (never the driver) supplies the lifecycle link:
-    // the repair supersedes and repairs the wrapper's own last authoritative ack.
-    const repairing = this.repairStageActive && this.lastAck !== null;
-    const message = {
-      method: 'reserve',
-      session_id: sessionId,
-      message_id: messageId,
-      job: identity.job,
-      source_sha: identity.sourceSha,
-      finding_sha256: identity.findingSha256,
-      authorization_sha256: identity.authorizationSha256,
-      role: identity.role,
-      rung: identity.rung,
-      window: identity.window,
-      driver: 'cq',
-      provider,
-      model,
-      // The logical attempt identity IS the host-issued positive attempt_ref;
-      // there is no client-manufactured logical_attempt_id and no wire_ordinal
-      // (the host owns the wire ordinal).
-      attempt_ref: this.attemptRef,
-      supersedes_ack_sequence: supersedes,
-      kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
-      envelope,
-      wire_output_ceiling: envelope.countedInput + 1,
-      repair_of_ack_sequence: repairing ? (this.lastAck?.ackSequence ?? null) : null,
-    };
-    const reply = await transport.reserve(message);
-    if (!('ackSequence' in reply)) {
-      throw new CrqWireRefusal(`the host refused the wire: ${reply.refused}`);
+    this.reserving = true;
+    try {
+      const sessionId = await this.session();
+      // LOCAL GATE: a new send is refused locally unless the prior wire's outcome was ACCEPTED.
+      // An unknown, refused or still-pending prior wire is terminal for local continuation.
+      if (
+        this.lastAck !== null &&
+        this.outcomeStatus.get(this.lastAck.ackSequence) !== 'completed'
+      ) {
+        throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
+      }
+      const envelope = bridgeEnvelope(encoder, projection(), provider, model);
+      const messageId = this.messageId + 1;
+      const supersedes = this.lastAck === null ? 0 : this.lastAck.ackSequence;
+      // Inside the repair stage the wrapper (never the driver) supplies the lifecycle link:
+      // the repair supersedes and repairs the wrapper's own last authoritative ack.
+      const repairing = this.repairStageActive && this.lastAck !== null;
+      const message = {
+        method: 'reserve',
+        session_id: sessionId,
+        message_id: messageId,
+        job: identity.job,
+        source_sha: identity.sourceSha,
+        finding_sha256: identity.findingSha256,
+        authorization_sha256: identity.authorizationSha256,
+        role: identity.role,
+        rung: identity.rung,
+        window: identity.window,
+        driver: 'cq',
+        provider,
+        model,
+        // The logical attempt identity IS the host-issued positive attempt_ref;
+        // there is no client-manufactured logical_attempt_id and no wire_ordinal
+        // (the host owns the wire ordinal).
+        attempt_ref: this.attemptRef,
+        supersedes_ack_sequence: supersedes,
+        kind: repairing ? 'repair' : identity.role.startsWith('judge') ? 'judge' : 'fixer',
+        envelope,
+        wire_output_ceiling: envelope.countedInput + 1,
+        repair_of_ack_sequence: repairing ? (this.lastAck?.ackSequence ?? null) : null,
+      };
+      const reply = await transport.reserve(message);
+      if (!('ackSequence' in reply)) {
+        throw new CrqWireRefusal(`the host refused the wire: ${reply.refused}`);
+      }
+      if (
+        reply.messageId !== messageId ||
+        reply.attemptRef !== this.attemptRef ||
+        typeof reply.wireOrdinal !== 'string' ||
+        reply.wireOrdinal.length === 0 ||
+        typeof reply.ackSequence !== 'number' ||
+        reply.ackSequence < 1
+      ) {
+        throw new CrqWireRefusal('the host acknowledgement does not bind this message');
+      }
+      if (
+        typeof reply.remainingMilliseconds !== 'number' ||
+        !Number.isInteger(reply.remainingMilliseconds) ||
+        reply.remainingMilliseconds <= 0
+      ) {
+        throw new CrqWireRefusal('the host acknowledgement carries no usable remaining time');
+      }
+      this.messageId = messageId;
+      this.lastAck = reply;
+      return reply;
+    } finally {
+      this.reserving = false;
     }
-    if (
-      reply.messageId !== messageId ||
-      reply.attemptRef !== this.attemptRef ||
-      typeof reply.wireOrdinal !== 'string' ||
-      reply.wireOrdinal.length === 0 ||
-      typeof reply.ackSequence !== 'number' ||
-      reply.ackSequence < 1
-    ) {
-      throw new CrqWireRefusal('the host acknowledgement does not bind this message');
-    }
-    if (
-      typeof reply.remainingMilliseconds !== 'number' ||
-      !Number.isInteger(reply.remainingMilliseconds) ||
-      reply.remainingMilliseconds <= 0
-    ) {
-      throw new CrqWireRefusal('the host acknowledgement carries no usable remaining time');
-    }
-    this.messageId = messageId;
-    this.lastAck = reply;
-    return reply;
   }
 
   /**
