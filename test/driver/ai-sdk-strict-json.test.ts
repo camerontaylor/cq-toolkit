@@ -934,7 +934,9 @@ describe('strict-JSON strategy: the GLM text-only capability on the driver path'
       expect(() => glm.count(JSON.stringify(withFormat))).toThrow(UnboundedGlmRequestShape);
       // The refusal is the profile's OWN refusal, not a missing-field accident:
       // the unmodified document still counts.
-      expect(() => glm.count(JSON.stringify({ ...projection, responseFormat: null }))).not.toThrow();
+      expect(() =>
+        glm.count(JSON.stringify({ ...projection, responseFormat: null })),
+      ).not.toThrow();
     } finally {
       await fx.cleanup();
     }
@@ -977,7 +979,9 @@ class StoppingTransport implements CrqWireTransport {
     return { sessionId: 'stop-session', attemptRef: 3, remainingMilliseconds: 600_000 };
   }
 
-  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+  async reserve(
+    message: Readonly<Record<string, unknown>>,
+  ): Promise<CrqWireAck | { refused: string }> {
     const envelope = message['envelope'];
     if (!isRecord(envelope)) {
       throw new CrqWireRefusal('the fixture requires an envelope object');

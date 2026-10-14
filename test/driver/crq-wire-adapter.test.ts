@@ -34,7 +34,9 @@ import {
 import type { WireReservation } from '../../src/driver/ai-sdk/pre-request-ceiling.js';
 
 /** The minimal V4 call options both composed lanes accept. */
-const PROMPT_CALL = { prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'q' }] }] };
+const PROMPT_CALL = {
+  prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'q' }] }],
+};
 
 const GLM_INPUT: GlmCapabilityInput = {
   provider: 'zai',
@@ -105,10 +107,16 @@ class FakeTransport implements CrqWireTransport {
 
   async hello(): Promise<{ sessionId: string; attemptRef: number; remainingMilliseconds: number }> {
     this.hellos += 1;
-    return { sessionId: `session-${String(this.hellos)}`, attemptRef: this.hellos, remainingMilliseconds: 600_000 };
+    return {
+      sessionId: `session-${String(this.hellos)}`,
+      attemptRef: this.hellos,
+      remainingMilliseconds: 600_000,
+    };
   }
 
-  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+  async reserve(
+    message: Readonly<Record<string, unknown>>,
+  ): Promise<CrqWireAck | { refused: string }> {
     this.reserved += 1;
     this.lastReserve = message;
     return {
@@ -168,7 +176,11 @@ describe('composed strict lane + GLM text-only capability', () => {
   it('composes the real GLM capability with the CRQ adapter without an index', async () => {
     const capability = createGlmTextCapability(GLM_INPUT, GLM_ATTESTATION);
     expect(capability).toBeDefined();
-    const adapter = createCrqWireAdapter({ identity: IDENTITY, provider: 'zai', model: 'glm-5.3-flash' });
+    const adapter = createCrqWireAdapter({
+      identity: IDENTITY,
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+    });
     const transport = new FakeTransport();
     const composed = createCrqWireAdapter({
       identity: IDENTITY,
@@ -243,7 +255,9 @@ describe('composed strict lane + GLM text-only capability', () => {
     });
     const counter = { fetches: 0 };
     const wrapped = adapter.wrapModel(countingModel(counter));
-    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(/no acknowledged wire is pending/);
+    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(
+      /no acknowledged wire is pending/,
+    );
     expect(counter.fetches).toBe(0);
     expect(transport.reserved).toBe(0);
   });
@@ -277,9 +291,7 @@ describe('composed strict lane + GLM text-only capability', () => {
     // The transport answers `stopped: null` (a LYING/incorrectly permissive reply).
     // The LOCALLY computed unknown is its own refusal: no accepted payload escapes,
     // the charge is kept and the outcome was reported exactly once.
-    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(
-      /not an accepted payload/,
-    );
+    await expect(wrapped.doGenerate(PROMPT_CALL)).rejects.toThrow(/not an accepted payload/);
     expect(counter.fetches).toBe(1);
     expect(transport.outcomes).toHaveLength(1);
     expect(transport.outcomes[0]?.['outcome']).toBe('unknown');
@@ -400,7 +412,9 @@ class StrictTransport implements CrqWireTransport {
     return { sessionId: 'strict-session', attemptRef: 7, remainingMilliseconds: 600_000 };
   }
 
-  async reserve(message: Readonly<Record<string, unknown>>): Promise<CrqWireAck | { refused: string }> {
+  async reserve(
+    message: Readonly<Record<string, unknown>>,
+  ): Promise<CrqWireAck | { refused: string }> {
     this.reserveCalls += 1;
     assertExactKeys(message, RESERVE_KEYS, 'reserve');
     if (typeof message['session_id'] !== 'string' || message['session_id'] !== 'strict-session') {

@@ -278,13 +278,20 @@ export {
 // First-party driver + price map (T1.4) — re-export only, no logic: the
 // in-process ai-sdk driver on the frozen seam, and the models.dev-derived
 // price map behind the derived-only costUSD rule.
-export type { AiSdkDriverOptions, ProviderFactory, StrictTokenWireAdapter } from './driver/ai-sdk/index.js';
+export type {
+  AiSdkDriverOptions,
+  ProviderFactory,
+  StrictTokenWireAdapter,
+} from './driver/ai-sdk/index.js';
 export { AiSdkDriver } from './driver/ai-sdk/index.js';
 // The composed CRQ per-wire adapter (C2 composition): the ONE operator-injected
 // object the strict wire seam accepts. `createCrqWireAdapter` builds it from the
 // caller's authenticated transport, so the loose reserve/stage/wrap pieces never
 // have to be assembled by a deployment. Re-export only, no logic.
-export { createCrqWireAdapter, type CrqWireAdapterOptions } from './driver/ai-sdk/crq-wire-adapter.js';
+export {
+  createCrqWireAdapter,
+  type CrqWireAdapterOptions,
+} from './driver/ai-sdk/crq-wire-adapter.js';
 export { CrqWireRefusal } from './driver/ai-sdk/crq-wire-wrapper.js';
 // The strict pre-request ceiling's CANONICAL cross-language bridge — the one
 // surface an out-of-process wrapper/ledger needs: the durable pre-wire receipt

@@ -481,9 +481,7 @@ export class CrqWireWrapper {
       throw new CrqWireRefusal('the host outcome reply is not an outcome frame');
     }
     if (reply.outcome !== kind) {
-      throw new CrqWireRefusal(
-        'the host outcome reply does not echo the reported outcome kind',
-      );
+      throw new CrqWireRefusal('the host outcome reply does not echo the reported outcome kind');
     }
     if (
       reply.sessionId !== this.sessionId ||

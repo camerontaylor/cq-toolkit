@@ -47,7 +47,10 @@ import { wrapLanguageModel } from 'ai';
 import type { LanguageModel, LanguageModelMiddleware } from 'ai';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import type { StrictTokenRepairStage, StrictTokenWireAdapter } from './index.js';
-import { canonicalProjectionDigestOf, CANONICAL_PROJECTION_PROTOCOL } from './canonical-projection.js';
+import {
+  canonicalProjectionDigestOf,
+  CANONICAL_PROJECTION_PROTOCOL,
+} from './canonical-projection.js';
 import type { WireReservation } from './pre-request-ceiling.js';
 import {
   CrqWireRefusal,
@@ -154,7 +157,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('the receipt canonical bytes exceed the bounded document size');
     }
     if (!HEX_LOWER_EVEN.test(bytesHex) || !DIGEST_HEX.test(digest)) {
-      throw new CrqWireRefusal('the receipt canonical bytes/digest are not a bounded lowercase hex document');
+      throw new CrqWireRefusal(
+        'the receipt canonical bytes/digest are not a bounded lowercase hex document',
+      );
     }
     // The digest is verified over the BYTES; the host's strict canonical decode
     // remains the domain authority — no parallel TS decoder is added here.
@@ -169,7 +174,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     if (sessionId !== null && attemptRef !== null) return { sessionId, attemptRef };
     const attested = await transport.attestHost();
     if (attested !== true) {
-      throw new CrqWireRefusal('the transport could not independently attest the host peer; refusing');
+      throw new CrqWireRefusal(
+        'the transport could not independently attest the host peer; refusing',
+      );
     }
     const ready = await transport.hello(identity, provider, model);
     if (typeof ready.sessionId !== 'string' || ready.sessionId.length === 0) {
@@ -201,10 +208,14 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     // durable reserve are one critical section, so two interleaved reserves can
     // never both pass the state checks and overwrite each other's ack.
     if (reserving) {
-      throw new CrqWireRefusal('a durable reservation is already in flight; refusing a concurrent reserve');
+      throw new CrqWireRefusal(
+        'a durable reservation is already in flight; refusing a concurrent reserve',
+      );
     }
     if (sendInFlight) {
-      throw new CrqWireRefusal('a provider send is already in flight; refusing a concurrent reserve');
+      throw new CrqWireRefusal(
+        'a provider send is already in flight; refusing a concurrent reserve',
+      );
     }
     const canonical = validateReceiptCanonical(receipt);
     if (!Number.isSafeInteger(receipt.reserveOutputTokens) || receipt.reserveOutputTokens < 1) {
@@ -287,7 +298,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         throw new CrqWireRefusal('the host ack sequence is not monotonic');
       }
       if (!Number.isSafeInteger(reply.reservationSequence) || reply.reservationSequence < 1) {
-        throw new CrqWireRefusal('the host acknowledgement carries no positive reservation sequence');
+        throw new CrqWireRefusal(
+          'the host acknowledgement carries no positive reservation sequence',
+        );
       }
       if (lastAck !== null && reply.reservationSequence <= lastAck.reservationSequence) {
         throw new CrqWireRefusal('the host reservation sequence is not monotonic');
@@ -357,9 +370,7 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       throw new CrqWireRefusal('the host outcome reply is not an outcome frame');
     }
     if (reply.outcome !== kind) {
-      throw new CrqWireRefusal(
-        'the host outcome reply does not echo the reported outcome kind',
-      );
+      throw new CrqWireRefusal('the host outcome reply does not echo the reported outcome kind');
     }
     if (
       reply.sessionId !== sessionId ||
@@ -377,7 +388,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
     enterRepairStage(): void {
       if (repairStageActive) return;
       if (repairStageCompleted) {
-        throw new CrqWireRefusal('a second completed repair stage is not permitted for this role attempt');
+        throw new CrqWireRefusal(
+          'a second completed repair stage is not permitted for this role attempt',
+        );
       }
       if (lastAck === null) {
         throw new CrqWireRefusal('no authoritative prior ack to repair; refusing the repair stage');
@@ -387,7 +400,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         throw new CrqWireRefusal('the prior ack has no recorded outcome (pending or unaudited)');
       }
       if (status !== 'completed') {
-        throw new CrqWireRefusal(`the prior wire outcome is ${status}; a repair stage requires an ACCEPTED outcome`);
+        throw new CrqWireRefusal(
+          `the prior wire outcome is ${status}; a repair stage requires an ACCEPTED outcome`,
+        );
       }
       repairStageActive = true;
     },
@@ -412,7 +427,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
       // BELOW the ceiling: invoked only for an ACTUAL provider attempt.
       wrapGenerate: async ({ doGenerate }) => {
         if (pendingAck === null) {
-          throw new CrqWireRefusal('no acknowledged wire is pending; refusing to call the provider');
+          throw new CrqWireRefusal(
+            'no acknowledged wire is pending; refusing to call the provider',
+          );
         }
         if (sendInFlight) {
           throw new CrqWireRefusal('a provider send is already in flight');
@@ -427,7 +444,12 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
           // propagates with the pending ack already closed (no second report). The
           // ORIGINAL provider error is preserved: a host stop reported alongside a
           // provider failure never replaces the provider's own error here.
-          await reportOutcomeOnce('unknown', null, null, err instanceof Error ? err.name : 'unknown');
+          await reportOutcomeOnce(
+            'unknown',
+            null,
+            null,
+            err instanceof Error ? err.name : 'unknown',
+          );
           throw err;
         }
         sendInFlight = false;
@@ -467,7 +489,9 @@ export function createCrqWireAdapter(options: CrqWireAdapterOptions): StrictToke
         if (pendingAck !== null) {
           await reportOutcomeOnce('refused', null, 'no-send', null);
         }
-        throw new CrqWireRefusal('the CRQ wire adapter does not support streaming; refusing before dispatch');
+        throw new CrqWireRefusal(
+          'the CRQ wire adapter does not support streaming; refusing before dispatch',
+        );
       },
     };
     return wrapLanguageModel({ model, middleware });
