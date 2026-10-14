@@ -222,18 +222,26 @@ describe('strict-JSON strategy: the wire carries no hosted structured output', (
       // `Output.object` is what would put a json schema on `responseFormat`.
       expect(params.responseFormat).toBeUndefined();
       // ... and the driver never even ASKED for it: the call carried no
-      // `output`, and its last message is the restated contract.
+      // `output`, and its last message is the restated contract. This layer is
+      // the driver's OWN args, so the content is the raw string it composed.
       const mainArgs = generateTextArgsFromEnd(0);
       expect(mainArgs.output).toBeUndefined();
       const mainTurns = mainArgs.messages ?? [];
       expect(mainTurns[mainTurns.length - 1]?.content).toBe(expectedContract());
 
-      // (2) The contract + schema are the LAST counted prompt turn, byte-exact.
+      // (2) The contract + schema are the LAST counted prompt turn. On the WIRE
+      // the SDK has normalized a user turn's string content into V4 content
+      // PARTS, so the exact part shape, its exact types and the exact text bytes
+      // are asserted (toEqual, no String() coercion and no cast); the schema
+      // JSON is inside that text, which the second assertion states on the WIRE
+      // value with an asymmetric matcher.
       const turns = promptTurns(params);
       const last = turns[turns.length - 1];
       expect(last?.role).toBe('user');
-      expect(last?.content).toBe(expectedContract());
-      expect(String(last?.content)).toContain(SCHEMA_JSON);
+      expect(last?.content).toEqual([{ type: 'text', text: expectedContract() }]);
+      expect(last?.content).toEqual([
+        { type: 'text', text: expect.stringContaining(SCHEMA_JSON) },
+      ]);
 
       // (3) The byte ceiling measured that text: the counted serialization
       // carries the JSON-escaped schema bytes the capability was handed.
@@ -304,10 +312,16 @@ describe('strict-JSON strategy: the repair is one extra CHARGED send', () => {
       // call, offset 0 = the repair).
       expect(generateTextArgsFromEnd(1).output).toBeUndefined();
       expect(generateTextArgsFromEnd(0).output).toBeUndefined();
-      // ... and its prompt restates the SAME contract.
+      // ... and its prompt restates the SAME contract, on the WIRE as ONE
+      // normalized text part whose bytes are the established repair wording plus
+      // the contract (exact shape, exact types, exact bytes; no coercion).
+      const expectedRepairText =
+        `Your previous reply did not satisfy the required JSON contract. ` +
+        expectedContract();
       const repairTurns = promptTurns(sent(fx.wire, 1));
       const repairLast = repairTurns[repairTurns.length - 1];
-      expect(String(repairLast?.content)).toContain(expectedContract());
+      expect(repairLast?.role).toBe('user');
+      expect(repairLast?.content).toEqual([{ type: 'text', text: expectedRepairText }]);
 
       // USAGE KEEPS BOTH CALLS: 100 + 40 in, 5 + 7 out.
       expect(result.usage.input).toBe(140);
