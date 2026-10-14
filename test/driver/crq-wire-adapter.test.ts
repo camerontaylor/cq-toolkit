@@ -248,12 +248,15 @@ describe('composed strict lane + GLM text-only capability', () => {
 
     // The negative leg: the strict lane's count step runs BEFORE the wire reserve,
     // and a non-null responseFormat makes it refuse (the publisher template renders
-    // no schema instruction and NO opaque transform is accepted).
+    // no schema instruction and NO opaque transform is accepted). The count step and
+    // the reserve are one AWAITED sequence, so the refusal is observed on the real
+    // promise (no floating promise and no void escape).
     const refused = projectionWith({ type: 'json', schema: { type: 'object' } });
-    expect(() => {
+    const negative = (async () => {
       capability?.count(JSON.stringify(refused));
-      void adapter.reserve(receiptFor(refused));
-    }).toThrow(UnboundedGlmRequestShape);
+      await adapter.reserve(receiptFor(refused));
+    })();
+    await expect(negative).rejects.toThrow(UnboundedGlmRequestShape);
     // Nothing was reserved for the refused projection and no fetch happened.
     expect(transport.reserved).toBe(1);
     expect(counter.fetches).toBe(1);
