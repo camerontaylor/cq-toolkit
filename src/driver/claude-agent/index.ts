@@ -263,6 +263,7 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
@@ -464,6 +465,14 @@ export class ClaudeAgentDriver implements Driver {
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
+
+    // --- Strict-budget honesty: this lane has no pre-request token ceiling,
+    // so a `Budget.strictTokenBudget` request must be REFUSED here (a
+    // pre-dispatch 'config' failure) rather than silently ignored. After the
+    // governed-cancellation check (I8), before any session, credential read or
+    // dispatch. Covers DIRECT construction; the factory's resolved-driver
+    // guard covers the factory path.
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-agent');
 
     // --- Structured-output preflight (PR #238 review round 2): the schema
     // document is caller-authored plain data — compile it BEFORE the agent

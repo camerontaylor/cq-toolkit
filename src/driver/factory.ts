@@ -41,6 +41,7 @@ import type { AiSdkDriverOptions } from './ai-sdk/index.js';
 import { ClaudeAgentDriver } from './claude-agent/index.js';
 import type { ClaudeAgentDriverOptions } from './claude-agent/index.js';
 import { DispatchError } from './errors.js';
+import { assertStrictTokenBudgetSupported } from './common/strict-budget.js';
 import type { PerMillionRates } from './pricing/index.js';
 import { withServedModelAssertion } from './served-model.js';
 import { LANE_IDS, type LaneId, type ServedModelPolicy } from './served-model.js';
@@ -348,6 +349,25 @@ export function withReapOnSettle(driver: Driver, sessionsDir: string): Driver {
   };
 }
 
+/**
+ * Refuse a strict pre-request token budget on any resolved lane that does not
+ * enforce it, BEFORE the lane runs (no session, no credential read, no spawn).
+ * The lane id is bound at resolve time; the check reads the REAL invocation
+ * budget at run time (a `DriverRequest` carries no Budget). `RunOptions` —
+ * signal and reservation — is forwarded to the inner driver unchanged. The
+ * ai-sdk lane passes through: it enforces the ceiling itself and refuses when
+ * no trusted capability is injected. `maxUsd` is untouched (advisory, as
+ * before).
+ */
+export function withStrictTokenBudgetGuard(driver: Driver, lane: LaneId): Driver {
+  return {
+    async run(invocation, options): Promise<WorkerResult> {
+      assertStrictTokenBudgetSupported(invocation.budget, lane);
+      return driver.run(invocation, options);
+    },
+  };
+}
+
 /** Create a driver factory over the given (optional) configuration. */
 export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFactory {
   // The alias sink resolves ONCE per factory (PR #238 review P2): a caller
@@ -380,10 +400,13 @@ export function createDriverFactory(config: DriverFactoryConfig = {}): DriverFac
           ? withReapOnSettle(inner, sessionsDirFor(lane, config))
           : inner;
       return {
-        driver: withServedModelAssertion(reaping, {
+        driver: withStrictTokenBudgetGuard(
+          withServedModelAssertion(reaping, {
+            lane,
+            ...(config.servedModel !== undefined ? { policy: config.servedModel } : {}),
+          }),
           lane,
-          ...(config.servedModel !== undefined ? { policy: config.servedModel } : {}),
-        }),
+        ),
         lane,
         modelSpec,
       };

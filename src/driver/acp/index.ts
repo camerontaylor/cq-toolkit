@@ -264,6 +264,7 @@ import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
 import { boundedErrorText, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
+import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { validateStructured } from '../common/structured.js';
 import { buildChildEnv } from '../subprocess/process.js';
@@ -861,6 +862,14 @@ export class AcpDriver implements Driver {
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
+
+    // --- Strict-budget honesty: this lane has no pre-request token ceiling,
+    // so a `Budget.strictTokenBudget` request must be REFUSED here (a
+    // pre-dispatch 'config' failure) rather than silently ignored. After the
+    // governed-cancellation check (I8), before the user-turn append, any
+    // session or the spawn. Covers DIRECT construction; the factory's
+    // resolved-driver guard covers the factory path.
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'acp');
 
     // --- I6 isolation / §2.4 workspace table: a fresh record — created in
     // the bound workspace when one is set, else in a fresh temp workspace —
