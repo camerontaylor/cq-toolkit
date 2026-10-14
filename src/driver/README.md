@@ -152,6 +152,22 @@ rather than claim a per-invocation bound as a whole-job one. The
 CRQ vectors at union `a13c6e4c`, where the Python reproduction test passed under
 an independent runner. On this head the TypeScript side is NOT executed in-lane
 and the pair has no independent review, so no interoperability is claimed.
+
+Strict-JSON strategy (owner decision, 2026-10-15): when an invocation opts into
+`Budget.strictTokenBudget` the lane sends TEXT-ONLY structured output. It does
+NOT hand the schema to the SDK's `Output.object`, because that puts the schema on
+the wire as a HOSTED `responseFormat` (response_format/json_schema) whose
+provider behaviour is unproven — and the strict profile refuses a non-null
+`responseFormat` at all. Instead the SAME JSON Schema plus the output contract
+ride the COUNTED prompt text, so the pre-request byte ceiling measures those
+bytes and the canonical projection binds them, and the reply is parsed LOCALLY
+(one JSON document, no fence stripping) and judged by the SAME shared validator
+the non-strict path uses. A parse or validation failure settles through the
+existing bounded one-repair flow, whose repair send is likewise text-only and is
+separately charged through the same pre-wire reservation bridge. The explicit
+strict-budget opt-in IS the selector — no model-name flag, no capability-factory
+switch, no attestation gate. Non-strict lanes keep `Output.object` and the lazy
+`result.output` path unchanged.
 The one driver-side temporal bound is the SDK call's per-request
 `timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS }` (120 s) — NOT a run deadline,
 but a bound on each step of the tool loop so a hung HTTP request cannot

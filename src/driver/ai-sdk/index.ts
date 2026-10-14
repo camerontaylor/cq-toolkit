@@ -116,6 +116,21 @@
 // provider cause and skips the repair (a repair call cannot fix a provider
 // failure).
 //
+// C7 STRICT-JSON VARIANT (owner decision, 2026-10-15): when the invocation
+// opts into `Budget.strictTokenBudget` the strict lane does NOT use the SDK
+// structured-output channel at all — no `Output.object`, so no HOSTED
+// `responseFormat` (response_format/json_schema) reaches the wire. The SAME
+// JSON Schema and the output contract instead ride the COUNTED prompt text (an
+// extra user turn, so the pre-request byte ceiling measures those bytes and the
+// canonical projection binds them), and the reply is parsed LOCALLY — one JSON
+// document, no fence stripping, no prose scavenging — and judged by the SAME
+// shared validator. A parse or validation failure takes the SAME bounded
+// one-repair path; that repair is text-only too and is a separate, separately
+// CHARGED send through the same pre-wire reservation bridge. The strict-budget
+// opt-in IS the selector: no model-name flag, no capability-factory switch, no
+// attestation gate. Non-strict lanes keep `Output.object` and the lazy
+// `result.output` path byte-unchanged.
+//
 // USAGE MAPPING (exact ai@7.0.99 `LanguageModelUsage` fields → frozen
 // Usage): inputTokens / inputTokenDetails.noCacheTokens → input (details
 // win: non-cached input keeps cache terms from double-counting; without
@@ -554,6 +569,19 @@ export class AiSdkDriver implements Driver {
     // schema source; it normalizes to the same plain-data OutputSchema the
     // shared validator judges.
     const outputSchema = opInvocation.outputSchema;
+    // --- C7 STRICT-JSON STRATEGY: the explicit strict-budget opt-in selects
+    // TEXT-ONLY structured output (see strictJsonContract above). The contract
+    // rides its OWN user turn appended to the transcript for the main send
+    // only — the transcript itself stays as it was, so the existing repair turn
+    // below keeps its established wording instead of doubling the contract.
+    const strictJson =
+      outputSchema !== undefined && strictBudget !== undefined
+        ? strictJsonContract(outputSchema)
+        : undefined;
+    const mainMessages: ModelMessage[] =
+      strictJson === undefined
+        ? transcript
+        : [...transcript, { role: 'user' as const, content: strictJson }];
 
     // --- The one SDK call. -------------------------------------------------
     // Per-step usage accumulation (DD-2 evidence): onStepFinish fires for
@@ -568,7 +596,7 @@ export class AiSdkDriver implements Driver {
         result = await generateText({
           model,
           system,
-          messages: transcript,
+          messages: mainMessages,
           // ONE retry per step request (bounded; ≤ DEFAULT_MAX_STEPS per run)
           // (#210 Ask 1): the SDK retries ONLY its
           // retryable transient class (endpoint header timeout / network),
@@ -607,13 +635,16 @@ export class AiSdkDriver implements Driver {
             stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
           },
           ...(abortSignal !== undefined ? { abortSignal } : {}),
-          // Transport (ADR-0002 §2.3): the SDK's structured output over the
-          // EXACT plain document the schema request carried — the native
-          // `jsonSchema` wrapper, no second zod conversion. The wrapper ships
-          // no `validate`, so the SDK's own parse is parse-level; the schema
-          // judgment is `validateStructured` after settle, the same shared
-          // validator every lane runs over the same stripped document.
-          ...(outputSchema !== undefined
+          // Transport (ADR-0002 §2.3), NON-STRICT ONLY: the SDK's structured
+          // output over the EXACT plain document the schema request carried —
+          // the native `jsonSchema` wrapper, no second zod conversion. The
+          // wrapper ships no `validate`, so the SDK's own parse is parse-level;
+          // the schema judgment is `validateStructured` after settle, the same
+          // shared validator every lane runs over the same stripped document.
+          // The C7 STRICT lane (strictJson) omits this on purpose: it asks for
+          // NO hosted structured response (so no `responseFormat` reaches the
+          // wire) and restates the schema in the counted prompt text instead.
+          ...(outputSchema !== undefined && strictJson === undefined
             ? {
                 output: Output.object({
                   schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
@@ -634,6 +665,7 @@ export class AiSdkDriver implements Driver {
           return await this.settleStructuredMiss({
             outputSchema,
             rejection: `the reply carried no parseable object — ${describeError(err)}`,
+            textOnlyStructured: strictJson !== undefined,
             mainText: err.text ?? '',
             mainUsage: stepUsage,
             servedModel:
@@ -679,12 +711,28 @@ export class AiSdkDriver implements Driver {
         // schema judgment is the shared validator below, over the same
         // stripped document that was sent. Never fabricate a
         // structuredOutput, never fall through to a 'complete' verdict.
+        //
+        // The C7 STRICT lane has no SDK structured output at all, so the
+        // payload is the reply's TEXT, parsed locally with the SAME strictness
+        // (one JSON document, no fence stripping) and judged by the SAME
+        // validator below. A parse failure is the same miss shape as an SDK
+        // getter miss: it goes through settleStructuredMiss, i.e. the existing
+        // bounded one-repair flow — never a silently accepted result.
         let rejection: string | undefined;
         let parsed: unknown;
-        try {
-          parsed = result.output;
-        } catch (err) {
-          rejection = `the reply carried no parseable object — ${describeError(err)}`;
+        if (strictJson !== undefined) {
+          const local = parseStrictJsonObject(text);
+          if (local.ok) {
+            parsed = local.value;
+          } else {
+            rejection = `the reply carried no parseable object — ${local.reason}`;
+          }
+        } else {
+          try {
+            parsed = result.output;
+          } catch (err) {
+            rejection = `the reply carried no parseable object — ${describeError(err)}`;
+          }
         }
         if (rejection === undefined) {
           const validated = validateStructured(outputSchema, parsed);
@@ -700,6 +748,7 @@ export class AiSdkDriver implements Driver {
           return await this.settleStructuredMiss({
             outputSchema,
             rejection,
+            textOnlyStructured: strictJson !== undefined,
             mainText: text,
             mainUsage: usage,
             servedModel,
@@ -859,6 +908,16 @@ export class AiSdkDriver implements Driver {
     outputSchema: OutputSchema;
     /** The main call's miss reason (bounded into the verdict text). */
     rejection: string;
+    /**
+     * C7 strict lane (`Budget.strictTokenBudget`): the main send asked for NO
+     * hosted structured response, so the repair must not ask for one either and
+     * BOTH payloads are the reply TEXT parsed locally instead of the SDK's lazy
+     * `output`. `false` keeps the unchanged `Output.object` path. The repair is
+     * still a REAL, separately CHARGED send through the same pre-wire
+     * reservation bridge (its own reservation, its own canonical digest): this
+     * flag never bypasses the ceiling, it only selects the transport.
+     */
+    textOnlyStructured: boolean;
     mainText: string;
     mainUsage: Usage;
     servedModel: string | undefined;
@@ -877,6 +936,7 @@ export class AiSdkDriver implements Driver {
     const {
       outputSchema,
       rejection,
+      textOnlyStructured,
       mainText,
       mainUsage,
       servedModel,
@@ -998,8 +1058,7 @@ export class AiSdkDriver implements Driver {
         role: 'user',
         content:
           `Your previous reply did not satisfy the required JSON contract. ` +
-          `Reply with ONLY one JSON object — no prose, no code fences — that validates ` +
-          `against this JSON Schema (draft 2020-12):\n${JSON.stringify(outputSchema.schema)}`,
+          strictJsonContract(outputSchema),
       },
     ];
     let repairUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -1020,9 +1079,17 @@ export class AiSdkDriver implements Driver {
         },
         // Tool-free: NO tools key at all.
         ...(abortSignal !== undefined ? { abortSignal } : {}),
-        output: Output.object({
-          schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
-        }),
+        // NON-STRICT ONLY: the repair asks for the hosted structured response
+        // exactly as before. The strict lane omits it and parses the repair's
+        // TEXT locally (below), so no `responseFormat` reaches the wire on a
+        // repair either.
+        ...(textOnlyStructured
+          ? {}
+          : {
+              output: Output.object({
+                schema: jsonSchema(outputSchema.schema as unknown as JSONSchema7),
+              }),
+            }),
       });
       const totalUsage = addUsage(mainUsage, usageFromSdk(repair.usage));
       // The repair is a REAL model call with its OWN served-id observation,
@@ -1099,15 +1166,30 @@ export class AiSdkDriver implements Driver {
         });
       }
       // The repair's object goes through the SAME validator as the main
-      // call's — one judge, whichever call produced the payload.
+      // call's — one judge, whichever call produced the payload. The strict
+      // lane has no SDK structured output, so its payload is the repair's TEXT,
+      // parsed locally with the SAME strictness; the non-strict lane keeps the
+      // lazy `repair.output` getter path unchanged. NO accepted result without
+      // the same validator succeeding.
       let repairRejection: string | undefined;
       let repairedValue: unknown;
-      try {
-        const validated = validateStructured(outputSchema, repair.output);
-        if (validated.ok) repairedValue = validated.value;
-        else repairRejection = validated.reason;
-      } catch (err) {
-        repairRejection = describeError(err);
+      if (textOnlyStructured) {
+        const local = parseStrictJsonObject(repair.text);
+        if (local.ok) {
+          const validated = validateStructured(outputSchema, local.value);
+          if (validated.ok) repairedValue = validated.value;
+          else repairRejection = validated.reason;
+        } else {
+          repairRejection = local.reason;
+        }
+      } else {
+        try {
+          const validated = validateStructured(outputSchema, repair.output);
+          if (validated.ok) repairedValue = validated.value;
+          else repairRejection = validated.reason;
+        } catch (err) {
+          repairRejection = describeError(err);
+        }
       }
       if (repairRejection === undefined) {
         // The repair consumed budget too: a successful repair is judged by
@@ -1350,6 +1432,50 @@ const SYSTEM_PREAMBLE =
   'You are a cq-toolkit worker executing one task. ' +
   'Work inside the provided workspace directory; use the available tools to read, edit, and run. ' +
   'Tool refusals arrive as denial text — adapt instead of retrying the same call.';
+
+/**
+ * C7 STRICT-JSON STRATEGY (owner decision, 2026-10-15): when a run opts into
+ * `Budget.strictTokenBudget`, structured output does NOT ride the SDK's
+ * structured-output channel. `Output.object(...)` makes the SDK put the schema
+ * on the wire as a HOSTED `responseFormat` (response_format/json_schema) whose
+ * provider behaviour is unproven, and the strict profile refuses a non-null
+ * `responseFormat` at all. The strict lane therefore restates the SAME JSON
+ * Schema and the output contract in the COUNTED prompt text — so the
+ * pre-request byte ceiling measures those bytes and the canonical projection
+ * binds them — and parses the reply LOCALLY, judging it with the SAME shared
+ * validator (`validateStructured`) the non-strict path uses. The strict budget
+ * opt-in IS the strategy selector; there is no model-name flag, no capability
+ * factory switch and no attestation gate. Non-strict lanes keep
+ * `Output.object` and the lazy `result.output` path byte-unchanged.
+ *
+ * The contract text is shared by the main strict send and the existing
+ * one-repair send, so the bytes a model is asked to satisfy are the same in
+ * both and the repair's prompt keeps its established wording.
+ */
+function strictJsonContract(schema: OutputSchema): string {
+  return (
+    `Reply with ONLY one JSON object — no prose, no code fences — that validates against ` +
+    `this JSON Schema (draft 2020-12):\n${JSON.stringify(schema.schema)}`
+  );
+}
+
+/**
+ * The strict lane's LOCAL parse: the whole trimmed reply must be ONE JSON
+ * document. Deliberately the same strictness the SDK's own structured-output
+ * parse applies (no fence stripping, no prose scavenging) — a fenced or padded
+ * reply is a parse failure and settles through the existing bounded repair
+ * flow rather than being silently accepted. Never throws.
+ */
+function parseStrictJsonObject(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  if (text.trim() === '') return { ok: false, reason: 'the reply was empty' };
+  try {
+    return { ok: true, value: JSON.parse(text.trim()) as unknown };
+  } catch (err) {
+    return { ok: false, reason: describeError(err) };
+  }
+}
 
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {

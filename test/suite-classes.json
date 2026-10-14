@@ -14,6 +14,7 @@
   "test/cli/registry.test.ts": "pure",
   "test/driver/acp.test.ts": "integration",
   "test/driver/ai-sdk-pre-request-ceiling.test.ts": "process",
+  "test/driver/ai-sdk-strict-json.test.ts": "process",
   "test/driver/ai-sdk.test.ts": "process",
   "test/driver/canonical-projection.test.ts": "pure",
   "test/driver/claude-agent.sdk-presence.test.ts": "process",
