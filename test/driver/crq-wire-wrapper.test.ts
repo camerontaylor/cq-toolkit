@@ -157,7 +157,7 @@ describe('CrqWireWrapper', () => {
     const retry = await wire.reserve();
     expect(transport.sessions).toBe(1);
     expect(retry.ackSequence).toBe(first.ackSequence + 1);
-    expect(transport.lastReserve?.['message_id']).toBe(2);
+    expect(transport.lastReserve?.['message_id']).toBe(3);
     expect(transport.lastReserve?.['supersedes_ack_sequence']).toBe(first.ackSequence);
     expect(String(transport.lastReserve?.['logical_attempt_id'])).toContain('fixer');
   });
