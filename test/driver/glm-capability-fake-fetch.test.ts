@@ -161,9 +161,10 @@ describe('glm capability — fake-fetch output-ceiling proof', () => {
       ],
     });
     const body = captured[0]?.body as { messages?: unknown };
-    // Stage 1 of the pinned serializer: system stays a string, a single text
-    // part folds to a plain string. Compared to the RENDERER's own stage-1
-    // output for the normalized prompt the middleware counted (hard equality).
+    // PINNED-SERIALIZER EXPECTATION (not a renderer-own stage-1 self-check): the
+    // pinned @ai-sdk/openai-compatible serializer folds a single text part to a
+    // plain string and keeps a system message as a string. This asserts the
+    // WIRE matches that pinned expectation.
     expect(body.messages).toEqual([
       { role: 'system', content: 'sys' },
       { role: 'user', content: 'ask' },
