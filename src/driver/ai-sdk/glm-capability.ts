@@ -28,6 +28,14 @@
 // response-format request the publisher template does not render (see below),
 // and `thinking.type: 'disabled'` (GLM-5.3 thinking CANNOT be disabled).
 //
+// CONSERVATIVE, NOT YET BYTE-EXACT. The renderer reproduces the template's
+// STRUCTURE and every dynamic value, and it renders Jinja `tojson` with the
+// HTML escapes (`<>&'` -> \uXXXX) and the wider `", "`/`": "` separators, so
+// its byte length is an UPPER BOUND of the hosted Jinja rendering — it never
+// omits content or under-counts. A byte-exact comparison against a pinned Jinja
+// runtime (and the public 20MB tokenizer) is still required before any claim of
+// exactness; that comparison is a named gap, not an asserted proof.
+//
 // WHAT IS *ABSENT* UNTIL AN EXTERNAL CONTRACT EXISTS. `createGlmTextCapability`
 // returns `undefined` unless the caller supplies a `GlmHostedTransformAttestation`
 // from a TRUSTED operator/host adapter (never from worker config, request body
@@ -175,9 +183,40 @@ function utf8Bytes(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
-/** `| tojson(ensure_ascii=False)`: JSON with non-ASCII preserved (as JS emits). */
-function jsonNoAscii(value: unknown): string {
-  return JSON.stringify(value);
+/**
+ * Jinja `| tojson(ensure_ascii=False)` — RENDERED CONSERVATIVELY, never shorter
+ * than the hosted Jinja output. Jinja's htmlsafe JSON escapes `<`, `>`, `&` and
+ * `'` as `\uXXXX` and uses `", "` / `": "` separators; a compact
+ * `JSON.stringify` would UNDER-count both, which is unsafe. This renderer emits
+ * the HTML escapes AND the wider separators (and preserves non-ASCII as UTF-8),
+ * so its byte length is an upper bound for the hosted rendering.
+ */
+function escapeJinjaString(jsonString: string): string {
+  return jsonString
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/'/g, '\\u0027');
+}
+
+function jinjaTojson(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return escapeJinjaString(JSON.stringify(value));
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new UnboundedGlmRequestShape('a non-finite number in JSON');
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => jinjaTojson(item)).join(', ')}]`;
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value).map(
+      ([key, item]) => `${escapeJinjaString(JSON.stringify(key))}: ${jinjaTojson(item)}`,
+    );
+    return `{${entries.join(', ')}}`;
+  }
+  throw new UnboundedGlmRequestShape('a value Jinja tojson cannot represent');
 }
 
 /** The publisher template's `tool_to_json`: keys except defer_loading/strict. */
@@ -185,7 +224,7 @@ function toolToJson(tool: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(tool)) {
     if (key === 'defer_loading' || key === 'strict') continue;
-    parts.push(`${JSON.stringify(key)}: ${jsonNoAscii(value)}`);
+    parts.push(`${JSON.stringify(key)}: ${jinjaTojson(value)}`);
   }
   return `{${parts.join(', ')}}`;
 }
@@ -348,7 +387,7 @@ function renderToolChoice(toolChoice: unknown): string | undefined {
     throw new UnboundedGlmRequestShape(`tool_choice '${toolChoice}' is not auto/none/required`);
   }
   if (isRecord(toolChoice) && toolChoice.type === 'tool' && typeof toolChoice.toolName === 'string') {
-    return `{"type":"function","function":{"name":${jsonNoAscii(toolChoice.toolName)}}}`;
+    return `{"type": "function", "function": {"name": ${jinjaTojson(toolChoice.toolName)}}}`;
   }
   throw new UnboundedGlmRequestShape('tool_choice is not a bounded choice');
 }
@@ -458,15 +497,14 @@ function toolsPrologue(tools: readonly GlmFunctionTool[]): string {
   return header + rendered + footer;
 }
 
-/** The provider tool dict passed to `tool_to_json`. */
+/** The provider tool dict the template renders after unwrapping `tool.function`. */
 function renderToolDict(tool: GlmFunctionTool): Record<string, unknown> {
+  // The template L40 unwraps `tool['function']` when present, then `tool_to_json`
+  // drops `strict`/`defer_loading`; render the unwrapped dict EXACTLY.
   return {
-    type: 'function',
-    function: {
-      name: tool.name,
-      ...(tool.description !== undefined ? { description: tool.description } : {}),
-      parameters: tool.inputSchema,
-    },
+    name: tool.name,
+    ...(tool.description !== undefined ? { description: tool.description } : {}),
+    parameters: tool.inputSchema,
   };
 }
 
@@ -479,7 +517,7 @@ function renderAssistantToolCalls(
     const args = call.argumentsObject;
     if (isRecord(args)) {
       for (const [key, value] of Object.entries(args)) {
-        const rendered = typeof value === 'string' ? value : jsonNoAscii(value);
+        const rendered = typeof value === 'string' ? value : jinjaTojson(value);
         out += `<arg_key>${key}</arg_key><arg_value>${rendered}</arg_value>`;
       }
     }
@@ -499,10 +537,19 @@ function capitalizeEffort(effort: string | undefined): string {
  * Over-approximates only by INCLUDING whitespace/framing literal bytes (never
  * by omitting content); any branch it does not implement throws.
  */
-function renderTemplate(messages: readonly GlmProviderMessage[], tools: readonly GlmFunctionTool[], reasoningEffort: string | undefined): string {
+function renderTemplate(
+  messages: readonly GlmProviderMessage[],
+  tools: readonly GlmFunctionTool[],
+  reasoningEffort: string | undefined,
+  clearThinking: boolean,
+): string {
   let out = PREAMBLE;
   out += `<|system|>Reasoning Effort: ${capitalizeEffort(reasoningEffort)}`;
   if (tools.length > 0) out += `\n${toolsPrologue(tools)}`;
+  let lastUserIndex = -1;
+  for (let i = 0; i < messages.length; i += 1) {
+    if ((messages[i] as GlmProviderMessage).role === 'user') lastUserIndex = i;
+  }
   for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i] as GlmProviderMessage;
     if (message.role === 'system') {
@@ -515,8 +562,23 @@ function renderTemplate(messages: readonly GlmProviderMessage[], tools: readonly
     }
     if (message.role === 'assistant') {
       out += '<|assistant|>';
-      out += message.reasoning !== undefined ? `<think>${message.reasoning}</think>` : '<think></think>';
-      const text = typeof message.content === 'string' ? message.content.trim() : '';
+      // Template L145-147: reasoning may be an explicit field OR embedded in the
+      // assistant content as a `<think>…</think>` prefix.
+      let content = typeof message.content === 'string' ? message.content : '';
+      let reasoning = message.reasoning;
+      if (reasoning === undefined && content.includes('</think>')) {
+        const before = content.split('</think>')[0] ?? '';
+        const thinkOpen = before.split('<think>');
+        reasoning = thinkOpen[thinkOpen.length - 1] ?? '';
+        content = content.split('</think>').slice(1).join('</think>');
+      }
+      // Template L148-152: emit the reasoning only when thinking is not cleared
+      // for history, else an empty think block.
+      out +=
+        (!clearThinking || i > lastUserIndex) && reasoning !== undefined
+          ? `<think>${reasoning}</think>`
+          : '<think></think>';
+      const text = content.trim();
       if (text !== '') out += text;
       if (message.toolCalls !== undefined) out += renderAssistantToolCalls(message.toolCalls);
       continue;
@@ -546,7 +608,7 @@ interface GlmProjectionFacts {
   readonly messages: readonly GlmProviderMessage[];
   readonly tools: readonly GlmFunctionTool[];
   readonly reasoningEffort: string | undefined;
-  readonly responseFormat: unknown;
+  readonly clearThinking: boolean;
   readonly responseFormatBytes: number;
 }
 
@@ -581,19 +643,19 @@ function parseProjection(input: unknown, attestation: GlmHostedTransformAttestat
       );
     }
     responseFormatBytes = attestation.responseFormatTransform.renderInstructionBytes(
-      jsonNoAscii(input.responseFormat),
+      jinjaTojson(input.responseFormat),
     );
     if (!Number.isSafeInteger(responseFormatBytes) || responseFormatBytes < 0) {
       throw new UnboundedGlmRequestShape('the attested responseFormat transform returned an unsafe byte count');
     }
   }
-  return { messages, tools, reasoningEffort: options.reasoningEffort, responseFormat: input.responseFormat, responseFormatBytes };
+  return { messages, tools, reasoningEffort: options.reasoningEffort, clearThinking: options.thinking?.clearThinking === true, responseFormatBytes };
 }
 
 /** The exported render primitive: the exact rendered prompt string. */
 export function renderGlmTextPrompt(projection: unknown, attestation?: GlmHostedTransformAttestation): string {
   const facts = parseProjection(projection, attestation);
-  return renderTemplate(facts.messages, facts.tools, facts.reasoningEffort);
+  return renderTemplate(facts.messages, facts.tools, facts.reasoningEffort, facts.clearThinking);
 }
 
 /**
@@ -602,7 +664,7 @@ export function renderGlmTextPrompt(projection: unknown, attestation?: GlmHosted
  */
 export function countGlmTextPromptBytes(projection: unknown, attestation?: GlmHostedTransformAttestation): number {
   const facts = parseProjection(projection, attestation);
-  const rendered = renderTemplate(facts.messages, facts.tools, facts.reasoningEffort);
+  const rendered = renderTemplate(facts.messages, facts.tools, facts.reasoningEffort, facts.clearThinking);
   const total = utf8Bytes(rendered) + facts.responseFormatBytes;
   if (!Number.isSafeInteger(total) || total < 0 || total > MAX_SAFE) {
     throw new UnboundedGlmRequestShape('the rendered bound exceeds the safe integer range');
