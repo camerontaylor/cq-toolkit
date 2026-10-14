@@ -153,6 +153,7 @@ describe('CrqWireWrapper', () => {
     const transport = new FakeTransport();
     const wire = wrapper(transport);
     const first = await wire.reserve();
+    await wire.outcome('completed', usage, 'end_turn', null);
     const retry = await wire.reserve();
     expect(transport.sessions).toBe(1);
     expect(retry.ackSequence).toBe(first.ackSequence + 1);
@@ -270,5 +271,33 @@ describe('CrqWireWrapper', () => {
     expect(transport.lastReserve?.['supersedes_ack_sequence']).toBe(first.ackSequence);
     expect(repair.ackSequence).not.toBe(first.ackSequence);
     expect(() => wire.enterRepairStage()).toThrow(/second completed repair stage/);
+  });
+
+  it('refuses local repair entry AND a new send after an UNKNOWN outcome', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    await wire.reserve();
+    await wire.outcome('unknown', null, null, null);
+    expect(() => wire.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
+    await expect(wire.reserve()).rejects.toThrow(/no accepted outcome/);
+  });
+
+  it('refuses local repair entry after a REFUSED outcome', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    await wire.reserve();
+    await wire.outcome('refused', usage, 'stop', null);
+    expect(() => wire.enterRepairStage()).toThrow(/requires an ACCEPTED outcome/);
+  });
+
+  it('records the status against the ack captured BEFORE the outcome await', async () => {
+    const transport = new FakeTransport();
+    const wire = wrapper(transport);
+    const first = await wire.reserve();
+    await wire.outcome('completed', usage, 'end_turn', null);
+    const second = await wire.reserve();
+    // The status belongs to ack 1; the NEW ack 2 is pending, so the stage must refuse it.
+    expect(second.ackSequence).toBe(first.ackSequence + 1);
+    expect(() => wire.enterRepairStage()).toThrow(/no recorded outcome/);
   });
 });

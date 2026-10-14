@@ -157,8 +157,8 @@ export class CrqWireWrapper {
   private sessionId: string | null = null;
   private messageId = 0;
   private lastAck: CrqWireAck | null = null;
-  /** Acks whose outcome this wrapper has already reported (the audited set). */
-  private readonly audited = new Set<number>();
+  /** Per-ack reported outcome status; only an ACCEPTED (completed) outcome is usable. */
+  private readonly outcomeStatus = new Map<number, CrqWireOutcomeKind>();
   /** The approved ONE bounded repair stage: active, or completed for this role attempt. */
   private repairStageActive = false;
   private repairStageCompleted = false;
@@ -207,8 +207,14 @@ export class CrqWireWrapper {
     if (this.lastAck === null) {
       throw new CrqWireRefusal('no authoritative prior ack to repair; refusing the repair stage');
     }
-    if (!this.audited.has(this.lastAck.ackSequence)) {
+    const status = this.outcomeStatus.get(this.lastAck.ackSequence);
+    if (status === undefined) {
       throw new CrqWireRefusal('the prior ack has no recorded outcome (pending or unaudited); refusing the repair stage');
+    }
+    if (status !== 'completed') {
+      // UNKNOWN or refused is TERMINAL: the host may refuse later, but a local repair entry on
+      // an unknown outcome is already wrong - the accepted contract throws here.
+      throw new CrqWireRefusal(`the prior wire outcome is ${status}; a repair stage requires an ACCEPTED outcome`);
     }
     this.repairStageActive = true;
   }
@@ -238,6 +244,11 @@ export class CrqWireWrapper {
       throw new CrqWireRefusal('the CRQ wire requires an injected canonical encoder and an authenticated transport');
     }
     const sessionId = await this.session();
+    // LOCAL GATE: a new send is refused locally unless the prior wire's outcome was ACCEPTED.
+    // An unknown, refused or still-pending prior wire is terminal for local continuation.
+    if (this.lastAck !== null && this.outcomeStatus.get(this.lastAck.ackSequence) !== 'completed') {
+      throw new CrqWireRefusal('the prior wire has no accepted outcome; refusing a new send');
+    }
     const envelope = bridgeEnvelope(encoder, projection(), provider, model);
     const messageId = this.messageId + 1;
     const supersedes = this.lastAck === null ? 0 : this.lastAck.ackSequence;
@@ -271,11 +282,6 @@ export class CrqWireWrapper {
     return reply;
   }
 
-  /** Record that this ack's outcome has been reported (the audited set the stage reads). */
-  private markAudited(ack: number): void {
-    this.audited.add(ack);
-  }
-
   /**
    * Report the outcome of the acknowledged wire call. EVERY actual model call must be
    * reported: a retry reports its own ack, a JSON repair reports its own ack, and a
@@ -289,15 +295,18 @@ export class CrqWireWrapper {
     if (this.lastAck === null) {
       throw new CrqWireRefusal('no acknowledged wire call to report an outcome for');
     }
+    // Capture the EXACT ack this outcome belongs to BEFORE the await: an interleaved reserve
+    // must never be able to change which ack gets its status recorded.
+    const ack = this.lastAck.ackSequence;
     const identity = this.options.identity;
     this.messageId += 1;
     await transport.outcome({
       method: 'outcome', session_id: this.sessionId, message_id: this.messageId,
       job: identity.job, source_sha: identity.sourceSha, finding_sha256: identity.findingSha256,
-      authorization_sha256: identity.authorizationSha256, ack_sequence: this.lastAck.ackSequence,
+      authorization_sha256: identity.authorizationSha256, ack_sequence: ack,
       outcome: kind, usage, stop_reason: stopReason, error_class: errorClass,
       repair_of_ack_sequence: repairOf,
     });
-    this.markAudited(this.lastAck.ackSequence);
+    this.outcomeStatus.set(ack, kind);
   }
 }
