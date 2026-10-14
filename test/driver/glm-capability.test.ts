@@ -176,6 +176,8 @@ describe('glm text capability — withOutputCeiling', () => {
     );
     expect(prepared.maxOutputTokens).toBe(64);
     expect(Object.isFrozen(prepared)).toBe(true);
+    // Detached + deep-frozen: the nested counted fields are cloned and frozen.
+    expect(Object.isFrozen(prepared.prompt)).toBe(true);
   });
 
   test('refuses a non-safe/non-positive reserve and an over-reserve request cap', () => {

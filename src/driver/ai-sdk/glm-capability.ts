@@ -99,14 +99,14 @@ export const GLM_TEXT_PROFILE: GlmTextProfilePins = {
 /**
  * The externally supplied hosted-transform contract. Supplied by a TRUSTED
  * operator/host adapter — NEVER derived from worker config, an HTTP body or a
- * model-name/boolean flag. It carries no numeric expansion and no callback: the
+ * model-name/boolean flag. It carries NO numeric expansion and NO callback: the
  * byte bound comes from the pinned renderer below.
  *
- * It optionally carries a `responseFormatTransform` ONLY when the actual host
- * adds a complete, known instruction/schema transform for `response_format`
- * (the publisher chat template does NOT render one). Absent it, any non-null
- * response-format request is REFUSED — the HTTP `response_format` field is
- * never silently dropped from the prompt bound.
+ * There is deliberately NO `responseFormatTransform`/numeric callback. Any
+ * non-null `response_format` request is REFUSED — the publisher chat template
+ * renders no schema instruction, and an opaque byte-count callback would
+ * contradict the no-opaque-expansion contract. A future exact hosted
+ * schema-insertion renderer is separate scope.
  */
 export interface GlmHostedTransformAttestation {
   readonly provider: 'zai';
@@ -121,15 +121,6 @@ export interface GlmHostedTransformAttestation {
   readonly reasoningInclusiveMaxTokens: true;
   /** No unreserved hidden generation or transport retry. */
   readonly noUnreservedHiddenGeneration: true;
-  /**
-   * Present ONLY when the host renders `response_format` into the model input
-   * with a COMPLETE known transform; `renderInstructionBytes` is the exact
-   * proven byte expansion it adds for a given schema document. Absent => any
-   * response format is refused.
-   */
-  readonly responseFormatTransform?: {
-    readonly renderInstructionBytes: (schemaJson: string) => number;
-  };
   /** Display-only label. */
   readonly provenance: string;
 }
@@ -168,6 +159,35 @@ const ZAI_OPTION_KEYS = new Set([
 ]);
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
+
+/** The fields cloned + frozen into the detached ceiling snapshot. */
+const COUNTED_FIELDS = [
+  'prompt',
+  'tools',
+  'toolChoice',
+  'responseFormat',
+  'providerOptions',
+  'maxOutputTokens',
+  'temperature',
+  'topP',
+  'topK',
+  'presencePenalty',
+  'frequencyPenalty',
+  'stopSequences',
+  'seed',
+  'reasoning',
+] as const;
+
+/** Recursively freeze a JSON-ish cloned value. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value as object)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+  }
+  return value;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -601,7 +621,11 @@ function renderTemplate(
         (!clearThinking || i > lastUserIndex) && reasoning !== undefined
           ? `<think>${reasoning}</think>`
           : '<think></think>';
-      const text = content.trim();
+      // CONSERVATIVE WHITESPACE: the template applies `content.strip()`, but JS
+      // `String.trim()` strips U+FEFF while Python `str.strip()` PRESERVES it
+      // (and NEL/other boundaries differ), so stripping here could UNDER-count
+      // the hosted render. Preserve the content verbatim — an upper bound.
+      const text = content;
       if (text !== '') out += text;
       if (message.toolCalls !== undefined) out += renderAssistantToolCalls(message.toolCalls);
       continue;
@@ -632,7 +656,6 @@ interface GlmProjectionFacts {
   readonly tools: readonly GlmFunctionTool[];
   readonly reasoningEffort: string | undefined;
   readonly clearThinking: boolean;
-  readonly responseFormatBytes: number;
 }
 
 function parseProjection(
@@ -671,35 +694,23 @@ function parseProjection(
   if (input.stopSequences !== null && input.stopSequences !== undefined) {
     asArray(input.stopSequences, 'stopSequences');
   }
-  // response_format is NOT rendered by the publisher chat template. Refuse any
-  // non-null response format unless the host attestation supplies a COMPLETE
-  // known transform; the HTTP field is never silently dropped from the bound.
-  let responseFormatBytes = 0;
+  // response_format is NOT rendered by the publisher chat template and there is
+  // NO opaque numeric transform. ANY non-null response format is REFUSED — the
+  // HTTP field is never silently dropped from the prompt bound.
   if (input.responseFormat !== null && input.responseFormat !== undefined) {
-    if (attestation?.responseFormatTransform === undefined) {
-      throw new UnboundedGlmRequestShape(
-        'responseFormat is set but the publisher template renders no schema instruction and no hosted transform is attested',
-      );
-    }
-    responseFormatBytes = attestation.responseFormatTransform.renderInstructionBytes(
-      jinjaTojson(input.responseFormat),
+    throw new UnboundedGlmRequestShape(
+      'responseFormat is set but the publisher template renders no schema instruction (no opaque transform is accepted)',
     );
-    if (!Number.isSafeInteger(responseFormatBytes) || responseFormatBytes < 0) {
-      throw new UnboundedGlmRequestShape(
-        'the attested responseFormat transform returned an unsafe byte count',
-      );
-    }
   }
   return {
     messages,
     tools,
     reasoningEffort: options.reasoningEffort,
     clearThinking: options.thinking?.clearThinking === true,
-    responseFormatBytes,
   };
 }
 
-/** The exported render primitive: the exact rendered prompt string. */
+/** The exported render primitive: the CONSERVATIVE rendered prompt string. */
 export function renderGlmTextPrompt(
   projection: unknown,
   attestation?: GlmHostedTransformAttestation,
@@ -723,7 +734,7 @@ export function countGlmTextPromptBytes(
     facts.reasoningEffort,
     facts.clearThinking,
   );
-  const total = utf8Bytes(rendered) + facts.responseFormatBytes;
+  const total = utf8Bytes(rendered);
   if (!Number.isSafeInteger(total) || total < 0 || total > MAX_SAFE) {
     throw new UnboundedGlmRequestShape('the rendered bound exceeds the safe integer range');
   }
@@ -791,7 +802,25 @@ export function createGlmTextCapability(
       if (params.maxOutputTokens !== undefined && params.maxOutputTokens > reserveOutputTokens) {
         throw new UnboundedGlmRequestShape('the request output ceiling exceeds the reserve');
       }
-      return Object.freeze({ ...params, maxOutputTokens: reserveOutputTokens });
+      // DETACHED, DEEP-FROZEN snapshot of the counted fields (mirroring the core
+      // ceiling's snapshot): nested prompt/tools/providerOptions are cloned so
+      // the caller cannot mutate what is sent under the taken count;
+      // abortSignal/headers keep their live references (never counted). A shape
+      // structuredClone cannot clone refuses.
+      const counted: Record<string, unknown> = {};
+      for (const key of COUNTED_FIELDS) {
+        const value = (params as unknown as Record<string, unknown>)[key];
+        if (value !== undefined) counted[key] = value;
+      }
+      let cloned: Record<string, unknown>;
+      try {
+        cloned = structuredClone(counted);
+      } catch {
+        throw new UnboundedGlmRequestShape('the request cannot be detached for the ceiling');
+      }
+      cloned.maxOutputTokens = reserveOutputTokens;
+      deepFreeze(cloned);
+      return Object.freeze({ ...params, ...cloned }) as LanguageModelV4CallOptions;
     },
   };
 }
