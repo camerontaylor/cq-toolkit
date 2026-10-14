@@ -90,7 +90,7 @@ describe('glm text capability — fail-closed by default', () => {
 describe('glm text capability — count is a proven render bound (no multiplier)', () => {
   for (const vector of vectors.accept) {
     test(`accept: ${vector.name}`, () => {
-      const rendered = renderGlmTextPrompt(vector.projection, ATTESTATION);
+      const rendered = renderGlmTextPrompt(vector.projection);
       for (const literal of vector.mustContain) {
         expect(rendered).toContain(literal);
       }
@@ -107,16 +107,14 @@ describe('glm text capability — count is a proven render bound (no multiplier)
 
   test('count is EXACTLY the rendered UTF-8 byte length (no padding/multiplier)', () => {
     const projection = vectors.accept[0]?.projection;
-    const rendered = renderGlmTextPrompt(projection, ATTESTATION);
-    expect(countGlmTextPromptBytes(projection, ATTESTATION)).toBe(
-      Buffer.byteLength(rendered, 'utf8'),
-    );
+    const rendered = renderGlmTextPrompt(projection);
+    expect(countGlmTextPromptBytes(projection)).toBe(Buffer.byteLength(rendered, 'utf8'));
   });
 
   for (const vector of vectors.monotonic) {
     test(`monotonic: ${vector.name}`, () => {
-      const smaller = countGlmTextPromptBytes(vector.smaller, ATTESTATION);
-      const larger = countGlmTextPromptBytes(vector.larger, ATTESTATION);
+      const smaller = countGlmTextPromptBytes(vector.smaller);
+      const larger = countGlmTextPromptBytes(vector.larger);
       expect(larger).toBeGreaterThan(smaller);
     });
   }
@@ -124,21 +122,17 @@ describe('glm text capability — count is a proven render bound (no multiplier)
   test('astral characters cost their UTF-8 bytes (astral is not 1 byte)', () => {
     const astral = vectors.accept.find((v) => v.name.includes('astral'));
     if (astral === undefined) throw new Error('astral vector missing');
-    const rendered = renderGlmTextPrompt(astral.projection, ATTESTATION);
+    const rendered = renderGlmTextPrompt(astral.projection);
     // The 4-byte emoji survives the render and is counted as UTF-8.
     expect(rendered).toContain('😀');
-    expect(countGlmTextPromptBytes(astral.projection, ATTESTATION)).toBe(
-      Buffer.byteLength(rendered, 'utf8'),
-    );
+    expect(countGlmTextPromptBytes(astral.projection)).toBe(Buffer.byteLength(rendered, 'utf8'));
   });
 });
 
 describe('glm text capability — refuse unbounded shapes', () => {
   for (const vector of vectors.refuse) {
     test(`refuse: ${vector.name}`, () => {
-      expect(() => countGlmTextPromptBytes(vector.projection, ATTESTATION)).toThrow(
-        UnboundedGlmRequestShape,
-      );
+      expect(() => countGlmTextPromptBytes(vector.projection)).toThrow(UnboundedGlmRequestShape);
       const capability = createGlmTextCapability(INPUT, ATTESTATION);
       if (capability === undefined) throw new Error('expected the capability to be present');
       expect(() => capability.count(JSON.stringify(vector.projection))).toThrow(
@@ -156,9 +150,7 @@ describe('glm text capability — refuse unbounded shapes', () => {
       providerOptions: { zai: { thinking: { type: 'disabled' } } },
       maxOutputTokens: 64,
     };
-    expect(() => countGlmTextPromptBytes(projection, ATTESTATION)).toThrow(
-      UnboundedGlmRequestShape,
-    );
+    expect(() => countGlmTextPromptBytes(projection)).toThrow(UnboundedGlmRequestShape);
   });
 
   test('a non-parseable projection refuses', () => {
