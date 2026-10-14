@@ -991,7 +991,7 @@ describe('ai-sdk driver strictTokenBudget', () => {
           anthropic: () =>
             new MockLanguageModelV4({
               modelId: 'claude-test',
-              doGenerate: () => {
+              doGenerate: async () => {
                 modelCalls += 1;
                 return textResult('ok');
               },
