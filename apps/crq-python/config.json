@@ -18,6 +18,7 @@
     "post_status": true,
     "status_context": "crq/promotion-review",
     "checks": [
+      "crq-python",
       "static",
       "denylist",
       "ratchet"

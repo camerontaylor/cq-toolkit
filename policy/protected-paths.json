@@ -11,7 +11,8 @@
     "^scripts/ratchet-[^/]+\\.mjs$",
     "^scripts/(?:github-settings-drift|render-templates)\\.mjs$",
     "^scripts/lib/(?:github-settings|render-templates)\\.mjs$",
-    "^scripts/denylist-scan$"
+    "^scripts/denylist-scan$",
+    "^apps/crq-python/"
   ],
-  "requiredChecks": ["static", "denylist", "ratchet"]
+  "requiredChecks": ["static", "denylist", "ratchet", "crq-python"]
 }
