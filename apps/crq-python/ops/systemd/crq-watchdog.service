@@ -1,0 +1,6 @@
+[Unit]
+Description=CRQ heartbeat watchdog
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env python3 %h/repos/coderabbit-queue/ops/crq-watchdog.py

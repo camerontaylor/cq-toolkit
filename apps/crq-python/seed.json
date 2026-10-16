@@ -1,0 +1,48 @@
+{
+  "_source": "/tmp/pr-review/round2/coderabbit-review-debt.md (audit 2026-10-03) + queue-builder decisions",
+  "open": [
+    {"pr": 258, "tier": 1, "prior_cycles": 0},
+    {"pr": 259, "tier": 1, "prior_cycles": 0},
+    {"pr": 247, "tier": 1, "prior_cycles": 0},
+    {"pr": 246, "tier": 1, "prior_cycles": 0},
+    {"pr": 249, "tier": 1, "prior_cycles": 0},
+    {"pr": 245, "tier": 1, "prior_cycles": 0},
+    {"pr": 257, "tier": 1, "prior_cycles": 0},
+    {"pr": 253, "tier": 1, "prior_cycles": 0, "depends_on": "pr249",
+     "note": "stacked on #249; reviewed after #249's cycles, pinned against its own base ref"},
+    {"pr": 255, "tier": 1, "prior_cycles": 0},
+    {"pr": 250, "tier": 1, "prior_cycles": 0},
+    {"pr": 248, "tier": 2, "prior_cycles": 1, "prior_base": "596afb8582a5b8adb193e5113cd915a407b87416",
+     "note": "cycle-1 base per /tmp/cq02-cr2.ndjson review_context; branch since restacked onto 70de728"},
+    {"pr": 256, "tier": 2, "prior_cycles": 1, "prior_base": "70de7280ffb57d3c3be8562774f995eb5795128b"},
+    {"pr": 251, "tier": 2, "prior_cycles": 1, "prior_base": "70de7280ffb57d3c3be8562774f995eb5795128b"},
+    {"pr": 254, "tier": 2, "prior_cycles": 1, "prior_base": "70de7280ffb57d3c3be8562774f995eb5795128b"},
+    {"pr": 252, "tier": 2, "prior_cycles": 1, "prior_base": "70de7280ffb57d3c3be8562774f995eb5795128b"},
+    {"pr": 260, "tier": 2, "prior_cycles": 1, "prior_base": "70de7280ffb57d3c3be8562774f995eb5795128b"}
+  ],
+  "delta": [
+    {"pr": 243, "since": "cdded95", "note": "2 cycles recorded through cdded95; later commits un-reviewed"},
+    {"pr": 217, "note": "2 cycles recorded; restacked 2026-10-03 with substantive test rework"},
+    {"pr": 218, "note": "2 cycles recorded; restacked 2026-10-03 with substantive test rework"},
+    {"pr": 219, "note": "2 cycles recorded; restacked 2026-10-03 with substantive test rework"},
+    {"pr": 227, "note": "2 cycles recorded; restacked 2026-10-03 with substantive test rework"},
+    {"pr": 244, "note": "2 cycles at base dd247ca; commits after the cycles"}
+  ],
+  "merged": [
+    {"pr": 192, "tier": 3, "owed_per_audit": 2},
+    {"pr": 220, "tier": 3, "owed_per_audit": 2},
+    {"pr": 191, "tier": 3, "owed_per_audit": 2},
+    {"pr": 194, "tier": 3, "owed_per_audit": 2},
+    {"pr": 207, "tier": 3, "owed_per_audit": 2},
+    {"pr": 196, "tier": 3, "owed_per_audit": 2},
+    {"pr": 190, "tier": 3, "owed_per_audit": 2},
+    {"pr": 206, "tier": 3, "owed_per_audit": 2},
+    {"pr": 195, "tier": 3, "owed_per_audit": 2},
+    {"pr": 198, "tier": 3, "owed_per_audit": 2},
+    {"pr": 201, "tier": 3, "owed_per_audit": 2},
+    {"pr": 197, "tier": 3, "owed_per_audit": 2},
+    {"pr": 222, "tier": 4, "owed_per_audit": 1},
+    {"pr": 189, "tier": 4, "owed_per_audit": 1},
+    {"pr": 188, "tier": 4, "owed_per_audit": 1}
+  ]
+}

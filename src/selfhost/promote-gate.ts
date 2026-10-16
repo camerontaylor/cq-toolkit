@@ -551,6 +551,9 @@ export function checkVerifiedRun(
     const steps = job['steps'];
     if (!Array.isArray(steps) || steps.length === 0) return fail(`job '${name}' has no steps`);
   }
+  if (want.file === 'ci.yml' && !jobs.some((raw) => asRecord(raw)['name'] === 'crq-python')) {
+    return fail('missing required job crq-python');
+  }
   return {
     state: 'success',
     reason: `run ${id}: ${String(jobs.length)} job(s) green`,
