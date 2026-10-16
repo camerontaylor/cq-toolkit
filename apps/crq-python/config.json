@@ -1,0 +1,135 @@
+{
+  "repo": "camerontaylor/cq-toolkit",
+  "clone": "/srv/operator/repos/worktrees/coderabbit-queue-repo",
+  "worktree_root": "/srv/operator/repos/worktrees",
+  "worktree_prefix": "coderabbit-queue-",
+  "max_starts_per_hour": 5,
+  "max_inflight": 2,
+  "review_timeout_min": 75,
+  "quiet_minutes": 30,
+  "rate_limit_default_backoff_min": 30,
+  "error_backoff_min": 30,
+  "max_item_failures": 3,
+  "merged_min_survival": 0.25,
+  "merged_min_surviving_lines": 15,
+  "merged_min_file_focus": 0.25,
+  "promotion": {
+    "enabled": true,
+    "post_status": true,
+    "status_context": "crq/promotion-review",
+    "checks": [
+      "static",
+      "denylist",
+      "ratchet"
+    ],
+    "merges_trigger": 5,
+    "hours_trigger": 8,
+    "dispatch_after_min": 20,
+    "tip_search_depth": 15,
+    "poster": "camerontaylor",
+    "alert_agent_id": "00000000-0000-4000-8000-000000000004",
+    "alert_agent_host": null,
+    "_alert_agent_host_note": "null = local Paseo daemon (a worker-host runner, rollback); ops/prepare-host.py renders the worker-host endpoint for the queue-host runner",
+    "allowed_reviewers": [],
+    "resolver": "conductor (acceptance conductor reviewer-example)",
+    "signer": {
+      "app_login": "cq-promotion-reviewer[bot]",
+      "reviewer_bot_id": 339373542,
+      "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
+      "spool": {
+        "dir": "/var/lib/crq-spool",
+        "ssh_alias": "operator@127.0.0.1",
+        "ssh_key": null,
+        "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; the queue-host host config sets ssh_key (ops/prepare-host.py). ssh_alias is a literal user@host (ssh runs with -F none); crq runs on queue-host, so the spool is reached over loopback sshd (never the Tailscale SSH address)"
+      }
+    },
+    "signer_stall_min": 90,
+    "signer_down_min": 30,
+    "record_url_template": null
+  },
+  "stale_alarm_min": 36,
+  "timeout_bin": "timeout",
+  "paseo_hosts": [],
+  "repair": {
+    "enabled": false,
+    "spend_authorization": null,
+    "max_concurrent": 3,
+    "max_rounds_per_pin": 2,
+    "fix_pr_cycles": 1,
+    "peak": {
+      "tz": "Asia/Singapore",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "start": "14:00",
+      "end": "18:00"
+    },
+    "budget": {
+      "wall_clock_min": 20,
+      "max_tokens": 400000
+    },
+    "mechanical": {
+      "tests": false,
+      "hack_detector": true
+    },
+    "judge_sample_rate": 0.0,
+    "cq_bin": "/home/operator/repos/cq-toolkit/dist/cli.js",
+    "roles": {
+      "fixer": {
+        "default": {
+          "driver": "cq",
+          "model": "zai/glm-5.3-flash"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6-luna"
+        }
+      },
+      "fixer_escalation": {
+        "default": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        }
+      },
+      "judge": {
+        "default": {
+          "driver": "cq",
+          "model": "zai/glm-5.3-flash"
+        },
+        "peak": {
+          "driver": "paseo",
+          "model": "pi/opencode-go/muse-spark-1.3-contributor"
+        }
+      },
+      "judge_critical": {
+        "default": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        },
+        "peak": {
+          "driver": "codex",
+          "model": "gpt-6.1-sol"
+        }
+      }
+    },
+    "paseo_host": null,
+    "paseo_read_only_mode": null,
+    "codex_budget_launcher": null,
+    "codex_budget_launcher_verified": false,
+    "paseo_budget_launcher": null,
+    "paseo_budget_launcher_verified": false
+  },
+  "coverage": {
+    "max_paths": 8,
+    "min_age_hours": 24,
+    "excluded_paths": []
+  }
+}

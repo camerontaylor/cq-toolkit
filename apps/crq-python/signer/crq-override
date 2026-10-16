@@ -1,0 +1,306 @@
+#!/usr/bin/python3 -I
+"""crq-override — owner-only promotion-review override for the promotion
+reviewer GitHub App.
+
+Run by the OWNER from a terminal no agent can reach: from the owner's OWN
+machine, `ssh queue-host`, then
+`sudo -u crq /opt/cq-reviewer/crq-override <40-hex-sha> <reason words...>`
+(queue-host is headless — the macOS plan's login-window design does not apply;
+the invariant is that the issuing terminal is not reachable from worker-host's
+agents, and the session is never routed through worker-host). TODAY this path
+is NOT agent-proof — worker-host agents hold passwordless ssh and sudo-equivalent
+access on queue-host until its P0 plus an owner-only FIDO ssh key land; see
+signer/README.md, "Accepted limit". NEVER through
+the spool — agents
+write the spool, and an override is a human decision (the design doc §4).
+Usage:
+
+    crq-override <40-hex-sha> <reason words...>
+
+Checks (all fail closed, computed fresh: main from the API, queue ancestry
+from the signer's own anonymous clone):
+  * sha on merge-queue's first-parent line; main an ancestor of sha; sha not
+    already contained in main; newest trusted reviewer-bot status on the
+    sha not already success.
+Then echoes exactly what it will post and requires an interactive `yes`
+before posting `crq/promotion-review` success as the App, description
+`override main=<main> <reason>` (total ≤140; the main= binding is never
+truncated — the `override` prefix is how the gate logs it).
+
+Security posture is the signer's: the App PEM is read only from
+/home/crq/.local/share/cq-app-keys/, JWT signing input goes to
+/usr/bin/openssl stdin, installation tokens are minted per use and exist
+only in memory — never argv, never a URL, never logged. Python
+3.9+-compatible stdlib only. Installed root-owned beside crq-signer.py in
+/opt/cq-reviewer/.
+"""
+from __future__ import annotations
+
+import base64
+import fcntl
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+OWNER_LOGIN = "camerontaylor"
+REPO = "camerontaylor/cq-toolkit"
+STATUS_CONTEXT = "crq/promotion-review"
+
+# Same identity rule as crq-signer.py (see its IDENTITY block): the values
+# come ONLY from the owner's registration record
+# (toolkit-research/plans/app-registration-session-20261004.md @ d8f132f,
+# read back from the GitHub API during registration); invalid or banned
+# values fail closed (this tool refuses to run). Never from a public-API
+# lookup by guessed name.
+REVIEWER_BOT_LOGIN: Optional[str] = "cq-promotion-reviewer[bot]"
+REVIEWER_BOT_ID: Optional[int] = 339373542
+# Same installation pin as crq-signer.py (registration record @ d8f132f):
+# tokens mint only from installation 169119051.
+REVIEWER_INSTALLATION_ID: Optional[int] = 169119051
+
+# Banned values — the stranger's pin that poisoned the first cut; a mistaken
+# paste fails closed (same rule as crq-signer.py and crq's reviewer_identity()).
+BANNED_BOT_LOGINS = frozenset({"cq-reviewer[bot]"})
+BANNED_BOT_IDS = frozenset({202921479})
+
+
+def reviewer_pinned() -> bool:
+    """Well-formed, non-banned identity only — see crq-signer.py."""
+    login, bot_id = REVIEWER_BOT_LOGIN, REVIEWER_BOT_ID
+    if (not isinstance(login, str) or not login.endswith("[bot]")
+            or login in BANNED_BOT_LOGINS):
+        return False
+    if (isinstance(bot_id, bool) or not isinstance(bot_id, int)
+            or bot_id <= 0 or bot_id in BANNED_BOT_IDS):
+        return False
+    return True
+
+API = "https://api.github.com"
+KEYS = Path("/home/crq/.local/share/cq-app-keys")
+PEM = KEYS / "cq-promotion-reviewer.pem"
+APP_META = KEYS / "cq-promotion-reviewer.json"
+AUDIT_LOG = Path("/home/crq/.local/state/crq-signer/audit.log")
+CLONE = Path("/home/crq/cq-work/cq-toolkit")  # the signer's anonymous clone
+DESC_MAX = 140
+SHA40 = re.compile(r"^[0-9a-f]{40}$")
+CHILD_ENV = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/home/crq"}
+OPENSSL = "/usr/bin/openssl"
+
+OVERRIDE_PREFIX = DESC_MAX - len("override main=") - 40 - 1  # room left for the reason
+
+
+def now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def iso(t: Optional[dt.datetime] = None) -> str:
+    return (t or now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def audit(event: str, **fields: Any) -> None:
+    try:
+        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG.open("a") as f:
+            f.write(json.dumps({"at": iso(), "event": event, **fields}, default=str)[:2000] + "\n")
+    except OSError:
+        pass
+
+
+def run(cmd: List[str], cwd: Optional[Path] = None, check: bool = True,
+        input_bytes: Optional[bytes] = None, timeout: int = 600) -> subprocess.CompletedProcess:
+    p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, env=CHILD_ENV,
+                       input=input_bytes, timeout=timeout)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:4])} … exit {p.returncode}")
+    return p
+
+
+def git(*args: str, check: bool = True, timeout: int = 600) -> str:
+    return run(["git", *args], cwd=CLONE, check=check, timeout=timeout).stdout.decode(errors="replace").strip()
+
+
+def is_ancestor(a: str, b: str) -> bool:
+    return run(["git", "merge-base", "--is-ancestor", a, b], cwd=CLONE, check=False).returncode == 0
+
+
+# ---------------------------------------------------------------- GitHub auth (same as the signer)
+
+
+def _b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def app_jwt() -> str:
+    if not PEM.is_file() or not APP_META.is_file():
+        raise RuntimeError(f"missing {PEM} or {APP_META} — run as crq on the provisioned host")
+    try:
+        client_id = json.loads(APP_META.read_text())["client_id"]
+    except (ValueError, KeyError):
+        raise RuntimeError(f"unparseable App metadata {APP_META}") from None
+    header = json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode()
+    ts = int(now().timestamp())
+    claims = json.dumps({"iat": ts - 60, "exp": ts + 540, "iss": client_id}, separators=(",", ":")).encode()
+    signing_input = f"{_b64u(header)}.{_b64u(claims)}"
+    p = run([OPENSSL, "dgst", "-sha256", "-sign", str(PEM), "-binary"],
+            input_bytes=signing_input.encode(), check=False)
+    if p.returncode != 0:
+        raise RuntimeError("App JWT signing failed (openssl)")
+    return f"{signing_input}.{_b64u(p.stdout)}"
+
+
+def api(method: str, path: str, token: Optional[str] = None, body: Optional[Dict[str, Any]] = None) -> Any:
+    req = urllib.request.Request(f"{API}/{path}", method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "crq-override")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        e.read()
+        raise RuntimeError(f"github api {e.code}: {path}") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"github api unreachable: {str(e)[:120]}") from None
+
+
+def install_token() -> str:
+    jwt = app_jwt()
+    installs = api("GET", "app/installations", token=jwt)
+    inst = next((i for i in installs
+                 if (i.get("account") or {}).get("login") == OWNER_LOGIN
+                 and i.get("id") == REVIEWER_INSTALLATION_ID), None)
+    if inst is None:
+        raise RuntimeError("no installation matching the pinned reviewer installation id "
+                           f"{REVIEWER_INSTALLATION_ID} for account {OWNER_LOGIN} — "
+                           "check the registration record")
+    out = api("POST", f"app/installations/{inst['id']}/access_tokens", token=jwt,
+              body={"repositories": [REPO.split("/")[1]],  # names, not slugs
+                    "permissions": {"statuses": "write", "checks": "read", "contents": "read"}})
+    return out["token"]
+
+
+def trusted_creator(creator: Dict[str, Any]) -> bool:
+    return (reviewer_pinned()
+            and creator.get("type") == "Bot"
+            and creator.get("login") == REVIEWER_BOT_LOGIN
+            and creator.get("id") == REVIEWER_BOT_ID)
+
+
+# ---------------------------------------------------------------- checks + post
+
+
+def ensure_clone() -> None:
+    """The signer's anonymous clone (same provisioning); bootstrap it if the
+    daemon has never run. Anonymous https only — no token in any URL."""
+    if not (CLONE / ".git").exists():
+        run(["git", "clone", "--quiet", "--no-checkout",
+             "https://github.com/camerontaylor/cq-toolkit.git", str(CLONE)],
+            cwd=CLONE.parent, timeout=600)
+
+
+def precheck(sha: str) -> str:
+    """All mechanical guards; returns the current main sha. Fail closed."""
+    CLONE.parent.mkdir(parents=True, exist_ok=True)
+    ensure_clone()
+    run(["git", "fetch", "--quiet", "--prune", "origin",
+         "+refs/heads/main:refs/remotes/origin/main",
+         "+refs/heads/merge-queue:refs/remotes/origin/merge-queue"], cwd=CLONE, timeout=600)
+    main = api("GET", f"repos/{REPO}/git/ref/heads/main", token=install_token())["object"]["sha"]
+    if not SHA40.match(main):
+        raise RuntimeError("bad main ref from api")
+    if sha not in set(git("rev-list", "--first-parent", "origin/merge-queue", timeout=300).split()):
+        raise RuntimeError("sha is not on merge-queue's first-parent line")
+    if not is_ancestor(main, sha):
+        raise RuntimeError("main is not an ancestor of sha")
+    if is_ancestor(sha, main):
+        raise RuntimeError("sha is already contained in main")
+    statuses = api("GET", f"repos/{REPO}/commits/{sha}/statuses?per_page=100", token=install_token()) or []
+    for s in statuses:  # newest first
+        if s.get("context") == STATUS_CONTEXT and trusted_creator(s.get("creator") or {}):
+            if s.get("state") == "success":
+                raise RuntimeError("newest trusted bot status on sha is already success")
+            break
+    return main
+
+
+def post_override(sha: str, desc: str) -> Any:
+    directory = Path('/home/crq/.local/state/crq-signer')
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / 'publication.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current_main = precheck(sha)  # revalidate after confirmation, under lock
+        if f'main={current_main} ' not in desc:
+            raise RuntimeError('main changed during owner confirmation')
+        return _post_override_locked(sha, desc)
+
+
+def _post_override_locked(sha: str, desc: str) -> Any:
+    token = install_token()
+    return api("POST", f"repos/{REPO}/statuses/{sha}", token=token,
+               body={"context": STATUS_CONTEXT, "state": "success", "description": desc})
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if len(args) < 2:
+        print("usage: crq-override <40-hex-sha> <reason words...>", file=sys.stderr)
+        return 2
+    if not reviewer_pinned():
+        print("crq-override: reviewer identity not pinned — fill REVIEWER_BOT_* only from "
+              "toolkit-research/plans/app-registration-session-20261004.md "
+              "after the App is registered", file=sys.stderr)
+        return 3
+    sha, reason_words = args[0], args[1:]
+    if not SHA40.match(sha):
+        print("crq-override: sha must be 40 lowercase hex", file=sys.stderr)
+        return 2
+    reason = " ".join(w for w in reason_words if w).strip()
+    if not reason:
+        print("crq-override: a non-empty reason is required", file=sys.stderr)
+        return 2
+    try:
+        main_sha = precheck(sha)
+        reason = reason[:OVERRIDE_PREFIX].strip()
+        desc = f"override main={main_sha} {reason}".strip()
+        if len(desc) > DESC_MAX or f"main={main_sha}" not in desc:
+            raise RuntimeError("description does not fit the 140-char budget")
+    except (RuntimeError, OSError) as e:
+        print(f"crq-override: refused: {str(e)[:200]}", file=sys.stderr)
+        audit("override-refused", sha=sha, why=str(e)[:200])
+        return 1
+    print("about to post:")
+    print(f"  repo:        {REPO}")
+    print(f"  sha:         {sha}")
+    print(f"  context:     {STATUS_CONTEXT}")
+    print("  state:       success")
+    print(f"  description: {desc}")
+    try:
+        answer = input("type 'yes' to post: ")
+    except EOFError:
+        answer = ""
+    if answer.strip() != "yes":
+        print("aborted — nothing posted")
+        audit("override-aborted", sha=sha)
+        return 1
+    try:
+        out = post_override(sha, desc)
+    except (RuntimeError, OSError) as e:
+        print(f"crq-override: post failed: {str(e)[:200]}", file=sys.stderr)
+        audit("override-post-failed", sha=sha, why=str(e)[:200])
+        return 1
+    print(f"posted: status id={out.get('id')}")
+    audit("override", sha=sha, main=main_sha, description=desc, status_id=out.get("id"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
