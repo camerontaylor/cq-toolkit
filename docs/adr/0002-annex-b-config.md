@@ -6,7 +6,7 @@
   [approval-token annex](0003-approval-token.md), the [journal annex](0003-journal-migration.md),
   [ADR-0004](0004-policy-check-trust-boundaries.md)
 
-Post-acceptance notes N3, N4 and N15 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N3, N4, N15 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 This annex fills ADR-0002's Annex B. It also defines the configuration keys ADR-0003 refers to. Neither ADR's main
 text changes.

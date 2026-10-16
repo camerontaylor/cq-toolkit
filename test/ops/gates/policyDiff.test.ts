@@ -48,7 +48,11 @@ import {
   type PolicyDiffOutcome,
 } from '../../../src/ops/gates/policyDiff.js';
 import type { ProtectedPathsPosture } from '../../../src/ops/gates/policyConfig.js';
-import { producersOf, scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
+import {
+  hasUnresolvableCheckName,
+  producersOf,
+  scanWorkflow,
+} from '../../../src/ops/gates/workflowScan.js';
 import { registry } from '../../../src/ops/gates/registry.js';
 
 // Git-heavy suite: explicit budgets for hooks and tests (verifyRatchet's idiom).
@@ -511,6 +515,11 @@ describe('policyDiff: baselines and definitions', SLOW, () => {
       'policy-trim-jobs': {
         files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: {} }) },
       },
+      'policy-swap-job': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { 'ci.yml': ['other'] } }),
+        },
+      },
     });
   }, HOOK_MS);
 
@@ -580,6 +589,11 @@ describe('policyDiff: baselines and definitions', SLOW, () => {
       ]),
     );
     expect((await run(c['policy-trim-jobs']!, 'diff-check')).findings).toContainEqual({
+      kind: 'entry-removed',
+      path: POLICY_LIST_PATH,
+      reason: 'removes requiredJobs entry ci.yml:static',
+    });
+    expect((await run(c['policy-swap-job']!, 'diff-check')).findings).toContainEqual({
       kind: 'entry-removed',
       path: POLICY_LIST_PATH,
       reason: 'removes requiredJobs entry ci.yml:static',
@@ -1593,6 +1607,7 @@ describe('policyDiff: faults are failed, never a pass', SLOW, () => {
     expect(result.status === 'ok' && result.value.report).toContain(
       `policy list: ${POLICY_LIST_PATH} absent at the trust ref — project protectedPaths and requiredChecks are inactive`,
     );
+    expect(result.status === 'ok' && result.value.requiredJobs).toEqual({});
   });
 
   test('a trust ref without the manifest is failed', async () => {
@@ -1645,6 +1660,22 @@ describe('policyDiff: the D-P revision window', SLOW, () => {
       'window-pkg': { files: { 'package.json': '{ "name": "fixture-window" }\n' } },
       // The subject declares its own window: lists come from the trust ref only.
       'window-self': { files: { [POLICY_LIST_PATH]: listWith({ revisionWindow: WINDOW }) } },
+      // The trust ref requires a ci.yml job `smoke` the workflow does not carry.
+      'window-smoke-trust': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({
+            revisionWindow: WINDOW,
+            requiredJobs: { 'ci.yml': ['static', 'smoke'] },
+          }),
+        },
+      },
+      'window-ci-comment': {
+        files: { [CI_PATH]: edit(CI_PATH, '# lint the tree', '# lint the whole tree') },
+      },
+      'jobs-bad-key': {
+        files: { [POLICY_LIST_PATH]: listWith({ requiredJobs: { '../ci.yml': ['static'] } }) },
+      },
+      'jobs-empty': { files: { [POLICY_LIST_PATH]: listWith({ requiredJobs: { 'ci.yml': [] } }) } },
     });
   }, HOOK_MS);
 
@@ -1716,6 +1747,25 @@ describe('policyDiff: the D-P revision window', SLOW, () => {
     );
   });
 
+  test('a changed workflow without a trust-ref required job needs a human even in the window', async () => {
+    const now = at('2026-10-20T12:00:00Z');
+    // Control: the same comment-only ci.yml edit passes when every required job is present.
+    const control = await judge(c['window-trust']!, c['window-ci-comment']!, now);
+    expect(control).toMatchObject({ verdict: 'pass', postureLayer: 'window' });
+    const out = await judge(c['window-smoke-trust']!, c['window-ci-comment']!, now);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: CI_PATH,
+      reason: 'no statically named required job smoke',
+    });
+    expect(out.verdict).toBe('needs-human');
+    // The gate's requiredJobs come from the TRUST ref's list, not the subject's.
+    expect(out.requiredJobs).toEqual({ 'ci.yml': ['static', 'smoke'] });
+    expect((await judge(trust, c['window-self']!, now)).requiredJobs).toEqual({
+      'ci.yml': ['static'],
+    });
+  });
+
   test('a window in the SUBJECT has no effect', async () => {
     const out = await judge(trust, c['window-self']!, at('2026-10-20T12:00:00Z'));
     expect(out).toMatchObject({
@@ -1731,6 +1781,8 @@ describe('policyDiff: the D-P revision window', SLOW, () => {
     ['window-inverted', /revisionWindow\.expires must be after opens/],
     ['window-bad-date', /must be a real UTC second/],
     ['window-human', /revisionWindow\.posture/],
+    ['jobs-bad-key', /requiredJobs/],
+    ['jobs-empty', /requiredJobs\.ci\.yml/],
   ])('an invalid window at the trust ref (%s) is failed', async (name, error) => {
     const result = await createPolicyDiff(
       { posture: 'human', layer: 'default' },
@@ -1877,13 +1929,23 @@ describe("the toolkit's own policy list", () => {
     SLOW.timeout,
   );
 
-  test('requiredJobs name jobs the verified workflows define', () => {
+  test('requiredJobs name jobs the verified workflows define, by display name', () => {
     expect(Object.keys(list.requiredJobs ?? {}).sort()).toEqual(['ci.yml', 'denylist.yml']);
+    // The gate verifies exactly the files gate.yml passes it; a key outside them refuses every promotion.
+    const gate = readFileSync(join(REPO_ROOT, '.github/workflows/gate.yml'), 'utf8');
+    const verified = /--verifiedWorkflows=([\w.,-]+)/.exec(gate)?.[1]?.split(',') ?? [];
+    expect(verified).toEqual(expect.arrayContaining(Object.keys(list.requiredJobs ?? {})));
     for (const [file, jobs] of Object.entries(list.requiredJobs ?? {})) {
       const scan = scanWorkflow(readFileSync(join(REPO_ROOT, '.github/workflows', file), 'utf8'));
       expect(scan.ok, `${file}: scans ok`).toBe(true);
       if (!scan.ok) continue;
-      for (const job of jobs) expect(scan.jobs.has(job), `${file}: job ${job}`).toBe(true);
+      for (const job of jobs) {
+        // The jobs API reports the display name (`name:`, else the id): no matrix, no dynamic name.
+        const named = [...scan.jobs.values()].filter(
+          (j) => !hasUnresolvableCheckName(j) && (j.name ?? j.id) === job,
+        );
+        expect(named, `${file}: a job displayed as ${job}`).toHaveLength(1);
+      }
     }
   });
 });

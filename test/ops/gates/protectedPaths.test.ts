@@ -20,6 +20,7 @@ import {
   isProtectedStagePath,
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
+import { scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
@@ -233,6 +234,17 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
 // verdict or move `main` — and nothing else in src/. The trusted-invocation
 // test below pins that list to the workflows, so a new trusted call fails
 // here until its closure is classified.
+/** `loadEngine`'s `imp('<rel>.js')` modules, as `src/ops/ratchet/<rel>.ts`. */
+function engineModules(): string[] {
+  const text = readFileSync(join(REPO_ROOT, 'scripts', 'ratchet-lib.mjs'), 'utf8');
+  const body = /export async function loadEngine\(\)[\s\S]*?\n\}/.exec(text)?.[0] ?? '';
+  const out = [...body.matchAll(/\bimp\('([\w/.-]+)\.js'\)/g)].map(
+    (m) => `src/ops/ratchet/${m[1]!}.ts`,
+  );
+  if (out.length === 0) throw new Error('scripts/ratchet-lib.mjs: no loadEngine imports found');
+  return out;
+}
+
 describe('protected-paths.json covers the gate and acceptance import closure', () => {
   const ENTRY_POINTS = [
     'src/selfhost/acceptance.ts',
@@ -242,6 +254,9 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     'src/ops/gates/policyConfig.ts',
     'src/ops/ratchet/verifyRatchet.ts',
     'src/ops/ratchet/recomputeTypecheck.ts',
+    // The prebuilt engine `scripts/ratchet-propose.mjs` loads in its
+    // `automation`-environment job (scripts/ratchet-lib.mjs `loadEngine`).
+    ...engineModules(),
   ];
 
   /**
@@ -339,14 +354,20 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
   };
 
   /**
-   * Privileged selfhost entry points run from main WITHOUT a trust split
-   * whose code is deliberately unprotected, each with the protected judge
-   * that re-checks everything it does (docs/protected-scope.md).
+   * Unprotected code that a privileged job (an `environment:`, a secret, a
+   * write permission) runs by path: the named residual of
+   * docs/protected-scope.md, each with what bounds it. Anything else such a
+   * job runs must be protected.
    */
-  const REJUDGED: Readonly<Record<string, string>> = {
-    'self-merge-prs':
-      'its merges into merge-queue are re-judged by promote-gate (closure, I2, policy)',
-    'self-review-loop': 'its pushes to PR heads are re-judged by cq/acceptance and promote-gate',
+  const RESIDUAL: Readonly<Record<string, string>> = {
+    'dist/selfhost/self-merge-prs.js':
+      'merges into merge-queue only; promote-gate re-judges closure, I2 and policy',
+    'dist/selfhost/self-review-loop.js':
+      'pushes to PR heads only; cq/acceptance and promote-gate re-judge them',
+    'scripts/dd1-abort-spike.mjs':
+      'live-drivers drill: workflow_dispatch on main only, model keys only',
+    'scripts/demo-eval-axes.mjs':
+      'live-drivers drill: workflow_dispatch on main only, model keys only',
   };
 
   const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
@@ -368,14 +389,31 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     for (const name of selfhost) expect(ENTRY_POINTS).toContain(`src/selfhost/${name}.ts`);
   });
 
-  test('every other privileged selfhost entry point is re-judged by a protected one', () => {
-    const untrusted = new Set<string>();
+  test('every script or selfhost entry a privileged job runs is protected or a named residual', () => {
+    const seen = new Set<string>();
+    const unclassified: string[] = [];
     for (const text of workflowTexts) {
-      for (const m of text.matchAll(/(?<!trust\/)\bdist\/selfhost\/([\w-]+)\.js/g)) {
-        untrusted.add(m[1]!);
+      const scan = scanWorkflow(text);
+      expect(scan.ok).toBe(true);
+      if (!scan.ok) continue;
+      for (const job of scan.jobs.values()) {
+        if (!job.privileged) continue;
+        // `trust/dist/...` is excluded by the leading-boundary rule: the walk covers it.
+        const refs = job.text.matchAll(
+          /(?:^|[\s"'=])(?:\.\/)?(scripts\/[\w./-]+|dist\/selfhost\/[\w-]+\.js)/gm,
+        );
+        for (const m of refs) {
+          const ref = m[1]!;
+          if (Object.hasOwn(RESIDUAL, ref)) seen.add(ref);
+          else if (!isProtectedPolicyPath(ref) && !REGEXES.some((re) => re.test(ref))) {
+            unclassified.push(`${job.id}: ${ref}`);
+          }
+        }
       }
     }
-    expect([...untrusted].sort()).toEqual(Object.keys(REJUDGED).sort());
+    expect(unclassified).toEqual([]);
+    // The residual never goes stale: each entry is still run by a privileged job.
+    expect([...seen].sort()).toEqual(Object.keys(RESIDUAL).sort());
   });
 
   test('every closure file is protected or allowlisted with a reason', () => {

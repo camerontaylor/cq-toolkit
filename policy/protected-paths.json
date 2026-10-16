@@ -1,10 +1,9 @@
 {
   "schemaVersion": 1,
   "protectedPaths": [
-    "^src/ops/gates/(?:checkRunner|d11Authorization|overrideRecord|policyConfig|policyDiff|protectedPaths|registry|workflowScan)\\.ts$",
+    "^src/ops/gates/(?:checkRunner|overrideRecord|policyConfig|policyDiff|protectedPaths|registry|workflowScan)\\.ts$",
     "^src/ops/gates/adapters/(?:eslint|tsc|vitest)\\.ts$",
-    "^src/ops/ratchet/(?:format|git|monotonicGuard|recomputeTypecheck|registry|sources|verifyRatchet)\\.ts$",
-    "^src/ops/ratchet/(?:adapters/typecheckCount|internal/definitions)\\.ts$",
+    "^src/ops/ratchet/",
     "^src/ops/review/(?:gh|threads)\\.ts$",
     "^src/selfhost/(?:acceptance|merge-recheck|promote-gate|settle-state|state-branch)\\.ts$",
     "^src/shared/independent-review\\.ts$",

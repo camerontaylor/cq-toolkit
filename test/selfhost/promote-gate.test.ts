@@ -830,12 +830,13 @@ const passAcceptance = (input: AcceptanceInput): Promise<AcceptanceResult> =>
 const policyOutcome = (
   verdict: PolicyDiffOutcome['verdict'],
   requiredJobs: PolicyDiffOutcome['requiredJobs'] = {},
+  postureLayer: PolicyDiffOutcome['postureLayer'] = 'default',
 ): OpResult<PolicyDiffOutcome> => ({
   status: 'ok',
   value: {
     verdict,
-    posture: 'human',
-    postureLayer: 'default',
+    posture: postureLayer === 'window' ? 'diff-check' : 'human',
+    postureLayer,
     requiredJobs,
     trustRef: TRUST,
     subject: M1,
@@ -1206,6 +1207,33 @@ describe('runGate', () => {
       policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['j'] })),
     });
     expect((await runGate(present.deps, cfg())).verdict).toBe('would-promote');
+  });
+
+  test('a pass that relied on the revision window is re-judged at push time', async () => {
+    // First judgement inside the window; the second (after the waits) finds it expired.
+    const answers = [policyOutcome('pass', {}, 'window'), policyOutcome('needs-human')];
+    const expired = harness(world(), {
+      policyDiff: () => Promise.resolve(answers.shift() ?? policyOutcome('needs-human')),
+    });
+    const r = await runGate(expired.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report).toContain('policy recheck (revision window): needs-human');
+    expect(r.report.at(-1)).toMatch(/revision-window pass no longer holds at push time/);
+
+    const calls: PolicyDiffInput[] = [];
+    const still = harness(world(), {
+      policyDiff: (input) => {
+        calls.push(input);
+        return Promise.resolve(policyOutcome('pass', {}, 'window'));
+      },
+    });
+    expect((await runGate(still.deps, cfg())).verdict).toBe('would-promote');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(calls[0]);
+    // A pass that did not rely on the window is not re-judged.
+    const plain = harness(world());
+    await runGate(plain.deps, cfg());
+    expect(plain.policyInputs).toHaveLength(1);
   });
 
   test('requiredJobs naming a workflow the gate does not verify refuses (never checkable)', async () => {

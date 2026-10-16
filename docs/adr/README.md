@@ -479,7 +479,9 @@ posture source: a time-boxed `diff-check` `revisionWindow` read from the
 trust ref's `policy/protected-paths.json`. It applies only at the default
 layer, fails closed to `human` outside its bounds, and is capped at 31 days.
 D-G.2's diff-check findings (privileged jobs, definitions, removals) still
-need the D11 record. The gate's required job names also move into that list
-(`requiredJobs`). The tables, the named residual (the CLI dispatch shell)
+need the D11 record. A gate pass that relied on the window is judged again
+at push time. The gate's required job names are declared in that list
+(`requiredJobs`). The tables, the two named residuals (R1, the CLI dispatch
+shell in the verifier jobs; R2, privileged jobs running unprotected code)
 and the window parameters are in
 [`docs/protected-scope.md`](../protected-scope.md).

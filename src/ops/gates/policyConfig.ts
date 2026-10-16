@@ -16,6 +16,8 @@
 // D-P, a time-boxed revision window on the TRUST REF is a third source; see
 // `applyRevisionWindow` below.
 
+import { z } from 'zod';
+
 /** `human`: every finding needs a human. `diff-check`: plain protected-path edits pass. */
 export type ProtectedPathsPosture = 'human' | 'diff-check';
 
@@ -88,22 +90,45 @@ export function resolveProtectedPathsConfig(
 //
 // The window relaxes ONLY the default layer: an explicit env or per-call
 // posture is a deliberate statement and wins whichever way it points. A
-// window that is not yet open, has expired, or cannot be read falls back to
-// `human` (fail closed, I5) and says so in the run report.
+// window that is not yet open, has expired, or is judged by an unusable
+// clock leaves the posture `human` (fail closed, I5) and says so in the run
+// report; a window the schema refuses fails the whole check instead.
 
 /** Longest window a policy list may declare: an open-ended relaxation is a schema error. */
 export const MAX_REVISION_WINDOW_DAYS = 31;
 
+const DAY_MS = 86_400_000;
+
+/** A real UTC second, `YYYY-MM-DDTHH:MM:SSZ` (round-trips, so `02-30` is refused). */
+const UtcSecond = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+  .refine((text) => {
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) && new Date(ms).toISOString() === text.replace('Z', '.000Z');
+  }, 'must be a real UTC second');
+
+/** The policy-list `revisionWindow`: diff-check only, explicit bounds, never open-ended. */
+export const RevisionWindowSchema = z
+  .object({
+    posture: z.literal('diff-check'),
+    /** Inclusive start. */
+    opens: UtcSecond,
+    /** Exclusive end. */
+    expires: UtcSecond,
+    /** The owner ruling that authorised the window. */
+    ruling: z.string().min(1),
+  })
+  .strict()
+  .refine((w) => Date.parse(w.expires) > Date.parse(w.opens), {
+    message: 'revisionWindow.expires must be after opens',
+  })
+  .refine((w) => Date.parse(w.expires) - Date.parse(w.opens) <= MAX_REVISION_WINDOW_DAYS * DAY_MS, {
+    message: `revisionWindow may span at most ${String(MAX_REVISION_WINDOW_DAYS)} days`,
+  });
+
 /** A declared revision window, as parsed from the trust ref's policy list. */
-export interface RevisionWindow {
-  readonly posture: 'diff-check';
-  /** Inclusive start, UTC `YYYY-MM-DDTHH:MM:SSZ`. */
-  readonly opens: string;
-  /** Exclusive end, UTC `YYYY-MM-DDTHH:MM:SSZ`. */
-  readonly expires: string;
-  /** The owner ruling that authorised the window. */
-  readonly ruling: string;
-}
+export type RevisionWindow = z.infer<typeof RevisionWindowSchema>;
 
 /** The posture after the window is applied, with its report lines. */
 export interface EffectivePosture {
@@ -116,8 +141,8 @@ export interface EffectivePosture {
  * Apply a trust-ref revision window to a resolved posture at `nowMs`.
  *
  * Inside `[opens, expires)` a default-layer posture becomes `diff-check` at
- * the `window` layer. Everywhere else the resolved posture stands; an
- * expired or not-yet-open window is reported so a stale entry is visible.
+ * the `window` layer. Everywhere else the resolved posture stands, and the
+ * report says why, so a stale entry stays visible.
  */
 export function applyRevisionWindow(
   config: ProtectedPathsConfig,
@@ -126,29 +151,26 @@ export function applyRevisionWindow(
 ): EffectivePosture {
   if (window === undefined) return { posture: config.posture, layer: config.layer, lines: [] };
   const span = `${window.opens}..${window.expires} (${window.ruling})`;
-  if (config.layer !== 'default') {
-    return {
-      posture: config.posture,
-      layer: config.layer,
-      lines: [`revision window ${span}: not applied — posture set at the ${config.layer} layer`],
-    };
-  }
   const opens = Date.parse(window.opens);
   const expires = Date.parse(window.expires);
-  if (!Number.isFinite(nowMs) || nowMs < opens) {
-    return {
-      posture: 'human',
-      layer: 'default',
-      lines: [`revision window ${span}: not open yet — posture human`],
-    };
+  const keep = (why: string): EffectivePosture => ({
+    posture: config.posture,
+    layer: config.layer,
+    lines: [`revision window ${span}: ${why}`],
+  });
+  const closed = (why: string): EffectivePosture => ({
+    posture: 'human',
+    layer: 'default',
+    lines: [`revision window ${span}: ${why} — posture human (fail closed)`],
+  });
+  if (config.layer !== 'default') {
+    const expired = Number.isFinite(nowMs) && nowMs >= expires ? ' (expired)' : '';
+    return keep(`not applied — posture set at the ${config.layer} layer${expired}`);
   }
-  if (nowMs >= expires) {
-    return {
-      posture: 'human',
-      layer: 'default',
-      lines: [`revision window ${span}: EXPIRED — posture human (fail closed)`],
-    };
-  }
+  if (!Number.isFinite(opens) || !Number.isFinite(expires)) return closed('bounds unreadable');
+  if (!Number.isFinite(nowMs)) return closed('clock unusable');
+  if (nowMs < opens) return closed('not open yet');
+  if (nowMs >= expires) return closed('EXPIRED');
   return {
     posture: window.posture,
     layer: 'window',

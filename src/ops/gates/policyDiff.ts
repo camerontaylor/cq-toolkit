@@ -60,7 +60,7 @@ import {
   type OverrideEvaluation,
 } from './overrideRecord.js';
 import {
-  MAX_REVISION_WINDOW_DAYS,
+  RevisionWindowSchema,
   applyRevisionWindow,
   type EffectivePosture,
   type ProtectedPathsConfig,
@@ -167,33 +167,6 @@ function compiles(source: string): boolean {
 
 /** A workflow file name under `.github/workflows/` (no directory part). */
 const WORKFLOW_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/;
-
-/** A real UTC second, `YYYY-MM-DDTHH:MM:SSZ` (round-trips, so `02-30` is refused). */
-const UtcSecond = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
-  .refine((text) => {
-    const ms = Date.parse(text);
-    return Number.isFinite(ms) && new Date(ms).toISOString() === text.replace('Z', '.000Z');
-  }, 'must be a real UTC second');
-
-const DAY_MS = 86_400_000;
-
-/** The D-P window: diff-check only, explicit bounds, never open-ended. */
-const RevisionWindowSchema = z
-  .object({
-    posture: z.literal('diff-check'),
-    opens: UtcSecond,
-    expires: UtcSecond,
-    ruling: z.string().min(1),
-  })
-  .strict()
-  .refine((w) => Date.parse(w.expires) > Date.parse(w.opens), {
-    message: 'revisionWindow.expires must be after opens',
-  })
-  .refine((w) => Date.parse(w.expires) - Date.parse(w.opens) <= MAX_REVISION_WINDOW_DAYS * DAY_MS, {
-    message: `revisionWindow may span at most ${String(MAX_REVISION_WINDOW_DAYS)} days`,
-  });
 
 /** `policy/protected-paths.json`: strict, every regex source compiles, every check name non-empty. */
 const PolicyListSchema = z
@@ -898,6 +871,31 @@ export function createPolicyDiff(
             `changes the producer of required check ${check} (${changes.join('; ')})`,
           );
         }
+      }
+    }
+
+    // required-check (required jobs): the gate requires the trust ref's
+    // `requiredJobs` by display name in each verified workflow's run, so a
+    // changed workflow that no longer statically names one would block every
+    // promotion. That is a definition change, needs-human in every posture —
+    // never a revision-window pass.
+    for (const [file, jobs] of Object.entries(policy.requiredJobs ?? {})) {
+      const wf = `${WORKFLOWS_DIR}/${file}`;
+      if (!safeSet.has(wf)) continue;
+      const scan = subjectFlows.get(wf)?.scan;
+      if (scan?.ok !== true) {
+        add(
+          'required-check',
+          wf,
+          `required jobs of ${file} unresolvable at the subject (${scan === undefined ? 'workflow removed' : 'unparseable'})`,
+        );
+        continue;
+      }
+      for (const required of jobs) {
+        const named = [...scan.jobs.values()].some(
+          (job) => !hasUnresolvableCheckName(job) && (job.name ?? job.id) === required,
+        );
+        if (!named) add('required-check', wf, `no statically named required job ${required}`);
       }
     }
 

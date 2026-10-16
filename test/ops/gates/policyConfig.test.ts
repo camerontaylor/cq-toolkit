@@ -124,7 +124,7 @@ describe('applyRevisionWindow', () => {
   });
 
   test.each([
-    ['before opening', '2026-10-16T23:59:59Z', /not open yet/],
+    ['before opening', '2026-10-16T23:59:59Z', /not open yet — posture human \(fail closed\)/],
     ['at expiry', '2026-10-31T00:00:00Z', /EXPIRED — posture human \(fail closed\)/],
     ['long after expiry', '2027-01-01T00:00:00Z', /EXPIRED/],
   ])('%s: human, reported', (_label, iso, line) => {
@@ -133,8 +133,27 @@ describe('applyRevisionWindow', () => {
     expect(out.lines.join('\n')).toMatch(line);
   });
 
-  test('an unusable clock is not open (fail closed)', () => {
-    expect(applyRevisionWindow(human, window, Number.NaN).posture).toBe('human');
+  test('an unusable clock or unreadable bounds stay human (fail closed)', () => {
+    const clock = applyRevisionWindow(human, window, Number.NaN);
+    expect(clock.posture).toBe('human');
+    expect(clock.lines.join('\n')).toMatch(/clock unusable — posture human \(fail closed\)/);
+    // Unreachable through the policy-list schema, but the function is exported.
+    const bounds = applyRevisionWindow(
+      human,
+      { ...window, expires: 'not-a-date' },
+      Date.parse('2026-10-20T00:00:00Z'),
+    );
+    expect(bounds.posture).toBe('human');
+    expect(bounds.lines.join('\n')).toMatch(/bounds unreadable/);
+  });
+
+  test('an expired window stays visible at an explicit layer', () => {
+    const out = applyRevisionWindow(
+      { posture: 'human', layer: 'env' },
+      window,
+      Date.parse('2026-11-01T00:00:00Z'),
+    );
+    expect(out.lines.join('\n')).toMatch(/not applied — posture set at the env layer \(expired\)/);
   });
 
   test.each([
