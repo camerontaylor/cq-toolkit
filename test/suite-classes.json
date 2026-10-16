@@ -57,7 +57,6 @@
   "test/kernel/journal.test.ts": "pure",
   "test/kernel/lanes.test.ts": "pure",
   "test/kernel/output.test.ts": "pure",
-  "test/kernel/rescue.test.ts": "pure",
   "test/kernel/runner-governed.test.ts": "process",
   "test/kernel/runner.test.ts": "process",
   "test/kernel/types.test.ts": "pure",
