@@ -1,6 +1,9 @@
 # Documentation index
 
-Precedence: owner rulings → accepted ADRs → this index's contract set → evidence and records.
+Authority: owner rulings and current canonical contracts govern; [Doctrine](../policy/DOCTRINE.md)
+is canonical for I1–I11. Accepted ADRs record historical design and yield to later
+post-acceptance notes or implementation changes, subject to those canonical authorities.
+Evidence and records document dated outcomes; they do not override current contracts.
 
 ## Canonical reading set
 
