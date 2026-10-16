@@ -14,8 +14,7 @@
 //   2. The persist-credentials split: generated ci.yml, denylist.yml, and
 //      install-matrix.yml run repo code, so their checkouts must drop
 //      the token (`persist-credentials: false`); the queue-mechanics
-//      the queue-mechanics workflow (init-merge-queue.yml; the retired
-//      merge-queue-gate.yml template keeps the same shape adopter-only) keeps the
+//      workflow (init-merge-queue.yml) keeps the
 //      promote PAT by design and must not declare the key at all — their
 //      policy note says so beside the pin (the gate's note mentions the
 //      word "persist-credentials" in prose, so the assertion is on the KEY,
@@ -46,7 +45,7 @@ const TEMPLATE_FILES = [
   'policy/templates/ratchet-propose-measure.yml',
   'policy/templates/init-merge-queue.yml',
   'policy/templates/live-merge.yml',
-  'policy/templates/merge-queue-gate.yml',
+  'policy/templates/live-drivers.yml',
   'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
   'policy/templates/affected-tests.md',
@@ -170,8 +169,7 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     // persisted credential BY DEFAULT — the pin comment says why. The
     // policy assertion is that the file does NOT DECLARE the key (which would
     // have to be `true` to matter, and `false` would break the push); the
-    // prose comment mentioning the word is not a declaration. (The retired
-    // merge-queue-gate.yml template keeps the same shape adopter-only.)
+    // prose comment mentioning the word is not a declaration.
     for (const name of ['init-merge-queue.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
       // This pushes with the promote PAT, so the checkout keeps its
