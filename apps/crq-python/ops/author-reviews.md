@@ -1,5 +1,80 @@
 # Supported author enrollment and shared quota (held, not used)
 
+## Opt-in lease arbitration (local item 1; no deployment)
+
+The legacy commands below retain their existing arguments, output and state
+when leases are not requested. To opt a **new** author request into leases, add
+`--review-policy <JSON-file> --fallback-reviewer <configured-agent-identity>`
+to `author-enroll`. Both are required together. The file must contain a positive
+integer at `review.reviewerTimeoutMin`; no default is substituted from
+`review_timeout_min`. Provider/model choice belongs to the caller's configuration.
+The reviewer identity is immutable for that request; no provider/model is chosen
+by this code. Only commit subjects are supported in item 1.
+
+The new item field is `author_lease`:
+
+```json
+{"v":1,"state":"waiting","requested_at":"2026-10-16T06:00:00Z","deadline_at":"2026-10-16T06:25:00Z","reviewerTimeoutMin":25,"reviewer":"<configured-agent-identity>"}
+```
+
+Times use the queue owner's UTC clock. Identical re-enrollment keeps the original
+deadline; policy/reviewer changes on an existing request refuse. A legacy request
+cannot be upgraded in place. Absent lease means legacy; malformed/unknown versions
+or states fail closed. Unknown fields are retained.
+
+Under the existing `state/tick.lock`, the natural tick can decide `waiting ->
+queue` **strictly before** the deadline, immediately before its existing durable
+start reservation. It rechecks after secret scan and worktree preparation. Queue
+grant, start reservation and run identity are saved together before spawning;
+the new lease adds `decided_at`. A queue grant is permanent even if launch fails,
+is ambiguous, or outlasts the waiting timeout. Existing recovery and quota rules
+remain authoritative; this is not a TTL release of a running review.
+
+After the deadline, the caller invokes the local operator command:
+
+```sh
+python3 crq.py author-fallback --request-id <stable-id>
+```
+
+It acquires the same lock, reloads the queue, and can decide `waiting -> agent`
+only for an unstarted pending admission. It persists `state:"agent",decided_at`
+in the lease and tombstones the item as `skipped` before responding. Late queue
+grants are refused, including after a manual requeue or clock rollback. Global
+pause/cooldown do not prevent this arbitration, since it starts no CodeRabbit
+review and creates no CodeRabbit quota reservation. An item blocked by the secret
+scan or with dispatch evidence cannot use this escape hatch.
+
+Success is one JSON line with exactly the v1 response fields:
+
+```json
+{"binding":{"base":"<sha40>","cycle":1,"head":"<sha40>","request_id":"<stable-id>","target":"origin/merge-queue"},"deadline_at":"2026-10-16T06:25:00Z","decided_at":"2026-10-16T06:25:00Z","dispatch":true,"issuer":"agent","request_id":"<stable-id>","reviewer":"<configured-agent-identity>","v":1}
+```
+
+`issuer` is `waiting`, `queue`, or `agent`. `reviewer` is null unless assigned
+to the agent; `decided_at` is null while waiting. `dispatch:true` is returned
+**only by the first successful fallback claim**, never by status or replay.
+`python3 crq.py author-lease --request-id <stable-id>` returns status with
+`dispatch:false`. Refused/contended new commands exit 3; lock contention retains
+the legacy text on stdout. Parse JSON only after exit 0, and require v1 and
+`issuer:"agent",dispatch:true` before handing off to the named agent reviewer.
+
+This is the local arbitration boundary for `dev.review`: the caller waits/polls
+until the recorded deadline, then asks for fallback. The command does **not**
+instantiate an agent or run an arbitrary model command. The caller launches the
+configured agent once on the returned immutable binding and records its evidence;
+it must secret-scan that exact range before sending it to the agent. A response
+lost after durable assignment yields **no retry permission**: escalation is
+required rather than an automatic second review. A transport error, waiting
+status, or local timeout is never fallback authorization. Worker transport is
+item 2; tree snapshots are item 3. Neither is delivered or activated here.
+
+The legacy queue, observation and promotion spool schemas and request bytes are
+unchanged for non-opted-in requests. `author_lease.v:1` and response `v:1` are the
+only new schema versions; there is no queue-wide version bump or ledger reset.
+Do not roll back to a runner unaware of lease tombstones or use owner admin
+actions to bypass a permanent grant. Production input capture, 24-hour shadow
+comparison and deployment/custody evidence remain future release gates.
+
 This source adds a supported operator path for an author CLI cycle. It does not
 enroll anything during installation, does not start a second scheduler, does not
 change limits, does not fabricate a review cycle, and does not touch the live

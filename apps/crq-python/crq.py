@@ -25,6 +25,7 @@ import status_summary
 import repair_tick
 import coverage
 import author_quota
+import author_lease
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -665,6 +666,7 @@ def plan_author(item: Dict[str, Any], dry: bool) -> Dict[str, Any]:
     """Author review plan. The binding's base/head are immutable commits; verify
     both are present in the clone (fetching if needed) before a worktree is cut,
     so an unpushed head WAITS (NotReady) instead of crashing the tick."""
+    author_lease.check_queue(item, at=iso())
     plan = author_quota.plan(item)
     if dry:
         return plan
@@ -691,6 +693,8 @@ def inflight(q: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str:
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        author_lease.check_queue(item, at=iso())
     run_id = f"{item['id']}-{now().strftime('%Y%m%dT%H%M%SZ')}"
     rdir = RUNS / run_id
     rdir.mkdir(parents=True)
@@ -722,6 +726,14 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
     if item["kind"] == author_quota.AUTHOR_KIND:
         a = item.get("author") or {}
         meta["author"] = {k: a.get(k) for k in ("request_id", "base", "head", "target", "cycle")}
+    if item["kind"] == author_quota.AUTHOR_KIND:
+        try:
+            # Scan/worktree preparation may outlast the wait deadline. Recheck
+            # immediately before reservation, still under the same tick lock.
+            author_lease.grant_queue(item, at=iso())
+        except author_quota.AuthorRefused:
+            remove_worktree(wt, wbranch)
+            raise
     repair_tick.atomic(rdir / "meta.json", meta)
     item["state"] = "reviewing"
     item["run"] = {"run_id": run_id, "pid": None, "started_at": meta["started_at"], "launch_pending": True}
@@ -2442,7 +2454,12 @@ def tick(dry: bool = False, only: Optional[str] = None, ignore_quiet: bool = Fal
                 log.append(f"DRY-RUN would start {item['id']} [{plan['label']}] base {plan['base'][:12]} "
                            f"head {plan['head'][:12]} target {plan['target']}")
             else:
-                started = launch(q, item, plan)
+                try:
+                    started = launch(q, item, plan)
+                except author_quota.AuthorRefused as exc:
+                    item["wait_reason"] = str(exc)
+                    log.append(f"{item['id']}: author launch refused: {exc}")
+                    continue
                 log.append(f"started {item['id']} [{plan['label']}] run {started}")
                 if item["kind"] == "promotion" and item["state"] == "reviewing":
                     post_promotion_status(item, item["batch_sha"], "pending",
@@ -2694,12 +2711,14 @@ def with_lock(fn, *a, **kw):
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        fh.close()
         print("another crq tick holds the lock; exiting")
         return None
     try:
         return fn(*a, **kw)
     finally:
         fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
 
 
 def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
@@ -2763,13 +2782,25 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def enroll_author(request_id: str, base: str, head: str, target: str, cycle: int) -> None:
+def enroll_author(request_id: str, base: str, head: str, target: str, cycle: int,
+                  review_policy: Optional[str] = None, fallback_reviewer: Optional[str] = None) -> None:
     """Supported author enrollment: create a PENDING author item in the queue.
     Never dispatches — the locked natural tick launches it when eligible."""
     q = load_queue()
     try:
+        if bool(review_policy) != bool(fallback_reviewer):
+            raise author_quota.AuthorRefused("--review-policy and --fallback-reviewer are required together")
+        lease = (author_lease.new_lease(json.loads(Path(review_policy).read_text()),
+                                       fallback_reviewer, at=iso()) if review_policy else None)
         res = author_quota.enroll(q, request_id=request_id, base=base, head=head, target=target,
                                   cycle=cycle, at=iso())
+        if lease is not None:
+            if res["created"]:
+                res["item"]["author_lease"] = lease
+            else:
+                old = author_lease.read(res["item"])
+                if old is None or any(old[k] != lease[k] for k in ("reviewerTimeoutMin", "reviewer")):
+                    raise author_quota.AuthorRefused("cannot replace an existing request's lease policy")
     except author_quota.AuthorRefused as exc:
         sys.exit(f"author-enroll refused: {exc}")
     if res["created"]:
@@ -2778,6 +2809,18 @@ def enroll_author(request_id: str, base: str, head: str, target: str, cycle: int
     save_queue(q)
     write_status(q)
     print(res["message"])
+
+
+def author_lease_command(request_id: str, claim_fallback: bool) -> Dict[str, Any]:
+    """Local protocol only; no model invocation or worker transport here."""
+    q = load_queue()
+    if claim_fallback:
+        result = author_lease.fallback(q, request_id, at=iso())
+        # Durable decision precedes response; uncertainty never authorizes retry.
+        save_queue(q)
+    else:
+        result = author_lease.decision(author_lease.find(q, request_id))
+    return result
 
 
 def author_observe(manifest_path: str) -> None:
@@ -2823,6 +2866,11 @@ def main() -> int:
     p.add_argument("--head", required=True, help="immutable reviewed head commit sha")
     p.add_argument("--target", required=True, help="target ref, e.g. origin/merge-queue")
     p.add_argument("--cycle", type=int, required=True, help="author cycle number (1 or 2)")
+    p.add_argument("--review-policy", help="opt into leases using review.reviewerTimeoutMin from this JSON file")
+    p.add_argument("--fallback-reviewer", help="configured agent reviewer identity; requires --review-policy")
+    for command in ("author-lease", "author-fallback"):
+        p = sub.add_parser(command, help="inspect lease or claim timed one-shot agent fallback (JSON v1)")
+        p.add_argument("--request-id", required=True)
     p = sub.add_parser("author-observe", help="charge a genuinely evidenced historical author invocation to the "
                                               "rolling hour (reserved=false); desk approval required before use")
     p.add_argument("manifest", help="observation manifest JSON (binding, started_at, artifact digests)")
@@ -2897,7 +2945,17 @@ def main() -> int:
     elif args.cmd == "promotion-resolve":
         with_lock(admin, args.cmd, None, f"{args.finding} {args.disposition}")
     elif args.cmd == "author-enroll":
-        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle)
+        with_lock(enroll_author, args.request_id, args.base, args.head, args.target, args.cycle,
+                  args.review_policy, args.fallback_reviewer)
+    elif args.cmd in ("author-lease", "author-fallback"):
+        try:
+            result = with_lock(author_lease_command, args.request_id, args.cmd == "author-fallback")
+        except author_quota.AuthorRefused as exc:
+            print(f"{args.cmd} refused: {exc}", file=sys.stderr)
+            return 3
+        if result is None:
+            return 3
+        print(json.dumps(result, sort_keys=True))
     elif args.cmd == "author-observe":
         with_lock(author_observe, args.manifest)
     else:
