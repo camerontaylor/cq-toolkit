@@ -11,7 +11,7 @@
 //      the tsconfig `extends`/`references` graph — are protected too;
 //   3. the paths that carry the protected-path list and the required-check
 //      list are in the definition set (D-C.4's last bullet).
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
@@ -227,8 +227,29 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
 // break-glass. This walks the relative-import closure of the entry points
 // (value imports only; `import type` / `export type` erase at build) and
 // asserts every file matches a `policy/protected-paths.json` regex.
+//
+// Protected scope (docs/protected-scope.md, 2026-10-16): the entry points are
+// the JUDGING code — what a trusted job (`trust/dist/...`) runs to post a
+// verdict or move `main` — and nothing else in src/. The trusted-invocation
+// test below pins that list to the workflows, so a new trusted call fails
+// here until its closure is classified.
 describe('protected-paths.json covers the gate and acceptance import closure', () => {
-  const ENTRY_POINTS = ['src/selfhost/acceptance.ts', 'src/selfhost/promote-gate.ts'];
+  const ENTRY_POINTS = [
+    'src/selfhost/acceptance.ts',
+    'src/selfhost/promote-gate.ts',
+    // The verifier ops the trusted `trust/dist/cli.js` invocations dispatch.
+    'src/ops/gates/policyDiff.ts',
+    'src/ops/gates/policyConfig.ts',
+    'src/ops/ratchet/verifyRatchet.ts',
+    'src/ops/ratchet/recomputeTypecheck.ts',
+  ];
+
+  /**
+   * Protected but NOT walked: the registry entries that bind the verifier
+   * ops (input schema, posture resolution). Their lazy importers also reach
+   * ops no trusted job runs, so walking them would protect library code.
+   */
+  const BINDINGS = ['src/ops/gates/registry.ts', 'src/ops/ratchet/registry.ts'];
 
   /**
    * Closure files that need NOT be protected, each with its reason. Keep it
@@ -295,6 +316,66 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
         ].join('\n'),
       ),
     ).toEqual(['./a.js', '../e.js', './f.js', './g.js', './side.js', './dyn.js']);
+  });
+
+  test('the verifier bindings are protected', () => {
+    for (const file of BINDINGS) {
+      expect(
+        REGEXES.some((re) => re.test(file)),
+        file,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * Every `trust/dist/...` call in a rendered workflow: the ops dispatched
+   * through `cli.js` and the selfhost entry points. Each must be one of the
+   * entry points above.
+   */
+  const TRUSTED_CLI_OPS: Readonly<Record<string, readonly string[]>> = {
+    'gates.policyDiff': ['src/ops/gates/policyDiff.ts', 'src/ops/gates/policyConfig.ts'],
+    'ratchet.verifyRatchet': ['src/ops/ratchet/verifyRatchet.ts'],
+    'ratchet.recomputeTypecheck': ['src/ops/ratchet/recomputeTypecheck.ts'],
+  };
+
+  /**
+   * Privileged selfhost entry points run from main WITHOUT a trust split
+   * whose code is deliberately unprotected, each with the protected judge
+   * that re-checks everything it does (docs/protected-scope.md).
+   */
+  const REJUDGED: Readonly<Record<string, string>> = {
+    'self-merge-prs':
+      'its merges into merge-queue are re-judged by promote-gate (closure, I2, policy)',
+    'self-review-loop': 'its pushes to PR heads are re-judged by cq/acceptance and promote-gate',
+  };
+
+  const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
+  const workflowTexts = readdirSync(WORKFLOWS_DIR)
+    .filter((f) => /\.ya?ml$/.test(f))
+    .map((f) => readFileSync(join(WORKFLOWS_DIR, f), 'utf8'));
+
+  test('every trusted invocation in the workflows is a walked entry point', () => {
+    const ops = new Set<string>();
+    const selfhost = new Set<string>();
+    for (const text of workflowTexts) {
+      for (const m of text.matchAll(/\btrust\/dist\/cli\.js\s+([A-Za-z][\w.]*)/g)) ops.add(m[1]!);
+      for (const m of text.matchAll(/\btrust\/dist\/selfhost\/([\w-]+)\.js/g)) selfhost.add(m[1]!);
+    }
+    expect([...ops].sort()).toEqual(Object.keys(TRUSTED_CLI_OPS).sort());
+    for (const sources of Object.values(TRUSTED_CLI_OPS)) {
+      expect(ENTRY_POINTS).toEqual(expect.arrayContaining([...sources]));
+    }
+    for (const name of selfhost) expect(ENTRY_POINTS).toContain(`src/selfhost/${name}.ts`);
+  });
+
+  test('every other privileged selfhost entry point is re-judged by a protected one', () => {
+    const untrusted = new Set<string>();
+    for (const text of workflowTexts) {
+      for (const m of text.matchAll(/(?<!trust\/)\bdist\/selfhost\/([\w-]+)\.js/g)) {
+        untrusted.add(m[1]!);
+      }
+    }
+    expect([...untrusted].sort()).toEqual(Object.keys(REJUDGED).sort());
   });
 
   test('every closure file is protected or allowlisted with a reason', () => {

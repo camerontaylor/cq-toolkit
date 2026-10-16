@@ -468,3 +468,18 @@ and `CQ_AUTOMATION_APP_CLIENT_ID` (variable) in
 the interim `CQ_AUTOMATION_TOKEN`/`GH_TOKEN` names stay in its
 `interimSecrets` allowlist (reported as drift notices) until the owner
 revokes them at C3/T7. This supersedes N20's `self-merge-prs` tail.
+
+### N23 — ADR-0004 D-G.1/D-G.2 and Annex B §B.1: protected scope is the deployed system; the D-P revision window
+
+Owner principle and rulings of 2026-10-16 (D-P, plus "narrow protection to
+the deployed system"). D-G.1's "check-code paths" now means exactly the
+judging closure: the code trusted jobs run to post a verdict or move `main`.
+In-development library code is not protected. Annex B §B.1 gains a third
+posture source: a time-boxed `diff-check` `revisionWindow` read from the
+trust ref's `policy/protected-paths.json`. It applies only at the default
+layer, fails closed to `human` outside its bounds, and is capped at 31 days.
+D-G.2's diff-check findings (privileged jobs, definitions, removals) still
+need the D11 record. The gate's required job names also move into that list
+(`requiredJobs`). The tables, the named residual (the CLI dispatch shell)
+and the window parameters are in
+[`docs/protected-scope.md`](../protected-scope.md).

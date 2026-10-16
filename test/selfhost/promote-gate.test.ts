@@ -451,6 +451,18 @@ describe('checkVerifiedRun', () => {
     expect(skipped.reason).toMatch(/completed\/skipped/);
     expect(checkVerifiedRun(wf(), [], want).reason).toMatch(/no jobs/);
   });
+
+  test('requiredJobs: every named job must be in the run (policy data, not code)', () => {
+    const named = { ...want, requiredJobs: ['static', 'crq-python'] };
+    const missing = checkVerifiedRun(wf(), [job(), job({ name: 'from-source' })], named);
+    expect(missing.state).toBe('failure');
+    expect(missing.reason).toMatch(/missing required job 'crq-python'/);
+    expect(checkVerifiedRun(wf(), [job(), job({ name: 'crq-python' })], named).state).toBe(
+      'success',
+    );
+    // Still pending before the jobs are read: presence is judged on real jobs only.
+    expect(checkVerifiedRun(wf(), null, named).state).toBe('pending');
+  });
 });
 
 describe('selectPromotionReview', () => {
@@ -815,12 +827,16 @@ const passAcceptance = (input: AcceptanceInput): Promise<AcceptanceResult> =>
     report: ['pass: accepted by user:owner'],
   });
 
-const policyOutcome = (verdict: PolicyDiffOutcome['verdict']): OpResult<PolicyDiffOutcome> => ({
+const policyOutcome = (
+  verdict: PolicyDiffOutcome['verdict'],
+  requiredJobs: PolicyDiffOutcome['requiredJobs'] = {},
+): OpResult<PolicyDiffOutcome> => ({
   status: 'ok',
   value: {
     verdict,
     posture: 'human',
     postureLayer: 'default',
+    requiredJobs,
     trustRef: TRUST,
     subject: M1,
     rangeBase: MAIN,
@@ -1175,6 +1191,30 @@ describe('runGate', () => {
       policyDiff: () => Promise.resolve({ status: 'failed', error: 'git fault' }),
     });
     expect((await runGate(failed.deps, cfg())).report.at(-1)).toMatch(/could not judge/);
+  });
+
+  test('requiredJobs from the trust policy list: a missing job refuses, a present one promotes', async () => {
+    const missing = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['crq-python'] })),
+    });
+    const refused = await runGate(missing.deps, cfg());
+    expect(refused.verdict).toBe('refused');
+    expect(refused.report.join('\n')).toMatch(
+      /verified ci\.yml: failure .*missing required job 'crq-python'/,
+    );
+    const present = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['j'] })),
+    });
+    expect((await runGate(present.deps, cfg())).verdict).toBe('would-promote');
+  });
+
+  test('requiredJobs naming a workflow the gate does not verify refuses (never checkable)', async () => {
+    const h = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'other.yml': ['x'] })),
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/requiredJobs names unverified workflow\(s\) other\.yml/);
   });
 
   test('a failure verdict refuses immediately (no wait)', async () => {

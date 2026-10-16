@@ -12,7 +12,9 @@
 // input and workspace files never carry it — the policy op's input schema is
 // strict and has no posture field, so a subject cannot relax its own check.
 // The per-call object shape follows W1.11's `SandboxOptIn` and plan §3.1; the
-// CLI `--opt-in` flag that would populate it is W3.6's.
+// CLI `--opt-in` flag that would populate it is W3.6's. Since owner ruling
+// D-P, a time-boxed revision window on the TRUST REF is a third source; see
+// `applyRevisionWindow` below.
 
 /** `human`: every finding needs a human. `diff-check`: plain protected-path edits pass. */
 export type ProtectedPathsPosture = 'human' | 'diff-check';
@@ -74,4 +76,82 @@ export function resolveProtectedPathsConfig(
     throw new Error(`policy: ${PROTECTED_PATHS_ENV} must be 'human' or 'diff-check', got '${raw}'`);
   }
   return Object.freeze({ posture: raw, layer: 'env' });
+}
+
+// THE D-P REVISION WINDOW (owner ruling D-P, 2026-10-16; docs/protected-scope.md).
+// A third posture source beside the two above, amending Annex B §B.1 for
+// this one shape: a time-boxed `diff-check` declared in the TRUST REF's
+// `policy/protected-paths.json`. The subject never supplies it. The policy
+// check reads the list at the trust ref only, so a PR cannot open, widen or
+// extend a window for itself, and editing the list is itself a definition
+// change that needs a human in every posture.
+//
+// The window relaxes ONLY the default layer: an explicit env or per-call
+// posture is a deliberate statement and wins whichever way it points. A
+// window that is not yet open, has expired, or cannot be read falls back to
+// `human` (fail closed, I5) and says so in the run report.
+
+/** Longest window a policy list may declare: an open-ended relaxation is a schema error. */
+export const MAX_REVISION_WINDOW_DAYS = 31;
+
+/** A declared revision window, as parsed from the trust ref's policy list. */
+export interface RevisionWindow {
+  readonly posture: 'diff-check';
+  /** Inclusive start, UTC `YYYY-MM-DDTHH:MM:SSZ`. */
+  readonly opens: string;
+  /** Exclusive end, UTC `YYYY-MM-DDTHH:MM:SSZ`. */
+  readonly expires: string;
+  /** The owner ruling that authorised the window. */
+  readonly ruling: string;
+}
+
+/** The posture after the window is applied, with its report lines. */
+export interface EffectivePosture {
+  readonly posture: ProtectedPathsPosture;
+  readonly layer: ProtectedPathsConfig['layer'] | 'window';
+  readonly lines: readonly string[];
+}
+
+/**
+ * Apply a trust-ref revision window to a resolved posture at `nowMs`.
+ *
+ * Inside `[opens, expires)` a default-layer posture becomes `diff-check` at
+ * the `window` layer. Everywhere else the resolved posture stands; an
+ * expired or not-yet-open window is reported so a stale entry is visible.
+ */
+export function applyRevisionWindow(
+  config: ProtectedPathsConfig,
+  window: RevisionWindow | undefined,
+  nowMs: number,
+): EffectivePosture {
+  if (window === undefined) return { posture: config.posture, layer: config.layer, lines: [] };
+  const span = `${window.opens}..${window.expires} (${window.ruling})`;
+  if (config.layer !== 'default') {
+    return {
+      posture: config.posture,
+      layer: config.layer,
+      lines: [`revision window ${span}: not applied — posture set at the ${config.layer} layer`],
+    };
+  }
+  const opens = Date.parse(window.opens);
+  const expires = Date.parse(window.expires);
+  if (!Number.isFinite(nowMs) || nowMs < opens) {
+    return {
+      posture: 'human',
+      layer: 'default',
+      lines: [`revision window ${span}: not open yet — posture human`],
+    };
+  }
+  if (nowMs >= expires) {
+    return {
+      posture: 'human',
+      layer: 'default',
+      lines: [`revision window ${span}: EXPIRED — posture human (fail closed)`],
+    };
+  }
+  return {
+    posture: window.posture,
+    layer: 'window',
+    lines: [`revision window ${span}: open — posture ${window.posture}`],
+  };
 }

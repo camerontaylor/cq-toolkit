@@ -57,7 +57,8 @@
 //      default-branch cq-verify ran at main" form), waited for —
 //      dispatching cq-verify once when none is bound to main.
 //   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green: the
-//      newest `merge-queue` push run of each on the tip.
+//      newest `merge-queue` push run of each on the tip, carrying every job
+//      the trust ref's policy list names in `requiredJobs` for that file.
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
 //      not catch it; any change refuses), then one no-wait re-read of steps
@@ -488,6 +489,12 @@ export interface VerifiedWant {
   file: string;
   tip: string;
   repositoryId: number;
+  /**
+   * Job names the run must contain (the trust ref's policy-list
+   * `requiredJobs` for this file): "every job green" cannot see a deleted
+   * job, so a required one is named.
+   */
+  requiredJobs?: readonly string[];
 }
 
 export interface VerifiedRunCheck {
@@ -504,7 +511,8 @@ export interface VerifiedRunCheck {
  * and at least one job, every job completed `success` (a `skipped` job is
  * NOT success — I4: a skipped required check is missing), with a non-null
  * `runner_id` and a non-empty `steps` list (a job that never ran on a
- * runner proves nothing). `jobs` is null until the run is known green.
+ * runner proves nothing), and every `requiredJobs` name present. `jobs` is
+ * null until the run is known green.
  */
 export function checkVerifiedRun(
   run: unknown,
@@ -550,6 +558,11 @@ export function checkVerifiedRun(
     if (asInt(job['runner_id']) === null) return fail(`job '${name}' has no runner_id`);
     const steps = job['steps'];
     if (!Array.isArray(steps) || steps.length === 0) return fail(`job '${name}' has no steps`);
+  }
+  for (const required of want.requiredJobs ?? []) {
+    if (!jobs.some((raw) => asRecord(raw)['name'] === required)) {
+      return fail(`missing required job '${clean(required)}'`);
+    }
   }
   return {
     state: 'success',
@@ -991,6 +1004,7 @@ async function gateBody(
     base: `refs/remotes/origin/${MAIN_BRANCH}`,
   });
   let policyRefusal: string | null = null;
+  let requiredJobs: Readonly<Record<string, readonly string[]>> = {};
   if (policy.status !== 'ok') {
     const detail =
       policy.status === 'failed'
@@ -1008,6 +1022,13 @@ async function gateBody(
     if (policy.value.verdict !== 'pass') {
       policyRefusal = `policy: ${policy.value.verdict} — D11 records are dormant until the C3 attestation, so a protected-path change promotes only by owner break-glass (ADR-0004 D-G.4, D-H.4)`;
     }
+    // The trust ref's required job names (policy data, not code). One that
+    // names a workflow the gate does not verify could never be checked.
+    requiredJobs = policy.value.requiredJobs;
+    const unverified = Object.keys(requiredJobs).filter((f) => !cfg.verifiedWorkflows.includes(f));
+    if (unverified.length > 0 && policyRefusal === null) {
+      policyRefusal = `policy: requiredJobs names unverified workflow(s) ${unverified.join(', ')}`;
+    }
   }
 
   // 7. Log each admitted PR's cq-override record (never decisive here).
@@ -1016,7 +1037,7 @@ async function gateBody(
 
   // 8–9. Verdicts and verified runs on the SUBJECT, waited for within one
   //      deadline.
-  await awaitVerdicts(deps, cfg, subject, main, report, refuse);
+  await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse);
 
   // 10a. I2 evidence again, now that the waits are over: the wait can take up
   //      to timeoutMin, and a change in acceptance moves no ref.
@@ -1030,7 +1051,7 @@ async function gateBody(
   // 10b. Verdicts and verified runs once more, without waiting: pass 2 can
   //      itself take minutes, and a failed rerun or a newly posted verdict
   //      moves no ref. One poll; anything short of green refuses.
-  await awaitVerdicts(deps, cfg, subject, main, report, refuse, 'recheck');
+  await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse, 'recheck');
 
   // 10. Promote.
   if (!cfg.push) {
@@ -1177,6 +1198,7 @@ async function logOverrides(
 async function awaitVerdicts(
   deps: GateDeps,
   cfg: GateConfig,
+  requiredJobs: Readonly<Record<string, readonly string[]>>,
   subject: string,
   main: string,
   report: string[],
@@ -1250,6 +1272,7 @@ async function awaitVerdicts(
           file,
           tip: subject,
           repositoryId: cfg.repositoryId,
+          requiredJobs: Object.hasOwn(requiredJobs, file) ? (requiredJobs[file] ?? []) : [],
         });
       }
       lines.push(`verified ${file}: ${check.state} — ${check.reason}`);

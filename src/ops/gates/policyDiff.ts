@@ -16,7 +16,9 @@
 //     `assertRepoRelPath` (#224's `.git` segment and the rest) is reported as
 //     `unsafe-path` and never read.
 //   - THE POSTURE is resolved by the caller (the registry importer, once per
-//     dispatch) and bound into the op; op input never carries it.
+//     dispatch) and bound into the op; op input never carries it. A D-P
+//     revision window in the trust ref's list may relax a default-layer
+//     posture to `diff-check` until its explicit expiry (policyConfig.ts).
 //   - THE OVERRIDE LABEL is evaluated from API timeline events and the
 //     settle-ledger head epoch, logged in full, and honoured only once the
 //     C3 attestation is on the trust ref (D-G.4).
@@ -57,7 +59,13 @@ import {
   parseC3Attestation,
   type OverrideEvaluation,
 } from './overrideRecord.js';
-import type { ProtectedPathsConfig, ProtectedPathsPosture } from './policyConfig.js';
+import {
+  MAX_REVISION_WINDOW_DAYS,
+  applyRevisionWindow,
+  type EffectivePosture,
+  type ProtectedPathsConfig,
+  type ProtectedPathsPosture,
+} from './policyConfig.js';
 import { isProtectedPolicyPath } from './protectedPaths.js';
 import {
   diffWorkflow,
@@ -131,8 +139,11 @@ export interface PolicyFinding {
 
 export interface PolicyDiffOutcome {
   verdict: 'pass' | 'fail' | 'needs-human';
+  /** The EFFECTIVE posture: the resolved one after the trust ref's revision window. */
   posture: ProtectedPathsPosture;
-  postureLayer: 'default' | 'env' | 'call';
+  postureLayer: EffectivePosture['layer'];
+  /** The trust ref's `requiredJobs` (empty when none): what the promotion gate requires by name. */
+  requiredJobs: Readonly<Record<string, readonly string[]>>;
   /** Resolved 40-hex SHAs the verdict is bound to. */
   trustRef: string;
   subject: string;
@@ -154,6 +165,36 @@ function compiles(source: string): boolean {
   }
 }
 
+/** A workflow file name under `.github/workflows/` (no directory part). */
+const WORKFLOW_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/;
+
+/** A real UTC second, `YYYY-MM-DDTHH:MM:SSZ` (round-trips, so `02-30` is refused). */
+const UtcSecond = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+  .refine((text) => {
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) && new Date(ms).toISOString() === text.replace('Z', '.000Z');
+  }, 'must be a real UTC second');
+
+const DAY_MS = 86_400_000;
+
+/** The D-P window: diff-check only, explicit bounds, never open-ended. */
+const RevisionWindowSchema = z
+  .object({
+    posture: z.literal('diff-check'),
+    opens: UtcSecond,
+    expires: UtcSecond,
+    ruling: z.string().min(1),
+  })
+  .strict()
+  .refine((w) => Date.parse(w.expires) > Date.parse(w.opens), {
+    message: 'revisionWindow.expires must be after opens',
+  })
+  .refine((w) => Date.parse(w.expires) - Date.parse(w.opens) <= MAX_REVISION_WINDOW_DAYS * DAY_MS, {
+    message: `revisionWindow may span at most ${String(MAX_REVISION_WINDOW_DAYS)} days`,
+  });
+
 /** `policy/protected-paths.json`: strict, every regex source compiles, every check name non-empty. */
 const PolicyListSchema = z
   .object({
@@ -170,6 +211,13 @@ const PolicyListSchema = z
         .refine(compiles, { message: 'protectedPaths entry must compile' }),
     ),
     requiredChecks: z.array(z.string().min(1)),
+    // Jobs the promotion gate requires BY NAME in each verified workflow's
+    // run (D-F.2): every job green is not enough when a job can be deleted.
+    requiredJobs: z
+      .record(z.string().regex(WORKFLOW_FILE), z.array(z.string().min(1)).min(1))
+      .exactOptional(),
+    // The D-P revision window (policyConfig.ts `applyRevisionWindow`).
+    revisionWindow: RevisionWindowSchema.exactOptional(),
   })
   .strict();
 
@@ -482,11 +530,14 @@ function judge(
 
 /**
  * The policy-diff op, bound to a resolved posture. See the module header for
- * what is trusted and why.
+ * what is trusted and why. `now` is the clock the trust ref's revision
+ * window is judged by (injected for tests).
  */
 export function createPolicyDiff(
   config: ProtectedPathsConfig,
+  options: { now?: () => number } = {},
 ): Op<PolicyDiffInput, PolicyDiffOutcome> {
+  const now = options.now ?? Date.now;
   return async (input) => {
     // Same base rule as verifyRatchet: a push subject is judged against main,
     // so a mislabeled push cannot silently use a PR range.
@@ -660,6 +711,15 @@ export function createPolicyDiff(
         for (const entry of basePolicy.value.requiredChecks) {
           if (!keptChecks.has(entry)) {
             add('entry-removed', POLICY_LIST_PATH, `removes requiredChecks entry ${entry}`);
+          }
+        }
+        const subjectJobs = subjectPolicy.value.requiredJobs ?? {};
+        for (const [file, jobs] of Object.entries(basePolicy.value.requiredJobs ?? {})) {
+          const keptJobs = new Set(Object.hasOwn(subjectJobs, file) ? subjectJobs[file] : []);
+          for (const job of jobs) {
+            if (!keptJobs.has(job)) {
+              add('entry-removed', POLICY_LIST_PATH, `removes requiredJobs entry ${file}:${job}`);
+            }
           }
         }
       }
@@ -850,12 +910,15 @@ export function createPolicyDiff(
     }
     const override = await evaluateOverride(input, trust, subject, notes);
 
-    let verdict = judge(config.posture, findings);
+    // The window comes from the TRUST REF's list only (never the subject's).
+    const effective = applyRevisionWindow(config, policy.revisionWindow, now());
+    let verdict = judge(effective.posture, findings);
     const authorized = verdict === 'needs-human' && override.status === 'honoured';
     if (authorized) verdict = 'pass';
 
     const report: string[] = [
-      `posture: ${config.posture} (layer ${config.layer})`,
+      `posture: ${effective.posture} (layer ${effective.layer})`,
+      ...effective.lines,
       `range: ${rangeBase}..${subject} (trust ${trust})`,
     ];
     if (findings.length === 0) report.push('findings: none');
@@ -875,8 +938,9 @@ export function createPolicyDiff(
       status: 'ok',
       value: {
         verdict,
-        posture: config.posture,
-        postureLayer: config.layer,
+        posture: effective.posture,
+        postureLayer: effective.layer,
+        requiredJobs: policy.requiredJobs ?? {},
         trustRef: trust,
         subject,
         rangeBase,
