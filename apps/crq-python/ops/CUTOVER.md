@@ -1,13 +1,18 @@
 # queue-host single-runner cutover
 
+**ARCHIVAL — completed 2026-10-10.** Queue host owns the runner; worker host is
+inert (`IMPLEMENTATION.md`). These historical steps do not authorize another
+handover. Current monorepo deployment and rollback use `HOST-DEPLOY.md`.
+
 Prepare all artifacts before stopping worker-host. The owner authorized handover.
 Never display credentials. Keep repair.enabled=false until existing spend
 approval has been verified and recorded; installation does not authorize spend.
 
 1. Prepare /home/operator/repos/coderabbit-queue on queue-host at the integrated commit.
    Prepare a dedicated cq-toolkit clone from origin/merge-queue and build its CLI
-   without tests. Provision ZAI_API_KEY via ~/.local/secrets privately. Validate
-   key presence only, never print values. Keep signer forced-command transport.
+   without tests. Keep signer forced-command transport. Provider credentials
+   are repair-only prerequisites; do not provision or validate them for the
+   model-free handover. Never print credential values.
 2. Render config host paths and both Paseo endpoint addresses. Unknown endpoints
    fail the quiet gate closed. Install ops/systemd units under ~/.config/systemd/user.
    Use ops/prepare-host.py to render the host config and inert marker; it refuses

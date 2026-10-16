@@ -2,8 +2,8 @@
 
 `coverage.py` is a standalone stdlib policy module. It imports no queue runtime,
 executes no processes, reads no repositories, and writes no files. The conductor
-integrates it under the queue lock. Only this module and this document belong to
-this worktree's lease. Testing and all dispatch remain suspended.
+integrates it under the queue lock. The original W5 lease is complete; this
+document describes the integrated runner, not an active worktree restriction.
 
 ## Ledger and completed reviews
 
@@ -12,10 +12,10 @@ queue's existing atomic save. Schema 1 holds `paths`, deduplicated `runs`, and
 idempotent tick `observations`. Retain run IDs for replay safety. Retain observation
 history for at least 24 hours; the conductor may prune older observations.
 
-After a terminal counted completion in `harvest_review`, extract path strings
-from terminal `reviewedFiles` (normalize object records to their documented path
-field in the adapter). `classify` currently retains only their count: add path
-extraction in the conductor. Call:
+After a terminal counted completion, `crq.py:harvest_review` already extracts
+terminal `reviewedFiles`: string entries or object `path`/`fileName` fields.
+It calls `coverage.record_review` under the queue lock. `classify`'s count alone
+does not establish path evidence. The integrated call has this shape:
 
 ```python
 q['coverage'] = coverage.record_review(
@@ -124,9 +124,9 @@ slots. No observations yields `None` idle counts rather than a misleading zero.
 A partial observation window must be labelled as such using `observed_ticks_24h`;
 these counters cannot establish historical utilization before integration.
 
-## Verification restriction
+## Focused verification
 
-Only source inspection, Python syntax compilation without importing/executing the
-module, and `git diff --check` are authorized. No tests, model probes, paid
-experiments, CodeRabbit slots, runtime model dispatch, or GitHub writes. No
-webfront repository access. Worktree stays available for conductor integration.
+Use `pnpm test:narrow apps/crq-python/test_coverage.py` for policy changes, and
+name the affected harvest tests for integration changes. The original W5
+no-tests restriction ended with that lease. Full discovery remains CI-only;
+focused tests use fixtures and authorize no live queue or model dispatch.

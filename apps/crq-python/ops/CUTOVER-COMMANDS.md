@@ -1,11 +1,11 @@
 # Prepared handover command sheet
 
-Candidate: the reviewed head that contains this sheet (it carries the `-F none`
-spool transport; 946a96b does not); record the exact SHA in
-state/implementation-deployment.json. Execute sections in order, inspecting each
-result. This is a command sheet, not an
-automatic deployment script. worker-host remains owner until section 4 completes.
-Repair remains disabled. No tests, probes, or credential output are permitted.
+**ARCHIVAL — completed cross-host handover (2026-10-10).** The queue host is
+already the sole runner, as recorded in `IMPLEMENTATION.md`; the worker host is
+inert. The historical commands below are retained as evidence, not an executable
+current deploy procedure. Current monorepo deploy/rollback: `HOST-DEPLOY.md`.
+No action, probe, deployment or credential access is authorized by this sheet.
+Repair remains disabled unless separately authorized.
 
 ## 1. Non-secret readiness and owner evidence
 
@@ -45,20 +45,16 @@ ssh queue-host 'cd /home/operator/repos/coderabbit-queue && python3 -c "import j
 # expect: cq-promotion-reviewer[bot] 339373542 operator@127.0.0.1 ~/.ssh/crq-spool-ed25519
 ```
 
-`prepare-host.py` renders from the committed `HEAD:config.json`, so re-running
-it is idempotent. After the handover NEVER run it plain (it marks the runner
-inert). Live update procedure (code or committed config change):
-`systemctl --user stop crq-tick.timer`, wait for `crq-tick.service` inactive,
-`git restore config.json`, fast-forward, `python3 ops/prepare-host.py
---live-config` (holds the tick lock, rewrites config.json only — live-only edits
-are overwritten and repair stays disabled), `systemctl --user start
-crq-tick.timer`, then confirm the next `~/.local/state/crq/heartbeat.json` has
-`"alert_agent_host": "worker-host.tailnet.example:6767"`. Verify the spool with crq's exact argv:
+The old helper rendered `HEAD:config.json`; that historical update procedure is
+superseded. Do not restore, fast-forward or re-render the old live checkout.
+Use `HOST-DEPLOY.md` for the first-deploy drift check, prefixed config lookup,
+private overlay and locked detached-checkout switch. After an owner-approved
+handover, confirm that the next XDG `heartbeat.json` has the privately configured
+`alert_agent_host` and an advancing `last_tick`.
 
-```sh
-ssh queue-host '/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@127.0.0.1 exist promo-0000000000'   # promo-0000000000 0
-ssh queue-host '/usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@127.0.0.1 id'   # spool-shell: operation refused, exit 2
-```
+The two original spool `exist`/`id` probes have been removed: this sheet grants
+no probe authorization. Any future probe requires separate recorded owner
+approval, even when its purpose is to confirm the forced-command refusal.
 
 Expected: delivered reviewed head, every unit inactive, marker present. Inspect
 host config without dumping it: repairs false, both quiet-gate endpoints set,

@@ -7,7 +7,8 @@ Sole CRQ owner/conductor/integrator: chancellor 00000000-0000-4000-8000-00000000
 worker-host inert (schedule schedule-example deleted, watchdog booted out, marker set, rollback set retained).
 Signer installed/active at 2696601; promotion mode `signer` (policy on cq-toolkit main 361a337).
 Evidence: state/implementation-deployment.json, toolkit-research plans/s2-signer-install-record-20261010.md.
-Updating the live queue-host runner: CUTOVER-COMMANDS.md §1 "Live update procedure" (never plain prepare-host).
+Historical deployment record below. Current monorepo deploy/rollback procedure:
+HOST-DEPLOY.md; CUTOVER-COMMANDS.md is archival, not a current update command.
 Owner authorization: W0–W5, local ops commits and safe single-runner queue-host handover.
 Baseline: clean main da295ce; legacy addressing; worker-host schedule schedule-example;
 no owned test jobs. Live checkout remains main da295ce until handover.
