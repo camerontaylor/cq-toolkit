@@ -1,34 +1,29 @@
 # Promotion policy: every-green-tip, CodeRabbit-reviewed promotion to `main`
 
-Owner ruling, 2026-10-04. Merging into `merge-queue` stays lenient: required checks green plus
+Owner ruling, 2026-10-16. Merging into `merge-queue` stays lenient: required checks green plus
 basic review, with the CodeRabbit CLI queue (crq) following up afterwards. **Promotion to `main`
 is the one place a CodeRabbit review is required before merge**, and promotion reviews get first
-claim on review slots. Every green tip beyond `main` is eligible for a promotion review.
+claim on review slots. crq cuts a promotion as soon as a `merge-queue` tip beyond
+`main` has all gate checks green; merges that land during an in-flight review
+join the next promotion.
 
-## When a batch is cut
+## When a promotion is cut
 
-crq cuts whenever a green first-parent `merge-queue` tip is beyond `main`.
-There is no batch-size or age wait: CodeRabbit quota, rate-limit cooldown and
-one promotion in flight are the only scheduling throttles. A running review is
-never pre-empted. The signer's private actual-start cap and split-prefix
-continuation after a size refusal still apply.
-
-The **batch tip** is the newest green first-parent commit in the whole unpromoted
-`main..origin/merge-queue` range. The search has no depth cutoff: newer pending,
-failed or cancelled tips cannot hide an older green tip. If no green tip exists,
-crq waits for checks. The **base** is `main` at cut time.
-
-The Python compatibility implementation sets `merges_trigger=1` and
-`dispatch_after_min=0`; `hours_trigger` and `tip_search_depth` remain inert keys.
-A successful signer review nudges the gate immediately when observed. Gate
-wakeups also come from CI completion and the scheduled sweep. The future
-TypeScript implementation has no batch-size or age-trigger keys.
+crq cuts a promotion whenever a `merge-queue` tip beyond `main` has all gate
+checks green. There is no merge-count or elapsed-time threshold. The **promotion
+tip** is the newest `merge-queue` commit whose gate wait list (`static`,
+`denylist`, `ratchet`) has completed with success. A commit whose checks are
+pending, failed or cancelled (a superseded intermediate tip) is never a
+promotion tip. If no such tip exists, crq waits for checks to finish. The
+**base** is `main` at cut time. The only throttles are crq's hourly start cap
+(`max_starts_per_hour`), the CodeRabbit rate-limit cooldown, the signer's
+own 2-per-hour start cap, and one promotion in flight at a time.
 
 ## What gets reviewed
 
 One CodeRabbit CLI review of `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
-crq gives a `promotion` item **absolute priority for the next start slot** (crq allows at most 5
-starts per hour). It does not pre-empt a running review.
+crq gives a `promotion` item **absolute priority for the next start slot**
+(`max_starts_per_hour` starts per hour). It does not pre-empt a running review.
 
 crq reports the state as a commit status on the batch tip: context `crq/promotion-review`, posted
 by the promotion-review signer as the pinned reviewer bot `cq-promotion-reviewer[bot]` (identity:
@@ -47,7 +42,8 @@ the owner's registration record, `app-registration-session-20261004.md` @ `d8f13
 ## What promotes
 
 `cq-gate` (`gate.yml`, armed) fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
-now. Merges that land after the cut wait for the next batch. The gate promotes the SHA only when:
+now. Merges that land during an in-flight review join the next promotion.
+The gate promotes the SHA only when:
 
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
@@ -243,9 +239,11 @@ is normative; this section is the policy-level summary.
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
     (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
     extends with its own clean internal deltas) covered the whole range with zero critical/major
-    findings; `failure` when a completed review found any; `error` for a skipped, oversized,
-    secret-scan-blocked or otherwise failed run (the batch is re-cut or escalated, never
-    promoted)
+    findings; `failure` when a completed review found any critical or major finding;
+    `error` for a skipped,
+    secret-scan-blocked or otherwise failed run (never promoted). After CodeRabbit refuses an
+    oversized range, crq splits it into prefixes at the accepted size and continues prefix by
+    prefix; the full batch still needs recorded clean coverage before promotion.
   - `description` (140 characters at most) always carries `main=<base_sha>`, for example
     `reviewed main=<base_sha> crq#<id>`,
     `blocked: 1 critical/2 major main=<base_sha> crq#<id>`, or
