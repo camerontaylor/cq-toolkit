@@ -95,7 +95,10 @@ def validate(overlay):
             if not isinstance(value, list) or not value or any(not isinstance(v, str) or not v for v in value):
                 raise ValueError('paseo_hosts must be nonempty endpoint strings')
         elif name in PATH_KEYS:
-            host_path(value)
+            # The accepted legacy renderer records a literal ~/ key path.
+            # CRQ expands it only at SSH invocation; retain those config bytes.
+            checked = value[1:] if name == 'promotion.signer.spool.ssh_key' and isinstance(value, str) and value.startswith('~/') else value
+            host_path(checked)
         elif not isinstance(value, str) or not value or any(c in value for c in '\n\r\x00'):
             raise ValueError('overlay host values must be nonempty strings')
     # Paths/endpoints needed by the model-free runner must be explicit.
@@ -103,8 +106,10 @@ def validate(overlay):
     required = CONFIG_KEYS - {'promotion.signer.spool.dir'}
     if not required <= supplied.keys():
         raise ValueError('missing host config keys: ' + ', '.join(sorted(required - supplied.keys())))
-    if not outside(Path(supplied['clone']), deploy) or not outside(deploy, Path(supplied['clone'])):
-        raise ValueError('review runtime clone must differ from deployment clone')
+    for name in ('clone', 'worktree_root'):
+        path = Path(supplied[name])
+        if not outside(path, deploy) or not outside(deploy, path):
+            raise ValueError('review clone/worktrees must be separate from deployment clone')
     fleet = overlay['fleet_reader']
     if not isinstance(fleet, dict) or set(fleet) != {'ssh_host', 'source'}:
         raise ValueError('fleet_reader accepts only ssh_host and source')
@@ -322,6 +327,8 @@ def verify_target(root, target, tag):
         raise ValueError('annotated tag does not name target')
     git(root, 'merge-base', '--is-ancestor', target, 'refs/remotes/origin/main')
     git(root, 'merge-base', '--is-ancestor', POLICY_FLOOR, target)
+    if git(root, 'ls-tree', '-r', '--name-only', target, 'apps/crq-python/state/'):
+        raise ValueError('target must not track runner state')
     # Targets before import C have a different configuration/state contract.
     config = committed(root, target)
     if config['promotion']['merges_trigger'] != 1 or config['promotion']['dispatch_after_min'] != 0:
@@ -395,12 +402,14 @@ def main(argv=None):
     elif args.operation == 'switch':
         switch(root, overlay, raw, args.sha, args.tag)
     elif args.operation == 'prepare':
+        require_outside_git(args.units_output)
         if not outside(args.units_output, root):
             raise ValueError('rendered units must be outside checkout')
         verify_target(root, git(root, 'rev-parse', 'HEAD'), args.tag)
         prepare(root, overlay, raw, args.units_output)
     elif args.operation == 'preview':
         root_check(root, overlay)
+        require_outside_git(args.output)
         if not outside(args.output, root):
             raise ValueError('preview output must be outside checkout')
         data = render(root, overlay)

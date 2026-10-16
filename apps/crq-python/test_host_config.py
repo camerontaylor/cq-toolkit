@@ -122,10 +122,11 @@ class HostConfigTests(unittest.TestCase):
             overlay[key] = value
             with self.assertRaises(ValueError):
                 host.validate(overlay)
-        overlay = copy.deepcopy(self.overlay)
-        overlay['config']['clone'] = str(self.root / 'runtime')
-        with self.assertRaises(ValueError):
-            host.validate(overlay)
+        for name in ('clone', 'worktree_root'):
+            overlay = copy.deepcopy(self.overlay)
+            overlay['config'][name] = str(self.root / 'runtime')
+            with self.assertRaises(ValueError):
+                host.validate(overlay)
         overlay = copy.deepcopy(self.overlay)
         overlay['fleet_reader']['ssh_host'] = '-oProxyCommand=bad'
         with self.assertRaises(ValueError):
@@ -214,6 +215,18 @@ class HostConfigTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 host.verify_target(self.root, self.before, 'crq-runner/20261016-4')
 
+    def test_target_tracking_runtime_state_is_refused(self):
+        state = self.runner / 'state'
+        state.mkdir()
+        (state / 'queue.json').write_text('{"must_not_overwrite":true}')
+        self.command('add', '-f', 'apps/crq-python/state/queue.json')
+        self.command('commit', '-qm', 'invalid tracked runtime state')
+        target = self.command('rev-parse', 'HEAD').strip()
+        self.command('update-ref', 'refs/remotes/origin/main', target)
+        self.command('tag', '-a', 'crq-runner/20261016-5', '-m', 'invalid fixture')
+        with self.assertRaisesRegex(ValueError, 'track runner state'):
+            host.verify_target(self.root, target, 'crq-runner/20261016-5')
+
     def test_rendered_units_use_monorepo_root(self):
         paths = host.render_units(self.root, self.base / 'units')
         self.assertEqual(len(paths), len(list((ROOT / 'ops/systemd').glob('crq-*'))))
@@ -226,7 +239,10 @@ class HostConfigTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze runs in Linux CI')
     def test_systemd_analyze_verify_detached_render(self):
         paths = host.render_units(self.root, self.base / 'units')
-        env = {**os.environ, 'SYSTEMD_UNIT_PATH': str(self.base / 'units') + ':'}
+        runtime = self.base / 'runtime-dir'
+        runtime.mkdir(mode=0o700)
+        env = {**os.environ, 'SYSTEMD_UNIT_PATH': str(self.base / 'units') + ':',
+               'XDG_RUNTIME_DIR': str(runtime)}
         result = subprocess.run(['systemd-analyze', '--user', 'verify', *paths],
                                 capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -269,7 +285,11 @@ class HostConfigTests(unittest.TestCase):
         committed = json.loads((ROOT / 'config.json').read_text())
         committed['promotion']['merges_trigger'] = 5
         committed['promotion']['dispatch_after_min'] = 20
+        self.overlay['config']['promotion']['signer']['spool']['ssh_key'] = '~/.ssh/crq-spool-key'
+        host.validate(self.overlay)
+        self.raw = host.encode(self.overlay)
         expected = host.apply(copy.deepcopy(committed), self.overlay)
+        self.assertEqual(expected['promotion']['signer']['spool']['ssh_key'], '~/.ssh/crq-spool-key')
         expected['promotion']['merges_trigger'] = 1
         (legacy / 'config.json').write_bytes(host.encode(expected))
         original = (legacy / 'config.json').read_bytes()
