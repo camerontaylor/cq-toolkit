@@ -126,6 +126,34 @@ class LeaseLaunchTest(unittest.TestCase):
             crq.launch(q, item, author_quota.plan(item))
         return spawn
 
+    def test_scan_block_survives_persistence_restart_and_manual_requeue(self):
+        q, item = queue()
+        saved = []
+        crq.save_queue.side_effect = lambda value: saved.append(copy.deepcopy(value))
+        with mock.patch.object(crq, "iso", return_value=BEFORE), \
+             mock.patch.object(crq, "secret_scan", return_value=(False, {
+                 "denylist_hits": [], "gitleaks_hits": [{}]})), \
+             mock.patch.object(crq.subprocess, "Popen") as spawn:
+            crq.launch(q, item, author_quota.plan(item))
+        spawn.assert_not_called()
+        restored = json.loads(json.dumps(saved[-1]))
+        blocked = restored["items"][0]
+        self.assertIs(blocked["author_lease"]["secret_scan_blocked"], True)
+        blocked.update(state="pending", last_error=None)
+        with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
+            author_lease.fallback(restored, legacy.REQ, at=LATER)
+        with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
+            author_lease.grant_queue(blocked, at=BEFORE)
+        self.assertEqual(restored["starts"], [])
+
+    def test_expired_plan_refuses_before_fetch_or_diff(self):
+        _, item = queue()
+        with mock.patch.object(crq, "iso", return_value=DEADLINE), \
+             mock.patch.object(crq, "fetch") as fetch:
+            with self.assertRaises(author_quota.AuthorRefused):
+                crq.plan_author(item, False)
+        fetch.assert_not_called()
+
     def test_grant_and_quota_are_durable_before_spawn(self):
         q, item = queue()
         saved = []

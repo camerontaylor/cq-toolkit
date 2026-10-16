@@ -43,6 +43,10 @@ grants are refused, including after a manual requeue or clock rollback. Global
 pause/cooldown do not prevent this arbitration, since it starts no CodeRabbit
 review and creates no CodeRabbit quota reservation. An item blocked by the secret
 scan or with dispatch evidence cannot use this escape hatch.
+For opted-in items a failed scan durably adds `secret_scan_blocked:true` inside
+`author_lease` v1 before returning. This permanent marker fences both queue and
+agent grants even if an operator resets the item's state/error. Correct the
+subject and enroll a new immutable request rather than clearing the marker.
 
 Success is one JSON line with exactly the v1 response fields:
 

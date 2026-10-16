@@ -40,6 +40,8 @@ def read(item):
         raise AuthorRefused("author_lease deadline does not match its policy")
     if lease.get("state") not in ("waiting", "queue", "agent"):
         raise AuthorRefused("unknown author_lease state")
+    if "secret_scan_blocked" in lease and lease["secret_scan_blocked"] is not True:
+        raise AuthorRefused("invalid author_lease secret-scan marker")
     if lease["state"] != "waiting":
         decided = _timestamp("decided_at", lease.get("decided_at"))
         deadline = _timestamp("deadline_at", lease["deadline_at"])
@@ -54,6 +56,8 @@ def check_queue(item, *, at):
     lease = read(item)
     if lease is None:
         return
+    if lease.get("secret_scan_blocked"):
+        raise AuthorRefused("author lease permanently blocked by secret scan")
     if item.get("state") != "pending" or item.get("run") or item.get("attempts"):
         raise AuthorRefused("author request is not an unstarted pending admission")
     current = _timestamp("at", at)
@@ -102,6 +106,8 @@ def fallback(q, request_id, *, at):
     """
     item = find(q, request_id)
     lease = read(item)
+    if lease.get("secret_scan_blocked"):
+        raise AuthorRefused("author lease permanently blocked by secret scan")
     if lease["state"] != "waiting":
         return decision(item)
     if _timestamp("at", at) < _timestamp("deadline_at", lease["deadline_at"]):

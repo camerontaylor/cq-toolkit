@@ -703,6 +703,9 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
         item["state"] = "blocked"
         item["last_error"] = (f"secret scan failed before upload: {len(scan['denylist_hits'])} denylist + "
                               f"{len(scan['gitleaks_hits'])} gitleaks hit(s) — see {rdir}/secret-scan.json")
+        if item["kind"] == author_quota.AUTHOR_KIND and "author_lease" in item:
+            item["author_lease"]["secret_scan_blocked"] = True
+            save_queue(q)
         event("blocked", item=item["id"], reason=item["last_error"])
         return run_id
     wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
