@@ -204,7 +204,8 @@ async function readLedgerAt(
  * that touched the ledger file, read lazily until `enough` holds for the
  * versions read so far. The observer prunes merged PRs from the tip, so a
  * merged PR's last record lives only in this history (the D11 epoch reads
- * it). An absent branch is an empty history. THROWS on any non-404
+ * it). `exhausted`: the history ran out before `enough` held. An absent
+ * branch is an empty history. THROWS on any non-404
  * transport failure or a listed commit that is not a 40-hex sha.
  */
 export async function readSettleHistory(
@@ -241,7 +242,7 @@ export async function readSettleHistory(
     versions.push(read.state);
     discarded.push(...read.discarded);
   }
-  return { versions, discarded, exhausted: true };
+  return { versions, discarded, exhausted: !enough(versions) };
 }
 
 /**
