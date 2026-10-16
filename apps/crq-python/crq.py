@@ -1084,8 +1084,9 @@ def checks_verdict(sha: str) -> str:
 
 def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
     """Newest first-parent merge-queue commit beyond `base` whose gate checks all passed."""
-    for sha in git("rev-list", "--first-parent", "-n", str(PROMO.get("tip_search_depth", 15)),
-                   f"{base}..origin/merge-queue").split():
+    # tip_search_depth is retained as an inert compatibility key. Search the
+    # whole unpromoted range: quota must not sit idle behind non-green tips.
+    for sha in git("rev-list", "--first-parent", f"{base}..origin/merge-queue").split():
         v = checks_verdict(sha)
         if v == "pass":
             return sha

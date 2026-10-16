@@ -1,22 +1,28 @@
-# Promotion policy: batched, CodeRabbit-reviewed promotion to `main`
+# Promotion policy: every-green-tip, CodeRabbit-reviewed promotion to `main`
 
 Owner ruling, 2026-10-04. Merging into `merge-queue` stays lenient: required checks green plus
 basic review, with the CodeRabbit CLI queue (crq) following up afterwards. **Promotion to `main`
 is the one place a CodeRabbit review is required before merge**, and promotion reviews get first
-claim on review slots. The gate no longer promotes on every green queue push.
+claim on review slots. Every green tip beyond `main` is eligible for a promotion review.
 
 ## When a batch is cut
 
-crq cuts a batch on the first of these:
+crq cuts whenever a green first-parent `merge-queue` tip is beyond `main`.
+There is no batch-size or age wait: CodeRabbit quota, rate-limit cooldown and
+one promotion in flight are the only scheduling throttles. A running review is
+never pre-empted. The signer's private actual-start cap and split-prefix
+continuation after a size refusal still apply.
 
-- **On demand.** The owner (or the chancellor) asks crq to cut a promotion.
-- **N = 5** merges into `merge-queue` since the last promotion.
-- **T = 8 hours** since the last promotion, with at least one unpromoted merge.
+The **batch tip** is the newest green first-parent commit in the whole unpromoted
+`main..origin/merge-queue` range. The search has no depth cutoff: newer pending,
+failed or cancelled tips cannot hide an older green tip. If no green tip exists,
+crq waits for checks. The **base** is `main` at cut time.
 
-The **batch tip** is the newest `merge-queue` commit whose gate wait list (`static`, `denylist`,
-`ratchet`) has _completed with success_. A commit whose checks are pending, failed or cancelled
-(a superseded intermediate tip) is never a batch tip. If no such commit exists, crq waits for
-checks to finish. The **base** is `main` at cut time. Only one promotion is open at a time.
+The Python compatibility implementation sets `merges_trigger=1` and
+`dispatch_after_min=0`; `hours_trigger` and `tip_search_depth` remain inert keys.
+A successful signer review nudges the gate immediately when observed. Gate
+wakeups also come from CI completion and the scheduled sweep. The future
+TypeScript implementation has no batch-size or age-trigger keys.
 
 ## What gets reviewed
 
