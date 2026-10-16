@@ -59,12 +59,25 @@ exclude this directory. Repair remains disabled.
 - Accepted author admission/quota baseline plus runner regressions:
   `test:narrow result="pass" exit=0 files=3 projects="python,pure" tests="101/101" failed=0 skipped=0`.
 
-CodeRabbit CLI 0.7.7 cycle, full diff against
-`7069782f5e935a7938e6b4ad5e2897a198a1f170`, including staged integration:
-**BLOCKED before analysis**. The initial attempt and one same-scope retry both
-returned `errorType=rate_limit`, exit 1: all five included reviews used,
-no on-demand review available. No findings were produced, so there are no
-finding dispositions; this is not a successful or clean review. No scope was
-narrowed and billing configuration was not changed. The pre-PR review gate
-remains open. Publication, CI at the final SHA and independent final-head review
-remain pending. The owner has not applied the D11 record.
+## CodeRabbit cycle and dispositions
+
+CodeRabbit CLI 0.7.7 reviewed the full committed diff at
+`d4e298c524de2c13186c637a86b62ef43a926362` against pinned base
+`7069782f5e935a7938e6b4ad5e2897a198a1f170`, clean tree. The owner authorized
+one full cycle for this import, overriding the repository's default two-cycle
+protocol. Earlier rate-limited attempts performed no analysis and do not count.
+After the reported one-minute wait, the retry ended with exit 0,
+`complete.status=review_completed`, `outcome=completed`, two findings and no
+error/action-required event. No code changes resulted; no targeted fix review
+was needed. This follow-up changes only this evidence record.
+
+| Finding | Severity | Disposition |
+| --- | --- | --- |
+| Signer README S2 snippet omits `record_ids.py` and uses executable mode for the service | minor | **Deferred to P2**, before any installation: replace the legacy standalone installation snippet when adapting deployment to the monorepo. The existing `signer/DEPLOY.md` already requires hashes for `record_ids.py`, helper mode 0644 and service mode 0644. This import preserves accepted signer-family bytes; it does not authorize executing the legacy snippet. |
+| Require two completed CLI cycles and independent review before opening the PR | major | **Rejected**: the owner's import ruling and amendment execution brief explicitly require one full CLI cycle; the independent final-head review follows the draft PR. Rate-limit attempts were not counted. The required full cycle has now completed; independent review remains a separate gate. |
+
+Full review NDJSON SHA-256:
+`91bb9b5c9dc948294775961317b48a412b238566952be454c696691de2d32ac4`.
+Raw CLI logs remain local, outside the public tree. CI at the final SHA and
+independent final-head review remain pending. The owner has not applied the D11
+record; no label, deployment or merge is authorized here.
