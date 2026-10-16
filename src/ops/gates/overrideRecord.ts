@@ -140,6 +140,24 @@ export function headObservationEpoch(
 }
 
 /**
+ * The head observation epoch for a MERGED PR from the settle ledger's
+ * history, newest version first. The observer prunes merged PRs, so the
+ * ledger tip may no longer hold the record: the newest version that holds
+ * any record for `pr` decides — its epoch when that record's tuple head is
+ * exactly `subject`, else undefined. An older version holding an earlier
+ * observation of the same head is never consulted, so a superseded
+ * observation cannot anchor the label.
+ */
+export function headObservationEpochInHistory(
+  history: readonly SettleState[],
+  pr: number,
+  subject: string,
+): string | undefined {
+  const holder = history.find((state) => Object.hasOwn(state.prs, String(pr)));
+  return holder === undefined ? undefined : headObservationEpoch(holder, pr, subject);
+}
+
+/**
  * Evaluate the current `cq-override` application from GitHub issue timeline /
  * issue-events API objects, in API (chronological) order. The current
  * application is the last `labeled` event with no later `unlabeled`; none is

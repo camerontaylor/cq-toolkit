@@ -1,13 +1,20 @@
 // W1.9 — the D11 cq-override label record (ADR-0004 D-G.4), including the
 // A14 regression: a label applied through an App token is never an owner
-// override, attested or not.
+// override, attested or not. Also the shared D11 authorization predicate
+// (d11Authorization.ts, ADR-0004 D-C.3) the gate and the verifier bind.
 import { describe, expect, test } from 'vitest';
+import {
+  authorizePaths,
+  bindD11Authorization,
+  type D11PrEvidence,
+} from '../../../src/ops/gates/d11Authorization.js';
 import {
   C3_ATTESTATION_PATH,
   OVERRIDE_LABEL,
   evaluateOverrideLabel,
   formatOverride,
   headObservationEpoch,
+  headObservationEpochInHistory,
   parseC3Attestation,
 } from '../../../src/ops/gates/overrideRecord.js';
 import type { SettleState } from '../../../src/selfhost/settle-state.js';
@@ -310,5 +317,144 @@ describe('parseC3Attestation: presence alone never arms D-G.4 records (compositi
     ['an extra key', JSON.stringify({ ...valid, armed: true })],
   ])('%s stays dormant', (_label, text) => {
     expect(parseC3Attestation(text).armed).toBe(false);
+  });
+});
+
+describe('headObservationEpochInHistory (merged PRs are pruned from the ledger tip)', () => {
+  const version = (prs: Record<string, string>): SettleState => ({
+    version: 1,
+    repo: 'o/r',
+    prs: Object.fromEntries(
+      Object.entries(prs).map(([pr, head]) => [
+        pr,
+        {
+          tuple: { head, base: BASE, forcePushEpoch: 0 },
+          observations: [{ observedAt: EPOCH, by: 'observer' }],
+        },
+      ]),
+    ),
+  });
+
+  test('the newest version holding the PR decides; a pruned tip falls through to it', () => {
+    expect(
+      headObservationEpochInHistory([version({}), version({ '7': SUBJECT })], 7, SUBJECT),
+    ).toBe(EPOCH);
+  });
+
+  test('a newer record of another head wins over an older one of this head (no stale anchor)', () => {
+    const history = [version({ '7': 'c'.repeat(40) }), version({ '7': SUBJECT })];
+    expect(headObservationEpochInHistory(history, 7, SUBJECT)).toBeUndefined();
+  });
+
+  test('no version holding the PR (or no ledger at all) → no epoch', () => {
+    expect(headObservationEpochInHistory([version({ '8': SUBJECT })], 7, SUBJECT)).toBeUndefined();
+    expect(headObservationEpochInHistory([], 7, SUBJECT)).toBeUndefined();
+  });
+});
+
+describe('D11 authorization (bindD11Authorization + authorizePaths)', () => {
+  const C3 = JSON.stringify({
+    schemaVersion: 1,
+    attests: 'C3',
+    attestedAt: '2026-10-01T00:00:00Z',
+  });
+  const evidence = (over: Partial<D11PrEvidence> = {}): D11PrEvidence => ({
+    pr: 7,
+    merge: 'c'.repeat(40),
+    head: SUBJECT,
+    paths: ['vitest.config.ts'],
+    events: [labelEvent()],
+    headObservedAt: EPOCH,
+    ...over,
+  });
+  const bind = (
+    prs: readonly D11PrEvidence[],
+    attestation: Parameters<typeof bindD11Authorization>[0]['attestation'] = {
+      state: 'present',
+      text: C3,
+    },
+    ownerId: number | null = OWNER_ID,
+  ) => bindD11Authorization({ ownerId, attestation, prs });
+
+  test('a valid record with C3 attested authorizes the path its PR changed', () => {
+    const auth = bind([evidence()]);
+    expect(auth.attested).toBe(true);
+    expect(auth.contributions[0]?.record.status).toBe('honoured');
+    const d = authorizePaths(auth, ['vitest.config.ts']);
+    expect(d).toMatchObject({ authorized: true, unauthorized: [] });
+    expect(d.lines).toEqual(['d11: vitest.config.ts authorized by PR #7']);
+  });
+
+  test('no attestation, or a malformed or unreadable one → dormant, unauthorized', () => {
+    for (const attestation of [
+      { state: 'absent' } as const,
+      { state: 'present', text: '{"schemaVersion":1}' } as const,
+      { state: 'unreadable', reason: 'git fault' } as const,
+    ]) {
+      const auth = bind([evidence()], attestation);
+      expect(auth.attested).toBe(false);
+      expect(auth.contributions[0]?.record.status).toBe('dormant');
+      expect(auth.report.join('\n')).toMatch(/records dormant/);
+      expect(authorizePaths(auth, ['vitest.config.ts']).unauthorized).toEqual([
+        {
+          path: 'vitest.config.ts',
+          why: `PR #7 (merge ${'c'.repeat(40)}) changes it and its D11 record is dormant`,
+        },
+      ]);
+    }
+  });
+
+  test('a label before the epoch, or with no epoch, is invalid', () => {
+    const early = bind([evidence({ events: [labelEvent({ at: '2026-09-20T09:00:00Z' })] })]);
+    expect(early.contributions[0]?.record.status).toBe('invalid');
+    expect(authorizePaths(early, ['vitest.config.ts']).authorized).toBe(false);
+    const none = bind([evidence({ headObservedAt: undefined })]);
+    expect(none.contributions[0]?.record.reasons).toEqual([
+      `no durable head observation for ${SUBJECT}`,
+    ]);
+  });
+
+  test('an App-applied label is invalid even when attested (A14)', () => {
+    const auth = bind([
+      evidence({ events: [labelEvent({ app: { slug: 'cq-automation' }, type: 'Bot', id: 9 })] }),
+    ]);
+    expect(auth.contributions[0]?.record.status).toBe('invalid');
+    expect(authorizePaths(auth, ['vitest.config.ts']).authorized).toBe(false);
+  });
+
+  test('a path no contribution changes (outside the closure) is named', () => {
+    const d = authorizePaths(bind([evidence()]), ['vitest.config.ts', 'ci.yml']);
+    expect(d.authorized).toBe(false);
+    expect(d.unauthorized).toEqual([
+      { path: 'ci.yml', why: 'not contributed by any admitted PR in the closure' },
+    ]);
+  });
+
+  test('one label never authorizes another PR that changed the same path', () => {
+    const other = evidence({ pr: 8, merge: 'd'.repeat(40), events: [] });
+    const d = authorizePaths(bind([evidence(), other]), ['vitest.config.ts']);
+    expect(d.authorized).toBe(false);
+    expect(d.unauthorized).toEqual([
+      {
+        path: 'vitest.config.ts',
+        why: `PR #8 (merge ${'d'.repeat(40)}) changes it and its D11 record is absent`,
+      },
+    ]);
+  });
+
+  test('ambiguous contributions, an unreadable owner id or unreadable events are invalid', () => {
+    const twice = bind([evidence(), evidence({ pr: 8 })]);
+    expect(twice.contributions.map((c) => c.record.status)).toEqual(['invalid', 'invalid']);
+    expect(twice.contributions[0]?.record.reasons[0]).toMatch(/^ambiguous: /);
+    const noOwner = bind([evidence()], undefined, null);
+    expect(noOwner.contributions[0]?.record.reasons).toEqual(['repository owner id unreadable']);
+    const noEvents = bind([evidence({ events: { unreadable: 'HTTP 502' } })]);
+    expect(noEvents.contributions[0]?.record.reasons).toEqual([
+      'label events unreadable: HTTP 502',
+    ]);
+  });
+
+  test('nothing to authorize is authorized', () => {
+    expect(authorizePaths(bind([]), [])).toEqual({ authorized: true, unauthorized: [], lines: [] });
   });
 });
