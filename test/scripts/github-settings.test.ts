@@ -295,6 +295,7 @@ describe('compareSettings', () => {
       { context: 'cq/policy', integration_id: VERDICT },
       { context: 'cq/ratchet', integration_id: 15368 },
       { context: 'static', integration_id: 15368 },
+      { context: 'crq-python', integration_id: 15368 },
       { context: 'denylist', integration_id: 15368 },
       { context: 'from-source', integration_id: 15368 },
       { context: 'pack-audit', integration_id: 15368 },
