@@ -39,6 +39,12 @@ export function selectPython(
   missing?: readonly string[],
 ): { files: string[]; fallback: boolean; reason: string };
 export function readPythonReport(stderr: string): TestCounts | null;
+export function pythonRunVerdict(input: {
+  run: { code: number | null; signal: string | null; timedOut: boolean; error?: Error };
+  counts: TestCounts | null;
+  interruptedBy: string | null;
+  lockPinned: boolean;
+}): { result: string; exit: number; reason?: string };
 export interface TestCounts {
   total: number;
   passed: number;

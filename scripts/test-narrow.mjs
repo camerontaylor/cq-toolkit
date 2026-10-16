@@ -23,7 +23,7 @@
 //      a JSON report for the counts, in its own process group (recorded in
 //      the lock with its leader's start time, so a killed runner cannot
 //      leave an orphan that runs beside the next one), killed after
-//      RUN_TIMEOUT_MS; load= and uptime= are sampled just before it starts;
+//      RUN_TIMEOUT_MS; load= and uptime= cover the combined execution interval;
 //   7. one stable summary line on stdout (`test:narrow result=… exit=…`),
 //      printed on every exit path.
 import { spawn, spawnSync } from 'node:child_process';
@@ -55,6 +55,7 @@ import {
   projectsOf,
   readReport,
   readPythonReport,
+  pythonRunVerdict,
   selectPython,
   runVerdict,
   signalExit,
@@ -121,7 +122,7 @@ if (getPriority() < NICE_INCREMENT) {
 const CALLER_CWD = process.env.INIT_CWD ?? process.cwd();
 process.chdir(ROOT);
 const stamp = () => ({ load: loadavg()[0].toFixed(1), uptimeS: uptime() });
-// Re-stamped just before vitest starts; this sample stands only when no run happens.
+// Re-stamped at the start of the combined Python/build/Vitest interval.
 const summary = { result: 'error', exit: 1, nice: getPriority(), ...stamp() };
 let printed = false;
 let releaseLock = () => {};
@@ -471,27 +472,12 @@ if (pythonFiles.length > 0) {
     cwd: join(ROOT, 'apps/crq-python'),
     stdio: ['ignore', 'inherit', 'pipe'],
     captureStderr: true,
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHON_COLORS: '0' },
   });
   pythonCounts = readPythonReport(run.stderr);
-  if (
-    lockPinned ||
-    run.error ||
-    run.timedOut ||
-    interruptedBy !== null ||
-    run.code !== 0 ||
-    pythonCounts === null ||
-    pythonCounts.failed > 0 ||
-    pythonCounts.passed === 0
-  ) {
-    finish({
-      result: 'fail',
-      exit: run.code || 1,
-      tests: pythonCounts,
-      ran: pythonFiles,
-      durationMs: Date.now() - started,
-      reason: 'Python run failed or produced no nonempty report',
-    });
+  const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy, lockPinned });
+  if (verdict.result !== 'pass') {
+    finish({ ...verdict, tests: pythonCounts, ran: pythonFiles, durationMs: Date.now() - started });
   }
   lock.annotate({ childPgid: null });
   if (tsFiles.length === 0)
@@ -562,8 +548,7 @@ say(
     .join(' ')}`,
 );
 
-// The load stamp belongs to the timed interval: sampled at its start.
-Object.assign(summary, stamp());
+// Retain the stamp sampled at `started`: duration includes Python and the build.
 const run = await runGroup(process.execPath, vitestArgs, {
   label: 'run',
   timeoutMs: RUN_TIMEOUT_MS,

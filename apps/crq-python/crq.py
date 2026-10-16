@@ -1082,15 +1082,38 @@ def checks_verdict(sha: str) -> str:
     return "pass"
 
 
-def newest_green_tip(base: str, log: List[str]) -> Optional[str]:
-    """Newest first-parent merge-queue commit beyond `base` whose gate checks all passed."""
-    # tip_search_depth is retained as an inert compatibility key. Search the
-    # whole unpromoted range: quota must not sit idle behind non-green tips.
-    for sha in git("rev-list", "--first-parent", f"{base}..origin/merge-queue").split():
+PROMOTION_TIP_CHECKS_PER_TICK = 5
+
+
+def newest_green_tip(base: str, log: List[str], state: Dict[str, Any]) -> Optional[str]:
+    """Scan newest-first in bounded pages; persist progress, never truncate the range.
+
+    A sweep finishes its pinned snapshot even if new commits arrive, so a busy
+    queue cannot starve an older green tip. The next sweep starts at the new tip.
+    """
+    cursor = state.get("tip_scan")
+    cursor = cursor if isinstance(cursor, dict) else {}
+    resume = cursor.get("next")
+    if (cursor.get("schema_version") != 1 or cursor.get("base") != base
+            or not isinstance(resume, str) or not re.fullmatch(r"[0-9a-f]{40}", resume)
+            or not is_ancestor(resume, "origin/merge-queue")):
+        resume = "origin/merge-queue"
+    # One lookahead SHA makes the next page inclusive, without repeating a check.
+    tips = git("rev-list", "--first-parent", "--max-count",
+               str(PROMOTION_TIP_CHECKS_PER_TICK + 1), f"{base}..{resume}").split()
+    for sha in tips[:PROMOTION_TIP_CHECKS_PER_TICK]:
+        # Save before the remote read; an exception retries only this candidate.
+        state["tip_scan"] = {"schema_version": 1, "base": base, "next": sha}
         v = checks_verdict(sha)
         if v == "pass":
+            state.pop("tip_scan", None)
             return sha
         log.append(f"promotion: skip tip {sha[:10]} ({v})")
+    if len(tips) > PROMOTION_TIP_CHECKS_PER_TICK:
+        state["tip_scan"] = {"schema_version": 1, "base": base, "next": tips[-1]}
+        log.append("promotion: green-tip scan continues next tick")
+    else:
+        state.pop("tip_scan", None)  # completed sweep; recheck pending tips next tick
     return None
 
 
@@ -1340,7 +1363,7 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
             item = None
         elif all(b.get("resolution") for b in item["blocking"]) and mode == "signer":
             # signer-owned coverage: no agent-judged success, no delta — a FULL re-review of main..tip
-            tip = newest_green_tip(main, log)
+            tip = newest_green_tip(main, log, dict(st) if dry else st)
             if not tip or tip == item["batch_sha"]:
                 return log + [f"promotion: {item['id']} resolved but no newer green tip yet — waiting for the fix to "
                               f"merge (false positives need an owner override)"]
@@ -1349,7 +1372,7 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
             cut_promotion(q, log, dry, main, tip, f"full re-review after {item['id']} findings resolved")
             return log
         elif all(b.get("resolution") for b in item["blocking"]):
-            tip = newest_green_tip(main, log)
+            tip = newest_green_tip(main, log, dict(st) if dry else st)
             if tip == item["batch_sha"]:
                 n = len(item["blocking"])
                 if not dry:
@@ -1409,7 +1432,7 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
            f"{age_h:.1f}h since last promotion" if merges and age_h >= PROMO.get("hours_trigger", 8) else None)
     if not why:
         return log
-    tip = newest_green_tip(main, log)
+    tip = newest_green_tip(main, log, dict(st) if dry else st)
     if not tip or is_ancestor(tip, main):
         return log + [f"promotion: trigger fired ({why}) but no merge-queue tip beyond main has all gate checks green"]
     cut_promotion(q, log, dry, main, tip, why)

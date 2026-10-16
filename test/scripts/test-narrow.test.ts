@@ -31,6 +31,7 @@ import {
   projectsOf,
   readReport,
   readPythonReport,
+  pythonRunVerdict,
   selectPython,
   runVerdict,
   signalExit,
@@ -650,6 +651,50 @@ describe('operator records', () => {
   });
 });
 
+describe('Python execution outcomes', () => {
+  const counts = { total: 2, passed: 2, failed: 0, skipped: 0 };
+  const base = {
+    run: { code: 0, signal: null, timedOut: false },
+    counts,
+    interruptedBy: null,
+    lockPinned: false,
+  };
+  it('preserves timeout and signal exits even with a valid report', () => {
+    expect(
+      pythonRunVerdict({ ...base, run: { code: null, signal: 'SIGTERM', timedOut: true } }),
+    ).toMatchObject({ result: 'timeout', exit: 143 });
+    expect(
+      pythonRunVerdict({ ...base, run: { code: 0, signal: null, timedOut: true } }),
+    ).toMatchObject({ result: 'timeout', exit: 124 });
+    expect(
+      pythonRunVerdict({
+        ...base,
+        interruptedBy: 'SIGINT',
+        run: { code: null, signal: 'SIGINT', timedOut: false },
+      }),
+    ).toMatchObject({ result: 'interrupted', exit: 130 });
+    expect(pythonRunVerdict({ ...base, interruptedBy: 'SIGTERM' })).toMatchObject({
+      result: 'interrupted',
+      exit: 143,
+    });
+  });
+  it('requires a passing nonempty report and safe cleanup', () => {
+    expect(pythonRunVerdict(base)).toEqual({ result: 'pass', exit: 0 });
+    expect(pythonRunVerdict({ ...base, counts: null })).toMatchObject({ result: 'fail', exit: 1 });
+    expect(pythonRunVerdict({ ...base, counts: { ...counts, failed: 1 } })).toMatchObject({
+      result: 'fail',
+      exit: 1,
+    });
+    expect(pythonRunVerdict({ ...base, lockPinned: true })).toMatchObject({
+      result: 'error',
+      exit: 1,
+    });
+    expect(
+      pythonRunVerdict({ ...base, run: { ...base.run, error: new Error('ENOENT') } }),
+    ).toMatchObject({ result: 'error', exit: 1 });
+  });
+});
+
 describe('Python narrow selection and evidence', () => {
   const a = 'apps/crq-python/test_author_quota.py';
   const b = 'apps/crq-python/test_status_summary.py';
@@ -672,6 +717,19 @@ describe('Python narrow selection and evidence', () => {
         include: [],
       }).ok,
     ).toBe(false);
+  });
+  it('reads Python 3.14 coloured pass and failure reports', () => {
+    expect(readPythonReport('Ran 2 tests in 0.01s\n\n\x1b[32mOK\x1b[0m (skipped=1)\n')).toEqual({
+      total: 2,
+      passed: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(
+      readPythonReport(
+        'Ran 2 tests in 0.01s\n\n\x1b[31mFAILED\x1b[0m (\x1b[31mfailures=1\x1b[0m)\n',
+      )?.failed,
+    ).toBe(1);
   });
   it('requires a nonempty terminal unittest report', () => {
     expect(readPythonReport('Ran 3 tests in 0.01s\n\nOK (skipped=1)\n')).toEqual({

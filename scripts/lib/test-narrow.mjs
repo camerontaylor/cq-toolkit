@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from 'node:util';
+
 // Pure policy for scripts/test-narrow.mjs, the ONE permitted local test
 // command (AGENTS.md "Local testing"). Everything here is data in, data out
 // — argv parsing, the run plan and the summary line — so
@@ -224,7 +226,9 @@ export function selectPython(changed, allTests, missing = []) {
 /** Read unittest's terminal report; an absent/zero-test report never passes. */
 export function readPythonReport(stderr) {
   const matches = [
-    ...stderr.matchAll(/^Ran (\d+) tests? in [^\n]+\n\s*\n(OK|FAILED)(?: \(([^\n]*)\))?\s*$/gm),
+    ...stripVTControlCharacters(stderr).matchAll(
+      /^Ran (\d+) tests? in [^\n]+\n\s*\n(OK|FAILED)(?: \(([^\n]*)\))?\s*$/gm,
+    ),
   ];
   const last = matches.at(-1);
   if (last === undefined || Number(last[1]) === 0) return null;
@@ -233,6 +237,30 @@ export function readPythonReport(stderr) {
   const failed = count('failures') + count('errors') + count('unexpected successes');
   const skipped = count('skipped') + count('expected failures');
   return { total, passed: total - failed - skipped, failed, skipped };
+}
+
+/** Python uses the same cancellation outcomes as Vitest, before report validation. */
+export function pythonRunVerdict({ run, counts, interruptedBy, lockPinned }) {
+  if (lockPinned)
+    return {
+      result: 'error',
+      exit: 1,
+      reason: 'the Python run left processes that could not be safely swept',
+    };
+  if (run.error)
+    return { result: 'error', exit: 1, reason: `cannot start Python: ${run.error.message}` };
+  const exit = run.code ?? (run.signal ? signalExit(run.signal) : 1);
+  if (run.timedOut || interruptedBy !== null) {
+    return runVerdict({ exit, report: null, files: [], timedOut: run.timedOut, interruptedBy });
+  }
+  if (exit !== 0 || counts === null || counts.failed > 0 || counts.passed === 0) {
+    return {
+      result: 'fail',
+      exit: exit || 1,
+      reason: 'Python run failed or produced no nonempty report',
+    };
+  }
+  return { result: 'pass', exit: 0 };
 }
 
 /**
