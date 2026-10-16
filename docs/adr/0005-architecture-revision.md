@@ -1,6 +1,6 @@
 # ADR-0005 — Architecture revision: a layered monorepo with policy as the primary library
 
-- **Status:** accepted in principle by the owner on 2026-10-16 (rulings D-A, D-B, D-C, D-P, D-E′, D-G, D-J, D-H)
+- **Status:** accepted in principle by the owner on 2026-10-16 (rulings D-A, D-B, D-C, D-P, D-E′, D-G, D-J, ADR-0005-D-H)
 - **Supersedes in part:** ADR-0001 §lanes (four → three), ADR-0002 Annex B (configuration resolver), ADR-0003 §rescue, the kernel "freeze rule"; ADR-0003 §lane classification awaits the Phase 1.8 contract decision
 - **Keeps in force:** ADR-0004 (trust boundaries) in substance; I1–I11 doctrine
 
@@ -22,12 +22,14 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
 
 ## Decision
 
-1. **Layer rule, enforced by lint:** policy → ops (owns its ports and contracts) → adapters and
-   agent-runtime (implement the ports) → github-app → cli → private workspaces. Policy never
-   imports I/O, a driver or a forge. Ops never spawn, read `process.env` or construct drivers;
-   they receive explicit deps. The initial workspace has six publishable packages (`policy`,
-   `ops`, `adapters`, `agent-runtime`, `github-app`, `cli`). Other packages described here are
-   later-phase boundaries; split further only on concrete dependency-isolation pressure.
+1. **Layer rule, enforced by lint:** dependency arrows point from importer to dependency:
+   `@cq/ops → @cq/policy`; `@cq/adapters → @cq/ops` (adapters implement ops-owned ports);
+   `@cq/agent-runtime → @cq/ops, @cq/policy`; `@cq/github-app → @cq/policy, @cq/adapters`;
+   `@cq/cli → @cq/github-app, @cq/adapters, @cq/agent-runtime, @cq/ops, @cq/policy`. Private
+   apps/workspaces assemble above these packages. Policy never imports I/O, a driver or a forge.
+   Ops never spawn, read `process.env` or construct drivers; they receive explicit deps. Start
+   with six publishable packages (`policy`, `ops`, `adapters`, `agent-runtime`, `github-app`,
+   `cli`); split further only on concrete dependency-isolation pressure.
 2. **`@cq/ops` is the adopter entry point; `@cq/policy` is its pure foundation.** Pure functions and data (presets with `extends`,
    prompts as `.md` files, decision tables, doctrine) with per-domain subpath entries. "Just the
    smarts" for an address-review cycle is `@cq/policy/review` + `@cq/ops/review` with fakes.
@@ -60,11 +62,17 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
    trust-set acceptance, promotion-reviewer pin + predicate (single implementation), check-run
    posting, settings-as-code apply + drift. `@cq/workflows` generates YAML from a typed spec;
    decisions move into `cq` subcommands; templates carry ≤40 inline bash lines.
-8. **crq is rewritten in TypeScript, signer included** (owner ruling D-H): smarts in
+8. **crq is rewritten in TypeScript, signer included** (owner ruling ADR-0005-D-H): smarts in
    `@cq/policy`/`@cq/ops` subpaths (later `@cq/review-queue`), daemons as `apps/queue-runner` and
    `apps/promotion-signer`. The signer's custody model is unchanged (dedicated user, root-owned
-   pinned install, forced-command spool, re-deriving verifier) and its replacement needs a fresh S2
-   evidence cycle and a scheduled cutover (shadow mode, single issuer, drain, rollback).
+   pinned install, forced-command spool, re-deriving verifier). Before cutover, install the TS
+   signer from a hash-pinned packed artifact and re-run the signer S2 evidence: custody and modes,
+   install-grant and scratch-creator readback, transport-negative and spool round-trip checks,
+   policy-data consumption, restart recovery, and pre/post runtime-artifact hashes; re-record the
+   attestation. Characterize the live ceres source and shadow the TS signer while Python remains
+   the sole issuer. Keep frozen paths in place until the TS signer reads `@cq/policy/queue`; retire
+   Python only after the TS signer posts real `crq/promotion-review` statuses under observation.
+   The owner schedules the cutover, including drain and rollback.
 9. **cq-fixtures becomes `packages/eval`** in the workspace, keeping a public-surface boundary
    test (revises the spec's two-repo decision).
 10. **The blanket type freeze and migration-PR rule are retired**; persisted and wire schemas
@@ -100,7 +108,10 @@ targeted re-review.
   place) completes before Phase 2 cuts; the owner's 2026-10-11 local-testing policy must be
   re-stated for per-package suites; crq's rewrite is a real project with a fresh evidence cycle.
 - Risks: `@ai-sdk/harness` / ACP / pi churn (mitigated: the seam stays ours, lanes are adapters);
-  over-splitting (mitigated: the fold list in `package-topology.md` §3).
+  over-splitting (mitigated by starting with the six packages above. If later isolation pressure
+  justifies Shape L, fold `store` into `git`, `pricing` into `kernel`, `driver-core` and `harness`
+  into `runtime`, `workflows` into `github-app`, and `review-queue` into `ops/queue`; these are
+  candidates, not additional Phase 0 packages).
 
 ## Alternatives considered
 
