@@ -86,7 +86,7 @@ import {
 } from '../../src/selfhost/self-review-loop.js';
 import type { SweepUsagePrRow } from '../../src/selfhost/self-review-loop.js';
 import type { runReviewLoop } from '../../src/plans/review-loop.js';
-import { SelfhostDefaults, SelfhostPeak } from '../../src/selfhost/config.js';
+import { SelfhostDefaults, SelfhostPeak, driverKeyEnv } from '../../src/selfhost/config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -1095,11 +1095,41 @@ describe('main — peak-aware driver credential (fail closed)', () => {
   });
 
   const at = (iso: string): number => Date.parse(iso);
+  // Owner ruling 2026-10-16: the peak window uses the SAME driver as off-peak,
+  // so both windows select the Z.AI key. The tests below still exercise the
+  // window-selection and single-clock-read mechanics, keyed on the resolved
+  // env names rather than on a provider difference.
+  const PEAK_KEY = `${String(driverKeyEnv(SelfhostPeak.driver))}\n`;
+  const OFF_PEAK_KEY = `${String(driverKeyEnv(SelfhostDefaults.driver))}\n`;
 
   test('--print-driver-key-env prints the key env the CURRENT clock selects', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
-    // Peak (Mon 2026-10-12T07:00Z) → the DeepSeek key …
+    // Peak (Mon 2026-10-12T07:00Z) → the peak driver's key …
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T07:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith(PEAK_KEY);
+    write.mockClear();
+    // … and every off-peak instant (same day, noon UTC) → the off-peak key.
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith(OFF_PEAK_KEY);
+  });
+
+  test('CQ_SELFHOST_PEAK_DRIVER reroutes the peak window to another provider (configuration, not code)', async () => {
+    vi.stubEnv('CQ_SELFHOST_PEAK_DRIVER', 'deepseek/deepseek-flash');
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
     await main({
       ...baseDeps(
         fakeGh([]),
@@ -1109,7 +1139,7 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     });
     expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
     write.mockClear();
-    // … and every off-peak instant (same day, noon UTC) → the Z.AI key.
+    // Off-peak is untouched by the peak override.
     await main({
       ...baseDeps(
         fakeGh([]),
@@ -1117,15 +1147,15 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       ),
       nowMs: () => at('2026-10-12T12:00:00Z'),
     });
-    expect(write).toHaveBeenCalledWith('ZAI_API_KEY\n');
+    expect(write).toHaveBeenCalledWith(OFF_PEAK_KEY);
   });
 
-  test('a PEAK run refuses before any effect when DEEPSEEK_API_KEY is absent', async () => {
+  test('a PEAK run refuses before any effect when the peak driver key is absent', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
-    // The off-peak key is present but NOT the selected one: the preflight
-    // must require the key belonging to the window, not any provider key.
-    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
-    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    // Another provider's key is present but NOT the selected one: the
+    // preflight must require the key belonging to the window's driver.
+    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('ZAI_API_KEY', '');
     await expect(
       main({
         ...baseDeps(
@@ -1134,10 +1164,10 @@ describe('main — peak-aware driver credential (fail closed)', () => {
         ),
         nowMs: () => at('2026-10-12T07:00:00Z'),
       }),
-    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+    ).rejects.toThrow('requires ZAI_API_KEY');
   });
 
-  test('an OFF-PEAK run conversely refuses when ZAI_API_KEY is absent', async () => {
+  test('an OFF-PEAK run likewise refuses when ZAI_API_KEY is absent', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
     vi.stubEnv('ZAI_API_KEY', '');
     vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
@@ -1165,12 +1195,12 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       ),
       nowMs: () => at('2026-10-12T05:45:00Z'),
     });
-    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    expect(write).toHaveBeenCalledWith(PEAK_KEY);
     write.mockRestore();
-    // … and a REAL run starting there refuses when only the off-peak key is set.
+    // … and a REAL run starting there refuses when the selected key is absent.
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
-    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
-    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('ZAI_API_KEY', '');
     await expect(
       main({
         ...baseDeps(
@@ -1179,7 +1209,7 @@ describe('main — peak-aware driver credential (fail closed)', () => {
         ),
         nowMs: () => at('2026-10-12T05:45:00Z'),
       }),
-    ).rejects.toThrow('requires DEEPSEEK_API_KEY');
+    ).rejects.toThrow('requires ZAI_API_KEY');
   });
 
   test('a pinned CQ_SELFHOST_NOW_MS drives the handshake AND the run', async () => {
@@ -1198,7 +1228,7 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       ),
       nowMs: () => at('2026-10-12T12:00:00Z'),
     });
-    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    expect(write).toHaveBeenCalledWith(PEAK_KEY);
     write.mockRestore();
     // … and the same pin decides the driver the sweep dispatches through.
     const journalRoot = tempJournalRoot();
@@ -1211,8 +1241,8 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       '--journal-root',
       journalRoot,
     ];
-    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
-    vi.stubEnv('DEEPSEEK_API_KEY', 'peak-key');
+    vi.stubEnv('ZAI_API_KEY', 'peak-key');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
     await main({
       ...baseDeps(
         fakeGh([pullRow(7)]),
@@ -1279,11 +1309,11 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       '--journal-root',
       journalRoot,
     ];
-    // The PEAK key is present, the OFF-PEAK key absent: a sweep that read its
-    // OWN clock after the preflight would pick zai (whose key is absent) even
-    // though the preflight checked deepseek.
-    vi.stubEnv('DEEPSEEK_API_KEY', 'peak-key');
-    vi.stubEnv('ZAI_API_KEY', '');
+    // The selected key is present; a sweep that read its OWN clock after the
+    // preflight would stamp the journal with the later instant (and, for an
+    // adopter with a distinct peak driver, pick the other provider).
+    vi.stubEnv('ZAI_API_KEY', 'peak-key');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
     const peak = Date.parse('2026-10-12T06:00:00Z');
     const offPeakLater = Date.parse('2026-10-12T11:00:00Z');
     let reads = 0;

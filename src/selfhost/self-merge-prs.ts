@@ -80,7 +80,12 @@ import { GhError, ghJson, makeGhRunner, type GhFn } from '../ops/review/gh.js';
 import { list } from '../registry/index.js';
 import { makeMergePrsPlan } from '../plans/merge-prs.js';
 import { fetchMergeCandidates, type ExcludedCandidate } from './candidates.js';
-import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
+import {
+  defaultJournalRoot,
+  parseSelfhostArgs,
+  SelfhostDefaults,
+  resolveSelfhostDriver,
+} from './config.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
   gateMergeEffects,
@@ -297,7 +302,7 @@ export function buildRunInput(
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
-      : { modelSpec: SelfhostDefaults.driver }),
+      : { modelSpec: resolveSelfhostDriver(nowMs) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
     ...(classifyConfig === undefined && allowSameAccountAgentReview === undefined
