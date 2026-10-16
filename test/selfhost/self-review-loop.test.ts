@@ -1126,6 +1126,30 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     expect(write).toHaveBeenCalledWith(OFF_PEAK_KEY);
   });
 
+  test('CQ_SELFHOST_PEAK_DRIVER reroutes the peak window to another provider (configuration, not code)', async () => {
+    vi.stubEnv('CQ_SELFHOST_PEAK_DRIVER', 'deepseek/deepseek-flash');
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = ['node', 'self-review-loop.js', '--print-driver-key-env'];
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T07:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith('DEEPSEEK_API_KEY\n');
+    write.mockClear();
+    // Off-peak is untouched by the peak override.
+    await main({
+      ...baseDeps(
+        fakeGh([]),
+        fakeLoop([], async () => fakeOutcome(1)),
+      ),
+      nowMs: () => at('2026-10-12T12:00:00Z'),
+    });
+    expect(write).toHaveBeenCalledWith(OFF_PEAK_KEY);
+  });
+
   test('a PEAK run refuses before any effect when the peak driver key is absent', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
     // Another provider's key is present but NOT the selected one: the

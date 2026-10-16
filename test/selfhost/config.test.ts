@@ -24,7 +24,11 @@ import {
   isSelfhostPeak,
   isSelfhostPeakHeadroom,
   parseSelfhostArgs,
+  parseModelSpec,
   resolveSelfhostDriver,
+  resolveSelfhostDrivers,
+  SELFHOST_DRIVER_ENV,
+  SELFHOST_PEAK_DRIVER_ENV,
   SelfhostDefaults,
   SelfhostPeak,
 } from '../../src/selfhost/config.js';
@@ -179,5 +183,63 @@ describe('parseSelfhostArgs overrides', () => {
   test('parsing never mutates the frozen defaults', () => {
     parseSelfhostArgs(['--max-usd', '2']);
     expect(SelfhostDefaults.maxTokens).toBe(2_000_000);
+  });
+});
+
+describe('selfhost drivers are configuration (owner ruling 2026-10-16)', () => {
+  test('parseModelSpec accepts exactly provider/model and rejects everything else', () => {
+    expect(parseModelSpec('deepseek/deepseek-flash', 'X')).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+    });
+    for (const bad of ['', 'zai', 'zai/', '/glm', 'a/b/c', 'zai/ glm', 'zai /glm']) {
+      expect(() => parseModelSpec(bad, 'CQ_TEST')).toThrow("CQ_TEST must be '<provider>/<model>'");
+    }
+  });
+
+  test('unset or blank env → the frozen defaults for both windows', () => {
+    expect(resolveSelfhostDrivers({})).toEqual({
+      offPeak: SelfhostDefaults.driver,
+      peak: SelfhostPeak.driver,
+    });
+    expect(
+      resolveSelfhostDrivers({ [SELFHOST_DRIVER_ENV]: '', [SELFHOST_PEAK_DRIVER_ENV]: '' }),
+    ).toEqual({ offPeak: SelfhostDefaults.driver, peak: SelfhostPeak.driver });
+  });
+
+  test('env overrides each window independently and resolveSelfhostDriver honours them', () => {
+    const env = {
+      [SELFHOST_DRIVER_ENV]: 'openai/gpt-x',
+      [SELFHOST_PEAK_DRIVER_ENV]: 'deepseek/deepseek-flash',
+    };
+    expect(resolveSelfhostDrivers(env)).toEqual({
+      offPeak: { provider: 'openai', model: 'gpt-x' },
+      peak: { provider: 'deepseek', model: 'deepseek-flash' },
+    });
+    // Monday 07:00Z is inside the peak band; noon is outside it.
+    expect(resolveSelfhostDriver(Date.parse('2026-10-12T07:00:00Z'), env)).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+    });
+    expect(resolveSelfhostDriver(Date.parse('2026-10-12T12:00:00Z'), env)).toEqual({
+      provider: 'openai',
+      model: 'gpt-x',
+    });
+    // One window overridden, the other left to its default.
+    expect(
+      resolveSelfhostDrivers({ [SELFHOST_PEAK_DRIVER_ENV]: 'deepseek/deepseek-flash' }),
+    ).toEqual({
+      offPeak: SelfhostDefaults.driver,
+      peak: { provider: 'deepseek', model: 'deepseek-flash' },
+    });
+  });
+
+  test('a malformed override fails loud, naming the env key', () => {
+    expect(() => resolveSelfhostDrivers({ [SELFHOST_PEAK_DRIVER_ENV]: 'deepseek' })).toThrow(
+      `${SELFHOST_PEAK_DRIVER_ENV} must be '<provider>/<model>'`,
+    );
+    expect(() => resolveSelfhostDrivers({ [SELFHOST_DRIVER_ENV]: 'a/b/c' })).toThrow(
+      `${SELFHOST_DRIVER_ENV} must be '<provider>/<model>'`,
+    );
   });
 });

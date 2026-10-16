@@ -176,12 +176,11 @@ export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
   // 05:40 inclusive). 20 minutes covers the privileged job's 15-minute
   // `timeout-minutes` with the documented bound's margin.
   headroomMinutes: 20,
-  // Owner ruling 2026-10-16: the peak window keeps the SAME driver as the
-  // rest of the day. Z.ai GLM capacity is ample for this repository's own
-  // loop, so the ~3× peak multiplier is accepted rather than routed around.
-  // The window, the pre-peak headroom and the single-clock-read semantics are
-  // retained unchanged (they still decide the journal stamp and keep the
-  // switch available to adopters who set a different peak driver here).
+  // DEFAULT only: the peak driver is configuration (`CQ_SELFHOST_PEAK_DRIVER`,
+  // see resolveSelfhostDrivers). Owner ruling 2026-10-16: by default the peak
+  // window keeps the same driver as the rest of the day (Z.ai GLM capacity is
+  // ample for this repository's own loop); the window, the pre-peak headroom
+  // and the single-clock-read semantics are unchanged.
   driver: SelfhostDefaults.driver,
 });
 
@@ -241,10 +240,66 @@ function inUtcWeekdayBand(nowMs: number, fromMinute: number, toMinute: number): 
  * delayed fire or a manual dispatch resolves at ITS OWN start, never at the
  * slot's nominal time.
  */
-export function resolveSelfhostDriver(nowMs: number): ModelSpec {
-  return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs)
-    ? SelfhostPeak.driver
-    : SelfhostDefaults.driver;
+/** Env key naming the off-peak driver as `provider/model` (blank → the frozen default). */
+export const SELFHOST_DRIVER_ENV = 'CQ_SELFHOST_DRIVER';
+/** Env key naming the peak-window driver as `provider/model` (blank → the frozen default). */
+export const SELFHOST_PEAK_DRIVER_ENV = 'CQ_SELFHOST_PEAK_DRIVER';
+
+/**
+ * Parse a `provider/model` spec. Exactly one slash, both halves non-empty,
+ * no whitespace: a malformed value THROWS with the offending env name so a
+ * typo fails the run loud instead of silently dispatching the default model.
+ */
+export function parseModelSpec(value: string, source: string): ModelSpec {
+  const parts = value.split('/');
+  const provider = parts[0];
+  const model = parts[1];
+  if (
+    parts.length !== 2 ||
+    provider === undefined ||
+    model === undefined ||
+    provider === '' ||
+    model === '' ||
+    /\s/.test(value)
+  ) {
+    throw new Error(
+      `selfhost: ${source} must be '<provider>/<model>' (got ${JSON.stringify(value)})`,
+    );
+  }
+  return { provider, model };
+}
+
+/** The off-peak and peak drivers: env overrides first, frozen defaults otherwise. */
+export interface SelfhostDrivers {
+  offPeak: ModelSpec;
+  peak: ModelSpec;
+}
+
+/**
+ * Model choice is CONFIGURATION, never a constant an operator has to edit
+ * in source (owner ruling 2026-10-16): `CQ_SELFHOST_DRIVER` and
+ * `CQ_SELFHOST_PEAK_DRIVER` name the drivers; an unset or blank key means the
+ * frozen default for that window. Read once per run at the composition root
+ * (the entry modules), never inside an op.
+ */
+export function resolveSelfhostDrivers(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SelfhostDrivers {
+  const offPeakRaw = env[SELFHOST_DRIVER_ENV] ?? '';
+  const peakRaw = env[SELFHOST_PEAK_DRIVER_ENV] ?? '';
+  return {
+    offPeak:
+      offPeakRaw === '' ? SelfhostDefaults.driver : parseModelSpec(offPeakRaw, SELFHOST_DRIVER_ENV),
+    peak: peakRaw === '' ? SelfhostPeak.driver : parseModelSpec(peakRaw, SELFHOST_PEAK_DRIVER_ENV),
+  };
+}
+
+export function resolveSelfhostDriver(
+  nowMs: number,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ModelSpec {
+  const drivers = resolveSelfhostDrivers(env);
+  return isSelfhostPeak(nowMs) || isSelfhostPeakHeadroom(nowMs) ? drivers.peak : drivers.offPeak;
 }
 
 /**
