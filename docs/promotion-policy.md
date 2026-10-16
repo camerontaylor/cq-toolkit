@@ -1,28 +1,27 @@
-# Promotion policy: batched, CodeRabbit-reviewed promotion to `main`
+# Promotion policy: every-green-tip, CodeRabbit-reviewed promotion to `main`
 
-Owner ruling, 2026-10-04. Merging into `merge-queue` stays lenient: required checks green plus
+Owner ruling, 2026-10-16. Merging into `merge-queue` stays lenient: required checks green plus
 basic review, with the CodeRabbit CLI queue (crq) following up afterwards. **Promotion to `main`
 is the one place a CodeRabbit review is required before merge**, and promotion reviews get first
 claim on review slots. The gate no longer promotes on every green queue push.
 
-## When a batch is cut
+## When a promotion is cut
 
-crq cuts a batch on the first of these:
-
-- **On demand.** The owner (or the chancellor) asks crq to cut a promotion.
-- **N = 5** merges into `merge-queue` since the last promotion.
-- **T = 8 hours** since the last promotion, with at least one unpromoted merge.
-
-The **batch tip** is the newest `merge-queue` commit whose gate wait list (`static`, `denylist`,
-`ratchet`) has _completed with success_. A commit whose checks are pending, failed or cancelled
-(a superseded intermediate tip) is never a batch tip. If no such commit exists, crq waits for
-checks to finish. The **base** is `main` at cut time. Only one promotion is open at a time.
+crq cuts a promotion whenever a `merge-queue` tip beyond `main` has all gate
+checks green. There is no merge-count or elapsed-time threshold. The **promotion
+tip** is the newest `merge-queue` commit whose gate wait list (`static`,
+`denylist`, `ratchet`) has completed with success. A commit whose checks are
+pending, failed or cancelled (a superseded intermediate tip) is never a
+promotion tip. If no such tip exists, crq waits for checks to finish. The
+**base** is `main` at cut time. The only throttles are crq's hourly start cap
+(`max_starts_per_hour`), the CodeRabbit rate-limit cooldown, and one promotion
+in flight at a time.
 
 ## What gets reviewed
 
 One CodeRabbit CLI review of `main..<batch tip>`, pinned to the two SHAs (never a moving branch).
-crq gives a `promotion` item **absolute priority for the next start slot** (crq allows at most 5
-starts per hour). It does not pre-empt a running review.
+crq gives a `promotion` item **absolute priority for the next start slot**
+(`max_starts_per_hour` starts per hour). It does not pre-empt a running review.
 
 crq reports the state as a commit status on the batch tip: context `crq/promotion-review`, posted
 by the promotion-review signer as the pinned reviewer bot `cq-promotion-reviewer[bot]` (identity:
@@ -41,7 +40,7 @@ the owner's registration record, `app-registration-session-20261004.md` @ `d8f13
 ## What promotes
 
 `cq-gate` (`gate.yml`, armed) fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
-now. Merges that land after the cut wait for the next batch. The gate promotes the SHA only when:
+now. Merges that land during a review join the next promotion. The gate promotes the SHA only when:
 
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
