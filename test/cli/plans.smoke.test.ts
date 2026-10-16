@@ -63,7 +63,7 @@ import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_proce
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { exitCodeForRunReport } from '../../src/cli/exit.js';
 import { RunReportSchema } from '../../src/kernel/schema.js';
@@ -94,6 +94,14 @@ import {
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST_CLI = join(ROOT, 'dist', 'cli.js');
+const DIST_FIX_PROMPT_LOADER = join(
+  ROOT,
+  'dist',
+  'ops',
+  'review',
+  'prompts',
+  'defaultFixPrompt.js',
+);
 const FAKE_GH = join(ROOT, 'test', 'fixtures', 'gh', 'fake-gh.mjs');
 const SMOKE_OPS = join(ROOT, 'test', 'fixtures', 'cli-smoke-ops');
 
@@ -131,6 +139,20 @@ beforeAll(
   // scratch-repo setup and misreport the failure as a hook timeout.
   BUILD_TIMEOUT_MS + 120_000,
 );
+
+test('the built fixer prompt loader reads its packaged Markdown asset', async () => {
+  const moduleUrl = JSON.stringify(pathToFileURL(DIST_FIX_PROMPT_LOADER).href);
+  const prompt = execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `import { defaultFixPrompt } from ${moduleUrl}; process.stdout.write(defaultFixPrompt);`,
+    ],
+    { encoding: 'utf8' },
+  );
+  expect(prompt).toContain('You are a code-review fixer.');
+});
 
 afterAll(() => {
   for (const dir of [scratchRepo, planDir]) {
