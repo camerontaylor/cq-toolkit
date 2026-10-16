@@ -3,7 +3,7 @@ Description=CRQ read-only promotion records on private mesh
 [Service]
 Type=simple
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/env python3 %h/repos/coderabbit-queue/ops/crq-records.py
+ExecStart=/usr/bin/env python3 @CRQ_ROOT@/ops/crq-records.py
 Restart=on-failure
 RestartSec=30
 [Install]
