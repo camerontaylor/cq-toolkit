@@ -172,7 +172,10 @@ Before removing worker-host's marker, move its runner checkout to this candidate
 later (identity pins, `-F none`, policy-file mode), then set
 `promotion.signer.spool` to `operator@queue-host.local.example.invalid` +
 `~/.ssh/crq-spool-ed25519` (LAN only; the committed default is queue-host loopback)
-and verify from worker-host itself:
+and verify from worker-host itself. `queue-host.local.example.invalid` is a
+redacted deployment placeholder, not a usable hostname. Replace it in both the
+spool configuration and the command below with the owner-provided reachable LAN
+hostname before starting the runner:
 
 ```sh
 /usr/bin/ssh -F none -i ~/.ssh/crq-spool-ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o BatchMode=yes operator@queue-host.local.example.invalid exist promo-0000000000   # promo-0000000000 0
