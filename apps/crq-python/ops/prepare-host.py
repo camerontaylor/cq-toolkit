@@ -99,6 +99,10 @@ def validate(overlay):
             # CRQ expands it only at SSH invocation; retain those config bytes.
             checked = value[1:] if name == 'promotion.signer.spool.ssh_key' and isinstance(value, str) and value.startswith('~/') else value
             host_path(checked)
+        elif name == 'promotion.signer.spool.ssh_alias':
+            if not isinstance(value, str) or not re.fullmatch(
+                    r'[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*', value):
+                raise ValueError('spool ssh_alias must be a literal user@host')
         elif not isinstance(value, str) or not value or any(c in value for c in '\n\r\x00'):
             raise ValueError('overlay host values must be nonempty strings')
     # Paths/endpoints needed by the model-free runner must be explicit.

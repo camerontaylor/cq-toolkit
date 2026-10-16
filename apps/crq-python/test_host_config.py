@@ -132,6 +132,33 @@ class HostConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.validate(overlay)
 
+    def test_spool_alias_matches_runtime_client_format(self):
+        import crq
+
+        valid = ['operator@127.0.0.1', '_operator@queue-host',
+                 'operator@queue.example.invalid', 'operator@2001:db8::1']
+        invalid = ['queue-host', '-operator@host', 'operator@-host',
+                   'operator@[::1]', 'operator@host alias', 'operator@host\n',
+                   'operator@host;true', 'operator@@host', 'operator@host/path']
+        for alias in valid + invalid:
+            with self.subTest(alias=alias):
+                overlay = copy.deepcopy(self.overlay)
+                spool = overlay['config']['promotion']['signer']['spool']
+                spool['ssh_alias'] = alias
+                if alias in valid:
+                    host.validate(overlay)
+                    self.assertIsNone(crq.Spool(spool).refused)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'literal user@host'):
+                        host.validate(overlay)
+                    self.assertIsNotNone(crq.Spool(spool).refused)
+        for alias in ['', None, 123, []]:
+            with self.subTest(alias=alias):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['promotion']['signer']['spool']['ssh_alias'] = alias
+                with self.assertRaisesRegex(ValueError, 'literal user@host'):
+                    host.validate(overlay)
+
     def test_overlay_must_be_external_and_raw_hash_preserved(self):
         self.assertEqual(host.load_overlay(self.overlay_path), (self.overlay, self.raw))
         internal = self.root / 'private.json'
