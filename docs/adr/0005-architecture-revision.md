@@ -1,7 +1,7 @@
 # ADR-0005 — Architecture revision: a layered monorepo with policy as the primary library
 
-- **Status:** accepted in principle by the owner on 2026-10-16 (rulings D-A, D-B, D-C, D-P, D-E′, D-G, D-J, ADR-0005-D-H)
-- **Supersedes in part:** ADR-0001 §lanes (four → three), ADR-0002 Annex B (configuration resolver), ADR-0003 §rescue, the kernel "freeze rule"; ADR-0003 §lane classification awaits the Phase 1.8 contract decision
+- **Status:** accepted in principle by the owner on 2026-10-16 (rulings D-A, D-B, D-C, D-P, D-E′, D-G, ADR-0005-D-J, ADR-0005-D-H)
+- **Supersedes in part:** ADR-0001 §lanes (four → three), ADR-0002 Annex B (resolver decision only; the remaining configuration contract stays in force through Phase 0 and is revised with Phase 1.7's separate domain configurations), ADR-0003 §rescue, the kernel "freeze rule"; ADR-0003 §lane classification awaits the Phase 1.8 contract decision
 - **Keeps in force:** ADR-0004 (trust boundaries) in substance; I1–I11 doctrine
 
 ## Context
@@ -28,19 +28,21 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
    `@cq/cli → @cq/github-app, @cq/adapters, @cq/agent-runtime, @cq/ops, @cq/policy`. Private
    apps/workspaces assemble above these packages. Policy never imports I/O, a driver or a forge.
    Ops never spawn, read `process.env` or construct drivers; they receive explicit deps. Start
-   with six publishable packages (`policy`, `ops`, `adapters`, `agent-runtime`, `github-app`,
-   `cli`); split further only on concrete dependency-isolation pressure.
+   with exactly six publishable packages (`policy`, `ops`, `adapters`, `agent-runtime`,
+   `github-app`, `cli`) plus private workspaces. No other package is part of this initial set;
+   split further only on concrete dependency-isolation pressure.
 2. **`@cq/ops` is the adopter entry point; `@cq/policy` is its pure foundation.** Pure functions and data (presets with `extends`,
    prompts as `.md` files, decision tables, doctrine) with per-domain subpath entries. "Just the
    smarts" for an address-review cycle is `@cq/policy/review` + `@cq/ops/review` with fakes.
 3. **One typed `Forge` port (GitHub implementation) and one `Git` adapter**, each shipping its
-   fake from a `./testing` subpath. `@cq/testing` publishes the fake forge, fake git, scripted
-   fake driver and virtual clock.
-4. **Three driver lanes**, each its own package with optional vendor peers: `driver-ai-sdk`
+   fake from a `./testing` subpath. Fakes and test-only helpers stay in those subpaths and private
+   workspace tests; the initial six-package shape does not add a separate `@cq/testing` package.
+4. **Three driver lanes** (`driver-ai-sdk`
    (first-party, in-process, toolkit harness), `driver-claude-code` (CLI primary, Agent SDK
    optional), `driver-acp` (on `@agentclientprotocol/sdk`, endpoint profiles; carries codex via
-   `codex-acp`). Cost is computed once at the worker boundary from `@cq/policy/pricing` data.
-   A shared `driver-core` is a later boundary.
+   `codex-acp`). They remain within `@cq/agent-runtime` in the initial package set and split into
+   separate packages only on concrete dependency-isolation pressure. Cost is computed once at the
+   worker boundary from `@cq/policy/pricing` data. A shared `driver-core` is a later boundary.
    `@ai-sdk/harness` (`HarnessV1`) is not adopted as the seam (P5: sandbox-mandatory, upstream-
    pinned vendor versions, no cost normalisation, patch-level breaking changes); its data shapes
    are copied, and a gated `HarnessV1Lane` may be added later for runtimes the toolkit will not
@@ -60,8 +62,9 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
    exposes structured read tools instead of a nine-spelling command grammar.
 7. **GitHub identity is a package.** `@cq/github-app` owns the roles manifest, token minting,
    trust-set acceptance, promotion-reviewer pin + predicate (single implementation), check-run
-   posting, settings-as-code apply + drift. `@cq/workflows` generates YAML from a typed spec;
-   decisions move into `cq` subcommands; templates carry ≤40 inline bash lines.
+   posting, settings-as-code apply + drift. In Phase 3, `@cq/workflows` generates YAML from a
+   typed spec; until then, the existing workflow templates stay at their current paths. Decisions
+   move into `cq` subcommands; templates carry ≤40 inline bash lines.
 8. **crq is rewritten in TypeScript, signer included** (owner ruling ADR-0005-D-H): smarts in
    `@cq/policy`/`@cq/ops` subpaths (later `@cq/review-queue`), daemons as `apps/queue-runner` and
    `apps/promotion-signer`. The signer's custody model is unchanged (dedicated user, root-owned
@@ -69,7 +72,7 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
    signer from a hash-pinned packed artifact and re-run the signer S2 evidence: custody and modes,
    install-grant and scratch-creator readback, transport-negative and spool round-trip checks,
    policy-data consumption, restart recovery, and pre/post runtime-artifact hashes; re-record the
-   attestation. Characterize the live ceres source and shadow the TS signer while Python remains
+   attestation. Characterize the deployed signer source and shadow the TS signer while Python remains
    the sole issuer. Keep frozen paths in place until the TS signer reads `@cq/policy/queue`; retire
    Python only after the TS signer posts real `crq/promotion-review` statuses under observation.
    The owner schedules the cutover, including drain and rollback.
@@ -87,16 +90,18 @@ backwards compatibility is not a constraint (owner, 2026-10-16).
 
 ## Owner rulings this ADR amends
 
-D8 (`resolveConfig` kept internal) → replaced; ADR-0002 Annex B → superseded (carrying the
-2026-10-11 `_URL` ruling); the kernel freeze rule → retired; the spec's two-repo decision →
+D8 (`resolveConfig` kept internal) → replaced; ADR-0002 Annex B → resolver decision superseded,
+with the 2026-10-11 `_URL` ruling carried forward. Its precedence, secret handling, CI mapping,
+journaling, key grammar and other safeguards remain normative through Phase 0 and are revised with
+Phase 1.7's separate domain configurations; the kernel freeze rule → retired; the spec's two-repo decision →
 revised (`packages/eval`); D7/D7b → preserved (container backend kept as the image seed, seatbelt
 moved not deleted); the 2026-10-11 local-testing policy → unchanged until the `ops` cut, then
 per-package suites with host admission retained; D11 protected paths → kept, regexes move in
 lockstep under D-P.
 
-D-J: one completed CodeRabbit CLI review cycle, with dispositions for every finding, and an
-independent review of the final head are required before merge-readiness; material changes get a
-targeted re-review.
+**Owner ruling ADR-0005-D-J:** one completed CodeRabbit CLI review cycle, with dispositions for
+every finding, and an independent review of the final head are required before merge-readiness;
+material changes get a targeted re-review.
 
 ## Consequences
 
