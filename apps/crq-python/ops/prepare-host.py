@@ -92,8 +92,8 @@ def validate(overlay):
             if value is not False:
                 raise ValueError('overlay cannot enable repair')
         elif name == 'paseo_hosts':
-            if not isinstance(value, list) or not value or any(not isinstance(v, str) or not v for v in value):
-                raise ValueError('paseo_hosts must be nonempty endpoint strings')
+            if not isinstance(value, list) or len(value) < 2 or any(not isinstance(v, str) or not v for v in value):
+                raise ValueError('paseo_hosts must contain at least two nonempty endpoint strings')
         elif name in PATH_KEYS:
             # The accepted legacy renderer records a literal ~/ key path.
             # CRQ expands it only at SSH invocation; retain those config bytes.
@@ -235,10 +235,21 @@ def unit_files(root):
 
 
 def inactive(root):
-    for path in unit_files(root):
-        state = run(['systemctl', '--user', 'show', '--property=ActiveState', '--value', path.name]).strip()
+    names = {path.name for path in unit_files(root)}
+    # Include obsolete installed files and loaded units whose files were removed.
+    for command in ('list-unit-files', 'list-units'):
+        args = ['systemctl', '--user', command, '--no-legend', '--no-pager', '--plain']
+        if command == 'list-units':
+            args.append('--all')
+        for line in run([*args, 'crq-*']).splitlines():
+            name = line.split()[0] if line.split() else ''
+            if not name.startswith('crq-') or not re.fullmatch(r'[A-Za-z0-9_.@:-]+', name):
+                raise ValueError('unrecognized CRQ unit listing')
+            names.add(name)
+    for name in sorted(names):
+        state = run(['systemctl', '--user', 'show', '--property=ActiveState', '--value', name]).strip()
         if state not in {'inactive', 'failed'}:
-            raise ValueError('refusing active or unknown unit: ' + path.name)
+            raise ValueError('refusing active or unknown unit: ' + name)
 
 
 @contextlib.contextmanager
@@ -259,12 +270,20 @@ def root_check(root, overlay):
         raise ValueError('deployment checkout must be detached')
 
 
+def validate_unit_template(name, text):
+    if Path(name).suffix in {'.service', '.path'} and '@CRQ_ROOT@' not in text:
+        raise ValueError('unit lacks monorepo root placeholder: ' + name)
+
+
 def render_units(root, output):
+    templates = [(source, source.read_text()) for source in unit_files(root)]
+    for source, text in templates:
+        validate_unit_template(source.name, text)
     output.mkdir(parents=True, exist_ok=True)
     runner = str(host_path(str(root)) / 'apps/crq-python')
     paths = []
-    for source in unit_files(root):
-        text = source.read_text().replace('@CRQ_ROOT@', runner)
+    for source, text in templates:
+        text = text.replace('@CRQ_ROOT@', runner)
         if '@CRQ_ROOT@' in text:
             raise ValueError('unexpanded runner root')
         target = output / source.name
@@ -339,6 +358,13 @@ def verify_target(root, target, tag):
         raise ValueError('target predates the every-green-tip policy floor')
     if not git(root, 'ls-tree', target, 'apps/crq-python/ops/prepare-host.py'):
         raise ValueError('target lacks monorepo deploy helper')
+    templates = git(root, 'ls-tree', '-r', '--name-only', target,
+                    'apps/crq-python/ops/systemd/').splitlines()
+    templates = [path for path in templates if Path(path).name.startswith('crq-')]
+    if not templates:
+        raise ValueError('target lacks CRQ unit templates')
+    for path in templates:
+        validate_unit_template(Path(path).name, git(root, 'show', f'{target}:{path}'))
 
 
 def switch(root, overlay, raw, target, tag):

@@ -53,7 +53,8 @@ class HostConfigTests(unittest.TestCase):
             'fleet_reader': {'ssh_host': 'queue.example.invalid', 'source': '/srv/state/crq/summary.json'},
             'config': {
                 'clone': str(self.base / 'runtime'), 'worktree_root': str(self.base / 'worktrees'),
-                'timeout_bin': '/usr/bin/timeout', 'paseo_hosts': ['worker.example.invalid:6767'],
+                'timeout_bin': '/usr/bin/timeout',
+                'paseo_hosts': ['worker.example.invalid:6767', '127.0.0.1:6767'],
                 'promotion': {'record_url_template': 'http://queue.example.invalid:6778/promotion/{item}',
                               'alert_agent_host': 'worker.example.invalid:6767',
                               'signer': {'spool': {'ssh_alias': 'operator@127.0.0.1',
@@ -76,6 +77,8 @@ class HostConfigTests(unittest.TestCase):
 
     def stopped(self, argv):
         if argv[0] == 'systemctl':
+            if argv[2] in {'list-unit-files', 'list-units'}:
+                return ''
             return 'inactive\n'
         return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
 
@@ -131,6 +134,16 @@ class HostConfigTests(unittest.TestCase):
         overlay['fleet_reader']['ssh_host'] = '-oProxyCommand=bad'
         with self.assertRaises(ValueError):
             host.validate(overlay)
+
+    def test_overlay_requires_both_paseo_endpoints(self):
+        for endpoints in [None, 'worker:6767', [], ['worker:6767'],
+                          ['worker:6767', ''], ['worker:6767', None]]:
+            with self.subTest(endpoints=endpoints):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['paseo_hosts'] = endpoints
+                with self.assertRaisesRegex(ValueError, 'at least two'):
+                    host.validate(overlay)
+        self.assertEqual(host.validate(self.overlay), self.overlay)
 
     def test_spool_alias_matches_runtime_client_format(self):
         import crq
@@ -222,7 +235,7 @@ class HostConfigTests(unittest.TestCase):
     def test_active_units_dirty_checkout_and_bad_tags_refuse(self):
         self.rendered()
         def active(argv):
-            return 'active\n' if argv[0] == 'systemctl' else self.stopped(argv)
+            return 'active\n' if argv[:3] == ['systemctl', '--user', 'show'] else self.stopped(argv)
         with mock.patch.object(host, 'run', side_effect=active):
             with self.assertRaisesRegex(ValueError, 'active'):
                 host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
@@ -253,6 +266,73 @@ class HostConfigTests(unittest.TestCase):
         self.command('tag', '-a', 'crq-runner/20261016-5', '-m', 'invalid fixture')
         with self.assertRaisesRegex(ValueError, 'track runner state'):
             host.verify_target(self.root, target, 'crq-runner/20261016-5')
+
+    def test_legacy_unit_target_refused_before_switching_or_rendering(self):
+        unit = self.runner / 'ops/systemd/crq-tick.service'
+        unit.write_text(unit.read_text().replace('@CRQ_ROOT@', '%h/repos/coderabbit-queue'))
+        self.command('commit', '-qam', 'legacy unit paths with helper still present')
+        target = self.command('rev-parse', 'HEAD').strip()
+        self.command('update-ref', 'refs/remotes/origin/main', target)
+        tag = 'crq-runner/20261016-6'
+        self.command('tag', '-a', tag, '-m', 'legacy fixture')
+        output = self.base / 'legacy-units'
+        with self.assertRaisesRegex(ValueError, 'root placeholder'):
+            host.render_units(self.root, output)
+        self.assertFalse(output.exists())
+        self.command('checkout', '-q', '--detach', self.before)
+        current = self.rendered()
+        with mock.patch.object(host, 'inactive') as inactive:
+            with self.assertRaisesRegex(ValueError, 'root placeholder'):
+                host.switch(self.root, self.overlay, self.raw, target, tag)
+            inactive.assert_not_called()
+        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+        self.assertEqual((self.root / host.CONFIG).read_bytes(), current)
+        self.assertFalse((self.base / 'records').exists())
+
+    def test_obsolete_installed_and_loaded_units_block_mutation(self):
+        self.rendered()
+        for listing in ('list-unit-files', 'list-units'):
+            for state in ('active', 'activating', 'reloading', 'deactivating', 'unknown'):
+                for operation in ('prepare', 'switch'):
+                    with self.subTest(listing=listing, state=state, operation=operation):
+                        calls = []
+                        def systemctl(argv):
+                            calls.append(argv)
+                            if argv[:3] == ['systemctl', '--user', listing]:
+                                return ('crq-obsolete.service enabled enabled\n' if listing == 'list-unit-files'
+                                        else 'crq-obsolete.service loaded active running Obsolete CRQ\n')
+                            if argv[0] == 'systemctl' and argv[-1] == 'crq-obsolete.service':
+                                return state + '\n'
+                            return self.stopped(argv)
+                        before = (self.root / host.CONFIG).read_bytes()
+                        with mock.patch.object(host, 'run', side_effect=systemctl):
+                            with self.assertRaisesRegex(ValueError, 'crq-obsolete.service'):
+                                if operation == 'prepare':
+                                    host.prepare(self.root, self.overlay, self.raw, self.base / 'installed')
+                                else:
+                                    host.switch(self.root, self.overlay, self.raw, self.target, self.tag)
+                        self.assertTrue(any(argv[2] == listing for argv in calls if argv[0] == 'systemctl'))
+                        self.assertEqual(self.command('rev-parse', 'HEAD').strip(), self.before)
+                        self.assertEqual((self.root / host.CONFIG).read_bytes(), before)
+                        self.assertFalse((self.base / 'installed').exists())
+                        self.assertFalse((self.base / 'records').exists())
+
+    def test_stopped_obsolete_units_are_allowed_and_listing_errors_fail_closed(self):
+        def stopped_obsolete(argv):
+            if argv[:3] == ['systemctl', '--user', 'list-unit-files']:
+                return 'crq-obsolete.service disabled enabled\n'
+            return self.stopped(argv)
+        with mock.patch.object(host, 'run', side_effect=stopped_obsolete) as run:
+            host.inactive(self.root)
+            self.assertTrue(any(call.args[0][-1] == 'crq-obsolete.service' for call in run.call_args_list))
+        for listing in ('list-unit-files', 'list-units'):
+            def unavailable(argv):
+                if argv[:3] == ['systemctl', '--user', listing]:
+                    raise subprocess.CalledProcessError(1, argv)
+                return self.stopped(argv)
+            with self.subTest(listing=listing), mock.patch.object(host, 'run', side_effect=unavailable):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    host.inactive(self.root)
 
     def test_rendered_units_use_monorepo_root(self):
         paths = host.render_units(self.root, self.base / 'units')

@@ -68,7 +68,9 @@ Never `git pull` the deployment clone. Fetch, verify the full SHA is reachable
 from `origin/main` (= `cq/promoted`), and verify its owner-approved annotated
 `crq-runner/YYYYMMDD-N` tag peels to that SHA. This tool does not create tags.
 Targets must descend from import C (`f748fd43`); earlier rollback needs the
-separate, recorded old-runner rollback below. Keep the checkout detached.
+separate, recorded old-runner rollback below. Targets must also provide relocated
+unit templates: every service/path template must contain `@CRQ_ROOT@`. Import-era
+targets with legacy unit paths are refused before checkout. Keep the checkout detached.
 
 The helper reads `HEAD:apps/crq-python/config.json`, never the generated working
 copy. The rendered bytes retain the existing indent-2 JSON plus newline format.
@@ -131,8 +133,10 @@ old handover as evidence, without inventing new live evidence.
 ## Subsequent deploy and rollback
 
 Stop timers/records and wait for tick inactivity before invoking `switch`.
-Keep a reviewed copy of the P2 helper outside the checkout when rolling back to
-an import commit whose original helper predates P2.
+The stopped-unit check includes installed and loaded `crq-*` units, including
+obsolete units absent from the selected checkout. Keep a reviewed copy of the
+P2 helper outside the checkout; pre-P2 targets with legacy unit paths require
+the separate owner-operated old-runner rollback, rather than this switch.
 
 ```sh
 python3 /retained/prepare-host.py --overlay /private/host.json switch --sha FULL40SHA --tag crq-runner/YYYYMMDD-N
