@@ -255,6 +255,8 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     'src/ops/gates/policyConfig.ts',
     'src/ops/ratchet/verifyRatchet.ts',
     'src/ops/ratchet/recomputeTypecheck.ts',
+    // cq-verify's in-process signer (`trust/dist/selfhost/verify-ratchet.js`).
+    'src/selfhost/verify-ratchet.ts',
     // The prebuilt engine `scripts/ratchet-propose.mjs` loads in its
     // `automation`-environment job (scripts/ratchet-lib.mjs `loadEngine`).
     ...engineModules(),
@@ -350,7 +352,6 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
    */
   const TRUSTED_CLI_OPS: Readonly<Record<string, readonly string[]>> = {
     'gates.policyDiff': ['src/ops/gates/policyDiff.ts', 'src/ops/gates/policyConfig.ts'],
-    'ratchet.verifyRatchet': ['src/ops/ratchet/verifyRatchet.ts'],
     'ratchet.recomputeTypecheck': ['src/ops/ratchet/recomputeTypecheck.ts'],
   };
 

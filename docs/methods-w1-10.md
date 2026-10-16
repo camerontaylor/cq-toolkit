@@ -214,8 +214,10 @@ attestation every valid record is `dormant`. C3 is done only when ALL of:
 - [x] the gate's policy pass consumes the bound per-PR authorization, so
       **the gate honours a valid override record** once attested (decisive,
       re-checked after the waits — never merely "the label is active");
-- [ ] the D-G.4 review-form record evaluates, and the `cq-verify` carrier
-      binds the same authorization for the `cq/ratchet` verdict;
+- [x] the `cq-verify` carrier binds the same authorization for the
+      `cq/ratchet` verdict on a queue-tip subject (`dist/selfhost/verify-ratchet.js`
+      → `bindQueueAuthorization`; PR #328, readiness T2);
+- [ ] the D-G.4 review-form record evaluates;
 - [ ] the promoter credential needs no `actions: write`: `decide`'s only
       dispatch (`cq-verify`) runs on its own `GITHUB_TOKEN`, restricted to the
       default ref (pinned by `test/workflows/default-ref-guards.test.ts`). If a

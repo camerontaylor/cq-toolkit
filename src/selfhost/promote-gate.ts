@@ -960,55 +960,10 @@ async function gateBody(
     }`,
   );
 
-  // 3. Closure over main..subject.
-  const commits = await git.rangeCommits(cfg.repo, main, subject);
-  const firstParent = await git.firstParentRange(cfg.repo, main, subject);
-  if (firstParent[0] !== subject) {
-    refuse('closure: the first-parent chain does not start at the subject');
-  }
-  const prs = new Map<string, MergedPr[]>();
-  const bySha = new Map(commits.map((c) => [c.sha, c]));
-  for (const sha of firstParent) {
-    if ((bySha.get(sha)?.parents.length ?? 0) !== 2) continue;
-    const path = `${repoPath}/commits/${sha}/pulls?per_page=100`;
-    const wire = slurpedComments(await getSlurp(path), path).flat();
-    prs.set(
-      sha,
-      wire.map(toMergedPr).filter((pr): pr is MergedPr => pr !== null),
-    );
-  }
-  const closure = checkClosure({
-    commits,
-    firstParent,
-    prs,
-    repositoryId: cfg.repositoryId,
-    queueBranch: QUEUE_BRANCH,
-  });
-  report.push(
-    `closure: ${String(commits.length)} commit(s), ${String(firstParent.length)} on the first-parent chain, ${String(closure.admitted.length)} admitted PR(s)`,
-  );
-  for (const a of closure.admitted) {
-    report.push(`  admitted PR #${String(a.pr)}: merge ${a.merge} head ${a.head}`);
-  }
-  for (const v of closure.violations) report.push(`  violation: ${v}`);
-  if (!closure.ok) refuse('closure: main..tip contains commits no accepted PR admits');
-
-  // 4. Clean first-parent merges.
-  for (const a of closure.admitted) {
-    const commit = bySha.get(a.merge);
-    const [p1 = '', p2 = ''] = commit?.parents ?? [];
-    const merged = await git.mergeTreeClean(cfg.repo, p1, p2);
-    const actual = await git.treeOf(cfg.repo, a.merge);
-    if (merged === null || merged !== actual) {
-      report.push(
-        `  merge-tree ${a.merge}: ${merged === null ? 'parents conflict' : `tree ${actual} != clean merge ${merged}`}`,
-      );
-      refuse(
-        `merge ${a.merge}: evil or conflict-resolving merge on the queue's first-parent chain`,
-      );
-    }
-  }
-  report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
+  // 3–4. Closure over main..subject, and clean first-parent merges.
+  const closure = await queueClosure(deps, cfg, main, subject, report);
+  if ('refusal' in closure) refuse(closure.refusal);
+  const { bySha } = closure;
 
   // 5. I2 evidence (not settle — see the header) per admitted PR, at its
   //    merged head. Re-judged in step 10a after the waits (a dismissal, new
@@ -1159,14 +1114,112 @@ async function judgeAdmitted(
   return rejected;
 }
 
+/** The admitted PRs of `main..subject`, or why the range cannot be admitted. */
+export type QueueClosure =
+  | { admitted: readonly AdmittedPr[]; bySha: ReadonlyMap<string, RangeCommit> }
+  | { refusal: string };
+
+/**
+ * Steps 3–4, shared by the gate and the ratchet verifier's carrier: the
+ * closure over `main..subject` (every first-parent commit the clean merge of
+ * exactly one merged same-repo PR) and the clean-merge check. Reports what
+ * it read; any doubt is a refusal, never a partial admission.
+ */
+export async function queueClosure(
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'repositoryId'>,
+  main: string,
+  subject: string,
+  report: string[],
+): Promise<QueueClosure> {
+  const { gh, git } = deps;
+  const repoPath = `repos/${cfg.owner}/${cfg.name}`;
+  const getSlurp = (path: string): Promise<unknown> =>
+    ghJson<unknown>(gh, ['api', path, '--paginate', '--slurp']);
+  const commits = await git.rangeCommits(cfg.repo, main, subject);
+  const firstParent = await git.firstParentRange(cfg.repo, main, subject);
+  if (firstParent[0] !== subject) {
+    return { refusal: 'closure: the first-parent chain does not start at the subject' };
+  }
+  const prs = new Map<string, MergedPr[]>();
+  const bySha = new Map(commits.map((c) => [c.sha, c]));
+  for (const sha of firstParent) {
+    if ((bySha.get(sha)?.parents.length ?? 0) !== 2) continue;
+    const path = `${repoPath}/commits/${sha}/pulls?per_page=100`;
+    const wire = slurpedComments(await getSlurp(path), path).flat();
+    prs.set(
+      sha,
+      wire.map(toMergedPr).filter((pr): pr is MergedPr => pr !== null),
+    );
+  }
+  const closure = checkClosure({
+    commits,
+    firstParent,
+    prs,
+    repositoryId: cfg.repositoryId,
+    queueBranch: QUEUE_BRANCH,
+  });
+  report.push(
+    `closure: ${String(commits.length)} commit(s), ${String(firstParent.length)} on the first-parent chain, ${String(closure.admitted.length)} admitted PR(s)`,
+  );
+  for (const a of closure.admitted) {
+    report.push(`  admitted PR #${String(a.pr)}: merge ${a.merge} head ${a.head}`);
+  }
+  for (const v of closure.violations) report.push(`  violation: ${v}`);
+  if (!closure.ok) return { refusal: 'closure: main..tip contains commits no accepted PR admits' };
+
+  // Clean first-parent merges.
+  for (const a of closure.admitted) {
+    const commit = bySha.get(a.merge);
+    const [p1 = '', p2 = ''] = commit?.parents ?? [];
+    const merged = await git.mergeTreeClean(cfg.repo, p1, p2);
+    const actual = await git.treeOf(cfg.repo, a.merge);
+    if (merged === null || merged !== actual) {
+      report.push(
+        `  merge-tree ${a.merge}: ${merged === null ? 'parents conflict' : `tree ${actual} != clean merge ${merged}`}`,
+      );
+      return {
+        refusal: `merge ${a.merge}: evil or conflict-resolving merge on the queue's first-parent chain`,
+      };
+    }
+  }
+  report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
+  return { admitted: closure.admitted, bySha };
+}
+
+/**
+ * The gate's D11 authorization for `main..subject`, for a caller that is not
+ * the gate (cq-verify's ratchet verdict on the queue tip, readiness T2): the
+ * same closure and the same per-PR evidence binding, so both judge with one
+ * object. A range the closure refuses binds no contribution, so every path
+ * stays unauthorized (fail closed).
+ */
+export async function bindQueueAuthorization(
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'repositoryId' | 'trustRef'>,
+  main: string,
+  subject: string,
+  report: string[],
+): Promise<D11Authorization> {
+  const closure = await queueClosure(deps, cfg, main, subject, report);
+  if ('refusal' in closure) {
+    return {
+      attested: false,
+      contributions: [],
+      report: [`d11: no authorization bound — ${closure.refusal}`],
+    };
+  }
+  return bindAdmitted(deps, cfg, closure.admitted, closure.bySha, report);
+}
+
 /**
  * Step 6: read and bind each admitted PR's D11 evidence. Every read failure
  * is a reason in the bound object (fail closed), except a git fault on the
  * contribution diff, which throws (the gate cannot judge the range).
  */
 async function bindAdmitted(
-  deps: GateDeps,
-  cfg: GateConfig,
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'trustRef'>,
   admitted: readonly AdmittedPr[],
   bySha: ReadonlyMap<string, RangeCommit>,
   report: string[],

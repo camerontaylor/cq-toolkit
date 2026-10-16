@@ -5,7 +5,7 @@
     "^src/ops/gates/adapters/(?:eslint|tsc|vitest)\\.ts$",
     "^src/ops/ratchet/",
     "^src/ops/review/(?:gh|threads)\\.ts$",
-    "^src/selfhost/(?:acceptance|merge-recheck|promote-gate|settle-state|state-branch)\\.ts$",
+    "^src/selfhost/(?:acceptance|merge-recheck|promote-gate|settle-state|state-branch|verify-ratchet)\\.ts$",
     "^src/shared/independent-review\\.ts$",
     "^policy/promotion-reviewer\\.json$",
     "^scripts/ratchet-[^/]+\\.mjs$",

@@ -41,9 +41,15 @@
 #     objects + those numbers and posts the `cq/ratchet` check run (a fail
 #     or needs-human verdict is a RED CHECK RUN, not a red job: the job
 #     fails only when trusted code crashed or the post failed). It runs
-#     no head code, holds `checks: write` only, runs in environment
-#     `cq-verdict`, and checks the trust ref out of the bundle with no
-#     persisted credential. `compute` stays credential-free: the signing
+#     no head code, holds `checks: write` plus read-only API scopes for the
+#     D11 evidence, runs in environment `cq-verdict`, and checks the trust
+#     ref out of the bundle with no persisted credential. The verifier runs
+#     IN-PROCESS (`dist/selfhost/verify-ratchet.js`, readiness T2): for a
+#     queue-tip subject it binds the promotion gate's own D11 authorization
+#     over `main..subject` (closure, label records, settle epoch, the C3
+#     attestation at the trust ref), so an owner-authorized definition change
+#     is judged on its evidence instead of needs-human. Records stay dormant
+#     until C3, and every unreadable input binds nothing (fail closed). `compute` stays credential-free: the signing
 #     environment never reaches a job that runs `tsc` over head content.
 #
 # IDENTITY (EXPAND, ADR-0004 D-H.2; W1.10 Decision 6): `judge` posts with a
@@ -413,12 +419,17 @@ jobs:
     # The verdict signer's environment (Decision 6): its only secret is the
     # verdict App key, reached only by the mint step below.
     environment: cq-verdict
-    # F5: `checks: write` is the verdict's own scope and nothing else — no
-    # repository read, no artifact read. The trust ref, the subject objects
-    # and the base all arrive in the `cq-verify-source` bundle, so this job
-    # needs no repository credential (ADR-0004 D-G.3).
+    # F5: `checks: write` is the verdict's own scope. The trust ref, the
+    # subject objects and the base all arrive in the `cq-verify-source`
+    # bundle, so no git credential is needed (ADR-0004 D-G.3). The read
+    # scopes serve the D11 evidence API reads only (readiness T2): the
+    # merged PRs of each queue merge, their label timelines, the owner id
+    # and the cq-state settle ledger. No step runs head code.
     permissions:
       checks: write
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
       - name: Refuse a half-registered verdict App (paired vars)
         # Posters mint on the client id; the gate and the sweep dedupe
@@ -480,9 +491,13 @@ jobs:
           if [ -n "$MEASUREMENT_JSON" ]; then
             printf '%s\n' "$MEASUREMENT_JSON" > "${dest}/measurement.json"
           fi
-      - name: 'Verify (CLI: ratchet.verifyRatchet)'
+      - name: 'Verify (in-process: selfhost/verify-ratchet, D11-bound)'
         id: verify
         env:
+          # Read-only evidence reads (the job's token, never the App's).
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
           KIND: ${{ needs.resolve.outputs.kind }}
@@ -494,6 +509,8 @@ jobs:
           verdict="${RUNNER_TEMP}/verdict.json"
           args=(
             --repo=trust
+            --repository="$REPO"
+            --repositoryId="$REPO_ID"
             --trustRef="$TRUST"
             --subject="$SUBJECT"
             --subjectKind="$KIND"
@@ -504,7 +521,7 @@ jobs:
           if [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
             args+=(--typecheckCount="$TYPECHECK_COUNT")
           fi
-          node trust/dist/cli.js ratchet.verifyRatchet "${args[@]}" \
+          node trust/dist/selfhost/verify-ratchet.js "${args[@]}" \
             > "$verdict" || true
           if ! jq -e -s \
             'length == 1 and (.[0] | type) == "object"

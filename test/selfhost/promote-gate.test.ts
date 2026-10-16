@@ -32,6 +32,7 @@ import {
   BANNED_REVIEWER_LOGINS,
   POLL_MS,
   checkClosure,
+  bindQueueAuthorization,
   checkVerifiedRun,
   mainWith,
   parseGateArgs,
@@ -49,6 +50,8 @@ import {
   type ReviewerWant,
   type VerdictWant,
 } from '../../src/selfhost/promote-gate.js';
+import { verifyWithAuthorization } from '../../src/selfhost/verify-ratchet.js';
+import type { VerifyRatchetInput } from '../../src/ops/ratchet/verifyRatchet.js';
 
 const sha = (c: string): string => c.repeat(40);
 const MAIN = sha('a');
@@ -2145,5 +2148,96 @@ describe('mainWith (the CLI seam)', () => {
     expect(h.ghBuilt()).toBe(true);
     expect(h.pushTokens).toEqual([]);
     expect(env).toEqual({});
+  });
+});
+
+// -- cq-verify binds the SAME authorization (readiness T2) -------------------------
+
+describe('bindQueueAuthorization — the object cq-verify consumes', () => {
+  const report = (): string[] => [];
+
+  test('the gate world with a valid record + C3: the definition change is authorized', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, report());
+    expect(auth.attested).toBe(true);
+    expect(auth.contributions.map((c) => [c.pr, c.record.status])).toEqual([[7, 'honoured']]);
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(true);
+    // One label never authorizes a path its PR did not change.
+    expect(authorizePaths(auth, ['tsconfig.json']).authorized).toBe(false);
+  });
+
+  test('no attestation: the record is dormant and nothing is authorized (as today)', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, null);
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, report());
+    expect(auth.attested).toBe(false);
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('a closure the gate would refuse binds no contribution (fail closed)', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    h.deps.git = { ...h.deps.git, firstParentRange: () => Promise.resolve([]) };
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(auth.contributions).toEqual([]);
+    expect(auth.report.join('\n')).toMatch(
+      /no authorization bound — closure: the first-parent chain/,
+    );
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test("cq-verify's in-process verifier forwards exactly that object for a queue-tip subject", async () => {
+    for (const [attestation, expected] of [
+      [C3_OK, true],
+      [null, false],
+    ] as const) {
+      const { h } = d11Harness({ timeline: () => [ownerLabel()] }, attestation);
+      const seen: VerifyRatchetInput[] = [];
+      const result = await verifyWithAuthorization(
+        {
+          gh: h.deps.gh,
+          git: h.deps.git,
+          verify: (input) => {
+            seen.push(input);
+            const d11 =
+              input.authorization === undefined
+                ? undefined
+                : authorizePaths(input.authorization, [CHANGED]);
+            return Promise.resolve({
+              status: 'ok',
+              value: {
+                verdict: d11?.authorized === true ? 'pass' : 'needs-human',
+                trustRef: TRUST,
+                subject: M1,
+                rangeBase: MAIN,
+                definitionChanges: [CHANGED],
+                ...(d11 === undefined ? {} : { d11 }),
+                guard: { ok: true, violations: [], filesChecked: 0 },
+                results: [],
+                reasons: d11?.lines ?? [],
+              },
+            });
+          },
+        },
+        {
+          repo: '/tmp/trust',
+          repository: 'o/r',
+          repositoryId: REPO_ID,
+          trustRef: TRUST,
+          subject: M1,
+          subjectKind: 'push',
+          base: 'refs/remotes/origin/main',
+          measureConclusion: 'success',
+        },
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.authorization?.attested).toBe(expected);
+      expect(result.status === 'ok' && result.value.verdict).toBe(
+        expected ? 'pass' : 'needs-human',
+      );
+      // The evidence is journalled in the verdict's reasons.
+      expect(result.status === 'ok' && result.value.reasons.join('\n')).toMatch(
+        /override PR #7 \(merge /,
+      );
+    }
   });
 });

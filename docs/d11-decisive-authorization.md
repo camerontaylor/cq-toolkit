@@ -101,9 +101,21 @@ decides: authorized → the verdict is judged from the guard and the ratchet
 results (the evidence was produced under the head's new definitions; lists
 and baselines still come from the trust ref, the stricter baseline still
 applies); unauthorized → needs-human naming the paths. There is no second
-predicate. The `cq-verify` carrier does not yet gather the evidence, so the
-`cq/ratchet` verdict stays needs-human for definition changes until a
-follow-up wires it (open question 2).
+predicate.
+
+**The `cq-verify` carrier (T2, owner ruling 2026-10-16; lands with PR #328).**
+`cq-verify`'s signing job runs `dist/selfhost/verify-ratchet.js` in-process
+instead of the CLI. For a queue-tip (`push`) subject it calls
+`bindQueueAuthorization`: the gate's own closure over `main..subject`
+(`queueClosure`, the gate's steps 3–4 extracted unchanged) and the gate's
+own evidence binding (`bindAdmitted`). Both judges therefore use one
+authorization object and one predicate. A closure the gate would refuse,
+or any evidence fault, binds no contribution, so the verdict is exactly
+the old needs-human (fail closed). The evidence is journalled in the
+`cq/ratchet` summary. A PR subject binds nothing: `cq/ratchet` is not
+required at merge, and the gate re-judges the tip. The judge job gains
+read-only `contents`, `issues` and `pull-requests` scopes for these reads;
+it still runs no head code and writes only `checks`.
 
 ## Fail-closed cases
 
@@ -129,16 +141,15 @@ The `absent` and `dormant` cases keep today's behaviour exactly.
 
 - The D-G.4 APPROVED-review record form (W1.10): only the label form is
   evaluated.
-- The `cq-verify` carrier gathering D11 evidence, and the lockfile-driven
-  typecheck toolchain choice (D-C.3): protected workflow templates.
+- The lockfile-driven typecheck toolchain choice (D-C.3): a protected
+  workflow template. (The `cq-verify` carrier is wired in PR #328.)
 - No new env keys, provider/model literals or `gh` calls in policyDiff.
 
 ## Open questions for the owner
 
 1. D-D.2's outside-Actions residual: a non-Actions session holding the
    owner credential still produces a record these checks accept.
-2. Whether the `cq-verify` carrier slice (T2 wiring) lands before C3, or
-   authorized definition changes keep promoting by break-glass after C3
-   until it does.
+2. ~~Whether the `cq-verify` carrier slice (T2 wiring) lands before C3.~~
+   Ruled 2026-10-16: it lands before C3, in the batched PR #328.
 3. Sync PRs: a sync merge whose contribution touches a protected path
    needs its own record. That is conservative; confirm it is wanted.
