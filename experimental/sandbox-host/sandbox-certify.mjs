@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // RS-13 backend certification runner (B14 evidence, NOT shared runner code).
 //
-// Executes the live boundary canaries from src/sandbox/probe.ts against this
+// Executes the live boundary canaries from experimental/sandbox-host/probe.ts against this
 // host's candidate backends and prints the certification verdict — pass and
 // blocker alike, verbatim.  This is the credential-free, zero-spend proof
 // path for "no synthetic certifiedBackends pass": whatever this script prints
@@ -9,7 +9,10 @@
 // environmental blocker instead of quietly passing.
 //
 // Usage:
-//   pnpm run build && node scripts/sandbox-certify.mjs \
+//   pnpm exec tsc --target ES2023 --module NodeNext --moduleResolution NodeNext \
+//     --types node --skipLibCheck --strict --outDir dist --rootDir . \
+//     experimental/sandbox-host/probe.ts && \
+//   node experimental/sandbox-host/sandbox-certify.mjs \
 //     [--network model-only|allow] [--model-proxy] [--json]
 //
 // --model-proxy composes model-only with a local proxy stand-in: only one
@@ -58,15 +61,15 @@ try {
   exit(2);
 }
 
-const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
-const probeUrl = pathToFileURL(join(repoRoot, 'dist', 'sandbox', 'probe.js'));
+const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
+const probeUrl = pathToFileURL(join(repoRoot, 'dist', 'experimental', 'sandbox-host', 'probe.js'));
 
 let probe;
 try {
   probe = await import(probeUrl.href);
 } catch (error) {
   stderr.write(
-    `sandbox-certify: cannot load dist/sandbox/probe.js — run \`pnpm run build\` first\n  ${error.message}\n`,
+    `sandbox-certify: cannot load dist/sandbox-host/probe.js — run \`pnpm run build\` first\n  ${error.message}\n`,
   );
   exit(2);
 }
