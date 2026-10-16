@@ -161,36 +161,87 @@ export async function readSettleState(deps: StateBranchDeps): Promise<StateBranc
     );
   }
 
+  return { ...(await readLedgerAt(deps, base, fullName, tip)), parentCommit: tip };
+}
+
+/** The ledger file at one cq-state commit (404 → empty); other failures throw. */
+async function readLedgerAt(
+  deps: StateBranchDeps,
+  base: string,
+  fullName: string,
+  commit: string,
+): Promise<{ state: SettleState; discarded: string[] }> {
   let fileWire: unknown;
   try {
     fileWire = await ghJson<unknown>(deps.gh, [
       'api',
-      `${base}/contents/${SETTLE_STATE_PATH}?ref=${tip}`,
+      `${base}/contents/${SETTLE_STATE_PATH}?ref=${commit}`,
     ]);
   } catch (err) {
-    if (isNotFound(err)) {
-      return { state: emptySettleState(fullName), parentCommit: tip, discarded: [] };
-    }
+    if (isNotFound(err)) return { state: emptySettleState(fullName), discarded: [] };
     throw err;
   }
   const file = asRecord(fileWire);
-  const discardedEmpty = (why: string): StateBranchSnapshot => ({
+  const discardedEmpty = (why: string): { state: SettleState; discarded: string[] } => ({
     state: emptySettleState(fullName),
-    parentCommit: tip,
     discarded: [why],
   });
   if (asString(file['encoding']) !== 'base64' || typeof file['content'] !== 'string') {
-    return discardedEmpty(`${SETTLE_STATE_PATH} at ${tip} is not a base64 file payload`);
+    return discardedEmpty(`${SETTLE_STATE_PATH} at ${commit} is not a base64 file payload`);
   }
   const text = Buffer.from(asString(file['content']).replace(/\s/g, ''), 'base64').toString('utf8');
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return discardedEmpty(`${SETTLE_STATE_PATH} at ${tip} is not valid JSON`);
+    return discardedEmpty(`${SETTLE_STATE_PATH} at ${commit} is not valid JSON`);
   }
-  const { state, discarded } = parseSettleState(raw, fullName);
-  return { state, parentCommit: tip, discarded };
+  return parseSettleState(raw, fullName);
+}
+
+/**
+ * The ledger's recent versions, newest first: up to `limit` cq-state commits
+ * that touched the ledger file, read lazily until `enough` holds for the
+ * versions read so far. The observer prunes merged PRs from the tip, so a
+ * merged PR's last record lives only in this history (the D11 epoch reads
+ * it). An absent branch is an empty history. THROWS on any non-404
+ * transport failure or a listed commit that is not a 40-hex sha.
+ */
+export async function readSettleHistory(
+  deps: StateBranchDeps,
+  limit: number,
+  enough: (versions: readonly SettleState[]) => boolean,
+): Promise<{ versions: SettleState[]; discarded: string[]; exhausted: boolean }> {
+  const base = repoPath(deps);
+  const fullName = `${deps.owner}/${deps.repo}`;
+  let listWire: unknown;
+  try {
+    listWire = await ghJson<unknown>(deps.gh, [
+      'api',
+      `${base}/commits?sha=${STATE_BRANCH}&path=${SETTLE_STATE_PATH}&per_page=${String(limit)}`,
+    ]);
+  } catch (err) {
+    if (isNotFound(err)) return { versions: [], discarded: [], exhausted: true };
+    throw err;
+  }
+  if (!Array.isArray(listWire)) {
+    throw new Error(`selfhost state-branch: ${STATE_BRANCH} history is not a JSON array`);
+  }
+  const commits = (listWire as unknown[]).slice(0, limit).map((c) => asString(asRecord(c)['sha']));
+  const versions: SettleState[] = [];
+  const discarded: string[] = [];
+  for (const commit of commits) {
+    if (enough(versions)) return { versions, discarded, exhausted: false };
+    if (!SHA_RE.test(commit)) {
+      throw new Error(
+        `selfhost state-branch: ${STATE_BRANCH} history listed a non-sha commit ${JSON.stringify(commit.slice(0, 80))}`,
+      );
+    }
+    const read = await readLedgerAt(deps, base, fullName, commit);
+    versions.push(read.state);
+    discarded.push(...read.discarded);
+  }
+  return { versions, discarded, exhausted: true };
 }
 
 /**
