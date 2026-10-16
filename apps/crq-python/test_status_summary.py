@@ -1,15 +1,17 @@
 """Window boundaries and failure visibility for the crq producer summary."""
 import importlib.machinery
 import importlib.util
-from pathlib import Path
-import unittest
 import json
+import os
 import tempfile
+import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 loader = importlib.machinery.SourceFileLoader("crq_adapter", str(ROOT / "status_summary.py"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
 adapter = importlib.util.module_from_spec(spec)
 loader.exec_module(adapter)
 
@@ -23,20 +25,32 @@ class SummaryTest(unittest.TestCase):
             events.write_text('{"event":"review_finished","at":"2026-10-08T02:30:00Z","outcome":"completed","secret":"never publish"}\n')
             queue = {"last_tick": "2026-10-08T02:24:00Z", "items": [], "starts": []}
             config = {"max_starts_per_hour": 5, "schedule_id": "tick", "clone": "/private/clone"}
-            with mock.patch.object(adapter, "command", return_value="12\n"):
+            xdg = root / "xdg-state"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
+                    mock.patch.object(adapter, "command", return_value="12\n"):
                 data = adapter.publish(root, queue, config, {"status": "active"}, home=root,
-                                       now=adapter.timestamp("2026-10-08T03:00:00Z"))
-            target = root / "Library/Application Support/crq/summary.json"
+                                       now=adapter.timestamp("2026-10-08T03:00:00Z"),
+                                       promotion_mode="signer")
+            target = xdg / "crq/summary.json"
             self.assertEqual(json.loads(target.read_text()), data)
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             self.assertNotIn("never publish", target.read_text())
             self.assertNotIn("/private/clone", target.read_text())
             self.assertEqual(data["outcomes_24h"]["completed"], 1)
             self.assertEqual(data["promotion"]["merges_waiting"], 12)
+            self.assertEqual(data["schema_version"], 2)
+            self.assertEqual(data["promotion"]["mode"], "signer")
+            self.assertEqual(set(data["systemd_timers"]),
+                             {"crq-tick.timer", "crq-watchdog.timer", "crq-records.timer"})
+            self.assertEqual(set(data["systemd_services"]), {"crq-records.service"})
+            for entry in list(data["systemd_timers"].values()) + list(data["systemd_services"].values()):
+                self.assertIsNone(entry["active"])
+                self.assertEqual(entry["error"], "systemd unit observation unavailable")
             # Complete malformed events preserve the last good file.
             old = target.read_bytes()
             events.write_text('broken complete line\n')
-            with self.assertRaises(json.JSONDecodeError):
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
+                    self.assertRaises(json.JSONDecodeError):
                 adapter.publish(root, queue, config, {}, home=root)
             self.assertEqual(target.read_bytes(), old)
 
@@ -46,11 +60,27 @@ class SummaryTest(unittest.TestCase):
             (root / "state").mkdir()
             # Ignore only a concurrently appended incomplete final record.
             (root / "state/events.jsonl").write_text('{"event":')
-            with mock.patch.object(adapter, "command", side_effect=RuntimeError("unavailable")):
+            xdg = root / "xdg-state"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
+                    mock.patch.object(adapter, "command", side_effect=RuntimeError("unavailable")):
                 data = adapter.publish(root, {"last_tick": "2026-10-08T02:24:00Z", "items": []},
                                        {"max_starts_per_hour": 5, "clone": "absent"}, {}, home=root)
-            self.assertEqual(data["schedule"]["state"], "unknown")
+            self.assertEqual(data["schedule"]["state"], "systemd")
+            self.assertIsNone(data["systemd_timers"]["crq-tick.timer"]["active"])
+            self.assertEqual(data["systemd_timers"]["crq-tick.timer"]["error"],
+                             "systemctl user show unavailable")
+            self.assertIsNone(data["systemd_services"]["crq-records.service"]["active"])
+            self.assertEqual(data["systemd_services"]["crq-records.service"]["error"],
+                             "systemctl user show unavailable")
             self.assertIsNone(data["promotion"]["merges_waiting"])
+            self.assertEqual(data["promotion"]["merges_error"], "cached merge refs unavailable")
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}), \
+                    mock.patch.object(adapter, "command", side_effect=RuntimeError("unavailable")):
+                unknown = adapter.publish(root, {"last_tick": "2026-10-08T02:24:00Z", "items": []},
+                                          {"max_starts_per_hour": 5, "clone": "absent"},
+                                          {"status": "unknown"}, home=root)
+            self.assertEqual(unknown["schedule"]["state"], "unknown")
+            self.assertEqual(unknown["schedule"]["error"], "schedule probe unavailable")
 
     def test_windows_failures_blockers_and_signer_inflight(self):
         now = adapter.timestamp("2026-10-08T03:00:00Z")
@@ -76,7 +106,8 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(data["in_flight"], 2)
         self.assertEqual(data["outcomes_24h"], {"completed": 0, "interrupted": 1, "error": 1})
         self.assertEqual(data["other_outcomes_24h"], 1)
-        self.assertEqual(data["backlog"], {"open": 1, "delta": 0, "merged": 0, "promotion": 0})
+        self.assertEqual(data["backlog"], {"open": 1, "delta": 0, "merged": 0, "promotion": 0,
+                                            "coverage": 0})
         self.assertEqual(data["promotion"]["blockers"], [{"item": "promo-blocked", "counts": {"major": 1}}])
         self.assertEqual(data["last_tick"], "2026-10-08T02:24:00Z")
 
