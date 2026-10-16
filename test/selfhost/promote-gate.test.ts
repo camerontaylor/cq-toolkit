@@ -417,13 +417,7 @@ describe('checkVerifiedRun', () => {
   });
 
   test('a green run with real jobs passes', () => {
-    expect(checkVerifiedRun(wf(), [job(), job({ name: 'crq-python' })], want).state).toBe(
-      'success',
-    );
-  });
-
-  test('refuses a historical CI run without Python', () => {
-    expect(checkVerifiedRun(wf(), [job()], want).reason).toMatch(/missing required job crq-python/);
+    expect(checkVerifiedRun(wf(), [job(), job({ name: 'b' })], want).state).toBe('success');
   });
 
   test('missing / pending / jobs not read', () => {
@@ -1202,12 +1196,12 @@ describe('runGate', () => {
 
   test('requiredJobs from the trust policy list: a missing job refuses, a present one promotes', async () => {
     const missing = harness(world(), {
-      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['crq-python'] })),
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['macos-pilot'] })),
     });
     const refused = await runGate(missing.deps, cfg());
     expect(refused.verdict).toBe('refused');
     expect(refused.report.join('\n')).toMatch(
-      /verified ci\.yml: failure .*missing required job 'crq-python'/,
+      /verified ci\.yml: failure .*missing required job 'macos-pilot'/,
     );
     const present = harness(world(), {
       policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['j'] })),

@@ -248,7 +248,11 @@ Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
   `cq/acceptance`, `from-source`, `pack-audit`). Applying R2 without dropping the classic
   `ratchet` context would trip D11's "removed required check" rule. C2's order: drop the
   classic contexts as R2 lands. `test/ops/gates/protectedPaths.test.ts` pins the mapping so
-  the two lists cannot drift apart silently again.
+  the two lists cannot drift apart silently again. **Amended 2026-10-16** (owner, minimal
+  merge-time set, [`protected-scope.md`](protected-scope.md)): R2 now requires only
+  `cq/policy`, `cq/acceptance` and `denylist`; `cq/ratchet` and the CI jobs are enforced on
+  the queue tip by the gate, so the test asserts each `requiredChecks` entry is enforced
+  by R2 _or_ by the gate.
 - **`live-review.yml` and `live-drivers.yml` are not render-enforced (r1 L5).** Both are
   repo-owned drill harnesses (this repo's scratch-repo convention, provider keys, demo
   scripts), so templating them would change their semantics rather than adopt a pattern —

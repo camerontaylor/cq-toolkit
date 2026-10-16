@@ -141,10 +141,12 @@ describe('github-settings.json: the committed D13 target', () => {
       context: string;
       integration_id: number;
     }[];
-    expect(checks.filter((c) => c.context.startsWith('cq/'))).toEqual([
+    // The minimal merge-time set: the I2/D11 verdicts plus denylist; the
+    // promotion gate enforces the rest on the queue tip.
+    expect(checks).toEqual([
       { context: 'cq/policy', integration_id: VERDICT },
-      { context: 'cq/ratchet', integration_id: VERDICT },
       { context: 'cq/acceptance', integration_id: VERDICT },
+      { context: 'denylist', integration_id: 15368 },
     ]);
     expect(renderSettings(TEMPLATE, { verdictAppId: '7', promoterAppId: '8' }).schemaVersion).toBe(
       1,
@@ -291,20 +293,17 @@ describe('compareSettings', () => {
   it('reports a missing, re-pinned or extra required check', () => {
     const live = liveFrom(target());
     const p = params(ruleset(live, 'cq-r2-merge-queue'), 'required_status_checks');
+    // The minimal merge-time set (docs/protected-scope.md): a re-pinned
+    // cq/policy, a missing cq/acceptance, and a dropped CI check still live.
     p['required_status_checks'] = [
-      { context: 'cq/policy', integration_id: VERDICT },
-      { context: 'cq/ratchet', integration_id: 15368 },
-      { context: 'static', integration_id: 15368 },
-      { context: 'crq-python', integration_id: 15368 },
+      { context: 'cq/policy', integration_id: 15368 },
       { context: 'denylist', integration_id: 15368 },
-      { context: 'from-source', integration_id: 15368 },
-      { context: 'pack-audit', integration_id: 15368 },
-      { context: 'ratchet', integration_id: 15368 },
+      { context: 'static', integration_id: 15368 },
     ];
     expect(driftOf(live)).toEqual([
       `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/acceptance (integration_id ${VERDICT}) missing`,
-      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/ratchet: integration_id differs: expected ${VERDICT} actual 15368`,
-      'ruleset cq-r2-merge-queue: rule required_status_checks: required check ratchet present live but not in the settings file',
+      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/policy: integration_id differs: expected ${VERDICT} actual 15368`,
+      'ruleset cq-r2-merge-queue: rule required_status_checks: required check static present live but not in the settings file',
     ]);
   });
 

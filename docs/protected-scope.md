@@ -138,8 +138,8 @@ the judging entry points and fails when a file is unprotected. The entry
 points include the ratchet engine that `loadEngine` imports, parsed from the
 script. It also pins which `trust/dist/...` calls the workflows contain.
 `test/ops/gates/policyDiff.test.ts` fails if a protected entry matches no
-tracked file. The only exception is a named pending entry: the crq entry
-until #327 lands.
+tracked file. A pending entry, one whose tree has not landed yet, must be
+named in that test, and none is pending today.
 
 ## The D-P revision window
 
@@ -184,12 +184,49 @@ opt-in") for this one shape. See [ADR index](adr/README.md#post-acceptance-notes
 ## Required jobs as policy data
 
 `requiredJobs` in `policy/protected-paths.json` names, by display name, the
-jobs the promotion gate requires in each verified workflow's run. Before
-this change no job names existed at all; #327 would have added the first one
-as code. A green run is not enough when
-someone could delete a job. Today the list is `ci.yml: static, from-source`
-and `denylist.yml: denylist`. PR #327 adds `crq-python` to this data instead
-of hard-coding it in `promote-gate.ts`. Removing an entry is an
+jobs the promotion gate requires in each verified workflow's run. A green run
+is not enough when someone could delete a job. Today the list is
+`ci.yml: static, crq-python, from-source` and `denylist.yml: denylist`. #327
+added the `crq-python` requirement as a hard-coded check in
+`promote-gate.ts`, and that check is now this data. Removing an entry is an
 `entry-removed` finding. Dropping a required job from its workflow is a
-`required-check` finding. A file the gate does not verify (`--verifiedWorkflows`)
-causes a refusal.
+`required-check` finding. A file the gate does not verify
+(`--verifiedWorkflows`) causes a refusal.
+
+## Required checks: enforce at promotion, not at merge
+
+Owner, 2026-10-16: _"Why would I want more required checks? This repo is
+already crippled by them."_ The same principle applies here: enforce at the
+deployed boundary. A merge into `merge-queue` deploys nothing; promotion to
+`main` does. A merge-time requirement stays only where the gate cannot
+enforce the same thing later.
+
+| Check                                                   | What it prevents                                                     | Gate enforces it at promotion?                                                                                           | Merge-time requirement                                                                                                                                        |
+| ------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cq/policy`                                             | an unauthorized protected or definition change (D11)                 | it recomputes `policyDiff` over `main..tip`, but until #322 it cannot read a PR's `cq-override` label for a push subject | **keep**: the PR check is where the owner's D11 record is honoured, and it keeps an unauthorized protected change out of the batch                            |
+| `cq/acceptance`                                         | admitting code without independent review of its exact head (I2)     | it recomputes the I2 evidence per admitted PR                                                                            | **keep**: I2 is the queue's admission rule. One unaccepted hand-merge blocks promotion of the whole batch until it is reverted. It is a verdict, not a CI run |
+| `denylist`                                              | denylisted content (secrets, internal names) entering branch history | `denylist.yml` must be green on the tip                                                                                  | **keep**: R0 makes `merge-queue` history append-only, so the gate can refuse to promote a leak but cannot un-merge it. Runs in seconds                        |
+| `cq/ratchet`                                            | baseline or coverage regressions (I5)                                | the verdict is required on the tip, bound to `main`                                                                      | drop                                                                                                                                                          |
+| `static`                                                | type, lint and test failures                                         | every `ci.yml` job must be green on the tip (`requiredJobs`)                                                             | drop                                                                                                                                                          |
+| `crq-python`                                            | crq Python test failures                                             | the same, by name                                                                                                        | drop (never applied live)                                                                                                                                     |
+| `from-source`                                           | a from-source smoke failure                                          | the same, by name                                                                                                        | drop                                                                                                                                                          |
+| `pack-audit`                                            | a bad npm tarball                                                    | no; it runs on PRs only, not on the queue tip                                                                            | drop: the deployed boundary is publication, and the release runbook dispatches `pack-audit.yml` on the release SHA                                            |
+| `ratchet` (classic, live)                               | the head-defined ratchet check                                       | superseded by `cq/ratchet`                                                                                               | drop (R2 already omitted it)                                                                                                                                  |
+| `main`: `static`, `denylist`, `ratchet` (classic, live) | an unchecked commit on `main`                                        | `main` moves only through the gate's fast-forward (R1: promoter App only)                                                | drop (R1 carries no status checks)                                                                                                                            |
+
+|               | Before (live classic)                                        | Before (settings-as-code R2)                                                                                | After (R2 here)                          |
+| ------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `merge-queue` | `static`, `denylist`, `from-source`, `pack-audit`, `ratchet` | `cq/policy`, `cq/ratchet`, `cq/acceptance`, `static`, `crq-python`, `denylist`, `from-source`, `pack-audit` | `cq/policy`, `cq/acceptance`, `denylist` |
+| `main`        | `static`, `denylist`, `ratchet`                              | none (R1: promoter-only updates)                                                                            | none                                     |
+
+Bot merges still wait for green CI. The merger merges only a `CLEAN` PR
+(`classifyPrs.ts`), and GitHub reports a PR whose non-required checks are
+failing or pending as `UNSTABLE`, not `CLEAN`. What this change removes is
+the hard block on hand-merges and on stuck checks. The cost is that a red
+hand-merge would stall that batch at the gate until a fix lands. It cannot
+reach `main`.
+
+The live settings change when the owner applies R2 and deletes the classic
+protections (C3 readiness, T6). The payload is `cq-r2-merge-queue.json` in
+the ARCH research `strategy/rulesets/`. This PR changes only the
+settings-as-code.

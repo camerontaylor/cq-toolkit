@@ -21,6 +21,7 @@ import {
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
 import { scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
+import { VERDICT_CHECK } from '../../../src/selfhost/promote-gate.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
@@ -443,10 +444,10 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
 // target and is a SUPERSET modulo one recorded supersession: the classic
 // `ratchet` context becomes the verdict-App `cq/ratchet` (methods note,
 // Residuals). This pins the mapping so the supersession stays documented.
-describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () => {
+describe('requiredChecks are enforced at merge (R2) or at promotion (the gate)', () => {
   const POLICY = JSON.parse(
     readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
-  ) as { requiredChecks: string[] };
+  ) as { requiredChecks: string[]; requiredJobs?: Record<string, string[]> };
   const SETTINGS = JSON.parse(
     readFileSync(join(REPO_ROOT, 'policy', 'templates', 'github-settings.json'), 'utf8'),
   ) as {
@@ -458,7 +459,7 @@ describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () 
     }>;
   };
 
-  /** Classic context → its R2 successor. Every key must stay recorded in the methods Residuals. */
+  /** Classic context → its verdict-App successor. Every key must stay recorded in the methods Residuals. */
   const SUPERSEDED: Readonly<Record<string, string>> = {
     ratchet: 'cq/ratchet',
   };
@@ -469,18 +470,29 @@ describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () 
       .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
       .map((check) => check.context) ?? [],
   );
+  // The minimal merge-time set (docs/protected-scope.md): what the gate
+  // enforces on the queue tip is not required again at merge.
+  const gateContexts = new Set([...Object.values(POLICY.requiredJobs ?? {}).flat(), VERDICT_CHECK]);
 
   test('R2 exists and carries required status checks', () => {
     expect(r2Contexts.size).toBeGreaterThan(0);
   });
 
-  test.each(POLICY.requiredChecks)('requiredChecks entry %s is covered by R2', (context) => {
-    const successor = SUPERSEDED[context];
-    if (successor === undefined) {
-      expect(r2Contexts.has(context), `${context} is in neither R2 nor SUPERSEDED`).toBe(true);
-    } else {
-      expect(r2Contexts.has(successor), `${context} supersedes to missing ${successor}`).toBe(true);
-    }
+  test.each(POLICY.requiredChecks)('requiredChecks entry %s is enforced somewhere', (context) => {
+    const enforced = SUPERSEDED[context] ?? context;
+    expect(
+      r2Contexts.has(enforced) || gateContexts.has(enforced),
+      `${context} (as ${enforced}) is enforced neither by R2 nor by the gate`,
+    ).toBe(true);
+  });
+
+  test('no gate-enforced CI job is also required at merge', () => {
+    const doubled = [...r2Contexts].filter(
+      (context) => gateContexts.has(context) && !['denylist'].includes(context),
+    );
+    // denylist stays at merge too: merge-queue history is append-only (R0),
+    // so a leak the gate refuses to promote could not be un-merged.
+    expect(doubled).toEqual([]);
   });
 
   test('every recorded supersession is documented in the methods note Residuals', () => {

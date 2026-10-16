@@ -1870,26 +1870,17 @@ describe("the toolkit's own policy list", () => {
    * lands it. A pending entry must match NOTHING: once its tree lands the
    * test fails until the entry leaves this list, so it cannot go stale.
    */
-  const PENDING: Readonly<Record<string, string>> = {
-    '^apps/crq-python/(?:signer/|ops/systemd/|ops/prepare-[^/]+\\.py$|config\\.json$)':
-      '#327 (crq-python import)',
-  };
+  const PENDING: Readonly<Record<string, string>> = {};
 
   // Retired at C2: the old gate's wait-list file is gone. requiredChecks keeps
   // its teeth by naming checks the retained CI workflows actually produce.
   test('requiredChecks are produced by the retained CI workflows', () => {
     const producers: Record<string, string> = {
       static: 'ci.yml',
-      'crq-python': 'ci.yml',
       denylist: 'denylist.yml',
       ratchet: 'ratchet.yml',
     };
-    expect([...list.requiredChecks].sort()).toEqual([
-      'crq-python',
-      'denylist',
-      'ratchet',
-      'static',
-    ]);
+    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'ratchet', 'static']);
     for (const check of list.requiredChecks) {
       const file = producers[check];
       expect(file, `${check}: has a retained producer`).toBeDefined();
@@ -1936,7 +1927,10 @@ describe("the toolkit's own policy list", () => {
   );
 
   test('requiredJobs name jobs the verified workflows define, by display name', () => {
-    expect(Object.keys(list.requiredJobs ?? {}).sort()).toEqual(['ci.yml', 'denylist.yml']);
+    expect(list.requiredJobs).toEqual({
+      'ci.yml': ['static', 'crq-python', 'from-source'],
+      'denylist.yml': ['denylist'],
+    });
     // The gate verifies exactly the files gate.yml passes it; a key outside them refuses every promotion.
     const gate = readFileSync(join(REPO_ROOT, '.github/workflows/gate.yml'), 'utf8');
     const verified = /--verifiedWorkflows=([\w.,-]+)/.exec(gate)?.[1]?.split(',') ?? [];
