@@ -69,6 +69,9 @@ These shipped during the family workstreams and are registered alongside the
 | `src/ops/analyze/agenticRemediation.ts` | `analyze.agenticRemediation`                                                             | `cq analyze.agenticRemediation` | G1/G2 agentic proposal                              |
 | `src/ops/analyze/playbooks/registry.ts` | `analyze.playbookRegister`, `analyze.playbookDispatch`, `analyze.playbookQuarantineList` | same three names as subcommands | G3 playbook lane                                    |
 | `src/ops/ratchet/monotonicGuard.ts`     | `ratchet.monotonicGuard`                                                                 | `cq ratchet.monotonicGuard`     | H2 only-tightening diff guard (I5)                  |
+| `src/ops/gates/policyDiff.ts`           | `gates.policyDiff`                                                                       | `cq gates.policyDiff`           | policy template drift check                         |
+| `src/ops/ratchet/recomputeTypecheck.ts` | `ratchet.recomputeTypecheck`                                                             | `cq ratchet.recomputeTypecheck` | recompute typecheck baseline                        |
+| `src/ops/ratchet/verifyRatchet.ts`      | `ratchet.verifyRatchet`                                                                  | `cq ratchet.verifyRatchet`      | ratchet verification                                |
 
 ## Not built (out of scope per plan)
 

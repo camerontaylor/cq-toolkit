@@ -4,7 +4,7 @@ Description=CRQ detached repair inbox drain
 Type=simple
 Nice=10
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-WorkingDirectory=%h/repos/coderabbit-queue
-ExecStart=/usr/bin/env python3 %h/repos/coderabbit-queue/crq_repair.py
+WorkingDirectory=@CRQ_ROOT@
+ExecStart=/usr/bin/env python3 @CRQ_ROOT@/crq_repair.py
 Restart=on-failure
 RestartSec=60

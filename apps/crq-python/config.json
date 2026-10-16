@@ -1,7 +1,7 @@
 {
   "repo": "camerontaylor/cq-toolkit",
-  "clone": "/srv/operator/repos/worktrees/coderabbit-queue-repo",
-  "worktree_root": "/srv/operator/repos/worktrees",
+  "clone": "@HOST_CLONE@",
+  "worktree_root": "@HOST_WORKTREE_ROOT@",
   "worktree_prefix": "coderabbit-queue-",
   "max_starts_per_hour": 5,
   "max_inflight": 2,
@@ -30,7 +30,7 @@
     "poster": "camerontaylor",
     "alert_agent_id": "00000000-0000-4000-8000-000000000004",
     "alert_agent_host": null,
-    "_alert_agent_host_note": "null = local Paseo daemon (a worker-host runner, rollback); ops/prepare-host.py renders the worker-host endpoint for the queue-host runner",
+    "_alert_agent_host_note": "Host overlay supplies the alert endpoint; ops/HOST-DEPLOY.md.",
     "allowed_reviewers": [],
     "resolver": "conductor (acceptance conductor reviewer-example)",
     "signer": {
@@ -39,9 +39,9 @@
       "_identity_source": "ONLY the owner's registration record: toolkit-research/plans/app-registration-session-20261004.md (never a name lookup)",
       "spool": {
         "dir": "/var/lib/crq-spool",
-        "ssh_alias": "operator@127.0.0.1",
+        "ssh_alias": "@HOST_SPOOL_SSH_ALIAS@",
         "ssh_key": null,
-        "_ssh_key_note": "dedicated key only (D4): forced command /opt/cq-reviewer/spool-shell on queue-host; the queue-host host config sets ssh_key (ops/prepare-host.py). ssh_alias is a literal user@host (ssh runs with -F none); crq runs on queue-host, so the spool is reached over loopback sshd (never the Tailscale SSH address)"
+        "_ssh_key_note": "Host overlay supplies the dedicated forced-command transport; ssh runs with -F none. No plain-shell fallback."
       }
     },
     "signer_stall_min": 90,
@@ -78,7 +78,7 @@
       "hack_detector": true
     },
     "judge_sample_rate": 0.0,
-    "cq_bin": "/home/operator/repos/cq-toolkit/dist/cli.js",
+    "cq_bin": "@HOST_CQ_BIN@",
     "roles": {
       "fixer": {
         "default": {

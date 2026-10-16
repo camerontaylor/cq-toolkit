@@ -1,5 +1,5 @@
 [Path]
-PathChanged=%h/repos/coderabbit-queue/state/repair/inbox
+PathChanged=@CRQ_ROOT@/state/repair/inbox
 Unit=crq-repair.service
 [Install]
 WantedBy=default.target

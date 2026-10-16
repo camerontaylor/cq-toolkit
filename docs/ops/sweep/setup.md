@@ -8,7 +8,7 @@ The worktree provider locks each new checkout against Git pruning. To install
 dependencies before the first probe, set the unit dispatch `install` hook:
 
 ```json
-{"command":"npm","args":["ci","--ignore-scripts"],"timeoutMs":600000}
+{"command":"pnpm","args":["install","--frozen-lockfile","--ignore-scripts"],"timeoutMs":600000}
 ```
 
 The argv command runs in the new worktree after it is locked and before its
@@ -22,8 +22,8 @@ worktree. SDK callers may inject `installDeps(worktreePath)` in
 `--ignore-scripts` only when its lifecycle scripts are required and trusted.
 
 On Windows the hook is spawned without a shell, so a `.cmd` shim such as
-`npm` does not resolve; route it through `cmd.exe` explicitly
-(`{"command":"cmd.exe","args":["/d","/s","/c","npm ci --ignore-scripts"]}`).
+`pnpm` does not resolve; route it through `cmd.exe` explicitly
+(`{"command":"cmd.exe","args":["/d","/s","/c","pnpm install --frozen-lockfile --ignore-scripts"]}`).
 A Windows timeout kills only the direct child, not lifecycle-script
 descendants (the harness's documented v1 process-group limitation).
 
