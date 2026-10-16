@@ -33,6 +33,12 @@ export function missingManifestEntries(
   exists: (file: string) => boolean,
 ): string[];
 export function projectsOf(run: readonly PlannedFile[]): string[];
+export function selectPython(
+  changed: readonly string[],
+  allTests: readonly string[],
+  missing?: readonly string[],
+): { files: string[]; fallback: boolean; reason: string };
+export function readPythonReport(stderr: string): TestCounts | null;
 export interface TestCounts {
   total: number;
   passed: number;

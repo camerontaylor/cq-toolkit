@@ -75,6 +75,7 @@
               { "context": "cq/ratchet", "integration_id": "{{VERDICT_APP_ID}}" },
               { "context": "cq/acceptance", "integration_id": "{{VERDICT_APP_ID}}" },
               { "context": "static", "integration_id": 15368 },
+              { "context": "crq-python", "integration_id": 15368 },
               { "context": "denylist", "integration_id": 15368 },
               { "context": "from-source", "integration_id": 15368 },
               { "context": "pack-audit", "integration_id": 15368 }

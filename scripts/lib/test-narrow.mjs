@@ -132,6 +132,7 @@ export function parseArgs(argv) {
 
 /** The vitest project a test file runs in (mirrors vitest.config.ts). */
 export function classOf(file, manifest) {
+  if (/^apps\/crq-python\/test_[A-Za-z0-9_]+\.py$/.test(file)) return 'python';
   const cls = manifest[file];
   if (cls !== undefined) return cls;
   return file.startsWith('test/e2e/') ? 'integration' : 'process';
@@ -197,9 +198,41 @@ export function missingManifestEntries(manifest, exists) {
 
 /** Projects in vitest.config.ts group order, restricted to the plan. */
 export function projectsOf(run) {
-  const order = ['pure', 'process', 'live', 'integration'];
+  const order = ['python', 'pure', 'process', 'live', 'integration'];
   const used = new Set(run.map((r) => r.project));
   return order.filter((p) => used.has(p));
+}
+
+/** Python has no import graph: direct modules only, never discovery locally. */
+export function selectPython(changed, allTests, missing = []) {
+  const selected = new Set();
+  for (const file of changed) {
+    if (!file.startsWith('apps/crq-python/')) continue;
+    const module = /^apps\/crq-python\/([A-Za-z0-9_]+)\.py$/.exec(file)?.[1];
+    const test = module?.startsWith('test_') ? file : `apps/crq-python/test_${module}.py`;
+    if (module === undefined || missing.includes(file) || !allTests.includes(test)) {
+      return { files: [], fallback: true, reason: `no Python mapping for ${file}` };
+    }
+    selected.add(test);
+  }
+  if (selected.size > 0 && selected.size === allTests.length) {
+    return { files: [], fallback: true, reason: 'Python selection would run every module' };
+  }
+  return { files: [...selected].sort(), fallback: false, reason: 'mapped' };
+}
+
+/** Read unittest's terminal report; an absent/zero-test report never passes. */
+export function readPythonReport(stderr) {
+  const matches = [
+    ...stderr.matchAll(/^Ran (\d+) tests? in [^\n]+\n\s*\n(OK|FAILED)(?: \(([^\n]*)\))?\s*$/gm),
+  ];
+  const last = matches.at(-1);
+  if (last === undefined || Number(last[1]) === 0) return null;
+  const total = Number(last[1]);
+  const count = (key) => Number(new RegExp(`\\b${key}=(\\d+)`).exec(last[3] ?? '')?.[1] ?? 0);
+  const failed = count('failures') + count('errors') + count('unexpected successes');
+  const skipped = count('skipped') + count('expected failures');
+  return { total, passed: total - failed - skipped, failed, skipped };
 }
 
 /**

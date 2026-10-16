@@ -167,6 +167,7 @@ function treeAllowlistPaths(noDist) {
 const REQUIRED_WORKFLOW_CHECKS = [
   { workflow: 'denylist.yml', check: 'denylist' },
   { workflow: 'ci.yml', check: 'static' },
+  { workflow: 'ci.yml', check: 'crq-python' },
   // H4 (PR-105 round-2): the ratchet is a required check — the I4 leg now
   // polices ratchet.yml the same way (both triggers top-level, zero filter
   // keys, a job named exactly 'ratchet'). (The retired merge-queue-gate.yml

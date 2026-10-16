@@ -30,6 +30,8 @@ import {
   planRun,
   projectsOf,
   readReport,
+  readPythonReport,
+  selectPython,
   runVerdict,
   signalExit,
   summaryLine,
@@ -645,5 +647,44 @@ describe('operator records', () => {
         include: parsed.include,
       }).ok,
     ).toBe(true);
+  });
+});
+
+describe('Python narrow selection and evidence', () => {
+  const a = 'apps/crq-python/test_author_quota.py';
+  const b = 'apps/crq-python/test_status_summary.py';
+  const c = 'apps/crq-python/test_promotion_retry.py';
+  it('maps source and named tests without discovery', () => {
+    expect(selectPython(['apps/crq-python/author_quota.py', b], [a, b, c]).files).toEqual([a, b]);
+    expect(classOf(a, {})).toBe('python');
+  });
+  it('refuses deleted, unmapped and full Python selections', () => {
+    expect(selectPython([a], [a, b], [a]).fallback).toBe(true);
+    expect(selectPython(['apps/crq-python/crq.py'], [a, b]).fallback).toBe(true);
+    expect(selectPython([a, b], [a, b]).fallback).toBe(true);
+  });
+  it('shares the total file cap across languages', () => {
+    const files = Array.from({ length: 10 }, (_, i) => `test/${i}.test.ts`);
+    expect(
+      planRun({
+        selection: { files: [...files, a], fallback: false, reason: 'mapped' },
+        manifest: {},
+        include: [],
+      }).ok,
+    ).toBe(false);
+  });
+  it('requires a nonempty terminal unittest report', () => {
+    expect(readPythonReport('Ran 3 tests in 0.01s\n\nOK (skipped=1)\n')).toEqual({
+      total: 3,
+      passed: 2,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(readPythonReport('Ran 2 tests in 0.01s\n\nFAILED (failures=1)\n')?.failed).toBe(1);
+    expect(
+      readPythonReport('Ran 1 test in 0.01s\n\nFAILED (unexpected successes=1)\n')?.failed,
+    ).toBe(1);
+    expect(readPythonReport('Ran 0 tests in 0.01s\n\nOK\n')).toBeNull();
+    expect(readPythonReport('no summary')).toBeNull();
   });
 });
