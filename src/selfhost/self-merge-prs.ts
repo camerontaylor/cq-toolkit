@@ -84,7 +84,7 @@ import {
   defaultJournalRoot,
   parseSelfhostArgs,
   SelfhostDefaults,
-  resolveSelfhostDrivers,
+  resolveSelfhostDriver,
 } from './config.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
@@ -302,7 +302,7 @@ export function buildRunInput(
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
     ...(cfg.disableConflictResolution === true
       ? { conflictResolutionDisabled: true }
-      : { modelSpec: resolveSelfhostDrivers().offPeak }),
+      : { modelSpec: resolveSelfhostDriver(nowMs) }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
     ...(classifyConfig === undefined && allowSameAccountAgentReview === undefined
