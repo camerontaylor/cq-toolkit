@@ -176,7 +176,13 @@ export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
   // 05:40 inclusive). 20 minutes covers the privileged job's 15-minute
   // `timeout-minutes` with the documented bound's margin.
   headroomMinutes: 20,
-  driver: { provider: 'deepseek', model: 'deepseek-flash' },
+  // Owner ruling 2026-10-16: the peak window keeps the SAME driver as the
+  // rest of the day. Z.ai GLM capacity is ample for this repository's own
+  // loop, so the ~3× peak multiplier is accepted rather than routed around.
+  // The window, the pre-peak headroom and the single-clock-read semantics are
+  // retained unchanged (they still decide the journal stamp and keep the
+  // switch available to adopters who set a different peak driver here).
+  driver: SelfhostDefaults.driver,
 });
 
 /**
