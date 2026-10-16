@@ -239,7 +239,8 @@ is normative; this section is the policy-level summary.
   - `state`: `pending` while reviewing; `success` only when the signer's own recorded reviews
     (a full run over `base_sha..batch_sha`, optionally preceded by a full run the signer then
     extends with its own clean internal deltas) covered the whole range with zero critical/major
-    findings; `failure` when a completed review found any; `error` for a skipped,
+    findings; `failure` when a completed review found any critical or major finding;
+    `error` for a skipped,
     secret-scan-blocked or otherwise failed run (never promoted). After CodeRabbit refuses an
     oversized range, crq splits it into prefixes at the accepted size and continues prefix by
     prefix; the full batch still needs recorded clean coverage before promotion.
