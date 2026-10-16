@@ -27,7 +27,7 @@ node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d
 - **Node 24** matches what this repo targets (CI `setup-node` versions and
   `@types/node` are on 24; there is no `engines`/`.nvmrc` override).
 - **Sufficient for certification and Node workloads**: every certification
-  canary (`src/sandbox/probe.ts`) executes `/usr/bin/touch`, `/bin/cat`,
+  canary (`experimental/sandbox-host/probe.ts`) executes `/usr/bin/touch`, `/bin/cat`,
   `/bin/bash --norc -c`, `/usr/bin/true`, and `/usr/bin/printenv` — all
   present in the Debian slim base — and the image carries `node` plus
   `corepack`. The image does **not** pre-cache any pnpm version, and

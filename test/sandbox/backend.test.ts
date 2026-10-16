@@ -4,25 +4,28 @@
 // evidence comes from probe.ts, never from these builders alone). The
 // seatbelt-live suite also exercises network, clipboard and process-group
 // canaries on macOS without broadening the profile's file permissions.
-import { mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
-  adaptersForPlatform,
-  bwrapAdapter,
-  bwrapArgv,
   containerAdapter,
   containerArgv,
   containerEnvFile,
   DEFAULT_SANDBOX_IMAGE,
   landlockAdapter,
-  seatbeltAdapter,
-  seatbeltProfile,
   type ContainerAdapterOptions,
   type LandlockAdapterOptions,
 } from '../../src/sandbox/backend.js';
+import { pathInsideWorkspace } from '../../src/sandbox/launcher.js';
+import {
+  adaptersForPlatform,
+  bwrapAdapter,
+  bwrapArgv,
+  seatbeltAdapter,
+  seatbeltProfile,
+} from '../../experimental/sandbox-host/backend.js';
 
 describe('seatbelt boundary construction', () => {
   test('the profile is deny-default with the bsd.sb startup closure', () => {
@@ -767,6 +770,19 @@ describe('launcher hardening (PR review)', () => {
   });
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  test('workspace containment respects path-segment boundaries', async () => {
+    const workspace = join(dir, 'workspace');
+    const dotPrefixedName = join(workspace, '..allowed');
+    const sibling = join(dir, 'outside');
+    await mkdir(workspace);
+    await writeFile(dotPrefixedName, 'inside');
+    await writeFile(sibling, 'outside');
+
+    expect(pathInsideWorkspace(dotPrefixedName, workspace)).toBe(true);
+    expect(pathInsideWorkspace(dir, workspace)).toBe(false);
+    expect(pathInsideWorkspace(sibling, workspace)).toBe(false);
   });
 
   test('a launcher inside the workspace is refused, and loader hooks never reach it', async () => {

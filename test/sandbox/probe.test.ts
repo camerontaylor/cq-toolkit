@@ -30,11 +30,8 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 // probe timeouts are untouched.
 vi.setConfig({ testTimeout: 120_000 });
 
-import {
-  seatbeltAdapter,
-  type SandboxBackendAdapter,
-  type SandboxLaunchResult,
-} from '../../src/sandbox/backend.js';
+import { seatbeltAdapter } from '../../experimental/sandbox-host/backend.js';
+import type { SandboxBackendAdapter, SandboxLaunchResult } from '../../src/sandbox/launcher.js';
 import { resolveSandboxConfig } from '../../src/sandbox/config.js';
 import {
   certifiedBackendsOf,
@@ -43,7 +40,7 @@ import {
   probeBackend,
   type BackendProbeRecord,
   type SandboxCertification,
-} from '../../src/sandbox/probe.js';
+} from '../../experimental/sandbox-host/probe.js';
 
 // Deterministic host seams: the probe's "external" egress target is a
 // loopback listener the bare host can always reach, and the local-prefix
