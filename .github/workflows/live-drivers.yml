@@ -1,3 +1,4 @@
+# instantiated from policy/templates/live-drivers.yml — edit the template, not this file
 # The LIVE drivers wiring — T1.7 slice 3 (the live-CI legs' only home).
 #
 # Runs the opt-in LIVE legs against real provider endpoints, MANUAL DISPATCH
@@ -11,7 +12,7 @@
 #      --only ai-sdk — both providers' ai-sdk lane; the claude-agent /
 #      subprocess / acp cells need the vendor CLIs, which a hosted runner
 #      does not have, so they are not wired here either).
-#   3. The DD-1 abort spike's ai-sdk lane (scripts/dd1-abort-spike.mjs
+#   3. The DD-1 abort spike's ai-sdk lane (tools/dd1-abort-spike.mjs
 #      --lane ai-sdk — the measured abort-vs-spend evidence run).
 #
 # SECRETS: this file carries NAMES only. The values arrive as `drill`
@@ -99,4 +100,4 @@ jobs:
       - name: Eval-axes demo — the ai-sdk cells (zai + deepseek)
         run: node scripts/demo-eval-axes.mjs --only ai-sdk
       - name: DD-1 abort spike — the ai-sdk lane
-        run: node scripts/dd1-abort-spike.mjs --lane ai-sdk
+        run: node tools/dd1-abort-spike.mjs --lane ai-sdk

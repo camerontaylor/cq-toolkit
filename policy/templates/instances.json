@@ -52,6 +52,11 @@
       }
     },
     {
+      "workflow": "live-drivers.yml",
+      "template": "live-drivers.yml",
+      "tokens": {}
+    },
+    {
       "workflow": "ratchet-propose-measure.yml",
       "template": "ratchet-propose-measure.yml",
       "tokens": {}
@@ -104,10 +109,6 @@
       "reason": "Repo-owned CI with no template today: proves this package's optional agent-SDK peer dependency (with and without the peer) — specific to this package, not an adoptable pattern."
     },
     {
-      "workflow": "live-drivers.yml",
-      "reason": "Repo-owned CI with no template today: the manual-dispatch live provider legs for this toolkit's drivers — specific to this package, not an adoptable pattern."
-    },
-    {
       "workflow": "live-review.yml",
       "reason": "Repo-owned CI with no template today: the manual-dispatch E5 live review-loop drill against a scratch repo (unlike live-merge.yml, it was never templated)."
     },
@@ -120,10 +121,5 @@
       "reason": "Repo-owned CI with no template today: audits this package's npm tarball (files allowlist + denylist scan) — specific to this package, not an adoptable pattern."
     }
   ],
-  "adopterOnly": [
-    {
-      "template": "merge-queue-gate.yml",
-      "reason": "Retired at the C2 cutover (2026-10-11): gate.yml (cq-gate, armed) is the sole promoter; kept as an adopter-only template, see docs/promotion-policy.md."
-    }
-  ]
+  "adopterOnly": []
 }

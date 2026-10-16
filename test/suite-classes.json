@@ -173,7 +173,6 @@
   "test/workflows/action-pins.test.ts": "pure",
   "test/workflows/cq-state-skip.test.ts": "pure",
   "test/workflows/default-ref-guards.test.ts": "pure",
-  "test/workflows/merge-queue-gate.test.ts": "process",
   "test/workflows/policy-provenance.test.ts": "process",
   "test/workflows/ratchet-provenance.test.ts": "process",
   "test/workflows/self-host-concurrency.test.ts": "pure",
