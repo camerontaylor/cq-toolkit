@@ -69,7 +69,7 @@ try {
   probe = await import(probeUrl.href);
 } catch (error) {
   stderr.write(
-    `sandbox-certify: cannot load dist/sandbox-host/probe.js — run \`pnpm run build\` first\n  ${error.message}\n`,
+    `sandbox-certify: cannot load dist/experimental/sandbox-host/probe.js — see Usage above for the experimental compile command\n  ${error.message}\n`,
   );
   exit(2);
 }
