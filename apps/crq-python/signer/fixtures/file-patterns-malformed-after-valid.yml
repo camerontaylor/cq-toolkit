@@ -1,0 +1,4 @@
+code_guidelines:
+  filePatterns:
+    - "src/**"
+      - "nested-but-unsupported/**"
