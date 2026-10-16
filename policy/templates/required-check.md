@@ -87,6 +87,21 @@ env:
   PNPM_CONFIG_VIRTUAL_STORE_TYPE: project
 
 jobs:
+  crq-python:
+    runs-on: {{RUNNER}}
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up production Python minor
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14'
+      - name: Python stdlib suite
+        working-directory: apps/crq-python
+        run: python3 -m unittest discover -p 'test_*.py'
   static:
     runs-on: {{RUNNER}}
     # The `cq-state` settle ledger is machine-written (selfhost settle-state);

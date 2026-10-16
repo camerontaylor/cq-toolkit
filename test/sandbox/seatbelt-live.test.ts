@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, test } from 'vitest';
-import { seatbeltAdapter } from '../../src/sandbox/backend.js';
+import { seatbeltAdapter } from '../../experimental/sandbox-host/backend.js';
 
 const execFile = promisify(execFileCb);
 const adapter = seatbeltAdapter();

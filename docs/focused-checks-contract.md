@@ -45,7 +45,7 @@ suite; they do not revisit this contract.
   the suite with coverage. The four declarations of the required set —
   `policy/protected-paths.json`, `scripts/denylist-scan`'s
   `REQUIRED_WORKFLOW_CHECKS`, the promotion gate's check list, and
-  `policy/templates/github-settings.json` — all name `static` and `denylist`;
+  `policy/templates/github-settings.json` — all name `static`, `denylist` and `crq-python`;
   they disagree about `ratchet`, `from-source` and `pack-audit`, and that
   disagreement is the reconciliation subject of the later CI-consolidation
   slice, not a claim this contract makes.
@@ -232,3 +232,12 @@ are the machinery that makes required CI trustworthy as the sole authority. The
 `macos-latest` job and its promotion pilot, the vitest project split, the
 per-file spawn work and the required-contexts reconciliation are separate slices
 with their own change, their own review and their own records.
+
+Python modules in `apps/crq-python` use this same runner and host lock:
+`pnpm test:narrow apps/crq-python/test_status_summary.py`. Source modules map
+only to their matching `test_<module>.py`; unmapped changes and discovery-sized
+selections are refused. Named modules run in one `python3 -m unittest`
+invocation, serially with any selected TypeScript tests, under the same total
+10-file cap, nice priority, timeout and process-group cleanup. Local bare
+unittest and discovery are prohibited; full Python discovery runs only in CI
+on Python 3.14, the production minor reported by the owner.

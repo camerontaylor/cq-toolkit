@@ -23,7 +23,7 @@
 //      a JSON report for the counts, in its own process group (recorded in
 //      the lock with its leader's start time, so a killed runner cannot
 //      leave an orphan that runs beside the next one), killed after
-//      RUN_TIMEOUT_MS; load= and uptime= are sampled just before it starts;
+//      RUN_TIMEOUT_MS; load= and uptime= cover the combined execution interval;
 //   7. one stable summary line on stdout (`test:narrow result=… exit=…`),
 //      printed on every exit path.
 import { spawn, spawnSync } from 'node:child_process';
@@ -54,6 +54,9 @@ import {
   planRun,
   projectsOf,
   readReport,
+  readPythonReport,
+  pythonRunVerdict,
+  selectPython,
   runVerdict,
   signalExit,
   spawnLocked,
@@ -119,7 +122,7 @@ if (getPriority() < NICE_INCREMENT) {
 const CALLER_CWD = process.env.INIT_CWD ?? process.cwd();
 process.chdir(ROOT);
 const stamp = () => ({ load: loadavg()[0].toFixed(1), uptimeS: uptime() });
-// Re-stamped just before vitest starts; this sample stands only when no run happens.
+// Re-stamped at the start of the combined Python/build/Vitest interval.
 const summary = { result: 'error', exit: 1, nice: getPriority(), ...stamp() };
 let printed = false;
 let releaseLock = () => {};
@@ -361,7 +364,21 @@ if (sources.length > 0) {
   }
 }
 
-const selection = selectAffected({ changed, allTests, related, missing });
+const pythonTests = readdirSync(join(ROOT, 'apps/crq-python'))
+  .filter((f) => /^test_[A-Za-z0-9_]+\.py$/.test(f))
+  .map((f) => `apps/crq-python/${f}`);
+const pythonSelection = selectPython(changed, pythonTests, missing);
+const selection = selectAffected({
+  changed: changed.filter((f) => !f.startsWith('apps/crq-python/')),
+  allTests,
+  related,
+  missing,
+});
+selection.files = [...new Set([...selection.files, ...pythonSelection.files])].sort();
+if (pythonSelection.fallback) {
+  selection.fallback = true;
+  selection.reason = pythonSelection.reason;
+}
 if (relatedError !== null) selection.reason += `: ${relatedError}`;
 const plan = planRun({ selection, manifest, include: opts.include });
 if (!plan.ok) {
@@ -374,6 +391,11 @@ if (!plan.ok) {
 }
 const projects = projectsOf(plan.run);
 const files = plan.run.map((r) => r.file);
+const pythonFiles = plan.run.filter((r) => r.project === 'python').map((r) => r.file);
+const tsFiles = files.filter((f) => !pythonFiles.includes(f));
+if (pythonFiles.length > 0 && opts.testNamePattern !== null) {
+  finish({ result: 'refused', exit: 2, reason: 'test-name filtering is unavailable for Python' });
+}
 Object.assign(summary, { files, projects });
 say(`${changed.length} changed file(s) -> ${files.length} test file(s)`);
 for (const r of plan.run) say(`  ${r.project.padEnd(11)} ${r.file}`);
@@ -391,9 +413,10 @@ if (files.length === 0) {
  * out. Resolves once it exits and its group is gone (sweepChild); after that
  * the pgid is never signalled again (it could be reused).
  */
-const runGroup = (command, args, { label, timeoutMs, ...options }) =>
+const runGroup = (command, args, { label, timeoutMs, captureStderr = false, ...options }) =>
   new Promise((done) => {
     let timedOut = false;
+    let stderr = '';
     childDone = false;
     try {
       const spawned = spawnLocked(
@@ -414,6 +437,11 @@ const runGroup = (command, args, { label, timeoutMs, ...options }) =>
       }
       throw error;
     }
+    if (captureStderr)
+      child.stderr.on('data', (chunk) => {
+        process.stderr.write(chunk);
+        stderr = (stderr + chunk.toString()).slice(-1_048_576);
+      });
     const timer = setTimeout(() => {
       timedOut = true;
       say(`${label} exceeded ${timeoutMs / 60_000} min; terminating`);
@@ -425,11 +453,42 @@ const runGroup = (command, args, { label, timeoutMs, ...options }) =>
       clearTimeout(timer);
       sweepChild(); // whatever the child left behind in its group, until gone
       childDone = true;
-      done({ ...outcome, timedOut });
+      done({ ...outcome, timedOut, stderr });
     };
     child.on('error', (error) => settle({ error }));
-    child.on('exit', (code, signal) => settle({ code, signal }));
+    child.on('close', (code, signal) => settle({ code, signal }));
   });
+
+// Python and TypeScript children run serially under the same host lock.
+Object.assign(summary, stamp());
+const started = Date.now();
+let pythonCounts = null;
+if (pythonFiles.length > 0) {
+  const modules = pythonFiles.map((f) => f.slice('apps/crq-python/'.length, -3));
+  say(`exec python3 -m unittest ${modules.join(' ')}`);
+  const run = await runGroup('python3', ['-m', 'unittest', ...modules], {
+    label: 'Python run',
+    timeoutMs: RUN_TIMEOUT_MS,
+    cwd: join(ROOT, 'apps/crq-python'),
+    stdio: ['ignore', 'inherit', 'pipe'],
+    captureStderr: true,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHON_COLORS: '0' },
+  });
+  pythonCounts = readPythonReport(run.stderr);
+  const verdict = pythonRunVerdict({ run, counts: pythonCounts, interruptedBy, lockPinned });
+  if (verdict.result !== 'pass') {
+    finish({ ...verdict, tests: pythonCounts, ran: pythonFiles, durationMs: Date.now() - started });
+  }
+  lock.annotate({ childPgid: null });
+  if (tsFiles.length === 0)
+    finish({
+      result: 'pass',
+      exit: 0,
+      tests: pythonCounts,
+      ran: pythonFiles,
+      durationMs: Date.now() - started,
+    });
+}
 
 // 5. Build once --------------------------------------------------------------
 const { BUILD_TIMEOUT_MS, distIsFresh } = await import('./ratchet-lib.mjs');
@@ -471,7 +530,7 @@ const reportPath = join(reportDir, 'report.json');
 const vitestArgs = [
   join(ROOT, 'node_modules/vitest/vitest.mjs'),
   'run',
-  ...projects.flatMap((p) => ['--project', p]),
+  ...projects.filter((p) => p !== 'python').flatMap((p) => ['--project', p]),
   '--no-file-parallelism',
   '--maxWorkers=1',
   '--reporter=default',
@@ -481,7 +540,7 @@ const vitestArgs = [
   // Absolute paths: vitest keeps a test file whose path starts with an
   // absolute filter (and whose relative path contains it); the post-run
   // check below catches any extra file such a match would pull in.
-  ...files.map((f) => join(ROOT, f)),
+  ...tsFiles.map((f) => join(ROOT, f)),
 ];
 say(
   `exec nice(${getPriority()}) node ${loggedVitestArgs(vitestArgs)
@@ -489,9 +548,7 @@ say(
     .join(' ')}`,
 );
 
-// The load stamp belongs to the timed interval: sampled at its start.
-Object.assign(summary, stamp());
-const started = Date.now();
+// Retain the stamp sampled at `started`: duration includes Python and the build.
 const run = await runGroup(process.execPath, vitestArgs, {
   label: 'run',
   timeoutMs: RUN_TIMEOUT_MS,
@@ -520,9 +577,14 @@ const exit = run.code ?? signalExit(run.signal);
 const verdict = runVerdict({
   exit,
   report,
-  files,
+  files: tsFiles,
   timedOut: run.timedOut,
   interruptedBy,
   testNamePattern: opts.testNamePattern,
 });
+if (report !== null && pythonCounts !== null) {
+  report.ran = [...pythonFiles, ...report.ran];
+  for (const key of ['total', 'passed', 'failed', 'skipped'])
+    report.tests[key] += pythonCounts[key];
+}
 finish({ durationMs, ...report, ...verdict });

@@ -1,0 +1,118 @@
+#!/usr/bin/python3 -I
+"""Closed, bounded v1 forced-command transport. Never evaluates shell input."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+ROOT = Path('/var/lib/crq-spool')
+
+def valid(iid):
+    if not re.fullmatch(r'promo-[0-9a-f]{10}\+{0,9}', iid):
+        raise ValueError('bad id')
+    return iid
+
+def read(path, limit=1048576):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError('invalid spool file')
+        body = stream.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError('oversized spool file')
+        return body
+
+def main():
+    args = os.environ.get('SSH_ORIGINAL_COMMAND', '').split()
+    if not args:
+        raise ValueError('no command')
+    verb, args = args[0], args[1:]
+    if verb in ('put', 'snapshot', 'withdraw'):
+        if len(args) != 1:
+            raise ValueError('one id required')
+        iid = valid(args[0])
+        request = ROOT / 'requests' / (iid + '.json')
+        claiming = ROOT / 'requests' / ('.' + iid + '.json.claiming')
+        result = ROOT / 'results' / (iid + '.json')
+        claim = ROOT / 'results' / (iid + '.claimed')
+        if verb == 'put':
+            body = sys.stdin.buffer.read(4097)
+            if len(body) > 4096:
+                raise ValueError('oversized request')
+            obj = json.loads(body)
+            if not isinstance(obj, dict) or obj.get('item') != iid:
+                raise ValueError('identity mismatch')
+            fd = os.open(ROOT / 'requests/.transport.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o660)
+            with os.fdopen(fd, 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if claim.exists() or claiming.exists() or result.exists():
+                    raise ValueError('identity claimed or completed')
+                old = read(request, 4096)
+                if old is not None:
+                    if old != body:
+                        raise ValueError('payload conflict')
+                else:
+                    fd, name = tempfile.mkstemp(prefix='.' + iid, dir=request.parent)
+                    try:
+                        with os.fdopen(fd, 'wb') as out:
+                            os.fchmod(out.fileno(), 0o644)
+                            out.write(body)
+                            out.flush()
+                            os.fsync(out.fileno())
+                        os.link(name, request)
+                        directory = os.open(request.parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                    finally:
+                        Path(name).unlink(missing_ok=True)
+            print('PUT ' + iid)
+        elif verb == 'withdraw':
+            try:
+                request.unlink()
+                print('RM')
+            except FileNotFoundError:
+                print('ENOENT')
+        else:
+            print('claimed ' + str(int(claim.exists() or claiming.exists())))
+            print('request ' + str(int(request.exists())))
+            body = read(result)
+            if body is None:
+                print('result -')
+            else:
+                sys.stdout.flush()
+                sys.stdout.buffer.write(b'result begin\n' + body + b'result end\n')
+    elif verb == 'read':
+        if len(args) != 2:
+            raise ValueError('read requires target and id')
+        if args == ['backoff', '-']:
+            path = ROOT / 'ledger/backoff.json'
+        elif args[0] == 'result':
+            path = ROOT / 'results' / (valid(args[1]) + '.json')
+        else:
+            raise ValueError('invalid read target')
+        sys.stdout.buffer.write(read(path) or b'')
+    elif verb == 'exist':
+        if not 1 <= len(args) <= 100:
+            raise ValueError('bounded ids required')
+        for iid in args:
+            valid(iid)
+        for iid in args:
+            print(iid + ' ' + str(int((ROOT / 'results' / (iid + '.json')).exists())))
+    else:
+        raise ValueError('unknown verb')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        print('spool-shell: operation refused', file=sys.stderr)
+        sys.exit(2)

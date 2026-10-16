@@ -15,9 +15,9 @@
     "^scripts/denylist-scan$",
     "^apps/crq-python/(?:signer/|ops/systemd/|ops/prepare-[^/]+\\.py$|config\\.json$)"
   ],
-  "requiredChecks": ["static", "denylist", "ratchet"],
+  "requiredChecks": ["static", "denylist", "ratchet", "crq-python"],
   "requiredJobs": {
-    "ci.yml": ["static", "from-source"],
+    "ci.yml": ["static", "crq-python", "from-source"],
     "denylist.yml": ["denylist"]
   },
   "revisionWindow": {

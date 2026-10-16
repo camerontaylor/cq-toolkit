@@ -417,7 +417,13 @@ describe('checkVerifiedRun', () => {
   });
 
   test('a green run with real jobs passes', () => {
-    expect(checkVerifiedRun(wf(), [job(), job({ name: 'b' })], want).state).toBe('success');
+    expect(checkVerifiedRun(wf(), [job(), job({ name: 'crq-python' })], want).state).toBe(
+      'success',
+    );
+  });
+
+  test('refuses a historical CI run without Python', () => {
+    expect(checkVerifiedRun(wf(), [job()], want).reason).toMatch(/missing required job crq-python/);
   });
 
   test('missing / pending / jobs not read', () => {
@@ -793,7 +799,7 @@ function world(tip = M1, main = MAIN, over: Partial<World> = {}): World {
       ['ci.yml', [greenRun('ci.yml', tip)]],
       ['denylist.yml', [greenRun('denylist.yml', tip)]],
     ]),
-    jobs: [greenJob],
+    jobs: [greenJob, { ...greenJob, name: 'crq-python' }],
     verifyRuns: [],
     dispatchCode: 0,
     ...over,

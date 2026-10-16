@@ -1,7 +1,7 @@
 import { describe, expect, test, vi, beforeEach } from 'vitest';
 
-import type { SandboxBackendAdapter } from '../../src/sandbox/backend.js';
-import { probeBackend } from '../../src/sandbox/probe.js';
+import type { SandboxBackendAdapter } from '../../src/sandbox/launcher.js';
+import { probeBackend } from '../../experimental/sandbox-host/probe.js';
 
 const fs = vi.hoisted(() => ({
   chmod: vi.fn<(path: string, mode: number) => Promise<void>>(),
