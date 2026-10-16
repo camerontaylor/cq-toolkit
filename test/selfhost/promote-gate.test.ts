@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
+import { authorizePaths } from '../../src/ops/gates/d11Authorization.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from '../../src/ops/gates/policyDiff.js';
 import type { RangeCommit } from '../../src/ops/ratchet/git.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -647,6 +648,10 @@ interface World {
   promoted?: string | undefined;
   /** When set, the marker ref read fails with this stderr (fail-closed). */
   promotedError?: string;
+  /** The cq-state ledger history, newest first; undefined = unrouted (unreadable). */
+  settle?: { sha: string; ledger: unknown }[];
+  /** The timeline label events per read (n = read index); default: one owner label. */
+  timeline?: (n: number) => unknown[];
 }
 
 const ok = (value: unknown): GhResult => ({
@@ -658,6 +663,7 @@ const ok = (value: unknown): GhResult => ({
 function fakeGh(world: World, calls: string[][]): GhFn {
   let checkReads = 0;
   let statusReads = 0;
+  let timelineReads = 0;
   return (args) => {
     calls.push(args);
     const path = args[0] === 'api' && args[1] === '-X' ? (args[3] ?? '') : (args[1] ?? '');
@@ -691,6 +697,23 @@ function fakeGh(world: World, calls: string[][]): GhFn {
       return Promise.resolve(ok([world.statuses.get(m[1] ?? '') ?? []]));
     }
     if (q === 'repos/o/r') return Promise.resolve(ok({ owner: { id: 1 } }));
+    if (world.settle !== undefined && q === 'repos/o/r/commits') {
+      return Promise.resolve(ok(world.settle.map((v) => ({ sha: v.sha }))));
+    }
+    if (world.settle !== undefined && q === 'repos/o/r/contents/.cq/settle-state.json') {
+      const ref = /[?&]ref=([0-9a-f]{40})/.exec(path)?.[1];
+      const version = world.settle.find((v) => v.sha === ref);
+      if (version === undefined) {
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' });
+      }
+      const content = Buffer.from(JSON.stringify(version.ledger)).toString('base64');
+      return Promise.resolve(ok({ encoding: 'base64', content }));
+    }
+    if (world.timeline !== undefined && /^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
+      const events = world.timeline(timelineReads);
+      timelineReads += 1;
+      return Promise.resolve(ok([events]));
+    }
     if (/^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
       return Promise.resolve(
         ok([
@@ -813,6 +836,9 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
+    // No C3 attestation at the trust ref; the PR's contribution is empty.
+    readBlob: () => Promise.resolve(null),
+    changedPaths: () => Promise.resolve([]),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -921,19 +947,24 @@ describe('runGate', () => {
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
     ]);
-    expect(h.policyInputs).toEqual([
-      {
-        repo: '/tmp/trust',
-        trustRef: TRUST,
-        subject: M1,
-        subjectKind: 'push',
-        base: 'refs/remotes/origin/main',
-      },
+    expect(h.policyInputs).toHaveLength(1);
+    expect(h.policyInputs[0]).toMatchObject({
+      repo: '/tmp/trust',
+      trustRef: TRUST,
+      subject: M1,
+      subjectKind: 'push',
+      base: 'refs/remotes/origin/main',
+      authorization: { attested: false },
+    });
+    expect(h.policyInputs[0]?.authorization?.contributions).toMatchObject([
+      { pr: 7, merge: M1, head: H1 },
     ]);
     const text = r.report.join('\n');
     expect(text).toMatch(/admitted PR #7/);
-    expect(text).toMatch(/override PR #7 \(logged only\)/);
-    // The label is logged invalid (no durable head observation), never honoured.
+    expect(text).toMatch(/override PR #7 \(merge c{40}, head b{40}\):/);
+    // No settle ledger is routed, so the label is invalid (no durable head
+    // observation), never honoured.
+    expect(text).toMatch(/settle ledger unreadable/);
     expect(text).toMatch(/verdict: invalid/);
     expect(text).toMatch(/verified ci\.yml: success/);
     expect(text).toMatch(/push: dry run/);
@@ -1178,7 +1209,7 @@ describe('runGate', () => {
     );
   });
 
-  test('policy needs-human refuses (break-glass), with the override still logged', async () => {
+  test('policy needs-human refuses (break-glass), with the override still echoed', async () => {
     const h = harness(world(), {
       policyDiff: () => Promise.resolve(policyOutcome('needs-human')),
     });
@@ -1187,7 +1218,7 @@ describe('runGate', () => {
     expect(r.report.at(-1)).toMatch(
       /policy: needs-human .* owner break-glass \(ADR-0004 D-G\.4, D-H\.4\)/,
     );
-    expect(r.report.join('\n')).toMatch(/override PR #7 \(logged only\)/);
+    expect(r.report.join('\n')).toMatch(/override PR #7 \(merge /);
     const failed = harness(world(), {
       policyDiff: () => Promise.resolve({ status: 'failed', error: 'git fault' }),
     });
@@ -1668,6 +1699,206 @@ describe('runGate', () => {
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(/gate error: gh exit 1: HTTP 502/);
+  });
+});
+
+// -- runGate: decisive D11 authorization (ADR-0004 D-C.3, D-G.4) ----------------
+
+const C3_OK = JSON.stringify({
+  schemaVersion: 1,
+  attests: 'C3',
+  attestedAt: '2026-10-01T00:00:00Z',
+});
+const EPOCH = '2026-09-01T00:00:00.000Z';
+const CHANGED = 'vitest.config.ts';
+
+/** A ledger version; `prs` maps a PR number to the head its record observed. */
+const ledger = (prs: Record<string, string>): unknown => ({
+  version: 1,
+  repo: 'o/r',
+  prs: Object.fromEntries(
+    Object.entries(prs).map(([pr, head]) => [
+      pr,
+      {
+        tuple: { head, base: MAIN, forcePushEpoch: 0 },
+        observations: [{ observedAt: EPOCH, by: 'self-merge-prs:observe' }],
+      },
+    ]),
+  ),
+});
+
+/** The settle history after the merge: the tip has pruned PR #7; an older version holds it. */
+const PRUNED_HISTORY = [
+  { sha: sha('1'), ledger: ledger({}) },
+  { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+];
+
+const ownerLabel = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  event: 'labeled',
+  label: { name: 'cq-override' },
+  actor: { login: 'owner', id: 1, type: 'User' },
+  created_at: '2026-09-02T00:00:00Z',
+  performed_via_github_app: null,
+  ...over,
+});
+
+/**
+ * A policy fake over the real D11 predicate: the range needs a human for
+ * `paths`, and passes only when the bound authorization authorizes them all.
+ */
+function d11Policy(
+  inputs: PolicyDiffInput[],
+  paths: readonly string[] = [CHANGED],
+): GateDeps['policyDiff'] {
+  return (input) => {
+    inputs.push(input);
+    const auth = input.authorization;
+    if (auth === undefined) return Promise.resolve(policyOutcome('needs-human'));
+    const d11 = authorizePaths(auth, paths);
+    const base = policyOutcome(d11.authorized ? 'pass' : 'needs-human');
+    if (base.status !== 'ok') return Promise.resolve(base);
+    return Promise.resolve({
+      status: 'ok',
+      value: { ...base.value, d11, report: d11.lines },
+    });
+  };
+}
+
+function d11Harness(
+  over: Partial<World>,
+  attestation: string | null = C3_OK,
+  contribution: readonly string[] = [CHANGED],
+): { h: Harness; inputs: PolicyDiffInput[] } {
+  const inputs: PolicyDiffInput[] = [];
+  const h = harness(world(M1, MAIN, { settle: PRUNED_HISTORY, ...over }), {
+    policyDiff: d11Policy(inputs),
+  });
+  h.deps.git = fakeGit({
+    readBlob: (_repo, rev, path) =>
+      Promise.resolve(rev === TRUST && path === 'policy/attestations/c3.json' ? attestation : null),
+    changedPaths: (_repo, from, to) =>
+      Promise.resolve(from === MAIN && to === M1 ? [...contribution] : []),
+  });
+  return { h, inputs };
+}
+
+describe('runGate — decisive D11 authorization', () => {
+  test('valid record + C3 attested at the trust ref → the definition change promotes', async () => {
+    const { h, inputs } = d11Harness({ timeline: () => [ownerLabel()] });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('would-promote');
+    const text = r.report.join('\n');
+    // The epoch came from the older ledger version (the tip pruned PR #7).
+    expect(text).toMatch(/settle ledger — 2 version\(s\) read/);
+    expect(text).toMatch(/attestation: .* valid at the trust ref — records honoured/);
+    expect(text).toMatch(/verdict: honoured/);
+    expect(text).toMatch(/d11: vitest\.config\.ts authorized by PR #7/);
+    // It relied on the record, so the record is re-read after the waits.
+    expect(inputs).toHaveLength(2);
+    expect(text).toMatch(/d11 pass 2:/);
+  });
+
+  test('valid record, no attestation → needs-human refusal with dormant logged', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, null);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/verdict: dormant/);
+    expect(text).toMatch(/dormant: ADR-0004 D-G\.4 records are honoured only once/);
+    expect(text).toMatch(/d11: vitest\.config\.ts unauthorized — PR #7 .* record is dormant/);
+    expect(r.report.at(-1)).toMatch(/dormant until the C3 attestation, .* owner break-glass/);
+  });
+
+  test('a malformed attestation at the trust ref is dormant, never armed', async () => {
+    const malformed = JSON.stringify({ schemaVersion: 1, attests: 'C3' });
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, malformed);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/present but invalid \(schema violation/);
+    expect(text).toMatch(/verdict: dormant/);
+  });
+
+  test('an unreadable attestation is dormant', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    h.deps.git = { ...h.deps.git, readBlob: () => Promise.reject(new Error('git fault')) };
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(/unreadable at the trust ref \(git fault\)/);
+  });
+
+  test('a label applied before the head-observation epoch is invalid', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel({ created_at: '2026-08-31T00:00:00Z' })],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/verdict: invalid/);
+    expect(text).toMatch(/is not after the head observation epoch/);
+    expect(r.report.at(-1)).toMatch(/not every path needing a human is authorized/);
+  });
+
+  test('an App-applied label is invalid (the A14 regression)', async () => {
+    const { h } = d11Harness({
+      timeline: () => [
+        ownerLabel({
+          actor: { login: 'cq-automation[bot]', id: 99, type: 'Bot' },
+          performed_via_github_app: { slug: 'cq-automation' },
+        }),
+      ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/label applied via GitHub App 'cq-automation'/);
+    expect(text).toMatch(/actor id 99 is not the repository owner id 1/);
+  });
+
+  test('the newest ledger version holding the PR observed another head → invalid', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: ledger({ '7': sha('9') }) },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(/no durable head observation for b{40}/);
+  });
+
+  test('an absent settle ledger leaves the record invalid', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()], settle: [] });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/settle ledger — 0 version\(s\) read \(history exhausted/);
+    expect(text).toMatch(/no durable head observation/);
+  });
+
+  test('a needs-human path no admitted PR contributes is named, even with a valid record', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, C3_OK, ['src/other.ts']);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(
+      /d11: vitest\.config\.ts unauthorized — not contributed by any admitted PR in the closure/,
+    );
+  });
+
+  test('an unlabel during the wait refuses at the D11 recheck', async () => {
+    const { h } = d11Harness({
+      timeline: (n) =>
+        n === 0
+          ? [ownerLabel()]
+          : [
+              ownerLabel(),
+              { ...ownerLabel(), event: 'unlabeled', created_at: '2026-09-03T00:00:00Z' },
+            ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/\(D11 recheck after the wait\)$/);
   });
 });
 

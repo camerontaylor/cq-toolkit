@@ -22,6 +22,10 @@
 //   - THE OVERRIDE LABEL is evaluated from API timeline events and the
 //     settle-ledger head epoch, logged in full, and honoured only once the
 //     C3 attestation is on the trust ref (D-G.4).
+//   - A PUSH SUBJECT carries no label of its own: the promotion gate binds
+//     a per-admitted-PR authorization (./d11Authorization.ts) in-process,
+//     and a needs-human range passes only when every path needing a human
+//     is authorized by every PR that changed it (D-C.3).
 //
 // Failure direction (I5): a finding the check cannot rule out is
 // needs-human, never a pass; `lint` is always `fail`. `failed` is reserved for
@@ -51,6 +55,7 @@ import {
   type RatchetManifest,
 } from '../ratchet/internal/definitions.js';
 import { checkDiffMonotonicity, formatViolations } from '../ratchet/monotonicGuard.js';
+import { authorizePaths, type D11Authorization, type D11Decision } from './d11Authorization.js';
 import {
   C3_ATTESTATION_PATH,
   evaluateOverrideLabel,
@@ -118,6 +123,11 @@ export interface PolicyDiffInput {
   labelEventsPath?: string;
   /** The fetched settle-ledger ref (`cq-state`), when it exists. */
   settleRef?: string;
+  /**
+   * Push subjects only: the per-admitted-PR D11 authorization the gate
+   * bound. In-process only — the strict CLI schema cannot carry it.
+   */
+  authorization?: D11Authorization;
 }
 
 export type PolicyFindingKind =
@@ -151,6 +161,8 @@ export interface PolicyDiffOutcome {
   rangeBase: string;
   findings: PolicyFinding[];
   override: OverrideEvaluation;
+  /** Push subjects with a bound authorization: the D11 decision over the needs-human paths. */
+  d11?: D11Decision;
   /** The run report: posture, range, findings, the override record, the verdict. */
   report: string[];
 }
@@ -423,7 +435,9 @@ async function evaluateOverride(
     status: 'absent',
     reasons: [`not evaluated: ${why}`],
   });
-  if (input.subjectKind !== 'pr') return skip('a push subject carries no PR label record');
+  if (input.subjectKind !== 'pr') {
+    return skip('a push subject is authorized per admitted PR (D11 authorization)');
+  }
   if (input.pr === undefined) return skip('no PR number');
   if (input.ownerId === undefined) return skip('no repository owner id');
   if (input.labelEventsPath === undefined) return skip('no label events');
@@ -491,14 +505,21 @@ async function evaluateOverride(
   });
 }
 
+/** The findings that make a posture's verdict needs-human. */
+function humanFindings(
+  posture: ProtectedPathsPosture,
+  findings: readonly PolicyFinding[],
+): PolicyFinding[] {
+  return posture === 'human' ? [...findings] : findings.filter((f) => f.kind !== 'protected-path');
+}
+
 /** The verdict a posture assigns to a finding list (before any override). */
 function judge(
   posture: ProtectedPathsPosture,
   findings: readonly PolicyFinding[],
 ): PolicyDiffOutcome['verdict'] {
   if (findings.some((f) => f.kind === 'lint')) return 'fail';
-  if (posture === 'human') return findings.length > 0 ? 'needs-human' : 'pass';
-  return findings.some((f) => f.kind !== 'protected-path') ? 'needs-human' : 'pass';
+  return humanFindings(posture, findings).length > 0 ? 'needs-human' : 'pass';
 }
 
 /**
@@ -911,7 +932,18 @@ export function createPolicyDiff(
     // The window comes from the TRUST REF's list only (never the subject's).
     const effective = applyRevisionWindow(config, policy.revisionWindow, now());
     let verdict = judge(effective.posture, findings);
-    const authorized = verdict === 'needs-human' && override.status === 'honoured';
+    let d11: D11Decision | undefined;
+    if (input.subjectKind === 'push' && verdict === 'needs-human') {
+      if (input.authorization === undefined) {
+        notes.push('d11: no authorization bound for this push subject — needs-human stands');
+      } else {
+        const paths = humanFindings(effective.posture, findings).map((f) => f.path);
+        d11 = authorizePaths(input.authorization, paths);
+      }
+    }
+    const authorized =
+      verdict === 'needs-human' &&
+      (input.subjectKind === 'push' ? d11?.authorized === true : override.status === 'honoured');
     if (authorized) verdict = 'pass';
 
     const report: string[] = [
@@ -926,9 +958,12 @@ export function createPolicyDiff(
       report.push(`  ${reason}`);
     }
     report.push(...notes);
+    if (d11 !== undefined) report.push(...d11.lines);
     report.push(
       authorized
-        ? 'verdict: pass (needs-human authorized by the D11 override record)'
+        ? input.subjectKind === 'push'
+          ? "verdict: pass (needs-human authorized by every changing PR's D11 record)"
+          : 'verdict: pass (needs-human authorized by the D11 override record)'
         : `verdict: ${verdict}`,
     );
 
@@ -944,6 +979,7 @@ export function createPolicyDiff(
         rangeBase,
         findings,
         override,
+        ...(d11 === undefined ? {} : { d11 }),
         report,
       },
     };

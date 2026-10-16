@@ -15,8 +15,9 @@
 //      change.
 //   4. The override record: honoured only with the C3 attestation on the
 //      trust ref; dormant without it; an App-applied label is invalid; a push
-//      subject is never evaluated; an unreadable events file is invalid,
-//      never `failed`.
+//      subject carries no label of its own; an unreadable events file is
+//      invalid, never `failed`. A push subject passes only through a bound
+//      D11 authorization covering every needs-human path; `lint` stays fail.
 //   5. The posture comes from the resolved config: the registry schema has no
 //      posture field and a bogus env value fails the dispatch.
 //
@@ -40,6 +41,10 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
+import {
+  bindD11Authorization,
+  type D11Authorization,
+} from '../../../src/ops/gates/d11Authorization.js';
 import {
   LABEL_EVENTS_MAX_BYTES,
   POLICY_LIST_PATH,
@@ -778,6 +783,47 @@ describe('policyDiff: workflows', SLOW, () => {
     expect(kinds(out)).toContain('lint');
     expect(await verdicts(c['lint']!)).toEqual({ human: 'fail', 'diff-check': 'fail' });
     expect(out.report.at(-1)).toBe('verdict: fail');
+  });
+
+  test('a D11 authorization covering every path never turns a lint fail into a pass', async () => {
+    const plain = await run(c['lint']!, 'human');
+    const auth = bindD11Authorization({
+      ownerId: 1,
+      attestation: {
+        state: 'present',
+        text: JSON.stringify({
+          schemaVersion: 1,
+          attests: 'C3',
+          attestedAt: '2026-10-01T00:00:00Z',
+        }),
+      },
+      prs: [
+        {
+          pr: 1,
+          merge: 'c'.repeat(40),
+          head: c['lint']!,
+          paths: plain.findings.map((f) => f.path),
+          events: [
+            {
+              event: 'labeled',
+              label: { name: 'cq-override' },
+              actor: { login: 'owner', id: 1, type: 'User' },
+              created_at: '2026-09-20T11:00:00Z',
+              performed_via_github_app: null,
+            },
+          ],
+          headObservedAt: '2026-09-20T10:00:00.000Z',
+        },
+      ],
+    });
+    expect(auth.contributions[0]?.record.status).toBe('honoured');
+    const out = await run(c['lint']!, 'human', {
+      subjectKind: 'push',
+      base: 'main',
+      authorization: auth,
+    });
+    expect(out.verdict).toBe('fail');
+    expect(out.d11).toBeUndefined();
   });
 
   test('an unparseable workflow fails closed to needs-human', async () => {
@@ -1539,12 +1585,84 @@ describe('policyDiff: the override record', SLOW, () => {
       subjectKind: 'push',
       base: 'main',
     });
-    expect(out.override).toEqual({
-      status: 'absent',
-      reasons: ['not evaluated: a push subject carries no PR label record'],
-    });
+    const skipped =
+      'not evaluated: a push subject is authorized per admitted PR (D11 authorization)';
+    expect(out.override).toEqual({ status: 'absent', reasons: [skipped] });
     expect(out.verdict).toBe('needs-human');
-    expect(out.report).toContain('  not evaluated: a push subject carries no PR label record');
+    expect(out.report).toContain(`  ${skipped}`);
+    expect(out.report).toContain(
+      'd11: no authorization bound for this push subject — needs-human stands',
+    );
+    expect(out.d11).toBeUndefined();
+  });
+
+  const C3 = JSON.stringify({
+    schemaVersion: 1,
+    attests: 'C3',
+    attestedAt: '2026-10-01T00:00:00Z',
+  });
+  const authorization = (
+    over: { paths?: string[]; attested?: boolean; events?: unknown[] } = {},
+  ): D11Authorization =>
+    bindD11Authorization({
+      ownerId: OWNER_ID,
+      attestation: over.attested === false ? { state: 'absent' } : { state: 'present', text: C3 },
+      prs: [
+        {
+          pr: PR,
+          merge: 'c'.repeat(40),
+          head: subject,
+          paths: over.paths ?? ['lint/x.txt'],
+          events: over.events ?? [labelEvent()],
+          headObservedAt: EPOCH,
+        },
+      ],
+    });
+  const push = (auth: D11Authorization): Partial<PolicyDiffInput> => ({
+    subjectKind: 'push',
+    base: 'main',
+    authorization: auth,
+  });
+
+  test('push: a bound, attested record of the PR that changed the path → pass', async () => {
+    const out = await run(subject, 'human', push(authorization()));
+    expect(out.verdict).toBe('pass');
+    expect(out.d11).toMatchObject({ authorized: true, unauthorized: [] });
+    expect(out.report).toContain('d11: lint/x.txt authorized by PR #7');
+    expect(out.report.at(-1)).toBe(
+      "verdict: pass (needs-human authorized by every changing PR's D11 record)",
+    );
+  });
+
+  test('push: a dormant record (no C3 attestation) stays needs-human, naming the path', async () => {
+    const out = await run(subject, 'human', push(authorization({ attested: false })));
+    expect(out.verdict).toBe('needs-human');
+    expect(out.d11?.unauthorized).toEqual([
+      {
+        path: 'lint/x.txt',
+        why: `PR #7 (merge ${'c'.repeat(40)}) changes it and its D11 record is dormant`,
+      },
+    ]);
+    expect(out.report.at(-1)).toBe('verdict: needs-human');
+  });
+
+  test('push: an App-applied or pre-epoch label is invalid → needs-human', async () => {
+    for (const event of [
+      labelEvent({ performed_via_github_app: { slug: 'bot' } }),
+      labelEvent({ created_at: '2026-09-20T09:00:00Z' }),
+    ]) {
+      const out = await run(subject, 'human', push(authorization({ events: [event] })));
+      expect(out.verdict).toBe('needs-human');
+      expect(out.d11?.unauthorized[0]?.why).toMatch(/D11 record is invalid$/);
+    }
+  });
+
+  test('push: a path no admitted PR contributed (outside the closure) → needs-human', async () => {
+    const out = await run(subject, 'human', push(authorization({ paths: ['src/other.ts'] })));
+    expect(out.verdict).toBe('needs-human');
+    expect(out.report).toContain(
+      'd11: lint/x.txt unauthorized — not contributed by any admitted PR in the closure',
+    );
   });
 });
 

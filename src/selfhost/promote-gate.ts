@@ -47,11 +47,17 @@
 //      judged here: only the merger's recheck (self-merge-prs,
 //      merge-recheck.ts) enforces it, so a PR hand-merged into
 //      `merge-queue` skips settle (methods-w1-10 Residuals; C2 owns it).
-//   6. gates.policyDiff recomputed in-process over main..tip (push subject);
-//      fail/needs-human refuses — D11 records are dormant until the C3
-//      attestation, so a protected-path change promotes only by owner
+//   6. each admitted PR's D11 evidence is read and BOUND (d11Authorization):
+//      its `cq-override` label events, its contribution diff(M^1, M), the
+//      head-observation epoch from the cq-state ledger history (merged PRs
+//      are pruned from the tip), and the C3 attestation at the TRUST ref.
+//      Every record is echoed in the report.
+//   7. gates.policyDiff recomputed in-process over main..tip (push subject)
+//      with that authorization: a needs-human range passes only when every
+//      path needing a human is authorized by every admitted PR that changed
+//      it; fail/needs-human refuses. Before C3 every valid record is
+//      dormant, so a protected-path change promotes only by owner
 //      break-glass (ADR-0004 D-G.4, D-H.4).
-//   7. each admitted PR's `cq-override` record is LOGGED (never decisive).
 //   8. a valid `cq/ratchet` verdict on tip bound to main (selectVerdict:
 //      verdict-App numeric id, or the interim slug + binding + "the
 //      default-branch cq-verify ran at main" form), waited for —
@@ -61,10 +67,12 @@
 //      the trust ref's policy list names in `requiredJobs` for that file.
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
-//      not catch it; any change refuses), then one no-wait re-read of steps
-//      8–9 (pass 2 can itself take minutes), the promotion-review re-read,
-//      then step 6 once more when its pass relied on the D-P revision
-//      window (the last read), then `push --atomic` of tip
+//      not catch it; any change refuses), steps 6–7 re-run when the policy
+//      pass relied on D11 records (an unlabel moves no ref either), then
+//      one no-wait re-read of steps 8–9 (pass 2 can itself take minutes),
+//      the promotion-review re-read, then step 6 once more when its pass
+//      relied on the D-P revision window (the last read), then
+//      `push --atomic` of tip
 //      onto main — leased on the (main, tip) read at step 1, never a plain
 //      force. One `ls-remote` right before the push re-reads the queue on
 //      the push's own transport: still the tip (the normal case) → only
@@ -74,10 +82,12 @@
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
 import {
-  evaluateOverrideLabel,
-  formatOverride,
-  type OverrideEvaluation,
-} from '../ops/gates/overrideRecord.js';
+  bindD11Authorization,
+  type C3AttestationRead,
+  type D11Authorization,
+  type D11PrEvidence,
+} from '../ops/gates/d11Authorization.js';
+import { C3_ATTESTATION_PATH, headObservationEpochInHistory } from '../ops/gates/overrideRecord.js';
 import { resolveProtectedPathsConfig } from '../ops/gates/policyConfig.js';
 import {
   createPolicyDiff,
@@ -85,11 +95,13 @@ import {
   type PolicyDiffOutcome,
 } from '../ops/gates/policyDiff.js';
 import {
+  gitChangedPaths,
   gitFirstParentRange,
   gitIsAncestor,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
+  gitReadBlob,
   gitRevParse,
   gitTreeOf,
   type LeasedUpdate,
@@ -103,6 +115,8 @@ import {
   type AcceptanceInput,
   type AcceptanceResult,
 } from './acceptance.js';
+import type { SettleState } from './settle-state.js';
+import { readSettleHistory } from './state-branch.js';
 
 /** The branch promotion advances. */
 export const MAIN_BRANCH = 'main';
@@ -153,6 +167,9 @@ export const POLL_MS = 30_000;
 
 /** Default wait budget, minutes. */
 export const DEFAULT_TIMEOUT_MIN = 20;
+
+/** Most cq-state ledger versions the D11 epoch read walks (newest first). */
+export const SETTLE_HISTORY_MAX = 50;
 
 const WORKFLOWS_DIR = '.github/workflows';
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -669,6 +686,10 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
+  /** A file at a revision, or null when absent (the C3 attestation at the trust ref). */
+  readBlob(repo: string, rev: string, path: string): Promise<string | null>;
+  /** Paths changed between two commits (an admitted PR's contribution diff(M^1, M)). */
+  changedPaths(repo: string, from: string, to: string): Promise<string[]>;
   pushAtomic(
     repo: string,
     url: string,
@@ -685,6 +706,8 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
+  readBlob: gitReadBlob,
+  changedPaths: gitChangedPaths,
   pushAtomic: gitPushAtomic,
 };
 
@@ -997,48 +1020,11 @@ async function gateBody(
     );
   }
 
-  // 6. Policy recompute over main..subject (push subject).
-  const policyInput: PolicyDiffInput = {
-    repo: cfg.repo,
-    trustRef: cfg.trustRef,
-    subject,
-    subjectKind: 'push',
-    base: `refs/remotes/origin/${MAIN_BRANCH}`,
-  };
-  const policy = await deps.policyDiff(policyInput);
-  let policyRefusal: string | null = null;
-  let requiredJobs: Readonly<Record<string, readonly string[]>> = {};
-  let windowed = false;
-  if (policy.status !== 'ok') {
-    const detail =
-      policy.status === 'failed'
-        ? policy.error
-        : policy.status === 'needs-human'
-          ? policy.reason
-          : policy.status === 'indeterminate'
-            ? policy.detail
-            : policy.status;
-    report.push(`policy: ${policy.status} — ${clean(detail)}`);
-    policyRefusal = 'policy: gates.policyDiff could not judge the range';
-  } else {
-    report.push(`policy: ${policy.value.verdict}`);
-    for (const line of policy.value.report) report.push(`  ${line}`);
-    if (policy.value.verdict !== 'pass') {
-      policyRefusal = `policy: ${policy.value.verdict} — D11 records are dormant until the C3 attestation, so a protected-path change promotes only by owner break-glass (ADR-0004 D-G.4, D-H.4)`;
-    }
-    // The trust ref's required job names (policy data, not code). One that
-    // names a workflow the gate does not verify could never be checked.
-    requiredJobs = policy.value.requiredJobs;
-    windowed = policy.value.postureLayer === 'window';
-    const unverified = Object.keys(requiredJobs).filter((f) => !cfg.verifiedWorkflows.includes(f));
-    if (unverified.length > 0 && policyRefusal === null) {
-      policyRefusal = `policy: requiredJobs names unverified workflow(s) ${unverified.join(', ')}`;
-    }
-  }
-
-  // 7. Log each admitted PR's cq-override record (never decisive here).
-  await logOverrides(deps, cfg, closure.admitted, report);
-  if (policyRefusal !== null) refuse(policyRefusal);
+  // 6–7. D11 evidence bound per admitted PR, then the policy recompute over
+  //      main..subject (push subject) with it.
+  const policy = await policyPass(deps, cfg, subject, closure.admitted, bySha, report, 'pass 1');
+  if (policy.refusal !== null) refuse(policy.refusal);
+  const { requiredJobs, windowed } = policy;
 
   // 8–9. Verdicts and verified runs on the SUBJECT, waited for within one
   //      deadline.
@@ -1052,6 +1038,12 @@ async function gateBody(
       `acceptance: ${changed.map((n) => `PR #${String(n)}`).join(', ')}: acceptance changed during the wait`,
     );
   }
+  // 10a'. The D11 records again when the pass relied on them: an unlabel
+  //       or relabel during the wait moves no ref either.
+  if (policy.relied) {
+    const again = await policyPass(deps, cfg, subject, closure.admitted, bySha, report, 'pass 2');
+    if (again.refusal !== null) refuse(`${again.refusal} (D11 recheck after the wait)`);
+  }
 
   // 10b. Verdicts and verified runs once more, without waiting: pass 2 can
   //      itself take minutes, and a failed rerun or a newly posted verdict
@@ -1064,11 +1056,16 @@ async function gateBody(
   //      expired window must not promote (fail closed).
   const recheckWindow = async (): Promise<void> => {
     if (!windowed) return;
-    const again = await deps.policyDiff(policyInput);
-    const verdict = again.status === 'ok' ? again.value.verdict : again.status;
-    report.push(`policy recheck (revision window): ${verdict}`);
-    if (again.status !== 'ok' || again.value.verdict !== 'pass') {
-      if (again.status === 'ok') for (const line of again.value.report) report.push(`  ${line}`);
+    const again = await policyPass(
+      deps,
+      cfg,
+      subject,
+      closure.admitted,
+      bySha,
+      report,
+      'recheck (revision window)',
+    );
+    if (again.refusal !== null) {
       refuse('policy: the revision-window pass no longer holds at push time');
     }
   };
@@ -1162,14 +1159,18 @@ async function judgeAdmitted(
   return rejected;
 }
 
-/** Step 7: evaluate and log each admitted PR's cq-override record. Never throws. */
-async function logOverrides(
+/**
+ * Step 6: read and bind each admitted PR's D11 evidence. Every read failure
+ * is a reason in the bound object (fail closed), except a git fault on the
+ * contribution diff, which throws (the gate cannot judge the range).
+ */
+async function bindAdmitted(
   deps: GateDeps,
   cfg: GateConfig,
   admitted: readonly AdmittedPr[],
+  bySha: ReadonlyMap<string, RangeCommit>,
   report: string[],
-): Promise<void> {
-  if (admitted.length === 0) return;
+): Promise<D11Authorization> {
   const repoPath = `repos/${cfg.owner}/${cfg.name}`;
   let ownerId: number | null = null;
   try {
@@ -1177,13 +1178,38 @@ async function logOverrides(
       asRecord(asRecord(await ghJson<unknown>(deps.gh, ['api', repoPath]))['owner'])['id'],
     );
   } catch (error) {
-    report.push(`override: owner id unreadable (${describeError(error)})`);
+    report.push(`  d11: owner id unreadable (${describeError(error)})`);
   }
+  let attestation: C3AttestationRead;
+  try {
+    const text = await deps.git.readBlob(cfg.repo, cfg.trustRef, C3_ATTESTATION_PATH);
+    attestation = text === null ? { state: 'absent' } : { state: 'present', text };
+  } catch (error) {
+    attestation = { state: 'unreadable', reason: describeError(error) };
+  }
+  let history: SettleState[] = [];
+  try {
+    const read = await readSettleHistory(
+      { gh: deps.gh, owner: cfg.owner, repo: cfg.name },
+      SETTLE_HISTORY_MAX,
+      (versions) => admitted.every((a) => versions.some((v) => Object.hasOwn(v.prs, String(a.pr)))),
+    );
+    history = read.versions;
+    report.push(
+      `  d11: settle ledger — ${String(read.versions.length)} version(s) read${read.exhausted ? ` (history exhausted, at most ${String(SETTLE_HISTORY_MAX)})` : ''}`,
+    );
+    for (const why of read.discarded) report.push(`  d11: settle ledger discarded — ${clean(why)}`);
+  } catch (error) {
+    report.push(`  d11: settle ledger unreadable (${describeError(error)}) — no head epoch`);
+  }
+  const prs: D11PrEvidence[] = [];
   for (const a of admitted) {
-    let evaluation: OverrideEvaluation;
+    const [p1 = ''] = bySha.get(a.merge)?.parents ?? [];
+    const paths = await deps.git.changedPaths(cfg.repo, p1, a.merge);
+    let events: D11PrEvidence['events'];
     try {
       const path = `${repoPath}/issues/${String(a.pr)}/timeline?per_page=100`;
-      const events = slurpedComments(
+      events = slurpedComments(
         await ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']),
         path,
       )
@@ -1192,24 +1218,97 @@ async function logOverrides(
           const event = asRecord(e)['event'];
           return event === 'labeled' || event === 'unlabeled';
         });
-      // No settle-ledger epoch is read here, so a present label is logged
-      // `invalid` (no durable head observation) — never honoured by the gate.
-      evaluation = evaluateOverrideLabel({
-        events,
-        ownerId: ownerId ?? 0,
-        subject: a.head,
-        headObservedAt: undefined,
-        attested: false,
-      });
     } catch (error) {
-      evaluation = {
-        status: 'invalid',
-        reasons: [`label events unreadable: ${describeError(error)}`],
-      };
+      events = { unreadable: describeError(error) };
     }
-    report.push(`override PR #${String(a.pr)} (logged only):`);
-    for (const line of formatOverride(evaluation)) report.push(`  ${line}`);
+    prs.push({
+      pr: a.pr,
+      merge: a.merge,
+      head: a.head,
+      paths,
+      events,
+      headObservedAt: headObservationEpochInHistory(history, a.pr, a.head),
+    });
   }
+  return bindD11Authorization({ ownerId, attestation, prs });
+}
+
+/** One policy pass: the refusal (null only for a pass) and what the later steps reuse. */
+interface PolicyPass {
+  refusal: string | null;
+  /** The pass needed D11 records (so the gate re-checks them after the waits). */
+  relied: boolean;
+  /** The pass relied on the D-P revision window (so the gate re-checks it last). */
+  windowed: boolean;
+  /** The trust ref's `requiredJobs` (policy data, not code). */
+  requiredJobs: Readonly<Record<string, readonly string[]>>;
+}
+
+/**
+ * Steps 6–7 (and 10a'): bind the admitted PRs' D11 evidence and recompute
+ * the policy over main..subject with it. `refusal` is null only for a pass;
+ * `relied` says the pass needed D11 records (so the gate re-checks them).
+ */
+async function policyPass(
+  deps: GateDeps,
+  cfg: GateConfig,
+  subject: string,
+  admitted: readonly AdmittedPr[],
+  bySha: ReadonlyMap<string, RangeCommit>,
+  report: string[],
+  pass: string,
+): Promise<PolicyPass> {
+  report.push(`d11 ${pass}:`);
+  const authorization = await bindAdmitted(deps, cfg, admitted, bySha, report);
+  for (const line of authorization.report) report.push(`  ${line}`);
+  const policy = await deps.policyDiff({
+    repo: cfg.repo,
+    trustRef: cfg.trustRef,
+    subject,
+    subjectKind: 'push',
+    base: `refs/remotes/origin/${MAIN_BRANCH}`,
+    authorization,
+  });
+  if (policy.status !== 'ok') {
+    const detail =
+      policy.status === 'failed'
+        ? policy.error
+        : policy.status === 'needs-human'
+          ? policy.reason
+          : policy.status === 'indeterminate'
+            ? policy.detail
+            : policy.status;
+    report.push(`policy ${pass}: ${policy.status} — ${clean(detail)}`);
+    return {
+      refusal: 'policy: gates.policyDiff could not judge the range',
+      relied: false,
+      windowed: false,
+      requiredJobs: {},
+    };
+  }
+  report.push(`policy ${pass}: ${policy.value.verdict}`);
+  for (const line of policy.value.report) report.push(`  ${line}`);
+  const relied = policy.value.d11?.authorized === true;
+  const windowed = policy.value.postureLayer === 'window';
+  // The trust ref's required job names. One that names a workflow the gate
+  // does not verify could never be checked.
+  const requiredJobs = policy.value.requiredJobs;
+  if (policy.value.verdict === 'pass') {
+    const unverified = Object.keys(requiredJobs).filter((f) => !cfg.verifiedWorkflows.includes(f));
+    const refusal =
+      unverified.length > 0
+        ? `policy: requiredJobs names unverified workflow(s) ${unverified.join(', ')}`
+        : null;
+    return { refusal, relied, windowed, requiredJobs };
+  }
+  return {
+    refusal: authorization.attested
+      ? `policy: ${policy.value.verdict} — not every path needing a human is authorized by a valid D11 record of every admitted PR that changed it (ADR-0004 D-C.3, D-G.4)`
+      : `policy: ${policy.value.verdict} — D11 records are dormant until the C3 attestation, so a protected-path change promotes only by owner break-glass (ADR-0004 D-G.4, D-H.4)`,
+    relied,
+    windowed,
+    requiredJobs,
+  };
 }
 
 /**

@@ -22,9 +22,14 @@
 //     `merge-base(subject, base)` (a PR: its base branch, so already-queued
 //     siblings are not flagged; a push subject: `main`), are matched against
 //     the trust ref's definition set plus the trust ref's tsconfig
-//     `extends`/`references` graph. Any hit is `needs-human` — the D11
-//     record that could authorize it is dormant until the D-H.3 C3
-//     attestation (D-G.4), so no record is honoured here.
+//     `extends`/`references` graph. Any hit is `needs-human` unless the
+//     caller binds a D11 authorization (../gates/d11Authorization.ts, the
+//     predicate the promotion gate's policy pass uses) that authorizes
+//     every hit. Records stay dormant until the D-H.3 C3 attestation
+//     (D-G.4), and the CLI carrier binds none, so today every hit is
+//     needs-human. Authorized, the subject is judged on its evidence —
+//     produced under its new definitions — with the trust ref's lists and
+//     the stricter baseline unchanged.
 //   - MONOTONIC GUARD over the same range's `baselines/` diff, with the
 //     hardened argv (no external diff, no textconv, no renames), after the
 //     one-decimal coverage re-basis.
@@ -43,6 +48,11 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
+import {
+  authorizePaths,
+  type D11Authorization,
+  type D11Decision,
+} from '../gates/d11Authorization.js';
 import {
   isDefinitionPath,
   loadTrustedManifest,
@@ -102,6 +112,11 @@ export interface VerifyRatchetInput {
   measurementPath?: string;
   /** typecheck-count from the trusted recompute; absent when the recompute failed. */
   typecheckCount?: number;
+  /**
+   * The D11 authorization bound by an in-process caller; the strict CLI
+   * schema cannot carry it. Absent: every definition change is needs-human.
+   */
+  authorization?: D11Authorization;
 }
 
 export interface RatchetResult {
@@ -121,8 +136,10 @@ export interface VerifyRatchetOutcome {
   subject: string;
   /** Start of the judged range: merge-base(subject, base). */
   rangeBase: string;
-  /** Definition-set paths the subject changed (non-empty → needs-human). */
+  /** Definition-set paths the subject changed (non-empty → needs-human unless authorized). */
   definitionChanges: string[];
+  /** The D11 decision over `definitionChanges`, when an authorization was bound. */
+  d11?: D11Decision;
   guard: DiffVerdict;
   results: RatchetResult[];
   /** One line per finding, for the check run's summary. */
@@ -370,17 +387,23 @@ export const verifyRatchet: Op<VerifyRatchetInput, VerifyRatchetOutcome> = async
   }
 
   const reasons: string[] = [];
-  if (definitionChanges.length > 0) {
+  const d11 =
+    definitionChanges.length > 0 && input.authorization !== undefined
+      ? authorizePaths(input.authorization, definitionChanges)
+      : undefined;
+  const unauthorized = definitionChanges.length > 0 && d11?.authorized !== true;
+  if (unauthorized) {
     reasons.push(
       `needs-human (D11): the subject changes ratchet definitions — ${definitionChanges.join(', ')}`,
     );
   }
+  if (d11 !== undefined) reasons.push(...d11.lines);
   if (guard.ok === false) reasons.push(...formatViolations(guard.violations));
   for (const r of results) {
     if (r.verdict === 'fail') reasons.push(`${r.target}/${r.metric}: ${r.reason ?? 'failed'}`);
   }
   const failing = guard.ok === false || results.some((r) => r.verdict === 'fail');
-  const verdict = definitionChanges.length > 0 ? 'needs-human' : failing ? 'fail' : 'pass';
+  const verdict = unauthorized ? 'needs-human' : failing ? 'fail' : 'pass';
   if (verdict === 'pass') {
     for (const r of results)
       reasons.push(`${r.target}/${r.metric}: ${r.value} vs baseline ${r.baseline}`);
@@ -393,6 +416,7 @@ export const verifyRatchet: Op<VerifyRatchetInput, VerifyRatchetOutcome> = async
       subject,
       rangeBase,
       definitionChanges,
+      ...(d11 === undefined ? {} : { d11 }),
       guard,
       results,
       reasons,

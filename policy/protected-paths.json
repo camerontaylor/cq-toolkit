@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "protectedPaths": [
-    "^src/ops/gates/(?:checkRunner|overrideRecord|policyConfig|policyDiff|protectedPaths|registry|workflowScan)\\.ts$",
+    "^src/ops/gates/(?:checkRunner|d11Authorization|overrideRecord|policyConfig|policyDiff|protectedPaths|registry|workflowScan)\\.ts$",
     "^src/ops/gates/adapters/(?:eslint|tsc|vitest)\\.ts$",
     "^src/ops/ratchet/",
     "^src/ops/review/(?:gh|threads)\\.ts$",

@@ -204,17 +204,18 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 
 ## The C3 checklist (owner cutover: activate D11 records)
 
-Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
-`settleRef`/`ownerId`, so every override record evaluates invalid, and
-`logOverrides` hard-codes `attested: false`. C3 is done only when ALL of:
+Until C3 the gate cannot honour a D11 override: it binds each admitted PR's
+record (owner id, the settle-ledger history epoch, the attestation at the
+trust ref) and its `diff(M^1, M)` contribution into one authorization
+([d11-decisive-authorization.md](d11-decisive-authorization.md)), but with no
+attestation every valid record is `dormant`. C3 is done only when ALL of:
 
 - [ ] the D11 attestation lands (the ledger epoch the checks arm against);
-- [ ] `settleRef` and `ownerId` are wired into the gate's `policyDiff` call and
-      into `logOverrides`, so **the gate honours a valid override record**
-      (a record that today only logs as `invalid` becomes decisive — never
-      merely "the label is active");
-- [ ] the D-G.4 review-form record and the gate's per-PR authorization (the
-      `M^1..M^2` range for a merged PR) evaluate;
+- [x] the gate's policy pass consumes the bound per-PR authorization, so
+      **the gate honours a valid override record** once attested (decisive,
+      re-checked after the waits — never merely "the label is active");
+- [ ] the D-G.4 review-form record evaluates, and the `cq-verify` carrier
+      binds the same authorization for the `cq/ratchet` verdict;
 - [ ] the promoter credential needs no `actions: write`: `decide`'s only
       dispatch (`cq-verify`) runs on its own `GITHUB_TOKEN`, restricted to the
       default ref (pinned by `test/workflows/default-ref-guards.test.ts`). If a
