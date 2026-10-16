@@ -105,6 +105,7 @@ Templates contain `@CRQ_ROOT@`; never install them without rendering.
 3. Use the P2 helper from a retained checkout, with a **legacy** private overlay
    containing the accepted old prepare overrides, to run `legacy-check
    --legacy-root /private/old-runner`. It reads accepted `0e35cd11:config.json`,
+   requires the old checkout's HEAD to equal that accepted commit,
    computes its host rendering in memory/temp, permits only `merges_trigger` 5→1,
    and byte-compares old live config. Any other drift refuses. It never writes
    old config, locks or markers. Retain its audit and the `.bak` privately, then

@@ -145,6 +145,23 @@ class HostConfigTests(unittest.TestCase):
                     host.validate(overlay)
         self.assertEqual(host.validate(self.overlay), self.overlay)
 
+    def test_promotion_record_template_format_checked_before_render(self):
+        for template in ['http://queue.example.invalid/{item',
+                         'http://queue.example.invalid/{unknown}', '{0}',
+                         '{item.missing}', '{item:d}', '{item[999]}']:
+            with self.subTest(template=template):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['promotion']['record_url_template'] = template
+                with self.assertRaisesRegex(ValueError, 'record URL template'):
+                    host.validate(overlay)
+        for template in ['http://queue.example.invalid/{item}',
+                         'http://queue.example.invalid/{{literal}}/{item!s}',
+                         'http://queue.example.invalid/records']:
+            with self.subTest(template=template):
+                overlay = copy.deepcopy(self.overlay)
+                overlay['config']['promotion']['record_url_template'] = template
+                host.validate(overlay)
+
     def test_spool_alias_matches_runtime_client_format(self):
         import crq
 
@@ -400,16 +417,43 @@ class HostConfigTests(unittest.TestCase):
         expected['promotion']['merges_trigger'] = 1
         (legacy / 'config.json').write_bytes(host.encode(expected))
         original = (legacy / 'config.json').read_bytes()
-        with mock.patch.object(host, 'committed', return_value=committed), mock.patch.object(host, 'record') as audit:
+        with mock.patch.object(host, 'git', return_value=host.LEGACY_SHA), \
+                mock.patch.object(host, 'committed', return_value=committed), \
+                mock.patch.object(host, 'record') as audit:
             host.legacy_check(legacy, self.overlay, self.raw)
             audit.assert_called_once()
         self.assertEqual((legacy / 'config.json').read_bytes(), original)
         self.assertEqual(list(legacy.iterdir()), [legacy / 'config.json'])
         expected['promotion']['dispatch_after_min'] = 0
         (legacy / 'config.json').write_bytes(host.encode(expected))
-        with mock.patch.object(host, 'committed', return_value=committed):
+        with mock.patch.object(host, 'git', return_value=host.LEGACY_SHA), \
+                mock.patch.object(host, 'committed', return_value=committed):
             with self.assertRaisesRegex(ValueError, 'dispatch_after_min'):
                 host.legacy_check(legacy, self.overlay, self.raw)
+
+    def test_legacy_fence_rejects_moved_head_even_with_matching_config(self):
+        legacy = self.base / 'old'
+        legacy.mkdir()
+        original = b'{"same_config":true}\n'
+        (legacy / 'config.json').write_bytes(original)
+        subprocess.run(['git', '-C', str(legacy), 'init', '-q'], check=True)
+        for args in [('config', 'user.name', 'Fixture'),
+                     ('config', 'user.email', 'fixture@example.invalid'),
+                     ('add', 'config.json'), ('commit', '-qm', 'accepted fixture')]:
+            subprocess.run(['git', '-C', str(legacy), *args], check=True)
+        accepted = host.git(legacy, 'rev-parse', 'HEAD')
+        with mock.patch.object(host, 'LEGACY_SHA', accepted), \
+                mock.patch.object(host, 'committed') as committed, \
+                mock.patch.object(host, 'drift_check') as drift, \
+                mock.patch.object(host, 'record') as audit:
+            subprocess.run(['git', '-C', str(legacy), 'commit', '--allow-empty', '-qm', 'code-only move'], check=True)
+            with self.assertRaisesRegex(ValueError, 'HEAD must match'):
+                host.legacy_check(legacy, self.overlay, self.raw)
+            committed.assert_not_called()
+            drift.assert_not_called()
+            audit.assert_not_called()
+        self.assertEqual((legacy / 'config.json').read_bytes(), original)
+        self.assertFalse((self.base / 'records').exists())
 
 
 if __name__ == '__main__':

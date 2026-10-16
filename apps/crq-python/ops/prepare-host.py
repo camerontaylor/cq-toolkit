@@ -110,6 +110,10 @@ def validate(overlay):
     required = CONFIG_KEYS - {'promotion.signer.spool.dir'}
     if not required <= supplied.keys():
         raise ValueError('missing host config keys: ' + ', '.join(sorted(required - supplied.keys())))
+    try:
+        supplied['promotion.record_url_template'].format(item='record-validation')
+    except (ValueError, KeyError, IndexError, AttributeError, TypeError):
+        raise ValueError('invalid promotion record URL template') from None
     for name in ('clone', 'worktree_root'):
         path = Path(supplied[name])
         if not outside(path, deploy) or not outside(deploy, path):
@@ -396,6 +400,8 @@ def switch(root, overlay, raw, target, tag):
 
 def legacy_check(root, overlay, raw):
     """Read-only first-deploy fence: accepted source + host overrides + 5→1 only."""
+    if git(root, 'rev-parse', 'HEAD') != LEGACY_SHA:
+        raise ValueError('legacy checkout HEAD must match the accepted baseline')
     config = apply(committed(root, LEGACY_SHA, 'config.json'), overlay)
     if config['promotion']['merges_trigger'] != 5:
         raise ValueError('unexpected accepted baseline policy')
