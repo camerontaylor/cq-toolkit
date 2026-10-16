@@ -55,12 +55,9 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { connect, createServer, type AddressInfo } from 'node:net';
 
-import {
-  adaptersForPlatform,
-  type SandboxBackendAdapter,
-  type SandboxLaunchResult,
-} from './backend.js';
-import type { SandboxBackend, SandboxNetwork } from './config.js';
+import { adaptersForPlatform } from './backend.js';
+import type { SandboxBackendAdapter, SandboxLaunchResult } from '../../src/sandbox/launcher.js';
+import type { SandboxBackend, SandboxNetwork } from '../../src/sandbox/config.js';
 
 const execFile = promisify(execFileCb);
 
