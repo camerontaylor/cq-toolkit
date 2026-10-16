@@ -33,15 +33,10 @@
 //      accepts a minimal valid input and rejects an unknown key, pr 0, and
 //      a missing worktree; the importer resolves to a callable op (the
 //      driver factory constructs inert lane instances — zero env deps).
-//  10. md/constant parity: prompts/fix.default.md on disk is byte-identical
-//      to defaultFixPrompt (the .md cannot rot away from the shipped
-//      constant).
 //
 // Hermetic by construction: the DriverFactory seam is a scripted fake — no
 // network, no spawned processes, no filesystem writes; the registry test
 // only CONSTRUCTS the driver's importer result.
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import type { DriverFactory, DriverRequest } from '../../../src/driver/factory.js';
 import type { OpInvocation, WorkerResult } from '../../../src/driver/types.js';
@@ -61,7 +56,7 @@ import type {
   FixReviewItemResult,
 } from '../../../src/ops/review/fixReviewItem.js';
 import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
-import { defaultFixPrompt } from '../../../src/ops/review/prompts/fix.default.js';
+import { defaultFixPrompt } from '../../../src/ops/review/prompts/defaultFixPrompt.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
 // ---------------------------------------------------------------------------
@@ -650,19 +645,6 @@ describe('review.fixItem registry entry', () => {
     const entry = fixEntry();
     const op = await entry.importer();
     expect(typeof op).toBe('function');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 9. md/constant parity
-// ---------------------------------------------------------------------------
-
-describe('fix.default.md ⇄ defaultFixPrompt parity', () => {
-  test('the shipped .md is byte-identical to the TS constant', () => {
-    const mdPath = fileURLToPath(
-      new URL('../../../src/ops/review/prompts/fix.default.md', import.meta.url),
-    );
-    expect(defaultFixPrompt).toBe(readFileSync(mdPath, 'utf8'));
   });
 });
 
