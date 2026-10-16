@@ -77,8 +77,15 @@ Protecting it at merge time would add a second one for code that cannot judge.
 
 ## Accepted residuals (named, with their fixes)
 
-These are open owner decisions. Neither residual is new: none of these files
-was protected before this change either.
+These are open owner decisions. R1 is not new: none of its files was
+protected before this change. R2 is mostly not new, with one exception.
+Before this change, `src/ops/merge/classify*` and `src/selfhost/candidates.ts`
+were protected as admission logic, and this change drops them because the gate
+re-judges every PR they admit. That is a deliberate narrowing, and **owner
+acceptance is needed**. It also widens R2 by those three files: they run in
+the `self-merge-prs` and `self-review-loop` jobs. Those protections never
+covered those jobs' credentials, though. The other ~60 files in the same
+closures, including the drivers and harness, were already unprotected.
 
 **R1: the CLI dispatch shell in the trusted verifier jobs.** The trusted
 verifiers dispatch through `dist/cli.js`. On every dispatch,

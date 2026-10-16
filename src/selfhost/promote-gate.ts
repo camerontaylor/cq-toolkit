@@ -62,8 +62,9 @@
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
 //      not catch it; any change refuses), then one no-wait re-read of steps
-//      8–9 (pass 2 can itself take minutes), then step 6 once more when
-//      its pass relied on the D-P revision window, then `push --atomic` of tip
+//      8–9 (pass 2 can itself take minutes), the promotion-review re-read,
+//      then step 6 once more when its pass relied on the D-P revision
+//      window (the last read), then `push --atomic` of tip
 //      onto main — leased on the (main, tip) read at step 1, never a plain
 //      force. One `ls-remote` right before the push re-reads the queue on
 //      the push's own transport: still the tip (the normal case) → only
@@ -1057,10 +1058,12 @@ async function gateBody(
   //      moves no ref. One poll; anything short of green refuses.
   await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse, 'recheck');
 
-  // 10c. A pass that relied on the D-P revision window is judged again at
-  //      push time: the waits can outlast the window's expiry, and an
+  // 10c. A pass that relied on the D-P revision window is judged again as
+  //      the LAST read before the push (and before a dry-run verdict): the
+  //      waits and the reads below can outlast the window's expiry, and an
   //      expired window must not promote (fail closed).
-  if (windowed) {
+  const recheckWindow = async (): Promise<void> => {
+    if (!windowed) return;
     const again = await deps.policyDiff(policyInput);
     const verdict = again.status === 'ok' ? again.value.verdict : again.status;
     report.push(`policy recheck (revision window): ${verdict}`);
@@ -1068,10 +1071,11 @@ async function gateBody(
       if (again.status === 'ok') for (const line of again.value.report) report.push(`  ${line}`);
       refuse('policy: the revision-window pass no longer holds at push time');
     }
-  }
+  };
 
   // 10. Promote.
   if (!cfg.push) {
+    await recheckWindow();
     report.push('push: dry run (no --push)');
     return { verdict: 'would-promote' };
   }
@@ -1111,6 +1115,7 @@ async function gateBody(
   // advanced queue can never ride along, and a rewind below the tip puts
   // the subject off the queue exactly when its stale read must not
   // promote). Every read is on the same transport the push uses.
+  await recheckWindow();
   const updates: LeasedUpdate[] = [
     { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
     {

@@ -1230,6 +1230,35 @@ describe('runGate', () => {
     expect((await runGate(still.deps, cfg())).verdict).toBe('would-promote');
     expect(calls).toHaveLength(2);
     expect(calls[1]).toEqual(calls[0]);
+    // With --push the recheck is the last read: after the promotion-review
+    // re-fetch, before the push. A window expiring during that fetch refuses.
+    for (const expires of [false, true]) {
+      const order: string[] = [];
+      const h = harness(world(), {
+        policyDiff: () => {
+          order.push('policy');
+          const second = order.filter((o) => o === 'policy').length > 1;
+          return Promise.resolve(
+            second && expires ? policyOutcome('needs-human') : policyOutcome('pass', {}, 'window'),
+          );
+        },
+      });
+      const gh = h.deps.gh;
+      h.deps.gh = (args) => {
+        if (/\/statuses\?/.test(args[1] ?? '')) order.push('statuses');
+        return gh(args);
+      };
+      h.deps.git = fakeGit({
+        pushAtomic: () => {
+          order.push('push');
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      });
+      const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+      const tail = order.slice(order.lastIndexOf('statuses'));
+      expect(tail).toEqual(expires ? ['statuses', 'policy'] : ['statuses', 'policy', 'push']);
+      expect(r.verdict).toBe(expires ? 'refused' : 'promoted');
+    }
     // A pass that did not rely on the window is not re-judged.
     const plain = harness(world());
     await runGate(plain.deps, cfg());
