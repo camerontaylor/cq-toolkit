@@ -45,8 +45,8 @@
 // against, not a kill switch).
 //
 // Usage:
-//   node scripts/dd1-abort-spike.mjs --lane ai-sdk
-//   node scripts/dd1-abort-spike.mjs --lane claude-agent
+//   node tools/dd1-abort-spike.mjs --lane ai-sdk
+//   node tools/dd1-abort-spike.mjs --lane claude-agent
 //
 // The claude-agent lane loads the SDK dynamically through the driver's
 // production default loader; make the optional peer resolvable for LIVE
