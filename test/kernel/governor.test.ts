@@ -16,8 +16,8 @@ import { match } from '../helpers/matchers.js';
 //   3. Dual caps: the in-flight ceiling holds as a high-water mark even at
 //      higher RunOptions.concurrency (and the pool binds in the min()'s other
 //      direction); runDispatchQuota refuses with the refusal recorded.
-//   4. Attempt caps: bounded re-dispatch end-to-end (rescue decision drives a
-//      resumed run; the governor refuses the third dispatch) and the frozen
+//   4. Attempt caps: bounded re-dispatch end-to-end (the seeded governor
+//      admits the resumed run and refuses the third dispatch) and the frozen
 //      JobStartedJournalEvent.attempt field driving the cap after seeding.
 //   5. Resume after a budget stop: a killed job with NO terminal event IS
 //      re-dispatched on resume; a terminal budget-exhausted row is NOT
@@ -57,7 +57,6 @@ import {
   governorConfig,
   runLadder,
 } from '../../src/kernel/governor.js';
-import { decideRescue, rescueInputFromJournal } from '../../src/kernel/rescue.js';
 import { runPlan } from '../../src/kernel/runner.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GovernorEvent, JobGovernance, LadderRungMarker } from '../../src/kernel/governor.js';
@@ -1715,7 +1714,7 @@ describe('dual caps (ws-a item 4)', () => {
 // ---------------------------------------------------------------------------
 
 describe('attempt caps (ws-a item 2)', () => {
-  test('bounded re-dispatch end-to-end: two attempts, the rescue decision, no third dispatch', async () => {
+  test('bounded re-dispatch end-to-end: two attempts, no third dispatch', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-attempt-'));
     try {
       const log = openRunLog(dir);
@@ -1728,13 +1727,6 @@ describe('attempt caps (ws-a item 2)', () => {
         calls.push((raw as { jobId: string }).jobId);
         return { status: 'failed', error: 'flake' };
       };
-      // The policy row under test: retry, 2 attempts TOTAL.
-      const row = {
-        id: 'retry-2',
-        on: 'failed' as const,
-        action: { kind: 'retry' as const, maxAttempts: 2 },
-      };
-
       // --- Attempt 1 ---
       const run1 = await runPlan(
         plan,
@@ -1747,13 +1739,7 @@ describe('attempt caps (ws-a item 2)', () => {
       expect(events1.filter((event) => event.type === 'job-started')).toMatchObject([
         { attempt: 1 },
       ]);
-      // The rescue lane licenses exactly one more attempt...
-      const decision1 = decideRescue(rescueInputFromJournal(events1, 'j1', 'flaky'), {
-        rows: [row],
-      });
-      expect(decision1).toEqual({ kind: 'retry', attempt: 2, rowId: 'retry-2' });
-
-      // ...whose EXECUTION is a resumed run under a governor seeded from run 1.
+      // Resume under a governor seeded from run 1, preserving the attempt ordinal.
       const governor2 = new BudgetGovernor({ maxAttemptsPerJob: 2 });
       governor2.seedFromJournal(events1);
       expect(governor2.attemptsFor('j1')).toBe(1);
@@ -1774,20 +1760,7 @@ describe('attempt caps (ws-a item 2)', () => {
         { attempt: 2 },
       ]);
 
-      // Over the ACCUMULATED evidence the policy is at cap → terminate...
-      const decision2 = decideRescue(
-        rescueInputFromJournal([...events1, ...events2], 'j1', 'flaky'),
-        { rows: [row] },
-        { maxAttemptsPerJob: 2 },
-      );
-      expect(decision2).toEqual({
-        kind: 'terminate',
-        reason: 'attempt-cap',
-        rowId: 'retry-2',
-        cap: 'row-max-attempts',
-      });
-
-      // ...and the third dispatch is refused by the governor: no op call.
+      // The third dispatch is refused by the governor: no op call.
       const governor3 = new BudgetGovernor({ maxAttemptsPerJob: 2 });
       governor3.seedFromJournal([...events1, ...events2]);
       expect(governor3.attemptsFor('j1')).toBe(2);
@@ -2443,7 +2416,7 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
 // ---------------------------------------------------------------------------
 
 describe('src/index.ts barrel', () => {
-  test('re-exports the governor + rescue public surface', () => {
+  test('re-exports the governor public surface', () => {
     expect(typeof toolkit.createGovernor).toBe('function');
     expect(typeof toolkit.runLadder).toBe('function');
     expect(typeof toolkit.governorConfig).toBe('function');
@@ -2454,10 +2427,6 @@ describe('src/index.ts barrel', () => {
     // is pinned to the doc by test/kernel/governor-config.test.ts.
     expect(toolkit.DEFAULT_ABORT_GRACE_MS).toBe(5_000);
     expect(toolkit.DEFAULT_KILL_GRACE_MS).toBe(5_000);
-    expect(typeof toolkit.decideRescue).toBe('function');
-    expect(typeof toolkit.attemptsFromJournal).toBe('function');
-    expect(typeof toolkit.rescueInputFromJournal).toBe('function');
-    expect(toolkit.CONSERVATIVE_RESCUE_POLICY).toEqual({ rows: [] });
     // The W2.3 journal-event schemas ride the barrel next to every
     // preexisting journal event schema — consumers name and validate the
     // new variants through the supported API, never unpublished internals
