@@ -1084,12 +1084,13 @@ async function gateBody(
   //      moves no ref. One poll; anything short of green refuses.
   await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse, 'recheck');
 
-  // 10c. A pass that relied on the D-P revision window is judged again as
-  //      the LAST read before the push (and before a dry-run verdict): the
-  //      waits and the reads below can outlast the window's expiry, and an
-  //      expired window must not promote (fail closed).
+  // 10c. A pass that relied on D11 records or on the D-P revision window is
+  //      judged again as the LAST read before the push (and before a dry-run
+  //      verdict): an unlabel moves no leased ref, and the waits and the
+  //      reads below can outlast the window's expiry. Either must refuse.
+  const relied = [...(policy.relied ? ['D11'] : []), ...(windowed ? ['revision-window'] : [])];
   const recheckWindow = async (): Promise<void> => {
-    if (!windowed) return;
+    if (relied.length === 0) return;
     const again = await policyPass(
       deps,
       cfg,
@@ -1097,10 +1098,10 @@ async function gateBody(
       closure.admitted,
       bySha,
       report,
-      'recheck (revision window)',
+      `recheck (${relied.join(', ')})`,
     );
     if (again.refusal !== null) {
-      refuse('policy: the revision-window pass no longer holds at push time');
+      refuse(`policy: the ${relied.join(' and ')} pass no longer holds at push time`);
     }
   };
 

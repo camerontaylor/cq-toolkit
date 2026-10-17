@@ -511,12 +511,16 @@ describe('checkVerifiedRun', () => {
     expect(checkVerifiedRun(wf({ run_attempt: 2 }), twins, want).reason).toMatch(
       /two jobs named 'x' in attempt 1: ambiguous/,
     );
-    // Names that only collide after sanitization are distinct jobs.
+    // Names that only collide after sanitization (`clean` maps both to
+    // 'lint?') are distinct jobs: 'linté' failed in attempt 1 and was never
+    // rerun, so the green 'lintö' of attempt 2 must not stand for it.
     const lookalikes = [
-      job({ id: 1, name: 'lint\u0007' }),
-      job({ id: 2, name: 'lint', conclusion: 'failure' }),
+      job({ id: 1, name: 'linté', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 2, name: 'lintö', run_attempt: 2 }),
     ];
-    expect(checkVerifiedRun(wf(), lookalikes, want).state).toBe('failure');
+    const masked = checkVerifiedRun(wf({ run_attempt: 2 }), lookalikes, want);
+    expect(masked.state).toBe('failure');
+    expect(masked.reason).toMatch(/job 'lint\?' is completed\/failure/);
   });
 
   test('jobs are bound to the run snapshot: a newer or unlisted attempt is pending', () => {
@@ -1316,7 +1320,7 @@ describe('runGate', () => {
     });
     const r = await runGate(expired.deps, cfg());
     expect(r.verdict).toBe('refused');
-    expect(r.report).toContain('policy recheck (revision window): needs-human');
+    expect(r.report).toContain('policy recheck (revision-window): needs-human');
     expect(r.report.at(-1)).toMatch(/revision-window pass no longer holds at push time/);
 
     const calls: PolicyDiffInput[] = [];
@@ -1861,9 +1865,11 @@ describe('runGate — decisive D11 authorization', () => {
     expect(text).toMatch(/attestation: .* valid at the trust ref — records honoured/);
     expect(text).toMatch(/verdict: honoured/);
     expect(text).toMatch(/d11: vitest\.config\.ts authorized by PR #7/);
-    // It relied on the record, so the record is re-read after the waits.
-    expect(inputs).toHaveLength(2);
+    // It relied on the record, so the record is re-read after the waits and
+    // once more as the last read before the push (or the dry-run verdict).
+    expect(inputs).toHaveLength(3);
     expect(text).toMatch(/d11 pass 2:/);
+    expect(text).toMatch(/d11 recheck \(D11\):/);
   });
 
   test('valid record, no attestation → needs-human refusal with dormant logged', async () => {
@@ -1967,6 +1973,31 @@ describe('runGate — decisive D11 authorization', () => {
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(/\(D11 recheck after the wait\)$/);
+  });
+
+  test('an unlabel after the D11 recheck still refuses at the last pre-push read', async () => {
+    // Labelled for pass 1 and pass 2; removed only by the final read.
+    const { h } = d11Harness({
+      timeline: (n) =>
+        n < 2
+          ? [ownerLabel()]
+          : [
+              ownerLabel(),
+              { ...ownerLabel(), event: 'unlabeled', created_at: '2026-09-03T00:00:00Z' },
+            ],
+    });
+    let pushed = false;
+    h.deps.git = {
+      ...h.deps.git,
+      pushAtomic: () => {
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    };
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+    expect(r.verdict).toBe('refused');
+    expect(pushed).toBe(false);
+    expect(r.report.at(-1)).toMatch(/the D11 pass no longer holds at push time/);
   });
 });
 
