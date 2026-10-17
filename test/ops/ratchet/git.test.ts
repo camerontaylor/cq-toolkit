@@ -25,9 +25,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../../src/shared/gitHarden.js';
 import {
-  GIT_HARDEN,
-  HARDENED_DIFF_FLAGS,
   assertRepoRelPath,
   extractTreeAttributeFree,
   gitChangedPaths,

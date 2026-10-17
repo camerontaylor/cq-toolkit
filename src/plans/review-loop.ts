@@ -71,7 +71,7 @@
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
-import { deepFreeze } from '../harness/config.js';
+import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
