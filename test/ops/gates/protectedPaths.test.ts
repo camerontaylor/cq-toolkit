@@ -11,7 +11,7 @@
 //      the tsconfig `extends`/`references` graph — are protected too;
 //   3. the paths that carry the protected-path list and the required-check
 //      list are in the definition set (D-C.4's last bullet).
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
@@ -20,6 +20,8 @@ import {
   isProtectedStagePath,
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
+import { scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
+import { VERDICT_CHECK } from '../../../src/selfhost/promote-gate.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
@@ -227,8 +229,45 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
 // break-glass. This walks the relative-import closure of the entry points
 // (value imports only; `import type` / `export type` erase at build) and
 // asserts every file matches a `policy/protected-paths.json` regex.
+//
+// Protected scope (docs/protected-scope.md, 2026-10-16): the entry points are
+// the JUDGING code — what a trusted job (`trust/dist/...`) runs to post a
+// verdict or move `main` — and nothing else in src/. The trusted-invocation
+// test below pins that list to the workflows, so a new trusted call fails
+// here until its closure is classified.
+/** `loadEngine`'s `imp('<rel>.js')` modules, as `src/ops/ratchet/<rel>.ts`. */
+function engineModules(): string[] {
+  const text = readFileSync(join(REPO_ROOT, 'scripts', 'ratchet-lib.mjs'), 'utf8');
+  const body = /export async function loadEngine\(\)[\s\S]*?\n\}/.exec(text)?.[0] ?? '';
+  const out = [...body.matchAll(/\bimp\('([\w/.-]+)\.js'\)/g)].map(
+    (m) => `src/ops/ratchet/${m[1]!}.ts`,
+  );
+  if (out.length === 0) throw new Error('scripts/ratchet-lib.mjs: no loadEngine imports found');
+  return out;
+}
+
 describe('protected-paths.json covers the gate and acceptance import closure', () => {
-  const ENTRY_POINTS = ['src/selfhost/acceptance.ts', 'src/selfhost/promote-gate.ts'];
+  const ENTRY_POINTS = [
+    'src/selfhost/acceptance.ts',
+    'src/selfhost/promote-gate.ts',
+    // The verifier ops the trusted `trust/dist/cli.js` invocations dispatch.
+    'src/ops/gates/policyDiff.ts',
+    'src/ops/gates/policyConfig.ts',
+    'src/ops/ratchet/verifyRatchet.ts',
+    'src/ops/ratchet/recomputeTypecheck.ts',
+    // cq-verify's in-process signer (`trust/dist/selfhost/verify-ratchet.js`).
+    'src/selfhost/verify-ratchet.ts',
+    // The prebuilt engine `scripts/ratchet-propose.mjs` loads in its
+    // `automation`-environment job (scripts/ratchet-lib.mjs `loadEngine`).
+    ...engineModules(),
+  ];
+
+  /**
+   * Protected but NOT walked: the registry entries that bind the verifier
+   * ops (input schema, posture resolution). Their lazy importers also reach
+   * ops no trusted job runs, so walking them would protect library code.
+   */
+  const BINDINGS = ['src/ops/gates/registry.ts', 'src/ops/ratchet/registry.ts'];
 
   /**
    * Closure files that need NOT be protected, each with its reason. Keep it
@@ -297,6 +336,88 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     ).toEqual(['./a.js', '../e.js', './f.js', './g.js', './side.js', './dyn.js']);
   });
 
+  test('the verifier bindings are protected', () => {
+    for (const file of BINDINGS) {
+      expect(
+        REGEXES.some((re) => re.test(file)),
+        file,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * Every `trust/dist/...` call in a rendered workflow: the ops dispatched
+   * through `cli.js` and the selfhost entry points. Each must be one of the
+   * entry points above.
+   */
+  const TRUSTED_CLI_OPS: Readonly<Record<string, readonly string[]>> = {
+    'gates.policyDiff': ['src/ops/gates/policyDiff.ts', 'src/ops/gates/policyConfig.ts'],
+    'ratchet.recomputeTypecheck': ['src/ops/ratchet/recomputeTypecheck.ts'],
+  };
+
+  /**
+   * Unprotected code that a privileged job (an `environment:`, a secret, a
+   * write permission) runs by path: the named residual of
+   * docs/protected-scope.md, each with what bounds it. Anything else such a
+   * job runs must be protected.
+   */
+  const RESIDUAL: Readonly<Record<string, string>> = {
+    'dist/selfhost/self-merge-prs.js':
+      'merges into merge-queue only; promote-gate re-judges closure, I2 and policy',
+    'dist/selfhost/self-review-loop.js':
+      'pushes to PR heads only; cq/acceptance and promote-gate re-judge them',
+    'scripts/dd1-abort-spike.mjs':
+      'live-drivers drill: workflow_dispatch on main only, model keys only',
+    'scripts/demo-eval-axes.mjs':
+      'live-drivers drill: workflow_dispatch on main only, model keys only',
+  };
+
+  const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
+  const workflowTexts = readdirSync(WORKFLOWS_DIR)
+    .filter((f) => /\.ya?ml$/.test(f))
+    .map((f) => readFileSync(join(WORKFLOWS_DIR, f), 'utf8'));
+
+  test('every trusted invocation in the workflows is a walked entry point', () => {
+    const ops = new Set<string>();
+    const selfhost = new Set<string>();
+    for (const text of workflowTexts) {
+      for (const m of text.matchAll(/\btrust\/dist\/cli\.js\s+([A-Za-z][\w.]*)/g)) ops.add(m[1]!);
+      for (const m of text.matchAll(/\btrust\/dist\/selfhost\/([\w-]+)\.js/g)) selfhost.add(m[1]!);
+    }
+    expect([...ops].sort()).toEqual(Object.keys(TRUSTED_CLI_OPS).sort());
+    for (const sources of Object.values(TRUSTED_CLI_OPS)) {
+      expect(ENTRY_POINTS).toEqual(expect.arrayContaining([...sources]));
+    }
+    for (const name of selfhost) expect(ENTRY_POINTS).toContain(`src/selfhost/${name}.ts`);
+  });
+
+  test('every script or selfhost entry a privileged job runs is protected or a named residual', () => {
+    const seen = new Set<string>();
+    const unclassified: string[] = [];
+    for (const text of workflowTexts) {
+      const scan = scanWorkflow(text);
+      expect(scan.ok).toBe(true);
+      if (!scan.ok) continue;
+      for (const job of scan.jobs.values()) {
+        if (!job.privileged) continue;
+        // `trust/dist/...` is excluded by the leading-boundary rule: the walk covers it.
+        const refs = job.text.matchAll(
+          /(?:^|[\s"'=])(?:\.\/)?(scripts\/[\w./-]+|dist\/selfhost\/[\w-]+\.js)/gm,
+        );
+        for (const m of refs) {
+          const ref = m[1]!;
+          if (Object.hasOwn(RESIDUAL, ref)) seen.add(ref);
+          else if (!isProtectedPolicyPath(ref) && !REGEXES.some((re) => re.test(ref))) {
+            unclassified.push(`${job.id}: ${ref}`);
+          }
+        }
+      }
+    }
+    expect(unclassified).toEqual([]);
+    // The residual never goes stale: each entry is still run by a privileged job.
+    expect([...seen].sort()).toEqual(Object.keys(RESIDUAL).sort());
+  });
+
   test('every closure file is protected or allowlisted with a reason', () => {
     const files = closure(ENTRY_POINTS);
     expect(files).toEqual(expect.arrayContaining([...ENTRY_POINTS, 'src/ops/review/threads.ts']));
@@ -324,10 +445,10 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
 // target and is a SUPERSET modulo one recorded supersession: the classic
 // `ratchet` context becomes the verdict-App `cq/ratchet` (methods note,
 // Residuals). This pins the mapping so the supersession stays documented.
-describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () => {
+describe('requiredChecks are enforced at merge (R2) or at promotion (the gate)', () => {
   const POLICY = JSON.parse(
     readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
-  ) as { requiredChecks: string[] };
+  ) as { requiredChecks: string[]; requiredJobs?: Record<string, string[]> };
   const SETTINGS = JSON.parse(
     readFileSync(join(REPO_ROOT, 'policy', 'templates', 'github-settings.json'), 'utf8'),
   ) as {
@@ -339,7 +460,7 @@ describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () 
     }>;
   };
 
-  /** Classic context → its R2 successor. Every key must stay recorded in the methods Residuals. */
+  /** Classic context → its verdict-App successor. Every key must stay recorded in the methods Residuals. */
   const SUPERSEDED: Readonly<Record<string, string>> = {
     ratchet: 'cq/ratchet',
   };
@@ -350,18 +471,29 @@ describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () 
       .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
       .map((check) => check.context) ?? [],
   );
+  // The minimal merge-time set (docs/protected-scope.md): what the gate
+  // enforces on the queue tip is not required again at merge.
+  const gateContexts = new Set([...Object.values(POLICY.requiredJobs ?? {}).flat(), VERDICT_CHECK]);
 
   test('R2 exists and carries required status checks', () => {
     expect(r2Contexts.size).toBeGreaterThan(0);
   });
 
-  test.each(POLICY.requiredChecks)('requiredChecks entry %s is covered by R2', (context) => {
-    const successor = SUPERSEDED[context];
-    if (successor === undefined) {
-      expect(r2Contexts.has(context), `${context} is in neither R2 nor SUPERSEDED`).toBe(true);
-    } else {
-      expect(r2Contexts.has(successor), `${context} supersedes to missing ${successor}`).toBe(true);
-    }
+  test.each(POLICY.requiredChecks)('requiredChecks entry %s is enforced somewhere', (context) => {
+    const enforced = SUPERSEDED[context] ?? context;
+    expect(
+      r2Contexts.has(enforced) || gateContexts.has(enforced),
+      `${context} (as ${enforced}) is enforced neither by R2 nor by the gate`,
+    ).toBe(true);
+  });
+
+  test('no gate-enforced CI job is also required at merge', () => {
+    const doubled = [...r2Contexts].filter(
+      (context) => gateContexts.has(context) && !['denylist'].includes(context),
+    );
+    // denylist stays at merge too: merge-queue history is append-only (R0),
+    // so a leak the gate refuses to promote could not be un-merged.
+    expect(doubled).toEqual([]);
   });
 
   test('every recorded supersession is documented in the methods note Residuals', () => {

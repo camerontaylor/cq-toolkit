@@ -15,8 +15,9 @@
 //      change.
 //   4. The override record: honoured only with the C3 attestation on the
 //      trust ref; dormant without it; an App-applied label is invalid; a push
-//      subject is never evaluated; an unreadable events file is invalid,
-//      never `failed`.
+//      subject carries no label of its own; an unreadable events file is
+//      invalid, never `failed`. A push subject passes only through a bound
+//      D11 authorization covering every needs-human path; `lint` stays fail.
 //   5. The posture comes from the resolved config: the registry schema has no
 //      posture field and a bogus env value fails the dispatch.
 //
@@ -41,6 +42,10 @@ import { delimiter, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import {
+  bindD11Authorization,
+  type D11Authorization,
+} from '../../../src/ops/gates/d11Authorization.js';
+import {
   LABEL_EVENTS_MAX_BYTES,
   POLICY_LIST_PATH,
   createPolicyDiff,
@@ -48,7 +53,11 @@ import {
   type PolicyDiffOutcome,
 } from '../../../src/ops/gates/policyDiff.js';
 import type { ProtectedPathsPosture } from '../../../src/ops/gates/policyConfig.js';
-import { producersOf, scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
+import {
+  hasUnresolvableCheckName,
+  producersOf,
+  scanWorkflow,
+} from '../../../src/ops/gates/workflowScan.js';
 import { registry } from '../../../src/ops/gates/registry.js';
 
 // Git-heavy suite: explicit budgets for hooks and tests (verifyRatchet's idiom).
@@ -98,6 +107,7 @@ const POLICY = {
   protectedPaths: ['^src/guarded/'],
   // `build` has NO statically resolvable producer: matrix.yml's job is a matrix.
   requiredChecks: ['static', 'build'],
+  requiredJobs: { 'ci.yml': ['static'] },
 };
 
 const wf = (...lines: string[]): string => `${lines.join('\n')}\n`;
@@ -507,6 +517,14 @@ describe('policyDiff: baselines and definitions', SLOW, () => {
         },
       },
       'policy-delete': { files: { [POLICY_LIST_PATH]: null } },
+      'policy-trim-jobs': {
+        files: { [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: {} }) },
+      },
+      'policy-swap-job': {
+        files: {
+          [POLICY_LIST_PATH]: JSON.stringify({ ...POLICY, requiredJobs: { 'ci.yml': ['other'] } }),
+        },
+      },
     });
   }, HOOK_MS);
 
@@ -575,6 +593,16 @@ describe('policyDiff: baselines and definitions', SLOW, () => {
         },
       ]),
     );
+    expect((await run(c['policy-trim-jobs']!, 'diff-check')).findings).toContainEqual({
+      kind: 'entry-removed',
+      path: POLICY_LIST_PATH,
+      reason: 'removes requiredJobs entry ci.yml:static',
+    });
+    expect((await run(c['policy-swap-job']!, 'diff-check')).findings).toContainEqual({
+      kind: 'entry-removed',
+      path: POLICY_LIST_PATH,
+      reason: 'removes requiredJobs entry ci.yml:static',
+    });
     const out = await run(c['policy-delete']!, 'diff-check');
     expect(out.findings).toContainEqual({
       kind: 'entry-removed',
@@ -755,6 +783,47 @@ describe('policyDiff: workflows', SLOW, () => {
     expect(kinds(out)).toContain('lint');
     expect(await verdicts(c['lint']!)).toEqual({ human: 'fail', 'diff-check': 'fail' });
     expect(out.report.at(-1)).toBe('verdict: fail');
+  });
+
+  test('a D11 authorization covering every path never turns a lint fail into a pass', async () => {
+    const plain = await run(c['lint']!, 'human');
+    const auth = bindD11Authorization({
+      ownerId: 1,
+      attestation: {
+        state: 'present',
+        text: JSON.stringify({
+          schemaVersion: 1,
+          attests: 'C3',
+          attestedAt: '2026-10-01T00:00:00Z',
+        }),
+      },
+      prs: [
+        {
+          pr: 1,
+          merge: 'c'.repeat(40),
+          head: c['lint']!,
+          paths: plain.findings.map((f) => f.path),
+          events: [
+            {
+              event: 'labeled',
+              label: { name: 'cq-override' },
+              actor: { login: 'owner', id: 1, type: 'User' },
+              created_at: '2026-09-20T11:00:00Z',
+              performed_via_github_app: null,
+            },
+          ],
+          headObservedAt: '2026-09-20T10:00:00.000Z',
+        },
+      ],
+    });
+    expect(auth.contributions[0]?.record.status).toBe('honoured');
+    const out = await run(c['lint']!, 'human', {
+      subjectKind: 'push',
+      base: 'main',
+      authorization: auth,
+    });
+    expect(out.verdict).toBe('fail');
+    expect(out.d11).toBeUndefined();
   });
 
   test('an unparseable workflow fails closed to needs-human', async () => {
@@ -1516,12 +1585,84 @@ describe('policyDiff: the override record', SLOW, () => {
       subjectKind: 'push',
       base: 'main',
     });
-    expect(out.override).toEqual({
-      status: 'absent',
-      reasons: ['not evaluated: a push subject carries no PR label record'],
-    });
+    const skipped =
+      'not evaluated: a push subject is authorized per admitted PR (D11 authorization)';
+    expect(out.override).toEqual({ status: 'absent', reasons: [skipped] });
     expect(out.verdict).toBe('needs-human');
-    expect(out.report).toContain('  not evaluated: a push subject carries no PR label record');
+    expect(out.report).toContain(`  ${skipped}`);
+    expect(out.report).toContain(
+      'd11: no authorization bound for this push subject — needs-human stands',
+    );
+    expect(out.d11).toBeUndefined();
+  });
+
+  const C3 = JSON.stringify({
+    schemaVersion: 1,
+    attests: 'C3',
+    attestedAt: '2026-10-01T00:00:00Z',
+  });
+  const authorization = (
+    over: { paths?: string[]; attested?: boolean; events?: unknown[] } = {},
+  ): D11Authorization =>
+    bindD11Authorization({
+      ownerId: OWNER_ID,
+      attestation: over.attested === false ? { state: 'absent' } : { state: 'present', text: C3 },
+      prs: [
+        {
+          pr: PR,
+          merge: 'c'.repeat(40),
+          head: subject,
+          paths: over.paths ?? ['lint/x.txt'],
+          events: over.events ?? [labelEvent()],
+          headObservedAt: EPOCH,
+        },
+      ],
+    });
+  const push = (auth: D11Authorization): Partial<PolicyDiffInput> => ({
+    subjectKind: 'push',
+    base: 'main',
+    authorization: auth,
+  });
+
+  test('push: a bound, attested record of the PR that changed the path → pass', async () => {
+    const out = await run(subject, 'human', push(authorization()));
+    expect(out.verdict).toBe('pass');
+    expect(out.d11).toMatchObject({ authorized: true, unauthorized: [] });
+    expect(out.report).toContain('d11: lint/x.txt authorized by PR #7');
+    expect(out.report.at(-1)).toBe(
+      "verdict: pass (needs-human authorized by every changing PR's D11 record)",
+    );
+  });
+
+  test('push: a dormant record (no C3 attestation) stays needs-human, naming the path', async () => {
+    const out = await run(subject, 'human', push(authorization({ attested: false })));
+    expect(out.verdict).toBe('needs-human');
+    expect(out.d11?.unauthorized).toEqual([
+      {
+        path: 'lint/x.txt',
+        why: `PR #7 (merge ${'c'.repeat(40)}) changes it and its D11 record is dormant`,
+      },
+    ]);
+    expect(out.report.at(-1)).toBe('verdict: needs-human');
+  });
+
+  test('push: an App-applied or pre-epoch label is invalid → needs-human', async () => {
+    for (const event of [
+      labelEvent({ performed_via_github_app: { slug: 'bot' } }),
+      labelEvent({ created_at: '2026-09-20T09:00:00Z' }),
+    ]) {
+      const out = await run(subject, 'human', push(authorization({ events: [event] })));
+      expect(out.verdict).toBe('needs-human');
+      expect(out.d11?.unauthorized[0]?.why).toMatch(/D11 record is invalid$/);
+    }
+  });
+
+  test('push: a path no admitted PR contributed (outside the closure) → needs-human', async () => {
+    const out = await run(subject, 'human', push(authorization({ paths: ['src/other.ts'] })));
+    expect(out.verdict).toBe('needs-human');
+    expect(out.report).toContain(
+      'd11: lint/x.txt unauthorized — not contributed by any admitted PR in the closure',
+    );
   });
 });
 
@@ -1584,10 +1725,195 @@ describe('policyDiff: faults are failed, never a pass', SLOW, () => {
     expect(result.status === 'ok' && result.value.report).toContain(
       `policy list: ${POLICY_LIST_PATH} absent at the trust ref — project protectedPaths and requiredChecks are inactive`,
     );
+    expect(result.status === 'ok' && result.value.requiredJobs).toEqual({});
   });
 
   test('a trust ref without the manifest is failed', async () => {
     expect(await call({ trustRef: c['no-manifest']! })).toMatchObject({ status: 'failed' });
+  });
+});
+
+// Owner ruling D-P (docs/protected-scope.md): a time-boxed diff-check window
+// read from the TRUST REF's list only, applied only at the default layer,
+// fail-closed outside its bounds, and never clearing a non-plain finding.
+describe('policyDiff: the D-P revision window', SLOW, () => {
+  const WINDOW = {
+    posture: 'diff-check',
+    opens: '2026-10-17T00:00:00Z',
+    expires: '2026-10-31T00:00:00Z',
+    ruling: 'D-P (owner, 2026-10-16)',
+  };
+  const at = (iso: string) => () => Date.parse(iso);
+  const listWith = (extra: Record<string, unknown>): string =>
+    `${JSON.stringify({ ...POLICY, ...extra }, null, 2)}\n`;
+  let c: Record<string, string>;
+  beforeAll(() => {
+    c = importCommits(repo, {
+      'window-trust': { files: { [POLICY_LIST_PATH]: listWith({ revisionWindow: WINDOW }) } },
+      'window-too-long': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({
+            revisionWindow: { ...WINDOW, expires: '2026-11-18T00:00:01Z' },
+          }),
+        },
+      },
+      'window-inverted': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({ revisionWindow: { ...WINDOW, expires: WINDOW.opens } }),
+        },
+      },
+      'window-bad-date': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({
+            revisionWindow: { ...WINDOW, expires: '2026-10-32T00:00:00Z' },
+          }),
+        },
+      },
+      'window-human': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({ revisionWindow: { ...WINDOW, posture: 'human' } }),
+        },
+      },
+      'window-plain': { files: { 'lint/x.txt': 'rule-window\n' } },
+      'window-pkg': { files: { 'package.json': '{ "name": "fixture-window" }\n' } },
+      // The subject declares its own window: lists come from the trust ref only.
+      'window-self': { files: { [POLICY_LIST_PATH]: listWith({ revisionWindow: WINDOW }) } },
+      // The trust ref requires a ci.yml job `smoke` the workflow does not carry.
+      'window-smoke-trust': {
+        files: {
+          [POLICY_LIST_PATH]: listWith({
+            revisionWindow: WINDOW,
+            requiredJobs: { 'ci.yml': ['static', 'smoke'] },
+          }),
+        },
+      },
+      'window-ci-comment': {
+        files: { [CI_PATH]: edit(CI_PATH, '# lint the tree', '# lint the whole tree') },
+      },
+      'jobs-bad-key': {
+        files: { [POLICY_LIST_PATH]: listWith({ requiredJobs: { '../ci.yml': ['static'] } }) },
+      },
+      'jobs-empty': { files: { [POLICY_LIST_PATH]: listWith({ requiredJobs: { 'ci.yml': [] } }) } },
+    });
+  }, HOOK_MS);
+
+  const judge = async (
+    trustRef: string,
+    subject: string,
+    now: () => number,
+    layer: 'default' | 'env' = 'default',
+  ) => {
+    const result = await createPolicyDiff(
+      { posture: 'human', layer },
+      { now },
+    )({
+      repo,
+      trustRef,
+      subject,
+      subjectKind: 'pr',
+      base: 'merge-queue',
+    });
+    if (result.status !== 'ok')
+      throw new Error(`policy ${result.status}: ${JSON.stringify(result)}`);
+    return result.value;
+  };
+
+  test('inside the window a plain protected-path edit passes at the window layer', async () => {
+    const out = await judge(c['window-trust']!, c['window-plain']!, at('2026-10-20T12:00:00Z'));
+    expect(kinds(out)).toEqual(['protected-path']);
+    expect(out).toMatchObject({ verdict: 'pass', posture: 'diff-check', postureLayer: 'window' });
+    expect(out.report[0]).toBe('posture: diff-check (layer window)');
+    expect(out.report[1]).toMatch(
+      /revision window 2026-10-17T00:00:00Z\.\.2026-10-31T00:00:00Z .*: open/,
+    );
+  });
+
+  test('at and after expiry, and before opening, the posture is human (fail closed)', async () => {
+    const expired = await judge(c['window-trust']!, c['window-plain']!, at(WINDOW.expires));
+    expect(expired).toMatchObject({
+      verdict: 'needs-human',
+      posture: 'human',
+      postureLayer: 'default',
+    });
+    expect(expired.report).toContainEqual(
+      expect.stringMatching(/EXPIRED — posture human \(fail closed\)/),
+    );
+    const early = await judge(c['window-trust']!, c['window-plain']!, at('2026-10-16T23:59:59Z'));
+    expect(early).toMatchObject({ verdict: 'needs-human', posture: 'human' });
+    expect(early.report).toContainEqual(expect.stringMatching(/not open yet/));
+    const nan = await judge(c['window-trust']!, c['window-plain']!, () => Number.NaN);
+    expect(nan.verdict).toBe('needs-human');
+  });
+
+  test('the window never clears a definition change (diff-check semantics stay)', async () => {
+    const out = await judge(c['window-trust']!, c['window-pkg']!, at('2026-10-20T12:00:00Z'));
+    expect(out.postureLayer).toBe('window');
+    expect(kinds(out)).toContain('definition-changed');
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('an explicit env posture wins over the window', async () => {
+    const out = await judge(
+      c['window-trust']!,
+      c['window-plain']!,
+      at('2026-10-20T12:00:00Z'),
+      'env',
+    );
+    expect(out).toMatchObject({ verdict: 'needs-human', posture: 'human', postureLayer: 'env' });
+    expect(out.report).toContainEqual(
+      expect.stringMatching(/not applied — posture set at the env layer/),
+    );
+  });
+
+  test('a changed workflow without a trust-ref required job needs a human even in the window', async () => {
+    const now = at('2026-10-20T12:00:00Z');
+    // Control: the same comment-only ci.yml edit passes when every required job is present.
+    const control = await judge(c['window-trust']!, c['window-ci-comment']!, now);
+    expect(control).toMatchObject({ verdict: 'pass', postureLayer: 'window' });
+    const out = await judge(c['window-smoke-trust']!, c['window-ci-comment']!, now);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: CI_PATH,
+      reason: 'no statically named required job smoke',
+    });
+    expect(out.verdict).toBe('needs-human');
+    // The gate's requiredJobs come from the TRUST ref's list, not the subject's.
+    expect(out.requiredJobs).toEqual({ 'ci.yml': ['static', 'smoke'] });
+    expect((await judge(trust, c['window-self']!, now)).requiredJobs).toEqual({
+      'ci.yml': ['static'],
+    });
+  });
+
+  test('a window in the SUBJECT has no effect', async () => {
+    const out = await judge(trust, c['window-self']!, at('2026-10-20T12:00:00Z'));
+    expect(out).toMatchObject({
+      verdict: 'needs-human',
+      posture: 'human',
+      postureLayer: 'default',
+    });
+    expect(out.report.join('\n')).not.toMatch(/revision window/);
+  });
+
+  test.each([
+    ['window-too-long', /revisionWindow may span at most 31 days/],
+    ['window-inverted', /revisionWindow\.expires must be after opens/],
+    ['window-bad-date', /must be a real UTC second/],
+    ['window-human', /revisionWindow\.posture/],
+    ['jobs-bad-key', /requiredJobs/],
+    ['jobs-empty', /requiredJobs\.ci\.yml/],
+  ])('an invalid window at the trust ref (%s) is failed', async (name, error) => {
+    const result = await createPolicyDiff(
+      { posture: 'human', layer: 'default' },
+      { now: at('2026-10-20T12:00:00Z') },
+    )({
+      repo,
+      trustRef: c[name]!,
+      subject: c['window-plain']!,
+      subjectKind: 'pr',
+      base: 'merge-queue',
+    });
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(result.status === 'failed' && result.error).toMatch(error);
   });
 });
 
@@ -1654,23 +1980,25 @@ describe("the toolkit's own policy list", () => {
     schemaVersion: number;
     protectedPaths: string[];
     requiredChecks: string[];
+    requiredJobs?: Record<string, string[]>;
   };
+
+  /**
+   * Entries protecting a tree that has not landed yet, each with the PR that
+   * lands it. A pending entry must match NOTHING: once its tree lands the
+   * test fails until the entry leaves this list, so it cannot go stale.
+   */
+  const PENDING: Readonly<Record<string, string>> = {};
 
   // Retired at C2: the old gate's wait-list file is gone. requiredChecks keeps
   // its teeth by naming checks the retained CI workflows actually produce.
   test('requiredChecks are produced by the retained CI workflows', () => {
     const producers: Record<string, string> = {
       static: 'ci.yml',
-      'crq-python': 'ci.yml',
       denylist: 'denylist.yml',
       ratchet: 'ratchet.yml',
     };
-    expect([...list.requiredChecks].sort()).toEqual([
-      'crq-python',
-      'denylist',
-      'ratchet',
-      'static',
-    ]);
+    expect([...list.requiredChecks].sort()).toEqual(['denylist', 'ratchet', 'static']);
     for (const check of list.requiredChecks) {
       const file = producers[check];
       expect(file, `${check}: has a retained producer`).toBeDefined();
@@ -1690,8 +2018,52 @@ describe("the toolkit's own policy list", () => {
       const pattern = new RegExp(source);
       expect(
         tracked.some((path) => pattern.test(path)),
-        source,
-      ).toBe(true);
+        Object.hasOwn(PENDING, source) ? `${source} (pending: ${PENDING[source]!})` : source,
+      ).toBe(!Object.hasOwn(PENDING, source));
+    }
+    for (const source of Object.keys(PENDING)) expect(list.protectedPaths).toContain(source);
+  });
+
+  test(
+    'the real list parses at a trust ref (window bounded, requiredJobs well-formed)',
+    async () => {
+      const at = importCommits(repo, {
+        'toolkit-list': {
+          files: { [POLICY_LIST_PATH]: readFileSync(join(REPO_ROOT, POLICY_LIST_PATH), 'utf8') },
+        },
+      })['toolkit-list']!;
+      const result = await createPolicyDiff({ posture: 'human', layer: 'default' })({
+        repo,
+        trustRef: at,
+        subject: at,
+        subjectKind: 'pr',
+        base: 'merge-queue',
+      });
+      expect(result.status).toBe('ok');
+    },
+    SLOW.timeout,
+  );
+
+  test('requiredJobs name jobs the verified workflows define, by display name', () => {
+    expect(list.requiredJobs).toEqual({
+      'ci.yml': ['static', 'crq-python', 'from-source'],
+      'denylist.yml': ['denylist'],
+    });
+    // The gate verifies exactly the files gate.yml passes it; a key outside them refuses every promotion.
+    const gate = readFileSync(join(REPO_ROOT, '.github/workflows/gate.yml'), 'utf8');
+    const verified = /--verifiedWorkflows=([\w.,-]+)/.exec(gate)?.[1]?.split(',') ?? [];
+    expect(verified).toEqual(expect.arrayContaining(Object.keys(list.requiredJobs ?? {})));
+    for (const [file, jobs] of Object.entries(list.requiredJobs ?? {})) {
+      const scan = scanWorkflow(readFileSync(join(REPO_ROOT, '.github/workflows', file), 'utf8'));
+      expect(scan.ok, `${file}: scans ok`).toBe(true);
+      if (!scan.ok) continue;
+      for (const job of jobs) {
+        // The jobs API reports the display name (`name:`, else the id): no matrix, no dynamic name.
+        const named = [...scan.jobs.values()].filter(
+          (j) => !hasUnresolvableCheckName(j) && (j.name ?? j.id) === job,
+        );
+        expect(named, `${file}: a job displayed as ${job}`).toHaveLength(1);
+      }
     }
   });
 });

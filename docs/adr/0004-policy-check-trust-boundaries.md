@@ -4,7 +4,7 @@
 - **Date:** 2026-09-24
 - **Related:** [ADR-0002 Annex B](0002-annex-b-config.md) (secret keys and their environments)
 
-Post-acceptance notes N7, N8, N9, N16, N17 and N19 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
+Post-acceptance notes N7, N8, N9, N16, N17, N19 and N23 in the [ADR index](README.md#post-acceptance-notes) narrow parts of this record.
 
 ## Context
 

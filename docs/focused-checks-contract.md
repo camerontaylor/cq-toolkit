@@ -42,13 +42,16 @@ suite; they do not revisit this contract.
   (doctrine I4 — no path, branch or tag filter; the sole sanctioned skip is the
   job-level `cq-state` settle-ledger exclusion in `.github/workflows/ci.yml`),
   and the `static` job runs `test:unit` + `test:e2e`. The `ratchet` job re-runs
-  the suite with coverage. The four declarations of the required set —
-  `policy/protected-paths.json`, `scripts/denylist-scan`'s
-  `REQUIRED_WORKFLOW_CHECKS`, the promotion gate's check list, and
-  `policy/templates/github-settings.json` — all name `static`, `denylist` and `crq-python`;
-  they disagree about `ratchet`, `from-source` and `pack-audit`, and that
-  disagreement is the reconciliation subject of the later CI-consolidation
-  slice, not a claim this contract makes.
+  the suite with coverage. The required set is split by where it is enforced
+  ([`protected-scope.md`](protected-scope.md), owner 2026-10-16). **At merge**
+  (ruleset R2 in `policy/templates/github-settings.json`): `cq/policy`,
+  `cq/acceptance` and `denylist`. **At promotion** (the gate, on the exact queue
+  tip): every job of `ci.yml` and `denylist.yml` green, by name the
+  `requiredJobs` in `policy/protected-paths.json` (`static`, `crq-python`,
+  `from-source`, `denylist`), plus the `cq/ratchet` verdict. `pack-audit` is
+  enforced at publication. `scripts/denylist-scan`'s `REQUIRED_WORKFLOW_CHECKS`
+  polices the I4 trigger shape of the required workflows, and
+  `protected-paths.json` `requiredChecks` names the D11-protected producers.
 - **Candidate evidence is green required CI on the exact candidate SHA.** On the
   queue route — the sanctioned one (doctrine I3: `main` advances only by the
   promotion gate's pure fast-forward) — the candidate is the `merge-queue`

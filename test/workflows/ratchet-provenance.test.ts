@@ -202,17 +202,25 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(compute).toContain("count=''");
       expect(compute).toContain('recompute emitted malformed JSON');
       const judge = jobs.get('judge') ?? '';
-      expect(judge).toContain('ratchet.verifyRatchet');
+      // The in-process verifier (readiness T2): it binds the gate's D11
+      // authorization; the CLI registry is no longer loaded to sign.
+      expect(judge).toContain('node trust/dist/selfhost/verify-ratchet.js "${args[@]}"');
+      expect(judge).not.toContain('cli.js ratchet.verifyRatchet');
       expect(judge).toContain('name: "cq/ratchet"');
       expect(judge).toContain('external_id: $ext');
       // A verifier crash or malformed output still produces a failing check.
       expect(judge).toContain('verifier emitted no valid JSON result');
       expect(judge).toMatch(/if ! jq -e -s[\s\S]*verdict\.json/);
       expect(judge).not.toMatch(/ratchet\.recomputeTypecheck|tsc/);
-      // F5: judge holds `checks: write` and nothing else, never checks out
-      // with a persisted credential, and never unpacks a HEAD-AUTHORED
-      // artifact — the measurement arrives as validated numbers.
-      expect(judge).toMatch(/^ {4}permissions:\n {6}checks: write$/m);
+      // F5: judge writes only `checks` (its read scopes serve the D11
+      // evidence API reads), never checks out with a persisted credential,
+      // and never unpacks a HEAD-AUTHORED artifact — the measurement
+      // arrives as validated numbers.
+      expect(judge).toMatch(
+        /^ {4}permissions:\n {6}checks: write\n {6}contents: read\n {6}issues: read\n {6}pull-requests: read$/m,
+      );
+      expect(judge).not.toMatch(/^ {6}(?!checks)[a-z-]+: write$/m);
+      expect(judge).toContain('GH_TOKEN: ${{ github.token }}');
       expect(judge).not.toMatch(/actions\/checkout@|persist-credentials/);
       // No cross-run download of the head-authored measurement in judge…
       expect(judge).not.toMatch(/run-id:|name: cq-measure/);

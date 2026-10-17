@@ -47,21 +47,32 @@
 //      judged here: only the merger's recheck (self-merge-prs,
 //      merge-recheck.ts) enforces it, so a PR hand-merged into
 //      `merge-queue` skips settle (methods-w1-10 Residuals; C2 owns it).
-//   6. gates.policyDiff recomputed in-process over main..tip (push subject);
-//      fail/needs-human refuses — D11 records are dormant until the C3
-//      attestation, so a protected-path change promotes only by owner
+//   6. each admitted PR's D11 evidence is read and BOUND (d11Authorization):
+//      its `cq-override` label events, its contribution diff(M^1, M), the
+//      head-observation epoch from the cq-state ledger history (merged PRs
+//      are pruned from the tip), and the C3 attestation at the TRUST ref.
+//      Every record is echoed in the report.
+//   7. gates.policyDiff recomputed in-process over main..tip (push subject)
+//      with that authorization: a needs-human range passes only when every
+//      path needing a human is authorized by every admitted PR that changed
+//      it; fail/needs-human refuses. Before C3 every valid record is
+//      dormant, so a protected-path change promotes only by owner
 //      break-glass (ADR-0004 D-G.4, D-H.4).
-//   7. each admitted PR's `cq-override` record is LOGGED (never decisive).
 //   8. a valid `cq/ratchet` verdict on tip bound to main (selectVerdict:
 //      verdict-App numeric id, or the interim slug + binding + "the
 //      default-branch cq-verify ran at main" form), waited for —
 //      dispatching cq-verify once when none is bound to main.
 //   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green: the
-//      newest `merge-queue` push run of each on the tip.
+//      newest `merge-queue` push run of each on the tip, carrying every job
+//      the trust ref's policy list names in `requiredJobs` for that file.
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
-//      not catch it; any change refuses), then one no-wait re-read of steps
-//      8–9 (pass 2 can itself take minutes), then `push --atomic` of tip
+//      not catch it; any change refuses), steps 6–7 re-run when the policy
+//      pass relied on D11 records (an unlabel moves no ref either), then
+//      one no-wait re-read of steps 8–9 (pass 2 can itself take minutes),
+//      the promotion-review re-read, then step 6 once more when its pass
+//      relied on the D-P revision window (the last read), then
+//      `push --atomic` of tip
 //      onto main — leased on the (main, tip) read at step 1, never a plain
 //      force. One `ls-remote` right before the push re-reads the queue on
 //      the push's own transport: still the tip (the normal case) → only
@@ -71,10 +82,12 @@
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
 import {
-  evaluateOverrideLabel,
-  formatOverride,
-  type OverrideEvaluation,
-} from '../ops/gates/overrideRecord.js';
+  bindD11Authorization,
+  type C3AttestationRead,
+  type D11Authorization,
+  type D11PrEvidence,
+} from '../ops/gates/d11Authorization.js';
+import { C3_ATTESTATION_PATH, headObservationEpochInHistory } from '../ops/gates/overrideRecord.js';
 import { resolveProtectedPathsConfig } from '../ops/gates/policyConfig.js';
 import {
   createPolicyDiff,
@@ -82,11 +95,13 @@ import {
   type PolicyDiffOutcome,
 } from '../ops/gates/policyDiff.js';
 import {
+  gitChangedPaths,
   gitFirstParentRange,
   gitIsAncestor,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
+  gitReadBlob,
   gitRevParse,
   gitTreeOf,
   type LeasedUpdate,
@@ -100,6 +115,8 @@ import {
   type AcceptanceInput,
   type AcceptanceResult,
 } from './acceptance.js';
+import type { SettleState } from './settle-state.js';
+import { readSettleHistory } from './state-branch.js';
 
 /** The branch promotion advances. */
 export const MAIN_BRANCH = 'main';
@@ -150,6 +167,9 @@ export const POLL_MS = 30_000;
 
 /** Default wait budget, minutes. */
 export const DEFAULT_TIMEOUT_MIN = 20;
+
+/** Most cq-state ledger versions the D11 epoch read walks (newest first). */
+export const SETTLE_HISTORY_MAX = 50;
 
 const WORKFLOWS_DIR = '.github/workflows';
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -488,11 +508,82 @@ export interface VerifiedWant {
   file: string;
   tip: string;
   repositoryId: number;
+  /**
+   * Job names the run must contain (the trust ref's policy-list
+   * `requiredJobs` for this file): "every job green" cannot see a deleted
+   * job, so a required one is named.
+   */
+  requiredJobs?: readonly string[];
 }
 
 export interface VerifiedRunCheck {
   state: 'success' | 'failure' | 'pending' | 'missing';
   reason: string;
+}
+
+/** The effective job set, or why it cannot be decided. */
+type EffectiveJobs =
+  | { ok: true; jobs: unknown[] }
+  | { ok: false; state: 'failure' | 'pending'; why: string };
+
+/**
+ * The effective job set of a run read with `filter=all`, bound to the run
+ * snapshot's `runAttempt`: for each job name (the raw API name, never a
+ * sanitized one) the execution at that name's highest `run_attempt`.
+ * Fail closed on anything that makes that ambiguous:
+ *   - a row with no name or no integer `run_attempt` (never inferred);
+ *   - two rows with the same name in one attempt (a shared display name
+ *     could otherwise let one execution stand for another);
+ *   - a row newer than the snapshot, or no row at the snapshot's attempt
+ *     when it is a rerun (`pending`: the rerun is in flight or not listed).
+ */
+function effectiveJobs(jobs: readonly unknown[], runAttempt: number): EffectiveJobs {
+  const newest = new Map<string, number>();
+  const seen = new Set<string>();
+  let atSnapshot = false;
+  for (const raw of jobs) {
+    const job = asRecord(raw);
+    const name = asString(job['name']);
+    const attempt = asInt(job['run_attempt']);
+    if (name === '') {
+      return { ok: false, state: 'failure', why: `job ${String(asInt(job['id']))} has no name` };
+    }
+    if (attempt === null || attempt < 1) {
+      return { ok: false, state: 'failure', why: `job '${clean(name)}' has no run_attempt` };
+    }
+    if (attempt > runAttempt) {
+      return {
+        ok: false,
+        state: 'pending',
+        why: `job '${clean(name)}' is from attempt ${String(attempt)}, newer than the run read (attempt ${String(runAttempt)}): a rerun is in flight`,
+      };
+    }
+    const key = JSON.stringify([name, attempt]);
+    if (seen.has(key)) {
+      return {
+        ok: false,
+        state: 'failure',
+        why: `two jobs named '${clean(name)}' in attempt ${String(attempt)}: ambiguous, fail closed`,
+      };
+    }
+    seen.add(key);
+    if (attempt === runAttempt) atSnapshot = true;
+    newest.set(name, Math.max(newest.get(name) ?? 0, attempt));
+  }
+  if (runAttempt > 1 && !atSnapshot) {
+    return {
+      ok: false,
+      state: 'pending',
+      why: `no job of attempt ${String(runAttempt)} listed yet`,
+    };
+  }
+  return {
+    ok: true,
+    jobs: jobs.filter((raw) => {
+      const job = asRecord(raw);
+      return asInt(job['run_attempt']) === newest.get(asString(job['name']));
+    }),
+  };
 }
 
 /**
@@ -504,7 +595,13 @@ export interface VerifiedRunCheck {
  * and at least one job, every job completed `success` (a `skipped` job is
  * NOT success — I4: a skipped required check is missing), with a non-null
  * `runner_id` and a non-empty `steps` list (a job that never ran on a
- * runner proves nothing). `jobs` is null until the run is known green.
+ * runner proves nothing), and every `requiredJobs` name present. `jobs` is
+ * null until the run is known green. `jobs` is every execution
+ * (`filter=all`): after a partial rerun each job name is judged by its
+ * NEWEST attempt up to the run's own `run_attempt` (see effectiveJobs), so
+ * a job green in attempt 1 and not rerun still counts, a rerun's result
+ * supersedes its earlier attempt, and a rerun newer than the run snapshot
+ * is pending, never evidence.
  */
 export function checkVerifiedRun(
   run: unknown,
@@ -539,7 +636,16 @@ export function checkVerifiedRun(
   }
   if (jobs === null) return { state: 'pending', reason: `run ${id}: jobs not read yet` };
   if (jobs.length === 0) return fail('no jobs');
-  for (const raw of jobs) {
+  const runAttempt = asInt(r['run_attempt']);
+  if (runAttempt === null || runAttempt < 1) return fail('the run has no run_attempt');
+  const decided = effectiveJobs(jobs, runAttempt);
+  if (!decided.ok) {
+    return decided.state === 'pending'
+      ? { state: 'pending', reason: `run ${id}: ${decided.why}` }
+      : fail(decided.why);
+  }
+  const effective = decided.jobs;
+  for (const raw of effective) {
     const job = asRecord(raw);
     const name = clean(asString(job['name'])) || String(asInt(job['id']));
     if (job['status'] !== 'completed' || job['conclusion'] !== 'success') {
@@ -551,8 +657,10 @@ export function checkVerifiedRun(
     const steps = job['steps'];
     if (!Array.isArray(steps) || steps.length === 0) return fail(`job '${name}' has no steps`);
   }
-  if (want.file === 'ci.yml' && !jobs.some((raw) => asRecord(raw)['name'] === 'crq-python')) {
-    return fail('missing required job crq-python');
+  for (const required of want.requiredJobs ?? []) {
+    if (!effective.some((raw) => asRecord(raw)['name'] === required)) {
+      return fail(`missing required job '${clean(required)}'`);
+    }
   }
   return {
     state: 'success',
@@ -657,6 +765,10 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
+  /** A file at a revision, or null when absent (the C3 attestation at the trust ref). */
+  readBlob(repo: string, rev: string, path: string): Promise<string | null>;
+  /** Paths changed between two commits (an admitted PR's contribution diff(M^1, M)). */
+  changedPaths(repo: string, from: string, to: string): Promise<string[]>;
   pushAtomic(
     repo: string,
     url: string,
@@ -673,6 +785,8 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
+  readBlob: gitReadBlob,
+  changedPaths: gitChangedPaths,
   pushAtomic: gitPushAtomic,
 };
 
@@ -925,55 +1039,10 @@ async function gateBody(
     }`,
   );
 
-  // 3. Closure over main..subject.
-  const commits = await git.rangeCommits(cfg.repo, main, subject);
-  const firstParent = await git.firstParentRange(cfg.repo, main, subject);
-  if (firstParent[0] !== subject) {
-    refuse('closure: the first-parent chain does not start at the subject');
-  }
-  const prs = new Map<string, MergedPr[]>();
-  const bySha = new Map(commits.map((c) => [c.sha, c]));
-  for (const sha of firstParent) {
-    if ((bySha.get(sha)?.parents.length ?? 0) !== 2) continue;
-    const path = `${repoPath}/commits/${sha}/pulls?per_page=100`;
-    const wire = slurpedComments(await getSlurp(path), path).flat();
-    prs.set(
-      sha,
-      wire.map(toMergedPr).filter((pr): pr is MergedPr => pr !== null),
-    );
-  }
-  const closure = checkClosure({
-    commits,
-    firstParent,
-    prs,
-    repositoryId: cfg.repositoryId,
-    queueBranch: QUEUE_BRANCH,
-  });
-  report.push(
-    `closure: ${String(commits.length)} commit(s), ${String(firstParent.length)} on the first-parent chain, ${String(closure.admitted.length)} admitted PR(s)`,
-  );
-  for (const a of closure.admitted) {
-    report.push(`  admitted PR #${String(a.pr)}: merge ${a.merge} head ${a.head}`);
-  }
-  for (const v of closure.violations) report.push(`  violation: ${v}`);
-  if (!closure.ok) refuse('closure: main..tip contains commits no accepted PR admits');
-
-  // 4. Clean first-parent merges.
-  for (const a of closure.admitted) {
-    const commit = bySha.get(a.merge);
-    const [p1 = '', p2 = ''] = commit?.parents ?? [];
-    const merged = await git.mergeTreeClean(cfg.repo, p1, p2);
-    const actual = await git.treeOf(cfg.repo, a.merge);
-    if (merged === null || merged !== actual) {
-      report.push(
-        `  merge-tree ${a.merge}: ${merged === null ? 'parents conflict' : `tree ${actual} != clean merge ${merged}`}`,
-      );
-      refuse(
-        `merge ${a.merge}: evil or conflict-resolving merge on the queue's first-parent chain`,
-      );
-    }
-  }
-  report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
+  // 3–4. Closure over main..subject, and clean first-parent merges.
+  const closure = await queueClosure(deps, cfg, main, subject, report);
+  if ('refusal' in closure) refuse(closure.refusal);
+  const { bySha } = closure;
 
   // 5. I2 evidence (not settle — see the header) per admitted PR, at its
   //    merged head. Re-judged in step 10a after the waits (a dismissal, new
@@ -985,41 +1054,15 @@ async function gateBody(
     );
   }
 
-  // 6. Policy recompute over main..subject (push subject).
-  const policy = await deps.policyDiff({
-    repo: cfg.repo,
-    trustRef: cfg.trustRef,
-    subject,
-    subjectKind: 'push',
-    base: `refs/remotes/origin/${MAIN_BRANCH}`,
-  });
-  let policyRefusal: string | null = null;
-  if (policy.status !== 'ok') {
-    const detail =
-      policy.status === 'failed'
-        ? policy.error
-        : policy.status === 'needs-human'
-          ? policy.reason
-          : policy.status === 'indeterminate'
-            ? policy.detail
-            : policy.status;
-    report.push(`policy: ${policy.status} — ${clean(detail)}`);
-    policyRefusal = 'policy: gates.policyDiff could not judge the range';
-  } else {
-    report.push(`policy: ${policy.value.verdict}`);
-    for (const line of policy.value.report) report.push(`  ${line}`);
-    if (policy.value.verdict !== 'pass') {
-      policyRefusal = `policy: ${policy.value.verdict} — D11 records are dormant until the C3 attestation, so a protected-path change promotes only by owner break-glass (ADR-0004 D-G.4, D-H.4)`;
-    }
-  }
-
-  // 7. Log each admitted PR's cq-override record (never decisive here).
-  await logOverrides(deps, cfg, closure.admitted, report);
-  if (policyRefusal !== null) refuse(policyRefusal);
+  // 6–7. D11 evidence bound per admitted PR, then the policy recompute over
+  //      main..subject (push subject) with it.
+  const policy = await policyPass(deps, cfg, subject, closure.admitted, bySha, report, 'pass 1');
+  if (policy.refusal !== null) refuse(policy.refusal);
+  const { requiredJobs, windowed } = policy;
 
   // 8–9. Verdicts and verified runs on the SUBJECT, waited for within one
   //      deadline.
-  await awaitVerdicts(deps, cfg, subject, main, report, refuse);
+  await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse);
 
   // 10a. I2 evidence again, now that the waits are over: the wait can take up
   //      to timeoutMin, and a change in acceptance moves no ref.
@@ -1029,14 +1072,42 @@ async function gateBody(
       `acceptance: ${changed.map((n) => `PR #${String(n)}`).join(', ')}: acceptance changed during the wait`,
     );
   }
+  // 10a'. The D11 records again when the pass relied on them: an unlabel
+  //       or relabel during the wait moves no ref either.
+  if (policy.relied) {
+    const again = await policyPass(deps, cfg, subject, closure.admitted, bySha, report, 'pass 2');
+    if (again.refusal !== null) refuse(`${again.refusal} (D11 recheck after the wait)`);
+  }
 
   // 10b. Verdicts and verified runs once more, without waiting: pass 2 can
   //      itself take minutes, and a failed rerun or a newly posted verdict
   //      moves no ref. One poll; anything short of green refuses.
-  await awaitVerdicts(deps, cfg, subject, main, report, refuse, 'recheck');
+  await awaitVerdicts(deps, cfg, requiredJobs, subject, main, report, refuse, 'recheck');
+
+  // 10c. A pass that relied on D11 records or on the D-P revision window is
+  //      judged again as the LAST read before the push (and before a dry-run
+  //      verdict): an unlabel moves no leased ref, and the waits and the
+  //      reads below can outlast the window's expiry. Either must refuse.
+  const relied = [...(policy.relied ? ['D11'] : []), ...(windowed ? ['revision-window'] : [])];
+  const recheckWindow = async (): Promise<void> => {
+    if (relied.length === 0) return;
+    const again = await policyPass(
+      deps,
+      cfg,
+      subject,
+      closure.admitted,
+      bySha,
+      report,
+      `recheck (${relied.join(', ')})`,
+    );
+    if (again.refusal !== null) {
+      refuse(`policy: the ${relied.join(' and ')} pass no longer holds at push time`);
+    }
+  };
 
   // 10. Promote.
   if (!cfg.push) {
+    await recheckWindow();
     report.push('push: dry run (no --push)');
     return { verdict: 'would-promote' };
   }
@@ -1076,6 +1147,7 @@ async function gateBody(
   // advanced queue can never ride along, and a rewind below the tip puts
   // the subject off the queue exactly when its stale read must not
   // promote). Every read is on the same transport the push uses.
+  await recheckWindow();
   const updates: LeasedUpdate[] = [
     { refspec: `${subject}:refs/heads/${MAIN_BRANCH}`, expected: main },
     {
@@ -1122,14 +1194,116 @@ async function judgeAdmitted(
   return rejected;
 }
 
-/** Step 7: evaluate and log each admitted PR's cq-override record. Never throws. */
-async function logOverrides(
-  deps: GateDeps,
-  cfg: GateConfig,
-  admitted: readonly AdmittedPr[],
+/** The admitted PRs of `main..subject`, or why the range cannot be admitted. */
+export type QueueClosure =
+  | { admitted: readonly AdmittedPr[]; bySha: ReadonlyMap<string, RangeCommit> }
+  | { refusal: string };
+
+/**
+ * Steps 3–4, shared by the gate and the ratchet verifier's carrier: the
+ * closure over `main..subject` (every first-parent commit the clean merge of
+ * exactly one merged same-repo PR) and the clean-merge check. Reports what
+ * it read; any doubt is a refusal, never a partial admission.
+ */
+export async function queueClosure(
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'repositoryId'>,
+  main: string,
+  subject: string,
   report: string[],
-): Promise<void> {
-  if (admitted.length === 0) return;
+): Promise<QueueClosure> {
+  const { gh, git } = deps;
+  const repoPath = `repos/${cfg.owner}/${cfg.name}`;
+  const getSlurp = (path: string): Promise<unknown> =>
+    ghJson<unknown>(gh, ['api', path, '--paginate', '--slurp']);
+  const commits = await git.rangeCommits(cfg.repo, main, subject);
+  const firstParent = await git.firstParentRange(cfg.repo, main, subject);
+  if (firstParent[0] !== subject) {
+    return { refusal: 'closure: the first-parent chain does not start at the subject' };
+  }
+  const prs = new Map<string, MergedPr[]>();
+  const bySha = new Map(commits.map((c) => [c.sha, c]));
+  for (const sha of firstParent) {
+    if ((bySha.get(sha)?.parents.length ?? 0) !== 2) continue;
+    const path = `${repoPath}/commits/${sha}/pulls?per_page=100`;
+    const wire = slurpedComments(await getSlurp(path), path).flat();
+    prs.set(
+      sha,
+      wire.map(toMergedPr).filter((pr): pr is MergedPr => pr !== null),
+    );
+  }
+  const closure = checkClosure({
+    commits,
+    firstParent,
+    prs,
+    repositoryId: cfg.repositoryId,
+    queueBranch: QUEUE_BRANCH,
+  });
+  report.push(
+    `closure: ${String(commits.length)} commit(s), ${String(firstParent.length)} on the first-parent chain, ${String(closure.admitted.length)} admitted PR(s)`,
+  );
+  for (const a of closure.admitted) {
+    report.push(`  admitted PR #${String(a.pr)}: merge ${a.merge} head ${a.head}`);
+  }
+  for (const v of closure.violations) report.push(`  violation: ${v}`);
+  if (!closure.ok) return { refusal: 'closure: main..tip contains commits no accepted PR admits' };
+
+  // Clean first-parent merges.
+  for (const a of closure.admitted) {
+    const commit = bySha.get(a.merge);
+    const [p1 = '', p2 = ''] = commit?.parents ?? [];
+    const merged = await git.mergeTreeClean(cfg.repo, p1, p2);
+    const actual = await git.treeOf(cfg.repo, a.merge);
+    if (merged === null || merged !== actual) {
+      report.push(
+        `  merge-tree ${a.merge}: ${merged === null ? 'parents conflict' : `tree ${actual} != clean merge ${merged}`}`,
+      );
+      return {
+        refusal: `merge ${a.merge}: evil or conflict-resolving merge on the queue's first-parent chain`,
+      };
+    }
+  }
+  report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
+  return { admitted: closure.admitted, bySha };
+}
+
+/**
+ * The gate's D11 authorization for `main..subject`, for a caller that is not
+ * the gate (cq-verify's ratchet verdict on the queue tip, readiness T2): the
+ * same closure and the same per-PR evidence binding, so both judge with one
+ * object. A range the closure refuses binds no contribution, so every path
+ * stays unauthorized (fail closed).
+ */
+export async function bindQueueAuthorization(
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'repositoryId' | 'trustRef'>,
+  main: string,
+  subject: string,
+  report: string[],
+): Promise<D11Authorization> {
+  const closure = await queueClosure(deps, cfg, main, subject, report);
+  if ('refusal' in closure) {
+    return {
+      attested: false,
+      contributions: [],
+      report: [`d11: no authorization bound — ${closure.refusal}`],
+    };
+  }
+  return bindAdmitted(deps, cfg, closure.admitted, closure.bySha, report);
+}
+
+/**
+ * Step 6: read and bind each admitted PR's D11 evidence. Every read failure
+ * is a reason in the bound object (fail closed), except a git fault on the
+ * contribution diff, which throws (the gate cannot judge the range).
+ */
+async function bindAdmitted(
+  deps: Pick<GateDeps, 'gh' | 'git'>,
+  cfg: Pick<GateConfig, 'repo' | 'owner' | 'name' | 'trustRef'>,
+  admitted: readonly AdmittedPr[],
+  bySha: ReadonlyMap<string, RangeCommit>,
+  report: string[],
+): Promise<D11Authorization> {
   const repoPath = `repos/${cfg.owner}/${cfg.name}`;
   let ownerId: number | null = null;
   try {
@@ -1137,13 +1311,43 @@ async function logOverrides(
       asRecord(asRecord(await ghJson<unknown>(deps.gh, ['api', repoPath]))['owner'])['id'],
     );
   } catch (error) {
-    report.push(`override: owner id unreadable (${describeError(error)})`);
+    report.push(`  d11: owner id unreadable (${describeError(error)})`);
   }
+  let attestation: C3AttestationRead;
+  try {
+    const text = await deps.git.readBlob(cfg.repo, cfg.trustRef, C3_ATTESTATION_PATH);
+    attestation = text === null ? { state: 'absent' } : { state: 'present', text };
+  } catch (error) {
+    attestation = { state: 'unreadable', reason: describeError(error) };
+  }
+  let history: SettleState[] = [];
+  try {
+    const read = await readSettleHistory(
+      { gh: deps.gh, owner: cfg.owner, repo: cfg.name },
+      SETTLE_HISTORY_MAX,
+      (versions) => admitted.every((a) => versions.some((v) => Object.hasOwn(v.prs, String(a.pr)))),
+    );
+    history = read.versions;
+    report.push(
+      `  d11: settle ledger — ${String(read.versions.length)} version(s) read${read.exhausted ? ` (history exhausted, at most ${String(SETTLE_HISTORY_MAX)})` : ''}`,
+    );
+    for (const why of read.discarded) report.push(`  d11: settle ledger discarded — ${clean(why)}`);
+    if (read.barrier) {
+      report.push(
+        '  d11: settle ledger — a malformed version is a lookup barrier; older versions are not consulted',
+      );
+    }
+  } catch (error) {
+    report.push(`  d11: settle ledger unreadable (${describeError(error)}) — no head epoch`);
+  }
+  const prs: D11PrEvidence[] = [];
   for (const a of admitted) {
-    let evaluation: OverrideEvaluation;
+    const [p1 = ''] = bySha.get(a.merge)?.parents ?? [];
+    const paths = await deps.git.changedPaths(cfg.repo, p1, a.merge);
+    let events: D11PrEvidence['events'];
     try {
       const path = `${repoPath}/issues/${String(a.pr)}/timeline?per_page=100`;
-      const events = slurpedComments(
+      events = slurpedComments(
         await ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']),
         path,
       )
@@ -1152,24 +1356,97 @@ async function logOverrides(
           const event = asRecord(e)['event'];
           return event === 'labeled' || event === 'unlabeled';
         });
-      // No settle-ledger epoch is read here, so a present label is logged
-      // `invalid` (no durable head observation) — never honoured by the gate.
-      evaluation = evaluateOverrideLabel({
-        events,
-        ownerId: ownerId ?? 0,
-        subject: a.head,
-        headObservedAt: undefined,
-        attested: false,
-      });
     } catch (error) {
-      evaluation = {
-        status: 'invalid',
-        reasons: [`label events unreadable: ${describeError(error)}`],
-      };
+      events = { unreadable: describeError(error) };
     }
-    report.push(`override PR #${String(a.pr)} (logged only):`);
-    for (const line of formatOverride(evaluation)) report.push(`  ${line}`);
+    prs.push({
+      pr: a.pr,
+      merge: a.merge,
+      head: a.head,
+      paths,
+      events,
+      headObservedAt: headObservationEpochInHistory(history, a.pr, a.head),
+    });
   }
+  return bindD11Authorization({ ownerId, attestation, prs });
+}
+
+/** One policy pass: the refusal (null only for a pass) and what the later steps reuse. */
+interface PolicyPass {
+  refusal: string | null;
+  /** The pass needed D11 records (so the gate re-checks them after the waits). */
+  relied: boolean;
+  /** The pass relied on the D-P revision window (so the gate re-checks it last). */
+  windowed: boolean;
+  /** The trust ref's `requiredJobs` (policy data, not code). */
+  requiredJobs: Readonly<Record<string, readonly string[]>>;
+}
+
+/**
+ * Steps 6–7 (and 10a'): bind the admitted PRs' D11 evidence and recompute
+ * the policy over main..subject with it. `refusal` is null only for a pass;
+ * `relied` says the pass needed D11 records (so the gate re-checks them).
+ */
+async function policyPass(
+  deps: GateDeps,
+  cfg: GateConfig,
+  subject: string,
+  admitted: readonly AdmittedPr[],
+  bySha: ReadonlyMap<string, RangeCommit>,
+  report: string[],
+  pass: string,
+): Promise<PolicyPass> {
+  report.push(`d11 ${pass}:`);
+  const authorization = await bindAdmitted(deps, cfg, admitted, bySha, report);
+  for (const line of authorization.report) report.push(`  ${line}`);
+  const policy = await deps.policyDiff({
+    repo: cfg.repo,
+    trustRef: cfg.trustRef,
+    subject,
+    subjectKind: 'push',
+    base: `refs/remotes/origin/${MAIN_BRANCH}`,
+    authorization,
+  });
+  if (policy.status !== 'ok') {
+    const detail =
+      policy.status === 'failed'
+        ? policy.error
+        : policy.status === 'needs-human'
+          ? policy.reason
+          : policy.status === 'indeterminate'
+            ? policy.detail
+            : policy.status;
+    report.push(`policy ${pass}: ${policy.status} — ${clean(detail)}`);
+    return {
+      refusal: 'policy: gates.policyDiff could not judge the range',
+      relied: false,
+      windowed: false,
+      requiredJobs: {},
+    };
+  }
+  report.push(`policy ${pass}: ${policy.value.verdict}`);
+  for (const line of policy.value.report) report.push(`  ${line}`);
+  const relied = policy.value.d11?.authorized === true;
+  const windowed = policy.value.postureLayer === 'window';
+  // The trust ref's required job names. One that names a workflow the gate
+  // does not verify could never be checked.
+  const requiredJobs = policy.value.requiredJobs;
+  if (policy.value.verdict === 'pass') {
+    const unverified = Object.keys(requiredJobs).filter((f) => !cfg.verifiedWorkflows.includes(f));
+    const refusal =
+      unverified.length > 0
+        ? `policy: requiredJobs names unverified workflow(s) ${unverified.join(', ')}`
+        : null;
+    return { refusal, relied, windowed, requiredJobs };
+  }
+  return {
+    refusal: authorization.attested
+      ? `policy: ${policy.value.verdict} — not every path needing a human is authorized by a valid D11 record of every admitted PR that changed it (ADR-0004 D-C.3, D-G.4)`
+      : `policy: ${policy.value.verdict} — D11 records are dormant until the C3 attestation, so a protected-path change promotes only by owner break-glass (ADR-0004 D-G.4, D-H.4)`,
+    relied,
+    windowed,
+    requiredJobs,
+  };
 }
 
 /**
@@ -1180,6 +1457,7 @@ async function logOverrides(
 async function awaitVerdicts(
   deps: GateDeps,
   cfg: GateConfig,
+  requiredJobs: Readonly<Record<string, readonly string[]>>,
   subject: string,
   main: string,
   report: string[],
@@ -1247,13 +1525,35 @@ async function awaitVerdicts(
       });
       if (check.state === 'pending' && newest !== null && newest['status'] === 'completed') {
         const id = asInt(newest['id']);
-        const jobsPath = `${repoPath}/actions/runs/${String(id)}/jobs?per_page=100`;
+        // Every execution (`filter=all`): checkVerifiedRun judges each job
+        // name by its newest attempt, so a partial rerun keeps earlier green jobs.
+        const jobsPath = `${repoPath}/actions/runs/${String(id)}/jobs?per_page=100&filter=all`;
         const jobs = pagesOf(await getSlurp(jobsPath), 'jobs', jobsPath);
         check = checkVerifiedRun(newest, jobs, {
           file,
           tip: subject,
           repositoryId: cfg.repositoryId,
+          requiredJobs: Object.hasOwn(requiredJobs, file) ? (requiredJobs[file] ?? []) : [],
         });
+        // The jobs must belong to the run snapshot they were judged against:
+        // re-read the run, and anything but the same completed, successful
+        // attempt (a rerun started meanwhile) is pending, never evidence.
+        if (check.state === 'success') {
+          const again = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
+          const after = [...again].sort(newestFirst('created_at'))[0] ?? null;
+          const same =
+            after !== null &&
+            asInt(after['id']) === id &&
+            asInt(after['run_attempt']) === asInt(newest['run_attempt']) &&
+            after['status'] === 'completed' &&
+            after['conclusion'] === 'success';
+          if (!same) {
+            check = {
+              state: 'pending',
+              reason: `run ${String(id)}: the run changed while its jobs were read (rerun?)`,
+            };
+          }
+        }
       }
       lines.push(`verified ${file}: ${check.state} — ${check.reason}`);
       if (check.state === 'failure') {

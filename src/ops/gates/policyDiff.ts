@@ -16,10 +16,16 @@
 //     `assertRepoRelPath` (#224's `.git` segment and the rest) is reported as
 //     `unsafe-path` and never read.
 //   - THE POSTURE is resolved by the caller (the registry importer, once per
-//     dispatch) and bound into the op; op input never carries it.
+//     dispatch) and bound into the op; op input never carries it. A D-P
+//     revision window in the trust ref's list may relax a default-layer
+//     posture to `diff-check` until its explicit expiry (policyConfig.ts).
 //   - THE OVERRIDE LABEL is evaluated from API timeline events and the
 //     settle-ledger head epoch, logged in full, and honoured only once the
 //     C3 attestation is on the trust ref (D-G.4).
+//   - A PUSH SUBJECT carries no label of its own: the promotion gate binds
+//     a per-admitted-PR authorization (./d11Authorization.ts) in-process,
+//     and a needs-human range passes only when every path needing a human
+//     is authorized by every PR that changed it (D-C.3).
 //
 // Failure direction (I5): a finding the check cannot rule out is
 // needs-human, never a pass; `lint` is always `fail`. `failed` is reserved for
@@ -49,6 +55,7 @@ import {
   type RatchetManifest,
 } from '../ratchet/internal/definitions.js';
 import { checkDiffMonotonicity, formatViolations } from '../ratchet/monotonicGuard.js';
+import { authorizePaths, type D11Authorization, type D11Decision } from './d11Authorization.js';
 import {
   C3_ATTESTATION_PATH,
   evaluateOverrideLabel,
@@ -57,7 +64,13 @@ import {
   parseC3Attestation,
   type OverrideEvaluation,
 } from './overrideRecord.js';
-import type { ProtectedPathsConfig, ProtectedPathsPosture } from './policyConfig.js';
+import {
+  RevisionWindowSchema,
+  applyRevisionWindow,
+  type EffectivePosture,
+  type ProtectedPathsConfig,
+  type ProtectedPathsPosture,
+} from './policyConfig.js';
 import { isProtectedPolicyPath } from './protectedPaths.js';
 import {
   diffWorkflow,
@@ -110,6 +123,11 @@ export interface PolicyDiffInput {
   labelEventsPath?: string;
   /** The fetched settle-ledger ref (`cq-state`), when it exists. */
   settleRef?: string;
+  /**
+   * Push subjects only: the per-admitted-PR D11 authorization the gate
+   * bound. In-process only — the strict CLI schema cannot carry it.
+   */
+  authorization?: D11Authorization;
 }
 
 export type PolicyFindingKind =
@@ -131,8 +149,11 @@ export interface PolicyFinding {
 
 export interface PolicyDiffOutcome {
   verdict: 'pass' | 'fail' | 'needs-human';
+  /** The EFFECTIVE posture: the resolved one after the trust ref's revision window. */
   posture: ProtectedPathsPosture;
-  postureLayer: 'default' | 'env' | 'call';
+  postureLayer: EffectivePosture['layer'];
+  /** The trust ref's `requiredJobs` (empty when none): what the promotion gate requires by name. */
+  requiredJobs: Readonly<Record<string, readonly string[]>>;
   /** Resolved 40-hex SHAs the verdict is bound to. */
   trustRef: string;
   subject: string;
@@ -140,6 +161,8 @@ export interface PolicyDiffOutcome {
   rangeBase: string;
   findings: PolicyFinding[];
   override: OverrideEvaluation;
+  /** Push subjects with a bound authorization: the D11 decision over the needs-human paths. */
+  d11?: D11Decision;
   /** The run report: posture, range, findings, the override record, the verdict. */
   report: string[];
 }
@@ -153,6 +176,9 @@ function compiles(source: string): boolean {
     return false;
   }
 }
+
+/** A workflow file name under `.github/workflows/` (no directory part). */
+const WORKFLOW_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/;
 
 /** `policy/protected-paths.json`: strict, every regex source compiles, every check name non-empty. */
 const PolicyListSchema = z
@@ -170,6 +196,13 @@ const PolicyListSchema = z
         .refine(compiles, { message: 'protectedPaths entry must compile' }),
     ),
     requiredChecks: z.array(z.string().min(1)),
+    // Jobs the promotion gate requires BY NAME in each verified workflow's
+    // run (D-F.2): every job green is not enough when a job can be deleted.
+    requiredJobs: z
+      .record(z.string().regex(WORKFLOW_FILE), z.array(z.string().min(1)).min(1))
+      .exactOptional(),
+    // The D-P revision window (policyConfig.ts `applyRevisionWindow`).
+    revisionWindow: RevisionWindowSchema.exactOptional(),
   })
   .strict();
 
@@ -402,7 +435,9 @@ async function evaluateOverride(
     status: 'absent',
     reasons: [`not evaluated: ${why}`],
   });
-  if (input.subjectKind !== 'pr') return skip('a push subject carries no PR label record');
+  if (input.subjectKind !== 'pr') {
+    return skip('a push subject is authorized per admitted PR (D11 authorization)');
+  }
   if (input.pr === undefined) return skip('no PR number');
   if (input.ownerId === undefined) return skip('no repository owner id');
   if (input.labelEventsPath === undefined) return skip('no label events');
@@ -470,23 +505,33 @@ async function evaluateOverride(
   });
 }
 
+/** The findings that make a posture's verdict needs-human. */
+function humanFindings(
+  posture: ProtectedPathsPosture,
+  findings: readonly PolicyFinding[],
+): PolicyFinding[] {
+  return posture === 'human' ? [...findings] : findings.filter((f) => f.kind !== 'protected-path');
+}
+
 /** The verdict a posture assigns to a finding list (before any override). */
 function judge(
   posture: ProtectedPathsPosture,
   findings: readonly PolicyFinding[],
 ): PolicyDiffOutcome['verdict'] {
   if (findings.some((f) => f.kind === 'lint')) return 'fail';
-  if (posture === 'human') return findings.length > 0 ? 'needs-human' : 'pass';
-  return findings.some((f) => f.kind !== 'protected-path') ? 'needs-human' : 'pass';
+  return humanFindings(posture, findings).length > 0 ? 'needs-human' : 'pass';
 }
 
 /**
  * The policy-diff op, bound to a resolved posture. See the module header for
- * what is trusted and why.
+ * what is trusted and why. `now` is the clock the trust ref's revision
+ * window is judged by (injected for tests).
  */
 export function createPolicyDiff(
   config: ProtectedPathsConfig,
+  options: { now?: () => number } = {},
 ): Op<PolicyDiffInput, PolicyDiffOutcome> {
+  const now = options.now ?? Date.now;
   return async (input) => {
     // Same base rule as verifyRatchet: a push subject is judged against main,
     // so a mislabeled push cannot silently use a PR range.
@@ -660,6 +705,15 @@ export function createPolicyDiff(
         for (const entry of basePolicy.value.requiredChecks) {
           if (!keptChecks.has(entry)) {
             add('entry-removed', POLICY_LIST_PATH, `removes requiredChecks entry ${entry}`);
+          }
+        }
+        const subjectJobs = subjectPolicy.value.requiredJobs ?? {};
+        for (const [file, jobs] of Object.entries(basePolicy.value.requiredJobs ?? {})) {
+          const keptJobs = new Set(Object.hasOwn(subjectJobs, file) ? subjectJobs[file] : []);
+          for (const job of jobs) {
+            if (!keptJobs.has(job)) {
+              add('entry-removed', POLICY_LIST_PATH, `removes requiredJobs entry ${file}:${job}`);
+            }
           }
         }
       }
@@ -841,6 +895,31 @@ export function createPolicyDiff(
       }
     }
 
+    // required-check (required jobs): the gate requires the trust ref's
+    // `requiredJobs` by display name in each verified workflow's run, so a
+    // changed workflow that no longer statically names one would block every
+    // promotion. That is a definition change, needs-human in every posture —
+    // never a revision-window pass.
+    for (const [file, jobs] of Object.entries(policy.requiredJobs ?? {})) {
+      const wf = `${WORKFLOWS_DIR}/${file}`;
+      if (!safeSet.has(wf)) continue;
+      const scan = subjectFlows.get(wf)?.scan;
+      if (scan?.ok !== true) {
+        add(
+          'required-check',
+          wf,
+          `required jobs of ${file} unresolvable at the subject (${scan === undefined ? 'workflow removed' : 'unparseable'})`,
+        );
+        continue;
+      }
+      for (const required of jobs) {
+        const named = [...scan.jobs.values()].some(
+          (job) => !hasUnresolvableCheckName(job) && (job.name ?? job.id) === required,
+        );
+        if (!named) add('required-check', wf, `no statically named required job ${required}`);
+      }
+    }
+
     // The override record (logged whatever the verdict).
     const notes: string[] = [];
     if (policyAbsent) {
@@ -850,12 +929,26 @@ export function createPolicyDiff(
     }
     const override = await evaluateOverride(input, trust, subject, notes);
 
-    let verdict = judge(config.posture, findings);
-    const authorized = verdict === 'needs-human' && override.status === 'honoured';
+    // The window comes from the TRUST REF's list only (never the subject's).
+    const effective = applyRevisionWindow(config, policy.revisionWindow, now());
+    let verdict = judge(effective.posture, findings);
+    let d11: D11Decision | undefined;
+    if (input.subjectKind === 'push' && verdict === 'needs-human') {
+      if (input.authorization === undefined) {
+        notes.push('d11: no authorization bound for this push subject — needs-human stands');
+      } else {
+        const paths = humanFindings(effective.posture, findings).map((f) => f.path);
+        d11 = authorizePaths(input.authorization, paths);
+      }
+    }
+    const authorized =
+      verdict === 'needs-human' &&
+      (input.subjectKind === 'push' ? d11?.authorized === true : override.status === 'honoured');
     if (authorized) verdict = 'pass';
 
     const report: string[] = [
-      `posture: ${config.posture} (layer ${config.layer})`,
+      `posture: ${effective.posture} (layer ${effective.layer})`,
+      ...effective.lines,
       `range: ${rangeBase}..${subject} (trust ${trust})`,
     ];
     if (findings.length === 0) report.push('findings: none');
@@ -865,9 +958,12 @@ export function createPolicyDiff(
       report.push(`  ${reason}`);
     }
     report.push(...notes);
+    if (d11 !== undefined) report.push(...d11.lines);
     report.push(
       authorized
-        ? 'verdict: pass (needs-human authorized by the D11 override record)'
+        ? input.subjectKind === 'push'
+          ? "verdict: pass (needs-human authorized by every changing PR's D11 record)"
+          : 'verdict: pass (needs-human authorized by the D11 override record)'
         : `verdict: ${verdict}`,
     );
 
@@ -875,13 +971,15 @@ export function createPolicyDiff(
       status: 'ok',
       value: {
         verdict,
-        posture: config.posture,
-        postureLayer: config.layer,
+        posture: effective.posture,
+        postureLayer: effective.layer,
+        requiredJobs: policy.requiredJobs ?? {},
         trustRef: trust,
         subject,
         rangeBase,
         findings,
         override,
+        ...(d11 === undefined ? {} : { d11 }),
         report,
       },
     };

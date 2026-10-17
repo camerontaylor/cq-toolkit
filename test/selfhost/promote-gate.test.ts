@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
+import { authorizePaths } from '../../src/ops/gates/d11Authorization.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from '../../src/ops/gates/policyDiff.js';
 import type { RangeCommit } from '../../src/ops/ratchet/git.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -31,6 +32,7 @@ import {
   BANNED_REVIEWER_LOGINS,
   POLL_MS,
   checkClosure,
+  bindQueueAuthorization,
   checkVerifiedRun,
   mainWith,
   parseGateArgs,
@@ -48,6 +50,8 @@ import {
   type ReviewerWant,
   type VerdictWant,
 } from '../../src/selfhost/promote-gate.js';
+import { verifyWithAuthorization } from '../../src/selfhost/verify-ratchet.js';
+import type { VerifyRatchetInput } from '../../src/ops/ratchet/verifyRatchet.js';
 
 const sha = (c: string): string => c.repeat(40);
 const MAIN = sha('a');
@@ -397,6 +401,7 @@ describe('checkVerifiedRun', () => {
   const want = { file: 'ci.yml', tip: TIP, repositoryId: REPO_ID };
   const wf = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 77,
+    run_attempt: 1,
     path: '.github/workflows/ci.yml',
     event: 'push',
     head_branch: 'merge-queue',
@@ -408,6 +413,7 @@ describe('checkVerifiedRun', () => {
   });
   const job = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 1,
+    run_attempt: 1,
     name: 'static',
     status: 'completed',
     conclusion: 'success',
@@ -417,13 +423,7 @@ describe('checkVerifiedRun', () => {
   });
 
   test('a green run with real jobs passes', () => {
-    expect(checkVerifiedRun(wf(), [job(), job({ name: 'crq-python' })], want).state).toBe(
-      'success',
-    );
-  });
-
-  test('refuses a historical CI run without Python', () => {
-    expect(checkVerifiedRun(wf(), [job()], want).reason).toMatch(/missing required job crq-python/);
+    expect(checkVerifiedRun(wf(), [job(), job({ name: 'b' })], want).state).toBe('success');
   });
 
   test('missing / pending / jobs not read', () => {
@@ -452,10 +452,87 @@ describe('checkVerifiedRun', () => {
   test('job shape: runner_id null, zero steps, skipped job, no jobs', () => {
     expect(checkVerifiedRun(wf(), [job({ runner_id: null })], want).reason).toMatch(/no runner_id/);
     expect(checkVerifiedRun(wf(), [job({ steps: [] })], want).reason).toMatch(/no steps/);
-    const skipped = checkVerifiedRun(wf(), [job(), job({ conclusion: 'skipped' })], want);
+    const skipped = checkVerifiedRun(
+      wf(),
+      [job(), job({ id: 2, name: 'b', conclusion: 'skipped' })],
+      want,
+    );
     expect(skipped.state).toBe('failure');
     expect(skipped.reason).toMatch(/completed\/skipped/);
     expect(checkVerifiedRun(wf(), [], want).reason).toMatch(/no jobs/);
+  });
+
+  test('requiredJobs: every named job must be in the run (policy data, not code)', () => {
+    const named = { ...want, requiredJobs: ['static', 'crq-python'] };
+    const missing = checkVerifiedRun(wf(), [job(), job({ name: 'from-source' })], named);
+    expect(missing.state).toBe('failure');
+    expect(missing.reason).toMatch(/missing required job 'crq-python'/);
+    expect(checkVerifiedRun(wf(), [job(), job({ name: 'crq-python' })], named).state).toBe(
+      'success',
+    );
+    // Still pending before the jobs are read: presence is judged on real jobs only.
+    expect(checkVerifiedRun(wf(), null, named).state).toBe('pending');
+  });
+
+  test('a partial rerun (filter=all): each job is judged by its newest attempt', () => {
+    const named = { ...want, requiredJobs: ['static', 'from-source'] };
+    const run2 = wf({ run_attempt: 2 });
+    // static green in attempt 1 and not rerun; from-source failed, then passed on rerun.
+    const rerun = [
+      job({ name: 'static', run_attempt: 1 }),
+      job({ id: 2, name: 'from-source', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 3, name: 'from-source', run_attempt: 2 }),
+    ];
+    expect(checkVerifiedRun(run2, rerun, named).state).toBe('success');
+    // A rerun's failure supersedes its earlier success.
+    const regressed = [
+      job({ name: 'static', run_attempt: 1 }),
+      job({ id: 2, name: 'static', run_attempt: 2, conclusion: 'failure' }),
+    ];
+    expect(checkVerifiedRun(run2, regressed, want).reason).toMatch(
+      /job 'static' is completed\/failure/,
+    );
+  });
+
+  test('job attribution fails closed: no attempt, duplicates, colliding names', () => {
+    // run_attempt is never inferred.
+    const bare = { ...job(), run_attempt: undefined };
+    expect(checkVerifiedRun(wf(), [bare], want).reason).toMatch(/job 'static' has no run_attempt/);
+    expect(checkVerifiedRun(wf({ run_attempt: undefined }), [job()], want).reason).toMatch(
+      /the run has no run_attempt/,
+    );
+    // Twins sharing a display name in one attempt are ambiguous, even when
+    // only one of them is rerun later.
+    const twins = [
+      job({ id: 1, name: 'x', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 2, name: 'x', run_attempt: 1 }),
+      job({ id: 3, name: 'x', run_attempt: 2 }),
+    ];
+    expect(checkVerifiedRun(wf({ run_attempt: 2 }), twins, want).reason).toMatch(
+      /two jobs named 'x' in attempt 1: ambiguous/,
+    );
+    // Names that only collide after sanitization (`clean` maps both to
+    // 'lint?') are distinct jobs: 'linté' failed in attempt 1 and was never
+    // rerun, so the green 'lintö' of attempt 2 must not stand for it.
+    const lookalikes = [
+      job({ id: 1, name: 'linté', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 2, name: 'lintö', run_attempt: 2 }),
+    ];
+    const masked = checkVerifiedRun(wf({ run_attempt: 2 }), lookalikes, want);
+    expect(masked.state).toBe('failure');
+    expect(masked.reason).toMatch(/job 'lint\?' is completed\/failure/);
+  });
+
+  test('jobs are bound to the run snapshot: a newer or unlisted attempt is pending', () => {
+    // A rerun started after the run was read: its rows are never evidence.
+    const newer = [job({ run_attempt: 1 }), job({ id: 2, name: 'b', run_attempt: 2 })];
+    const inFlight = checkVerifiedRun(wf(), newer, want);
+    expect(inFlight.state).toBe('pending');
+    expect(inFlight.reason).toMatch(/newer than the run read \(attempt 1\)/);
+    // The run says attempt 2, but no attempt-2 job is listed yet.
+    const unlisted = checkVerifiedRun(wf({ run_attempt: 2 }), [job()], want);
+    expect(unlisted.state).toBe('pending');
+    expect(unlisted.reason).toMatch(/no job of attempt 2 listed yet/);
   });
 });
 
@@ -641,6 +718,10 @@ interface World {
   promoted?: string | undefined;
   /** When set, the marker ref read fails with this stderr (fail-closed). */
   promotedError?: string;
+  /** The cq-state ledger history, newest first; undefined = unrouted (unreadable). */
+  settle?: { sha: string; ledger: unknown }[];
+  /** The timeline label events per read (n = read index); default: one owner label. */
+  timeline?: (n: number) => unknown[];
 }
 
 const ok = (value: unknown): GhResult => ({
@@ -652,6 +733,7 @@ const ok = (value: unknown): GhResult => ({
 function fakeGh(world: World, calls: string[][]): GhFn {
   let checkReads = 0;
   let statusReads = 0;
+  let timelineReads = 0;
   return (args) => {
     calls.push(args);
     const path = args[0] === 'api' && args[1] === '-X' ? (args[3] ?? '') : (args[1] ?? '');
@@ -685,6 +767,23 @@ function fakeGh(world: World, calls: string[][]): GhFn {
       return Promise.resolve(ok([world.statuses.get(m[1] ?? '') ?? []]));
     }
     if (q === 'repos/o/r') return Promise.resolve(ok({ owner: { id: 1 } }));
+    if (world.settle !== undefined && q === 'repos/o/r/commits') {
+      return Promise.resolve(ok(world.settle.map((v) => ({ sha: v.sha }))));
+    }
+    if (world.settle !== undefined && q === 'repos/o/r/contents/.cq/settle-state.json') {
+      const ref = /[?&]ref=([0-9a-f]{40})/.exec(path)?.[1];
+      const version = world.settle.find((v) => v.sha === ref);
+      if (version === undefined) {
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' });
+      }
+      const content = Buffer.from(JSON.stringify(version.ledger)).toString('base64');
+      return Promise.resolve(ok({ encoding: 'base64', content }));
+    }
+    if (world.timeline !== undefined && /^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
+      const events = world.timeline(timelineReads);
+      timelineReads += 1;
+      return Promise.resolve(ok([events]));
+    }
     if (/^repos\/o\/r\/issues\/\d+\/timeline$/.test(q)) {
       return Promise.resolve(
         ok([
@@ -726,6 +825,7 @@ function fakeGh(world: World, calls: string[][]): GhFn {
 
 const greenRun = (file: string, tip: string): Record<string, unknown> => ({
   id: 100,
+  run_attempt: 1,
   path: `.github/workflows/${file}`,
   event: 'push',
   head_branch: 'merge-queue',
@@ -738,6 +838,7 @@ const greenRun = (file: string, tip: string): Record<string, unknown> => ({
 
 const greenJob = {
   id: 1,
+  run_attempt: 1,
   name: 'j',
   status: 'completed',
   conclusion: 'success',
@@ -807,6 +908,9 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
+    // No C3 attestation at the trust ref; the PR's contribution is empty.
+    readBlob: () => Promise.resolve(null),
+    changedPaths: () => Promise.resolve([]),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -821,12 +925,17 @@ const passAcceptance = (input: AcceptanceInput): Promise<AcceptanceResult> =>
     report: ['pass: accepted by user:owner'],
   });
 
-const policyOutcome = (verdict: PolicyDiffOutcome['verdict']): OpResult<PolicyDiffOutcome> => ({
+const policyOutcome = (
+  verdict: PolicyDiffOutcome['verdict'],
+  requiredJobs: PolicyDiffOutcome['requiredJobs'] = {},
+  postureLayer: PolicyDiffOutcome['postureLayer'] = 'default',
+): OpResult<PolicyDiffOutcome> => ({
   status: 'ok',
   value: {
     verdict,
-    posture: 'human',
-    postureLayer: 'default',
+    posture: postureLayer === 'window' ? 'diff-check' : 'human',
+    postureLayer,
+    requiredJobs,
     trustRef: TRUST,
     subject: M1,
     rangeBase: MAIN,
@@ -910,19 +1019,24 @@ describe('runGate', () => {
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
     ]);
-    expect(h.policyInputs).toEqual([
-      {
-        repo: '/tmp/trust',
-        trustRef: TRUST,
-        subject: M1,
-        subjectKind: 'push',
-        base: 'refs/remotes/origin/main',
-      },
+    expect(h.policyInputs).toHaveLength(1);
+    expect(h.policyInputs[0]).toMatchObject({
+      repo: '/tmp/trust',
+      trustRef: TRUST,
+      subject: M1,
+      subjectKind: 'push',
+      base: 'refs/remotes/origin/main',
+      authorization: { attested: false },
+    });
+    expect(h.policyInputs[0]?.authorization?.contributions).toMatchObject([
+      { pr: 7, merge: M1, head: H1 },
     ]);
     const text = r.report.join('\n');
     expect(text).toMatch(/admitted PR #7/);
-    expect(text).toMatch(/override PR #7 \(logged only\)/);
-    // The label is logged invalid (no durable head observation), never honoured.
+    expect(text).toMatch(/override PR #7 \(merge c{40}, head b{40}\):/);
+    // No settle ledger is routed, so the label is invalid (no durable head
+    // observation), never honoured.
+    expect(text).toMatch(/settle ledger unreadable/);
     expect(text).toMatch(/verdict: invalid/);
     expect(text).toMatch(/verified ci\.yml: success/);
     expect(text).toMatch(/push: dry run/);
@@ -1167,7 +1281,7 @@ describe('runGate', () => {
     );
   });
 
-  test('policy needs-human refuses (break-glass), with the override still logged', async () => {
+  test('policy needs-human refuses (break-glass), with the override still echoed', async () => {
     const h = harness(world(), {
       policyDiff: () => Promise.resolve(policyOutcome('needs-human')),
     });
@@ -1176,11 +1290,91 @@ describe('runGate', () => {
     expect(r.report.at(-1)).toMatch(
       /policy: needs-human .* owner break-glass \(ADR-0004 D-G\.4, D-H\.4\)/,
     );
-    expect(r.report.join('\n')).toMatch(/override PR #7 \(logged only\)/);
+    expect(r.report.join('\n')).toMatch(/override PR #7 \(merge /);
     const failed = harness(world(), {
       policyDiff: () => Promise.resolve({ status: 'failed', error: 'git fault' }),
     });
     expect((await runGate(failed.deps, cfg())).report.at(-1)).toMatch(/could not judge/);
+  });
+
+  test('requiredJobs from the trust policy list: a missing job refuses, a present one promotes', async () => {
+    const missing = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['macos-pilot'] })),
+    });
+    const refused = await runGate(missing.deps, cfg());
+    expect(refused.verdict).toBe('refused');
+    expect(refused.report.join('\n')).toMatch(
+      /verified ci\.yml: failure .*missing required job 'macos-pilot'/,
+    );
+    const present = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'ci.yml': ['j'] })),
+    });
+    expect((await runGate(present.deps, cfg())).verdict).toBe('would-promote');
+  });
+
+  test('a pass that relied on the revision window is re-judged at push time', async () => {
+    // First judgement inside the window; the second (after the waits) finds it expired.
+    const answers = [policyOutcome('pass', {}, 'window'), policyOutcome('needs-human')];
+    const expired = harness(world(), {
+      policyDiff: () => Promise.resolve(answers.shift() ?? policyOutcome('needs-human')),
+    });
+    const r = await runGate(expired.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report).toContain('policy recheck (revision-window): needs-human');
+    expect(r.report.at(-1)).toMatch(/revision-window pass no longer holds at push time/);
+
+    const calls: PolicyDiffInput[] = [];
+    const still = harness(world(), {
+      policyDiff: (input) => {
+        calls.push(input);
+        return Promise.resolve(policyOutcome('pass', {}, 'window'));
+      },
+    });
+    expect((await runGate(still.deps, cfg())).verdict).toBe('would-promote');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(calls[0]);
+    // With --push the recheck is the last read: after the promotion-review
+    // re-fetch, before the push. A window expiring during that fetch refuses.
+    for (const expires of [false, true]) {
+      const order: string[] = [];
+      const h = harness(world(), {
+        policyDiff: () => {
+          order.push('policy');
+          const second = order.filter((o) => o === 'policy').length > 1;
+          return Promise.resolve(
+            second && expires ? policyOutcome('needs-human') : policyOutcome('pass', {}, 'window'),
+          );
+        },
+      });
+      const gh = h.deps.gh;
+      h.deps.gh = (args) => {
+        if (/\/statuses\?/.test(args[1] ?? '')) order.push('statuses');
+        return gh(args);
+      };
+      h.deps.git = fakeGit({
+        pushAtomic: () => {
+          order.push('push');
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      });
+      const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+      const tail = order.slice(order.lastIndexOf('statuses'));
+      expect(tail).toEqual(expires ? ['statuses', 'policy'] : ['statuses', 'policy', 'push']);
+      expect(r.verdict).toBe(expires ? 'refused' : 'promoted');
+    }
+    // A pass that did not rely on the window is not re-judged.
+    const plain = harness(world());
+    await runGate(plain.deps, cfg());
+    expect(plain.policyInputs).toHaveLength(1);
+  });
+
+  test('requiredJobs naming a workflow the gate does not verify refuses (never checkable)', async () => {
+    const h = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('pass', { 'other.yml': ['x'] })),
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/requiredJobs names unverified workflow\(s\) other\.yml/);
   });
 
   test('a failure verdict refuses immediately (no wait)', async () => {
@@ -1580,6 +1774,233 @@ describe('runGate', () => {
   });
 });
 
+// -- runGate: decisive D11 authorization (ADR-0004 D-C.3, D-G.4) ----------------
+
+const C3_OK = JSON.stringify({
+  schemaVersion: 1,
+  attests: 'C3',
+  attestedAt: '2026-10-01T00:00:00Z',
+});
+const EPOCH = '2026-09-01T00:00:00.000Z';
+const CHANGED = 'vitest.config.ts';
+
+/** A ledger version; `prs` maps a PR number to the head its record observed. */
+const ledger = (prs: Record<string, string>): unknown => ({
+  version: 1,
+  repo: 'o/r',
+  prs: Object.fromEntries(
+    Object.entries(prs).map(([pr, head]) => [
+      pr,
+      {
+        tuple: { head, base: MAIN, forcePushEpoch: 0 },
+        observations: [{ observedAt: EPOCH, by: 'self-merge-prs:observe' }],
+      },
+    ]),
+  ),
+});
+
+/** The settle history after the merge: the tip has pruned PR #7; an older version holds it. */
+const PRUNED_HISTORY = [
+  { sha: sha('1'), ledger: ledger({}) },
+  { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+];
+
+const ownerLabel = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  event: 'labeled',
+  label: { name: 'cq-override' },
+  actor: { login: 'owner', id: 1, type: 'User' },
+  created_at: '2026-09-02T00:00:00Z',
+  performed_via_github_app: null,
+  ...over,
+});
+
+/**
+ * A policy fake over the real D11 predicate: the range needs a human for
+ * `paths`, and passes only when the bound authorization authorizes them all.
+ */
+function d11Policy(
+  inputs: PolicyDiffInput[],
+  paths: readonly string[] = [CHANGED],
+): GateDeps['policyDiff'] {
+  return (input) => {
+    inputs.push(input);
+    const auth = input.authorization;
+    if (auth === undefined) return Promise.resolve(policyOutcome('needs-human'));
+    const d11 = authorizePaths(auth, paths);
+    const base = policyOutcome(d11.authorized ? 'pass' : 'needs-human');
+    if (base.status !== 'ok') return Promise.resolve(base);
+    return Promise.resolve({
+      status: 'ok',
+      value: { ...base.value, d11, report: d11.lines },
+    });
+  };
+}
+
+function d11Harness(
+  over: Partial<World>,
+  attestation: string | null = C3_OK,
+  contribution: readonly string[] = [CHANGED],
+): { h: Harness; inputs: PolicyDiffInput[] } {
+  const inputs: PolicyDiffInput[] = [];
+  const h = harness(world(M1, MAIN, { settle: PRUNED_HISTORY, ...over }), {
+    policyDiff: d11Policy(inputs),
+  });
+  h.deps.git = fakeGit({
+    readBlob: (_repo, rev, path) =>
+      Promise.resolve(rev === TRUST && path === 'policy/attestations/c3.json' ? attestation : null),
+    changedPaths: (_repo, from, to) =>
+      Promise.resolve(from === MAIN && to === M1 ? [...contribution] : []),
+  });
+  return { h, inputs };
+}
+
+describe('runGate — decisive D11 authorization', () => {
+  test('valid record + C3 attested at the trust ref → the definition change promotes', async () => {
+    const { h, inputs } = d11Harness({ timeline: () => [ownerLabel()] });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('would-promote');
+    const text = r.report.join('\n');
+    // The epoch came from the older ledger version (the tip pruned PR #7).
+    expect(text).toMatch(/settle ledger — 2 version\(s\) read/);
+    expect(text).toMatch(/attestation: .* valid at the trust ref — records honoured/);
+    expect(text).toMatch(/verdict: honoured/);
+    expect(text).toMatch(/d11: vitest\.config\.ts authorized by PR #7/);
+    // It relied on the record, so the record is re-read after the waits and
+    // once more as the last read before the push (or the dry-run verdict).
+    expect(inputs).toHaveLength(3);
+    expect(text).toMatch(/d11 pass 2:/);
+    expect(text).toMatch(/d11 recheck \(D11\):/);
+  });
+
+  test('valid record, no attestation → needs-human refusal with dormant logged', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, null);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/verdict: dormant/);
+    expect(text).toMatch(/dormant: ADR-0004 D-G\.4 records are honoured only once/);
+    expect(text).toMatch(/d11: vitest\.config\.ts unauthorized — PR #7 .* record is dormant/);
+    expect(r.report.at(-1)).toMatch(/dormant until the C3 attestation, .* owner break-glass/);
+  });
+
+  test('a malformed attestation at the trust ref is dormant, never armed', async () => {
+    const malformed = JSON.stringify({ schemaVersion: 1, attests: 'C3' });
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, malformed);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/present but invalid \(schema violation/);
+    expect(text).toMatch(/verdict: dormant/);
+  });
+
+  test('an unreadable attestation is dormant', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    h.deps.git = { ...h.deps.git, readBlob: () => Promise.reject(new Error('git fault')) };
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(/unreadable at the trust ref \(git fault\)/);
+  });
+
+  test('a label applied before the head-observation epoch is invalid', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel({ created_at: '2026-08-31T00:00:00Z' })],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/verdict: invalid/);
+    expect(text).toMatch(/is not after the head observation epoch/);
+    expect(r.report.at(-1)).toMatch(/not every path needing a human is authorized/);
+  });
+
+  test('an App-applied label is invalid (the A14 regression)', async () => {
+    const { h } = d11Harness({
+      timeline: () => [
+        ownerLabel({
+          actor: { login: 'cq-automation[bot]', id: 99, type: 'Bot' },
+          performed_via_github_app: { slug: 'cq-automation' },
+        }),
+      ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/label applied via GitHub App 'cq-automation'/);
+    expect(text).toMatch(/actor id 99 is not the repository owner id 1/);
+  });
+
+  test('the newest ledger version holding the PR observed another head → invalid', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: ledger({ '7': sha('9') }) },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(/no durable head observation for b{40}/);
+  });
+
+  test('an absent settle ledger leaves the record invalid', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()], settle: [] });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/settle ledger — 0 version\(s\) read \(history exhausted/);
+    expect(text).toMatch(/no durable head observation/);
+  });
+
+  test('a needs-human path no admitted PR contributes is named, even with a valid record', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, C3_OK, ['src/other.ts']);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(
+      /d11: vitest\.config\.ts unauthorized — not contributed by any admitted PR in the closure/,
+    );
+  });
+
+  test('an unlabel during the wait refuses at the D11 recheck', async () => {
+    const { h } = d11Harness({
+      timeline: (n) =>
+        n === 0
+          ? [ownerLabel()]
+          : [
+              ownerLabel(),
+              { ...ownerLabel(), event: 'unlabeled', created_at: '2026-09-03T00:00:00Z' },
+            ],
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/\(D11 recheck after the wait\)$/);
+  });
+
+  test('an unlabel after the D11 recheck still refuses at the last pre-push read', async () => {
+    // Labelled for pass 1 and pass 2; removed only by the final read.
+    const { h } = d11Harness({
+      timeline: (n) =>
+        n < 2
+          ? [ownerLabel()]
+          : [
+              ownerLabel(),
+              { ...ownerLabel(), event: 'unlabeled', created_at: '2026-09-03T00:00:00Z' },
+            ],
+    });
+    let pushed = false;
+    h.deps.git = {
+      ...h.deps.git,
+      pushAtomic: () => {
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    };
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+    expect(r.verdict).toBe('refused');
+    expect(pushed).toBe(false);
+    expect(r.report.at(-1)).toMatch(/the D11 pass no longer holds at push time/);
+  });
+});
+
 describe('runGate — real git, promoted to a local bare remote', { timeout: 180_000 }, () => {
   const GIT_ENV: NodeJS.ProcessEnv = {
     ...process.env,
@@ -1823,5 +2244,160 @@ describe('mainWith (the CLI seam)', () => {
     expect(h.ghBuilt()).toBe(true);
     expect(h.pushTokens).toEqual([]);
     expect(env).toEqual({});
+  });
+});
+
+// -- cq-verify binds the SAME authorization (readiness T2) -------------------------
+
+describe('bindQueueAuthorization — the object cq-verify consumes', () => {
+  const report = (): string[] => [];
+
+  test('the gate world with a valid record + C3: the definition change is authorized', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, report());
+    expect(auth.attested).toBe(true);
+    expect(auth.contributions.map((c) => [c.pr, c.record.status])).toEqual([[7, 'honoured']]);
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(true);
+    // One label never authorizes a path its PR did not change.
+    expect(authorizePaths(auth, ['tsconfig.json']).authorized).toBe(false);
+  });
+
+  test('no attestation: the record is dormant and nothing is authorized (as today)', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, null);
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, report());
+    expect(auth.attested).toBe(false);
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('a listed ledger version whose file is missing (404) is a barrier too', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: ledger({}) },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const gh = h.deps.gh;
+    h.deps.gh = (args) =>
+      (args[1] ?? '').includes(`settle-state.json?ref=${sha('1')}`)
+        ? Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' })
+        : gh(args);
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(lines.join('\n')).toMatch(/missing at listed history commit/);
+    expect(lines.join('\n')).toMatch(/lookup barrier/);
+    expect(auth.contributions[0]?.record.status).toBe('invalid');
+  });
+
+  test('a malformed newest ledger version is a barrier: no stale epoch from an older one', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: 'not a ledger' },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(lines.join('\n')).toMatch(/malformed version is a lookup barrier/);
+    expect(auth.contributions[0]?.record.status).toBe('invalid');
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('a run that changes while its jobs are read is never evidence (pending, then timeout)', async () => {
+    const h = harness(world());
+    const gh = h.deps.gh;
+    let ciReads = 0;
+    h.deps.gh = async (args) => {
+      const result = await gh(args);
+      if (!/actions\/workflows\/ci\.yml\/runs/.test(args[1] ?? '')) return result;
+      ciReads += 1;
+      if (ciReads < 2) return result;
+      // Every later read sees a rerun (attempt 2) of the same run.
+      const pages = JSON.parse(result.stdout) as { workflow_runs: Record<string, unknown>[] }[];
+      for (const page of pages) for (const run of page.workflow_runs) run['run_attempt'] = 2;
+      return { ...result, stdout: JSON.stringify(pages) };
+    };
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(
+      /the run changed while its jobs were read|no job of attempt 2/,
+    );
+  });
+
+  test('the gate reads every job execution (filter=all) of a verified run', async () => {
+    const h = harness(world());
+    await runGate(h.deps, cfg());
+    const jobReads = h.calls.map((c) => c[1] ?? '').filter((p) => /\/jobs\?/.test(p));
+    expect(jobReads.length).toBeGreaterThan(0);
+    for (const p of jobReads) expect(p).toMatch(/[?&]filter=all(?:&|$)/);
+  });
+
+  test('a closure the gate would refuse binds no contribution (fail closed)', async () => {
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] });
+    h.deps.git = { ...h.deps.git, firstParentRange: () => Promise.resolve([]) };
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(auth.contributions).toEqual([]);
+    expect(auth.report.join('\n')).toMatch(
+      /no authorization bound — closure: the first-parent chain/,
+    );
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test("cq-verify's in-process verifier forwards exactly that object for a queue-tip subject", async () => {
+    for (const [attestation, expected] of [
+      [C3_OK, true],
+      [null, false],
+    ] as const) {
+      const { h } = d11Harness({ timeline: () => [ownerLabel()] }, attestation);
+      const seen: VerifyRatchetInput[] = [];
+      const result = await verifyWithAuthorization(
+        {
+          gh: h.deps.gh,
+          git: h.deps.git,
+          verify: (input) => {
+            seen.push(input);
+            const d11 =
+              input.authorization === undefined
+                ? undefined
+                : authorizePaths(input.authorization, [CHANGED]);
+            return Promise.resolve({
+              status: 'ok',
+              value: {
+                verdict: d11?.authorized === true ? 'pass' : 'needs-human',
+                trustRef: TRUST,
+                subject: M1,
+                rangeBase: MAIN,
+                definitionChanges: [CHANGED],
+                ...(d11 === undefined ? {} : { d11 }),
+                guard: { ok: true, violations: [], filesChecked: 0 },
+                results: [],
+                reasons: d11?.lines ?? [],
+              },
+            });
+          },
+        },
+        {
+          repo: '/tmp/trust',
+          repository: 'o/r',
+          repositoryId: REPO_ID,
+          trustRef: TRUST,
+          subject: M1,
+          subjectKind: 'push',
+          base: 'refs/remotes/origin/main',
+          measureConclusion: 'success',
+        },
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.authorization?.attested).toBe(expected);
+      expect(result.status === 'ok' && result.value.verdict).toBe(
+        expected ? 'pass' : 'needs-human',
+      );
+      // The evidence is journalled in the verdict's reasons.
+      expect(result.status === 'ok' && result.value.reasons.join('\n')).toMatch(
+        /override PR #7 \(merge /,
+      );
+    }
   });
 });

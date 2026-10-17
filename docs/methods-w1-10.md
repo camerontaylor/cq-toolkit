@@ -211,17 +211,20 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 
 ## The C3 checklist (owner cutover: activate D11 records)
 
-Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
-`settleRef`/`ownerId`, so every override record evaluates invalid, and
-`logOverrides` hard-codes `attested: false`. C3 is done only when ALL of:
+Until C3 the gate cannot honour a D11 override: it binds each admitted PR's
+record (owner id, the settle-ledger history epoch, the attestation at the
+trust ref) and its `diff(M^1, M)` contribution into one authorization
+([d11-decisive-authorization.md](d11-decisive-authorization.md)), but with no
+attestation every valid record is `dormant`. C3 is done only when ALL of:
 
 - [ ] the D11 attestation lands (the ledger epoch the checks arm against);
-- [ ] `settleRef` and `ownerId` are wired into the gate's `policyDiff` call and
-      into `logOverrides`, so **the gate honours a valid override record**
-      (a record that today only logs as `invalid` becomes decisive — never
-      merely "the label is active");
-- [ ] the D-G.4 review-form record and the gate's per-PR authorization (the
-      `M^1..M^2` range for a merged PR) evaluate;
+- [x] the gate's policy pass consumes the bound per-PR authorization, so
+      **the gate honours a valid override record** once attested (decisive,
+      re-checked after the waits — never merely "the label is active");
+- [x] the `cq-verify` carrier binds the same authorization for the
+      `cq/ratchet` verdict on a queue-tip subject (`dist/selfhost/verify-ratchet.js`
+      → `bindQueueAuthorization`; PR #328, readiness T2);
+- [ ] the D-G.4 review-form record evaluates;
 - [ ] the promoter credential needs no `actions: write`: `decide`'s only
       dispatch (`cq-verify`) runs on its own `GITHUB_TOKEN`, restricted to the
       default ref (pinned by `test/workflows/default-ref-guards.test.ts`). If a
@@ -255,7 +258,11 @@ Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
   `cq/acceptance`, `from-source`, `pack-audit`). Applying R2 without dropping the classic
   `ratchet` context would trip D11's "removed required check" rule. C2's order: drop the
   classic contexts as R2 lands. `test/ops/gates/protectedPaths.test.ts` pins the mapping so
-  the two lists cannot drift apart silently again.
+  the two lists cannot drift apart silently again. **Amended 2026-10-16** (owner, minimal
+  merge-time set, [`protected-scope.md`](protected-scope.md)): R2 now requires only
+  `cq/policy`, `cq/acceptance` and `denylist`; `cq/ratchet` and the CI jobs are enforced on
+  the queue tip by the gate, so the test asserts each `requiredChecks` entry is enforced
+  by R2 _or_ by the gate.
 - **`live-review.yml` and `live-drivers.yml` are not render-enforced (r1 L5).** Both are
   repo-owned drill harnesses (this repo's scratch-repo convention, provider keys, demo
   scripts), so templating them would change their semantics rather than adopt a pattern —
