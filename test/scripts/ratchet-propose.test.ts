@@ -222,7 +222,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     )}\n`;
   }
 
-  async function setup(label: string) {
+  async function setup(label: string, coverageBaseline = 90) {
     const dir = join(tmp, label);
     const origin = join(dir, 'origin.git');
     const repo = join(dir, 'repo');
@@ -256,7 +256,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     git(repo, ['commit', '-m', 'main']);
     git(repo, ['push', 'origin', 'main']);
     git(repo, ['checkout', '-b', 'merge-queue']);
-    writeFileSync(join(repo, COVERAGE_BASELINE), baseline(90));
+    writeFileSync(join(repo, COVERAGE_BASELINE), baseline(coverageBaseline));
     writeFileSync(join(repo, 'baselines', 'ratchets.json'), '{"not":"a baseline"}\n');
     // The tip can select a Git filter through its attributes. Configure the
     // filter only after committing the tip, then prove the privileged
@@ -357,10 +357,50 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     { timeout: 240_000 },
     async () => {
       const ctx = await setup('none');
-      const res = propose(ctx, { coverage: 89.96 }); // rounds to 90.0 — equal, not tighter
+      const res = propose(ctx, { coverage: 89.96 }); // below 90 — not tighter at any precision
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stderr).toContain('no tightening to propose');
       expect(existsSync(ctx.ghLog)).toBe(false);
+    },
+  );
+
+  it(
+    'the RAW #319 shape end to end: 94.29 against a 94.2 tip proposes NOTHING — never the half-up 94.3',
+    { timeout: 240_000 },
+    async () => {
+      const ctx = await setup('raw-319', 94.2);
+      // OLD caller behavior: the script half-up-rounded 94.29 to 94.3 BEFORE
+      // the op and proposed it — stricter than the measurement, and a value
+      // a re-measurement cannot reproduce (the proposal PR then failed its
+      // own gate). With raw pass-through, the op's directional floor at the
+      // file's one decimal absorbs the improvement: nothing proposes and gh
+      // is never consulted.
+      const absorbed = propose(ctx, { coverage: 94.29 });
+      expect(absorbed.status, `${absorbed.stdout}${absorbed.stderr}`).toBe(0);
+      expect(absorbed.stderr).toContain('no tightening to propose');
+      expect(absorbed.stderr).toContain("rounds to 94.2 at the baseline file's precision");
+      // gh IS consulted before the op runs (repo view, pr list), but no
+      // proposal PR is ever created and no head branch lands on the origin.
+      expect(absorbed.stdout.trim()).toBe('');
+      const ghCalls = readFileSync(ctx.ghLog, 'utf8');
+      expect(ghCalls).not.toContain('pr create');
+      const refsAfterAbsorbed = git(ctx.origin, [
+        'for-each-ref',
+        '--format=%(refname:short)',
+        'refs/heads/',
+      ]);
+      expect(refsAfterAbsorbed).not.toContain('ratchet/propose-');
+      // The floor still tightens on real headroom: raw 94.31 → exactly 94.3.
+      const res = propose(ctx, { coverage: 94.31 }, git(ctx.repo, ['rev-parse', 'HEAD']));
+      expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
+      expect(res.stdout.trim()).toBe('https://github.com/owner/repo/pull/7');
+      const heads = git(ctx.origin, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
+      const head = heads.split('\n').find((h) => h.startsWith('ratchet/propose-'));
+      expect(head, heads).toBeDefined();
+      const proposed = JSON.parse(git(ctx.origin, ['show', `${head}:${COVERAGE_BASELINE}`])) as {
+        value: number;
+      };
+      expect(proposed.value).toBe(94.3);
     },
   );
 });
