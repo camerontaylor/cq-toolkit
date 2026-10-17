@@ -374,14 +374,18 @@ function tokenScale(token: string): number | null {
  * or null when none can be located. A small escape-aware scan: string
  * literals are consumed atomically (a target like "x \"value\": 8.8" can
  * never pose as the value token), nesting depth is tracked, and the token
- * is read only after the depth-1 "value" key's colon. A key written with
- * unicode escapes simply misses — the caller falls back to the canonical
- * scale, which can only absorb a proposal, never loosen one.
+ * is read only after the depth-1 "value" key's colon. DUPLICATE top-level
+ * keys resolve LAST-WINS — JSON.parse (and therefore parseBaseline) takes
+ * the last occurrence, so the precision basis must read the same token
+ * ("value": 94, "value": 94.20 parses to 94.2 and speaks two decimals). A
+ * key written with unicode escapes simply misses — the caller falls back to
+ * the canonical scale, which can only absorb a proposal, never loosen one.
  */
 function rawValueToken(text: string): string | null {
   let depth = 0;
   let i = 0;
   const n = text.length;
+  let last: string | null = null;
   while (i < n) {
     const ch = text.charAt(i);
     if (ch === '"') {
@@ -402,7 +406,8 @@ function rawValueToken(text: string): string | null {
         if (i >= n || text.charAt(i) === '"') return null;
         let end = i;
         while (end < n && /[0-9.eE+-]/.test(text.charAt(end))) end += 1;
-        return text.slice(i, end);
+        last = text.slice(i, end);
+        i = end;
       }
     } else if (ch === '{' || ch === '[') {
       depth += 1;
@@ -414,7 +419,7 @@ function rawValueToken(text: string): string | null {
       i += 1;
     }
   }
-  return null;
+  return last;
 }
 
 /**
