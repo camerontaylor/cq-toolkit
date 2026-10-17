@@ -32,6 +32,7 @@ import type { OpResult } from '../kernel/types.js';
 import type { D11Authorization } from '../ops/gates/d11Authorization.js';
 import { verifyRatchet, type VerifyRatchetOutcome } from '../ops/ratchet/verifyRatchet.js';
 import { ghNameOk, makeGhRunner, type GhFn } from '../ops/review/gh.js';
+import { EntryUsageError, parseEntryArgs, runEntry } from './trusted-entry.js';
 import { bindQueueAuthorization, realGateGit, type GateGit } from './promote-gate.js';
 
 /** The verifier's own input, as the CLI schema has it, plus the repository identity. */
@@ -54,33 +55,14 @@ export type VerifyArgs = z.infer<typeof ArgsSchema>;
 
 /** Strict `--name=value` parsing: an unknown, repeated or empty flag throws. */
 export function parseVerifyArgs(argv: readonly string[]): VerifyArgs {
-  const values: Record<string, string> = {};
-  for (const arg of argv) {
-    const match = /^--([A-Za-z]+)=(.*)$/s.exec(arg);
-    const flag = match?.[1];
-    const value = match?.[2];
-    if (flag === undefined || value === undefined) {
-      throw new Error(`unknown argument ${JSON.stringify(arg)}`);
-    }
-    if (Object.hasOwn(values, flag)) throw new Error(`--${flag} given more than once`);
-    if (value === '') throw new Error(`--${flag} needs a value`);
-    values[flag] = value;
-  }
-  const parsed = ArgsSchema.safeParse(values);
-  if (!parsed.success) {
-    throw new Error(
-      parsed.error.issues
-        .map((i) => `--${i.path.map(String).join('.') || '(args)'}: ${i.message}`)
-        .join('; '),
-    );
-  }
-  const [owner = '', name = '', ...extra] = parsed.data.repository.split('/');
+  const args = parseEntryArgs(argv, ArgsSchema);
+  const [owner = '', name = '', ...extra] = args.repository.split('/');
   if (extra.length > 0 || !ghNameOk(owner) || !ghNameOk(name)) {
-    throw new Error(
-      `--repository must be <owner>/<name> — got ${JSON.stringify(parsed.data.repository)}`,
+    throw new EntryUsageError(
+      `--repository must be <owner>/<name> — got ${JSON.stringify(args.repository)}`,
     );
   }
-  return parsed.data;
+  return args;
 }
 
 export interface VerifyDeps {
@@ -155,12 +137,11 @@ export interface VerifyMainDeps extends Pick<VerifyDeps, 'bind' | 'verify'> {
   write: (line: string) => void;
 }
 
-/** Parse, verify, write ONE JSON line. Exit code 0 for an ok result, 1 otherwise. */
-export async function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise<number> {
-  let result: OpResult<VerifyRatchetOutcome>;
-  try {
+/** Parse, verify, write ONE JSON line; return the I1 exit code (./trusted-entry.ts). */
+export function mainWith(argv: readonly string[], deps: VerifyMainDeps): Promise<number> {
+  return runEntry<VerifyRatchetOutcome>(() => {
     const args = parseVerifyArgs(argv);
-    result = await verifyWithAuthorization(
+    return verifyWithAuthorization(
       {
         gh: deps.makeGh(),
         git: deps.git,
@@ -169,11 +150,7 @@ export async function mainWith(argv: readonly string[], deps: VerifyMainDeps): P
       },
       args,
     );
-  } catch (error) {
-    result = { status: 'failed', error: error instanceof Error ? error.message : String(error) };
-  }
-  deps.write(`${JSON.stringify(result)}\n`);
-  return result.status === 'ok' ? 0 : 1;
+  }, deps.write);
 }
 
 const invokedDirectly =

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "protectedPaths": [
-    "^src/ops/gates/(?:checkRunner|d11Authorization|overrideRecord|policyConfig|policyDiff|protectedPaths|registry|workflowScan)\\.ts$",
+    "^src/ops/gates/(?:checkRunner|d11Authorization|overrideRecord|policyConfig|policyDiff|policyDiffInput|protectedPaths|registry|workflowScan)\\.ts$",
     "^src/ops/gates/adapters/(?:eslint|tsc|vitest)\\.ts$",
     "^src/ops/ratchet/",
     "^src/ops/review/(?:gh|threads)\\.ts$",
-    "^src/selfhost/(?:acceptance|merge-recheck|promote-gate|settle-state|state-branch|verify-ratchet)\\.ts$",
+    "^src/selfhost/(?:acceptance|merge-recheck|policy-diff|promote-gate|recompute-typecheck|settle-state|state-branch|trusted-entry|verify-ratchet)\\.ts$",
     "^src/shared/independent-review\\.ts$",
     "^policy/promotion-reviewer\\.json$",
     "^scripts/ratchet-[^/]+\\.mjs$",

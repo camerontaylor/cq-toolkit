@@ -207,9 +207,10 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       for (const install of body.matchAll(/pnpm install[^\n]*/g)) {
         expect(install[0]).toContain('--ignore-scripts');
       }
-      // The only node invocation is the trusted CLI.
+      // The only node invocation is the in-process policy check (R1): never
+      // the CLI, which loads every op registry.
       for (const m of body.matchAll(/\bnode (\S+)/g)) {
-        expect(m[1]).toBe('trust/dist/cli.js');
+        expect(m[1]).toBe('trust/dist/selfhost/policy-diff.js');
       }
       expect(body).not.toMatch(/\bnpx\b|\bpnpm exec\b|vitest|pnpm test|pnpm run test/);
       // The head is fetched as objects, never materialised as a tree.
@@ -247,7 +248,8 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
         /^ {6}CQ_MERGE_PROTECTED_PATHS: \$\{\{ vars\.CQ_MERGE_PROTECTED_PATHS \}\}$/m,
       );
       expect(body.match(/CQ_MERGE_PROTECTED_PATHS:/g)).toHaveLength(1);
-      expect(judge).toContain('node trust/dist/cli.js gates.policyDiff');
+      expect(judge).toContain('node trust/dist/selfhost/policy-diff.js "${args[@]}"');
+      expect(body).not.toContain('cli.js');
       expect(judge).toContain('OWNER_ID: ${{ github.repository_owner_id }}');
       expect(judge).toContain('repos/${REPO}/issues/${PR}/timeline');
       // I11: the override record reads the COMPLETE, chronological label
@@ -272,7 +274,8 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(tokenSteps[2]).toContain(
         'GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}',
       );
-      const judgeStep = steps(judge).find((s) => s.includes('gates.policyDiff')) ?? '';
+      const judgeStep = steps(judge).find((s) => s.includes('selfhost/policy-diff.js')) ?? '';
+      expect(judgeStep).not.toBe('');
       expect(judgeStep).not.toMatch(/GH_TOKEN|github\.token/);
     },
   );
