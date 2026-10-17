@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   makeDevReview,
   sshAuthorTransport,
@@ -41,6 +44,30 @@ describe('dev.review worker admission (no local issuer)', () => {
     expect(DevReviewInputSchema.safeParse({ ...input, spool: 'promotion' }).success).toBe(false);
     expect(DevReviewInputSchema.safeParse({ ...input, head: input.base }).success).toBe(false);
     expect(() => sshAuthorTransport('-oProxyCommand=bad')).toThrow();
+  });
+
+  it('disables SSH sharing before sending admission to the author identity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-author-ssh-'));
+    try {
+      await writeFile(
+        join(root, 'ssh'),
+        [
+          '#!/bin/sh',
+          '[ "$1" = "-T" ] || exit 20',
+          '[ "$2" = "-S" ] && [ "$3" = "none" ] || exit 21',
+          'cat >/dev/null',
+          `printf '%s\\n' '${JSON.stringify(waiting)}'`,
+          '',
+        ].join('\n'),
+        { mode: 0o700 },
+      );
+      vi.stubEnv('PATH', root + ':' + process.env['PATH']);
+      const reply = await makeDevReview(sshAuthorTransport('fixture-author'))(input);
+      expect(reply).toEqual({ status: 'ok', value: waiting });
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('round-trips the real Python versioned wire encoder/decoder at this SHA', async () => {

@@ -37,6 +37,8 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
         'ssh',
         [
           '-T',
+          '-S',
+          'none',
           '-o',
           'BatchMode=yes',
           '-o',

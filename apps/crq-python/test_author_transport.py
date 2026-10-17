@@ -56,7 +56,8 @@ class Backend:
 class TransportTest(unittest.TestCase):
     def call(self, raw, backend=None):
         return json.loads(transport.handle(raw, backend or Backend(),
-                                          policy_path="operator-policy.json", reviewer="agent:configured"))
+                                          policy_path="operator-policy.json", reviewer="agent:configured",
+                                          approved_target=BINDING["target"]))
 
     def test_enrollment_is_pending_no_start_and_stdout_is_one_json(self):
         backend = Backend()
@@ -76,6 +77,20 @@ class TransportTest(unittest.TestCase):
         with self.assertRaises(author_quota.AuthorRefused):
             self.call(request(head="c" * 40), backend)
         self.assertEqual(backend.q, before)
+
+    def test_only_operator_target_is_admitted_before_lock_or_quota_mutation(self):
+        backend = Backend()
+        before = copy.deepcopy(backend.q)
+        for target in (None, "origin/main"):
+            with self.subTest(target=target), self.assertRaisesRegex(
+                    author_quota.AuthorRefused, "operator-approved"):
+                transport.handle(request(), backend, policy_path="policy.json",
+                                 reviewer="agent:configured", approved_target=target)
+        with self.assertRaisesRegex(author_quota.AuthorRefused, "operator-approved"):
+            self.call(request(target="origin/main", request_id="duplicate-target"), backend)
+        self.assertEqual(backend.q, before)
+        self.assertEqual(backend.claims, [])
+        self.assertFalse(backend.locked)
 
     def test_status_and_fallback_require_full_binding_before_delegate(self):
         backend = Backend()
@@ -106,7 +121,7 @@ class TransportTest(unittest.TestCase):
         with self.assertRaisesRegex(author_quota.AuthorRefused, "P3"):
             self.call(request(), object())
         with self.assertRaises(author_quota.AuthorRefused):
-            transport.handle(request(), Backend(), policy_path=None, reviewer=None)
+            transport.handle(request(), Backend(), policy_path=None, reviewer=None, approved_target=None)
 
     def test_actual_runner_lock_blocks_worker_and_preserves_queue(self):
         import fcntl
@@ -140,10 +155,12 @@ class TransportTest(unittest.TestCase):
                  mock.patch.object(crq, "load_queue", return_value=q), \
                  mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "event"), \
                  mock.patch.object(crq, "write_status"), mock.patch.object(crq, "iso", return_value="2026-10-17T00:00:00Z"):
-                transport.handle(request(), crq, policy_path=str(policy), reviewer="agent:configured")
+                transport.handle(request(), crq, policy_path=str(policy), reviewer="agent:configured", approved_target=BINDING["target"])
                 with mock.patch.object(crq, "iso", return_value="2026-10-17T00:01:00Z"):
-                    first = json.loads(transport.handle(request("fallback"), crq, policy_path=str(policy), reviewer="agent:configured"))
-                    replay = json.loads(transport.handle(request("fallback"), crq, policy_path=str(policy), reviewer="agent:configured"))
+                    first = json.loads(transport.handle(request("fallback"), crq, policy_path=str(policy), reviewer="agent:configured",
+                                          approved_target=BINDING["target"]))
+                    replay = json.loads(transport.handle(request("fallback"), crq, policy_path=str(policy), reviewer="agent:configured",
+                                          approved_target=BINDING["target"]))
                 self.assertTrue(first["dispatch"])
                 self.assertFalse(replay["dispatch"])
                 self.assertEqual(q["starts"], [])
@@ -154,6 +171,7 @@ def fixture_main():
     sys.modules["crq"] = Backend()
     os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
                       CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
-                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured")
+                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
+                      CRQ_AUTHOR_TARGET=BINDING["target"])
     sys.argv = [transport.__file__]
     raise SystemExit(transport.main())

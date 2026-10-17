@@ -11,10 +11,14 @@ spool identity. Its authorized_keys entry uses `restrict` and a fixed command
 that changes to the deployed runner root and executes
 `/usr/bin/python3 -B -m author_transport`. Bind `CRQ_AUTHOR_REVIEW_POLICY` to the
 operator-controlled policy file and `CRQ_AUTHOR_FALLBACK_REVIEWER` to the chosen
-reviewer configuration in that fixed command/environment. Neither value is
+reviewer configuration in that fixed command/environment. Bind `CRQ_AUTHOR_TARGET`
+to the sole operator-approved target (for example, the intended queue ref);
+requests naming another target or missing this configuration are refused before
+admission, preventing target aliases from charging twice for the same diff. Neither value is
 accepted from the worker. No model or provider is hard-coded. Do not permit
 arbitrary environment forwarding, PTYs, port/agent forwarding or a general shell.
-The exact SSH original command must be `author-v1`; spool commands are refused.
+The worker disables SSH connection multiplexing (`-S none`), so a shared master
+cannot substitute another authenticated identity. The exact SSH original command must be `author-v1`; spool commands are refused.
 
 Configure the worker's `CQ_AUTHOR_SSH_ALIAS` for this separate identity. The CLI
 uses the normal dotted-command flag grammar:

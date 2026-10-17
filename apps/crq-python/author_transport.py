@@ -46,7 +46,7 @@ def decode(raw):
     return {**req, "binding": normalize_binding(**b)}
 
 
-def handle(raw, runner, *, policy_path, reviewer):
+def handle(raw, runner, *, policy_path, reviewer, approved_target):
     request = decode(raw)
     # No silent downgrade to an unleased legacy enrollment on pre-P3 runners.
     if not callable(getattr(runner, "author_lease_command", None)):
@@ -54,6 +54,8 @@ def handle(raw, runner, *, policy_path, reviewer):
     if not policy_path or not reviewer:
         raise AuthorRefused("operator review policy and fallback reviewer required")
     binding = request["binding"]
+    if not isinstance(approved_target, str) or binding["target"] != approved_target:
+        raise AuthorRefused("operator-approved author target required")
 
     def locked():
         # Check the binding before status/fallback, not just request_id.
@@ -84,7 +86,8 @@ def main():
         raw = sys.stdin.buffer.read(MAX_BYTES + 1)
         import crq  # Only after the forced-command guard; never imports signer.
         result = handle(raw, crq, policy_path=os.environ.get("CRQ_AUTHOR_REVIEW_POLICY"),
-                        reviewer=os.environ.get("CRQ_AUTHOR_FALLBACK_REVIEWER"))
+                        reviewer=os.environ.get("CRQ_AUTHOR_FALLBACK_REVIEWER"),
+                        approved_target=os.environ.get("CRQ_AUTHOR_TARGET"))
         sys.stdout.buffer.write(result)
         return 0
     except (AuthorRefused, OSError, ValueError, SystemExit):
