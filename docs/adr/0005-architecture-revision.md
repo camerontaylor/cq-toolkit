@@ -3,6 +3,7 @@
 - **Status:** accepted in principle by the owner on 2026-10-16 (rulings ADR-0005-D-A, ADR-0005-D-B, ADR-0005-D-C, ADR-0005-D-P, ADR-0005-D-E′, ADR-0005-D-G, ADR-0005-D-H, ADR-0005-D-J)
 - **Supersedes in part:** ADR-0001 §lanes (four → three), ADR-0002 Annex B (resolver decision only; the remaining configuration contract stays in force through Phase 0 and is revised with Phase 1.7's separate domain configurations), ADR-0003 §rescue, the kernel "freeze rule"; ADR-0003 §lane classification awaits the Phase 1.8 contract decision
 - **Keeps in force:** ADR-0004 (trust boundaries) in substance; I1–I11 doctrine
+- **Ruling → decision map:** ADR-0005-D-A → decision 10 (freeze retired, persisted/wire schemas versioned now, one Phase 1.8 contract revision); ADR-0005-D-B → decision 1 (six-package start); ADR-0005-D-C → decision 6 and the Phase 0 scoped deletions (delete `src/config` and pricing admission/profiles; sandbox launchers move, the container backend stays); ADR-0005-D-E′ → decision 4 (time-boxed spike decides the Claude Code lane substrate); ADR-0005-D-G → decision 10 (per-package suites replace `test:narrow` at the `ops` cut; `heavy-lock` stays); ADR-0005-D-H → decision 8; ADR-0005-D-J → the review ruling under "Owner rulings this ADR amends"; ADR-0005-D-P → the D11 amendment in the same section. ADR-0005-D-P lockstep: protected paths stay protected — a PR that moves protected content moves its `policy/protected-paths.json` regex in the same PR, under the declared `diff-check` revision-window posture.
 
 ## Context
 
