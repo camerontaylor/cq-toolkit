@@ -85,8 +85,8 @@ import {
   writeSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { GIT_HARDEN } from '../ratchet/git.js';
-import { makeGitMutex } from '../sweep/gitMutex.js';
+import { GIT_HARDEN } from '../../shared/gitHarden.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
 
 /** The workspace state an approval binds to (ADR-0003 §2 `state`, §4c step 1). */

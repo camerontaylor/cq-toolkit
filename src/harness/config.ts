@@ -26,6 +26,7 @@
 // numbers, arrays) so a harness config can ride in an op input, a journal
 // event, or a plan definition unchanged.
 import { z } from 'zod';
+import { deepFreeze } from '../shared/deepFreeze.js';
 
 // ---------------------------------------------------------------------------
 // Per-tool config — the R4 data surface
@@ -108,23 +109,6 @@ export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
 // ---------------------------------------------------------------------------
 // Conservative defaults
 // ---------------------------------------------------------------------------
-
-/**
- * Deep-freeze a plain-data value in place (recursively — objects and arrays)
- * and return it. Shared default CONFIG must be immutable: a caller mutating
- * a nested object of `defaultHarnessConfig` would otherwise silently change
- * every later consumer's behavior — freezing makes that write THROW loudly
- * (strict mode) instead of poisoning the shared default.
- */
-export function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      deepFreeze((value as Record<string, unknown>)[key]);
-    }
-    Object.freeze(value);
-  }
-  return value;
-}
 
 /**
  * The conservative baseline harness config (parsed through the schema so it
