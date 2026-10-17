@@ -4,7 +4,6 @@
     "^src/ops/gates/",
     "^src/ops/ratchet/",
     "^src/ops/merge/classify",
-    "^src/policy/queue/settle-state\\.ts$",
     "^src/selfhost/(?:merge-recheck|settle-state|state-branch|candidates|acceptance|promote-gate)\\.ts$",
     "^src/ops/review/(?:gh|threads)\\.ts$",
     "^src/shared/independent-review\\.ts$",
