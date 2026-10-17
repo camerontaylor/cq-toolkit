@@ -698,7 +698,11 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
 
   'opencode-go': {
     id: 'opencode-go',
-    lanes: ['subprocess'],
+    // The RS-14 map knew only the opencode CLI (subprocess lane); the
+    // ai-sdk lane's direct 'opencode-go' handle (dev-strategy §8 item 7)
+    // now reaches the SAME wire, so both lanes carry this profile and the
+    // endpoint-scoped 402 rule below speaks for both.
+    lanes: ['ai-sdk', 'subprocess'],
     accounting: 'quota',
     limitsKnown: true,
     cap: {

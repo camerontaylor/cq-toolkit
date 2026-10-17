@@ -820,6 +820,7 @@ export function resolveConfig(input: ResolveConfigOptions = {}): ResolvedConfig 
     'ZAI_ANTHROPIC_BASE_URL',
     'DEEPSEEK_ANTHROPIC_BASE_URL',
     'ANTHROPIC_BASE_URL',
+    'OPENCODE_GO_BASE_URL',
   ]) {
     const value = nonblank(envValue(env, name, platform));
     if (value && !validForeignBaseUrl(value))

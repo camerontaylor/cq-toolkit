@@ -1,6 +1,6 @@
 // The driver factory (ADR-0002 §2.5) — resolution + wrapping behavior.
 //
-// Pins: the conservative default bindings (every role → ai-sdk on the four
+// Pins: the conservative default bindings (every role → ai-sdk on the five
 // default providers, never a host-CLI lane), configured bindings + the '*'
 // wildcard winning over defaults, the DispatchError('config') on an
 // unbound provider (never a silent fallback), the deprecated 'ai-sdk'
@@ -93,7 +93,7 @@ const probe = async (
 };
 
 describe('driver factory — resolution', () => {
-  test.each(['zai', 'anthropic', 'openai', 'deepseek'])(
+  test.each(['zai', 'anthropic', 'openai', 'deepseek', 'opencode-go'])(
     'default bindings: %s resolves ANY role to the ai-sdk lane',
     async (provider) => {
       const factory = createDriverFactory();
