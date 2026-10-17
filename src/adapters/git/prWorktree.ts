@@ -72,7 +72,7 @@
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve as pathResolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
-import type { GhFn } from './gh.js';
+import type { GhFn } from '../forge-github/gh.js';
 
 /** One registry entry: where the PR's worktree lives and what it is on. */
 export interface WorktreeRegistryEntry {

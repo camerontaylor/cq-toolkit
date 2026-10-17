@@ -48,7 +48,7 @@ import { COMPONENT_MAX_CHARS, NOTE_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../led
 // TYPE-ONLY import of the store format: erased at compile time, so this
 // module never loads the store's node:fs adapter (the ledger module's own
 // discipline).
-import type { LedgerEntry } from '../ledger/store.js';
+import type { LedgerEntry } from '../../adapters/store/ledgerStore.js';
 import type { LedgerView } from '../ledger/ledger.js';
 import type { Cluster, ClusterErrorsInput, ClusterErrorsReport } from './clusterErrors.js';
 import type { ApprovalAuthority } from './approval.js';
@@ -71,7 +71,7 @@ import type {
   PlaybookRegisterInput,
   PlaybookRegistry,
 } from './playbooks/registry.js';
-import type { QuarantineLedger } from './playbooks/quarantine.js';
+import type { QuarantineLedger } from '../../adapters/store/quarantine.js';
 
 /**
  * ENCODED-size cap for the identifiers that flow into the cluster
@@ -541,13 +541,14 @@ export const registry: OpRegistryEntry[] = [
     // dispatch entry below, and both lazy bindings create-or-reuse the same
     // instances.
     importer: () =>
-      Promise.all([import('./playbooks/registry.js'), import('./playbooks/quarantine.js')]).then(
-        ([r, q]) => {
-          sharedPlaybooks ??= r.makePlaybookRegistry();
-          sharedQuarantine ??= q.makeQuarantineLedger();
-          return r.makePlaybookRegisterOp(sharedPlaybooks) as Op<unknown, unknown>;
-        },
-      ),
+      Promise.all([
+        import('./playbooks/registry.js'),
+        import('../../adapters/store/quarantine.js'),
+      ]).then(([r, q]) => {
+        sharedPlaybooks ??= r.makePlaybookRegistry();
+        sharedQuarantine ??= q.makeQuarantineLedger();
+        return r.makePlaybookRegisterOp(sharedPlaybooks) as Op<unknown, unknown>;
+      }),
   },
   {
     name: 'analyze.playbookDispatch',
@@ -561,7 +562,7 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([
         import('./playbooks/registry.js'),
-        import('./playbooks/quarantine.js'),
+        import('../../adapters/store/quarantine.js'),
         import('./analysisStore.js'),
         import('../gates/checkRunner.js'),
       ]).then(([r, q, s, runner]) => {
@@ -586,11 +587,12 @@ export const registry: OpRegistryEntry[] = [
     // entry writes through, so the list is exactly what fail-closed
     // dispatch consults.
     importer: () =>
-      Promise.all([import('./playbooks/registry.js'), import('./playbooks/quarantine.js')]).then(
-        ([r, q]) => {
-          sharedQuarantine ??= q.makeQuarantineLedger();
-          return r.makePlaybookQuarantineListOp(sharedQuarantine) as Op<unknown, unknown>;
-        },
-      ),
+      Promise.all([
+        import('./playbooks/registry.js'),
+        import('../../adapters/store/quarantine.js'),
+      ]).then(([r, q]) => {
+        sharedQuarantine ??= q.makeQuarantineLedger();
+        return r.makePlaybookQuarantineListOp(sharedQuarantine) as Op<unknown, unknown>;
+      }),
   },
 ];

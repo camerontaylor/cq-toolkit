@@ -67,9 +67,9 @@ import type {
 } from '../../../src/driver/types.js';
 import type { OpResult } from '../../../src/kernel/types.js';
 import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
-import type { GhResult } from '../../../src/ops/review/gh.js';
-import type { MergeEffects } from '../../../src/ops/merge/effects.js';
-import { headRefFor } from '../../../src/ops/merge/effects.js';
+import type { GhResult } from '../../../src/adapters/forge-github/gh.js';
+import type { MergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
+import { headRefFor } from '../../../src/adapters/forge-github/mergeEffects.js';
 import {
   DEFAULT_RESOLVE_WALL_CLOCK_MS,
   MergeConflictContractError,

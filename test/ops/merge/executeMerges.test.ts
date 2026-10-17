@@ -93,8 +93,8 @@ import {
   safeArgs,
   safeRunner,
   withPreparedWorktree,
-} from '../../../src/ops/merge/effects.js';
-import type { MergeEffects } from '../../../src/ops/merge/effects.js';
+} from '../../../src/adapters/forge-github/mergeEffects.js';
+import type { MergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
 import { planMergeOrder } from '../../../src/ops/merge/planMergeOrder.js';
 import type {
   PlanBlockReason,
@@ -103,7 +103,7 @@ import type {
   PlannedPr,
 } from '../../../src/ops/merge/planMergeOrder.js';
 import type { PrClassification } from '../../../src/ops/merge/classifyPrs.js';
-import type { GhResult } from '../../../src/ops/review/gh.js';
+import type { GhResult } from '../../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures

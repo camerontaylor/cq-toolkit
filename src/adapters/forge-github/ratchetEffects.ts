@@ -30,7 +30,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { BaselinePrEffects } from './proposeBaselineUpdate.js';
+import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
 const MAX_BUFFER = 64 * 1024 * 1024;

@@ -77,7 +77,7 @@ export const registry: OpRegistryEntry[] = [
     // containment checked at the seam) — no op wiring exists at registry
     // module scope.
     importer: () =>
-      Promise.all([import('./ledger.js'), import('./store.js')]).then(
+      Promise.all([import('./ledger.js'), import('../../adapters/store/ledgerStore.js')]).then(
         ([m, s]) =>
           m.makeLedgerRecord((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
             unknown,
@@ -89,7 +89,7 @@ export const registry: OpRegistryEntry[] = [
     name: 'ledger.query',
     inputSchema: LedgerQueryInputSchema,
     importer: () =>
-      Promise.all([import('./ledger.js'), import('./store.js')]).then(
+      Promise.all([import('./ledger.js'), import('../../adapters/store/ledgerStore.js')]).then(
         ([m, s]) =>
           m.makeLedgerQuery((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
             unknown,

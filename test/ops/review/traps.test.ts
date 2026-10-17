@@ -32,10 +32,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
-import { fetchReviewState } from '../../../src/ops/review/fetchReviewState.js';
-import type { FetchReviewStateInput } from '../../../src/ops/review/fetchReviewState.js';
-import { makeGhRunner } from '../../../src/ops/review/gh.js';
-import type { GhFn } from '../../../src/ops/review/gh.js';
+import { fetchReviewState } from '../../../src/adapters/forge-github/fetchReviewState.js';
+import type { FetchReviewStateInput } from '../../../src/adapters/forge-github/fetchReviewState.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
+import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 
 const FAKE_GH = fileURLToPath(new URL('../../fixtures/gh/fake-gh.mjs', import.meta.url));
 const SCENARIO = fileURLToPath(

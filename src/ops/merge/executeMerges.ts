@@ -88,9 +88,9 @@
 // `failed` with the error, so the report is still total. (The planner's
 // duplicate_pr gate guarantees one entry per pr; executeMerges relies on
 // that and does not re-guard.)
-import type { GhResult } from '../review/gh.js';
-import type { MergeEffects } from './effects.js';
-import { headRefFor } from './effects.js';
+import type { GhResult } from '../../adapters/forge-github/gh.js';
+import type { MergeEffects } from '../../adapters/forge-github/mergeEffects.js';
+import { headRefFor } from '../../adapters/forge-github/mergeEffects.js';
 import type { PlannedMergeEntry, PlanMergeResult } from './planMergeOrder.js';
 
 /** Retries default to 3 when `maxRetries` is omitted (at most 4 mergePr

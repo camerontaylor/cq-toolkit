@@ -34,7 +34,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { makeGhRunner } from '../../../src/ops/review/gh.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
 /** The op result shape the adapters fold to (loose, for assertions). */

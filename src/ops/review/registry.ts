@@ -61,11 +61,11 @@ import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { ClassifiedItem, Classification } from './classifyThreads.js';
 import type { FixableReviewItem, FixReviewItemInput } from './fixReviewItem.js';
-import type { FetchedReviewState } from './fetchReviewState.js';
+import type { FetchedReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import type { PlanBatchConfig } from './planReviewBatch.js';
 import type { ReviewAction } from './replyAndResolve.js';
 import type { RestComment, ReviewSummary, ReviewThread, ThreadComment } from './threads.js';
-import type { PrSnapshot } from './verifyReviewOutcome.js';
+import type { PrSnapshot } from '../../adapters/forge-github/snapshotPrState.js';
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -546,7 +546,10 @@ export const registry: OpRegistryEntry[] = [
     // construction (gh.ts reads CQ_GH_BIN and spawns only when the returned
     // runner is CALLED), so resolving this entry never touches env/network.
     importer: () =>
-      Promise.all([import('./fetchReviewState.js'), import('./gh.js')]).then(
+      Promise.all([
+        import('../../adapters/forge-github/fetchReviewState.js'),
+        import('../../adapters/forge-github/gh.js'),
+      ]).then(
         ([m, gh]) =>
           awaitOp((input: FetchReviewStateOpInput) =>
             m.fetchReviewState(
@@ -624,7 +627,11 @@ export const registry: OpRegistryEntry[] = [
     // anything posts; absent → null (no push), exactly the library's
     // option shape.
     importer: () =>
-      Promise.all([import('./replyAndResolve.js'), import('./gh.js')]).then(([m, gh]) => {
+      Promise.all([
+        import('./replyAndResolve.js'),
+        import('../../adapters/store/dispatchLog.js'),
+        import('../../adapters/forge-github/gh.js'),
+      ]).then(([m, log, gh]) => {
         // TWO transports (round-2 finding 4): the gh API runner serves the
         // posts/mutations; the push is GIT — binding makeGhRunner() as the
         // push transport would hand git argv to a gh binary (it cannot
@@ -638,7 +645,7 @@ export const registry: OpRegistryEntry[] = [
             pr: input.pr,
             run,
             push: input.pushArgs === undefined ? null : { run: gitPush, args: input.pushArgs },
-            dispatchLog: m.fileDispatchLog(input.dispatchLogPath),
+            dispatchLog: log.fileDispatchLog(input.dispatchLogPath),
             nowMs: input.nowMs,
           });
         }) as Op<unknown, unknown>;

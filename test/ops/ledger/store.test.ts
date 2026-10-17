@@ -4,13 +4,13 @@
 // violation of the committed format is a LedgerFormatError — a hand-edited
 // unsorted or duplicate-laden file is never silently normalized).
 import { describe, expect, test } from 'vitest';
-import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
+import type { LedgerEntry, LedgerFile } from '../../../src/adapters/store/ledgerStore.js';
 import {
   LedgerFormatError,
   parseLedger,
   serializeLedger,
   sortEntries,
-} from '../../../src/ops/ledger/store.js';
+} from '../../../src/adapters/store/ledgerStore.js';
 
 /** Ten signatures spanning the byte range; insertion order is deliberately unsorted. */
 const SIGNATURES = [

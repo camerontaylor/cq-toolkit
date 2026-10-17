@@ -8,7 +8,7 @@ import { describe, expect, test } from 'vitest';
 import {
   QUARANTINE_PHASE,
   makeQuarantineLedger,
-} from '../../../../src/ops/analyze/playbooks/quarantine.js';
+} from '../../../../src/adapters/store/quarantine.js';
 
 describe('makeQuarantineLedger (the pure quarantine state machine)', () => {
   test('quarantine records the phase-tagged reason; consults see it', () => {

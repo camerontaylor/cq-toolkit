@@ -36,8 +36,8 @@
 // one-line, capped, log-safe reason. Report lines carry counts, actor keys
 // and reasons — never review bodies or tokens.
 import { pathToFileURL } from 'node:url';
-import { GhError, ghNameOk, makeGhRunner } from '../ops/review/gh.js';
-import type { GhFn } from '../ops/review/gh.js';
+import { GhError, ghNameOk, makeGhRunner } from '../adapters/forge-github/gh.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
 import { countUnresolvedThreads } from '../ops/review/threads.js';
 import type { ReviewThread } from '../ops/review/threads.js';
 import {

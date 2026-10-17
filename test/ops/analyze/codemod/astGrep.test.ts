@@ -15,9 +15,9 @@ import type {
   ApprovalState,
   ExercisedScope,
 } from '../../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
   withApprovedMutation,
 } from '../../../../src/ops/analyze/approval.js';

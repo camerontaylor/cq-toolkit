@@ -46,7 +46,7 @@ import {
   readinessSnapshotOf,
   reviewStateOfDecision,
   selectPrMatch,
-} from '../../../src/ops/pr/ghEffects.js';
+} from '../../../src/adapters/forge-github/ghEffects.js';
 import { registry } from '../../../src/ops/pr/registry.js';
 
 const ENTRY_NAMES = ['pr.ensureTrackerBranch', 'pr.assemblePrs', 'pr.runReport'];

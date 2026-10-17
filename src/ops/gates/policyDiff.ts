@@ -44,7 +44,7 @@ import {
   gitMergeBase,
   gitReadBlob,
   gitRevParse,
-} from '../ratchet/git.js';
+} from '../../adapters/git/ratchetGit.js';
 import { normalizeBaselineDiffValues } from '../ratchet/format.js';
 import {
   RATCHETS_MANIFEST_PATH,

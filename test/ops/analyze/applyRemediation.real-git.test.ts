@@ -16,10 +16,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { ApprovalState, ApprovalStateReader } from '../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
   makeGitApprovalStateReader,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 import type { AnalyzeFileStore } from '../../../src/ops/analyze/analysisStore.js';

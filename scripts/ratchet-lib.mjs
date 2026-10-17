@@ -292,7 +292,10 @@ export async function loadEngine() {
       imp('proposeBaselineUpdate.js'),
       imp('adapters/typecheckCount.js'),
       imp('adapters/coverage.js'),
-      imp('git.js'),
+      // git.js moved to the git adapter in Phase 1.4; the built path is
+      // dist/adapters/git/ratchetGit.js (the resolver joins from
+      // dist/ops/ratchet, hence the .. segments).
+      imp('../../adapters/git/ratchetGit.js'),
     ]);
   return {
     createCheckRatchet: check.createCheckRatchet,

@@ -22,7 +22,7 @@
 //       the seam). D1 has not consumed this contract yet, so shaping it here
 //       is still free.
 import { describe, expect, test } from 'vitest';
-import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
+import type { LedgerEntry, LedgerFile } from '../../../src/adapters/store/ledgerStore.js';
 import type { LedgerStore } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery, makeLedgerRecord } from '../../../src/ops/ledger/ledger.js';
 import {
