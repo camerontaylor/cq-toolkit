@@ -201,10 +201,37 @@ async function readLive(repo, expected, requireEventPolicy) {
       secretPage?.secrets,
       secretPage?.total_count,
     );
+    // Unlike the other lists, GitHub caps environment variables at 30 per page.
+    const variables = [];
+    let variableTotal;
+    for (let page = 1; ; page++) {
+      const result = await ghGet(`${base}/variables?per_page=30&page=${page}`);
+      if (
+        !Number.isSafeInteger(result?.total_count) ||
+        result.total_count < 0 ||
+        !Array.isArray(result.variables) ||
+        result.variables.length > 30
+      ) {
+        throw new Error(`environment ${name} variables: unexpected response shape`);
+      }
+      variableTotal ??= result.total_count;
+      if (result.total_count !== variableTotal) {
+        throw new Error(`environment ${name} variables: total changed during pagination`);
+      }
+      variables.push(...result.variables);
+      if (variables.length > variableTotal) {
+        throw new Error(`environment ${name} variables: more items than total_count`);
+      }
+      if (variables.length === variableTotal) break;
+      if (result.variables.length === 0) {
+        throw new Error(`environment ${name} variables: incomplete pagination`);
+      }
+    }
     environments[name] = environmentFromApi(
       env,
       policies,
       secrets.map((s) => String(s.name)),
+      variables.map((v) => String(v.name)),
     );
   }
 
@@ -273,7 +300,16 @@ async function main() {
     throw new UsageError(error.message);
   }
   const live = await readLive(opts.repo, expected, opts.requireEventPolicy);
-  const { drift, notices } = compareSettings(expected, live);
+  // settings-drift checks out the trust ref, never a PR head. Only ENOENT
+  // means pre-C3; unreadable attestations must fail closed.
+  let c3Attested = false;
+  try {
+    readFileSync(join(ROOT, 'policy', 'attestations', 'c3.json'));
+    c3Attested = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const { drift, notices } = compareSettings(expected, live, { c3Attested });
   for (const line of drift) console.log(`drift: ${line}`);
   for (const line of notices) console.log(`notice: ${line}`);
   console.log(

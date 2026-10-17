@@ -160,13 +160,10 @@ Environments (each: custom branch policy, exactly `main`):
 | `cq-verdict` | `cq-policy` judge, `cq-verify` judge, `cq-accept` judge, `settings-drift`                                    | `CQ_VERDICT_APP_KEY` [`CQ_SETTINGS_TOKEN`]                                  |
 | `promote`    | `cq-gate` decide                                                                                             | `CQ_PROMOTER_APP_KEY` [`PROMOTE_TOKEN`]                                     |
 | `automation` | `self-merge-prs`, `self-review-loop` (privileged), `sync-merge-queue`, `init-merge-queue`, `ratchet-propose` | `CQ_AUTOMATION_APP_KEY`, `Z_AI_API_KEY` [`CQ_AUTOMATION_TOKEN`, `GH_TOKEN`] |
-| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `CQ_DRILL_MERGE_TOKEN`, `GH_TOKEN`, `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`      |
+| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`                                          |
 
 Only `drill` may have the owner as a required reviewer. The target state has
-no repository-level secrets. The two `drill` GitHub tokens have different
-scopes: `CQ_DRILL_MERGE_TOKEN` (`live-merge`) is a classic token with `repo`
-plus `read:org`; `GH_TOKEN` (`live-review`) is a fine-grained PAT scoped to
-its scratch repositories.
+no repository-level secrets. The `live-merge` and `live-review` drills remain disabled at C3; their App identity is deferred until after C3. Their PAT names are not allowed in `drill`.
 
 Repository variables: `CQ_VERDICT_APP_ID` and `CQ_VERDICT_APP_CLIENT_ID`
 (verdict App: the client id mints the posting token, the numeric id drives

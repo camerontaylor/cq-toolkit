@@ -98,6 +98,7 @@ export function renderSettings(templateText, ids) {
  *   `wait_timer` and `branch_policy` (e.g. a custom deployment protection
  *   rule) — sorted; the target has none, so any entry is drift.
  * @property {string[]} secrets  `environments/{name}/secrets` → `.secrets[].name`.
+ * @property {string[]} variables  `environments/{name}/variables` → `.variables[].name`.
  */
 
 /**
@@ -148,9 +149,10 @@ const MODELED_RULE_TYPES = Object.freeze(['required_reviewers', 'wait_timer', 'b
  * @param {Record<string, any>} env
  * @param {Record<string, any>[]} branchPolicies
  * @param {string[]} secretNames
+ * @param {string[]} [variableNames]
  * @returns {LiveEnvironment}
  */
-export function environmentFromApi(env, branchPolicies, secretNames) {
+export function environmentFromApi(env, branchPolicies, secretNames, variableNames = []) {
   const dbp = env.deployment_branch_policy;
   const rules = Array.isArray(env.protection_rules) ? env.protection_rules : [];
   const reviewerRules = rules.filter((rule) => rule?.type === 'required_reviewers');
@@ -184,6 +186,7 @@ export function environmentFromApi(env, branchPolicies, secretNames) {
     wait_timer: waitTimer,
     other_rules: otherRules,
     secrets: [...secretNames],
+    variables: [...variableNames],
   };
 }
 
@@ -464,8 +467,9 @@ function compareNamed(kind, expected, actual, drift) {
  * @param {LiveEnvironment} actual
  * @param {string[]} drift
  * @param {string[]} notices
+ * @param {boolean} c3Attested
  */
-function compareEnvironment(name, expected, actual, drift, notices) {
+function compareEnvironment(name, expected, actual, drift, notices, c3Attested) {
   const prefix = `environment ${name}`;
   const expDbp = expected.deployment_branch_policy;
   const actDbp = actual.deployment_branch_policy;
@@ -518,11 +522,17 @@ function compareEnvironment(name, expected, actual, drift, notices) {
       );
     }
   }
+  const allowedVariables = new Set(expected.variables ?? []);
+  for (const variable of [...(actual.variables ?? [])].sort(byString)) {
+    if (!allowedVariables.has(variable)) {
+      drift.push(`${prefix}: variable ${variable} is not in the allowlist`);
+    }
+  }
   const allowed = new Set(expected.secrets ?? []);
   const interim = new Set(expected.interimSecrets ?? []);
   for (const secret of [...(actual.secrets ?? [])].sort(byString)) {
     if (allowed.has(secret)) continue;
-    if (interim.has(secret)) {
+    if (interim.has(secret) && !c3Attested) {
       notices.push(
         `${prefix}: interim secret ${secret} present (allowed until the ADR-0004 D-H.3 C3 attestation)`,
       );
@@ -536,9 +546,10 @@ function compareEnvironment(name, expected, actual, drift, notices) {
  * Compare the rendered target settings with the live settings.
  * @param {Record<string, any>} expected  renderSettings() output
  * @param {LiveSettings} actual
+ * @param {{ c3Attested?: boolean }} [options]  Presence on the checked-out trust ref.
  * @returns {{ drift: string[], notices: string[] }}
  */
-export function compareSettings(expected, actual) {
+export function compareSettings(expected, actual, { c3Attested = false } = {}) {
   /** @type {string[]} */
   const drift = [];
   /** @type {string[]} */
@@ -567,7 +578,7 @@ export function compareSettings(expected, actual) {
   for (const name of Object.keys(expEnvs).sort(byString)) {
     const live = actEnvs[name];
     if (live === undefined) drift.push(`environment ${name}: missing`);
-    else compareEnvironment(name, expEnvs[name], live, drift, notices);
+    else compareEnvironment(name, expEnvs[name], live, drift, notices, c3Attested);
   }
   for (const name of Object.keys(actEnvs).sort(byString)) {
     if (!(name in expEnvs))
