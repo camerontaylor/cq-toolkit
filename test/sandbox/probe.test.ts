@@ -237,6 +237,33 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     expect(record.blocker).toMatch(/read-escape/);
   });
 
+  test('a canary binary absent from the boundary is inconclusive, never a denial', async () => {
+    // bwrap on a host without FHS paths (NixOS without envfs): the host
+    // control arms through PATH, but /bin/cat does not exist inside the
+    // namespace, so bwrap exits 1 reporting ENOENT on the exec. That run never
+    // reached the target; reading it as a denial would certify an unproven
+    // boundary.
+    const adapter = fakeAdapter('fs-only');
+    const confined = adapter.launch;
+    adapter.launch = (request) =>
+      request.argv[0] === '/bin/cat'
+        ? Promise.resolve(
+            result({
+              exitCode: 1,
+              stderr: 'bwrap: execvp /bin/cat: No such file or directory',
+            }),
+          )
+        : confined(request);
+    const record = await probeBackend(adapter, seams());
+    for (const id of ['read-escape', 'read-escape-sibling', 'symlink-escape', 'credential-file']) {
+      expect(verdictOf(record, id)).toBe('inconclusive');
+    }
+    expect(record.canaries.find((c) => c.id === 'read-escape')?.detail).toMatch(
+      /canary binary absent in the boundary/,
+    );
+    expect(record.certified).toBe(false);
+  });
+
   test.runIf(process.platform === 'linux')(
     'a proc-link leak fails despite ordinary filesystem denials',
     async () => {

@@ -215,13 +215,19 @@ function executed(r: { spawnError?: string; timedOut: boolean; exitCode: number 
  */
 function denialOutcome(
   id: CanaryId,
-  result: SandboxLaunchResult,
+  result: CanaryLaunch,
   armed: boolean,
   what: string,
 ): CanaryOutcome {
   if (result.ok) return { id, verdict: 'fail', detail: what };
   if (!armed)
     return { id, verdict: 'inconclusive', detail: `control did not arm: ${detail(result)}` };
+  if (result.canaryMissing === true)
+    return {
+      id,
+      verdict: 'inconclusive',
+      detail: `canary binary absent in the boundary: ${detail(result)}`,
+    };
   if (!executed(result))
     return { id, verdict: 'inconclusive', detail: `canary never ran: ${detail(result)}` };
   return { id, verdict: 'pass', detail: detail(result) };
@@ -277,6 +283,32 @@ function execRefusalAttributable(
   const canonical = new RegExp(`execvp\\(\\) of '${escaped}' failed:`, 'm');
   const pattern = anchored[backend];
   return (pattern !== undefined && pattern.test(evidence)) || canonical.test(evidence);
+}
+
+/**
+ * A canary launch annotated with whether the launcher reported that the
+ * canary BINARY itself is absent from the boundary's namespace.
+ */
+type CanaryLaunch = SandboxLaunchResult & { readonly canaryMissing?: boolean };
+
+/**
+ * Whether the launcher's own exec report says the canary binary (argv[0])
+ * does not exist inside the boundary — ENOENT on the exec, so the canary
+ * never ran.  bwrap reports that as `bwrap: execvp /bin/cat: No such file or
+ * directory` with exit 1, which executed() alone would read as a run that
+ * failed: once the host control arms (hostTool), denialOutcome would then
+ * certify a denial no canary performed.  An EPERM exec refusal is different
+ * — that is the boundary refusing, and keeps its meaning.  A canary that ran
+ * and failed to find its TARGET does not match: the launcher anchors name
+ * the exact canary binary, not the target.
+ */
+function canaryBinaryMissing(
+  backend: SandboxBackend,
+  argv0: string,
+  r: SandboxLaunchResult,
+): boolean {
+  if (!execRefusalAttributable(backend, argv0, r)) return false;
+  return /No such file or directory|ENOENT/.test(`${r.spawnError ?? ''}\n${r.stderr}`);
 }
 
 /**
@@ -551,8 +583,11 @@ async function probeBackendWithLaunch(
     };
 
     let proxyPort: number | undefined;
-    const launch = (argv: readonly string[], launchTimeoutMs = timeoutMs) =>
-      launchVia({
+    const launch = async (
+      argv: readonly string[],
+      launchTimeoutMs = timeoutMs,
+    ): Promise<CanaryLaunch> => {
+      const result = await launchVia({
         workspace,
         argv,
         parentEnv,
@@ -561,6 +596,11 @@ async function probeBackendWithLaunch(
         timeoutMs: launchTimeoutMs,
         maxOutputChars: 4_000,
       });
+      return {
+        ...result,
+        canaryMissing: canaryBinaryMissing(adapter.backend, argv[0] ?? '', result),
+      };
+    };
 
     let homeCanaryCreated = false;
     try {
