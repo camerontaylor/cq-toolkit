@@ -1,0 +1,321 @@
+// record.ts unit tests — the dev-record format (deterministic serialize,
+// strict parse), the branch-path safety, the fs store round trip, and the
+// readiness assembly matrix (the dev.ready / pr.open shared core).
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
+import {
+  assembleReadiness,
+  branchPathFault,
+  DEV_LEDGER_VERSION,
+  devLedgerPath,
+  parseDevLedger,
+  pathDevLedgerStore,
+  repoRootFault,
+  serializeDevLedger,
+} from '../../../src/ops/dev/record.js';
+import type {
+  DevCycleRecord,
+  DevCheckRecord,
+  DevDispositionRecord,
+  DevLedgerFile,
+} from '../../../src/ops/dev/record.js';
+import { BASE, BRANCH, checkRecord, cycleRecord, dispositionRecord, HEAD } from './fakes.js';
+
+const tmpDirs: string[] = [];
+afterEach(async () => {
+  for (const dir of tmpDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Format
+// ---------------------------------------------------------------------------
+
+describe('the dev-record format', () => {
+  test('serialize is deterministic: schema key order, 2-space indent, one trailing newline', () => {
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [dispositionRecord()],
+    };
+    const once = serializeDevLedger(file);
+    const twice = serializeDevLedger({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [dispositionRecord()],
+    });
+    expect(once).toBe(twice);
+    expect(once.endsWith('\n')).toBe(true);
+    expect(once.endsWith('\n\n')).toBe(false);
+    expect(JSON.parse(once)).toHaveProperty('version', DEV_LEDGER_VERSION);
+  });
+
+  test('serialize refuses duplicate record ids (the store never collapses)', () => {
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord(), cycleRecord()],
+    };
+    expect(() => serializeDevLedger(file)).toThrow(/duplicate record id/);
+  });
+
+  test('parse round-trips a serialized file', () => {
+    const file: DevLedgerFile = {
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord(), checkRecord(), dispositionRecord()],
+    };
+    expect(parseDevLedger(serializeDevLedger(file))).toEqual(file);
+  });
+
+  test('parse fails closed: bad JSON, wrong version, unknown kind', () => {
+    expect(() => parseDevLedger('not json')).toThrow(/not valid JSON/);
+    expect(() => parseDevLedger(JSON.stringify({ version: 2, branch: 'b', records: [] }))).toThrow(
+      /schema violation/,
+    );
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: 'b',
+          records: [{ kind: 'mystery' }],
+        }),
+      ),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(
+        JSON.stringify({
+          version: DEV_LEDGER_VERSION,
+          branch: 'b',
+          records: [cycleRecord(), cycleRecord()],
+        }),
+      ),
+    ).toThrow(/duplicate record id/);
+  });
+
+  test('parse rejects a disposition with an empty why', () => {
+    const text = JSON.stringify({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [dispositionRecord({ why: '  ' })],
+    });
+    expect(() => parseDevLedger(text)).toThrow(/schema violation/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Branch-path safety
+// ---------------------------------------------------------------------------
+
+describe('branchPathFault', () => {
+  test('a normal namespaced branch is safe and joins under .cq/dev/', () => {
+    expect(branchPathFault('phase1/dev-commands')).toBeNull();
+    expect(devLedgerPath('/repo', 'phase1/dev-commands')).toBe(
+      join('/repo', '.cq', 'dev', 'phase1/dev-commands.json'),
+    );
+  });
+
+  test('refusals: empty, absolute, .., leading dot, .lock suffix, spaces, backslash', () => {
+    for (const branch of ['', '/abs', 'a/../b', '.hidden', 'x.lock', 'a b', 'a\\b']) {
+      expect(branchPathFault(branch), branch).not.toBeNull();
+    }
+  });
+
+  test('devLedgerPath throws on an unsafe branch (defense in depth)', () => {
+    expect(() => devLedgerPath('/repo', '../escape')).toThrow(/path-safe refname/);
+  });
+});
+
+describe('repoRootFault (the library boundary)', () => {
+  test('a non-string, empty, or control-character root fails', () => {
+    expect(repoRootFault(undefined)).not.toBeNull();
+    expect(repoRootFault('')).not.toBeNull();
+    expect(repoRootFault('a\nb')).not.toBeNull();
+    expect(repoRootFault('/repo')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fs store
+// ---------------------------------------------------------------------------
+
+describe('pathDevLedgerStore', () => {
+  test('a missing ledger loads empty; save → load round-trips; mutate appends under the mutex', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dev-record-'));
+    tmpDirs.push(root);
+    const store = pathDevLedgerStore(root, BRANCH);
+    expect(store.load()).toEqual({ version: DEV_LEDGER_VERSION, branch: BRANCH, records: [] });
+    store.save({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [checkRecord()],
+    });
+    expect(store.load().records).toHaveLength(1);
+    const value = await store.mutate((ledger) => ({
+      ledger: { ...ledger, records: [...ledger.records, dispositionRecord()] },
+      value: 'done',
+    }));
+    expect(value).toBe('done');
+    expect(store.load().records).toHaveLength(2);
+    // The persisted bytes parse back exactly.
+    const onDisk = JSON.parse(await readFile(devLedgerPath(root, BRANCH), 'utf8')) as DevLedgerFile;
+    expect(onDisk.records).toHaveLength(2);
+  });
+
+  test('an unsafe branch refuses the store outright', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dev-record-'));
+    tmpDirs.push(root);
+    expect(() => pathDevLedgerStore(root, '../escape')).toThrow(/path-safe refname/);
+  });
+
+  test('a corrupt ledger file faults on load (never silently emptied)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dev-record-'));
+    tmpDirs.push(root);
+    const path = devLedgerPath(root, BRANCH);
+    await mkdir(path.slice(0, path.lastIndexOf('/')), { recursive: true });
+    await writeFile(path, 'not json', 'utf8');
+    expect(() => pathDevLedgerStore(root, BRANCH).load()).toThrow(/not valid JSON/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Readiness assembly
+// ---------------------------------------------------------------------------
+
+function assemble(
+  ledgerRecords: (DevCycleRecord | DevCheckRecord | DevDispositionRecord)[],
+  untracked: string[] = [],
+) {
+  return assembleReadiness({
+    branch: BRANCH,
+    target: 'merge-queue',
+    identity: { base: BASE, head: HEAD, dirtySha256: 'dirty' },
+    ledger: { version: DEV_LEDGER_VERSION, branch: BRANCH, records: ledgerRecords },
+    untracked,
+    nowIso: '2026-10-17T01:00:00.000Z',
+  });
+}
+
+describe('assembleReadiness', () => {
+  test('ready: terminal cycle + green check at the current identity', () => {
+    const result = assemble([cycleRecord(), checkRecord()]);
+    expect(result.ready).toBe(true);
+    if (result.ready) {
+      expect(result.record).toMatchObject({
+        ready: true,
+        evidenceClass: 'author',
+        branch: BRANCH,
+        cycleId: 'c001-aaaaaaaa',
+        checkId: 'k001-aaaaaaaa',
+        base: BASE,
+        head: HEAD,
+        dirtySha256: 'dirty',
+      });
+      expect(result.record.caveat).toContain('not verification');
+    }
+  });
+
+  test('no records: both gaps named', () => {
+    const result = assemble([]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const fields = result.gaps.map((gap) => gap.field);
+      expect(fields).toContain('terminal-review-cycle');
+      expect(fields).toContain('green-check');
+    }
+  });
+
+  test('an uncommitted-scope terminal cycle never satisfies readiness', () => {
+    const result = assemble([cycleRecord({ scope: 'uncommitted' }), checkRecord()]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const gap = result.gaps.find((entry) => entry.field === 'terminal-review-cycle');
+      expect(gap?.detail).toContain('uncommitted-scope');
+    }
+  });
+
+  test('a blocked cycle never counts as the terminal cycle', () => {
+    const result = assemble([
+      cycleRecord({ completion: { kind: 'blocked', reason: 'cli exit 1' } }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) expect(result.gaps.map((g) => g.field)).toContain('terminal-review-cycle');
+  });
+
+  test('a stale cycle identity is named field by field', () => {
+    const result = assemble([
+      cycleRecord({ head: 'older', dirtySha256: 'older-dirty' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const stale = result.gaps.find((gap) => gap.field === 'stale-review-identity');
+      expect(stale?.detail).toContain('head');
+      expect(stale?.detail).toContain('working-tree diff changed');
+    }
+  });
+
+  test('a blocking finding is open until fixed/rejected; deferred does NOT close it', () => {
+    const cycle = cycleRecord({
+      findings: [
+        { id: 'c001-aaaaaaaa#f1', severity: 'critical' },
+        { id: 'c001-aaaaaaaa#f2', severity: 'major', fileName: 'a.ts' },
+        { id: 'c001-aaaaaaaa#f3', severity: 'minor' },
+      ],
+    });
+    // Deferred f1, nothing for f2, fixed f3: f1 and f2 stay open.
+    const result = assemble([
+      cycle,
+      checkRecord(),
+      dispositionRecord({ findingId: 'c001-aaaaaaaa#f1', action: 'deferred' }),
+      dispositionRecord({ findingId: 'c001-aaaaaaaa#f3', action: 'fixed' }),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const open = result.gaps.find((gap) => gap.field === 'open-blocking-findings');
+      expect(open?.detail).toContain('#f1');
+      expect(open?.detail).toContain('#f2');
+      expect(open?.detail).not.toContain('#f3');
+    }
+  });
+
+  test('fixed and rejected dispositions close blocking findings; minor never blocks', () => {
+    const cycle = cycleRecord({
+      findings: [
+        { id: 'c001-aaaaaaaa#f1', severity: 'critical' },
+        { id: 'c001-aaaaaaaa#f2', severity: 'major' },
+        { id: 'c001-aaaaaaaa#f3', severity: 'trivial' },
+      ],
+    });
+    const result = assemble([
+      cycle,
+      checkRecord(),
+      dispositionRecord({ findingId: 'c001-aaaaaaaa#f1', action: 'fixed' }),
+      dispositionRecord({
+        findingId: 'c001-aaaaaaaa#f2',
+        action: 'rejected',
+        why: 'false positive: mechanism cited',
+      }),
+    ]);
+    expect(result.ready).toBe(true);
+  });
+
+  test('a red check is no check; a stale check identity is a gap', () => {
+    const redOnly = assemble([cycleRecord(), checkRecord({ passed: false })]);
+    expect(redOnly.ready).toBe(false);
+    const stale = assemble([cycleRecord(), checkRecord({ base: 'older-base' })]);
+    expect(stale.ready).toBe(false);
+    if (!stale.ready) expect(stale.gaps.map((g) => g.field)).toContain('stale-check-identity');
+  });
+
+  test('untracked files are a gap with the names listed', () => {
+    const result = assemble([cycleRecord(), checkRecord()], ['scratch/new.ts']);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      const gap = result.gaps.find((entry) => entry.field === 'untracked-files');
+      expect(gap?.detail).toContain('scratch/new.ts');
+    }
+  });
+});
