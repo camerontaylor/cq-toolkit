@@ -25,9 +25,11 @@
 // {coverage?, typecheck-count?}}`, nothing else. Any violation fails the run
 // BEFORE any git or gh call; an unknown metric is refused, never ignored. A
 // metric absent from the artifact is noted and proposes nothing (I5). The
-// coverage reading is rounded with the engine's roundCoveragePct (one
-// decimal place) before any comparison. Worst case for a forged reading is a
-// too-tight proposal — a visible PR judged by the same checks as any other.
+// coverage reading passes through RAW — proposal rounding is the op's
+// directional law at the baseline file's precision (see RAW READINGS,
+// OP-OWNED ROUNDING below), never a half-up here. Worst case for a forged
+// reading is a too-tight proposal — a visible PR judged by the same checks
+// as any other.
 //
 // TARGET merge-queue: the proposal PR is opened against `merge-queue`, cut
 // from the merge-queue tip and judged against THAT tip's committed
@@ -42,6 +44,17 @@
 // head attribute can run a Git filter in the
 // credential-bearing job. The worktree is removed in a finally, and ROOT
 // is never switched (the dirty-tree guard on ROOT remains for local runs).
+//
+// RAW READINGS, OP-OWNED ROUNDING (#319): the coverage reading passes to the
+// op UNROUNDED. The op's directional law — floor for higher-is-better, ceil
+// for lower-is-better, at the baseline file's own precision — is the one
+// rounding a proposal may carry; a half-up here would turn a 94.29
+// measurement into a 94.3 proposal a re-measurement cannot reproduce. The
+// tightens() check below is only a fast path: it can never reject an
+// improvement the op would propose, because the op's rounded value is never
+// stricter than the raw one it rounds. Worst case for a forged reading is
+// still a too-tight proposal — a visible PR judged by the same checks as
+// any other.
 //
 // ONE BRAIN: the driver only collects readings and enumerates committed
 // baselines; every decision the op owns — grouping, the tighten gate,
@@ -259,9 +272,9 @@ if ((status.stdout ?? '').trim() !== '') {
 // ---- engine: the PREBUILT trusted dist/ (no adapters needed: no measuring here) ----
 const engine = await loadEngine();
 
-// ---- readings: ONLY from the artifact; coverage at one decimal place ----
+// ---- readings: ONLY from the artifact, RAW (the op owns proposal rounding) ----
 const live = {
-  coverage: measured.coverage === undefined ? null : engine.roundCoveragePct(measured.coverage),
+  coverage: measured.coverage === undefined ? null : measured.coverage,
   'typecheck-count': measured['typecheck-count'] === undefined ? null : measured['typecheck-count'],
 };
 for (const [metric, value] of Object.entries(live)) {
@@ -387,6 +400,13 @@ for (const entry of tree
 }
 
 // ---- improvements: only genuine TIGHTENs, judged by the engine's own comparator ----
+// A NECESSARY condition only: the op judges at the baseline file's precision
+// with directional rounding, and its rounded value is never stricter than
+// the raw reading, so anything the op would propose also tightens here
+// raw-vs-committed. Normalizing the baseline side (roundCoveragePct) could
+// reject a real proposal against a finer-grained file (94.29 over a 94.25
+// baseline: the normalized side says not-tighter, the op says 94.29) — so
+// the comparison stays raw.
 const improvements = [];
 for (const b of committed) {
   const value = Object.hasOwn(live, b.metric) ? live[b.metric] : undefined;
@@ -397,8 +417,7 @@ for (const b of committed) {
     continue;
   }
   if (value === null) continue; // note already emitted above
-  const committedValue = b.metric === 'coverage' ? engine.roundCoveragePct(b.value) : b.value;
-  if (engine.tightens(committedValue, value, b.direction)) {
+  if (engine.tightens(b.value, value, b.direction)) {
     improvements.push({ target: b.target, metric: b.metric, value });
   } else {
     console.error(
