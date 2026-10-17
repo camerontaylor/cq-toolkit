@@ -1476,4 +1476,65 @@ describe('proposeBaselineUpdate', () => {
       value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.29 }] },
     });
   });
+
+  test('duplicate top-level "value" keys are LAST-WINS, matching JSON.parse (PR review #4304483877)', async () => {
+    // parseBaseline reads the LAST occurrence: {"value": 94, "value": 94.20}
+    // parses to 94.2 — so the file speaks two decimals and 94.29 proposes at
+    // two decimals. A first-wins scanner would read the integer 94 (zero
+    // decimals) and wrongly absorb the tighten.
+    const lastWins = await seedRawBaseline(
+      TARGET,
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        `  "target": "${TARGET}",`,
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94,',
+        '  "value": 94.20,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    expect(parseBaseline(await readFile(join(ws, lastWins), 'utf8')).value).toBe(94.2);
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.29 }] },
+    });
+    // Mirror ordering: the last key is the integer 94 — the parsed value is
+    // 94 and the file speaks ZERO decimals, so 94.29 absorbs (never a
+    // proposal at the coarser-than-file precision a first-wins scan of
+    // 94.20 would have produced).
+    const intLast = await seedRawBaseline(
+      'dup-int-last',
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        '  "target": "dup-int-last",',
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94.20,',
+        '  "value": 94,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    expect(parseBaseline(await readFile(join(ws, intLast), 'utf8')).value).toBe(94);
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: 'dup-int-last', metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
+  });
 });
