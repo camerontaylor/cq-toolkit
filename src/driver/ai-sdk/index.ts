@@ -48,16 +48,17 @@
 //
 // PROVIDER INSTANCES (seam rule): providers are imported DIRECTLY and
 // instantiated as real language-model objects — never gateway string ids.
-// The registry { anthropic, openai, zai, ai-sdk, deepseek } maps the frozen
-// ModelSpec.provider handle onto the matching @ai-sdk factory; the model id
-// rides ModelSpec.model. UNKNOWN PROVIDER THROWS BEFORE DISPATCH (and
-// before any session is created) — fail loudly, never guess. Production
-// default builds instances lazily at run() time with API keys read from the
-// environment AT CALL TIME (ANTHROPIC_API_KEY / OPENAI_API_KEY /
-// ZAI_API_KEY / DEEPSEEK_API_KEY; a missing key throws a clear error before
-// dispatch). For testability the constructor accepts a `providers` override
-// map (name → (modelId) => language-model instance); the conformance suite
-// injects a mock there and never touches the network.
+// The registry { anthropic, openai, zai, ai-sdk, deepseek, opencode-go }
+// maps the frozen ModelSpec.provider handle onto the matching @ai-sdk
+// factory; the model id rides ModelSpec.model. UNKNOWN PROVIDER THROWS
+// BEFORE DISPATCH (and before any session is created) — fail loudly, never
+// guess. Production default builds instances lazily at run() time with API
+// keys read from the environment AT CALL TIME (ANTHROPIC_API_KEY /
+// OPENAI_API_KEY / ZAI_API_KEY / DEEPSEEK_API_KEY / OPENCODE_GO_API_KEY; a
+// missing key throws a clear error before dispatch). For testability the
+// constructor accepts a `providers` override map (name → (modelId) =>
+// language-model instance); the conformance suite injects a mock there and
+// never touches the network.
 //
 // I6 ISOLATION via the harness session store (src/harness/session.ts):
 //   - NO sessionRef → `tempWorkspace()` (fresh scratch dir) +
@@ -1379,6 +1380,27 @@ function defaultSessionsDir(): string {
  * endpoint answers 200). ZAI_BASE_URL overrides the base URL for
  * deployments on the pay-as-you-go wire.
  *
+ * THE `opencode-go` HANDLE (dev-strategy §8 item 7): OpenCode's Go
+ * subscription wire, OpenAI-compatible CHAT COMPLETIONS only. The model
+ * AND the route are CONFIGURATION, never constants (owner ruling
+ * 2026-10-16): the key is read from OPENCODE_GO_API_KEY and the base URL
+ * from OPENCODE_GO_BASE_URL — REQUIRED, with NO built-in default route, so
+ * a deployment points the handle at its wire explicitly (the captured Go
+ * origin lives in the pricing profile's endpoint-scoped 402 rule,
+ * provider-profiles.ts, and is deliberately not duplicated here). The
+ * model id rides ModelSpec.model verbatim — `.chat(modelId)`, no aliasing.
+ * The Go wire ECHOES the requested id in the response `model` field (RS-14
+ * capture: the upstream serving provider surfaces only in routing
+ * headers, which are explicitly NOT a served-id alias — see
+ * candidate-aliases.ts), so deployments request the served id directly; a
+ * deployment that observes a remap declares it under
+ * DriverFactoryConfig.servedModel.aliases['ai-sdk']['opencode-go'] —
+ * config-owned data, never a built-in row. The wire's Responses-only ids
+ * (the muse/luna family) are NOT addressable through this handle: it
+ * speaks chat completions only, and no chat route is fabricated for them.
+ * Funded-allowance exhaustion on this wire is HTTP 402 → 'quota'
+ * (classifyRunFailure below).
+ *
  * THE `ai-sdk` HANDLE (review-debt #186): the self-hosting default's
  * provider (SelfhostDefaults.driver.provider) names the DRIVER, not a
  * vendor — "the Z.AI coding endpoint is the ai-sdk default route" (see
@@ -1388,7 +1410,7 @@ function defaultSessionsDir(): string {
  * handles keep their own routes.
  */
 function defaultProviders(): Record<string, ProviderFactory> {
-  const requireKey = (provider: string, envName: string): string => {
+  const requireEnv = (provider: string, envName: string): string => {
     const value = process.env[envName];
     if (value === undefined || value === '') {
       // Pre-dispatch misconfiguration carries its class as structured data
@@ -1404,23 +1426,33 @@ function defaultProviders(): Record<string, ProviderFactory> {
     (handle: string) =>
     (modelId: string): LanguageModel =>
       createZai({
-        apiKey: requireKey(handle, 'ZAI_API_KEY'),
+        apiKey: requireEnv(handle, 'ZAI_API_KEY'),
         baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
       }).languageModel(modelId);
   return {
     anthropic: (modelId) =>
-      createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
+      createAnthropic({ apiKey: requireEnv('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
         modelId,
       ),
     openai: (modelId) =>
-      createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
+      createOpenAI({ apiKey: requireEnv('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
     zai: zai('zai'),
     // The driver-kind alias (see header): the self-host default provider.
     // It reports ITS OWN handle in a missing-key error (not 'zai'), so the
     // message names the provider the caller actually configured.
     'ai-sdk': zai('ai-sdk'),
     deepseek: (modelId) =>
-      createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
+      createDeepSeek({
+        apiKey: requireEnv('deepseek', 'DEEPSEEK_API_KEY'),
+      }).languageModel(modelId),
+    // Chat-completions-only OpenCode Go handle (see the doc comment above):
+    // both the credential and the route are required env reads — there is
+    // deliberately NO default base-URL literal here.
+    'opencode-go': (modelId) =>
+      createOpenAI({
+        apiKey: requireEnv('opencode-go', 'OPENCODE_GO_API_KEY'),
+        baseURL: requireEnv('opencode-go', 'OPENCODE_GO_BASE_URL'),
+      }).chat(modelId),
   };
 }
 
@@ -1631,7 +1663,10 @@ export function classifyRunFailure(err: unknown): WorkerErrorClass {
     ) {
       return 'quota';
     }
-    // HTTP 402 — funded balance exhausted (DeepSeek, OpenCode Zen).
+    // HTTP 402 — funded balance exhausted (DeepSeek, OpenCode Zen and the
+    // OpenCode Go wire, whose per-model monthly allowance answers the same
+    // status; the pricing profile's endpoint-scoped rule discriminates the
+    // two wires at the profile layer).
     if (statusCode === 402) return 'quota';
     // Cut 3.
     if (statusCode === 401 || statusCode === 403) return 'auth';

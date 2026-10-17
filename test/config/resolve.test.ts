@@ -489,6 +489,16 @@ describe('pure configuration resolution', () => {
       expect(() => resolve({ env: { ZAI_BASE_URL: 'https://example.com:abc' } })).toThrow(
         /expected HTTPS URL/,
       );
+      // The OpenCode Go handle's route env is a foreign URL key like its
+      // siblings: https-only, no userinfo, no query (dev-strategy §8 item 7).
+      expect(() => resolve({ env: { OPENCODE_GO_BASE_URL: 'http://go-wire.invalid/v1' } })).toThrow(
+        /expected HTTPS URL/,
+      );
+      expect(() =>
+        resolve({ env: { OPENCODE_GO_BASE_URL: 'https://user@go-wire.invalid/v1' } }),
+      ).toThrow(/expected HTTPS URL/);
+      const journalled = resolve({ env: { OPENCODE_GO_BASE_URL: 'https://go-wire.invalid/v1' } });
+      expect(journalled.foreign.OPENCODE_GO_BASE_URL).toBe('https://go-wire.invalid/v1');
     });
 
     it('treats whitespace-only CQ secrets as unset and denies passthrough case-insensitively', () => {
