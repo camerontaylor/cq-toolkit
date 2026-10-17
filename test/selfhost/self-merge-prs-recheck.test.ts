@@ -39,9 +39,10 @@ import {
   observe,
   parseSettleState,
   serializeSettleState,
-} from '../../src/selfhost/settle-state.js';
-import type { SettleState } from '../../src/selfhost/settle-state.js';
-import { SETTLE_STATE_PATH, STATE_BRANCH } from '../../src/selfhost/state-branch.js';
+} from '../../src/policy/queue/settle-state.js';
+import type { SettleState } from '../../src/policy/queue/settle-state.js';
+import { SETTLE_STATE_PATH } from '../../src/selfhost/config.js';
+import { STATE_BRANCH } from '../../src/selfhost/state-branch.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';

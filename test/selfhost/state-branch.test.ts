@@ -33,9 +33,9 @@ import {
   observe,
   settleStatus,
   type SettleTuple,
-} from '../../src/selfhost/settle-state.js';
+} from '../../src/policy/queue/settle-state.js';
+import { SETTLE_STATE_PATH } from '../../src/selfhost/config.js';
 import {
-  SETTLE_STATE_PATH,
   STATE_BRANCH,
   readSettleState,
   writeSettleState,

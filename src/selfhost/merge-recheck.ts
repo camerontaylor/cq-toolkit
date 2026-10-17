@@ -1,7 +1,8 @@
 // selfhost/merge-recheck — the MERGE-TIME RECHECK (task W1.2 slice B, the
 // RS-3 decision): the last gate between "the plan says merge" and the forge
-// merge call. Composition glue over the settle ledger (settle-state.ts, pure
-// rules) and its durable persistence (state-branch.ts); the only logic here
+// merge call. Composition glue over the settle ledger (policy/queue/
+// settle-state.ts, pure rules) and its durable persistence (state-branch.ts);
+// the only logic here
 // is wire mapping, the head-bound acceptance judgment, and fail-closed
 // bookkeeping.
 //
@@ -39,7 +40,7 @@
 // this policy and can only narrow the blanks.
 //
 // SETTLE. The durable two-observation rule on `(head, base, forcePushEpoch)`
-// lives in settle-state.ts. The force-push epoch is the number of
+// lives in policy/queue/settle-state.ts. The force-push epoch is the number of
 // HeadRefForcePushedEvent NODES in the PR timeline, COUNTED CLIENT-SIDE —
 // the filtered connection's `totalCount` is the UNFILTERED timeline count
 // and is never read. The state branch IS the persistence: an observation
@@ -77,8 +78,8 @@ import type { GhFn, GhResult } from '../adapters/forge-github/gh.js';
 import type { MergeEffects } from '../adapters/forge-github/mergeEffects.js';
 import { attachRestReplies, countUnresolvedThreads } from '../ops/review/threads.js';
 import type { RestComment, ReviewThread } from '../ops/review/threads.js';
-import { observeWithChange, pruneToOpen, settleStatus } from './settle-state.js';
-import type { SettleTuple } from './settle-state.js';
+import { observeWithChange, pruneToOpen, settleStatus } from '../policy/queue/settle-state.js';
+import type { SettleTuple } from '../policy/queue/settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
 import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
 import { parseIndependentReview } from '../shared/independent-review.js';

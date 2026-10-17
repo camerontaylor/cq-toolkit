@@ -1,6 +1,7 @@
 // selfhost/state-branch — the DURABLE settle-ledger store (task W1.2 slice
-// A, the RS-3 decision): settle-state.ts's ledger persisted as ONE file
-// (`.cq/settle-state.json`) on a dedicated git STATE BRANCH (`cq-state`),
+// A, the RS-3 decision): the settle ledger (policy/queue/settle-state.ts,
+// the pure schema) persisted as ONE file (`SETTLE_STATE_PATH`, selfhost
+// config) on a dedicated git STATE BRANCH (`cq-state`),
 // read and written through the GitHub git-data REST API over the gh CLI
 // transport (gh.ts's GhFn seam).
 //
@@ -45,14 +46,12 @@
 // empty — harmless for settle, and the subsequent write fails loudly.
 import { GhError, ghJson, ghNameOk } from '../adapters/forge-github/gh.js';
 import type { GhFn } from '../adapters/forge-github/gh.js';
-import { emptySettleState, parseSettleState, serializeSettleState } from './settle-state.js';
-import type { SettleState } from './settle-state.js';
+import { emptySettleState, parseSettleState, serializeSettleState } from '../policy/queue/settle-state.js';
+import type { SettleState } from '../policy/queue/settle-state.js';
+import { SETTLE_STATE_PATH } from './config.js';
 
 /** The dedicated state branch holding the settle ledger (and nothing else). */
 export const STATE_BRANCH = 'cq-state';
-
-/** The ledger's path on the state branch. */
-export const SETTLE_STATE_PATH = '.cq/settle-state.json';
 
 /** Cap for a one-line failure reason (candidates.ts's FETCH_REASON_MAX convention). */
 const REASON_MAX = 500;
