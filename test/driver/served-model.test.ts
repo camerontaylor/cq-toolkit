@@ -47,7 +47,7 @@ const lanes = LANE_IDS;
 describe('served-model assertion — the m-ii matrix', () => {
   test('an observed mismatch becomes error/served-model-mismatch: payload dropped, spend kept', async () => {
     const raw = complete('model-b');
-    const wrapped = withServedModelAssertion(driverReturning(raw), { lane: 'subprocess' });
+    const wrapped = withServedModelAssertion(driverReturning(raw), { lane: 'claude-code' });
     const verdict = await wrapped.run(invocation());
     expect(verdict.stopReason).toBe('error');
     expect(verdict.errorClass).toBe('served-model-mismatch');
@@ -78,15 +78,15 @@ describe('served-model assertion — the m-ii matrix', () => {
 
   test('a lane-scoped alias admits the declared pair on its lane only', async () => {
     const policy: ServedModelPolicy = {
-      aliases: { subprocess: { test: { 'model-a': ['model-b'] } } },
+      aliases: { 'claude-code': { test: { 'model-a': ['model-b'] } } },
     };
     const raw = complete('model-b');
     const passed = await withServedModelAssertion(driverReturning(raw), {
-      lane: 'subprocess',
+      lane: 'claude-code',
       policy,
     }).run(invocation());
     expect(passed.stopReason).toBe('complete');
-    expect(servedModelCheck(invocation(), raw, { lane: 'subprocess', policy })).toEqual({
+    expect(servedModelCheck(invocation(), raw, { lane: 'claude-code', policy })).toEqual({
       pass: true,
       via: 'alias',
     });
@@ -97,9 +97,9 @@ describe('served-model assertion — the m-ii matrix', () => {
     }).run(invocation());
     expect(other.stopReason).toBe('error');
     expect(other.errorClass).toBe('served-model-mismatch');
-    expect(
-      servedModelCheck(invocation(), complete('model-b'), { lane: 'claude-agent', policy }),
-    ).toEqual({ pass: false, reason: "requested 'model-a', served 'model-b'" });
+    expect(servedModelCheck(invocation(), complete('model-b'), { lane: 'ai-sdk', policy })).toEqual(
+      { pass: false, reason: "requested 'model-a', served 'model-b'" },
+    );
   });
 
   test('an alias compares NORMALISED ids: acp namespace + case do not defeat the declaration', () => {
@@ -127,28 +127,28 @@ describe('served-model assertion — the m-ii matrix', () => {
   });
 
   test('requireObserved[lane]=false admits an unobserved id on that lane only', async () => {
-    const policy: ServedModelPolicy = { requireObserved: { subprocess: false } };
+    const policy: ServedModelPolicy = { requireObserved: { 'claude-code': false } };
     const passed = await withServedModelAssertion(driverReturning(complete(undefined)), {
-      lane: 'subprocess',
+      lane: 'claude-code',
       policy,
     }).run(invocation());
     expect(passed.stopReason).toBe('complete');
     expect(passed.structuredOutput).toEqual({ ok: true });
     expect(
-      servedModelCheck(invocation(), complete(undefined), { lane: 'subprocess', policy }),
+      servedModelCheck(invocation(), complete(undefined), { lane: 'claude-code', policy }),
     ).toEqual({ pass: true, via: 'unobserved-allowed' });
     // Lane-scoped: the same policy leaves every other lane fail-closed.
     const other = await withServedModelAssertion(driverReturning(complete(undefined)), {
-      lane: 'claude-agent',
+      lane: 'ai-sdk',
       policy,
     }).run(invocation());
     expect(other.stopReason).toBe('error');
   });
 
   test('an OBSERVED mismatching id is never admitted by requireObserved=false', async () => {
-    const policy: ServedModelPolicy = { requireObserved: { subprocess: false } };
+    const policy: ServedModelPolicy = { requireObserved: { 'claude-code': false } };
     const verdict = await withServedModelAssertion(driverReturning(complete('model-b')), {
-      lane: 'subprocess',
+      lane: 'claude-code',
       policy,
     }).run(invocation());
     expect(verdict.stopReason).toBe('error');
@@ -166,7 +166,7 @@ describe('served-model assertion — the m-ii matrix', () => {
       errorClass: 'provider-error',
     };
     const verdict = await withServedModelAssertion(driverReturning(failed), {
-      lane: 'subprocess',
+      lane: 'claude-code',
     }).run(invocation());
     expect(verdict).toBe(failed);
   });
@@ -177,13 +177,13 @@ describe('the lane set (LANE_IDS — the runtime statement of the LaneId union)'
     // The factory's binding validation checks decoded/JS config against
     // this array — it must name exactly the four first-party lanes, never
     // drift from the union it mirrors.
-    expect([...LANE_IDS].sort()).toEqual(['acp', 'ai-sdk', 'claude-agent', 'subprocess']);
+    expect([...LANE_IDS].sort()).toEqual(['acp', 'ai-sdk', 'claude-code']);
   });
 });
 
 describe('acp normalisation (normaliseModelId)', () => {
   test('the non-acp lanes are identity — no case folding', () => {
-    for (const lane of ['ai-sdk', 'claude-agent', 'subprocess'] as const) {
+    for (const lane of ['ai-sdk', 'claude-code'] as const) {
       expect(normaliseModelId(lane, 'GLM-5.3')).toBe('GLM-5.3');
       expect(normaliseModelId(lane, 'builtin:bigmodel\\GLM-5.3')).toBe('builtin:bigmodel\\GLM-5.3');
     }
@@ -215,24 +215,24 @@ describe('acp normalisation (normaliseModelId)', () => {
 describe('servedModelCheck — the exported record (via vocabulary)', () => {
   test('exact / alias / unobserved-allowed passes and both fail reasons', () => {
     const policy: ServedModelPolicy = {
-      aliases: { subprocess: { test: { 'model-a': ['model-b'] } } },
-      requireObserved: { 'claude-agent': false },
+      aliases: { 'claude-code': { test: { 'model-a': ['model-b'] } } },
+      requireObserved: { 'ai-sdk': false },
     };
-    expect(servedModelCheck(invocation(), complete('model-a'), { lane: 'subprocess' })).toEqual({
+    expect(servedModelCheck(invocation(), complete('model-a'), { lane: 'claude-code' })).toEqual({
       pass: true,
       via: 'exact',
     });
     expect(
-      servedModelCheck(invocation(), complete('model-b'), { lane: 'subprocess', policy }),
+      servedModelCheck(invocation(), complete('model-b'), { lane: 'claude-code', policy }),
     ).toEqual({ pass: true, via: 'alias' });
-    expect(
-      servedModelCheck(invocation(), complete(undefined), { lane: 'claude-agent', policy }),
-    ).toEqual({ pass: true, via: 'unobserved-allowed' });
-    expect(servedModelCheck(invocation(), complete(undefined), { lane: 'subprocess' })).toEqual({
+    expect(servedModelCheck(invocation(), complete(undefined), { lane: 'ai-sdk', policy })).toEqual(
+      { pass: true, via: 'unobserved-allowed' },
+    );
+    expect(servedModelCheck(invocation(), complete(undefined), { lane: 'claude-code' })).toEqual({
       pass: false,
       reason: "requested 'model-a', served unobserved",
     });
-    expect(servedModelCheck(invocation(), complete('model-z'), { lane: 'subprocess' })).toEqual({
+    expect(servedModelCheck(invocation(), complete('model-z'), { lane: 'claude-code' })).toEqual({
       pass: false,
       reason: "requested 'model-a', served 'model-z'",
     });
@@ -240,11 +240,11 @@ describe('servedModelCheck — the exported record (via vocabulary)', () => {
 
   test('an alias is provider-scoped: another provider handle is not admitted', () => {
     const policy: ServedModelPolicy = {
-      aliases: { subprocess: { test: { 'model-a': ['model-b'] } } },
+      aliases: { 'claude-code': { test: { 'model-a': ['model-b'] } } },
     };
     expect(
       servedModelCheck(invocation('model-a', 'other'), complete('model-b'), {
-        lane: 'subprocess',
+        lane: 'claude-code',
         policy,
       }),
     ).toEqual({ pass: false, reason: "requested 'model-a', served 'model-b'" });
@@ -256,12 +256,12 @@ describe('RunOptions forwarding through the wrapper', () => {
     const controller = new AbortController();
     const options: RunOptions = { signal: controller.signal };
     const inner = vi.fn(async (): Promise<WorkerResult> => complete('model-a'));
-    const wrapped = withServedModelAssertion({ run: inner }, { lane: 'subprocess' });
+    const wrapped = withServedModelAssertion({ run: inner }, { lane: 'claude-code' });
     await wrapped.run(invocation(), options);
     expect(inner).toHaveBeenCalledExactlyOnceWith(invocation(), options);
 
     const mismatching = withServedModelAssertion(driverReturning(complete('model-b')), {
-      lane: 'subprocess',
+      lane: 'claude-code',
     });
     const verdict = await mismatching.run(invocation(), options);
     expect(verdict.stopReason).toBe('error');

@@ -52,7 +52,7 @@ async function laneImports(directory: string, root = directory): Promise<string[
       // template literals (a backtick import is still an import edge).
       const source = stripComments(await readFile(path, 'utf8'));
       if (
-        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*driver\/(?:ai-sdk|claude-agent|subprocess|acp)\//.test(
+        /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"`][^'"`]*driver\/(?:ai-sdk|claude-code|acp)\//.test(
           source,
         )
       ) {
@@ -196,7 +196,7 @@ describe('sample: agentic-class op through the real registry', () => {
       );
       await writeFile(
         join(scratch, 'quoted.ts'),
-        "import x from '../../driver/subprocess/index.js';\nexport default x;\n",
+        "import x from '../../driver/claude-code/index.js';\nexport default x;\n",
       );
       // A nested hit is named relative to the SCAN ROOT (the root threads
       // through the recursion), matching the live tree's naming.

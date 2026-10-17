@@ -46,8 +46,9 @@ import { mkdtemp, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { ClaudeAgentDriver, SDK_MODULE_SPECIFIER } from '../../src/driver/claude-agent/index.js';
-import type { OpInvocation } from '../../src/driver/types.js';
+import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
+import { SDK_MODULE_SPECIFIER } from '../../../src/driver/claude-code/sdk.js';
+import type { OpInvocation } from '../../../src/driver/types.js';
 
 /**
  * Classify ONE import rejection (issue #29 + review): 'absent' ONLY for the
@@ -106,7 +107,7 @@ function invocation(): OpInvocation {
 }
 
 describe.skipIf(!sdkPresent)(
-  'claude-agent driver × REAL installed SDK (production import path)',
+  'claude-code sdk transport × REAL installed SDK (production import path)',
   () => {
     test('the production loader resolves the real module and its surface feature-detects', async () => {
       const mod = (await import(SDK_MODULE_SPECIFIER)) as Record<string, unknown>;
@@ -125,7 +126,10 @@ describe.skipIf(!sdkPresent)(
         // Satisfy the pre-dispatch key check with a DUMMY value (never used:
         // this run is rejected before dispatch, so no endpoint is contacted).
         process.env['ANTHROPIC_API_KEY'] = 'sdk-presence-dummy-key';
-        const driver = new ClaudeAgentDriver({ sessionsDir: join(scratchDir, 'sessions') });
+        const driver = new ClaudeCodeDriver({
+          transport: 'sdk',
+          sessionsDir: join(scratchDir, 'sessions'),
+        });
         // The rejection must be the budget-validation error — reaching it
         // PROVES the default loader resolved the real module and capability
         // detection passed (a peer problem would have thrown the peer-absent

@@ -1,0 +1,29 @@
+{
+  "label": "agent-sdk 0.3.302-shaped success result: flat main-loop usage EXCLUDES subagent spend; modelUsage aggregates INCLUDE it",
+  "result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "session_id": "rec-sdk-usage-1",
+    "usage": {
+      "input_tokens": 100,
+      "output_tokens": 50,
+      "cache_read_input_tokens": 10,
+      "cache_creation_input_tokens": 2
+    },
+    "modelUsage": {
+      "claude-sonnet-4-5": {
+        "inputTokens": 100,
+        "outputTokens": 50,
+        "cacheReadInputTokens": 10,
+        "cacheCreationInputTokens": 2
+      },
+      "claude-haiku-4-5": {
+        "inputTokens": 700,
+        "outputTokens": 300,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      }
+    }
+  }
+}

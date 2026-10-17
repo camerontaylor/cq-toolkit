@@ -31,7 +31,7 @@
 //   LEVEL 2 — WorkerResult.denials parity. The same sequence folded by each
 //   lane: claude-agent runs the driver with the mock SDK executing the
 //   scripted calls through its registered handlers; subprocess runs a REAL
-//   SubprocessDriver whose `spawn` override returns a fake CLI child that
+//   ClaudeCodeDriver whose `spawn` override returns a fake CLI child that
 //   emits realistic stream-json frames (init, tool_use, tool_result,
 //   result) built from the SAME CallToolResults. Both lanes must report the
 //   identical {tool, reason} list, in harness names ('read'/'edit'/'run').
@@ -45,15 +45,14 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
-import { ClaudeAgentDriver } from '../../src/driver/claude-agent/index.js';
-import { EndpointTableSchema } from '../../src/driver/claude-agent/routing.js';
-import { SubprocessDriver } from '../../src/driver/subprocess/index.js';
+import { ClaudeCodeDriver } from '../../src/driver/claude-code/index.js';
+import { RoutingTableSchema as EndpointTableSchema } from '../../src/driver/claude-code/routing.js';
 import type {
   ManagedChild,
   ProcessClose,
   SpawnOptions,
-} from '../../src/driver/subprocess/process.js';
-import { RoutingTableSchema } from '../../src/driver/subprocess/routing.js';
+} from '../../src/driver/claude-code/process.js';
+import { RoutingTableSchema } from '../../src/driver/claude-code/routing.js';
 import type { SandboxLevel, ToolDenial, WorkerResult } from '../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
@@ -356,7 +355,7 @@ const AGENT_ENDPOINTS = EndpointTableSchema.parse({
   },
 });
 
-/** Run the claude-agent driver over one phase; returns handler results, the tools, the verdict. */
+/** Run the claude-code sdk transport over one phase; returns handler results, the tools, the verdict. */
 async function claudeAgentPhase(
   sandbox: SandboxLevel,
   steps: ReadonlyArray<{ tool: string; input: unknown }>,
@@ -373,9 +372,10 @@ async function claudeAgentPhase(
 }> {
   const session = await seededSession(`agent-${sandbox}`, options.workspace);
   const sink: { tools: CapturedTool[]; results: unknown[] } = { tools: [], results: [] };
-  const driver = new ClaudeAgentDriver({
+  const driver = new ClaudeCodeDriver({
+    transport: 'sdk',
     sdkLoader: async () => scriptedSdk(steps, sink),
-    endpointTable: AGENT_ENDPOINTS,
+    routingTable: AGENT_ENDPOINTS,
     sessionsDir: session.sessionsDir,
     harnessConfig: options.harnessConfig ?? HARNESS,
     ...(options.envAllowlist === undefined ? {} : { envAllowlist: options.envAllowlist }),
@@ -412,7 +412,7 @@ async function corePhase(
 }
 
 // ---------------------------------------------------------------------------
-// The subprocess lane: a real SubprocessDriver over a fake CLI child
+// The subprocess lane: a real ClaudeCodeDriver over a fake CLI child
 // ---------------------------------------------------------------------------
 
 const SUBPROCESS_ROUTES = RoutingTableSchema.parse({
@@ -528,7 +528,7 @@ function streamJsonFor(
   return lines.map((line) => JSON.stringify(line));
 }
 
-/** Run a real SubprocessDriver over one phase with the fake CLI child. */
+/** Run a real ClaudeCodeDriver over one phase with the fake CLI child. */
 async function subprocessPhase(
   sandbox: SandboxLevel,
   steps: readonly Step[],
@@ -536,7 +536,7 @@ async function subprocessPhase(
 ): Promise<{ verdict: WorkerResult; manifest: HarnessManifest | undefined; workspace: string }> {
   const session = await seededSession(`subprocess-${sandbox}`);
   let seenManifest: HarnessManifest | undefined;
-  const driver = new SubprocessDriver({
+  const driver = new ClaudeCodeDriver({
     binary: 'fake-claude',
     routingTable: SUBPROCESS_ROUTES,
     sessionsDir: session.sessionsDir,

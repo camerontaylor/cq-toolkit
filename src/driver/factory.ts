@@ -6,9 +6,9 @@
 // RESOLUTION RULES (frozen):
 //   - DEFAULT BINDINGS ARE CONSERVATIVE: every role maps to lane 'ai-sdk'
 //     for the default providers (zai / anthropic / openai / deepseek) — the
-//     in-process lane with no host-CLI dependency. The subprocess,
-//     claude-agent and acp lanes are NEVER defaults: a host-CLI or
-//     vendor-process lane only runs when the deployment BINDS it.
+//     in-process lane with no host-CLI dependency. The claude-code and acp
+//     lanes are NEVER defaults: a host-CLI or vendor-process lane only runs
+//     when the deployment BINDS it.
 //   - Configured bindings (role → provider → lane, '*' = any provider) win
 //     over defaults; a provider that is neither a default provider nor bound
 //     for the requested role is a DispatchError('config') — the factory
@@ -41,15 +41,13 @@ import { AcpDriver } from './acp/index.js';
 import type { AcpDriverOptions } from './acp/index.js';
 import { AiSdkDriver } from './ai-sdk/index.js';
 import type { AiSdkDriverOptions } from './ai-sdk/index.js';
-import { ClaudeAgentDriver } from './claude-agent/index.js';
-import type { ClaudeAgentDriverOptions } from './claude-agent/index.js';
+import { ClaudeCodeDriver } from './claude-code/index.js';
+import type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './claude-code/index.js';
 import { DispatchError } from './errors.js';
 import { assertStrictTokenBudgetSupported } from './common/strict-budget.js';
 import type { PerMillionRates } from './pricing/index.js';
 import { withServedModelAssertion } from './served-model.js';
 import { LANE_IDS, type LaneId, type ServedModelPolicy } from './served-model.js';
-import { SubprocessDriver } from './subprocess/index.js';
-import type { SubprocessDriverOptions } from './subprocess/index.js';
 import type { Driver, ModelSpec, WorkerResult } from './types.js';
 import type { HarnessConfig } from '../harness/config.js';
 import { SessionStore } from '../harness/session.js';
@@ -97,12 +95,6 @@ export interface DriverFactory {
   resolve(request: DriverRequest): ResolvedDriver;
 }
 
-/** Plan-data construction knobs for the subprocess lane (its serializable option subset). */
-export type SubprocessLaneConfig = Pick<
-  SubprocessDriverOptions,
-  'binary' | 'routingTable' | 'termGraceMs' | 'killGraceMs' | 'envAllowlist' | 'sessionsDir'
->;
-
 /** Plan-data construction knobs for the acp lane (its serializable option subset). */
 export type AcpLaneConfig = Pick<
   AcpDriverOptions,
@@ -118,11 +110,23 @@ export type AcpLaneConfig = Pick<
   | 'sessionsDir'
 >;
 
-/** Plan-data construction knobs for the claude-agent lane (its serializable option subset). */
-export type ClaudeAgentLaneConfig = Pick<
-  ClaudeAgentDriverOptions,
-  'endpointTable' | 'envAllowlist' | 'sessionsDir'
+/** Plan-data construction knobs for the Claude Code lane (its serializable option subset). */
+export type ClaudeCodeLaneConfig = Pick<
+  ClaudeCodeDriverOptions,
+  | 'transport'
+  | 'binary'
+  | 'routingTable'
+  | 'termGraceMs'
+  | 'killGraceMs'
+  | 'envAllowlist'
+  | 'sessionsDir'
 >;
+
+/**
+ * The Claude Code lane's substrate path, as plan data. 'cli' (the default)
+ * spawns the headless CLI; 'sdk' requires the optional agent-SDK peer.
+ */
+export type ClaudeCodeLaneTransport = ClaudeCodeTransport;
 
 /**
  * Construction knobs for the ai-sdk lane. `providers` is an in-process
@@ -161,9 +165,8 @@ export interface DriverFactoryConfig {
   onDeprecatedAlias?: (message: string) => void;
   /** Per-lane construction knobs. */
   lanes?: {
-    subprocess?: SubprocessLaneConfig;
+    claudeCode?: ClaudeCodeLaneConfig;
     acp?: AcpLaneConfig;
-    claudeAgent?: ClaudeAgentLaneConfig;
     aiSdk?: AiSdkLaneConfig;
   };
 }
@@ -234,13 +237,11 @@ function laneForRole(
 /** The lane-config sessionsDir override, else the factory's, else the lanes' shared default. */
 function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
   const laneDir =
-    lane === 'subprocess'
-      ? config.lanes?.subprocess?.sessionsDir
-      : lane === 'claude-agent'
-        ? config.lanes?.claudeAgent?.sessionsDir
-        : lane === 'acp'
-          ? config.lanes?.acp?.sessionsDir
-          : config.lanes?.aiSdk?.sessionsDir;
+    lane === 'claude-code'
+      ? config.lanes?.claudeCode?.sessionsDir
+      : lane === 'acp'
+        ? config.lanes?.acp?.sessionsDir
+        : config.lanes?.aiSdk?.sessionsDir;
   return laneDir ?? config.sessionsDir ?? DEFAULT_SESSIONS_DIR;
 }
 
@@ -256,23 +257,14 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
   const harness = request.harness !== undefined ? { harnessConfig: request.harness } : {};
   const pricing = config.pricing !== undefined ? { pricing: config.pricing } : {};
   switch (lane) {
-    case 'subprocess': {
-      const cfg = config.lanes?.subprocess;
-      return new SubprocessDriver({
+    case 'claude-code': {
+      const cfg = config.lanes?.claudeCode;
+      return new ClaudeCodeDriver({
+        ...(cfg?.transport !== undefined ? { transport: cfg.transport } : {}),
         ...(cfg?.binary !== undefined ? { binary: cfg.binary } : {}),
         ...(cfg?.routingTable !== undefined ? { routingTable: cfg.routingTable } : {}),
         ...(cfg?.termGraceMs !== undefined ? { termGraceMs: cfg.termGraceMs } : {}),
         ...(cfg?.killGraceMs !== undefined ? { killGraceMs: cfg.killGraceMs } : {}),
-        ...(cfg?.envAllowlist !== undefined ? { envAllowlist: cfg.envAllowlist } : {}),
-        sessionsDir,
-        ...harness,
-        ...pricing,
-      });
-    }
-    case 'claude-agent': {
-      const cfg = config.lanes?.claudeAgent;
-      return new ClaudeAgentDriver({
-        ...(cfg?.endpointTable !== undefined ? { endpointTable: cfg.endpointTable } : {}),
         ...(cfg?.envAllowlist !== undefined ? { envAllowlist: cfg.envAllowlist } : {}),
         sessionsDir,
         ...harness,

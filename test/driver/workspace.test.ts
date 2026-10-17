@@ -6,7 +6,7 @@ import { describe, expect, test } from 'vitest';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../../src/driver/common/workspace.js';
 import { SessionStore } from '../../src/harness/session.js';
 
-const LANES = ['acp driver', 'ai-sdk driver', 'claude-agent driver', 'subprocess driver'];
+const LANES = ['acp driver', 'ai-sdk driver', 'claude-code driver'];
 
 describe('shared driver workspace binding', () => {
   test.each(LANES)('%s resumes a legacy record through a directory alias', async (lane) => {

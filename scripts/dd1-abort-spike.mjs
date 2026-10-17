@@ -13,10 +13,10 @@
 //                      verdict (ai-sdk: zeros by design — ai@7 generateText
 //                      THROWS on abort and surfaces no usage, which is
 //                      exactly why the frozen unmeasured-abort rule exists;
-//                      claude-agent: the tokens already folded from
+//                      claude-code (sdk): the tokens already folded from
 //                      assistant frames before the abort — real numbers).
 //   usageAfterPoll   — POLL_MS later: the usage-shaped fact after the poll.
-//                      claude-agent: the CLI's LOCAL transcript message
+//                      claude-code (sdk): the CLI's LOCAL transcript message
 //                      count at settle vs after the poll (growth = the
 //                      worker kept producing after the abort) plus whether
 //                      any agent worker PROCESS survived the poll.
@@ -46,20 +46,20 @@
 //
 // Usage:
 //   node scripts/dd1-abort-spike.mjs --lane ai-sdk
-//   node scripts/dd1-abort-spike.mjs --lane claude-agent
+//   node scripts/dd1-abort-spike.mjs --lane claude-code-sdk
 //
-// The claude-agent lane loads the SDK dynamically through the driver's
+// The claude-code sdk transport loads the SDK dynamically through the driver's
 // production default loader; make the optional peer resolvable for LIVE
 // runs only, without touching package.json/lockfile:
 //   ln -s /tmp/sdk-probe/node_modules/@anthropic-ai node_modules/@anthropic-ai
 import {
   AiSdkDriver,
-  ClaudeAgentDriver,
+  ClaudeCodeDriver,
+  CLI_SESSION_FILE,
   SessionStore,
   defaultHarnessConfig,
   runLadder,
 } from '../dist/index.js';
-import { AGENT_SESSION_FILE } from '../dist/driver/claude-agent/index.js';
 import dns from 'node:dns';
 import net from 'node:net';
 import { mkdtemp, readFile, realpath } from 'node:fs/promises';
@@ -168,14 +168,15 @@ function aiSdkLane(scratchDir) {
   return { driver, invocation, lane: 'ai-sdk' };
 }
 
-function claudeAgentLane(scratchDir) {
+function claudeCodeSdkLane(scratchDir) {
   // The production default loader (dynamic import) resolves the OPTIONAL
   // peer through the node_modules symlink — no package.json/lockfile change.
   // harnessConfig.workspaceRoot is pinned UNDER the run's own scratch dir:
   // the agent worker's cwd is therefore unique to THIS run, which is what
   // the cleanup sweep scopes its kills to (only this run's workers can ever
   // be killed).
-  const driver = new ClaudeAgentDriver({
+  const driver = new ClaudeCodeDriver({
+    transport: 'sdk',
     sessionsDir: join(scratchDir, 'agent-sessions'),
     harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
   });
@@ -186,10 +187,10 @@ function claudeAgentLane(scratchDir) {
     sandboxPolicy: { level: 'none' },
     budget: { maxUsd: MAX_USD },
   };
-  return { driver, invocation, lane: 'claude-agent' };
+  return { driver, invocation, lane: 'claude-code-sdk' };
 }
 
-/** The claude-agent leg's post-abort observables: CLI transcript growth. */
+/** The claude-code-sdk leg's post-abort observables: CLI transcript growth. */
 async function claudeAgentPollEvidence(verdict, scratchDir) {
   // Transcript-channel evidence only: the lingering-worker poll lives in
   // sweepLingeringWorkers (the authoritative, every-exit-path sweep).
@@ -199,7 +200,7 @@ async function claudeAgentPollEvidence(verdict, scratchDir) {
       verdict.sessionId,
     );
     const workspace = record.workspace;
-    const agentSessionId = (await readFile(join(workspace, AGENT_SESSION_FILE), 'utf8')).trim();
+    const agentSessionId = (await readFile(join(workspace, CLI_SESSION_FILE), 'utf8')).trim();
     const sdk = await import('@anthropic-ai/claude-agent-sdk');
     const count = async () => {
       try {
@@ -281,7 +282,7 @@ async function measure(laneName) {
   // identify (and only kill) THIS run's workers.
   const scratchDir = await mkdtemp(join(tmpdir(), 'dd1-abort-spike-'));
   const { driver, invocation, lane } =
-    laneName === 'claude-agent' ? claudeAgentLane(scratchDir) : aiSdkLane(scratchDir);
+    laneName === 'claude-code-sdk' ? claudeCodeSdkLane(scratchDir) : aiSdkLane(scratchDir);
 
   const startedAt = Date.now();
   let verdict;
@@ -331,7 +332,7 @@ async function measure(laneName) {
 
   let usageAfterPoll = verdict.usage;
   let pollEvidence = {};
-  if (lane === 'claude-agent') {
+  if (lane === 'claude-code-sdk') {
     pollEvidence = await claudeAgentPollEvidence(verdict, scratchDir);
     usageAfterPoll = {
       ...verdict.usage,
@@ -373,18 +374,18 @@ async function measure(laneName) {
   // gap is inconclusive.
   let spendStopped;
   let inconclusiveReason;
-  if (lane === 'claude-agent' && pollEvidence.pollError !== undefined) {
+  if (lane === 'claude-code-sdk' && pollEvidence.pollError !== undefined) {
     spendStopped = 'inconclusive';
     inconclusiveReason = `post-abort evidence channel failed: ${pollEvidence.pollError}`;
   } else if (
-    lane === 'claude-agent' &&
+    lane === 'claude-code-sdk' &&
     (pollEvidence.transcriptCountAtSettle === undefined ||
       pollEvidence.transcriptCountAfterPoll === undefined)
   ) {
     spendStopped = 'inconclusive';
     inconclusiveReason =
       'the agent transcript message counts were unavailable at settle and/or after the poll';
-  } else if (lane === 'claude-agent' && pollEvidence.processCheckError !== undefined) {
+  } else if (lane === 'claude-code-sdk' && pollEvidence.processCheckError !== undefined) {
     // The lingering-process check FAILED (pgrep itself broke) — an empty
     // pid list was never observed, so "no survivors" cannot be claimed.
     spendStopped = 'inconclusive';
@@ -423,8 +424,8 @@ async function measure(laneName) {
   };
 }
 
-if (lane !== 'ai-sdk' && lane !== 'claude-agent') {
-  console.error('dd1-abort-spike: pass --lane ai-sdk or --lane claude-agent');
+if (lane !== 'ai-sdk' && lane !== 'claude-code-sdk') {
+  console.error('dd1-abort-spike: pass --lane ai-sdk or --lane claude-code-sdk');
   process.exit(1);
 }
 const verdictJson = await measure(lane);
