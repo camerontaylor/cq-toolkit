@@ -19,7 +19,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
-import { makeSubprocessBaselinePrEffects } from '../../../src/ops/ratchet/effects.js';
+import { makeSubprocessBaselinePrEffects } from '../../../src/adapters/forge-github/ratchetEffects.js';
 
 const GIT_ENV: NodeJS.ProcessEnv = {
   ...process.env,

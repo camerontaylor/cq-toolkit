@@ -38,7 +38,7 @@ import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { makeLedgerQuery } from '../ledger/ledger.js';
 import type { LedgerQueryInput, LedgerView } from '../ledger/ledger.js';
-import { pathLedgerStore } from '../ledger/store.js';
+import { pathLedgerStore } from '../../adapters/store/ledgerStore.js';
 import type { Job, Op, OpResult } from '../../kernel/types.js';
 
 /**

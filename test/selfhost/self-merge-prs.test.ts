@@ -39,7 +39,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { currentJobContext } from '../../src/kernel/governor.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, OpResult } from '../../src/kernel/types.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import { RunMergePrsInputSchema } from '../../src/ops/merge/registry.js';
 import type { MergePrsOutcome, RunMergePrsInput } from '../../src/ops/merge/runPrs.js';
 import {

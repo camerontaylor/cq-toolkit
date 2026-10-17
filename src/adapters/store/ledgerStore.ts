@@ -48,8 +48,8 @@ import {
   NOTE_MAX_CHARS,
   SIGNATURE_MAX_CHARS,
   sortEntries,
-} from './ledger.js';
-import type { LedgerStore } from './ledger.js';
+} from '../../ops/ledger/ledger.js';
+import type { LedgerStore } from '../../ops/ledger/ledger.js';
 
 /** The canonical signature order lives in the pure decision-ops module (see ledger.js). */
 export { sortEntries };

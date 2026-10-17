@@ -20,18 +20,18 @@ import {
   makePlaybookRegisterOp,
   makePlaybookRegistry,
 } from '../../../../src/ops/analyze/playbooks/registry.js';
-import { makeQuarantineLedger } from '../../../../src/ops/analyze/playbooks/quarantine.js';
+import { makeQuarantineLedger } from '../../../../src/adapters/store/quarantine.js';
+import type { InspectableNonceLedger } from '../../../../src/adapters/store/nonceLedger.js';
 import type {
   ApprovalAuthority,
   ApprovalState,
   ApprovalStateReader,
-  InspectableNonceLedger,
   MutationLocks,
 } from '../../../../src/ops/analyze/approval.js';
 import type { PlaybookDispatchUnverified } from '../../../../src/ops/analyze/playbooks/registry.js';
+import { makeInMemoryNonceLedger } from '../../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../../src/ops/analyze/approval.js';
 

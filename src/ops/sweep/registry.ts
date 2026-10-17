@@ -26,12 +26,12 @@ import { errorClassOf } from '../../driver/errors.js';
 import { createDriverFactory } from '../../driver/factory.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
-import type { CleanupInput } from './cleanup.js';
+import type { CleanupInput } from '../../adapters/git/cleanup.js';
 import { fixerBudgetFault } from './internal/fixerBudget.js';
 import type { PlanSweepInput, WorkUnit } from './planSweep.js';
 import type { SalvageInput } from './salvage.js';
 import type { SweepUnitDispatchInput, SweepUnitReport } from './unit.js';
-import type { WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
+import type { WorktreeForInput, WorktreeMutexConfig } from '../../adapters/git/worktreeFor.js';
 
 // TYPE-ONLY re-export of the git-mutation mutex's config type: gitMutex.ts
 // is a LIBRARY utility, never a registered op, and this reference is the
@@ -328,7 +328,7 @@ export const registry: OpRegistryEntry[] = [
     // Same seam, same input-driven binding: the worktree effects adapter is
     // bound to the dispatched input's repoRoot per call.
     importer: () =>
-      import('./worktreeFor.js').then(
+      import('../../adapters/git/worktreeFor.js').then(
         (m) =>
           (async (input: WorktreeForInput) =>
             m.makeWorktreeFor(m.makeSubprocessWorktreeEffects(input.repoRoot))(input)) as Op<
@@ -431,7 +431,7 @@ export const registry: OpRegistryEntry[] = [
     // the worktreeFor adapter's parsers; worktree remove carries NO force
     // flag unless the op's explicit force reached the effect).
     importer: () =>
-      import('./cleanup.js').then(
+      import('../../adapters/git/cleanup.js').then(
         (m) =>
           (async (input: CleanupInput) =>
             m.makeCleanup(m.makeSubprocessCleanupEffects(input.repoRoot))(input)) as Op<

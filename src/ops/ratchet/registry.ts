@@ -241,68 +241,70 @@ export const registry: OpRegistryEntry[] = [
     // comparison basis is keyed on the coverage METRIC id, so any
     // (target, coverage) baseline normalizes, not just the shipped pair.
     importer: () =>
-      Promise.all([import('./monotonicGuard.js'), import('./format.js'), import('./git.js')]).then(
-        ([m, format, git]) => {
-          // `baselines/<target>--<metric>--<digest>.json`; sanitized segments
-          // never contain `--`, so the metric segment is unambiguous.
-          const coverageBaseline = /^baselines\/[^/]*--coverage--[^/]*\.json$/;
-          const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
-            // The schema refines this, but direct TS dispatch bypasses the
-            // registry: require EXACTLY one source (both-set is ambiguous).
-            const sources = [input.diff, input.diffPath, input.repo].filter((v) => v !== undefined);
-            if (sources.length !== 1) {
+      Promise.all([
+        import('./monotonicGuard.js'),
+        import('./format.js'),
+        import('../../adapters/git/ratchetGit.js'),
+      ]).then(([m, format, git]) => {
+        // `baselines/<target>--<metric>--<digest>.json`; sanitized segments
+        // never contain `--`, so the metric segment is unambiguous.
+        const coverageBaseline = /^baselines\/[^/]*--coverage--[^/]*\.json$/;
+        const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
+          // The schema refines this, but direct TS dispatch bypasses the
+          // registry: require EXACTLY one source (both-set is ambiguous).
+          const sources = [input.diff, input.diffPath, input.repo].filter((v) => v !== undefined);
+          if (sources.length !== 1) {
+            return {
+              status: 'failed',
+              error: 'ratchet: provide exactly one of diff, diffPath, or repo+base+head',
+            };
+          }
+          let diff: string;
+          if (input.repo !== undefined) {
+            // Ref mode (W1.7): the op takes the diff itself with the
+            // hardened, no-shell argv (no external diff driver, no
+            // textconv, no renames — a rename is a delete plus an add the
+            // guard pairs), over merge-base(base, head)..head.
+            if (input.base === undefined || input.head === undefined) {
+              return { status: 'failed', error: 'ratchet: ref mode needs repo, base and head' };
+            }
+            try {
+              const head = await git.gitRevParse(input.repo, input.head);
+              const from = await git.gitMergeBase(input.repo, input.base, head);
+              diff = await git.gitDiffText(input.repo, from, head, ['baselines/']);
+            } catch (err) {
               return {
                 status: 'failed',
-                error: 'ratchet: provide exactly one of diff, diffPath, or repo+base+head',
+                error: `ratchet: ${err instanceof Error ? err.message : String(err)}`,
               };
             }
-            let diff: string;
-            if (input.repo !== undefined) {
-              // Ref mode (W1.7): the op takes the diff itself with the
-              // hardened, no-shell argv (no external diff driver, no
-              // textconv, no renames — a rename is a delete plus an add the
-              // guard pairs), over merge-base(base, head)..head.
-              if (input.base === undefined || input.head === undefined) {
-                return { status: 'failed', error: 'ratchet: ref mode needs repo, base and head' };
-              }
-              try {
-                const head = await git.gitRevParse(input.repo, input.head);
-                const from = await git.gitMergeBase(input.repo, input.base, head);
-                diff = await git.gitDiffText(input.repo, from, head, ['baselines/']);
-              } catch (err) {
-                return {
-                  status: 'failed',
-                  error: `ratchet: ${err instanceof Error ? err.message : String(err)}`,
-                };
-              }
-            } else if (input.diff !== undefined) {
-              diff = input.diff;
-            } else {
-              const diffPath = input.diffPath;
-              if (diffPath === undefined) {
-                return { status: 'failed', error: 'ratchet: no diff or diffPath supplied' };
-              }
-              try {
-                diff = await readFile(resolve(diffPath), 'utf8');
-              } catch (err) {
-                return {
-                  status: 'failed',
-                  error:
-                    `ratchet: could not read diff '${diffPath}' — ` +
-                    `${err instanceof Error ? err.message : String(err)}`,
-                };
-              }
+          } else if (input.diff !== undefined) {
+            diff = input.diff;
+          } else {
+            const diffPath = input.diffPath;
+            if (diffPath === undefined) {
+              return { status: 'failed', error: 'ratchet: no diff or diffPath supplied' };
             }
-            return {
-              status: 'ok',
-              value: m.checkDiffMonotonicity(
-                format.normalizeBaselineDiffValues(diff, coverageBaseline),
-              ),
-            };
+            try {
+              diff = await readFile(resolve(diffPath), 'utf8');
+            } catch (err) {
+              return {
+                status: 'failed',
+                error:
+                  `ratchet: could not read diff '${diffPath}' — ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
+          }
+          return {
+            status: 'ok',
+            value: m.checkDiffMonotonicity(
+              format.normalizeBaselineDiffValues(diff, coverageBaseline),
+            ),
           };
-          return op as Op<unknown, unknown>;
-        },
-      ),
+        };
+        return op as Op<unknown, unknown>;
+      }),
   },
   {
     name: 'ratchet.verifyRatchet',
@@ -335,17 +337,18 @@ export const registry: OpRegistryEntry[] = [
     // plain-JSON workspace (the sweep/merge input-driven binding): nothing is
     // wired at registry module scope and construction is closure-only.
     importer: () =>
-      Promise.all([import('./proposeBaselineUpdate.js'), import('./effects.js')]).then(
-        ([m, effects]) => {
-          const op: Op<ProposeInput, ProposeOutcome> = async (input) =>
-            m.createProposeBaselineUpdate(
-              // The effects capture the proposal's base so findOpenPrByHead can
-              // disambiguate the (head, base) pair (one head, several bases).
-              effects.makeSubprocessBaselinePrEffects(input.ws, input.base),
-            )(input);
-          return op as Op<unknown, unknown>;
-        },
-      ),
+      Promise.all([
+        import('./proposeBaselineUpdate.js'),
+        import('../../adapters/forge-github/ratchetEffects.js'),
+      ]).then(([m, effects]) => {
+        const op: Op<ProposeInput, ProposeOutcome> = async (input) =>
+          m.createProposeBaselineUpdate(
+            // The effects capture the proposal's base so findOpenPrByHead can
+            // disambiguate the (head, base) pair (one head, several bases).
+            effects.makeSubprocessBaselinePrEffects(input.ws, input.base),
+          )(input);
+        return op as Op<unknown, unknown>;
+      }),
   },
 ];
 

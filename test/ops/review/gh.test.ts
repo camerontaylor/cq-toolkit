@@ -11,8 +11,8 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import { makeGhRunner, ghJson } from '../../../src/ops/review/gh.js';
-import type { GhFn } from '../../../src/ops/review/gh.js';
+import { makeGhRunner, ghJson } from '../../../src/adapters/forge-github/gh.js';
+import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 
 const tempDirs: string[] = [];
 afterEach(async () => {

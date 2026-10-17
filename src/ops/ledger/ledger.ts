@@ -26,7 +26,7 @@ import type { Op } from '../../kernel/types.js';
 // The canonical signature order below lives HERE (folded from order.ts):
 // lane i's registry-completeness heuristic (PR 64) would flag a sibling
 // module the family registry never references as an orphan op.
-import type { LedgerEntry, LedgerFile } from './store.js';
+import type { LedgerEntry, LedgerFile } from '../../adapters/store/ledgerStore.js';
 
 /**
  * The canonical signature order: byte-wise ascending. Implemented as

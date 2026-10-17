@@ -48,14 +48,16 @@ import type {
   VerifiedApproval,
 } from '../../../src/ops/analyze/approval.js';
 import {
+  makeFileNonceLedger,
+  makeInMemoryNonceLedger,
+} from '../../../src/adapters/store/nonceLedger.js';
+import {
   approvalInputDigest,
   canonicalWorkspace,
   DENY_ALL_APPROVALS,
   isExercisedScope,
   makeApprovalAuthority,
-  makeFileNonceLedger,
   makeGitApprovalStateReader,
-  makeInMemoryNonceLedger,
   makeLedgerBesideMutationLocks,
   makeProcessLocalMutationLocks,
   withApprovedMutation,

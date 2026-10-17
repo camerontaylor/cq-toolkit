@@ -23,8 +23,8 @@
 // result; every input contract violation is a `failed` result naming the
 // field (the family's boundary style).
 import type { Op } from '../../kernel/types.js';
-import { makeGhRunner } from '../review/gh.js';
-import type { GhResult } from '../review/gh.js';
+import { makeGhRunner } from '../../adapters/forge-github/gh.js';
+import type { GhResult } from '../../adapters/forge-github/gh.js';
 import { prBranchFaultOf, runPrefixFault } from './assemblePrs.js';
 
 /** The shipped git wall clock for the tracker-branch leg (ms). */

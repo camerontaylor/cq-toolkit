@@ -36,7 +36,7 @@ import {
   gitMergeBase,
   gitReadBlob,
   gitRevParse,
-} from '../../../src/ops/ratchet/git.js';
+} from '../../../src/adapters/git/ratchetGit.js';
 
 const GIT_ENV: NodeJS.ProcessEnv = {
   ...process.env,

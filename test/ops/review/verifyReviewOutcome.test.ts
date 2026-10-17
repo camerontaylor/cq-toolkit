@@ -31,12 +31,13 @@
 // The gh seam is INJECTED (a fake GhFn routing on argv) — no spawned
 // process, no network, no real clocks.
 import { describe, expect, test } from 'vitest';
-import { snapshotPrState, verifyPrOutcome } from '../../../src/ops/review/verifyReviewOutcome.js';
+import { snapshotPrState } from '../../../src/adapters/forge-github/snapshotPrState.js';
+import { verifyPrOutcome } from '../../../src/ops/review/verifyReviewOutcome.js';
 import type {
   PrSnapshot,
   SnapshotPrStateOpts,
-} from '../../../src/ops/review/verifyReviewOutcome.js';
-import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
+} from '../../../src/adapters/forge-github/snapshotPrState.js';
+import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures + fakes

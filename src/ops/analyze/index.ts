@@ -58,6 +58,11 @@ export { makeApplyRemediation } from './applyRemediation.js';
 // (`withApprovedMutation` reaches the authority's locks through a
 // module-private symbol, so a structural stand-in cannot work).
 export type {
+  FileNonceLedgerConfig,
+  InspectableNonceLedger,
+  NonceLedger,
+} from '../../adapters/store/nonceLedger.js';
+export type {
   ApprovalAdmission,
   ApprovalAuthority,
   ApprovalAuthorityConfig,
@@ -69,21 +74,17 @@ export type {
   ApprovalSubject,
   ApprovedMutation,
   ExercisedScope,
-  FileNonceLedgerConfig,
-  InspectableNonceLedger,
   MutationLock,
   MutationLocks,
-  NonceLedger,
   VerifiedApproval,
   VerifiedApprovals,
 } from './approval.js';
+export { makeFileNonceLedger, makeInMemoryNonceLedger } from '../../adapters/store/nonceLedger.js';
 export {
   approvalInputDigest,
   DENY_ALL_APPROVALS,
   makeApprovalAuthority,
-  makeFileNonceLedger,
   makeGitApprovalStateReader,
-  makeInMemoryNonceLedger,
   makeLedgerBesideMutationLocks,
   makeProcessLocalMutationLocks,
 } from './approval.js';

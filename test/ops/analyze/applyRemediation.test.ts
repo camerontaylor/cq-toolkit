@@ -10,16 +10,16 @@
 import { resolve, sep } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import type { InspectableNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import type {
   ApprovalAuthority,
   ApprovalState,
   ApprovalStateReader,
-  InspectableNonceLedger,
   MutationLocks,
 } from '../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 import type { AnalyzeFileStore } from '../../../src/ops/analyze/analysisStore.js';

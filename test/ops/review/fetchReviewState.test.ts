@@ -24,10 +24,10 @@
 // The gh seam is INJECTED (a fake GhFn routing on argv) — no spawned
 // process here; the CLI/fake-gh-script path is slice 3.
 import { describe, expect, test } from 'vitest';
-import { fetchReviewState } from '../../../src/ops/review/fetchReviewState.js';
-import type { FetchReviewStateInput } from '../../../src/ops/review/fetchReviewState.js';
-import { GhError } from '../../../src/ops/review/gh.js';
-import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
+import { fetchReviewState } from '../../../src/adapters/forge-github/fetchReviewState.js';
+import type { FetchReviewStateInput } from '../../../src/adapters/forge-github/fetchReviewState.js';
+import { GhError } from '../../../src/adapters/forge-github/gh.js';
+import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Fake gh — routes on argv: `graphql` → the fixture's page builder;

@@ -8,6 +8,8 @@
 // consistent):
 //   - execFile with an ARGS ARRAY — never a shell string, so no input value
 //     can be re-parsed as shell syntax (the repo's tooling convention).
+//   - The binary is CQ_GH_BIN, else `gh` — the ONE gh-runner convention the
+//     forge-github adapter honours everywhere (Phase 1.4).
 //   - `GH_PROMPT_DISABLED=1` on every invocation: gh's interactive prompts
 //     become hard failures instead of hangs (the op maps the fault; the
 //     runner never stalls waiting for a TTY).
@@ -36,7 +38,7 @@ import type {
   PrReviewState,
   PrSearchResult,
   PrState,
-} from './assemblePrs.js';
+} from '../../ops/pr/assemblePrs.js';
 
 /** Generous capture ceiling — a big pr list must not truncate into a fault. */
 const GH_OUTPUT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -94,6 +96,13 @@ export function mapGhFault(
   );
 }
 
+/** The gh binary for every PR-lane invocation: CQ_GH_BIN (the review/merge
+ * families' seam), else `gh` — Phase 1.4 hoisted ONE gh runner convention,
+ * so every gh invocation in the adapter honours the same env seam. */
+function ghBin(): string {
+  return process.env['CQ_GH_BIN'] ?? 'gh';
+}
+
 /**
  * Run gh with an execFile ARGS ARRAY. A non-zero exit, a spawn failure, or
  * a run exceeding `timeoutMs` (SIGKILL) rejects with the mapped fault.
@@ -104,7 +113,7 @@ export function mapGhFault(
 function runGh(args: string[], cwd: string, timeoutMs: number, stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(
-      'gh',
+      ghBin(),
       args,
       {
         cwd,

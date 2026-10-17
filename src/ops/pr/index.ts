@@ -52,7 +52,7 @@ export {
 // family's report reachable by name everywhere.
 export type { PrReadiness, PrRunReport, RunReportInput, RunReportRow } from './runReport.js';
 export { makeRunReport } from './runReport.js';
-export type { SubprocessPrEffectsOptions } from './ghEffects.js';
+export type { SubprocessPrEffectsOptions } from '../../adapters/forge-github/ghEffects.js';
 export {
   bodyOf,
   checksOfRollup,
@@ -65,7 +65,7 @@ export {
   readinessSnapshotOf,
   reviewStateOfDecision,
   selectPrMatch,
-} from './ghEffects.js';
+} from '../../adapters/forge-github/ghEffects.js';
 export {
   AssemblePrsInputSchema,
   EnsureTrackerBranchInputSchema,
