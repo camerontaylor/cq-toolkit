@@ -3,7 +3,7 @@
   "target": "coverage",
   "metric": "coverage",
   "direction": "higher-is-better",
-  "value": 94,
+  "value": 94.7,
   "unit": "pct",
-  "capturedAt": "2026-09-20T17:48:12.636Z"
+  "capturedAt": "2026-10-17T23:27:42.083Z"
 }
