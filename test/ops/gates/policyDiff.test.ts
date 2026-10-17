@@ -1493,10 +1493,12 @@ describe('policyDiff: the override record', SLOW, () => {
     expect(out.report).toContain('settle ledger: no settle ref (cq-state absent)');
   });
 
-  test('settleStatePath relocates the ledger read; a path with no ledger fails closed', async () => {
-    // The caller passes the ledger's location (selfhost config, migration
-    // 1.2): a ledger at the passed path is read and honoured; the default
-    // wire path is unchanged for callers that omit the field.
+  test('the composition-bound settleStatePath relocates the ledger read; a path with no ledger fails closed', async () => {
+    // The ledger's location is bound at composition (selfhost config,
+    // migration 1.2): a ledger at the bound path is read and honoured, and
+    // the default wire path is unchanged for compositions that omit the
+    // option. The path is never op input — dispatch data cannot choose
+    // which bytes supply the override epoch.
     importCommits(repo, {
       'cq-state': {
         from: cqState,
@@ -1514,15 +1516,30 @@ describe('policyDiff: the override record', SLOW, () => {
         },
       },
     });
-    const relocated = withRecord(events('relocated.json', [labelEvent()]));
-    relocated.settleStatePath = 'custom/ledger.json';
-    const out = await run(subject, 'human', relocated);
+    const runBound = async (path: string): Promise<PolicyDiffOutcome> => {
+      const result = await createPolicyDiff(
+        { posture: 'human', layer: 'env' },
+        { settleStatePath: path },
+      )({
+        repo,
+        trustRef: attestedTrust,
+        subject,
+        subjectKind: 'pr',
+        base: 'merge-queue',
+        pr: PR,
+        repository: 'o/r',
+        ownerId: OWNER_ID,
+        labelEventsPath: events('relocated.json', [labelEvent()]),
+        settleRef: 'cq-state',
+      });
+      if (result.status !== 'ok') throw new Error(JSON.stringify(result));
+      return result.value;
+    };
+    const out = await runBound('custom/ledger.json');
     expect(out.override.status).toBe('honoured');
     expect(out.verdict).toBe('pass');
 
-    const absent = withRecord(events('relocated.json', [labelEvent()]));
-    absent.settleStatePath = 'custom/missing.json';
-    const outAbsent = await run(subject, 'human', absent);
+    const outAbsent = await runBound('custom/missing.json');
     expect(outAbsent.override.status).toBe('invalid');
     expect(outAbsent.report).toContain('settle ledger: custom/missing.json absent at cq-state');
   });
