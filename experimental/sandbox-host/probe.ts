@@ -802,7 +802,7 @@ async function probeBackendWithLaunch(
                   ? 'CQ_PROBE_CANARY_SECRET reached the child'
                   : 'printenv found the name with a different value',
               }
-            : !executed(envRead)
+            : !executed(envRead) || envRead.canaryMissing === true
               ? {
                   id: 'credential-env',
                   verdict: 'inconclusive',

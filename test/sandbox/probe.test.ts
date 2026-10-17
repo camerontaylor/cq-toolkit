@@ -264,6 +264,30 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     expect(record.certified).toBe(false);
   });
 
+  test('a printenv canary absent from the boundary is inconclusive, never a pass', async () => {
+    // Same shape as the /bin/cat case, on the credential-env branch: the
+    // bare-host printenv control arms, the in-boundary binary is missing, and
+    // bwrap exits 1 — the exit code this canary otherwise reads as "the secret
+    // did not reach the child".
+    const adapter = fakeAdapter('fs-only');
+    const confined = adapter.launch;
+    adapter.launch = (request) =>
+      request.argv[0] === '/usr/bin/printenv'
+        ? Promise.resolve(
+            result({
+              exitCode: 1,
+              stderr: 'bwrap: execvp /usr/bin/printenv: No such file or directory',
+            }),
+          )
+        : confined(request);
+    const record = await probeBackend(adapter, seams());
+    expect(verdictOf(record, 'credential-env')).toBe('inconclusive');
+    expect(record.canaries.find((c) => c.id === 'credential-env')?.detail).toMatch(
+      /printenv never ran/,
+    );
+    expect(record.certified).toBe(false);
+  });
+
   test.runIf(process.platform === 'linux')(
     'a proc-link leak fails despite ordinary filesystem denials',
     async () => {
