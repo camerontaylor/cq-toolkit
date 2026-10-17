@@ -67,8 +67,21 @@ describe('parsePolicyDiffArgs', () => {
       labelEventsPath: '/tmp/label-events.json',
       settleRef: 'refs/remotes/origin/cq-state',
     });
-    // A push subject carries the five required flags only.
-    expect(parsePolicyDiffArgs(ARGV.slice(0, 5))).toMatchObject({ subjectKind: 'pr' });
+    // A push subject (cq-policy's queue-tip form) carries the five required flags only.
+    const push = [
+      '--repo=trust',
+      `--trustRef=${TRUST}`,
+      `--subject=${HEAD}`,
+      '--subjectKind=push',
+      '--base=refs/remotes/origin/main',
+    ];
+    expect(parsePolicyDiffArgs(push)).toEqual({
+      repo: 'trust',
+      trustRef: TRUST,
+      subject: HEAD,
+      subjectKind: 'push',
+      base: 'refs/remotes/origin/main',
+    });
   });
 
   test('a SHA that parses as a JSON number stays a string (the CLI would have coerced it)', () => {
