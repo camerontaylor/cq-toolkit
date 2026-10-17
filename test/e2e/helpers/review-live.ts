@@ -19,7 +19,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
+import type { RoutingTable } from '../../../src/driver/claude-code/routing.js';
 import { ghJson, makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 

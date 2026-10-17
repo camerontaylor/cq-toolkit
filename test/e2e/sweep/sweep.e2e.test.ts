@@ -202,9 +202,9 @@ function optsFor(
     // CLI; the lane knobs (binary/routing table/sessions dir) live HERE,
     // never in plan JSON. The factory owns the served-model assertion.
     drivers: createDriverFactory({
-      bindings: { fixer: { 'cq-d4-e2e': 'subprocess' } },
+      bindings: { fixer: { 'cq-d4-e2e': 'claude-code' } },
       lanes: {
-        subprocess: {
+        claudeCode: {
           binary: AGENT_CLI,
           sessionsDir: scene.sessionsDir,
           routingTable: {

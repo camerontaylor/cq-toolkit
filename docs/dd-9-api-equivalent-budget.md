@@ -33,7 +33,7 @@ debt like any other: it ships reviewed or it does not ship.
   present; a result with no cost carries no basis either. Both first-party
   drivers label their derived figure `costBasis: 'modeled'` (the
   `costField` helpers in `src/driver/ai-sdk/index.ts` and
-  `src/driver/subprocess/index.ts`).
+  `src/driver/claude-code/failures.ts`).
 - `RunOptions.maxTokens?: number` (`src/kernel/types.ts`) — the run-level
   token rollup cap. No `Limits.maxTokens` half (see §5).
 - `GovernorConfig.maxTokens?: number` (`src/kernel/governor.ts`), built by

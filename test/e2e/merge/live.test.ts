@@ -124,7 +124,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createDriverFactory } from '../../../src/driver/factory.js';
-import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
+import type { RoutingTable } from '../../../src/driver/claude-code/routing.js';
 import { realMergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
 import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
@@ -719,9 +719,9 @@ const reportSummary = (report: ExecutionReport): string =>
         // so the lane config carries only its transport knobs; the factory
         // owns the served-model assertion.
         const drivers = createDriverFactory({
-          bindings: { 'conflict-resolver': { f5fake: 'subprocess' } },
+          bindings: { 'conflict-resolver': { f5fake: 'claude-code' } },
           lanes: {
-            subprocess: {
+            claudeCode: {
               binary: agentPath,
               sessionsDir,
               routingTable: FAKE_ROUTING_TABLE,
