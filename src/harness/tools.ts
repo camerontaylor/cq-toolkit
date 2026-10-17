@@ -128,6 +128,7 @@ import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { buildChildEnv } from '../driver/subprocess/process.js';
+import { messageOf } from '../shared/messageOf.js';
 import { runArgvCommand, runShellCommand } from './run.js';
 import type { RunCommandOptions, RunOutcome } from './run.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
@@ -384,11 +385,6 @@ function commandVerdict(patterns: readonly CommandPattern[], command: string): C
 // ---------------------------------------------------------------------------
 // buildTools — descriptors + executors bound to one workspace
 // ---------------------------------------------------------------------------
-
-/** Small local helper (same pattern as runner.ts): message of an unknown throwable. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 /** Node error code of an unknown throwable, when it carries one. */
 function errorCode(err: unknown): string | undefined {

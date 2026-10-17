@@ -97,6 +97,7 @@ import type {
 } from '../../driver/types.js';
 import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { defaultFixPrompt } from './prompts/fix.default.js';
 import type { ThreadComment } from './threads.js';
 
@@ -489,9 +490,6 @@ const parseFixOutput = (
     summaryTruncated: summary.truncated,
   };
 };
-
-/** Error message of an unknown throwable, for indeterminate/failed details. */
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Build the `review.fixItem` op over the injected DriverFactory (ADR-0002

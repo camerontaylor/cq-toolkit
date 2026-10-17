@@ -25,6 +25,7 @@
 //     subject/trailer value; the boundary is same-principal config, and
 //     callers own that trust.
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 
 /** One trailer rule: presence (`required`) plus a value shape (`oneOf` / `pattern`). */
 export interface TrailerRule {
@@ -318,9 +319,4 @@ function trailersOf(lines: string[]): Map<string, string> {
     }
   }
   return trailers;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

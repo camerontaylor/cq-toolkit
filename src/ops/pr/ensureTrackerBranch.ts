@@ -23,6 +23,7 @@
 // result; every input contract violation is a `failed` result naming the
 // field (the family's boundary style).
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { makeGhRunner } from '../review/gh.js';
 import type { GhResult } from '../review/gh.js';
 import { prBranchFaultOf, runPrefixFault } from './assemblePrs.js';
@@ -314,9 +315,4 @@ function inputFaultOf(input: EnsureTrackerBranchInput): string | null {
     return `pr: push (${String(input.push)}) must be a boolean (absent means true)`;
   }
   return prBranchFaultOf(input.branch, input.runPrefix, 'branch');
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

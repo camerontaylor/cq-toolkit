@@ -30,6 +30,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { messageOf } from '../../shared/messageOf.js';
 import type { BaselinePrEffects } from './proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
@@ -44,11 +45,6 @@ interface ExecResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
-}
-
-/** Message of an unknown throwable (restore-path narration, never a cast). */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

@@ -36,6 +36,7 @@ import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex, GitMutexConfig } from './gitMutex.js';
 import { makeSubprocessWorktreeEffects, mapWorktreeGitFault } from './worktreeFor.js';
@@ -695,11 +696,6 @@ async function realpathOf(p: string): Promise<string> {
   } catch {
     return p;
   }
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

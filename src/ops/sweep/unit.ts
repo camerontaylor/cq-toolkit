@@ -37,6 +37,7 @@ import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import { currentJobContext } from '../../kernel/governor.js';
+import { messageOf } from '../../shared/messageOf.js';
 import type { AdapterName, CheckCommand, FailureSet, RunCheck } from '../gates/checkRunner.js';
 import { subprocessRunCheck } from '../gates/checkRunner.js';
 import { makeBaselineProbe } from '../gates/baselineProbe.js';
@@ -1479,11 +1480,6 @@ function resultDetail(result: {
   detail?: string;
 }): string {
   return result.error ?? result.reason ?? result.detail ?? '(no detail)';
-}
-
-/** Error message of an unknown throwable. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // ---------------------------------------------------------------------------

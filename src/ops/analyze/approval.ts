@@ -85,6 +85,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { messageOf } from '../../shared/messageOf.js';
 import { GIT_HARDEN } from '../ratchet/git.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
 import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
@@ -1398,9 +1399,4 @@ function canonicalJson(value: unknown): string {
   return `{${entries
     .map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`)
     .join(',')}}`;
-}
-
-/** Error message of an unknown throwable, for refusal reasons. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

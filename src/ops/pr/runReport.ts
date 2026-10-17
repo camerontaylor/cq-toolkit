@@ -36,6 +36,7 @@
 //   - No throws across the op seam; counts include zeros; the report is
 //     plain JSON.
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import {
   composeSection,
   makeTrackerBodyLock,
@@ -503,9 +504,4 @@ async function settled<T>(read: () => Promise<T>): Promise<Settled<T>> {
   } catch (err) {
     return { outcome: 'fault', message: messageOf(err) };
   }
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

@@ -58,6 +58,7 @@ import { z } from 'zod';
 import { createDriverFactory } from '../../driver/factory.js';
 import { HarnessConfigSchema } from '../../harness/config.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { ClassifiedItem, Classification } from './classifyThreads.js';
 import type { FixableReviewItem, FixReviewItemInput } from './fixReviewItem.js';
@@ -70,9 +71,6 @@ import type { PrSnapshot } from './verifyReviewOutcome.js';
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
 // ---------------------------------------------------------------------------
-
-/** Error message of an unknown throwable, for `failed` adapters. */
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Wrap one library call as an Op (the ADAPTER RULE, module doc): the

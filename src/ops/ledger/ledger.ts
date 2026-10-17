@@ -26,6 +26,7 @@ import type { Op } from '../../kernel/types.js';
 // The canonical signature order below lives HERE (folded from order.ts):
 // lane i's registry-completeness heuristic (PR 64) would flag a sibling
 // module the family registry never references as an orphan op.
+import { messageOf } from '../../shared/messageOf.js';
 import type { LedgerEntry, LedgerFile } from './store.js';
 
 /**
@@ -392,8 +393,3 @@ function lengthFaultOf(field: string, value: unknown, max: number): string | nul
  * fault) even when a store lock wraps the section.
  */
 class StoreFault extends Error {}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
