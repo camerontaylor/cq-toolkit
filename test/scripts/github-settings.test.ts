@@ -649,7 +649,7 @@ describe('github-settings-drift CLI: the Actions event policy read', () => {
         total_count: env.branch_policies.length,
         branch_policies: env.branch_policies,
       };
-      out[`${base}/variables?${PAGE}`] = {
+      out[`${base}/variables?per_page=30&page=1`] = {
         total_count: (env.variables ?? []).length,
         variables: (env.variables ?? []).map((name) => ({ name, value: 'not compared' })),
       };
@@ -698,7 +698,12 @@ exit 1
 `;
 
   /** Write the fake gh and its responses into a fresh dir; the CLI's argv and env. */
-  function fakeSetup(extra: string[], status: Record<string, number>, c3Attested = false) {
+  function fakeSetup(
+    extra: string[],
+    status: Record<string, number>,
+    c3Attested = false,
+    overrides: Record<string, unknown> = {},
+  ) {
     const dir = mkdtempSync(join(tmpdir(), 'settings-drift-gh-'));
     const bin = join(dir, 'gh');
     mkdirSync(join(dir, 'scripts', 'lib'), { recursive: true });
@@ -718,7 +723,7 @@ exit 1
         secrets: [{ name: 'PROMOTE_TOKEN' }],
       };
     }
-    const index = Object.entries(responses).map(([path, body], i) => {
+    const index = Object.entries({ ...responses, ...overrides }).map(([path, body], i) => {
       const file = `r${String(i)}.json`;
       writeFileSync(join(dir, file), JSON.stringify(body));
       return `${file}\t${path}\n`;
@@ -744,14 +749,53 @@ exit 1
     };
   }
 
-  function runFake(extra: string[], status: Record<string, number>, c3Attested = false) {
-    const { dir, args, env } = fakeSetup(extra, status, c3Attested);
+  function runFake(
+    extra: string[],
+    status: Record<string, number>,
+    c3Attested = false,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const { dir, args, env } = fakeSetup(extra, status, c3Attested, overrides);
     try {
       return spawnSync(process.execPath, args, { encoding: 'utf8', env });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+
+  it('compares all environment variables across 30-item pages', () => {
+    const base = `${REPO}/environments/drill/variables?per_page=30&page=`;
+    const names = Array.from({ length: 31 }, (_, i) => `UNLISTED_${String(i).padStart(2, '0')}`);
+    const result = runFake([], {}, false, {
+      [`${base}1`]: { total_count: 31, variables: names.slice(0, 30).map((name) => ({ name })) },
+      [`${base}2`]: { total_count: 31, variables: [{ name: names[30] }] },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    for (const name of names) {
+      expect(result.stdout).toContain(
+        `drift: environment drill: variable ${name} is not in the allowlist`,
+      );
+    }
+    expect(result.stdout).toContain('31 drift line(s), 0 notice(s)');
+  });
+
+  it('rejects malformed or incomplete variable pagination', () => {
+    const base = `${REPO}/environments/drill/variables?per_page=30&page=`;
+    const first = { total_count: 2, variables: [{ name: 'FIRST' }] };
+    for (const second of [
+      { total_count: 2, variables: [] },
+      { total_count: 3, variables: [{ name: 'SECOND' }] },
+      { variables: [{ name: 'SECOND' }] },
+      { total_count: 1, variables: [{ name: 'SECOND' }] },
+      { total_count: 2, variables: [{ name: 'SECOND' }, { name: 'THIRD' }] },
+    ]) {
+      const result = runFake([], {}, false, { [`${base}1`]: first, [`${base}2`]: second });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('environment drill variables:');
+      expect(result.stdout).toBe('');
+    }
+  });
 
   it('reads C3 from its trust-ref checkout and rejects an interim secret', () => {
     const result = runFake([], {}, true);
@@ -763,7 +807,9 @@ exit 1
   });
 
   it('fails closed when the environment-variable read is refused', () => {
-    const result = runFake([], { [`${REPO}/environments/drill/variables?${PAGE}`]: 403 });
+    const result = runFake([], {
+      [`${REPO}/environments/drill/variables?per_page=30&page=1`]: 403,
+    });
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('variables');
   });

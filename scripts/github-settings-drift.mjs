@@ -201,12 +201,32 @@ async function readLive(repo, expected, requireEventPolicy) {
       secretPage?.secrets,
       secretPage?.total_count,
     );
-    const variablePage = await ghGet(`${base}/variables?per_page=${PAGE}`);
-    const variables = complete(
-      `environment ${name} variables`,
-      variablePage?.variables,
-      variablePage?.total_count,
-    );
+    // Unlike the other lists, GitHub caps environment variables at 30 per page.
+    const variables = [];
+    let variableTotal;
+    for (let page = 1; ; page++) {
+      const result = await ghGet(`${base}/variables?per_page=30&page=${page}`);
+      if (
+        !Number.isSafeInteger(result?.total_count) ||
+        result.total_count < 0 ||
+        !Array.isArray(result.variables) ||
+        result.variables.length > 30
+      ) {
+        throw new Error(`environment ${name} variables: unexpected response shape`);
+      }
+      variableTotal ??= result.total_count;
+      if (result.total_count !== variableTotal) {
+        throw new Error(`environment ${name} variables: total changed during pagination`);
+      }
+      variables.push(...result.variables);
+      if (variables.length > variableTotal) {
+        throw new Error(`environment ${name} variables: more items than total_count`);
+      }
+      if (variables.length === variableTotal) break;
+      if (result.variables.length === 0) {
+        throw new Error(`environment ${name} variables: incomplete pagination`);
+      }
+    }
     environments[name] = environmentFromApi(
       env,
       policies,
