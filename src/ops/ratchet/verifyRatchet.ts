@@ -48,6 +48,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import {
   authorizePaths,
   type D11Authorization,
@@ -150,11 +151,6 @@ export interface VerifyRatchetOutcome {
   results: RatchetResult[];
   /** One line per finding, for the check run's summary. */
   reasons: string[];
-}
-
-/** Error message of an unknown throwable. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

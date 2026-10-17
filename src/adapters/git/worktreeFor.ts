@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // Sweep lane (WS-D, goal D1) — the worktree PROVIDER (ADOPT git worktree +
 // thin COPY; UC §1 rows 20, 23; R2 D2): derive the run's branch and checkout
 // path from config-grade naming inputs, RESERVE the namespace (refuse, never
@@ -731,11 +732,6 @@ function mutexConfigOf(mutex: WorktreeMutexConfig): GitMutexConfig {
   if (mutex.retries !== undefined) config.retries = mutex.retries;
   if (mutex.retryBaseMs !== undefined) config.retryBaseMs = mutex.retryBaseMs;
   return config;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

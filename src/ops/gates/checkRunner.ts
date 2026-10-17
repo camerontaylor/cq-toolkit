@@ -17,6 +17,7 @@
 //     OpResult taxonomy — gate decisions live in C2's probe/gate ops.
 import { execFile } from 'node:child_process';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { eslintJsonAdapter } from './adapters/eslint.js';
 import { tscLinesAdapter } from './adapters/tsc.js';
 import { vitestJsonAdapter } from './adapters/vitest.js';
@@ -211,8 +212,3 @@ export const subprocessRunCheck: RunCheck = (cmd) =>
 
 /** Generous capture ceiling — a big real report must not truncate into a fake indeterminate. */
 const CHECK_OUTPUT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

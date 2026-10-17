@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // PR lane (goal D3 follow-up, review-debt #173) — ensure the sweep fleet's
 // TRACKER BRANCH exists on the remote before `pr.assemblePrs` opens the
 // tracker PR. The assembler NAMES the tracker head (`<runPrefix>/tracker`)
@@ -314,9 +315,4 @@ function inputFaultOf(input: EnsureTrackerBranchInput): string | null {
     return `pr: push (${String(input.push)}) must be a boolean (absent means true)`;
   }
   return prBranchFaultOf(input.branch, input.runPrefix, 'branch');
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

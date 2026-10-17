@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // Ledger lane C4 — the ledger DECISION ops over an INJECTED store: record a
 // recurring error signature (count-only recurrence) and query the
 // suppression/escalation view dispatch consults. Zero I/O here — persistence
@@ -24,9 +25,9 @@ import type { Op } from '../../kernel/types.js';
 // {@link LedgerStore} port itself: the store adapter imports them to
 // implement the port (adapters → ops, ADR-0005:27) — never the reverse,
 // so the Phase 2 package split cannot form an ops→adapters type edge
-// (PR #335 review, Codex P1). This module still has ZERO runtime imports —
-// not ./store.js (whose optional node:fs adapter must never load into pure
-// decision-op consumers) and nothing else. The canonical signature order
+// (PR #335 review, Codex P1). Its only runtime dependency is the pure shared
+// message helper; the optional node:fs store adapter never loads into pure
+// decision-op consumers. The canonical signature order
 // below lives HERE (folded from order.ts): lane i's registry-completeness
 // heuristic (PR 64) would flag a sibling module the family registry never
 // references as an orphan op.
@@ -413,8 +414,3 @@ function lengthFaultOf(field: string, value: unknown, max: number): string | nul
  * fault) even when a store lock wraps the section.
  */
 class StoreFault extends Error {}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

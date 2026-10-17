@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // Sweep lane (WS-D, goal D2) — the AGE-BASED CLEANUP of run-prefixed
 // worktrees and branches (UC §1 row 13): enumerate candidate worktrees whose
 // branch sits under the reserved run prefix AND whose path sits inside the
@@ -695,11 +696,6 @@ async function realpathOf(p: string): Promise<string> {
   } catch {
     return p;
   }
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

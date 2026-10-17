@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // PR lane (ws-d item 4, goal D3; UC §1 row 22) — the TRACKER-FIRST PR
 // assembler: one tracker PR per fleet run, opened BEFORE any per-package PR
 // and updated IN PLACE forever after (never a second tracker), with the
@@ -716,11 +717,6 @@ function withUrl(
   url: string | undefined,
 ): { name: string; number: number; created: boolean; url?: string } {
   return url === undefined ? row : { ...row, url };
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // ---------------------------------------------------------------------------

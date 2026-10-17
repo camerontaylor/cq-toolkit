@@ -20,6 +20,7 @@
 //     clean/failing from its evidence even when its TEXT quotes a signature
 //     — a test asserting on ECONNREFUSED FAILS, it does not bail.
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import type {
   AdapterName,
   CheckCommand,
@@ -160,9 +161,4 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
 function matchesBailSignature(raw: RawCheckOutput, lowercasePatterns: readonly string[]): boolean {
   const haystack = `${raw.stdout}\n${raw.stderr}`.toLowerCase();
   return lowercasePatterns.some((pattern) => haystack.includes(pattern));
-}
-
-/** Error message of an unknown throwable, for the crashed-runner detail. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

@@ -102,6 +102,7 @@
 // has no payload slot. The full `trace` query op and a durable dispatch
 // journal are post-v1 (recorded in the family NOTES.md).
 import type { Op, OpResult } from '../../../kernel/types.js';
+import { messageOf } from '../../../shared/messageOf.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
 import type { ApprovalAuthority, ApprovedMutation } from '../approval.js';
 import {
@@ -1036,9 +1037,4 @@ function restoreProse(restore: PlaybookRestoreReport): string {
     return `the applied edits were ROLLED BACK to their pre-dispatch bytes (${restore.restored.length} file(s) restored) and the workspace is back at its pre-dispatch state.`;
   }
   return `the applied edits were ROLLED BACK where possible, but the restore FAILED for ${restore.stranded.map((entry) => `${entry.file} (${entry.error})`).join(', ')} — those files are STRANDED and the workspace is NOT at its pre-dispatch state; restored: ${restore.restored.length === 0 ? 'none' : restore.restored.join(', ')}.`;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

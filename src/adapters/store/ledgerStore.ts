@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // Ledger lane C4 — the novel-error ledger's flat file format and its pure
 // (de)serialization. The ledger prevents re-fixing known noise: every
 // recurring error signature carries a recurrence COUNT — no timestamps —
@@ -446,11 +447,6 @@ function strictDescendantFault(rootReal: string, candidate: string): string | nu
     return `'${candidate}' does not resolve to a strict descendant of root '${rootReal}'`;
   }
   return null;
-}
-
-/** Error message of an unknown throwable, for fault messages. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Temp-name salt: uniqueness within a process; EEXIST collisions advance the counter, bounded. */

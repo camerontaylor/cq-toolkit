@@ -261,6 +261,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { computeCostUSD } from '../pricing/index.js';
 import { boundedErrorText, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
@@ -2380,9 +2381,4 @@ function errorCauseOf(inputs: VerdictInputs): string {
     return `acp driver: the harness ended the turn with stopReason '${inputs.promptStopReason}'`;
   }
   return 'acp driver: the run failed without a cause';
-}
-
-/** Best-effort error message (an unknown throw shape is still evidence). */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

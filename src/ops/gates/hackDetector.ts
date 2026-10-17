@@ -34,6 +34,7 @@
 //     backtracking at scan time; the boundary is same-principal config,
 //     and callers own that trust.
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import {
   isProtectedConfigPath,
   isProtectedTestPath,
@@ -557,9 +558,4 @@ function looksLikeDiff(diff: string): boolean {
     previousWasMinusHeader = line.startsWith('--- ');
   }
   return false;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

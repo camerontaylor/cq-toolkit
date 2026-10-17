@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // fixReviewItem — E4 slice 1 (goal E4; ws-e item 4): the agentic fix half of
 // the review loop. One review item in, one worker invocation out: the op
 // composes the prompt, maps the harness config onto the frozen driver-seam
@@ -622,9 +623,6 @@ const parseFixOutput = (raw: unknown): ParsedFix => {
     evidence,
   };
 };
-
-/** Error message of an unknown throwable, for indeterminate/failed details. */
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Build the `review.fixItem` op over the injected DriverFactory (ADR-0002
