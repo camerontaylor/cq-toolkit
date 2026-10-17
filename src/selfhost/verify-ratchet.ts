@@ -31,7 +31,7 @@ import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
 import type { D11Authorization } from '../ops/gates/d11Authorization.js';
 import { verifyRatchet, type VerifyRatchetOutcome } from '../ops/ratchet/verifyRatchet.js';
-import { ghNameOk, makeGhRunner, type GhFn } from '../ops/review/gh.js';
+import { ghNameOk, makeGhRunner, type GhFn } from '../adapters/forge-github/gh.js';
 import { EntryUsageError, parseEntryArgs, runEntry } from './trusted-entry.js';
 import { bindQueueAuthorization, realGateGit, type GateGit } from './promote-gate.js';
 
