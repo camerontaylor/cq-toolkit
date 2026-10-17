@@ -43,34 +43,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-
-/** Global options prefixed to every git invocation (#221 closed-form hardening). */
-export const GIT_HARDEN: readonly string[] = [
-  '--no-pager',
-  '--literal-pathspecs',
-  '-c',
-  'core.fsmonitor=false',
-  '-c',
-  'core.quotePath=true',
-];
-
-/**
- * Diff flags for every diff this module runs: W1.8's hardened set (text, no
- * external driver, no textconv, no renames, pinned prefixes) plus `--no-color`
- * and `--no-relative`, which pin repository config (`color.diff=always`,
- * `diff.relative=true`) that would otherwise reshape the patch text a parser
- * consumes.
- */
-export const HARDENED_DIFF_FLAGS: readonly string[] = [
-  '--text',
-  '--no-ext-diff',
-  '--no-textconv',
-  '--no-renames',
-  '--src-prefix=a/',
-  '--dst-prefix=b/',
-  '--no-color',
-  '--no-relative',
-];
+import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 
 /** Captured output ceiling for text-returning calls (a full diff or a blob). */
 const MAX_BUFFER = 64 * 1024 * 1024;

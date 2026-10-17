@@ -1,5 +1,5 @@
 // Sweep lane (WS-D, goal D1) — evidence for the git-mutation mutex
-// (src/ops/sweep/gitMutex.ts, UC §1 row 32 / R2 D2). REAL filesystem
+// (src/shared/gitMutex.ts, UC §1 row 32 / R2 D2). REAL filesystem
 // throughout (mkdtemp tmpdirs; proper-lockfile itself is never mocked):
 //   1. MUTUAL EXCLUSION: concurrent fake runs on one lockPath serialize —
 //      overlapping critical sections fail the test outright.
@@ -21,8 +21,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lock } from 'proper-lockfile';
 import { afterEach, describe, expect, test } from 'vitest';
-import { makeGitMutex } from '../../../src/ops/sweep/gitMutex.js';
-import type { GitMutexEvent } from '../../../src/ops/sweep/gitMutex.js';
+import { makeGitMutex } from '../../../src/shared/gitMutex.js';
+import type { GitMutexEvent } from '../../../src/shared/gitMutex.js';
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {

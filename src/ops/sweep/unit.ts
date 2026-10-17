@@ -50,7 +50,7 @@ import { makeGhRunner } from '../../adapters/forge-github/gh.js';
 import { runArgvCommand } from '../../harness/run.js';
 import type { GhFn } from '../../adapters/forge-github/gh.js';
 import type { WorkUnit } from './planSweep.js';
-import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
 import { fixerBudgetBreach, fixerBudgetFault, startFixerDeadline } from './internal/fixerBudget.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from '../../adapters/git/worktreeFor.js';
 import type { WorktreeEffects } from '../../adapters/git/worktreeFor.js';
