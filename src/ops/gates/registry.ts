@@ -4,12 +4,12 @@
 // against the FROZEN OpRegistryEntry (src/kernel/types.ts). The probe's
 // importer binds the default subprocess runner — the lane's only I/O
 // wiring — through DYNAMIC imports, so loading the registry never loads an
-// op module: module scope imports only zod and
-// types (the type-only imports are erased at compile time), keeping the
-// lazy-import pattern. The zod schemas are registry-time mirrors of the
-// lane's types and live HERE (the shared spot, C1's CheckRunnerInputSchema
-// precedent) because `inputSchema` must exist eagerly while the ops may
-// not.
+// op module: module scope imports only zod, types (the type-only imports
+// are erased at compile time) and the schema-only './policyDiffInput.js',
+// keeping the lazy-import pattern. The zod schemas are registry-time
+// mirrors of the lane's types and live HERE (the shared spot, C1's
+// CheckRunnerInputSchema precedent) because `inputSchema` must exist
+// eagerly while the ops may not.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { BaselineProbeInput } from './baselineProbe.js';
@@ -18,6 +18,7 @@ import type { CommitGateInput } from './commitGate.js';
 import type { FingerprintConfig } from './fingerprint.js';
 import type { HackDetectorInput } from './hackDetector.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
+import { PolicyDiffInputObject } from './policyDiffInput.js';
 import type { RegressionGateInput } from './regressionGate.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
 // gates.policyDiff helpers (W1.9), reached through './policyDiff.js': the
@@ -209,29 +210,10 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
   .strict();
 
 /**
- * Registry-time mirror of {@link PolicyDiffInput} (W1.9, D11): the full
- * input, and only it. STRICT and deliberately WITHOUT a posture field — the
- * posture comes from the project env / per-call opt-in at dispatch
- * (RS-15 Annex B §B.1), never from plan JSON or op input, so a subject
- * cannot relax its own check. Numeric ids are positive integers. Equally
- * without `authorization`: a D11Authorization ('./d11Authorization.js') is
- * bound in-process only, by the promotion gate and cq-verify's
- * `selfhost/verify-ratchet`, never carried by a CLI or plan input.
+ * Registry-time mirror of {@link PolicyDiffInput} (W1.9, D11), shared with
+ * cq-policy's in-process entry: see './policyDiffInput.js'.
  */
-export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
-  .object({
-    repo: z.string().min(1),
-    trustRef: z.string().min(1),
-    subject: z.string().min(1),
-    subjectKind: z.enum(['pr', 'push']),
-    base: z.string().min(1),
-    pr: z.number().int().positive().exactOptional(),
-    repository: z.string().min(1).exactOptional(),
-    ownerId: z.number().int().positive().exactOptional(),
-    labelEventsPath: z.string().min(1).exactOptional(),
-    settleRef: z.string().min(1).exactOptional(),
-  })
-  .strict();
+export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = PolicyDiffInputObject;
 
 /** Gates-lane op registry (C1 runner; C2 probe + gate; C3 hack detector + commit gate). */
 export const registry: OpRegistryEntry[] = [

@@ -110,7 +110,9 @@ describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.
       expect(fetch).toMatch(/persist-credentials: false/);
       expect(fetch).toContain('git bundle create');
       expect(fetch).toContain('actions/upload-artifact@');
-      expect(fetch).not.toMatch(/pnpm install|pnpm run|vitest|ratchet\.recomputeTypecheck/);
+      expect(fetch).not.toMatch(
+        /pnpm install|pnpm run|vitest|ratchet\.recomputeTypecheck|recompute-typecheck/,
+      );
       const measure = jobs.get('measure') ?? '';
       expect(measure).toMatch(/^ {4}needs: fetch$/m);
       expect(measure).not.toMatch(/^ {4}permissions:/m);
@@ -189,11 +191,14 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(fetch).toContain('GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"');
       expect(fetch).toContain('git bundle create');
       expect(fetch).not.toMatch(
-        /pnpm install|pnpm run|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
+        /pnpm install|pnpm run|recompute-typecheck|verify-ratchet|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
       );
       const compute = jobs.get('compute') ?? '';
       expect(compute).toMatch(/^\s{4}permissions: \{\}$/m);
-      expect(compute).toContain('ratchet.recomputeTypecheck');
+      // The in-process recompute (R1): the CLI registry no longer produces
+      // the count that feeds cq/ratchet.
+      expect(compute).toContain('node trust/dist/selfhost/recompute-typecheck.js \\');
+      expect(compute).not.toContain('cli.js');
       expect(compute).toContain('actions/download-artifact@');
       expect(compute).not.toMatch(/actions\/checkout@|git fetch --no-tags origin/);
       expect(compute).not.toMatch(/github\.token|GH_TOKEN|secrets\./);
@@ -211,7 +216,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       // A verifier crash or malformed output still produces a failing check.
       expect(judge).toContain('verifier emitted no valid JSON result');
       expect(judge).toMatch(/if ! jq -e -s[\s\S]*verdict\.json/);
-      expect(judge).not.toMatch(/ratchet\.recomputeTypecheck|tsc/);
+      expect(judge).not.toMatch(/ratchet\.recomputeTypecheck|recompute-typecheck|tsc/);
       // F5: judge writes only `checks` (its read scopes serve the D11
       // evidence API reads), never checks out with a persisted credential,
       // and never unpacks a HEAD-AUTHORED artifact — the measurement

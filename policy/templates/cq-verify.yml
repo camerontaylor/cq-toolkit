@@ -32,7 +32,9 @@
 #   - `compute` recomputes typecheck-count with the TRUST-REF toolchain over
 #     the extracted head tree. It runs `tsc` over head content, so it holds
 #     NOTHING: `permissions: {}`, no secrets, no environment. Its only output
-#     is a number.
+#     is a number. It runs `trust/dist/selfhost/recompute-typecheck.js`, not
+#     the CLI, so only protected code produces that number (residual R1,
+#     docs/protected-scope.md).
 #   - `measurement` downloads the HEAD-AUTHORED measurement artifact and
 #     re-validates it in a job that holds no write scope and no secrets;
 #     only a numbers-only JSON crosses to `judge`, which therefore never
@@ -314,7 +316,7 @@ jobs:
           SUBJECT: ${{ needs.resolve.outputs.subject }}
         run: |
           set -euo pipefail
-          out="$(node trust/dist/cli.js ratchet.recomputeTypecheck \
+          out="$(node trust/dist/selfhost/recompute-typecheck.js \
             --repo=trust \
             --subject="$SUBJECT" \
             --scratch="${RUNNER_TEMP}/cq-recompute")" || true

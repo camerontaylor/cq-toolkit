@@ -10,7 +10,9 @@
 //
 // LAZY RULE (the family convention): module scope imports only zod, node
 // builtins, type-only imports, the pure `./format.js` library (its
-// ISO-instant validator refines the CLI boundary), and the two deliberate
+// ISO-instant validator refines the CLI boundary), the schema-only
+// `./recomputeTypecheckInput.js` (shared with cq-verify's in-process
+// entry), and the two deliberate
 // helper re-exports at the bottom (the sweep registry's GitMutexConfig
 // precedent) — loading this registry never loads an op module. Every op is
 // reached through its entry's dynamic importer at dispatch.
@@ -32,6 +34,7 @@ import type { CheckRatchetOutcome } from './checkRatchet.js';
 import { isIso8601Instant } from './format.js';
 import type { DiffVerdict } from './monotonicGuard.js';
 import type { RecomputeTypecheckOutcome } from './recomputeTypecheck.js';
+import { RecomputeTypecheckCommandInputSchema } from './recomputeTypecheckInput.js';
 import type { VerifyRatchetOutcome } from './verifyRatchet.js';
 // The op module's declared Propose* types pin the mirror at compile time.
 import type { ProposeInput, ProposeOutcome } from './proposeBaselineUpdate.js';
@@ -136,15 +139,8 @@ export const VerifyRatchetCommandInputSchema = z
   })
   .strict();
 
-/** The `ratchet.recomputeTypecheck` registry input (the trusted recompute, W1.7). */
-export const RecomputeTypecheckCommandInputSchema = z
-  .object({
-    repo: z.string().min(1),
-    subject: z.string().min(1),
-    scratch: z.string().min(1),
-    timeoutMs: z.number().int().positive().exactOptional(),
-  })
-  .strict();
+/** The `ratchet.recomputeTypecheck` registry input, shared with cq-verify's in-process entry. */
+export { RecomputeTypecheckCommandInputSchema };
 
 /** The `ratchet.proposeBaselineUpdate` registry input (the op's own JSON input). */
 export const ProposeBaselineUpdateCommandInputSchema: z.ZodType<ProposeInput> = z

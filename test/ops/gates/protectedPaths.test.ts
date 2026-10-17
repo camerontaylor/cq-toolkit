@@ -22,6 +22,7 @@ import {
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
 import { scanWorkflow } from '../../../src/ops/gates/workflowScan.js';
 import { VERDICT_CHECK } from '../../../src/selfhost/promote-gate.js';
+import { scanModuleLoads, type ModuleScan } from '../../helpers/import-closure.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 
@@ -222,19 +223,24 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
 });
 
 // W1.10 (#220, Decision 14) — the check code the promotion gate and the I2
-// acceptance verifier DECIDE through must be protected, not just the two
-// entry points: a PR that weakens a helper they call (say, the unresolved-
-// thread count) would otherwise land as an ordinary change and weaken
+// acceptance verifier DECIDE through must be protected, not just the entry
+// points: a PR that weakens a helper they call (say, the unresolved-thread
+// count) would otherwise land as an ordinary change and weaken
 // `cq/acceptance` and the gate's per-PR recompute without owner
-// break-glass. This walks the relative-import closure of the entry points
-// (value imports only; `import type` / `export type` erase at build) and
-// asserts every file matches a `policy/protected-paths.json` regex.
+// break-glass.
 //
-// Protected scope (docs/protected-scope.md, 2026-10-16): the entry points are
-// the JUDGING code — what a trusted job (`trust/dist/...`) runs to post a
-// verdict or move `main` — and nothing else in src/. The trusted-invocation
-// test below pins that list to the workflows, so a new trusted call fails
-// here until its closure is classified.
+// Protected scope (docs/protected-scope.md, 2026-10-16) and residual R1
+// (closed 2026-10-17): the entry points are what a TRUSTED job runs —
+// every job that builds or runs the trust checkout, to post a verdict or
+// move `main`. They are derived from the rendered workflows, not listed by
+// hand, and each must be a `trust/dist/selfhost/<entry>.js` invocation:
+// `trust/dist/cli.js` loads every op registry, so it may not run there at
+// all. The walk then follows each entry's module-loading closure FAIL
+// CLOSED (test/helpers/import-closure.ts) and requires every file to match
+// a `policy/protected-paths.json` regex. A form the scan cannot resolve, or
+// a specifier that is neither relative, a `node:` builtin nor a declared
+// dependency (the lockfile and package.json are protected by the built-in
+// taxonomy), is a failure, never a skipped edge.
 /** `loadEngine`'s `imp('<rel>.js')` modules, as `src/ops/ratchet/<rel>.ts`. */
 function engineModules(): string[] {
   const text = readFileSync(join(REPO_ROOT, 'scripts', 'ratchet-lib.mjs'), 'utf8');
@@ -246,17 +252,155 @@ function engineModules(): string[] {
   return out;
 }
 
-describe('protected-paths.json covers the gate and acceptance import closure', () => {
+describe('every trusted job runs a protected entry point with a protected closure', () => {
+  const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
+  const workflows = readdirSync(WORKFLOWS_DIR)
+    .filter((f) => /\.ya?ml$/.test(f))
+    .sort()
+    .map((file) => ({ file, text: readFileSync(join(WORKFLOWS_DIR, file), 'utf8') }));
+  const workflowTexts = workflows.map((w) => w.text);
+
+  /** A job's lines without comments or step names (prose, not commands). */
+  const commandLines = (text: string): string =>
+    text
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line) && !/^\s*(?:-\s+)?name:/.test(line))
+      .join('\n');
+
+  /** A job builds or runs the trust checkout when its commands name `trust` as a path. */
+  const TRUST_PATH = /(?:^|[\s"'=:])trust(?:\/|[ \t]*$)/m;
+
+  /** Every job that builds or runs the trust checkout, with its workflow's head (env, defaults). */
+  const trustedJobs = workflows.flatMap(({ file, text }) => {
+    const scan = scanWorkflow(text);
+    if (!scan.ok) throw new Error(`${file}: workflow does not scan`);
+    const head = commandLines(text.slice(0, Math.max(0, text.search(/^jobs:/m))));
+    return [...scan.jobs.values()]
+      .map((job) => ({
+        key: `${file}:${job.id}`,
+        code: commandLines(job.text),
+        head,
+        localUses: job.localUses,
+      }))
+      .filter((job) => TRUST_PATH.test(job.code));
+  });
+
+  /** The one `node` form a trusted job may use, and the `pnpm` forms that build it. */
+  const NODE_TOKEN = /(?<![\w-])node(?![\w.-])/g;
+  const NODE_ENTRY = /^node\s+trust\/dist\/selfhost\/([\w-]+)\.js(?=[\s\\"';|)]|$)/;
+  const PNPM_TOKEN = /(?<![\w./-])pnpm(?![\w./-])/g;
+  const PNPM_FORMS = /^pnpm (?:install --frozen-lockfile --ignore-scripts|run build)[ \t]*$/m;
+  /** Ways to load or run code a job's argv does not name, in the job or its workflow head. */
+  const LOADERS =
+    /\b(?:NODE_OPTIONS|NODE_PATH|nodejs|npx|pnpx|bunx?|deno|tsx|ts-node)\b|--(?:import|require|loader|experimental-loader)\b|\$\{?NODE\b|node_modules\/\.bin\b|^\s*shell:(?![ \t]*bash[ \t]*$)/m;
+
+  /** One trusted job's selfhost entries, and every invocation of any other form. */
+  function classifyTrustedJob(job: {
+    key: string;
+    code: string;
+    head: string;
+    localUses: readonly string[];
+  }): { entries: string[]; unclassified: string[] } {
+    const { key, code } = job;
+    const entries: string[] = [];
+    const unclassified: string[] = [];
+    for (const m of code.matchAll(NODE_TOKEN)) {
+      const entry = NODE_ENTRY.exec(code.slice(m.index))?.[1];
+      // `/usr/bin/node …`: a node named by path is not the runner's `node`.
+      if (entry === undefined || code[m.index - 1] === '/') {
+        unclassified.push(`${key}: ${code.slice(Math.max(0, m.index - 20), m.index + 60)}`);
+      } else entries.push(entry);
+    }
+    for (const m of code.matchAll(PNPM_TOKEN)) {
+      if (!PNPM_FORMS.test(code.slice(m.index).split('\n')[0]!)) {
+        unclassified.push(`${key}: ${code.slice(m.index).split('\n')[0]!}`);
+      }
+    }
+    for (const [where, text] of [
+      ['job', code],
+      ['workflow head', job.head],
+    ] as const) {
+      const loader = LOADERS.exec(text);
+      if (loader !== null) unclassified.push(`${key}: ${where} loads code via ${loader[0].trim()}`);
+    }
+    for (const local of job.localUses) unclassified.push(`${key}: runs local action ./${local}`);
+    return { entries, unclassified };
+  }
+
+  /** Each trusted job's entries, computed once. */
+  const TRUSTED = trustedJobs.map((job) => ({ key: job.key, ...classifyTrustedJob(job) }));
+
+  test('no workflow runs trust/dist/cli.js (residual R1)', () => {
+    for (const { file, text } of workflows) {
+      expect(text, file).not.toMatch(/\btrust\/dist\/cli\.js\b/);
+    }
+  });
+
+  test('trusted jobs run node only as `node trust/dist/selfhost/<entry>.js`', () => {
+    expect(TRUSTED.flatMap((job) => job.unclassified)).toEqual([]);
+    // Pinned, so the derived entry set cannot shrink to vacuity: adding or
+    // removing a trusted job, or an entry it runs, updates this table.
+    expect(Object.fromEntries(TRUSTED.map((job) => [job.key, job.entries]))).toEqual({
+      'cq-accept.yml:judge': ['acceptance'],
+      'cq-policy.yml:judge': ['policy-diff'],
+      'cq-verify.yml:compute': ['recompute-typecheck'],
+      'cq-verify.yml:judge': ['verify-ratchet'],
+      'gate.yml:decide': ['promote-gate'],
+    });
+  });
+
+  test('the invocation rules refuse other forms', () => {
+    const refused = (code: string, head = '', localUses: string[] = []): string[] =>
+      classifyTrustedJob({ key: 'w:j', code, head, localUses }).unclassified;
+    expect(TRUST_PATH.test('        working-directory: trust')).toBe(true);
+    expect(TRUST_PATH.test('          git init trust')).toBe(true);
+    expect(TRUST_PATH.test('      trusted: yes')).toBe(false);
+    expect(refused('node trust/dist/selfhost/acceptance.js \\')).toEqual([]);
+    expect(refused('pnpm install --frozen-lockfile --ignore-scripts\npnpm run build')).toEqual([]);
+    for (const code of [
+      'node trust/dist/cli.js gates.policyDiff',
+      'node --import ./x.js trust/dist/selfhost/acceptance.js',
+      `node -e "import('./x.js')"`,
+      'node dist/cli.js gates.policyDiff',
+      'node trust/dist/selfhost/$ENTRY.js',
+      '/usr/bin/node trust/dist/selfhost/acceptance.js',
+      '"$NODE" trust/dist/selfhost/acceptance.js',
+      'nodejs trust/dist/cli.js',
+      'trust/node_modules/.bin/tsx x.ts',
+      'pnpm run build && node x.js',
+      'pnpm install --frozen-lockfile',
+      'pnpm exec vitest',
+      '    NODE_OPTIONS: --import ./hook.js',
+      '        shell: node {0}',
+    ]) {
+      expect(refused(code), code).not.toEqual([]);
+    }
+    expect(refused('', 'env:\n  NODE_OPTIONS: --import ./hook.js')).not.toEqual([]);
+    expect(refused('', 'defaults:\n  run:\n    shell: node {0}')).not.toEqual([]);
+    expect(refused('        shell: bash')).toEqual([]);
+    expect(refused('', '', ['trust/.github/actions/x'])).not.toEqual([]);
+  });
+
+  test("the trust build runs only protected scripts (package.json's build)", () => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    const build = pkg.scripts['build'] ?? '';
+    const scripts = [...build.matchAll(/(?:^|[\s'"])(?:\.\/)?(scripts\/[\w./-]+\.m?js)\b/g)].map(
+      (m) => m[1]!,
+    );
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const script of scripts) expect(isProtectedPolicyPath(script), script).toBe(true);
+    // Nothing else runs: every command is node on a script, or the build tsc.
+    for (const command of build.split('&&').map((c) => c.trim())) {
+      expect(command, command).toMatch(
+        /^(?:node (?:scripts\/|--input-type=module -e )|tsc -p tsconfig\.build\.json$)/,
+      );
+    }
+  });
+
   const ENTRY_POINTS = [
-    'src/selfhost/acceptance.ts',
-    'src/selfhost/promote-gate.ts',
-    // The verifier ops the trusted `trust/dist/cli.js` invocations dispatch.
-    'src/ops/gates/policyDiff.ts',
-    'src/ops/gates/policyConfig.ts',
-    'src/ops/ratchet/verifyRatchet.ts',
-    'src/ops/ratchet/recomputeTypecheck.ts',
-    // cq-verify's in-process signer (`trust/dist/selfhost/verify-ratchet.js`).
-    'src/selfhost/verify-ratchet.ts',
+    ...[...new Set(TRUSTED.flatMap((job) => job.entries))].map((e) => `src/selfhost/${e}.ts`),
     // The prebuilt engine `scripts/ratchet-propose.mjs` loads in its
     // `automation`-environment job (scripts/ratchet-lib.mjs `loadEngine`).
     ...engineModules(),
@@ -264,8 +408,9 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
 
   /**
    * Protected but NOT walked: the registry entries that bind the verifier
-   * ops (input schema, posture resolution). Their lazy importers also reach
-   * ops no trusted job runs, so walking them would protect library code.
+   * ops for the CLI and plans. No trusted job loads them now (R1); their
+   * lazy importers also reach ops no trusted job runs, so walking them
+   * would protect library code.
    */
   const BINDINGS = ['src/ops/gates/registry.ts', 'src/ops/ratchet/registry.ts'];
 
@@ -278,39 +423,42 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
    */
   const ALLOWLIST: Readonly<Record<string, string>> = {};
 
-  /** Relative value-import specifiers of one TS source (type-only forms excluded). */
-  function valueImports(text: string): string[] {
-    const out: string[] = [];
-    const fromRe = /^\s*(import|export)\s+(type\s+)?[^;'"]*?\bfrom\s+'(\.{1,2}\/[^']+)'/gm;
-    for (const m of text.matchAll(fromRe)) {
-      if (m[2] === undefined && m[3] !== undefined) out.push(m[3]);
-    }
-    for (const m of text.matchAll(/^\s*import\s+'(\.{1,2}\/[^']+)'/gm)) {
-      if (m[1] !== undefined) out.push(m[1]);
-    }
-    for (const m of text.matchAll(/\bimport\(\s*'(\.{1,2}\/[^']+)'\s*\)/g)) {
-      if (m[1] !== undefined) out.push(m[1]);
-    }
-    return out;
-  }
+  const PACKAGE = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>;
+  };
+  const DEPENDENCIES = new Set(Object.keys(PACKAGE.dependencies));
+  /** `zod` → `zod`, `@scope/pkg/sub` → `@scope/pkg`. */
+  const packageOf = (spec: string): string =>
+    spec
+      .split('/')
+      .slice(0, spec.startsWith('@') ? 2 : 1)
+      .join('/');
 
-  function closure(entries: readonly string[]): string[] {
+  /** The module-loading closure of `entries`, and every edge it could not classify. */
+  function closure(entries: readonly string[]): { files: string[]; problems: string[] } {
     const seen = new Set<string>();
+    const problems: string[] = [];
     const stack = [...entries];
     while (stack.length > 0) {
       const file = stack.pop() ?? '';
       if (seen.has(file)) continue;
       seen.add(file);
-      const text = readFileSync(join(REPO_ROOT, file), 'utf8');
-      for (const spec of valueImports(text)) {
-        const target = posix.normalize(
-          posix.join(posix.dirname(file), spec.replace(/\.js$/, '.ts')),
-        );
-        expect(target.startsWith('src/'), `${file} imports ${spec} outside src/`).toBe(true);
-        stack.push(target);
+      const scan = scanModuleLoads(readFileSync(join(REPO_ROOT, file), 'utf8'));
+      problems.push(...scan.problems.map((p) => `${file}: ${p}`));
+      for (const spec of scan.specifiers) {
+        if (spec.startsWith('./') || spec.startsWith('../')) {
+          const target = posix.normalize(
+            posix.join(posix.dirname(file), spec.replace(/\.js$/, '.ts')),
+          );
+          if (!target.startsWith('src/') || !target.endsWith('.ts')) {
+            problems.push(`${file}: ${spec} resolves outside src/*.ts`);
+          } else stack.push(target);
+        } else if (!spec.startsWith('node:') && !DEPENDENCIES.has(packageOf(spec))) {
+          problems.push(`${file}: ${spec} is not relative, a node: builtin or a dependency`);
+        }
       }
     }
-    return [...seen].sort();
+    return { files: [...seen].sort(), problems };
   }
 
   const POLICY = JSON.parse(
@@ -318,9 +466,10 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
   ) as { protectedPaths: string[] };
   const REGEXES = POLICY.protectedPaths.map((source) => new RegExp(source));
 
-  test('the import scanner keeps value imports and drops type-only ones', () => {
+  test('the closure walk refuses what it cannot classify', () => {
+    const scan = (text: string): ModuleScan => scanModuleLoads(text);
     expect(
-      valueImports(
+      scan(
         [
           "import { a, type B } from './a.js';",
           "import type { C } from './c.js';",
@@ -331,9 +480,37 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
           "import './side.js';",
           "const m = await import('./dyn.js');",
           "import { x } from 'node:fs';",
+          "// import { c } from './comment.js';",
+          'const s = "import(\'./string.js\')";',
+          "const re = /'/g;",
         ].join('\n'),
       ),
-    ).toEqual(['./a.js', '../e.js', './f.js', './g.js', './side.js', './dyn.js']);
+    ).toEqual({
+      specifiers: ['./a.js', '../e.js', './f.js', './g.js', 'node:fs', './side.js', './dyn.js'],
+      problems: [],
+    });
+    expect(scan('const m = await import(name);').problems).toHaveLength(1);
+    expect(scan('const m = await import(`./${x}.js`);').problems).toHaveLength(1);
+    expect(scan("const r = createRequire(import.meta.url); r('./x.cjs');").problems).toHaveLength(
+      1,
+    );
+    // A from-clause cannot span a call: the computed import stays visible.
+    expect(
+      scan("export const f = (n) => import(n)\nexport { x } from './x.js';").problems,
+    ).toHaveLength(1);
+    for (const text of [
+      "register('./hooks.mjs', import.meta.url);",
+      "new Function('return 1')();",
+      "eval('1');",
+      "process.dlopen(m, './x.node');",
+    ]) {
+      expect(scan(text).problems, text).toHaveLength(1);
+    }
+    expect(scan("export * from 'node:fs';")).toEqual({ specifiers: ['node:fs'], problems: [] });
+    // The package self-import resolves through dist/index.js, the whole SDK.
+    expect(packageOf('@camerontaylor/cq-toolkit')).toBe('@camerontaylor/cq-toolkit');
+    expect(DEPENDENCIES.has(packageOf('@camerontaylor/cq-toolkit'))).toBe(false);
+    expect(DEPENDENCIES.has(packageOf('#internal'))).toBe(false);
   });
 
   test('the verifier bindings are protected', () => {
@@ -344,16 +521,6 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
       ).toBe(true);
     }
   });
-
-  /**
-   * Every `trust/dist/...` call in a rendered workflow: the ops dispatched
-   * through `cli.js` and the selfhost entry points. Each must be one of the
-   * entry points above.
-   */
-  const TRUSTED_CLI_OPS: Readonly<Record<string, readonly string[]>> = {
-    'gates.policyDiff': ['src/ops/gates/policyDiff.ts', 'src/ops/gates/policyConfig.ts'],
-    'ratchet.recomputeTypecheck': ['src/ops/ratchet/recomputeTypecheck.ts'],
-  };
 
   /**
    * Unprotected code that a privileged job (an `environment:`, a secret, a
@@ -371,25 +538,6 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     'scripts/demo-eval-axes.mjs':
       'live-drivers drill: workflow_dispatch on main only, model keys only',
   };
-
-  const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
-  const workflowTexts = readdirSync(WORKFLOWS_DIR)
-    .filter((f) => /\.ya?ml$/.test(f))
-    .map((f) => readFileSync(join(WORKFLOWS_DIR, f), 'utf8'));
-
-  test('every trusted invocation in the workflows is a walked entry point', () => {
-    const ops = new Set<string>();
-    const selfhost = new Set<string>();
-    for (const text of workflowTexts) {
-      for (const m of text.matchAll(/\btrust\/dist\/cli\.js\s+([A-Za-z][\w.]*)/g)) ops.add(m[1]!);
-      for (const m of text.matchAll(/\btrust\/dist\/selfhost\/([\w-]+)\.js/g)) selfhost.add(m[1]!);
-    }
-    expect([...ops].sort()).toEqual(Object.keys(TRUSTED_CLI_OPS).sort());
-    for (const sources of Object.values(TRUSTED_CLI_OPS)) {
-      expect(ENTRY_POINTS).toEqual(expect.arrayContaining([...sources]));
-    }
-    for (const name of selfhost) expect(ENTRY_POINTS).toContain(`src/selfhost/${name}.ts`);
-  });
 
   test('every script or selfhost entry a privileged job runs is protected or a named residual', () => {
     const seen = new Set<string>();
@@ -419,8 +567,23 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
   });
 
   test('every closure file is protected or allowlisted with a reason', () => {
-    const files = closure(ENTRY_POINTS);
-    expect(files).toEqual(expect.arrayContaining([...ENTRY_POINTS, 'src/ops/review/threads.ts']));
+    const { files, problems } = closure(ENTRY_POINTS);
+    expect(problems).toEqual([]);
+    // The judges the trusted entries exist to run are reached.
+    expect(files).toEqual(
+      expect.arrayContaining([
+        ...ENTRY_POINTS,
+        'src/ops/gates/policyDiff.ts',
+        'src/ops/gates/policyConfig.ts',
+        'src/ops/ratchet/verifyRatchet.ts',
+        'src/ops/ratchet/recomputeTypecheck.ts',
+        'src/ops/review/threads.ts',
+      ]),
+    );
+    // R1: none of the CLI shell runs in a trusted job.
+    expect(
+      files.filter((f) => /^src\/(?:cli|kernel|registry)\//.test(f) || f === 'src/cli.ts'),
+    ).toEqual([]);
     const uncovered = files.filter(
       (file) => !REGEXES.some((re) => re.test(file)) && !Object.hasOwn(ALLOWLIST, file),
     );

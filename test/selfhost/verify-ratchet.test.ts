@@ -203,14 +203,14 @@ describe('mainWith', () => {
     expect(parsed.status === 'ok' && parsed.value.verdict).toBe('needs-human');
   });
 
-  test('bad arguments are a failed result, exit 1, still one JSON line', async () => {
+  test('bad arguments are a failed result, exit 2 (I1), still one JSON line', async () => {
     const lines: string[] = [];
     const code = await mainWith(['--bogus=1'], {
       makeGh: () => gh,
       git,
       write: (line) => lines.push(line),
     });
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(JSON.parse(lines[0] ?? '')).toMatchObject({ status: 'failed' });
   });
 });
