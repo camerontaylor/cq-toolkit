@@ -29,7 +29,7 @@
 // restored to its original branch in a `finally`.
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
@@ -101,9 +101,21 @@ function exec(
   });
 }
 
-/** The gh binary: CQ_GH_BIN (the review/merge family seam), else `gh`. */
+/**
+ * The gh binary: CQ_GH_BIN (the review/merge family seam), else `gh`. A
+ * RELATIVE bin path with a separator resolves against the PROCESS cwd — the
+ * same pre-scoping resolution makeGhRunner and the pr effects adapter apply
+ * — because {@link runGh} spawns with cwd=repoRoot, which would otherwise
+ * silently change which binary a relative CQ_GH_BIN names. Bare names keep
+ * PATH lookup; absolute paths pass through.
+ */
 function ghBin(): string {
-  return process.env['CQ_GH_BIN'] ?? 'gh';
+  const rawBin = process.env['CQ_GH_BIN'] ?? 'gh';
+  return rawBin.includes('/') || rawBin.includes('\\')
+    ? isAbsolute(rawBin)
+      ? rawBin
+      : pathResolve(process.cwd(), rawBin)
+    : rawBin;
 }
 
 /**
