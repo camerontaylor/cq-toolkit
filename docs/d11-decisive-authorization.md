@@ -20,7 +20,9 @@ Callers do the I/O and hand it plain data:
   `actor.id === owner id`, `actor.type === 'User'`,
   `performed_via_github_app === null`, `created_at` strictly after the
   epoch). `attested` is `parseC3Attestation(text).armed` for the attestation
-  as read **at the trust ref**, never the head or tip.
+  as read **at the trust ref**, never the head or tip. An armed record must
+  also have `created_at` strictly after the attestation's `attestedAt`, so
+  C3 never honours a label applied before it.
 - `authorizePaths(auth, paths)` decides a set of paths that need a human. A
   path is authorized iff at least one admitted contribution changes it and
   **every** admitted contribution that changes it carries an `honoured`
@@ -127,6 +129,7 @@ named in the report:
 | Settle ledger absent or unreadable, or the PR not in the last `SETTLE_HISTORY_MAX` versions | no epoch → record `invalid`                       |
 | Attestation absent, unreadable, or schema-invalid at the trust ref                          | `attested: false` → record `dormant`              |
 | Label applied at or before the epoch                                                        | `invalid` (strictly after)                        |
+| Label applied at or before the C3 attestation's `attestedAt` (attested)                     | `invalid` (strictly after; never retroactive)     |
 | Label applied via a GitHub App, or by anyone but the owner's `User`                         | `invalid`                                         |
 | Owner id unreadable                                                                         | every record `invalid`                            |
 | Label events unreadable                                                                     | that PR's record `invalid`                        |

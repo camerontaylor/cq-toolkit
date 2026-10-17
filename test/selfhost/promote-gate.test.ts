@@ -1779,7 +1779,7 @@ describe('runGate', () => {
 const C3_OK = JSON.stringify({
   schemaVersion: 1,
   attests: 'C3',
-  attestedAt: '2026-10-01T00:00:00Z',
+  attestedAt: '2026-09-01T00:00:00Z',
 });
 const EPOCH = '2026-09-01T00:00:00.000Z';
 const CHANGED = 'vitest.config.ts';
@@ -1899,6 +1899,24 @@ describe('runGate — decisive D11 authorization', () => {
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
     expect(r.report.join('\n')).toMatch(/unreadable at the trust ref \(git fault\)/);
+  });
+
+  test('#338 P1: a label applied before C3 attestedAt is invalid — C3 is never retroactive', async () => {
+    const late = JSON.stringify({
+      schemaVersion: 1,
+      attests: 'C3',
+      attestedAt: '2026-10-01T00:00:00Z',
+    });
+    const { h } = d11Harness({ timeline: () => [ownerLabel()] }, late);
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    const text = r.report.join('\n');
+    expect(text).toMatch(/records honoured when applied after attestedAt 2026-10-01T00:00:00Z/);
+    expect(text).toMatch(/verdict: invalid/);
+    expect(text).toMatch(
+      /label created_at 2026-09-02T00:00:00Z is not after the C3 attestation attestedAt 2026-10-01T00:00:00Z/,
+    );
+    expect(r.report.at(-1)).toMatch(/not every path needing a human is authorized/);
   });
 
   test('a label applied before the head-observation epoch is invalid', async () => {

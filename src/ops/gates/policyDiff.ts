@@ -21,7 +21,8 @@
 //     posture to `diff-check` until its explicit expiry (policyConfig.ts).
 //   - THE OVERRIDE LABEL is evaluated from API timeline events and the
 //     settle-ledger head epoch, logged in full, and honoured only once the
-//     C3 attestation is on the trust ref (D-G.4).
+//     C3 attestation is on the trust ref and only when applied after its
+//     `attestedAt` (D-G.4).
 //   - A PUSH SUBJECT carries no label of its own: the promotion gate binds
 //     a per-admitted-PR authorization (./d11Authorization.ts) in-process,
 //     and a needs-human range passes only when every path needing a human
@@ -478,13 +479,14 @@ async function evaluateOverride(
     }
   }
 
-  let attested = false;
+  let attestedAt: string | undefined;
   try {
     const text = await gitReadBlob(input.repo, trust, C3_ATTESTATION_PATH);
     if (text !== null) {
       const check = parseC3Attestation(text);
-      attested = check.armed;
-      if (!check.armed) {
+      if (check.armed) {
+        attestedAt = check.attestedAt;
+      } else {
         notes.push(
           `attestation: ${C3_ATTESTATION_PATH} present but invalid (${check.reason}) — records stay dormant`,
         );
@@ -501,7 +503,7 @@ async function evaluateOverride(
     ownerId: input.ownerId,
     subject,
     headObservedAt,
-    attested,
+    attestedAt,
   });
 }
 
