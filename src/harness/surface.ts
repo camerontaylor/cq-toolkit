@@ -41,7 +41,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolPolicy } from '../driver/types.js';
-import { stripMetaSchema } from '../driver/json-schema.js';
+import { stripMetaSchema } from '../shared/json-schema.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 import { buildTools } from './tools.js';

@@ -1,7 +1,8 @@
 // Process-lifecycle helpers for the acp driver — T1.8.
 //
-// THE I8 EXEMPT FILE (same posture as the subprocess and claude-agent
-// lanes' process.ts): the driver-hygiene scan bans driver-owned
+// THE I8 EXEMPT FILE (same posture as shared/proc.ts — the subprocess
+// lane's former process.ts — and the claude-agent lane's process.ts): the
+// driver-hygiene scan bans driver-owned
 // scheduling primitives under src/driver/**, with the single exemption
 // `driver/<name>/process.{ts,js,mjs}` — process-lifecycle helpers may own
 // timers, because there the decision has ALREADY BEEN MADE. This file owns

@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { buildChildEnv } from '../../src/driver/subprocess/process.js';
+import { buildChildEnv } from '../../src/shared/proc.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { runArgvCommand } from '../../src/harness/run.js';
