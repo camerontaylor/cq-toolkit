@@ -5,10 +5,11 @@
 //
 // RESOLUTION RULES (frozen):
 //   - DEFAULT BINDINGS ARE CONSERVATIVE: every role maps to lane 'ai-sdk'
-//     for the default providers (zai / anthropic / openai / deepseek) — the
-//     in-process lane with no host-CLI dependency. The subprocess,
-//     claude-agent and acp lanes are NEVER defaults: a host-CLI or
-//     vendor-process lane only runs when the deployment BINDS it.
+//     for the default providers (zai / anthropic / openai / deepseek /
+//     opencode-go) — the in-process lane with no host-CLI dependency. The
+//     subprocess, claude-agent and acp lanes are NEVER defaults: a
+//     host-CLI or vendor-process lane only runs when the deployment BINDS
+//     it.
 //   - Configured bindings (role → provider → lane, '*' = any provider) win
 //     over defaults; a provider that is neither a default provider nor bound
 //     for the requested role is a DispatchError('config') — the factory
@@ -173,7 +174,13 @@ export interface DriverFactoryConfig {
 // ---------------------------------------------------------------------------
 
 /** The providers the conservative default binding serves (lane 'ai-sdk'). */
-const DEFAULT_PROVIDERS: readonly string[] = ['zai', 'anthropic', 'openai', 'deepseek'];
+const DEFAULT_PROVIDERS: readonly string[] = [
+  'zai',
+  'anthropic',
+  'openai',
+  'deepseek',
+  'opencode-go',
+];
 
 /** The default lane for the default providers — the in-process lane. */
 const DEFAULT_LANE: LaneId = 'ai-sdk';
