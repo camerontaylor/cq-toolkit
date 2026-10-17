@@ -3,14 +3,14 @@
 // sync node:fs store, and the decision ops — the record op whose escalation
 // IS the needs-human emission, and the read-only query whose knownNoise is
 // the suppression view dispatch consults.
-export type { LedgerEntry, LedgerFile } from './store.js';
+export type { LedgerEntry, LedgerFile } from '../../adapters/store/ledgerStore.js';
 export {
   LedgerFormatError,
   parseLedger,
   pathLedgerStore,
   serializeLedger,
   sortEntries,
-} from './store.js';
+} from '../../adapters/store/ledgerStore.js';
 export type {
   LedgerQueryInput,
   LedgerRecordInput,

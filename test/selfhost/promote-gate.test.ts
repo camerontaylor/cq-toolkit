@@ -23,8 +23,8 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
 import type { PolicyDiffInput, PolicyDiffOutcome } from '../../src/ops/gates/policyDiff.js';
-import type { RangeCommit } from '../../src/ops/ratchet/git.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { RangeCommit } from '../../src/adapters/git/ratchetGit.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import type { AcceptanceInput, AcceptanceResult } from '../../src/selfhost/acceptance.js';
 import {
   BANNED_REVIEWER_IDS,

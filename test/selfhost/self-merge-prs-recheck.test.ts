@@ -30,8 +30,8 @@ import { afterEach, describe, expect, test } from 'vitest';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../src/kernel/types.js';
 import { REVIEW_ACCEPT_SETTLE_MS } from '../../src/ops/merge/classify.config.js';
-import type { MergeEffects } from '../../src/ops/merge/effects.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { MergeEffects } from '../../src/adapters/forge-github/mergeEffects.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import { PR_SNAPSHOT_QUERY, trustPolicyFromConfig } from '../../src/selfhost/merge-recheck.js';
 import { recheckedRegistryView, runSelfMergePrs } from '../../src/selfhost/self-merge-prs.js';
 import {

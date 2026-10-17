@@ -94,7 +94,7 @@
 // classify.config.ts AS DATA — this module only reads them.
 import { defaultClassifyConfig } from './classify.config.js';
 import type { ClassifyConfig } from './classify.config.js';
-import type { FetchedReviewState } from './fetchReviewState.js';
+import type { FetchedReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import type { RestComment, ReviewSummary, ReviewThread, ThreadComment } from './threads.js';
 
 /**

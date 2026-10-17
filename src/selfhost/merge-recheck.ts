@@ -72,9 +72,9 @@
 // error, transport failure, CAS loss) refuses. recheckBeforeMerge and
 // observeOpenPrs NEVER throw — a throw inside becomes a one-line, capped,
 // log-safe refusal reason (counts and actor keys; never review bodies).
-import { GhError, ghJson, ghNameOk, slurpedComments } from '../ops/review/gh.js';
-import type { GhFn, GhResult } from '../ops/review/gh.js';
-import type { MergeEffects } from '../ops/merge/effects.js';
+import { GhError, ghJson, ghNameOk, slurpedComments } from '../adapters/forge-github/gh.js';
+import type { GhFn, GhResult } from '../adapters/forge-github/gh.js';
+import type { MergeEffects } from '../adapters/forge-github/mergeEffects.js';
 import { attachRestReplies, countUnresolvedThreads } from '../ops/review/threads.js';
 import type { RestComment, ReviewThread } from '../ops/review/threads.js';
 import { observeWithChange, pruneToOpen, settleStatus } from './settle-state.js';

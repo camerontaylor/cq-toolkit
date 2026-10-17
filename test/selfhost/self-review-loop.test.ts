@@ -75,7 +75,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { RunReport } from '../../src/kernel/types.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 import type { SelfReviewLoopCfg, SelfReviewLoopDeps } from '../../src/selfhost/self-review-loop.js';
 import {

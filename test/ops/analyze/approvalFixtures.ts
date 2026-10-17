@@ -7,18 +7,18 @@
 // `git status` answer, so no repository is needed) and the run's VERIFIED
 // approvals (the kernel verifier's §4a/§4b output, which this patch
 // deliberately does not implement).
+import type { InspectableNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import type {
   ApprovalAuthority,
   ApprovalState,
   ApprovalStateReader,
   ApprovalSubject,
-  InspectableNonceLedger,
   MutationLocks,
   VerifiedApprovals,
 } from '../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 

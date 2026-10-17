@@ -91,9 +91,15 @@ import {
   gitTreeOf,
   type LeasedUpdate,
   type RangeCommit,
-} from '../ops/ratchet/git.js';
-import { GhError, ghJson, ghNameOk, makeGhRunner, slurpedComments } from '../ops/review/gh.js';
-import type { GhFn } from '../ops/review/gh.js';
+} from '../adapters/git/ratchetGit.js';
+import {
+  GhError,
+  ghJson,
+  ghNameOk,
+  makeGhRunner,
+  slurpedComments,
+} from '../adapters/forge-github/gh.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
 import {
   judgeAcceptance,
   resolveAcceptanceTrust,

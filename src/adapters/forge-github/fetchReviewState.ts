@@ -32,8 +32,13 @@
 import { ghJson, ghNameOk, makeGhRunner, slurpedComments } from './gh.js';
 import type { GhFn } from './gh.js';
 import { GH_NAME_OK } from './gh.js';
-import { attachRestReplies } from './threads.js';
-import type { RestComment, ReviewSummary, ReviewThread, TruncationFlag } from './threads.js';
+import { attachRestReplies } from '../../ops/review/threads.js';
+import type {
+  RestComment,
+  ReviewSummary,
+  ReviewThread,
+  TruncationFlag,
+} from '../../ops/review/threads.js';
 
 /** Which PR to fetch. */
 export interface FetchReviewStateInput {

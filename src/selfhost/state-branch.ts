@@ -43,8 +43,8 @@
 // gh's status form (`HTTP 404`) is a 404 — bare "Not Found" text is a
 // transport failure. A 404 from an inaccessible repository also reads as
 // empty — harmless for settle, and the subsequent write fails loudly.
-import { GhError, ghJson, ghNameOk } from '../ops/review/gh.js';
-import type { GhFn } from '../ops/review/gh.js';
+import { GhError, ghJson, ghNameOk } from '../adapters/forge-github/gh.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
 import { emptySettleState, parseSettleState, serializeSettleState } from './settle-state.js';
 import type { SettleState } from './settle-state.js';
 

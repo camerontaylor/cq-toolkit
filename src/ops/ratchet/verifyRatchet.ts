@@ -56,7 +56,13 @@ import {
   parseBaseline,
   roundCoveragePct,
 } from './format.js';
-import { gitChangedPaths, gitDiffText, gitMergeBase, gitReadBlob, gitRevParse } from './git.js';
+import {
+  gitChangedPaths,
+  gitDiffText,
+  gitMergeBase,
+  gitReadBlob,
+  gitRevParse,
+} from '../../adapters/git/ratchetGit.js';
 import { checkDiffMonotonicity, formatViolations } from './monotonicGuard.js';
 import type { DiffVerdict } from './monotonicGuard.js';
 

@@ -125,7 +125,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createDriverFactory } from '../../../src/driver/factory.js';
 import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
-import { realMergeEffects } from '../../../src/ops/merge/effects.js';
+import { realMergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
 import { makeResolveConflictOp } from '../../../src/ops/merge/resolveConflict.js';
 import { runMergePrs } from '../../../src/ops/merge/runPrs.js';

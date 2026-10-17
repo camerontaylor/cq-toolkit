@@ -47,12 +47,12 @@ import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GovernanceOptIn, OpRegistryEntry } from '../../src/kernel/types.js';
 import type { Plan } from '../../src/kernel/types.js';
 import type { ClassifiedItem } from '../../src/ops/review/classifyThreads.js';
-import type { FetchedReviewState } from '../../src/ops/review/fetchReviewState.js';
+import type { FetchedReviewState } from '../../src/adapters/forge-github/fetchReviewState.js';
 import { makeFixReviewItem } from '../../src/ops/review/fixReviewItem.js';
 import { FixReviewItemInputSchema } from '../../src/ops/review/registry.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import type { PlannedBatch } from '../../src/ops/review/planReviewBatch.js';
-import type { RegistryMap, WorktreeRegistry } from '../../src/ops/review/prWorktree.js';
+import type { RegistryMap, WorktreeRegistry } from '../../src/adapters/git/prWorktree.js';
 import type { ReviewThread } from '../../src/ops/review/threads.js';
 import { listPlans } from '../../src/plans/registry.js';
 import {

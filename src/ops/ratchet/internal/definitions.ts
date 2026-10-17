@@ -21,7 +21,7 @@
 import { posix } from 'node:path';
 import { z } from 'zod';
 import type { Direction } from '../format.js';
-import { assertRepoRelPath, gitReadBlob, gitRevParse } from '../git.js';
+import { assertRepoRelPath, gitReadBlob, gitRevParse } from '../../../adapters/git/ratchetGit.js';
 
 /** Repo-relative path of the manifest (read at the trust ref). */
 export const RATCHETS_MANIFEST_PATH = 'baselines/ratchets.json';

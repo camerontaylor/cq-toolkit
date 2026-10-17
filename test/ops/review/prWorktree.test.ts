@@ -60,14 +60,14 @@ import {
   removePrWorktree,
   resolvePrWorktree,
   reviewBranchFor,
-} from '../../../src/ops/review/prWorktree.js';
+} from '../../../src/adapters/git/prWorktree.js';
 import type {
   PrWorktreeOpts,
   RegistryMap,
   WorktreeRegistry,
   WorktreeRegistryEntry,
-} from '../../../src/ops/review/prWorktree.js';
-import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
+} from '../../../src/adapters/git/prWorktree.js';
+import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures + the fake git model

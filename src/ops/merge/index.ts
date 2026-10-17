@@ -20,7 +20,11 @@ export type {
   PlannedPr,
 } from './planMergeOrder.js';
 export { planMergeOrder } from './planMergeOrder.js';
-export type { MergeEffects, RealMergeEffectsOpts, SafeArgsOpts } from './effects.js';
+export type {
+  MergeEffects,
+  RealMergeEffectsOpts,
+  SafeArgsOpts,
+} from '../../adapters/forge-github/mergeEffects.js';
 export {
   DEFAULT_PROTECTED_BRANCH,
   UnsafeMergeArgsError,
@@ -29,7 +33,7 @@ export {
   safeArgs,
   safeRunner,
   withPreparedWorktree,
-} from './effects.js';
+} from '../../adapters/forge-github/mergeEffects.js';
 export type { ExecuteMergeInput, ExecutionBlockReason, ExecutionReport } from './executeMerges.js';
 export { DEFAULT_MAX_RETRIES, executeMerges } from './executeMerges.js';
 export type { MergeFailureCause, MergeFailureDiagnosis } from './diagnoseMergeFailure.js';

@@ -3,7 +3,7 @@ import { classifyThreads } from '../../../src/ops/review/classifyThreads.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import { defaultClassifyConfig } from '../../../src/ops/review/classify.config.js';
 import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
-import type { FetchedReviewState } from '../../../src/ops/review/fetchReviewState.js';
+import type { FetchedReviewState } from '../../../src/adapters/forge-github/fetchReviewState.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
 import {
   registry as mergeRegistry,

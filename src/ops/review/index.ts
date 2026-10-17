@@ -17,14 +17,14 @@ export type {
   TruncationFlag,
 } from './threads.js';
 export { attachRestReplies, countUnresolvedThreads } from './threads.js';
-export type { GhFn, GhResult } from './gh.js';
-export { GhError, ghJson, makeGhRunner } from './gh.js';
+export type { GhFn, GhResult } from '../../adapters/forge-github/gh.js';
+export { GhError, ghJson, makeGhRunner } from '../../adapters/forge-github/gh.js';
 export type {
   FetchReviewStateCaps,
   FetchReviewStateInput,
   FetchedReviewState,
-} from './fetchReviewState.js';
-export { fetchReviewState } from './fetchReviewState.js';
+} from '../../adapters/forge-github/fetchReviewState.js';
+export { fetchReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 export type { ClassifyConfig } from './classify.config.js';
 export { defaultClassifyConfig } from './classify.config.js';
 export type { ClassifiedItem, Classification, ThreadVerdict } from './classifyThreads.js';
@@ -36,9 +36,8 @@ export { defaultPlanBatchConfig, planReviewBatch } from './planReviewBatch.js';
 // REST-counted anti-hallucination verify with its explicit NO PROGRESS
 // contract (verifyReviewOutcome), and per-PR worktree resolution with the
 // registry (prWorktree — origin branch is truth, never the sweep worktree).
+export type { DispatchLog, DispatchRecord } from '../../adapters/store/dispatchLog.js';
 export type {
-  DispatchLog,
-  DispatchRecord,
   IssueCommentAction,
   ReplyAndResolveOpts,
   ReplyAndResolveResult,
@@ -46,21 +45,26 @@ export type {
   ReviewAction,
   ReviewReplyAction,
 } from './replyAndResolve.js';
-export { fileDispatchLog, replyAndResolve } from './replyAndResolve.js';
+export { fileDispatchLog } from '../../adapters/store/dispatchLog.js';
+export { replyAndResolve } from './replyAndResolve.js';
 export type {
   PrSnapshot,
-  ProgressReason,
   SnapshotPrStateOpts,
-  VerifyOutcome,
-} from './verifyReviewOutcome.js';
-export { snapshotPrState, verifyPrOutcome } from './verifyReviewOutcome.js';
+} from '../../adapters/forge-github/snapshotPrState.js';
+export type { ProgressReason, VerifyOutcome } from './verifyReviewOutcome.js';
+export { snapshotPrState } from '../../adapters/forge-github/snapshotPrState.js';
+export { verifyPrOutcome } from './verifyReviewOutcome.js';
 export type {
   PrWorktreeOpts,
   RegistryMap,
   WorktreeRegistry,
   WorktreeRegistryEntry,
-} from './prWorktree.js';
-export { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from './prWorktree.js';
+} from '../../adapters/git/prWorktree.js';
+export {
+  fileWorktreeRegistry,
+  removePrWorktree,
+  resolvePrWorktree,
+} from '../../adapters/git/prWorktree.js';
 // E4 — the agentic fix half of the loop: fixReviewItem drives ONE worker
 // over ONE review item in the resolved per-PR worktree through the injected
 // Driver seam (conservative harness-derived tool allowlist, head-capped

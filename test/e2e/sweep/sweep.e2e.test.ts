@@ -62,10 +62,10 @@ import {
   type SweepUnitReport,
 } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
-import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
+import { makeSubprocessWorktreeEffects } from '../../../src/adapters/git/worktreeFor.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import { subprocessRunCheck } from '../../../src/ops/gates/checkRunner.js';
-import { makeGhRunner } from '../../../src/ops/review/gh.js';
+import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import type {
   AssemblePrsPackageReport,
   AssemblePrsReport,
