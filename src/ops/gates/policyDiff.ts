@@ -37,6 +37,7 @@ import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
 import { parseSettleState } from '../../selfhost/settle-state.js';
 import { SETTLE_STATE_PATH } from '../../selfhost/state-branch.js';
+import { messageOf } from '../../shared/messageOf.js';
 import {
   assertRepoRelPath,
   gitChangedPaths,
@@ -225,11 +226,6 @@ function parsePolicyList(text: string): PolicyList {
     throw new Error(`${POLICY_LIST_PATH}: schema violation — ${issues}`);
   }
   return parsed.data;
-}
-
-/** Error message of an unknown throwable. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** A side of the range that may be absent or unreadable, never a throw. */

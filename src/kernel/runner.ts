@@ -145,6 +145,7 @@
 // honest stop).
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
+import { messageOf } from '../shared/messageOf.js';
 import { GovernanceOptInRefusedError } from './errors.js';
 import {
   acquirePlanLock,
@@ -210,11 +211,6 @@ interface OutcomeEntry {
   /** Per-job modeled USD rollup (governed evidence sums; replay copies it too). */
   costUSD?: number;
   origin: EntryOrigin;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

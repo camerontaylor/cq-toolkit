@@ -67,6 +67,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { fnv1a32Hex } from '../gates/fingerprint.js';
 import { SIGNATURE_MAX_CHARS } from '../ledger/ledger.js';
@@ -525,8 +526,3 @@ export function makeRenderAnalysisReport(
 // ops, the registry importer COMPOSES this op from the named factory plus
 // the dynamically-imported path store (the registry-bound store seam), and
 // tests/library consumers inject their own store through the factory.
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

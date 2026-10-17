@@ -57,6 +57,7 @@
 // three lines of context, which is precisely the assurance a dry-run needs.
 import { resolve } from 'node:path';
 import type { Op } from '../../../kernel/types.js';
+import { messageOf } from '../../../shared/messageOf.js';
 import type { RawCheckOutput, RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
 import type {
@@ -1053,9 +1054,4 @@ class CodemodWriteFault extends Error {}
  */
 function stripDotSlash(file: string): string {
   return file.startsWith('./') ? file.slice(2) : file;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

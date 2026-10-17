@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // BaselinePrEffects over the `gh` + `git` subprocesses — the DEFAULT binding
 // the `ratchet.proposeBaselineUpdate` registry importer constructs per
 // dispatch (the sweep/merge input-driven precedent: nothing is wired at
@@ -44,11 +45,6 @@ interface ExecResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
-}
-
-/** Message of an unknown throwable (restore-path narration, never a cast). */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

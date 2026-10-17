@@ -22,6 +22,7 @@
 //     quarantined playbook — the reason is the quarantine record's payload.
 //   - The module is pure with respect to processes: the ONLY execution
 //     crosses the injected runner, so tests inject fakes and never spawn.
+import { messageOf } from '../../../shared/messageOf.js';
 import type { RawCheckOutput, RunCheck } from '../../gates/checkRunner.js';
 import type { VerifierCommand } from './format.js';
 
@@ -80,9 +81,4 @@ export function makePlaybookVerifier(
 function excerptOf(stdout: string, stderr: string): string {
   const combined = `${stdout.trim()}${stderr.trim() === '' ? '' : `\n${stderr.trim()}`}`;
   return combined.slice(0, EXCERPT_MAX_CHARS);
-}
-
-/** Error message of an unknown throwable, for indeterminate reasons. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

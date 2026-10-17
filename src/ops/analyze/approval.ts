@@ -1,3 +1,4 @@
+import { messageOf } from '../../shared/messageOf.js';
 // Analyze lane — the APPROVAL AUTHORITY (W4.3; ADR-0003 annex r1 §4b/§4c,
 // §5, §6; resolves the O-5 / O-6 reconciliation rows and guards A16).
 //
@@ -1078,9 +1079,4 @@ function canonicalJson(value: unknown): string {
   return `{${entries
     .map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`)
     .join(',')}}`;
-}
-
-/** Error message of an unknown throwable, for refusal reasons. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
