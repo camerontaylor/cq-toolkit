@@ -9,11 +9,16 @@
 // its own. No op consumes Forge yet — it is declared here so the adapter
 // layer owns its port shape before the wiring PR lands.
 //
-// Everything composes the SAME transport (makeGhRunner, the CQ_GH_BIN-
-// honouring gh seam) and stays INERT at construction: no env read beyond the
-// runner's own CQ_GH_BIN lookup at invocation time, no spawn, no network —
-// building a Forge is closure-building only, so a composition root can
-// construct it eagerly.
+// Transports (one CQ_GH_BIN convention, two spawn layers): `run` and
+// `mergeEffects` spawn through makeGhRunner (the shared GhFn seam — the
+// merge effects route both their git and gh runners through it);
+// `prEffects` and `baselinePrEffects` spawn gh through their OWN execFile
+// transports (GH_PROMPT_DISABLED/timeout and the automation-token env layer
+// are theirs) — both resolve CQ_GH_BIN exactly like makeGhRunner does, but
+// an injected `run` does NOT intercept them; use their own opts seams
+// instead. Every member stays INERT at construction: closures only — no env
+// read beyond each transport's own CQ_GH_BIN lookup at invocation time, no
+// spawn, no network — so a composition root can construct a Forge eagerly.
 import type { BaselinePrEffects } from '../../ops/ratchet/proposeBaselineUpdate.js';
 import type { SubprocessPrEffectsOptions } from './ghEffects.js';
 import type { PrEffects } from '../../ops/pr/assemblePrs.js';
