@@ -11,7 +11,7 @@ Land: phase 1 (WS-B).
   the bound serialized surface, denial classification, the init-surface
   comparator.
 - `mcp/` — the `cq-harness-mcp` stdio server (hand-rolled closed-subset
-  JSON-RPC, zero runtime dependencies) the subprocess lane's CLI launches.
+  JSON-RPC, zero runtime dependencies) the claude-code lane's CLI transport launches.
 - `session.ts` — the session store and temp workspaces (I6).
 
 ## Closed-form git commands
@@ -57,15 +57,14 @@ truncated rather than denied; killed commands return a null exit code.
 
 Every `run` child receives a default-deny environment composed by the
 shared core at execution time, whether called directly through
-`buildTools`, in-process through the claude-agent SDK, or through the
-subprocess lane's stdio MCP server. Only default runtime/locale/network
+`buildTools`, in-process through the claude-code lane's SDK transport, or through
+the CLI transport's stdio MCP server. Only default runtime/locale/network
 names and explicitly permitted extra names are copied. Parent API keys,
 tokens, and other secrets are absent by default. Route credential
 overrides used to authenticate the agent child are not automatically
 passed to harness commands.
 
-`SubprocessDriverOptions.envAllowlist` and
-`ClaudeAgentDriverOptions.envAllowlist` carry additional variable names
+`ClaudeCodeDriverOptions.envAllowlist` carries additional variable names
 through the driver-authored manifest's `envNames`; the shared surface
 passes those names to `buildTools`. The manifest also captures the
 comma- or whitespace-separated names in `CQ_RUN_ENV_PASSTHROUGH`, so

@@ -1,8 +1,12 @@
-// Child-process mechanics for the subprocess driver — T1.5 slice 1.
+// Child-process mechanics for the Claude Code lane — Phase 1.9 (the merged
+// lane's ONE I8-exempt file: the CLI transport's spawn + SIGTERM→SIGKILL
+// grace ladder, consolidated from the former subprocess lane's process.ts,
+// plus the SDK transport's cancellation-root wiring, consolidated from the
+// former claude-agent lane's process.ts).
 //
 // I8 EXEMPTION (the ONE file under src/driver/** allowed to own scheduling
-// primitives — the driver-hygiene scan exempts exactly this path,
-// src/driver/subprocess/process.ts): the SIGTERM→SIGKILL grace ladder lives
+// primitives — the driver-hygiene scan exempts exactly this path pattern,
+// src/driver/<name>/process.ts): the SIGTERM→SIGKILL grace ladder lives
 // here because here the kernel has ALREADY DECIDED to kill (the governed
 // RunOptions.signal fired — I8: the governor decides WHEN to
 // abort, the driver only obeys) and this helper only EXECUTES that decision
@@ -639,4 +643,71 @@ function fireRung(
   } catch {
     // deliberately swallowed — the ladder continues to the next rung
   }
+}
+
+// ---------------------------------------------------------------------------
+// abortRootFollowing — the SDK transport's cancellation-root wiring
+// ---------------------------------------------------------------------------
+//
+// The SDK transport owns exactly one machine from the I8-exempt family: the
+// construction of the SDK query's cancellation root (`Options.abortController`
+// — "Controller for cancelling the query. When aborted, the query will stop
+// and clean up resources", claude-agent-sdk). The SDK transport (sdk.ts)
+// decides NOTHING about WHEN to abort: it forwards the `RunOptions.signal`
+// it received (seam v2 — the caller passes the governed rung-1 signal
+// explicitly) and this helper only WIRES that signal into the root the SDK
+// watches. No timer, no deadline, no retry lives here — a signal that never
+// fires produces a query that never aborts, which is the point: outside a
+// governed run there is no cancellation source and the run is simply
+// un-abortable by us.
+//
+// DD-1 SPIKE RESULT (T1.6, 2026-09-14 — docs/dd-1-abort-spike.md): the
+// question this mechanism poses was measured LIVE on this lane against the
+// Z.AI anthropic-compat endpoint: a governed abort settles ≈2.0 s after the
+// signal (2006 / 2008 ms, two samples — the SDK's CLI-worker teardown), with
+// NO transcript growth and NO surviving worker process over the 5 s
+// post-abort poll. Verdict: abort stops spend client-side on this lane; the
+// rung-1 → rung-2 grace default derived from this measurement
+// (DEFAULT_ABORT_GRACE_MS = 5000, src/kernel/governor.config.ts) leaves
+// ≈2.5× headroom over it. Provider-side metering of tokens already in flight
+// when the socket died remains unobservable from any client — the spike's
+// claim is deliberately scoped to what was measured.
+
+/** One wired cancellation root plus the teardown for its signal listener. */
+export interface AbortRoot {
+  /** The root the SDK query watches (`Options.abortController`). */
+  readonly controller: AbortController;
+  /** Detach the governed-signal listener (call when the query settles). */
+  dispose(): void;
+}
+
+/**
+ * Wire a governed signal into a fresh SDK cancellation root.
+ *
+ *   - `signal === undefined` (an un-governed run) → `undefined`: the query
+ *     runs with no cancellation source at all.
+ *   - an already-fired signal → an already-aborted root (the query's own
+ *     abort handling settles it immediately).
+ *   - otherwise the root aborts exactly when the governed signal fires
+ *     (rung 1, the governor's decision), once, and `dispose()` detaches.
+ */
+export function abortRootFollowing(signal: AbortSignal | undefined): AbortRoot | undefined {
+  if (signal === undefined) {
+    return undefined;
+  }
+  const controller = new AbortController();
+  const onAbort = (): void => {
+    controller.abort();
+  };
+  if (signal.aborted) {
+    onAbort();
+    return { controller, dispose: (): void => undefined };
+  }
+  signal.addEventListener('abort', onAbort, { once: true });
+  return {
+    controller,
+    dispose: (): void => {
+      signal.removeEventListener('abort', onAbort);
+    },
+  };
 }

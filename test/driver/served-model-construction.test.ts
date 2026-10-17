@@ -31,7 +31,7 @@ describe('served-model real construction paths', () => {
     async (variant) => {
       const root = await fixture();
       // The FACTORY is the served-model hook (ADR-0002 §2.6), so the real
-      // construction path under test is factory → subprocess lane over the
+      // construction path under test is factory → claude-code lane over the
       // fake CLI. The lane binding is explicit factory config (the
       // conservative defaults never resolve to a host-CLI lane).
       const binary = [
@@ -46,7 +46,7 @@ describe('served-model real construction paths', () => {
 
       // The op intentionally summarizes driver failures without their error
       // text. Observe the REAL wrapper verdict without replacing construction,
-      // the subprocess, or its run result. A removed wrap leaves the control
+      // the CLI transport, or its run result. A removed wrap leaves the control
       // green, but the treatment's op status becomes ok and fails below.
       const verdicts: WorkerResult[] = [];
       const wrap = servedModel.withServedModelAssertion;
@@ -62,9 +62,9 @@ describe('served-model real construction paths', () => {
       });
       const op = makeAgenticRemediation(
         createDriverFactory({
-          bindings: { remediator: { construction: 'subprocess' } },
+          bindings: { remediator: { construction: 'claude-code' } },
           lanes: {
-            subprocess: {
+            claudeCode: {
               binary,
               sessionsDir: join(root, 'sessions'),
               routingTable: {
@@ -132,13 +132,13 @@ describe('served-model real construction paths', () => {
       // S4b-B2 (ADR-0002 §2.3/§2.5): the dispatch input's driver section is
       // the factory's RESOLUTION INPUT ({provider, model} — plan data names
       // no executable); the lane knobs (binary/routing table/sessions dir)
-      // moved into DriverFactoryConfig.lanes.subprocess, and the CONFIGURED
+      // moved into DriverFactoryConfig.lanes.claudeCode, and the CONFIGURED
       // factory is bindingsFromDispatch's second argument. The factory owns
       // the served-model assertion.
       const drivers = createDriverFactory({
-        bindings: { fixer: { construction: 'subprocess' } },
+        bindings: { fixer: { construction: 'claude-code' } },
         lanes: {
-          subprocess: {
+          claudeCode: {
             binary: [
               'env',
               ...(variant === 'TREATMENT' ? ['FAKE_AGENT_SERVED_MODEL=remapped'] : []),

@@ -267,7 +267,7 @@ import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
 import { validateStructured } from '../common/structured.js';
-import { buildChildEnv } from '../subprocess/process.js';
+import { buildChildEnv } from '../claude-code/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,

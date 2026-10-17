@@ -1,0 +1,45 @@
+{
+  "label": "agent-sdk frames, SDK >=0.3.162 stop_reason vocabulary, <=0.3.301 structured_output delivery shape",
+  "frames": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "rec-sdk-refusal-1",
+      "model": "claude-sonnet-4-5",
+      "mcp_servers": [],
+      "tools": ["StructuredOutput"]
+    },
+    {
+      "type": "assistant",
+      "session_id": "rec-sdk-refusal-1",
+      "message": {
+        "id": "msg_rec_sdk_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5",
+        "content": [{ "type": "text", "text": "I can't help with that request." }],
+        "stop_reason": "refusal",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 9,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "rec-sdk-refusal-1",
+      "stop_reason": "refusal",
+      "usage": {
+        "input_tokens": 12,
+        "output_tokens": 9,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "structured_output": { "answer": "I can't help with that request.", "confidence": 1 }
+    }
+  ]
+}

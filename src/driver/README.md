@@ -56,7 +56,7 @@ edit inside a later goal.
 `src/driver/types.ts` sits INSIDE the vendor-import ban (eslint rule
 `cq/no-vendor-sdk-in-kernel`, same scope as `src/kernel/**`). The three
 driver implementations under `src/driver/drivers/` (in-process SDK,
-agent-SDK, subprocess CLI) adopt vendors deliberately and are NOT covered.
+the Claude Code CLI/SDK transports, ACP) adopt vendors deliberately and are NOT covered.
 
 ## First-party driver: `ai-sdk` (T1.4)
 
@@ -190,127 +190,168 @@ docs/reverify-2026-09.md with the copyright notice preserved there;
 values as-of 2026-09). `costUSD` is absent when the map does not know the
 model — the driver never fabricates USD.
 
-## First-party driver: `subprocess` (T1.5)
+## First-party driver: `claude-code` (Phase 1.9 — the D-E′ consolidation)
 
-`src/driver/subprocess/` — the null-hypothesis floor: drive an existing
-agent CLI headless (`claude -p …` by default) as a worker on the frozen
-seam. One spawn per run, no daemon, no pooling; if a stock CLI can be a
-worker, the toolkit's value is not "you can run Claude headless".
+`src/driver/claude-code/` — ONE cq-owned lane for the Claude Code substrate
+(owner ruling D-E′, option A), merging the former `subprocess` (T1.5) and
+`claude-agent` (T1.6) lanes. CLI PRIMARY, Agent SDK OPTIONAL: the substrate
+path is CONFIGURATION (`transport: 'cli' | 'sdk'`, default `'cli'`), never
+a src literal. One spawn/query per run, no daemon, no pooling, no retries.
 
-Files:
+Files (what the merge SHARES — one implementation each):
 
-- `index.ts` — `SubprocessDriver implements Driver` (constructor options:
-  `binary?` default `'claude'`, `routingTable?`,
-  `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
-  `harnessConfig?`, `pricing?`, `envAllowlist?`, `toolSurface?` (default
-  `'harness'`; `'stock'` is the D6 null-hypothesis mode, reachable only by
-  constructing the class directly), and a `spawn?` override hook for
-  tests). Before the CLI receives the JSON Schema, the driver
-  removes `$schema` properties and absolute `http(s)://json-schema.org/`
-  values under `$ref`, `$dynamicRef`, and `$recursiveRef` (`stripMetaSchema`).
-- `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
-  `defaultRoutingTable()`, `routeFor`). Endpoints are anthropic-compat
-  (zai / deepseek / anthropic, values from provider docs, as-of
-  2026-09); the endpoint is injected purely through env
-  (`ANTHROPIC_BASE_URL` + auth-token vars), the model rides `--model`.
-  THE FOOTGUN RULE: an unknown model name THROWS before dispatch —
-  DeepSeek-style gateways silently remap unknown names to their default
-  model, and a silently-wrong model poisons every downstream fact.
-  Routes carry env var NAMES only, never key values.
-- `process.ts` — child-process mechanics, and the ONE file under
-  `src/driver/**` exempt from the I8 hygiene scan
-  (`driver/<name>/process.ts`): `spawnManaged` (shell-less spawn,
-  line-streamed stdout, prompt via stdin, spawn failures surfaced as
-  data) and `terminateGracefully` — the SIGTERM→SIGKILL grace ladder
-  that EXECUTES an already-decided kill (rungs observable via `onRung`
-  markers; grace delays injectable for tests). The governor decides
+- `index.ts` — `ClaudeCodeDriver implements Driver`: the transport
+  selection over the shared knobs (`routingTable?`, `sessionsDir?`,
+  `harnessConfig?`, `pricing?`, `envAllowlist?`) plus per-transport knobs
+  (CLI: `binary?`, `termGraceMs?`/`killGraceMs?`, `toolSurface?` — default
+  `'harness'`, `'stock'` is the D6 null-hypothesis EVAL mode, reachable
+  only by constructing the class directly — and a `spawn?` test seam;
+  SDK: `sdkLoader?`). An unknown transport value throws at construction.
+- `routing.ts` — THE ONE env-based routing table as CONFIG
+  (`RoutingTable`, `defaultRoutingTable()`, `resolveRoute`): zai /
+  deepseek / anthropic anthropic-compat endpoints (provider docs,
+  as-of 2026-09); the endpoint is injected purely through env
+  (`ANTHROPIC_BASE_URL` + auth-token vars); the model id rides through
+  UNCHECKED (the model allowlist is retired, ADR-0002 §2.6 + owner
+  override 2026-09-14 — the historical `models` rows are accepted table
+  data, never enforced). The SILENT-REMAP DEFENCE is the OBSERVED-MODEL
+  check: the lane surfaces the id the substrate reports as served into
+  `WorkerResult.model` and the shared served-model assertion fails a
+  remap post-hoc. Routes carry env var NAMES only, never key values.
+- `process.ts` — the ONE I8-exempt file for the lane
+  (`driver/<name>/process.ts`): the CLI transport's `spawnManaged`
+  (shell-less spawn, line-streamed stdout, prompt via stdin, spawn
+  failures surfaced as data) + `terminateGracefully` (the
+  SIGTERM→SIGKILL grace ladder that EXECUTES an already-decided kill;
+  rungs observable, grace delays injectable) AND the SDK transport's
+  cancellation-root wiring (`abortRootFollowing`). The governor decides
   WHEN (the governed `RunOptions.signal`); this file only obeys.
+- `usage.ts` — THE ONE worker-accounting fold: the result frame's
+  `modelUsage` per-model token aggregates when well-shaped (the SDK's
+  camelCase aggregate vocabulary; subagent spend INCLUDED; tokens only —
+  cost stays derived), else the flat main-loop `usage`, else the Σ
+  assistant-frame usage. `usage-provenance` narration markers record the
+  surprising folds only (assistant fallback; an aggregate that includes
+  spend beyond the flat usage, naming the contributing models — absence
+  is the documented default-channel baseline, and the record's role-'tool'
+  shape stays "a tool ran"). `resumed-usage-semantics` markers record the
+  version-gated per-call-vs-cumulative boundary on resumed sessions (the
+  reported figure is recorded verbatim, never a fabricated delta —
+  session-cumulative on CLI ≥2.1.277-shaped pins, per-call before).
+  Lying numerics fold to the honest zero (#19-3); unmeasured verdicts
+  report the zero fold and NEVER a cost.
+- `failures.ts` — THE ONE error-class classifier (ADR-0002 §2.2 cut
+  order): oversized line → `harness`; `enforced_spend_limit_reached`, the
+  structured assistant `error:'rate_limit'` field, the CLI
+  "You've hit your … limit · resets …" result and the funded-allowance
+  prose rows → `quota` (+ the extractable reset instant in
+  `providerSignals.windows[*].resetAt`); `rate_limit_error` and the
+  throttle rows → `rate-limit` (retry-after in
+  `providerSignals.retryAfterMs` when the vendor states one); a
+  result-frame error → `provider-error`; the codex row (real usage folded,
+  non-zero exit, no result event) → `provider-error`; spawn/exit/crash
+  surfaces → `harness`. Anchored patterns only, never a numeric-status
+  scan.
+- `sessions.ts` — the ONE substrate-session sidecar protocol
+  (`CLI_SESSION_FILE` = `.cq-cli-session`), shared by both transports so
+  a record created by one resumes honestly on the other.
+- `verdict.ts` — the ONE stop-reason map and the ONE structured-output
+  judge. THE REFUSAL VOID (D-E′ F2): `stop_reason: 'refusal'` observed on
+  any assistant/result frame voids any structured payload outright —
+  error/`output-invalid`, the payload never reaches the seam, whatever
+  its shape (the pre-0.3.302 defect delivered refused responses THROUGH
+  `structured_output`); recorded, version-labelled fixtures pin the
+  behavior for both transports (`test/fixtures/claude-code/`). A refusal
+  on a schema-less run is a normal model outcome (the transcript carries
+  it) with the `model-refusal` narration marker as the observable fact.
+  The cap subtypes (`error_max_turns` / `error_max_budget_usd`) classify
+  `budget` on BOTH transports (one stop-reason map).
+- `cli.ts` — the CLI transport (PRIMARY): the headless
+  `claude -p …` stream-json path.
+- `sdk.ts` — the SDK transport (OPTIONAL): the agent-SDK host
+  (`query({ prompt, options })` of `@anthropic-ai/claude-agent-sdk`).
 
-Child environment is DEFAULT-DENY (issue #183) for the subprocess CLI,
-the claude-agent SDK child, the ACP vendor process, and every harness `run`
-child. All use the shared `buildChildEnv` policy. ACP configures its vendor
-process with `envNames`; its tools run in that vendor process, separately
-from the shared harness tool core.
-The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
-terminal + locale basics, XDG dirs, network-egress/TLS config
-(`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
-from the entry process env. By default it excludes `GH_TOKEN`, `*_API_KEY`,
-`*_SECRET`, `AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH`.
-Per-route endpoint/auth vars are composed explicitly into the agent CLI
-or SDK child's environment and always win over the allowlist, so configured
-driver keys still reach that worker. These credential overrides are not
-passed to harness `run` children. A deployment extends the copied names
-with `SubprocessDriverOptions.envAllowlist` or
-`ClaudeAgentDriverOptions.envAllowlist` (names only, never values) —
-e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
-the entry process env therefore cannot reach a `spawnManaged` worker,
-where prompt-injected PR content could exfiltrate it. TWO CAVEATS (issue
-#183 r1/r2): proxy vars are inherited because egress needs them and their
-URL MAY embed credentials a worker can read (leave them unset to avoid
-that); and `HOME` stays inherited because the CLI reads its own config
-there, so a worker with file-read tools can still reach
-`~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
-boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
+Child environment is DEFAULT-DENY (issue #183) for the CLI, the SDK child,
+the ACP vendor process, and every harness `run` child. All use the shared
+`buildChildEnv` policy (this lane's `process.ts`; ACP imports it from
+here). The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST`
+(PATH/HOME/SHELL/USER/temp dirs, terminal + locale basics, XDG dirs,
+network-egress/TLS config (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy
+vars), Windows equivalents) from the entry process env. By default it
+excludes `GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`, `NPM_TOKEN`,
+`SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH` — and nothing `CQ_*` ever
+reaches a worker (the sandbox policy knobs are launcher-side only). Per-
+route endpoint/auth vars are composed explicitly into the substrate
+child's environment and always win over the allowlist; these credential
+overrides are not passed to harness `run` children. A deployment extends
+the copied names with `ClaudeCodeDriverOptions.envAllowlist` (names only,
+never values). TWO CAVEATS (issue #183 r1/r2): proxy vars are inherited
+because egress needs them and their URL MAY embed credentials a worker can
+read (leave them unset to avoid that); and `HOME` stays inherited because
+the CLI reads its own config there, so a worker with file-read tools can
+still reach `~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, …
+— that boundary is the `ToolPolicy`/sandbox surface, not this env
+allowlist.
 
-Both drivers carry their explicit `envAllowlist` through the harness
-manifest's `envNames`. The manifest also captures names from the deployment
-variable `CQ_RUN_ENV_PASSTHROUGH` (comma- or whitespace-separated names),
-so those opt-ins survive the stdio startup scrub. The shared core filters
-the environment at every `run` execution, including in-process SDK tools and direct `buildTools`
-calls; the stdio server's startup scrub is an additional boundary. Both
-closed-form git commands and shell commands receive the filtered env.
+The lane carries its explicit `envAllowlist` through the harness
+manifest's `envNames`. The manifest also captures names from the
+deployment variable `CQ_RUN_ENV_PASSTHROUGH` (comma- or
+whitespace-separated names). The shared core filters the environment at
+every `run` execution, including in-process SDK tools and direct
+`buildTools` calls; the stdio server's startup scrub is an additional
+boundary.
 
-Argv surface (headless reference, harness mode — the default): `-p` (prompt
-rides stdin), `--output-format stream-json`, `--verbose` (the real CLI
-refuses stream-json print mode without it — found live, CLI 2.1.270, T1.6
-slice 4), `--json-schema <schema>` when the invocation carries
-`outputSchema`, then the
-CLOSED SURFACE (W1.4): `--tools ""` (builtins absent, not denied),
+CLI argv surface (headless reference, harness mode — the default): `-p`
+(prompt rides stdin), `--output-format stream-json`, `--verbose` (the real
+CLI refuses stream-json print mode without it — found live, CLI 2.1.270),
+`--json-schema <schema>` when the invocation carries `outputSchema`, then
+the CLOSED SURFACE (W1.4): `--tools ""` (builtins absent, not denied),
 `--setting-sources ""` (no ambient settings), `--strict-mcp-config` (no
-ambient MCP servers), `--mcp-config <sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json`
-(unique per run, created `O_EXCL` 0600; a name collision is a hard error)
-when the selected surface is non-empty, and `--allowedTools` — ALWAYS
-present, ONE space-joined argv element (comma-joining silently pre-approves
-only the first entry) holding the qualified spellings
+ambient MCP servers), `--mcp-config
+<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json` (unique per run,
+created `O_EXCL` 0600; a name collision is a hard error) when the selected
+surface is non-empty, and `--allowedTools` — ALWAYS present, ONE
+space-joined argv element holding the qualified spellings
 `mcp__cq-harness__<name>` of harness ∩ the frozen ToolPolicy (empty = mode
 `none`). Then `--model <route.model>` and `--resume <cli-session-id>` on
 sessionRef resume. No undocumented flags: `--permission-prompts none` and
-`--bare` were removed (issue #19). Stock mode keeps the legacy argv
-(no closed-surface flags; harness names in `--allowedTools`, inert).
+`--bare` were removed (issue #19). Stock mode keeps the legacy argv (no
+closed-surface flags; harness names in `--allowedTools`, inert) — eval
+only, never a factory or plan key, not admissible in production.
 
-Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A):
+The SDK transport's closed-surface counterpart: `tools: []` (built-ins
+off), `settingSources: []` + `strictMcpConfig: true` — ambient workspace
+settings (`.claude/settings.json`, `.mcp.json`) and the account's
+claude.ai connectors are structurally EXCLUDED (W1.4 live leg A.5j);
+`permissionMode: 'default'` headless (un-pre-approved tools auto-denied,
+the result's `permission_denials` map into `WorkerResult.denials`);
+`env` = the default-deny child env + the route credentials;
+`outputFormat: { type: 'json_schema' }` when the invocation carries a
+schema (schema stripped of meta-URIs first, same as the CLI transport);
+`Options.resume` from the shared sidecar on resume.
 
-- The shared core `src/harness/surface.ts` (vendor-free) owns naming
-  (`cq-harness`, `mcp__cq-harness__<name>`), selection, the strict
-  driver-authored manifest (`buildManifest` — the only constructor:
-  workspace realpath, sandbox level, harness ∩ policy, harness config, env
-  names), the bound serialized surface (`createHarnessSurface`), the MCP
-  `CallToolResult` mapping, the stable harness denial prefixes
-  (`isHarnessDenial`) and the init-surface comparator. BOTH lanes serve it:
-  claude-agent in-process, subprocess over stdio; a two-level parity test
-  (`test/driver/harness-parity.test.ts`) pins identical CallToolResults and
-  identical `WorkerResult.denials`.
-- The stdio server `src/harness/mcp/` (bin `cq-harness-mcp`) is a
-  hand-rolled closed subset of JSON-RPC 2.0 (initialize / initialized /
-  cancelled / ping / tools/list / tools/call; version negotiation; 1 MiB
-  line cap) — ZERO runtime dependencies; `@modelcontextprotocol/sdk` is a
-  devDependency conformance client only. Toolkit dispatch launches it as
-  `process.execPath` + the module-relative `dist/harness/mcp/bin.js` —
-  never through PATH, npx or plan data. It re-validates the manifest at
-  startup (strict schema, realpath identity, surface equality), chdirs to
-  the workspace and scrubs its env to the default child-env allowlist plus
-  the lane's `envAllowlist` names, or exits 78 before `initialize`.
-- The driver asserts the FIRST `system/init` fail-closed (exactly
-  `cq-harness`/connected and exactly the qualified selected tools, plus the
-  CLI's `StructuredOutput` under `--json-schema`), classifies `is_error`
-  harness results three ways (harness denial by prefix / CLI permission
-  denial / anything else = transport failure), and settles every harness
-  failure as stopReason `error` with a `HARNESS_ERROR_PREFIX` cause and an
-  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field —
-  shipped with seam v2).
-- Named limitations: a same-uid `run` command can still read an
-  ancestor's environment (OS confinement, T1.8); a server killed without
-  SIGTERM orphans an in-flight command group until it exits on its own.
+Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A) — BOTH
+transports serve the SAME shared core `src/harness/surface.ts`:
+`buildManifest` (workspace realpath, sandbox level, harness ∩ policy,
+harness config, env names) → CLI over stdio (`cq-harness-mcp`,
+`src/harness/mcp/`, launched as `process.execPath` + the module-relative
+`dist/harness/mcp/bin.js` — never PATH/npx/plan data; the server
+re-validates the manifest, chdirs, scrubs its env, or exits 78 before
+`initialize`), SDK in-process (`createSdkMcpServer` + `tool(...)`, handler
+`surface.call` — byte-identical CallToolResults; the two-level parity test
+`test/driver/harness-parity.test.ts` pins it). The driver asserts the
+FIRST `system/init` fail-closed (exactly `cq-harness`/connected and
+exactly the qualified selected tools, plus `StructuredOutput` when
+structured output is requested), classifies `is_error` harness results
+three ways (harness denial by prefix / permission denial / anything else
+= transport failure, CLI transport), and settles every harness failure as
+stopReason `error` with a `HARNESS_ERROR_PREFIX` cause and an
+`errorClass: 'harness'` narration marker. Named limitations: a same-uid
+`run` command can still read an ancestor's environment (OS confinement);
+a server killed without SIGTERM orphans an in-flight command group until
+it exits on its own. The SDK transport's sandbox option
+(`sandbox: { enabled: true, failIfUnavailable: false }`) is
+DEFENSE-IN-DEPTH only — enforcement stays in the harness tools.
 
 The shared `run` tool accepts six closed-form `git diff` commands and
 three closed-form `git log` commands, each still requiring an allowlist
@@ -320,211 +361,78 @@ for these commands and ordinary shell commands: bounded output, timeout,
 cancellation, and POSIX process-group termination. See the exact forms and
 config pins in [the harness README](../harness/README.md).
 
-TRUST STATEMENT (issue #28's subprocess half): in harness mode the harness
-enforces the TOOL-level sandbox mapping on this lane (read-only denials,
-workspace containment, path/command allowlists); OS confinement stays
-unenforced, so a requested level with a non-empty surface records
-`{cq: 'sandbox-level-unenforced', level, layer: 'os'}`. `run` commands keep
-host privileges (the harness trust boundary). In stock mode the CLI's own
-permission model governs and the legacy marker (no `layer`) records that
-nothing was enforced by the harness.
+TRUST STATEMENT (issue #28): in harness mode the harness enforces the
+TOOL-level sandbox mapping on this lane (read-only denials, workspace
+containment, path/command allowlists); OS confinement stays unenforced,
+so a requested level with a non-empty surface records
+`{cq: 'sandbox-level-unenforced', level, layer: 'os'}` (CLI transport).
+`run` commands keep host privileges (the harness trust boundary). In
+stock mode the CLI's own permission model governs and the legacy marker
+(no `layer`) records that nothing was enforced by the harness.
 
-Event mapping (stream-json → seam): init `session_id` → CLI session id
-(persisted post-settle to the sessions-store sidecar
-`<sessionsDir>/<sessionId>.cq-cli-session` (`CLI_SESSION_FILE` in
-`index.ts`) — see the isolation paragraph for why it no longer lives in the
-workspace); init/result `model` → the OBSERVED served model id, surfaced as
-`WorkerResult.model`; assistant text → transcript; errored `tool_result`
-events → frozen `{tool, reason}` denials; the terminal `result` event →
-frozen Usage (`input_tokens`/`output_tokens`/`cache_read_input_tokens`/
-`cache_creation_input_tokens`), `structured_output` →
-`structuredOutput`, status → stopReason. Non-JSON lines become narration
-(`toolName:'cli-narration'`), never a crash.
-
-Pricing attribution: `costUSD` is derived over the OBSERVED served model id
-(`{ ...modelSpec, model: servedModel ?? modelSpec.model }`; the provider
-handle stays `modelSpec.provider`) — a gateway that silently remaps is
-priced off the id the CLI actually reported, and pricing the requested id
-would attribute the wrong rates. A served/reported mismatch with the
-requested id is recorded as a `served-model-mismatch` narration marker
-(issue #19): the conformance suite fails a mismatching run loudly (leg m);
-production runs record the mismatch and price off the served id. Absent
-when the map does not know the served id — the driver never fabricates USD.
-
-Budget mapping (I8, the honest floor): a headless CLI has no mid-run
-token hook — `Budget.maxTokens` is checked only against the folded
-result usage (it can classify a finished run `budget`; stopping early on
-tokens is governor/admission business). `wallClockMs` is the governor's
-ladder (the driver forwards its signal to the kill ladder only);
-`maxAttempts` means one spawn; `maxUsd` is caller-side derived
-accounting. Stop reasons: governed abort → `aborted`; folded usage ≥
-`maxTokens` → `budget`; result `success` → `complete`; any other result
-status, no result event, or a spawn failure → `error`. Once spawned,
-`run()` never throws past the seam — and a SYNCHRONOUS spawn failure is a
-verdict too: it returns stopReason `error` with the failure narrated,
-never a rejection. Every `error` verdict also populates
-`WorkerResult.error` (bounded, secret-redacted): the cause from the CLI
-result event when it carries one, else the child's exit code/signal or
-spawn error, plus the retained stderr tail — so a 0-token failure is
-diagnosable from the journal (#208).
+Budget mapping (I8, the honest floor): the lane owns NO wall clock — the
+governed `RunOptions.signal` is forwarded to exactly one cancellation
+mechanism per transport (the CLI kill ladder / the SDK query's
+`abortController`); `Budget.wallClockMs` is the governor's ladder's
+business. The DD-1 spike MEASURED the SDK transport's cooperative abort
+settle live: ≈2.0 s after the signal, no post-abort transcript growth, no
+surviving worker (docs/dd-1-abort-spike.md). `Budget.maxTokens` is
+enforced POST-HOC over the shared usage fold on both transports (it
+classifies a finished run `budget`; stopping early on tokens is
+governor/admission business). `maxAttempts` means one spawn/query;
+`maxUsd` is caller-side derived accounting. Stop reasons (the ONE map):
+governed abort → `aborted`; harness failure → `error`; folded usage ≥
+`maxTokens` or a cap subtype → `budget`; result `success` → `complete`;
+anything else → `error`. Once dispatched, `run()` never throws past the
+seam — and a SYNCHRONOUS spawn failure is a verdict too (CLI transport).
+Every `error` verdict populates `WorkerResult.error` (bounded,
+secret-redacted; #208).
 
 Isolation (I6): no `sessionRef` → fresh temp workspace +
-`SessionStore.create` (cwd = workspace); `sessionRef` →
-`SessionStore.load` resumes the SAME workspace and passes `--resume`
-when the sessions store carries the CLI session sidecar for that
-sessionId (`<sessionsDir>/<sessionId>.cq-cli-session`, issue #26 design
-(b) — RELOCATED out of the model-visible workspace, whose earlier
+`SessionStore.create` (cwd = workspace; a workspace binding creates the
+fresh record IN realpath(workspace.path) and a resume/workspace mismatch
+throws pre-dispatch); `sessionRef` → `SessionStore.load` resumes the SAME
+workspace and passes the substrate resume handle when the sessions store
+carries the sidecar (`<sessionsDir>/<sessionId>.cq-cli-session`, issue #26
+design (b) — RELOCATED out of the model-visible workspace, whose earlier
 sidecar placement let the model read or alter its own resume handle
-through the very tools the policy hands it; keyed by sessionId it is
-exactly as precise and out of reach); a sidecar-less session resumes the
-workspace only — an honest partial continuation; unknown
+through the very tools the policy hands it); a sidecar-less session
+resumes the workspace only — an honest partial continuation; unknown
 sessionRef throws. Session turns persist in our `SessionMessage`
-vocabulary only.
+vocabulary only (`cli-narration` / `agent-narration` are the two
+transports' narration toolNames).
 
-Process groups (#19): on POSIX the child is spawned `detached` (its own
-process-group leader) and the driver's kill signals the WHOLE group
-(`process.kill(-pid)`), so agent-spawned descendants die with the CLI;
-Windows has no Job Object in v1 (descendants can survive there —
-recorded limitation in `src/driver/subprocess/process.ts`). Stdout/stderr
-retention is bounded to a 1 MiB tail (`DEFAULT_MAX_RETAINED_BYTES`,
-`SpawnOptions.maxRetainedBytes`) with the dropped byte count on
-`ProcessClose.droppedBytes` — the verdict path folds evidence from the
-line callbacks, so the cap bounds the buffer, never the evidence.
+Process groups (#19): on POSIX the CLI child is spawned `detached` (its
+own process-group leader) and the kill signals the WHOLE group, so
+agent-spawned descendants die with the CLI; Windows has no Job Object in
+v1 (descendants can survive there — recorded limitation in
+`src/driver/claude-code/process.ts`; the supported descendant-cleanup
+guarantee is POSIX-only until independently proven on Windows).
+Stdout/stderr retention is bounded to a 1 MiB tail
+(`DEFAULT_MAX_RETAINED_BYTES`, `SpawnOptions.maxRetainedBytes`) with the
+dropped byte count on `ProcessClose.droppedBytes`.
 
-## First-party driver: `claude-agent` (T1.6)
+Optional-peer semantics (sdk transport): `@anthropic-ai/claude-agent-sdk`
+is an optional peerDependency, NEVER a dependency. The SDK is loaded
+lazily by dynamic import at run() time via the `sdkLoader` seam (tests
+inject a plain-object mock) and feature-detected against the driven
+surface (query / tool / createSdkMcpServer) — capability detection, never
+version checks. A peer that is absent (or misshaped) is a PRE-DISPATCH
+throw naming the peer and the install command. The repo builds and the
+whole suite passes with the peer ABSENT; the `install-matrix` workflow
+proves both halves on every PR. Refusal detection is the D-E′ F2
+alternative to a pin bump: the lane detects `stop_reason: 'refusal'`
+structurally (available in the vendor vocabulary since the 0.3.162-era
+frames) instead of requiring ≥0.3.302 pins — the recorded fixtures pin
+both the detection and the void.
 
-`src/driver/claude-agent/` — the THIRD lane: drive the agent-SDK host
-(`query({ prompt, options })` of `@anthropic-ai/claude-agent-sdk`) as a
-governed worker on the frozen seam. One query per run, no daemon, no
-pooling, no retries.
-
-Files:
-
-- `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
-  `sdkLoader?`, `endpointTable?`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`, `envAllowlist?`. The structured-output
-  schema rides the INVOCATION (`OpInvocation.outputSchema`, seam v2) and
-  activates the SDK's native `outputFormat: { type: 'json_schema' }`.) The env option contains
-  additional host variable names exposed to the SDK child and harness
-  `run` children through the manifest; invalid names are rejected at
-  construction. Before the CLI receives the schema, the
-  driver removes `$schema` properties and absolute
-  `http(s)://json-schema.org/` values under `$ref`, `$dynamicRef`, and
-  `$recursiveRef` (`stripMetaSchema`).
-- `routing.ts` — PROVIDER-only endpoint routing as CONFIG
-  (`EndpointTable`, `defaultEndpointTable()` — zai / deepseek / anthropic,
-  values from provider docs, as-of 2026-09; `resolveEndpoint`). Resolves
-  base URL + auth env NAME for the provider handle; unknown provider
-  throws pre-dispatch. Env var NAMES only, never key values.
-- `process.ts` — the I8 scan's exempt file for this lane: construction of
-  the SDK query's cancellation root (`Options.abortController`), wired
-  from the governed signal. The driver decides nothing about WHEN to
-  abort; the helper only obeys.
-
-Optional-peer semantics: `@anthropic-ai/claude-agent-sdk` is an optional
-peerDependency (`"peerDependenciesMeta": { "optional": true }`), NEVER a
-dependency. The SDK is loaded lazily by dynamic import at run() time via
-the `sdkLoader` constructor seam (tests inject a plain-object mock; the
-conformance suite never touches the network or a real CLI) and
-feature-detected against the driven surface (query / tool /
-createSdkMcpServer) — capability detection, never version checks. A peer
-that is absent (or misshaped) is a PRE-DISPATCH throw naming the peer and
-the install command — the same posture as a missing API key: fail loudly
-before any session exists, never a crash mid-run. Install the peer with:
-
-```
-npm install --save-optional @anthropic-ai/claude-agent-sdk@0.3.270
-```
-
-The repo builds and the whole suite passes with the peer ABSENT; the
-`install-matrix` workflow proves both halves on every PR.
-
-NO MODEL ALLOWLIST (owner override 2026-09-14): any model id reachable
-over an anthropic-compat endpoint is permitted. Routing is by PROVIDER
-only; the model id rides `Options.model` UNCHECKED — there is no
-routeFor-style throw on model names. The silent-remap defence is the
-OBSERVED-MODEL CHECK (conformance leg m): the driver surfaces the model
-id the agent reports as served (init frame `model`, overwritten per
-assistant frame by the response-carried `message.model`) into
-`WorkerResult.model`, and the suite fails a lane that remaps silently or
-cannot observe. A pre-dispatch allowlist (the subprocess lane's choice)
-and post-dispatch observation are alternative defences; this lane
-deliberately takes the second.
-
-Tool policy mapping (the governed surface, exact): built-in agent tools
-are disabled wholesale (`tools: []`), and `settingSources: []` +
-`strictMcpConfig: true` keep the account's claude.ai connectors off the
-surface under subscription auth (W1.4 live leg A.5j); the FIRST init frame
-is asserted fail-closed against the expected surface. The ONLY surface is
-the harness read/edit/run surface — the shared core's bound surface
-(`src/harness/surface.ts`), registered as the SDK's in-process custom tools
-(`createSdkMcpServer` + `tool(...)` under one server name, addressable as
-`mcp__<server>__<name>` in `allowedTools`). Mode `allowlist` (default) →
-harness ∩ `policy.allow`; `unrestricted` → the whole harness surface;
-`none` → no server at all + empty `allowedTools`. `permissionMode` stays
-`default` in every mode — the surface restriction IS the policy: headless,
-an un-pre-approved tool is auto-denied (never prompted), and those
-SDK-side refusals (the result's `permission_denials`) map into
-`WorkerResult.denials` next to the harness denials observed at the
-execute boundary (each denial is also the tool's error output text, so
-the model can adapt).
-
-Sandbox mapping (honest): `none` → no sandbox option; `workspace-write` /
-`read-only` → `sandbox: { enabled: true, failIfUnavailable: false }` —
-the agent's OS sandbox is DEFENSE-IN-DEPTH only. Enforcement stays in the
-harness tools (workspace containment, allowlists, the read-only denial
-reasons); a platform without sandbox support degrades to that documented
-enforcement instead of failing the run on a capability we do not rely on.
-
-Budget mapping (I8): the driver owns NO wall clock — the governed
-`RunOptions.signal` (the caller passes the rung-1 signal explicitly,
-seam v2) is forwarded to the SDK query's
-cancellation root and `Budget.wallClockMs` is ignored (the governor's
-ladder decides when). The DD-1 spike MEASURED this lane's cooperative
-abort settle live: ≈2.0 s after the signal, with no post-abort transcript
-growth and no surviving worker process (docs/dd-1-abort-spike.md).
-`Budget.maxTokens` has NO native SDK stop (the SDK's caps are turns, USD,
-and an alpha pacing budget — none is a token stop), so it is enforced the
-subprocess lane's way: post-hoc verdict classification over the folded
-result usage — it classifies a finished run `budget` but cannot stop one
-early. `maxAttempts` means one query; `maxUsd` is caller-side derived
-accounting.
-
-Stop reasons: governed abort (or abort-shaped failure) → `aborted`;
-folded usage ≥ `maxTokens`, or the SDK's own cap subtypes
-(`error_max_turns` / `error_max_budget_usd`) → `budget`; result `success`
-with `is_error` ≠ true → `complete`; any other result status, or no
-result event → `error`. Once dispatched, `run()` never throws past the
-seam.
-
-Isolation (I6): no `sessionRef` → fresh temp workspace +
-`SessionStore.create`; `sessionRef` → `SessionStore.load` resumes the
-SAME workspace and passes `Options.resume` when the sessions store
-carries the agent session sidecar for that sessionId
-(`<sessionsDir>/<sessionId>.cq-cli-session`, `AGENT_SESSION_FILE` —
-issue #26 design (b), matching the subprocess lane: RELOCATED out of the
-model-visible workspace, where the harness edit tool's `**/*` glob
-includes dotfiles and the earlier placement let the model read or alter
-its own resume handle; keyed by sessionId beside the session records the
-handle is exactly as precise and out of its reach; a sidecar-less
-session resumes the workspace only, an honest partial continuation);
-unknown sessionRef throws. Session turns persist in our
-`SessionMessage` vocabulary only. Structured output rides the SDK's
-NATIVE `outputFormat: { type: 'json_schema' }` path (the schema rides the
-INVOCATION); the result's `structured_output` is validated post-settle by
-the shared validator — a payload that fails settles the uniform
-error/`output-invalid` verdict, never trusted. Usage maps the result vocabulary (`input_tokens` /
-`output_tokens` / `cache_read_input_tokens` /
-`cache_creation_input_tokens`); `reasoning` is deliberately OMITTED —
-the SDK's `thinkingTokens` are already counted inside `output_tokens`,
-so a separate field would double-count every total (Budget.maxTokens
-classification). Invariant across the seam: `reasoning` is an `output`
-breakdown and must already be included in `output` — the frozen field
-stays optional for lanes that REPORT the breakdown, never for additive
-accounting. `costUSD` is
-NEVER reported on unmeasured error/abort verdicts — the SDK's own
-`total_cost_usd` estimate is deliberately not surfaced (a vendor-side
-cost figure would bypass the derived-only rule).
+Pricing attribution: `costUSD` is derived over the OBSERVED served model
+id (the provider handle stays `ModelSpec.provider`); a served/reported
+mismatch is recorded as a `served-model-mismatch` narration marker and
+the conformance suite fails it loudly (leg m). `costUSD` is NEVER
+reported on unmeasured error/abort verdicts, and the SDK's own
+`total_cost_usd` estimate is deliberately not surfaced — a vendor-side
+cost figure would bypass the derived-only rule.
 
 ## First-party driver: `acp` (T1.8)
 

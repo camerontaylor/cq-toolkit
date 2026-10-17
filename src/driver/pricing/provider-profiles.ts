@@ -302,7 +302,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
 
   'claude-subscription': {
     id: 'claude-subscription',
-    lanes: ['subprocess', 'claude-agent'],
+    lanes: ['claude-code'],
     accounting: 'quota',
     limitsKnown: true,
     cap: {
@@ -654,7 +654,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
 
   'codex-chatgpt': {
     id: 'codex-chatgpt',
-    lanes: ['subprocess'],
+    lanes: ['claude-code'],
     accounting: 'quota',
     // The CLI surfaces remaining usage only in an interactive TUI; a JSON
     // `codex exec --json` event stream carries no quota fields (RS-14 capture).
@@ -684,7 +684,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
     // NO provider errorSignals rule, deliberately — the empty array IS the
     // statement. The lane's documented failure default is REAL and already
     // implemented upstream: the seam's `classifyFailure`
-    // (src/driver/subprocess/index.ts, header-cut order case 5) classifies "a
+    // (src/driver/claude-code/failures.ts, cut order case 8) classifies "a
     // codex CLI that folded real usage and exited non-zero with no result event"
     // as `provider-error`. Recording it here was wrong twice over — a rule with no
     // discriminator is unreachable (every `firstMatchingRule` tier is gated on
@@ -698,7 +698,7 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
 
   'opencode-go': {
     id: 'opencode-go',
-    lanes: ['subprocess'],
+    lanes: ['claude-code'],
     accounting: 'quota',
     limitsKnown: true,
     cap: {

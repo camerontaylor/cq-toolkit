@@ -47,7 +47,10 @@ describe('real-process inventory', () => {
   test('the entry-point scan still finds the known process-backed suites', async () => {
     // A scan that silently matched nothing would make the check below vacuous.
     expect(await processBackedTestFiles()).toEqual(
-      expect.arrayContaining(['test/driver/subprocess.test.ts', 'test/ops/ratchet/git.test.ts']),
+      expect.arrayContaining([
+        'test/driver/claude-code/cli.test.ts',
+        'test/ops/ratchet/git.test.ts',
+      ]),
     );
   });
 

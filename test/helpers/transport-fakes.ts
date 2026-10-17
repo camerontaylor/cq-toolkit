@@ -8,8 +8,8 @@ import type {
   ManagedChild,
   ProcessClose,
   SpawnOptions,
-} from '../../src/driver/subprocess/process.js';
-import type { SpawnFn } from '../../src/driver/subprocess/index.js';
+} from '../../src/driver/claude-code/process.js';
+import type { SpawnFn } from '../../src/driver/claude-code/cli.js';
 
 export type JsonLineFrame = Record<string, unknown>;
 
