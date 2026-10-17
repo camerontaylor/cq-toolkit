@@ -1,0 +1,232 @@
+{
+  "source": "0e35cd11153fc7ad681f002d580b9b22feb22092",
+  "sha256": {
+    "author_quota.py": "541825982e1290f6828f23d845a543f227730e72f0682ba4ee3fd6b7a289882c",
+    "crq.py": "689ec8d49bd9d79521aeaa0cef92ebe4a69a5b488e3bfbc49dfe212a21c3a8d1"
+  },
+  "capture": {
+    "queue": {
+      "items": [
+        {
+          "id": "author-author-cycle-1",
+          "pr": 0,
+          "kind": "author",
+          "order": 1,
+          "state": "pending",
+          "cycles": [],
+          "author_cycles": [],
+          "attempts": [],
+          "requested_at": "2026-10-16T06:00:00Z",
+          "author": {
+            "request_id": "author-cycle-1",
+            "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "target": "origin/merge-queue",
+            "cycle": 1
+          },
+          "notes": [
+            "2026-10-16T06:00:00Z author-enrolled (request author-cycle-1): cycle 1, aaaaaaaaaa..bbbbbbbbbb \u2192 origin/merge-queue"
+          ]
+        }
+      ],
+      "starts": [],
+      "unknown": {
+        "retain": [
+          null,
+          false,
+          7
+        ]
+      },
+      "author_requests": {
+        "author-cycle-1": {
+          "request_id": "author-cycle-1",
+          "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target": "origin/merge-queue",
+          "cycle": 1,
+          "item": "author-author-cycle-1",
+          "created_at": "2026-10-16T06:00:00Z",
+          "state": "enrolled"
+        }
+      }
+    },
+    "first": {
+      "item": {
+        "id": "author-author-cycle-1",
+        "pr": 0,
+        "kind": "author",
+        "order": 1,
+        "state": "pending",
+        "cycles": [],
+        "author_cycles": [],
+        "attempts": [],
+        "requested_at": "2026-10-16T06:00:00Z",
+        "author": {
+          "request_id": "author-cycle-1",
+          "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target": "origin/merge-queue",
+          "cycle": 1
+        },
+        "notes": [
+          "2026-10-16T06:00:00Z author-enrolled (request author-cycle-1): cycle 1, aaaaaaaaaa..bbbbbbbbbb \u2192 origin/merge-queue"
+        ]
+      },
+      "created": true,
+      "message": "author author-author-cycle-1: enrolled cycle 1 (aaaaaaaaaaaa..bbbbbbbbbbbb \u2192 origin/merge-queue)"
+    },
+    "again": {
+      "item": {
+        "id": "author-author-cycle-1",
+        "pr": 0,
+        "kind": "author",
+        "order": 1,
+        "state": "pending",
+        "cycles": [],
+        "author_cycles": [],
+        "attempts": [],
+        "requested_at": "2026-10-16T06:00:00Z",
+        "author": {
+          "request_id": "author-cycle-1",
+          "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target": "origin/merge-queue",
+          "cycle": 1
+        },
+        "notes": [
+          "2026-10-16T06:00:00Z author-enrolled (request author-cycle-1): cycle 1, aaaaaaaaaa..bbbbbbbbbb \u2192 origin/merge-queue"
+        ]
+      },
+      "created": false,
+      "message": "author author-author-cycle-1: idempotent (already enrolled cycle 1)"
+    },
+    "refusal": "request_id 'author-cycle-1' is already enrolled with a different binding ({'base': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'head': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'target': 'origin/merge-queue', 'cycle': 1}); refusing to mutate an immutable request",
+    "plan": {
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "target": "origin/merge-queue",
+      "cycle": 1,
+      "branch": null,
+      "notes": [],
+      "label": "author review \u2014 cycle 1 aaaaaaaaaaaa..bbbbbbbbbbbb \u2192 origin/merge-queue"
+    },
+    "liveness": [
+      [
+        "managed",
+        false,
+        null,
+        "ambiguous"
+      ],
+      [
+        "managed",
+        false,
+        false,
+        "ambiguous"
+      ],
+      [
+        "managed",
+        false,
+        true,
+        "alive"
+      ],
+      [
+        "managed",
+        true,
+        null,
+        "harvest"
+      ],
+      [
+        "managed",
+        true,
+        false,
+        "harvest"
+      ],
+      [
+        "managed",
+        true,
+        true,
+        "alive"
+      ],
+      [
+        "legacy",
+        false,
+        null,
+        "ambiguous"
+      ],
+      [
+        "legacy",
+        false,
+        false,
+        "ambiguous"
+      ],
+      [
+        "legacy",
+        false,
+        true,
+        "alive"
+      ],
+      [
+        "legacy",
+        true,
+        null,
+        "ambiguous"
+      ],
+      [
+        "legacy",
+        true,
+        false,
+        "harvest"
+      ],
+      [
+        "legacy",
+        true,
+        true,
+        "alive"
+      ],
+      [
+        "invalid",
+        false,
+        null,
+        "ambiguous"
+      ],
+      [
+        "invalid",
+        false,
+        false,
+        "ambiguous"
+      ],
+      [
+        "invalid",
+        false,
+        true,
+        "alive"
+      ],
+      [
+        "invalid",
+        true,
+        null,
+        "ambiguous"
+      ],
+      [
+        "invalid",
+        true,
+        false,
+        "ambiguous"
+      ],
+      [
+        "invalid",
+        true,
+        true,
+        "alive"
+      ]
+    ],
+    "wrapper": [
+      "timeout",
+      "--foreground",
+      "--kill-after=60",
+      "75m",
+      "coderabbit",
+      "review"
+    ]
+  }
+}
