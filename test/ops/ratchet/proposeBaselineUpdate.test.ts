@@ -38,6 +38,22 @@ import { match } from '../../helpers/matchers.js';
 //      (nothing happened); a commitAndUpsertPr rejection → indeterminate
 //      (the commit may or may not have landed); no throw crosses the op
 //      seam. DEFAULT_PR_TOKEN is the CQ_AUTOMATION_TOKEN doctrine marker.
+//   6. Directional rounding at the baseline FILE's precision (#319): the
+//      proposal value is the measurement rounded AWAY from strictness —
+//      floor for higher-is-better, ceil for lower-is-better — at the exact
+//      decimal precision of the file's own value token (lexical digits: a
+//      raw 94.20 speaks two decimals; the parsed number's canonical scale
+//      is the fallback; an escaped in-string "value" never poses as the
+//      token), so a
+//      proposal is never stricter than the measurement it was told (a 94.29
+//      reading against a 94.2 file proposes nothing, never the half-up 94.3
+//      a re-measurement cannot reproduce); an exact decimal boundary never
+//      moves (94.3 floors to exactly 94.3, 68.1 ceils to exactly 68.1, and
+//      at a magnitude where scaled-float math genuinely errs — 0.29 × 100 is
+//      28.999999999999996 — the boundary still floors to exactly 0.29); the
+//      file's own granularity governs (integer file → 0 decimals;
+//      2-decimal file → 2); negatives round mathematically (floor toward
+//      −∞, ceil toward +∞, never truncation toward zero).
 //
 // The effects seam is faked in-memory (Map keyed by head, recording every
 // call); the real gh-backed implementation lands in H4.
@@ -162,6 +178,14 @@ async function seedBaseline(
 
 function proposeInput(overrides: Partial<ProposeInput> = {}): ProposeInput {
   return { ws, base: 'main', improvements: [], ...overrides };
+}
+
+/** Seed a baseline from RAW file text — for lexical shapes renderBaseline cannot express ("value": 94.20). */
+async function seedRawBaseline(target: string, metric: string, rawFile: string): Promise<string> {
+  const rel = baselineRelPath(target, metric);
+  await mkdir(join(ws, 'baselines'), { recursive: true });
+  await writeFile(join(ws, rel), rawFile, 'utf8');
+  return rel;
 }
 
 describe('proposeBaselineUpdate', () => {
@@ -1168,5 +1192,349 @@ describe('proposeBaselineUpdate', () => {
       status: 'indeterminate',
       detail: match.stringMatching(/may or may not have landed.*network dropped/s),
     });
+  });
+
+  // ------------------------------------------------------------------------
+  // Directional rounding at the baseline FILE's precision (#319)
+  // ------------------------------------------------------------------------
+
+  test('higher-is-better rounds DOWN at the file precision: 94.29 against 94.2 proposes NOTHING (#319)', async () => {
+    // The regression shape: a half-up rounding at the proposal boundary
+    // would turn 94.29 into 94.3 — stricter than the measurement, and a
+    // value a re-measurement cannot reproduce (the gate then fails on the
+    // proposal PR). Floor at the file's one decimal is 94.2: the rounding
+    // absorbs the raw improvement, so the truth is 'not a tightening' and
+    // no effects call ever happens.
+    await seedBaseline(TARGET, METRIC, 94.2, 'higher-is-better');
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        proposal: 'none',
+        prNumber: null,
+        prUrl: null,
+        head: null,
+        applied: [],
+        skipped: [
+          {
+            target: TARGET,
+            metric: METRIC,
+            reason: match.stringMatching(
+              /94\.2 → 94\.2 is not a tightening \(higher-is-better\) — the measurement 94\.29 rounds to 94\.2 at the baseline file's precision — nothing to propose/,
+            ),
+          },
+        ],
+      },
+    });
+    expect(effects.findCalls()).toBe(0);
+    expect(effects.upsertCalls()).toBe(0);
+  });
+
+  test('higher-is-better with real headroom proposes the floored value: 94.31 against 94.2 proposes 94.3', async () => {
+    await seedBaseline(TARGET, METRIC, 94.2, 'higher-is-better');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 94.31, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.3 }] },
+    });
+    const pr = effects.prs.values().next().value;
+    expect(pr?.files[0]?.content).toContain('"value": 94.3');
+    expect(pr?.body).toContain(`: 94.2 → 94.3 (higher-is-better)`);
+  });
+
+  test('lower-is-better rounds UP at the file precision: 2.38 against 2.4 cannot tighten, 2.29 tightens to 2.3', async () => {
+    await seedBaseline(TARGET, METRIC, 2.4, 'lower-is-better');
+    // ceil(2.38) at the file's one decimal is 2.4 — equal to the baseline,
+    // so nothing tighter than the measurement can be stated at this
+    // precision and the improvement is absorbed.
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 2.38 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: {
+        proposal: 'none',
+        applied: [],
+        skipped: [
+          match.objectContaining({
+            reason: match.stringMatching(
+              /2\.4 → 2\.4 is not a tightening \(lower-is-better\) — the measurement 2\.38 rounds to 2\.4/,
+            ),
+          }),
+        ],
+      },
+    });
+    expect(absorbed.upsertCalls()).toBe(0);
+    // A genuinely better reading: ceil(2.29) at one decimal is 2.3 — still
+    // ≥ the measurement (never stricter) and a real tighten of 2.4.
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 2.29, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 2.4, newValue: 2.3 }] },
+    });
+    const pr = effects.prs.values().next().value;
+    expect(pr?.files[0]?.content).toContain('"value": 2.3');
+    expect(pr?.body).toContain(': 2.4 → 2.3 (lower-is-better)');
+  });
+
+  test('an exact decimal boundary never moves: 94.3 floors to exactly 94.3, 68.1 ceils to exactly 68.1', async () => {
+    // A scaled-float implementation (×10^p, floor/ceil, ÷10^p) survives SOME
+    // boundaries only by luck of the rounding — the guarantee here is that
+    // no scaled product is ever consulted: the digits come from the
+    // canonical decimal string, so an on-precision measurement is carried
+    // through byte-identical in both directions.
+    await seedBaseline(TARGET, METRIC, 94.2, 'higher-is-better');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 94.3, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.3 }] },
+    });
+    expect(effects.prs.values().next().value?.files[0]?.content).toContain('"value": 94.3');
+    // Mirror boundary for lower-is-better (ceil side).
+    await seedBaseline('cx', 'avg-cx', 68.2, 'lower-is-better');
+    const effects2 = makeFakeEffects();
+    const result2 = await createProposeBaselineUpdate(effects2)(
+      proposeInput({
+        improvements: [{ target: 'cx', metric: 'avg-cx', value: 68.1, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result2).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 68.2, newValue: 68.1 }] },
+    });
+    expect(effects2.prs.values().next().value?.files[0]?.content).toContain('"value": 68.1');
+  });
+
+  test('the boundary holds where scaled-float math actually errs: 0.29 against a 0.28 file floors to exactly 0.29', async () => {
+    // 0.29 × 100 is 28.999999999999996 in doubles — a ×100/floor/÷100
+    // implementation floors the boundary DOWN to 0.28, absorbs the tighten,
+    // and the ratchet never advances. The exact-decimal path keeps 0.29: a
+    // genuine tighten of the 0.28 file, never stricter than the 0.29 the
+    // caller measured.
+    await seedBaseline(TARGET, METRIC, 0.28, 'higher-is-better');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 0.29, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 0.28, newValue: 0.29 }] },
+    });
+    expect(effects.prs.values().next().value?.files[0]?.content).toContain('"value": 0.29');
+  });
+
+  test('the FILE precision governs: a 2-decimal file proposes at 2 decimals, an integer file at 0', async () => {
+    // 94.291 floors at the 94.25 file's TWO decimals to 94.29 — a genuine
+    // tighten that a fixed one-decimal law would have hidden.
+    await seedBaseline(TARGET, METRIC, 94.25, 'higher-is-better');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 94.291, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.25, newValue: 94.29 }] },
+    });
+    expect(effects.prs.values().next().value?.files[0]?.content).toContain('"value": 94.29');
+    // An integer-valued file speaks ZERO decimals: 94.29 floors to 94 —
+    // equal to the baseline 94, absorbed, never proposed.
+    await seedBaseline('int-file', METRIC, 94, 'higher-is-better');
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: 'int-file', metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
+  });
+
+  test('negative measurements round the mathematical way: floor toward −∞, ceil toward +∞', async () => {
+    // higher-is-better with a negative measurement: floor(−12.34) at one
+    // decimal is −12.4 — NOT the −12.3 truncation toward zero would give
+    // (−12.3 > −12.34 would be stricter than the measurement).
+    await seedBaseline(TARGET, METRIC, -12.5, 'higher-is-better');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: -12.34, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: -12.5, newValue: -12.4 }] },
+    });
+    // lower-is-better with a negative measurement: ceil(−12.34) at one
+    // decimal is −12.3 — ≥ the measurement (never stricter) and a genuine
+    // tighten of −12.2.
+    await seedBaseline('neg', METRIC, -12.2, 'lower-is-better');
+    const effects2 = makeFakeEffects();
+    const result2 = await createProposeBaselineUpdate(effects2)(
+      proposeInput({
+        improvements: [{ target: 'neg', metric: METRIC, value: -12.34, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result2).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: -12.2, newValue: -12.3 }] },
+    });
+  });
+
+  test('LEXICAL file precision: a raw "value": 94.20 speaks two decimals — 94.29 proposes 94.29, 94.2 absorbs', async () => {
+    // parseBaseline reads 94.20 as the canonical number 94.2, but the FILE
+    // writes two decimals, so two is the precision the proposal rounding
+    // owns: the raw 94.29 measurement floors at two decimals to itself — a
+    // genuine tighten of the file's 94.2. A canonical-scale fallback would
+    // have hidden the tighten behind a one-decimal floor to 94.2.
+    const rel = await seedRawBaseline(
+      TARGET,
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        `  "target": "${TARGET}",`,
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94.20,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 94.29, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ path: rel, oldValue: 94.2, newValue: 94.29 }] },
+    });
+    expect(effects.prs.values().next().value?.files[0]?.content).toContain('"value": 94.29');
+    // The boundary absorbs: 94.2 is already at or coarser than two decimals.
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 94.2 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
+  });
+
+  test('a target string containing a fake "value": key never poses as the value token', async () => {
+    // The target's raw JSON encoding carries an escaped in-string
+    // `\"value\": 8.8` — one decimal. The scan consumes strings atomically,
+    // so the real top-level 94.20 token (two decimals) governs and 94.29
+    // proposes at two decimals; a scanner fooled by the in-string token
+    // would have floored to 94.2 and absorbed the tighten.
+    const hostile = 'x "value": 8.8';
+    const rawFile = [
+      '{',
+      '  "schemaVersion": 1,',
+      `  "target": ${JSON.stringify(hostile)},`,
+      `  "metric": "${METRIC}",`,
+      '  "direction": "higher-is-better",',
+      '  "value": 94.20,',
+      `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+      '}',
+      '',
+    ].join('\n');
+    await seedRawBaseline(hostile, METRIC, rawFile);
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: hostile, metric: METRIC, value: 94.29, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.29 }] },
+    });
+  });
+
+  test('duplicate top-level "value" keys are LAST-WINS, matching JSON.parse (PR review #4304483877)', async () => {
+    // parseBaseline reads the LAST occurrence: {"value": 94, "value": 94.20}
+    // parses to 94.2 — so the file speaks two decimals and 94.29 proposes at
+    // two decimals. A first-wins scanner would read the integer 94 (zero
+    // decimals) and wrongly absorb the tighten.
+    const lastWins = await seedRawBaseline(
+      TARGET,
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        `  "target": "${TARGET}",`,
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94,',
+        '  "value": 94.20,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    expect(parseBaseline(await readFile(join(ws, lastWins), 'utf8')).value).toBe(94.2);
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.29 }] },
+    });
+    // Mirror ordering: the last key is the integer 94 — the parsed value is
+    // 94 and the file speaks ZERO decimals, so 94.29 absorbs (never a
+    // proposal at the coarser-than-file precision a first-wins scan of
+    // 94.20 would have produced).
+    const intLast = await seedRawBaseline(
+      'dup-int-last',
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        '  "target": "dup-int-last",',
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94.20,',
+        '  "value": 94,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    expect(parseBaseline(await readFile(join(ws, intLast), 'utf8')).value).toBe(94);
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: 'dup-int-last', metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
   });
 });

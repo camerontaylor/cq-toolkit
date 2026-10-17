@@ -57,9 +57,31 @@
 // readings — the improvement IS the reading — and the baseline's recorded
 // direction is the ratchet's semantics (a committed direction that disagrees
 // with a current adapter is H2's identity-check business, not a reason to
-// guess here). Only tightens(baselineValue, improvementValue,
+// guess here). Only tightens(baselineValue, proposalValue,
 // baseline.direction) is proposed; equal or looser is skipped ('not a
 // tightening').
+//
+// DIRECTIONAL ROUNDING AT THE FILE'S PRECISION (#319): the proposal value is
+// never the raw measurement — it is the measurement rounded AWAY from
+// strictness at the precision the committed baseline file actually writes
+// (the lexical digits of its raw "value" token — a hand-edited 94.20 speaks
+// two decimals — with the parsed number's canonical scale as the fallback),
+// floor for higher-is-better, ceil for lower-is-better. A half-up rounding
+// here
+// would propose a baseline the evidence cannot reproduce: a 94.29 reading
+// against a 94.2 file must never become the 94.3 a re-measurement cannot
+// reach (CI then measures 94.2x and fails the gate). The rounding is EXACT
+// DECIMAL work on the canonical decimal strings (shortest round-trip form —
+// exactly what renderBaseline emits), never scaled-float arithmetic whose
+// products go wrong on ordinary magnitudes (94.29 × 10 is 942.9000000000001,
+// 0.29 × 100 is 28.999999999999996) and can move an exact boundary or flip
+// a floor/ceil. An exact boundary does not move: 94.3 floors to exactly
+// 94.3, and a measurement already at or coarser than the file's
+// precision passes through byte-identical. Rounding can absorb a raw
+// improvement entirely (94.29 → 94.2 against a 94.2 file): absorbed is
+// skipped ('not a tightening'), never written at a stricter precision, and
+// the skip reason names the measurement, the rounding, and the file
+// precision that produced it.
 //
 // Failure direction at the op-seam level: input validation failures (null
 // input, non-string ws/base/headPrefix, malformed improvements) are `failed`
@@ -171,6 +193,11 @@ export interface ProposeOutcome {
     target: string;
     metric: string;
     oldValue: number;
+    /**
+     * The proposed value: the measurement rounded AWAY from strictness at
+     * the committed baseline's own precision (floor for higher-is-better,
+     * ceil for lower-is-better) — never stricter than the measurement.
+     */
     newValue: number;
   }>;
   /** Improvements that produced no proposal, each with the reason naming why. */
@@ -286,6 +313,166 @@ function noUsableBaseline(relPath: string, metric: string): string {
     `ratchet: baseline '${relPath}' for metric '${metric}' not found — ` +
     'no usable baseline — refusing to propose from nothing (I5)'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Directional rounding — exact decimal, never stricter than the measurement
+// ---------------------------------------------------------------------------
+
+/**
+ * The exact decimal decomposition of a finite number: its shortest
+ * round-trip decimal string (String(value) — the canonical form
+ * renderBaseline's JSON.stringify emits) split into a sign, the unscaled
+ * BigInt magnitude |value| × 10^scale, and the fractional digit count.
+ * Exponent notation is expanded by pure string shifts ('1.5e-7' → scale 8,
+ * '1.5e+21' → scale 0), so no binary-float arithmetic ever touches the
+ * digits.
+ */
+interface ExactDecimal {
+  negative: boolean;
+  unscaled: bigint;
+  scale: number;
+}
+
+// String() of every finite number matches: optional sign, integer digits,
+// optional fraction, optional exponent. The throw is the unreachable
+// non-finite case — a plain failure, never a silent NaN.
+const DECIMAL_STRING_PATTERN = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
+
+function exactDecimal(value: number): ExactDecimal {
+  const match = DECIMAL_STRING_PATTERN.exec(String(value));
+  if (match === null) {
+    throw new Error(`ratchet: not a finite decimal — ${String(value)}`);
+  }
+  const fraction = match[3] ?? '';
+  let unscaled = BigInt((match[2] ?? '') + fraction);
+  let scale = fraction.length;
+  const exponent = match[4] === undefined ? 0 : Number(match[4]);
+  scale -= exponent;
+  if (scale < 0) {
+    unscaled *= 10n ** BigInt(-scale);
+    scale = 0;
+  }
+  return { negative: match[1] === '-', unscaled, scale };
+}
+
+/**
+ * The exact decimal scale of a raw JSON number token: the written
+ * fractional digits shifted by the written exponent ('94.20' → 2, '9.42e1'
+ * → 0, '9.42e-1' → 3). null for anything outside the strict JSON number
+ * grammar.
+ */
+function tokenScale(token: string): number | null {
+  const match = /^-?(?:0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+  if (match === null) return null;
+  const exponent = match[2] === undefined ? 0 : Number(match[2]);
+  return Math.max(0, (match[1]?.length ?? 0) - exponent);
+}
+
+/**
+ * The raw JSON number token the text writes for its TOP-LEVEL "value" key,
+ * or null when none can be located. A small escape-aware scan: string
+ * literals are consumed atomically (a target like "x \"value\": 8.8" can
+ * never pose as the value token), nesting depth is tracked, and the token
+ * is read only after the depth-1 "value" key's colon. DUPLICATE top-level
+ * keys resolve LAST-WINS — JSON.parse (and therefore parseBaseline) takes
+ * the last occurrence, so the precision basis must read the same token
+ * ("value": 94, "value": 94.20 parses to 94.2 and speaks two decimals). A
+ * key written with unicode escapes simply misses — the caller falls back to
+ * the canonical scale, which can only absorb a proposal, never loosen one.
+ */
+function rawValueToken(text: string): string | null {
+  let depth = 0;
+  let i = 0;
+  const n = text.length;
+  let last: string | null = null;
+  while (i < n) {
+    const ch = text.charAt(i);
+    if (ch === '"') {
+      const keyStart = i;
+      i += 1;
+      while (i < n && text.charAt(i) !== '"') i += text.charAt(i) === '\\' ? 2 : 1;
+      if (i >= n) return null;
+      const keyEnd = i;
+      i += 1;
+      if (depth === 1 && text.slice(keyStart + 1, keyEnd) === 'value') {
+        while (i < n && /\s/.test(text.charAt(i))) i += 1;
+        if (text.charAt(i) !== ':') continue;
+        i += 1;
+        while (i < n && /\s/.test(text.charAt(i))) i += 1;
+        // parseBaseline has already proven "value" holds a number, so an
+        // end-of-text or string value here is unreachable; refusing it
+        // beats misreading it.
+        if (i >= n || text.charAt(i) === '"') return null;
+        let end = i;
+        while (end < n && /[0-9.eE+-]/.test(text.charAt(end))) end += 1;
+        last = text.slice(i, end);
+        i = end;
+      }
+    } else if (ch === '{' || ch === '[') {
+      depth += 1;
+      i += 1;
+    } else if (ch === '}' || ch === ']') {
+      depth -= 1;
+      i += 1;
+    } else {
+      i += 1;
+    }
+  }
+  return last;
+}
+
+/**
+ * The baseline FILE's precision: the decimal scale of the value token the
+ * file actually WRITES — lexical digits, so a hand-edited 94.20 speaks two
+ * decimals even though the parsed number is the canonical 94.2 — falling
+ * back to the parsed number's canonical scale when the raw token cannot be
+ * located (renderBaseline emits shortest form, so engine-written files
+ * carry their scale either way).
+ */
+function fileValuePrecision(text: string, parsed: number): number {
+  const token = rawValueToken(text);
+  if (token !== null) {
+    const scale = tokenScale(token);
+    if (scale !== null) return scale;
+  }
+  return exactDecimal(parsed).scale;
+}
+
+/**
+ * The proposal value: `measurement` rounded at `precision` decimals AWAY
+ * from strictness — toward −∞ for higher-is-better (floor: the proposal can
+ * never exceed what was measured), toward +∞ for lower-is-better (ceil:
+ * never below it). All the arithmetic is exact-decimal (BigInt magnitudes
+ * over {@link exactDecimal}'s digits); a measurement already at or coarser
+ * than the file's precision is returned UNCHANGED, so an exact decimal
+ * boundary never moves — 94.3 floors to exactly 94.3, 0.29 floors at two
+ * decimals to exactly 0.29, where a scaled-float implementation would
+ * consult 0.29 × 100 = 28.999999999999996 and drop the boundary to 0.28.
+ * Floor and ceil are the mathematical ones, so −12.34 floors to −12.4, not
+ * the −12.3 truncation toward zero would give. The result is rebuilt from
+ * the exact scaled integer and parsed the way JSON.parse would parse the
+ * same literal, so renderBaseline re-emits the same digits.
+ */
+function directionalRound(measurement: number, precision: number, direction: Direction): number {
+  const exact = exactDecimal(measurement);
+  if (precision >= exact.scale) return measurement;
+  const divisor = 10n ** BigInt(exact.scale - precision);
+  let scaled = exact.unscaled / divisor;
+  if (exact.unscaled % divisor !== 0n) {
+    // Digits are actually being dropped, so floor vs ceil can differ. The
+    // magnitude grows by one exactly when the rounding direction points
+    // away from zero: ceil for a positive value (toward +∞), floor for a
+    // negative one (toward −∞).
+    const awayFromZero = direction === 'lower-is-better';
+    if (awayFromZero !== exact.negative) scaled += 1n;
+  }
+  const digits = scaled.toString().padStart(precision + 1, '0');
+  const literal =
+    precision === 0 ? digits : `${digits.slice(0, -precision)}.${digits.slice(-precision)}`;
+  const rounded = Number(literal);
+  if (scaled === 0n) return 0;
+  return exact.negative ? -rounded : rounded;
 }
 
 /** Build the propose op over the injected gh effects seam. */
@@ -492,16 +679,35 @@ export function createProposeBaselineUpdate(
           });
           continue;
         }
-        // The ONLY path into a proposal: a genuine tighten, with the
-        // direction ALWAYS from the committed baseline (this op has no
-        // readings — the improvement IS the reading).
-        if (tightens(baseline.value, imp.value, baseline.direction) === false) {
+        // DIRECTIONAL ROUNDING before the gate (#319): the proposal value is
+        // the measurement rounded AWAY from strictness at the precision the
+        // committed file actually writes (lexical value-token digits,
+        // canonical fallback) — a proposal is never stricter than the
+        // evidence that produced it. Exact decimal work; an exact boundary
+        // passes through unchanged.
+        const proposalValue = directionalRound(
+          imp.value,
+          fileValuePrecision(text, baseline.value),
+          baseline.direction,
+        );
+        // The ONLY path into a proposal: a genuine tighten AT THE PROPOSAL'S
+        // OWN PRECISION, with the direction ALWAYS from the committed
+        // baseline (this op has no readings — the improvement IS the
+        // reading). Rounding can absorb a raw improvement entirely (94.29
+        // against a 94.2 file rounds to 94.2): absorbed is skipped — never
+        // written at a stricter precision than the file speaks.
+        if (tightens(baseline.value, proposalValue, baseline.direction) === false) {
+          const rounding =
+            proposalValue === imp.value
+              ? ''
+              : ` — the measurement ${imp.value} rounds to ${proposalValue} at the ` +
+                "baseline file's precision";
           skipped.push({
             target: imp.target,
             metric: imp.metric,
             reason:
-              `ratchet: metric '${imp.metric}' ${baseline.value} → ${imp.value} is not a ` +
-              `tightening (${baseline.direction}) — nothing to propose`,
+              `ratchet: metric '${imp.metric}' ${baseline.value} → ${proposalValue} is not a ` +
+              `tightening (${baseline.direction})${rounding} — nothing to propose`,
           });
           continue;
         }
@@ -515,7 +721,7 @@ export function createProposeBaselineUpdate(
           target: baseline.target,
           metric: baseline.metric,
           direction: baseline.direction,
-          value: imp.value,
+          value: proposalValue,
           ...(baseline.unit === undefined ? {} : { unit: baseline.unit }),
           capturedAt: imp.capturedAt ?? new Date().toISOString(),
         });
@@ -524,7 +730,7 @@ export function createProposeBaselineUpdate(
           target: imp.target,
           metric: imp.metric,
           oldValue: baseline.value,
-          newValue: imp.value,
+          newValue: proposalValue,
           direction: baseline.direction,
           content,
         });
