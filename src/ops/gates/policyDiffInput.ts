@@ -27,6 +27,5 @@ export const PolicyDiffInputObject = z
     ownerId: z.number().int().positive().exactOptional(),
     labelEventsPath: z.string().min(1).exactOptional(),
     settleRef: z.string().min(1).exactOptional(),
-    settleStatePath: z.string().min(1).exactOptional(),
   })
   .strict();

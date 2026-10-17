@@ -46,10 +46,6 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
-    "settleStatePath": {
-      "minLength": 1,
-      "type": "string"
-    },
     "subject": {
       "minLength": 1,
       "type": "string"
