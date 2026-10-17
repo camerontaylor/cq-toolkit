@@ -30,6 +30,7 @@
 // fixture-tested in test/ops/pr/registry.test.ts against captured gh JSON
 // shapes.
 import { execFile } from 'node:child_process';
+import { isAbsolute, resolve as pathResolve } from 'node:path';
 import type {
   PrChecks,
   PrEffects,
@@ -98,9 +99,19 @@ export function mapGhFault(
 
 /** The gh binary for every PR-lane invocation: CQ_GH_BIN (the review/merge
  * families' seam), else `gh` — Phase 1.4 hoisted ONE gh runner convention,
- * so every gh invocation in the adapter honours the same env seam. */
+ * so every gh invocation in the adapter honours the same env seam. A
+ * RELATIVE bin path with a separator resolves against the PROCESS cwd (the
+ * same pre-scoping resolution makeGhRunner applies): runGh below spawns
+ * with cwd=repoRoot, which would otherwise silently change which binary a
+ * relative CQ_GH_BIN names. Bare names keep PATH lookup; absolute paths
+ * pass through. */
 function ghBin(): string {
-  return process.env['CQ_GH_BIN'] ?? 'gh';
+  const rawBin = process.env['CQ_GH_BIN'] ?? 'gh';
+  return rawBin.includes('/') || rawBin.includes('\\')
+    ? isAbsolute(rawBin)
+      ? rawBin
+      : pathResolve(process.cwd(), rawBin)
+    : rawBin;
 }
 
 /**
