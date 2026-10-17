@@ -36,9 +36,9 @@ import {
 import { tscLinesAdapter } from '../../../src/ops/gates/adapters/tsc.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
 import type { ApprovalAuthority, ApprovalState } from '../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 import { pathAnalysisFileStore } from '../../../src/ops/analyze/analysisStore.js';
@@ -54,7 +54,7 @@ import {
   makePlaybookDispatchOp,
   makePlaybookRegistry,
 } from '../../../src/ops/analyze/playbooks/registry.js';
-import { makeQuarantineLedger } from '../../../src/ops/analyze/playbooks/quarantine.js';
+import { makeQuarantineLedger } from '../../../src/adapters/store/quarantine.js';
 
 /** The repo root (three levels up from this file) — for the vendored tsc bin. */
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

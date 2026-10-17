@@ -48,7 +48,7 @@ import { describe, expect, test } from 'vitest';
 import { defaultClassifyConfig } from '../../../src/ops/review/classify.config.js';
 import { classifyThreads } from '../../../src/ops/review/classifyThreads.js';
 import type { ClassifiedItem } from '../../../src/ops/review/classifyThreads.js';
-import type { FetchedReviewState } from '../../../src/ops/review/fetchReviewState.js';
+import type { FetchedReviewState } from '../../../src/adapters/forge-github/fetchReviewState.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../../../src/ops/review/threads.js';
 
 // ---------------------------------------------------------------------------

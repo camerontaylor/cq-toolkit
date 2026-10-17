@@ -28,8 +28,8 @@
 // the bin configurable per opts. No new dependencies.
 import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve as pathResolve } from 'node:path';
-import type { GhFn, GhResult } from '../review/gh.js';
-import { makeGhRunner } from '../review/gh.js';
+import type { GhFn, GhResult } from './gh.js';
+import { makeGhRunner } from './gh.js';
 
 /**
  * The PR head ref every merge-flow effect addresses the PR by (the

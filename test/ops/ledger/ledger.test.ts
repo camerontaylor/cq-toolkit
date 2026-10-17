@@ -8,7 +8,7 @@ import { match } from '../../helpers/matchers.js';
 // rejects the RESOLVED pair (a lone suppressAt above the default
 // escalateAt) — both pinned here.
 import { describe, expect, test } from 'vitest';
-import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
+import type { LedgerEntry, LedgerFile } from '../../../src/adapters/store/ledgerStore.js';
 import type { LedgerRecordInput, LedgerStore } from '../../../src/ops/ledger/ledger.js';
 import {
   DEFAULT_THRESHOLD,

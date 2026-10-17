@@ -20,8 +20,8 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
-import { ghJson, makeGhRunner } from '../../../src/ops/review/gh.js';
-import type { GhFn } from '../../../src/ops/review/gh.js';
+import { ghJson, makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
+import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 
 /**
  * The recorded single-identity deviation flag (module doc): true means the

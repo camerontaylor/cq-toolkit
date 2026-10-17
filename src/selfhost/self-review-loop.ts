@@ -83,11 +83,11 @@ import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'n
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
-import { GhError, ghJson } from '../ops/review/gh.js';
-import type { GhFn } from '../ops/review/gh.js';
-import { makeGhRunner } from '../ops/review/gh.js';
-import { fileWorktreeRegistry } from '../ops/review/prWorktree.js';
-import { fetchReviewState } from '../ops/review/fetchReviewState.js';
+import { GhError, ghJson } from '../adapters/forge-github/gh.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
+import { makeGhRunner } from '../adapters/forge-github/gh.js';
+import { fileWorktreeRegistry } from '../adapters/git/prWorktree.js';
+import { fetchReviewState } from '../adapters/forge-github/fetchReviewState.js';
 import { runReviewLoop, totalTokens } from '../plans/review-loop.js';
 import type { ReviewLoopOutcome, ReviewLoopOpts } from '../plans/review-loop.js';
 import { listOpenPrs } from './candidates.js';

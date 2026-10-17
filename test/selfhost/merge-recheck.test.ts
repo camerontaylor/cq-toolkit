@@ -30,8 +30,8 @@
 // all probed through recheckBeforeMerge.
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
-import type { MergeEffects } from '../../src/ops/merge/effects.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
+import type { MergeEffects } from '../../src/adapters/forge-github/mergeEffects.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
   PR_SNAPSHOT_QUERY,

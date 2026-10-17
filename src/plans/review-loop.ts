@@ -89,9 +89,9 @@ import type { ClassifyConfig } from '../ops/review/classify.config.js';
 import { defaultClassifyConfig } from '../ops/review/classify.config.js';
 import type { ClassifiedItem } from '../ops/review/classifyThreads.js';
 import { classifyThreads } from '../ops/review/classifyThreads.js';
-import type { FetchedReviewState } from '../ops/review/fetchReviewState.js';
-import { fetchReviewState } from '../ops/review/fetchReviewState.js';
-import type { GhFn } from '../ops/review/gh.js';
+import type { FetchedReviewState } from '../adapters/forge-github/fetchReviewState.js';
+import { fetchReviewState } from '../adapters/forge-github/fetchReviewState.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
 import type {
   FixableReviewItem,
   FixReviewItemInput,
@@ -100,12 +100,14 @@ import type {
 import { reviewFixHarness } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
-import type { WorktreeRegistry } from '../ops/review/prWorktree.js';
-import { resolvePrWorktree } from '../ops/review/prWorktree.js';
+import type { WorktreeRegistry } from '../adapters/git/prWorktree.js';
+import { resolvePrWorktree } from '../adapters/git/prWorktree.js';
 import type { ReplyAndResolveResult, ReviewAction } from '../ops/review/replyAndResolve.js';
-import { fileDispatchLog, replyAndResolve } from '../ops/review/replyAndResolve.js';
+import { fileDispatchLog } from '../adapters/store/dispatchLog.js';
+import { replyAndResolve } from '../ops/review/replyAndResolve.js';
 import type { VerifyOutcome } from '../ops/review/verifyReviewOutcome.js';
-import { snapshotPrState, verifyPrOutcome } from '../ops/review/verifyReviewOutcome.js';
+import { snapshotPrState } from '../adapters/forge-github/snapshotPrState.js';
+import { verifyPrOutcome } from '../ops/review/verifyReviewOutcome.js';
 
 /** Cap for the composed push-failure reason — a push can spew pages of output. */
 const PUSH_REASON_MAX = 500;

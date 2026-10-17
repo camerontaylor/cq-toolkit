@@ -33,7 +33,7 @@ import type {
   PrReviewState,
   PrState,
 } from '../../../src/ops/pr/assemblePrs.js';
-import { makeSubprocessPrEffects } from '../../../src/ops/pr/ghEffects.js';
+import { makeSubprocessPrEffects } from '../../../src/adapters/forge-github/ghEffects.js';
 import { makeRunReport, type RunReportInput } from '../../../src/ops/pr/runReport.js';
 
 // ---------------------------------------------------------------------------

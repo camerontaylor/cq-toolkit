@@ -44,8 +44,8 @@ import {
   parseBranchRefs,
   parseRemoteHeads,
   parseWorktreePorcelain,
-} from '../../../src/ops/sweep/worktreeFor.js';
-import type { WorktreeEffects, WorktreeForInput } from '../../../src/ops/sweep/worktreeFor.js';
+} from '../../../src/adapters/git/worktreeFor.js';
+import type { WorktreeEffects, WorktreeForInput } from '../../../src/adapters/git/worktreeFor.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures: derived naming

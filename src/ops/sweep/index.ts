@@ -44,21 +44,21 @@ export type {
   WorktreeForInput,
   WorktreeMutexConfig,
   SweepWorkspace,
-} from './worktreeFor.js';
+} from '../../adapters/git/worktreeFor.js';
 export {
   makeSubprocessWorktreeEffects,
   makeWorktreeFor,
   parseBranchRefs,
   parseRemoteHeads,
   parseWorktreePorcelain,
-} from './worktreeFor.js';
+} from '../../adapters/git/worktreeFor.js';
 export type {
   CleanupEffects,
   CleanupInput,
   CleanupReport,
   SubprocessCleanupEffectsOptions,
-} from './cleanup.js';
-export { makeCleanup, makeSubprocessCleanupEffects } from './cleanup.js';
+} from '../../adapters/git/cleanup.js';
+export { makeCleanup, makeSubprocessCleanupEffects } from '../../adapters/git/cleanup.js';
 export type {
   CommittedMarker,
   SweepUnitFaultClass,

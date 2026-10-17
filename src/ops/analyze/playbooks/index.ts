@@ -13,8 +13,12 @@ export {
 export type { Playbook, VerifierCommand } from './format.js';
 export { makePlaybookVerifier } from './verifier.js';
 export type { PlaybookVerifierOutcome } from './verifier.js';
-export { QUARANTINE_PHASE, makeQuarantineLedger } from './quarantine.js';
-export type { QuarantineLedger, QuarantinePhase, QuarantineRecord } from './quarantine.js';
+export { QUARANTINE_PHASE, makeQuarantineLedger } from '../../../adapters/store/quarantine.js';
+export type {
+  QuarantineLedger,
+  QuarantinePhase,
+  QuarantineRecord,
+} from '../../../adapters/store/quarantine.js';
 export {
   makePlaybookDispatchOp,
   makePlaybookQuarantineListOp,

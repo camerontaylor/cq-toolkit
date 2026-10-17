@@ -26,8 +26,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { GhError } from '../../src/ops/review/gh.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import { GhError } from '../../src/adapters/forge-github/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import {
   emptySettleState,
   observe,

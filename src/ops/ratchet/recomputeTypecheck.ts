@@ -34,7 +34,7 @@ import { join, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { subprocessRunCheck } from '../gates/checkRunner.js';
 import { typecheckCount } from './adapters/typecheckCount.js';
-import { extractTreeAttributeFree, gitRevParse } from './git.js';
+import { extractTreeAttributeFree, gitRevParse } from '../../adapters/git/ratchetGit.js';
 import { classifyTscCapture } from './sources.js';
 
 /** Default wall-clock budget for the recompute's tsc run; a timeout is a failure. */

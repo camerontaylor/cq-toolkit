@@ -34,7 +34,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { classifyPr } from '../../src/ops/merge/classifyPrs.js';
 import type { PrCandidate } from '../../src/ops/merge/classifyPrs.js';
 import { defaultClassifyPrConfig } from '../../src/ops/merge/classify.config.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import { judgeAcceptance } from '../../src/selfhost/acceptance.js';
 import type { AcceptanceResult } from '../../src/selfhost/acceptance.js';
 import { CONSERVATIVE_TRUST_POLICY } from '../../src/selfhost/merge-recheck.js';

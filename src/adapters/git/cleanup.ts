@@ -36,8 +36,8 @@ import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
-import { makeGitMutex } from './gitMutex.js';
-import type { GitMutex, GitMutexConfig } from './gitMutex.js';
+import { makeGitMutex } from '../../ops/sweep/gitMutex.js';
+import type { GitMutex, GitMutexConfig } from '../../ops/sweep/gitMutex.js';
 import { makeSubprocessWorktreeEffects, mapWorktreeGitFault } from './worktreeFor.js';
 import type { WorktreeMutexConfig } from './worktreeFor.js';
 

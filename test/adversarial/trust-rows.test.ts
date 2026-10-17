@@ -5,7 +5,7 @@ import { defaultClassifyPrConfig } from '../../src/ops/merge/classify.config.js'
 import { classifyThreads } from '../../src/ops/review/classifyThreads.js';
 import { defaultClassifyConfig } from '../../src/ops/review/classify.config.js';
 import { planReviewBatch } from '../../src/ops/review/planReviewBatch.js';
-import type { FetchedReviewState } from '../../src/ops/review/fetchReviewState.js';
+import type { FetchedReviewState } from '../../src/adapters/forge-github/fetchReviewState.js';
 
 const HEAD = 'a'.repeat(40);
 const OLD_HEAD = 'b'.repeat(40);
