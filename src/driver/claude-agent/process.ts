@@ -1,7 +1,8 @@
 // Process-lifecycle helpers for the claude-agent driver — T1.6.
 //
-// THE I8 EXEMPT FILE (same posture as the subprocess lane's process.ts):
-// the driver-hygiene scan bans driver-owned scheduling primitives and
+// THE I8 EXEMPT FILE (same posture as shared/proc.ts — the subprocess
+// lane's former process.ts): the driver-hygiene scan bans driver-owned
+// scheduling primitives and
 // cancellation ROOTS under src/driver/**, with the single exemption
 // `driver/<name>/process.{ts,js,mjs}` — process-lifecycle helpers may own
 // the machinery, because there the decision has ALREADY BEEN MADE. This

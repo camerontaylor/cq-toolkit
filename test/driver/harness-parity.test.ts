@@ -48,11 +48,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { ClaudeAgentDriver } from '../../src/driver/claude-agent/index.js';
 import { EndpointTableSchema } from '../../src/driver/claude-agent/routing.js';
 import { SubprocessDriver } from '../../src/driver/subprocess/index.js';
-import type {
-  ManagedChild,
-  ProcessClose,
-  SpawnOptions,
-} from '../../src/driver/subprocess/process.js';
+import type { ManagedChild, ProcessClose, SpawnOptions } from '../../src/shared/proc.js';
 import { RoutingTableSchema } from '../../src/driver/subprocess/routing.js';
 import type { SandboxLevel, ToolDenial, WorkerResult } from '../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';

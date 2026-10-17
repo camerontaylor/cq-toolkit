@@ -127,7 +127,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
-import { buildChildEnv } from '../driver/subprocess/process.js';
+import { buildChildEnv } from '../shared/proc.js';
 import { runArgvCommand, runShellCommand } from './run.js';
 import type { RunCommandOptions, RunOutcome } from './run.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
