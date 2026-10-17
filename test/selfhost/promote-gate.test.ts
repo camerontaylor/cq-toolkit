@@ -467,6 +467,31 @@ describe('checkVerifiedRun', () => {
     // Still pending before the jobs are read: presence is judged on real jobs only.
     expect(checkVerifiedRun(wf(), null, named).state).toBe('pending');
   });
+
+  test('a partial rerun (filter=all): each job is judged by its newest attempt', () => {
+    const named = { ...want, requiredJobs: ['static', 'from-source'] };
+    // static green in attempt 1 and not rerun; from-source failed, then passed on rerun.
+    const rerun = [
+      job({ name: 'static', run_attempt: 1 }),
+      job({ name: 'from-source', run_attempt: 1, conclusion: 'failure' }),
+      job({ name: 'from-source', run_attempt: 2 }),
+    ];
+    expect(checkVerifiedRun(wf(), rerun, named).state).toBe('success');
+    // A rerun's failure supersedes its earlier success.
+    const regressed = [
+      job({ name: 'static', run_attempt: 1 }),
+      job({ name: 'static', run_attempt: 2, conclusion: 'failure' }),
+    ];
+    expect(checkVerifiedRun(wf(), regressed, want).reason).toMatch(
+      /job 'static' is completed\/failure/,
+    );
+    // Two jobs sharing a display name at the newest attempt are both judged.
+    const twins = [
+      job({ name: 'static', id: 1 }),
+      job({ name: 'static', id: 2, conclusion: 'failure' }),
+    ];
+    expect(checkVerifiedRun(wf(), twins, want).state).toBe('failure');
+  });
 });
 
 describe('selectPromotionReview', () => {
@@ -2171,6 +2196,29 @@ describe('bindQueueAuthorization — the object cq-verify consumes', () => {
     const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, report());
     expect(auth.attested).toBe(false);
     expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('a malformed newest ledger version is a barrier: no stale epoch from an older one', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: 'not a ledger' },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(lines.join('\n')).toMatch(/malformed version is a lookup barrier/);
+    expect(auth.contributions[0]?.record.status).toBe('invalid');
+    expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('the gate reads every job execution (filter=all) of a verified run', async () => {
+    const h = harness(world());
+    await runGate(h.deps, cfg());
+    const jobReads = h.calls.map((c) => c[1] ?? '').filter((p) => /\/jobs\?/.test(p));
+    expect(jobReads.length).toBeGreaterThan(0);
+    for (const p of jobReads) expect(p).toMatch(/[?&]filter=all(?:&|$)/);
   });
 
   test('a closure the gate would refuse binds no contribution (fail closed)', async () => {

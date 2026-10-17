@@ -205,14 +205,23 @@ async function readLedgerAt(
  * versions read so far. The observer prunes merged PRs from the tip, so a
  * merged PR's last record lives only in this history (the D11 epoch reads
  * it). `exhausted`: the history ran out before `enough` held. An absent
- * branch is an empty history. THROWS on any non-404
- * transport failure or a listed commit that is not a 40-hex sha.
+ * branch is an empty history. A version with ANY discarded content (an
+ * unreadable or malformed ledger, or a dropped record) is a lookup BARRIER:
+ * it is kept and reading stops there (`barrier`), so a PR it may have held
+ * never falls through to an older, possibly stale observation — the PR gets
+ * no epoch and its D11 record is invalid (fail closed). THROWS on any
+ * non-404 transport failure or a listed commit that is not a 40-hex sha.
  */
 export async function readSettleHistory(
   deps: StateBranchDeps,
   limit: number,
   enough: (versions: readonly SettleState[]) => boolean,
-): Promise<{ versions: SettleState[]; discarded: string[]; exhausted: boolean }> {
+): Promise<{
+  versions: SettleState[];
+  discarded: string[];
+  exhausted: boolean;
+  barrier: boolean;
+}> {
   const base = repoPath(deps);
   const fullName = `${deps.owner}/${deps.repo}`;
   let listWire: unknown;
@@ -222,7 +231,7 @@ export async function readSettleHistory(
       `${base}/commits?sha=${STATE_BRANCH}&path=${SETTLE_STATE_PATH}&per_page=${String(limit)}`,
     ]);
   } catch (err) {
-    if (isNotFound(err)) return { versions: [], discarded: [], exhausted: true };
+    if (isNotFound(err)) return { versions: [], discarded: [], exhausted: true, barrier: false };
     throw err;
   }
   if (!Array.isArray(listWire)) {
@@ -232,7 +241,7 @@ export async function readSettleHistory(
   const versions: SettleState[] = [];
   const discarded: string[] = [];
   for (const commit of commits) {
-    if (enough(versions)) return { versions, discarded, exhausted: false };
+    if (enough(versions)) return { versions, discarded, exhausted: false, barrier: false };
     if (!SHA_RE.test(commit)) {
       throw new Error(
         `selfhost state-branch: ${STATE_BRANCH} history listed a non-sha commit ${JSON.stringify(commit.slice(0, 80))}`,
@@ -241,8 +250,9 @@ export async function readSettleHistory(
     const read = await readLedgerAt(deps, base, fullName, commit);
     versions.push(read.state);
     discarded.push(...read.discarded);
+    if (read.discarded.length > 0) return { versions, discarded, exhausted: false, barrier: true };
   }
-  return { versions, discarded, exhausted: !enough(versions) };
+  return { versions, discarded, exhausted: !enough(versions), barrier: false };
 }
 
 /**

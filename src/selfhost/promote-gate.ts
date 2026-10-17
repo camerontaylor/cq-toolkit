@@ -522,6 +522,24 @@ export interface VerifiedRunCheck {
 }
 
 /**
+ * The effective job set of a run read with `filter=all`: for each job name,
+ * every execution at that name's highest `run_attempt` (a missing attempt
+ * counts as 1). Keeping all executions at the newest attempt, not one per
+ * name, means two jobs sharing a display name can never hide a failure.
+ */
+function effectiveJobs(jobs: readonly unknown[]): unknown[] {
+  const nameOf = (raw: unknown): string =>
+    clean(asString(asRecord(raw)['name'])) || String(asInt(asRecord(raw)['id']));
+  const attemptOf = (raw: unknown): number => asInt(asRecord(raw)['run_attempt']) ?? 1;
+  const newest = new Map<string, number>();
+  for (const raw of jobs) {
+    const name = nameOf(raw);
+    newest.set(name, Math.max(newest.get(name) ?? 0, attemptOf(raw)));
+  }
+  return jobs.filter((raw) => attemptOf(raw) === newest.get(nameOf(raw)));
+}
+
+/**
  * Judge the newest push run of a block-only head-defined workflow on `tip`
  * (D-F.2): path `.github/workflows/<file>`, event `push`, head branch
  * `merge-queue` (a push of the same sha to another branch is not the
@@ -531,7 +549,10 @@ export interface VerifiedRunCheck {
  * NOT success — I4: a skipped required check is missing), with a non-null
  * `runner_id` and a non-empty `steps` list (a job that never ran on a
  * runner proves nothing), and every `requiredJobs` name present. `jobs` is
- * null until the run is known green.
+ * null until the run is known green. `jobs` is every execution
+ * (`filter=all`): after a partial rerun each job name is judged by its
+ * NEWEST attempt (see effectiveJobs), so a job green in attempt 1 and not
+ * rerun still counts, and a rerun's result supersedes its earlier attempt.
  */
 export function checkVerifiedRun(
   run: unknown,
@@ -566,7 +587,8 @@ export function checkVerifiedRun(
   }
   if (jobs === null) return { state: 'pending', reason: `run ${id}: jobs not read yet` };
   if (jobs.length === 0) return fail('no jobs');
-  for (const raw of jobs) {
+  const effective = effectiveJobs(jobs);
+  for (const raw of effective) {
     const job = asRecord(raw);
     const name = clean(asString(job['name'])) || String(asInt(job['id']));
     if (job['status'] !== 'completed' || job['conclusion'] !== 'success') {
@@ -579,7 +601,7 @@ export function checkVerifiedRun(
     if (!Array.isArray(steps) || steps.length === 0) return fail(`job '${name}' has no steps`);
   }
   for (const required of want.requiredJobs ?? []) {
-    if (!jobs.some((raw) => asRecord(raw)['name'] === required)) {
+    if (!effective.some((raw) => asRecord(raw)['name'] === required)) {
       return fail(`missing required job '${clean(required)}'`);
     }
   }
@@ -1252,6 +1274,11 @@ async function bindAdmitted(
       `  d11: settle ledger — ${String(read.versions.length)} version(s) read${read.exhausted ? ` (history exhausted, at most ${String(SETTLE_HISTORY_MAX)})` : ''}`,
     );
     for (const why of read.discarded) report.push(`  d11: settle ledger discarded — ${clean(why)}`);
+    if (read.barrier) {
+      report.push(
+        '  d11: settle ledger — a malformed version is a lookup barrier; older versions are not consulted',
+      );
+    }
   } catch (error) {
     report.push(`  d11: settle ledger unreadable (${describeError(error)}) — no head epoch`);
   }
@@ -1440,7 +1467,9 @@ async function awaitVerdicts(
       });
       if (check.state === 'pending' && newest !== null && newest['status'] === 'completed') {
         const id = asInt(newest['id']);
-        const jobsPath = `${repoPath}/actions/runs/${String(id)}/jobs?per_page=100`;
+        // Every execution (`filter=all`): checkVerifiedRun judges each job
+        // name by its newest attempt, so a partial rerun keeps earlier green jobs.
+        const jobsPath = `${repoPath}/actions/runs/${String(id)}/jobs?per_page=100&filter=all`;
         const jobs = pagesOf(await getSlurp(jobsPath), 'jobs', jobsPath);
         check = checkVerifiedRun(newest, jobs, {
           file,

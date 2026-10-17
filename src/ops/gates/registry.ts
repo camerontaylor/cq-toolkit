@@ -21,8 +21,10 @@ import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import type { RegressionGateInput } from './regressionGate.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
 // gates.policyDiff helpers (W1.9), reached through './policyDiff.js': the
-// workflow scanner './workflowScan.js' and the override record
-// './overrideRecord.js'; the posture resolver './policyConfig.js' is bound
+// workflow scanner './workflowScan.js', the override record
+// './overrideRecord.js' and the D11 authorization predicate
+// './d11Authorization.js' (ADR-0004 D-C.3, D-G.4; shared with
+// ratchet.verifyRatchet); the posture resolver './policyConfig.js' is bound
 // by the importer below.
 
 /**
@@ -211,7 +213,10 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
  * input, and only it. STRICT and deliberately WITHOUT a posture field — the
  * posture comes from the project env / per-call opt-in at dispatch
  * (RS-15 Annex B §B.1), never from plan JSON or op input, so a subject
- * cannot relax its own check. Numeric ids are positive integers.
+ * cannot relax its own check. Numeric ids are positive integers. Equally
+ * without `authorization`: a D11Authorization ('./d11Authorization.js') is
+ * bound in-process only, by the promotion gate and cq-verify's
+ * `selfhost/verify-ratchet`, never carried by a CLI or plan input.
  */
 export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
   .object({
