@@ -101,6 +101,47 @@ describe('production Oxlint configuration and architecture plugin', () => {
     expect(cliBoundaryDiagnostics).toHaveLength(4);
   });
 
+  it('warns on harness driver imports without failing the run (warn-mode boundary)', () => {
+    const files: Record<string, string> = {
+      'src/harness/surface.ts': [
+        "import type { SandboxLevel } from '../driver/types.js';", // violation (warn)
+        "import { stripMetaSchema } from '../shared/json-schema.js';", // the legal edge
+        'export type { SandboxLevel };', // use both imports: only the boundary rule may fire
+        'export const stripped = stripMetaSchema({});',
+      ].join('\n'),
+    };
+    const result = lint(fixture(files), Object.keys(files));
+    // WARN severity: diagnostics are reported but the run does not fail —
+    // the migration-1.1 boundary hardens to error only in a later lane.
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const harness = diagnosticsOf(result).filter((entry) =>
+      entry.code.includes('no-driver-import-in-harness'),
+    );
+    expect(harness).toHaveLength(1);
+    expect(harness[0]?.filename).toBe('src/harness/surface.ts');
+    expect(harness[0]?.labels?.[0]?.span?.line).toBe(1);
+  });
+
+  it('keeps the real harness tree at exactly the documented driver-import violations', () => {
+    const result = spawnSync(process.execPath, [BIN, '-f', 'json', 'src/harness'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    const violations = diagnosticsOf(result)
+      .filter((entry) => entry.code.includes('no-driver-import-in-harness'))
+      .map((entry) => entry.filename.replace(`${ROOT}/`, ''))
+      .sort();
+    // The rule header documents these two type-only src/driver/types.ts
+    // imports (they become contracts imports in a later migration step).
+    // This assertion makes the documentation a ratchet: a NEW harness→
+    // driver import fails here instead of silently joining the warn list.
+    expect(violations).toEqual(['src/harness/surface.ts', 'src/harness/tools.ts']);
+  });
+
   it.each(['missing-plugin', 'invalid-config'])('fails closed for %s', (failure) => {
     const root = fixture({ 'src/kernel/a.ts': "import 'ai';" });
     if (failure === 'missing-plugin') rmSync(join(root, 'lint/plugin.mjs'));

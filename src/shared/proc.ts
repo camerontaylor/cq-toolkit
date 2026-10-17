@@ -1,14 +1,18 @@
-// Child-process mechanics for the subprocess driver — T1.5 slice 1.
+// Child-process mechanics for the drivers — T1.5 slice 1 (migration 1.1:
+// moved from src/driver/subprocess/process.ts to shared/proc.ts so the
+// harness and every lane consume shared process lifecycle instead of
+// reaching into the subprocess driver).
 //
-// I8 EXEMPTION (the ONE file under src/driver/** allowed to own scheduling
-// primitives — the driver-hygiene scan exempts exactly this path,
-// src/driver/subprocess/process.ts): the SIGTERM→SIGKILL grace ladder lives
-// here because here the kernel has ALREADY DECIDED to kill (the governed
-// RunOptions.signal fired — I8: the governor decides WHEN to
+// SCHEDULING PRIMITIVES OWNED HERE (I8 posture): the SIGTERM→SIGKILL grace
+// ladder lives here because here the kernel has ALREADY DECIDED to kill (the
+// governed RunOptions.signal fired — I8: the governor decides WHEN to
 // abort, the driver only obeys) and this helper only EXECUTES that decision
 // against a real OS process. It never decides to start a termination on its
 // own: `terminateGracefully` is called by the driver purely as a reaction
-// to the governed signal. Consequences, by design:
+// to the governed signal. (The driver-hygiene scan's `driver/<name>/process
+// .ts` exemption covers the driver-INTERNAL lifecycle helpers — the
+// claude-agent and acp lanes; this shared file sits outside the scanned
+// driver tree with the same posture.) Consequences, by design:
 //   - every timer in this file is an EXECUTION detail of a decided kill
 //     (the grace windows between rungs), never a scheduling policy;
 //   - the delays are INJECTABLE (`GraceLadderOptions.delay`) so tests run
@@ -37,10 +41,7 @@
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
-import {
-  processSignalCleanupStarted,
-  registerProcessSignalCleanup,
-} from '../../shared/process-signals.js';
+import { processSignalCleanupStarted, registerProcessSignalCleanup } from './process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
@@ -556,7 +557,7 @@ export interface GraceLadderOptions {
   killGraceMs?: number;
   /**
    * Injectable wait between rungs. Default: a real (unref'd) timeout —
-   * the ONLY scheduling primitive under src/driver/**, allowed here
+   * the ONLY scheduling primitive in this file, allowed here
    * because it executes an already-decided kill (see the file header).
    */
   delay?: (ms: number) => Promise<void>;

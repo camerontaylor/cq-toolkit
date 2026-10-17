@@ -2,7 +2,7 @@
 // A.3) — split from ./bin.ts so they are importable without starting a
 // server. See bin.ts for the check list and exit statuses.
 import { realpathSync, statSync } from 'node:fs';
-import { buildChildEnv } from '../../driver/subprocess/process.js';
+import { buildChildEnv } from '../../shared/proc.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../../sandbox/index.js';
 import { createHarnessSurface, HarnessManifestSchema } from '../surface.js';
 import type { HarnessManifest, HarnessSurface } from '../surface.js';

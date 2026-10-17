@@ -12,7 +12,7 @@
 // never mutated. The drivers' own tests cover the wiring.
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
-import { stripMetaSchema } from '../../src/driver/json-schema.js';
+import { stripMetaSchema } from '../../src/shared/json-schema.js';
 
 const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
 

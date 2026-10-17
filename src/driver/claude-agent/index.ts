@@ -265,8 +265,8 @@ import { boundedErrorText, describeError, redactSensitiveText } from '../error-t
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
-import { buildChildEnv } from '../subprocess/process.js';
-import { stripMetaSchema } from '../json-schema.js';
+import { buildChildEnv } from '../../shared/proc.js';
+import { stripMetaSchema } from '../../shared/json-schema.js';
 import {
   compileOutputSchema,
   uncompilableSchemaVerdict,

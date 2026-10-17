@@ -50,7 +50,7 @@ import {
   usageFromCli,
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
-import type { ManagedChild, SpawnOptions } from '../../src/driver/subprocess/process.js';
+import type { ManagedChild, SpawnOptions } from '../../src/shared/proc.js';
 import { fakeManagedSpawn } from '../helpers/transport-fakes.js';
 import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
@@ -66,8 +66,8 @@ import {
   buildChildEnv,
   spawnManaged,
   terminateActiveChildrenOnExit,
-} from '../../src/driver/subprocess/process.js';
-import type { ProcessClose } from '../../src/driver/subprocess/process.js';
+} from '../../src/shared/proc.js';
+import type { ProcessClose } from '../../src/shared/proc.js';
 import { runDriverConformance } from '../../src/driver/conformance.js';
 import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
 import {
@@ -1546,7 +1546,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('importing driver and runCli does not install signal handlers', async () => {
     await withScratch(async (scratchDir) => {
-      const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+      const processUrl = new URL('../../src/shared/proc.ts', import.meta.url).href;
       const cliUrl = new URL('../../src/cli/main.ts', import.meta.url).href;
       const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
       const child = spawnManaged({
@@ -1580,7 +1580,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       await withScratch(async (scratchDir) => {
         const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
         const bin = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
-        const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+        const processUrl = new URL('../../src/shared/proc.ts', import.meta.url).href;
         const runUrl = new URL('../../src/harness/run.ts', import.meta.url).href;
         const preload = join(scratchDir, 'owned-child.mjs');
         const runWorker = join(scratchDir, 'run-worker.cjs');

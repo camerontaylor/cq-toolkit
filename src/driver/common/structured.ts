@@ -10,7 +10,7 @@
 // strip below is deterministic, and `validateStructured` re-derives its zod
 // schema from `os.schema` itself, never from the caller's original.
 //
-// RELATIONSHIP TO src/driver/json-schema.ts: that helper is the CLI-bound
+// RELATIONSHIP TO src/shared/json-schema.ts: that helper is the CLI-bound
 // meta guard (issue #209) — it SILENTLY DROPS `$schema` and any absolute
 // json-schema.org reference, because the claude CLI has no registry lookup.
 // The seam needs the stricter rule an ADR can state: external references are

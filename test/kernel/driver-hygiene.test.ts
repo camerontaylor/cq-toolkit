@@ -5,8 +5,9 @@
 // linter's job; this is the ownership ratchet):
 //   1. src/driver/** must contain NO `setTimeout` and NO `AbortController`,
 //      EXCLUDING src/driver/<name>/process.ts — process-lifecycle helpers
-//      (T1.5's SIGTERM→SIGKILL ladder) may own timers, because there the
-//      kernel has already DECIDED to kill and the helper only executes.
+//      may own timers, because there the kernel has already DECIDED to kill
+//      and the helper only executes. (The T1.5 SIGTERM→SIGKILL ladder itself
+//      moved to src/shared/proc.ts in migration 1.1 — outside this tree.)
 //      Drivers never decide WHEN to abort; they receive signals.
 //   2. src/kernel/** contains no `setTimeout`/`AbortController` OUTSIDE
 //      governor.ts — the governor is the kernel's ONE wall-clock owner
@@ -30,7 +31,7 @@ const KERNEL_DIR = join(SRC, 'kernel');
 /** The banned primitives: wall-clock scheduling and cancellation roots. */
 const PATTERN = /setTimeout|AbortController/;
 
-/** The one exclusion: src/driver/<name>/process.{ts,js,mjs} (T1.5's kill-ladder home). */
+/** The one exclusion: src/driver/<name>/process.{ts,js,mjs} — in-driver lifecycle helpers (the T1.5 kill ladder itself lives in src/shared/proc.ts). */
 const PROCESS_HELPER = /^driver\/[^/]+\/process\.(?:ts|js|mjs)$/;
 /**
  * The other exclusion: the SHIPPED conformance suite (seam v2, ADR-0002 §4).
