@@ -1,4 +1,4 @@
-// selfhost/settle-state — the PURE settle ledger (task W1.2 slice A, the
+// policy/queue/settle-state — the PURE settle ledger (task W1.2 slice A, the
 // RS-3 decision): how long a PR's exact code has sat still, measured from
 // OUR OWN durable observations instead of anything the PR author controls.
 //

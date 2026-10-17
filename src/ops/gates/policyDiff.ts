@@ -34,8 +34,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
-import { parseSettleState } from '../../selfhost/settle-state.js';
-import { SETTLE_STATE_PATH } from '../../selfhost/state-branch.js';
+import { parseSettleState } from '../../policy/queue/settle-state.js';
 import {
   assertRepoRelPath,
   gitChangedPaths,
@@ -86,6 +85,17 @@ import {
 /** The project's policy list, read at the trust ref (and at both range ends for removals). */
 export const POLICY_LIST_PATH = 'policy/protected-paths.json';
 
+/**
+ * The settle ledger's path on the settle ref, as the deployed automation
+ * writes it (`selfhost/config.ts`'s `SETTLE_STATE_PATH` — the same wire
+ * path the self-host templates document). An input may relocate the read
+ * (`PolicyDiffInput.settleStatePath`, the migration-1.2 parameter that
+ * replaced the selfhost import); the default keeps today's wire semantics.
+ * A relocated path can only fail closed: a blob that does not parse as the
+ * ledger discards to no observations, never to a valid override record.
+ */
+const DEFAULT_SETTLE_STATE_PATH = '.cq/settle-state.json';
+
 /** The only directory GitHub reads workflows from. */
 const WORKFLOWS_DIR = '.github/workflows';
 
@@ -128,6 +138,12 @@ export interface PolicyDiffInput {
    * bound. In-process only — the strict CLI schema cannot carry it.
    */
   authorization?: D11Authorization;
+  /**
+   * The settle ledger's path on the settle ref, passed in by the caller
+   * (selfhost configuration; migration 1.2). Omitted → the built-in wire
+   * default. Only read when the override record is evaluated.
+   */
+  settleStatePath?: string;
 }
 
 export type PolicyFindingKind =
@@ -464,10 +480,11 @@ async function evaluateOverride(
   if (input.settleRef === undefined) {
     notes.push('settle ledger: no settle ref (cq-state absent)');
   } else {
+    const settlePath = input.settleStatePath ?? DEFAULT_SETTLE_STATE_PATH;
     try {
-      const text = await gitReadBlob(input.repo, input.settleRef, SETTLE_STATE_PATH);
+      const text = await gitReadBlob(input.repo, input.settleRef, settlePath);
       if (text === null) {
-        notes.push(`settle ledger: ${SETTLE_STATE_PATH} absent at ${input.settleRef}`);
+        notes.push(`settle ledger: ${settlePath} absent at ${input.settleRef}`);
       } else {
         const { state, discarded } = parseSettleState(JSON.parse(text), input.repository ?? '');
         for (const why of discarded) notes.push(`settle ledger: discarded — ${why}`);

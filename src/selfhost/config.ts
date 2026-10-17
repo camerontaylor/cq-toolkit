@@ -246,6 +246,19 @@ export const SELFHOST_DRIVER_ENV = 'CQ_SELFHOST_DRIVER';
 export const SELFHOST_PEAK_DRIVER_ENV = 'CQ_SELFHOST_PEAK_DRIVER';
 
 /**
+ * The settle ledger's path on the `cq-state` state branch (`state-branch.ts`
+ * is the only writer; `policy/queue/settle-state.ts` owns the schema). The
+ * deployed automation pins this wire path — the self-host templates document
+ * it and the shipped `cq-policy.yml` reads the ledger at it when it judges a
+ * `cq-override` label — so it is configuration data here, not a literal in
+ * each consumer: migration step 1.2 passes it as a parameter to
+ * `gates.policyDiff` (whose built-in wire default matches this value), which
+ * is what lets the gates import the pure schema from `policy/queue` and
+ * nothing else from selfhost.
+ */
+export const SETTLE_STATE_PATH = '.cq/settle-state.json';
+
+/**
  * Parse a `provider/model` spec. Exactly one slash, both halves non-empty,
  * no whitespace: a malformed value THROWS with the offending env name so a
  * typo fails the run loud instead of silently dispatching the default model.

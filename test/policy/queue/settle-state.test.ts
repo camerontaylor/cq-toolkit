@@ -1,5 +1,5 @@
 // W1.2 slice A — tests for the PURE settle ledger
-// (src/selfhost/settle-state.ts, the RS-3 decision).
+// (src/policy/queue/settle-state.ts, the RS-3 decision).
 //
 // Pinned here:
 //   1. observe: the same tuple appends; a head change, a base change, and a
@@ -27,8 +27,8 @@ import {
   sameTuple,
   serializeSettleState,
   settleStatus,
-} from '../../src/selfhost/settle-state.js';
-import type { SettleState, SettleTuple } from '../../src/selfhost/settle-state.js';
+} from '../../../src/policy/queue/settle-state.js';
+import type { SettleState, SettleTuple } from '../../../src/policy/queue/settle-state.js';
 
 const REPO = 'octo/widget';
 const HEAD_A = 'a'.repeat(40);

@@ -1458,6 +1458,7 @@ describe('policyDiff: the override record', SLOW, () => {
   const OWNER_ID = 1001;
   const EPOCH = '2026-09-20T10:00:00.000Z';
   let subject: string;
+  let cqState: string;
 
   const labelEvent = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     event: 'labeled',
@@ -1500,9 +1501,9 @@ describe('policyDiff: the override record', SLOW, () => {
         },
       },
     };
-    importCommits(repo, {
+    cqState = importCommits(repo, {
       'cq-state': { files: { '.cq/settle-state.json': JSON.stringify(ledger) } },
-    });
+    })['cq-state']!;
   }, HOOK_MS);
 
   test('attested trust + a valid owner label after the epoch is honoured: pass', async () => {
@@ -1559,6 +1560,40 @@ describe('policyDiff: the override record', SLOW, () => {
     const out = await run(subject, 'human', noLedger);
     expect(out.override.status).toBe('invalid');
     expect(out.report).toContain('settle ledger: no settle ref (cq-state absent)');
+  });
+
+  test('settleStatePath relocates the ledger read; a path with no ledger fails closed', async () => {
+    // The caller passes the ledger's location (selfhost config, migration
+    // 1.2): a ledger at the passed path is read and honoured; the default
+    // wire path is unchanged for callers that omit the field.
+    importCommits(repo, {
+      'cq-state': {
+        from: cqState,
+        files: {
+          'custom/ledger.json': JSON.stringify({
+            version: 1,
+            repo: 'o/r',
+            prs: {
+              [String(PR)]: {
+                tuple: { head: subject, base: trust, forcePushEpoch: 0 },
+                observations: [{ observedAt: EPOCH, by: 'test' }],
+              },
+            },
+          }),
+        },
+      },
+    });
+    const relocated = withRecord(events('relocated.json', [labelEvent()]));
+    relocated.settleStatePath = 'custom/ledger.json';
+    const out = await run(subject, 'human', relocated);
+    expect(out.override.status).toBe('honoured');
+    expect(out.verdict).toBe('pass');
+
+    const absent = withRecord(events('relocated.json', [labelEvent()]));
+    absent.settleStatePath = 'custom/missing.json';
+    const outAbsent = await run(subject, 'human', absent);
+    expect(outAbsent.override.status).toBe('invalid');
+    expect(outAbsent.report).toContain('settle ledger: custom/missing.json absent at cq-state');
   });
 
   test('an unreadable events file is an invalid record, never `failed`', async () => {
