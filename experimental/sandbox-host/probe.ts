@@ -51,7 +51,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { connect, createServer, type AddressInfo } from 'node:net';
 
@@ -279,13 +279,39 @@ function execRefusalAttributable(
   return (pattern !== undefined && pattern.test(evidence)) || canonical.test(evidence);
 }
 
+/**
+ * The tool a HOST-side control runs.  Controls execute on the bare host,
+ * outside any boundary, so any working copy of the tool proves the target is
+ * readable/writable; only the in-boundary canary must use the FHS path,
+ * because the boundary binds just /usr, /bin, /sbin, /lib and /lib64.  On a
+ * host without FHS paths (NixOS: /bin holds only sh) the fixed path is
+ * absent, every control fails to arm, and every canary reads inconclusive.
+ * So: the FHS path when it is executable, else the same basename from the
+ * host PATH, else the FHS path unchanged (the control then fails as before).
+ */
+async function hostTool(path: string): Promise<string> {
+  const executable = async (candidate: string): Promise<boolean> =>
+    access(candidate, constants.X_OK).then(
+      () => true,
+      () => false,
+    );
+  if (!isAbsolute(path) || (await executable(path))) return path;
+  const name = basename(path);
+  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+    if (dir === '' || !isAbsolute(dir)) continue;
+    const candidate = join(dir, name);
+    if (await executable(candidate)) return candidate;
+  }
+  return path;
+}
+
 /** Executed on the bare host — the control that proves a canary CAN fire. */
 async function hostExec(
   argv: readonly string[],
   env?: Record<string, string>,
 ): Promise<{ ok: boolean; stderr: string }> {
   try {
-    await execFile(argv[0]!, argv.slice(1), { env, timeout: 10_000 });
+    await execFile(await hostTool(argv[0]!), argv.slice(1), { env, timeout: 10_000 });
     return { ok: true, stderr: '' };
   } catch (error) {
     const err = error as NodeJS.ErrnoException & { stderr?: string; message?: string };

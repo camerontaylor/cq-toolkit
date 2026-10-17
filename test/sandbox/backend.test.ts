@@ -4,9 +4,10 @@
 // evidence comes from probe.ts, never from these builders alone). The
 // seatbelt-live suite also exercises network, clipboard and process-group
 // canaries on macOS without broadening the profile's file permissions.
+import { accessSync, constants } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
@@ -815,6 +816,26 @@ describe('launcher hardening (PR review)', () => {
     }
   });
 
+  // The landlock stand-in helper execs the argv on the HOST, so resolve perl
+  // the way a shell would rather than assuming FHS /usr/bin (NixOS has no
+  // /usr/bin/perl). Inside a real boundary the FHS path is the point; here it
+  // is not.
+  const hostPerl = (): string => {
+    const executable = (path: string): boolean => {
+      try {
+        accessSync(path, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (executable('/usr/bin/perl')) return '/usr/bin/perl';
+    for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+      if (dir !== '' && executable(join(dir, 'perl'))) return join(dir, 'perl');
+    }
+    return '/usr/bin/perl';
+  };
+
   test('a descendant that escapes the group cannot hold the launch past its deadline', async () => {
     const outsideDir = await mkdtemp(join(tmpdir(), 'cq-sbx-harden-out-'));
     const pidFile = join(outsideDir, 'escaped.pid');
@@ -836,7 +857,7 @@ describe('launcher hardening (PR review)', () => {
       const result = await landlockAdapter({ helperPath: helper }).launch({
         workspace: dir,
         argv: [
-          '/usr/bin/perl',
+          hostPerl(),
           '-e',
           `use POSIX; pipe(my $r, my $w) or die; if (fork) { close $w; <$r>; exit 0 } close $r; setsid(); open my $f, '>', '${pidFile}'; print $f $$; close $f; close $w; sleep 120`,
         ],
