@@ -22,6 +22,7 @@ code disagree with an ADR, the code and the notes are current.
 | [ADR-0003 annex — Approval token](0003-approval-token.md)                         | The signed, single-use human approval for `approved: true` jobs                                            |
 | [ADR-0003 annex — Journal v2](0003-journal-migration.md)                          | The journal v2 schema and replay rules                                                                     |
 | [ADR-0004 — Policy-check trust boundaries](0004-policy-check-trust-boundaries.md) | Where policy checks get their code and definitions, credentials and identities, and promotion              |
+| [ADR-0005 — Architecture revision](0005-architecture-revision.md)                 | The layered monorepo, policy foundation, driver lanes and TypeScript queue rewrite                         |
 
 ## Terms and identifiers
 
