@@ -418,6 +418,7 @@ export * from './ops/merge/index.js';
 export * from './ops/ratchet/index.js';
 export * from './ops/sweep/index.js';
 export * from './ops/pr/index.js';
+export * from './ops/dev/index.js';
 export * from './ops/analyze/index.js';
 export * from './plans/index.js';
 export * from './driver/index.js';

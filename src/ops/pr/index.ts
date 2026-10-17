@@ -52,6 +52,15 @@ export {
 // family's report reachable by name everywhere.
 export type { PrReadiness, PrRunReport, RunReportInput, RunReportRow } from './runReport.js';
 export { makeRunReport } from './runReport.js';
+// pr.open (strategy §3): the readiness-record PR opener — the managed
+// section markers follow the assemblePrs compose protocol.
+export type { PrOpenInput, PrOpenReport } from './open.js';
+export {
+  DEV_READINESS_SECTION_MARKER,
+  makePrOpen,
+  renderDispositionsComment,
+  renderReadinessSection,
+} from './open.js';
 export type { SubprocessPrEffectsOptions } from './ghEffects.js';
 export {
   bodyOf,
@@ -69,6 +78,7 @@ export {
 export {
   AssemblePrsInputSchema,
   EnsureTrackerBranchInputSchema,
+  PrOpenInputSchema,
   registry as prRegistry,
   RunReportInputSchema,
 } from './registry.js';
