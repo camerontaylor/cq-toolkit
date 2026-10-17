@@ -33,6 +33,7 @@
 //     as an orphan, never silently dropped: the report must account for
 //     every file the dep showed it.
 import { execFile } from 'node:child_process';
+import { messageOf } from '../../shared/messageOf.js';
 import { fingerprintFailure, legacyFingerprintFailure } from '../gates/fingerprint.js';
 import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
@@ -676,11 +677,6 @@ function addSignature(byPackage: Map<string, string[]>, pkg: string, signature: 
   const signatures = byPackage.get(pkg);
   if (signatures === undefined) byPackage.set(pkg, [signature]);
   else if (!signatures.includes(signature)) signatures.push(signature);
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Generous capture ceiling — a big diff listing must not truncate into a fake empty diff. */

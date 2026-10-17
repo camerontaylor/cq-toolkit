@@ -32,6 +32,7 @@
 import { mkdir, readdir, symlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { subprocessRunCheck } from '../gates/checkRunner.js';
 import { typecheckCount } from './adapters/typecheckCount.js';
 import { extractTreeAttributeFree, gitRevParse } from './git.js';
@@ -61,11 +62,6 @@ export interface RecomputeTypecheckOutcome {
   skipped: number;
   /** tsc's exit code (null: killed, timed out, spawn failure). */
   exitCode: number | null;
-}
-
-/** Error message of an unknown throwable. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** The recompute op. */

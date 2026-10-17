@@ -68,6 +68,7 @@
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import type { RunCheck } from '../gates/checkRunner.js';
 import type { ApprovalAuthority, ApprovalSubject } from './approval.js';
 import type { ApprovedMutation } from './approval.js';
@@ -631,8 +632,3 @@ function storeRootOf(input: ApplyRemediationInput): string {
 // runner seam + the registry-bound store seam, `dir` defaulted to the
 // sidecar's directory). The plan runner's autonomous path never dispatches
 // this op.
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}

@@ -44,6 +44,7 @@
 // remediation honest.
 import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { messageOf } from '../../shared/messageOf.js';
 
 /**
  * The injected I/O seam of the analyze remediation slice — the ONE place the
@@ -223,9 +224,4 @@ function isEnoent(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'ENOENT'
   );
-}
-
-/** Error message of an unknown throwable, for fault messages. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

@@ -32,6 +32,7 @@ import { execFile } from 'node:child_process';
 import { lstat, realpath, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { messageOf } from '../../shared/messageOf.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex, GitMutexConfig } from './gitMutex.js';
 
@@ -731,11 +732,6 @@ function mutexConfigOf(mutex: WorktreeMutexConfig): GitMutexConfig {
   if (mutex.retries !== undefined) config.retries = mutex.retries;
   if (mutex.retryBaseMs !== undefined) config.retryBaseMs = mutex.retryBaseMs;
   return config;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**
