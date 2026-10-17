@@ -55,7 +55,7 @@ const id = '1'.padStart(64, '0');
 
 describe('daemon-owned container lifetime', () => {
   test('a timed-out attach removes the immutable created ID', async () => {
-    const { adapter, dir, log } = await stub('exec /bin/sleep 2');
+    const { adapter, dir, log } = await stub('exec sleep 2');
     const result = await adapter.launch({
       workspace: dir,
       argv: ['/usr/bin/true'],
@@ -146,7 +146,7 @@ describe('daemon-owned container lifetime', () => {
     const { adapter, dir, log } = await stub(
       'echo attached',
       'exit 0',
-      "/bin/sleep 1; printf '%064d\\n' 1",
+      "sleep 1; printf '%064d\\n' 1",
     );
     const result = await adapter.launch({
       workspace: dir,

@@ -51,7 +51,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { connect, createServer, type AddressInfo } from 'node:net';
 
@@ -215,13 +215,19 @@ function executed(r: { spawnError?: string; timedOut: boolean; exitCode: number 
  */
 function denialOutcome(
   id: CanaryId,
-  result: SandboxLaunchResult,
+  result: CanaryLaunch,
   armed: boolean,
   what: string,
 ): CanaryOutcome {
   if (result.ok) return { id, verdict: 'fail', detail: what };
   if (!armed)
     return { id, verdict: 'inconclusive', detail: `control did not arm: ${detail(result)}` };
+  if (result.canaryMissing === true)
+    return {
+      id,
+      verdict: 'inconclusive',
+      detail: `canary binary absent in the boundary: ${detail(result)}`,
+    };
   if (!executed(result))
     return { id, verdict: 'inconclusive', detail: `canary never ran: ${detail(result)}` };
   return { id, verdict: 'pass', detail: detail(result) };
@@ -279,13 +285,65 @@ function execRefusalAttributable(
   return (pattern !== undefined && pattern.test(evidence)) || canonical.test(evidence);
 }
 
+/**
+ * A canary launch annotated with whether the launcher reported that the
+ * canary BINARY itself is absent from the boundary's namespace.
+ */
+type CanaryLaunch = SandboxLaunchResult & { readonly canaryMissing?: boolean };
+
+/**
+ * Whether the launcher's own exec report says the canary binary (argv[0])
+ * does not exist inside the boundary — ENOENT on the exec, so the canary
+ * never ran.  bwrap reports that as `bwrap: execvp /bin/cat: No such file or
+ * directory` with exit 1, which executed() alone would read as a run that
+ * failed: once the host control arms (hostTool), denialOutcome would then
+ * certify a denial no canary performed.  An EPERM exec refusal is different
+ * — that is the boundary refusing, and keeps its meaning.  A canary that ran
+ * and failed to find its TARGET does not match: the launcher anchors name
+ * the exact canary binary, not the target.
+ */
+function canaryBinaryMissing(
+  backend: SandboxBackend,
+  argv0: string,
+  r: SandboxLaunchResult,
+): boolean {
+  if (!execRefusalAttributable(backend, argv0, r)) return false;
+  return /No such file or directory|ENOENT/.test(`${r.spawnError ?? ''}\n${r.stderr}`);
+}
+
+/**
+ * The tool a HOST-side control runs.  Controls execute on the bare host,
+ * outside any boundary, so any working copy of the tool proves the target is
+ * readable/writable; only the in-boundary canary must use the FHS path,
+ * because the boundary binds just /usr, /bin, /sbin, /lib and /lib64.  On a
+ * host without FHS paths (NixOS: /bin holds only sh) the fixed path is
+ * absent, every control fails to arm, and every canary reads inconclusive.
+ * So: the FHS path when it is executable, else the same basename from the
+ * host PATH, else the FHS path unchanged (the control then fails as before).
+ */
+async function hostTool(path: string): Promise<string> {
+  const executable = async (candidate: string): Promise<boolean> =>
+    access(candidate, constants.X_OK).then(
+      () => true,
+      () => false,
+    );
+  if (!isAbsolute(path) || (await executable(path))) return path;
+  const name = basename(path);
+  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+    if (dir === '' || !isAbsolute(dir)) continue;
+    const candidate = join(dir, name);
+    if (await executable(candidate)) return candidate;
+  }
+  return path;
+}
+
 /** Executed on the bare host — the control that proves a canary CAN fire. */
 async function hostExec(
   argv: readonly string[],
   env?: Record<string, string>,
 ): Promise<{ ok: boolean; stderr: string }> {
   try {
-    await execFile(argv[0]!, argv.slice(1), { env, timeout: 10_000 });
+    await execFile(await hostTool(argv[0]!), argv.slice(1), { env, timeout: 10_000 });
     return { ok: true, stderr: '' };
   } catch (error) {
     const err = error as NodeJS.ErrnoException & { stderr?: string; message?: string };
@@ -525,8 +583,11 @@ async function probeBackendWithLaunch(
     };
 
     let proxyPort: number | undefined;
-    const launch = (argv: readonly string[], launchTimeoutMs = timeoutMs) =>
-      launchVia({
+    const launch = async (
+      argv: readonly string[],
+      launchTimeoutMs = timeoutMs,
+    ): Promise<CanaryLaunch> => {
+      const result = await launchVia({
         workspace,
         argv,
         parentEnv,
@@ -535,6 +596,11 @@ async function probeBackendWithLaunch(
         timeoutMs: launchTimeoutMs,
         maxOutputChars: 4_000,
       });
+      return {
+        ...result,
+        canaryMissing: canaryBinaryMissing(adapter.backend, argv[0] ?? '', result),
+      };
+    };
 
     let homeCanaryCreated = false;
     try {
@@ -736,7 +802,7 @@ async function probeBackendWithLaunch(
                   ? 'CQ_PROBE_CANARY_SECRET reached the child'
                   : 'printenv found the name with a different value',
               }
-            : !executed(envRead)
+            : !executed(envRead) || envRead.canaryMissing === true
               ? {
                   id: 'credential-env',
                   verdict: 'inconclusive',
