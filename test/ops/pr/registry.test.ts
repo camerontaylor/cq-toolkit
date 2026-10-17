@@ -49,7 +49,7 @@ import {
 } from '../../../src/adapters/forge-github/ghEffects.js';
 import { registry } from '../../../src/ops/pr/registry.js';
 
-const ENTRY_NAMES = ['pr.ensureTrackerBranch', 'pr.assemblePrs', 'pr.runReport'];
+const ENTRY_NAMES = ['pr.ensureTrackerBranch', 'pr.assemblePrs', 'pr.runReport', 'pr.open'];
 
 const entryByName = (name: string) => {
   const entry = registry.find((candidate) => candidate.name === name);
@@ -86,10 +86,17 @@ const ensureTrackerBranchInput = (): Record<string, unknown> => ({
   branch: 'cq/09-16a/tracker',
 });
 
+// pr.open (strategy §3 lane 1): opens the PR FROM the readiness record; the
+// minimal input is the repo root alone (target/title/draft all optional).
+const openPrInput = (): Record<string, unknown> => ({
+  repoRoot: '/repo',
+});
+
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
   'pr.ensureTrackerBranch': ensureTrackerBranchInput,
   'pr.assemblePrs': assembleInput,
   'pr.runReport': reportInput,
+  'pr.open': openPrInput,
 };
 
 /** The minimal input fixture for one entry, failing loud when the name is unknown. */

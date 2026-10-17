@@ -27,6 +27,7 @@ import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { AssemblePrsInput } from './assemblePrs.js';
 import type { EnsureTrackerBranchInput } from './ensureTrackerBranch.js';
+import type { PrOpenInput } from './open.js';
 import type { RunReportInput } from './runReport.js';
 
 /**
@@ -87,6 +88,15 @@ export const RunReportInputSchema: z.ZodType<RunReportInput> = z
   })
   .strict();
 
+export const PrOpenInputSchema: z.ZodType<PrOpenInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    target: z.string().min(1).exactOptional(),
+    title: z.string().min(1).exactOptional(),
+    draft: z.boolean().exactOptional(),
+  })
+  .strict();
+
 /** PR family op registry (D3: tracker-first assembly + the fleet run report). */
 export const registry: OpRegistryEntry[] = [
   {
@@ -144,6 +154,27 @@ export const registry: OpRegistryEntry[] = [
             unknown,
             unknown
           >,
+      ),
+  },
+  {
+    name: 'pr.open',
+    inputSchema: PrOpenInputSchema,
+    // The readiness-ledger reader and the git reads bind from the dispatched
+    // repoRoot through the dev family's inert subprocess effects; the gh
+    // half binds through the family's own gh effects. Resolution stays
+    // inert (closures only — no network, no ledger, no lock touched).
+    importer: () =>
+      Promise.all([
+        import('./open.js'),
+        import('./ghEffects.js'),
+        import('../dev/effects.js'),
+      ]).then(
+        ([m, ghEffects, devEffects]) =>
+          (async (input: PrOpenInput) =>
+            m.makePrOpen(
+              devEffects.makeSubprocessDevEffects(input.repoRoot),
+              ghEffects.makeSubprocessPrEffects(input.repoRoot),
+            )(input)) as Op<unknown, unknown>,
       ),
   },
 ];
