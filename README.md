@@ -65,8 +65,7 @@ Exit codes: `0` clean, `1` thrown/definitive failure, `2` usage error, `3` needs
 Drivers implement one seam (`Driver.run(opInvocation)`), so plans are transport-independent: each worker is a fresh isolated invocation, and vendor vocabulary never reaches the kernel or persisted data (I6, I10).
 
 - `AiSdkDriver` — in-process provider drivers over the AI SDK (anthropic, openai, zai, deepseek), keys read from the environment at call time.
-- `SubprocessDriver` — runs an operator-installed agent CLI headless over stdio, with env-based model routing.
-- `ClaudeAgentDriver` — the `@anthropic-ai/claude-agent-sdk` lane. That package is an **optional peer dependency**: importing or building the toolkit never requires it, and the driver loads it lazily at `run()` time. Install it only if you use this lane:
+- `ClaudeCodeDriver` — runs the Claude Code substrate on the frozen seam with env-based model routing: the headless CLI over stdio (the primary transport) or the agent-SDK host (the optional `sdk` transport). The SDK package (`@anthropic-ai/claude-agent-sdk`) is an **optional peer dependency**: importing or building the toolkit never requires it, and the sdk transport loads it lazily at `run()` time. Install it only if you use that transport:
 
 ```sh
 npm install @anthropic-ai/claude-agent-sdk
@@ -107,7 +106,7 @@ registered — is [policy/README.md](policy/README.md).
 
 ## Self-hosting
 
-Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the package and drives a real governed plan through the built barrel (`scripts/smoke-run-plan.mjs` — two jobs, subprocess driver, journal + report + I1 output contract asserted), and the [pack audit](.github/workflows/pack-audit.yml) tarballs the package, asserts every shipped path hangs off the `files` allowlist, and denylist-scans the unpacked tree. The required `static` job regenerates the op reference and fails on drift, so `docs/ops/` cannot diverge from the registry.
+Stage 1 reached: CI runs the toolkit from source. The `from-source` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds the package and drives a real governed plan through the built barrel (`scripts/smoke-run-plan.mjs` — two jobs, claude-code driver (CLI transport), journal + report + I1 output contract asserted), and the [pack audit](.github/workflows/pack-audit.yml) tarballs the package, asserts every shipped path hangs off the `files` allowlist, and denylist-scans the unpacked tree. The required `static` job regenerates the op reference and fails on drift, so `docs/ops/` cannot diverge from the registry.
 
 ## Local verification
 

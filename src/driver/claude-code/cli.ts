@@ -1,41 +1,34 @@
-// The subprocess driver — T1.5 slice 1 (the null-hypothesis floor: run an
-// existing agent CLI headless on the FROZEN Driver seam:
-// run(opInvocation) → Promise<WorkerResult>).
+// The Claude Code lane's CLI transport — Phase 1.9 (the consolidation of
+// the former subprocess driver, T1.5 slice 1): run the `claude` CLI headless
+// on the FROZEN Driver seam (run(opInvocation) → Promise<WorkerResult>).
+// This is the lane's PRIMARY substrate path (D-E′ option A: one cq-owned
+// Claude Code lane, CLI primary, Agent SDK optional — sdk.ts).
 //
 // EXECUTION MODEL: out-of-process. Each invocation spawns ONE headless CLI
 // run (`claude -p …` by default — see the argv table below) in the
 // invocation's workspace, parses its stream-json stdout, and folds the
-// events into our seam vocabulary. No daemon, no pooling, no reuse — the
-// null hypothesis against which the in-process driver (T1.4) must justify
-// itself: if a stock agent CLI can be driven as a worker, the toolkit's
-// value is NOT "you can run Claude headless".
+// events into our seam vocabulary. No daemon, no pooling, no reuse.
 //
-// I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
-// driver-owned scheduling primitives under src/driver/**; this file (and
-// routing.ts) contain none. WHEN to abort is the signal sender's decision:
-// the run's ONLY cancellation SOURCE is `RunOptions.signal` (seam v2,
-// ADR-0002 §2.1) — the caller passes the governed rung-1 signal
-// explicitly. The signal is forwarded EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder
-// in ./process.ts (the scan's single exempt file, where the ladder executes
-// an already-decided kill). An already-aborted signal never dispatches and
-// creates NO session state. Outside a governed run without a signal no
-// cancellation source exists and a run is simply un-abortable by us.
-// Consequences, documented:
+// I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
+// SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
+// passes the governed rung-1 signal explicitly. The signal is forwarded
+// EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder in ./process.ts (the
+// hygiene scan's single exempt file, where the ladder executes an
+// already-decided kill). An already-aborted signal never dispatches and
+// creates NO session state. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
 //     clock; a driver-owned deadline would duplicate and race it.
 //   - No retries, ever: exactly ONE spawn per run (attempts are the
 //     runner/governor's business — a retry here would hide attempts).
 //
-// ROUTING (./routing.ts): ModelSpec → env-based route over a serializable
-// RoutingTable (default: zai / deepseek / anthropic anthropic-compat
-// endpoints, as-of 2026-09). The endpoint is injected purely through env
-// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model` UNCHECKED
-// — the DEEPSEEK SILENT-REMAP FOOTGUN is defended POST-DISPATCH since the
-// §2.6 allowlist retirement: the driver surfaces the model id the CLI
-// reports as served, and the shared served-model assertion (applied by the
-// factory, ADR-0002 §2.6) fails a mismatching run. Key VALUES are read from
-// the environment at run() time; a missing one throws pre-dispatch. Routes
-// carry var NAMES only, never secrets.
+// ROUTING (./routing.ts): ModelSpec → env-based route over the shared
+// RoutingTable. The endpoint is injected purely through env
+// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model`
+// UNCHECKED — the DEEPSEEK SILENT-REMAP FOOTGUN is defended POST-DISPATCH
+// (§2.6 allowlist retirement): the transport surfaces the model id the CLI
+// reports as served, and the shared served-model assertion fails a
+// mismatching run. Key VALUES are read from the environment at run() time;
+// a missing one throws pre-dispatch. Routes carry var NAMES only.
 //
 // ARGV (the reference headless surface, built by `buildArgs`):
 //   -p                          headless print mode; the PROMPT rides stdin
@@ -78,20 +71,19 @@
 //   --model <route.model>       the routed model id (routed verbatim — the
 //                               pre-dispatch model allowlist is retired, §2.6)
 //   --resume <cli-session-id>   only on sessionRef resume, when the record
-//                               carries a CLI session marker (below)
+//                               carries a CLI session marker (sessions.ts)
 //
 // CLOSED TOOL SURFACE (W1.4 — RS-12 design, ADR-0002 Annex A.4). The
-// harness executors now run on this lane too: the CLI's only tools are the
+// harness executors run on this transport too: the CLI's only tools are the
 // harness's, served over stdio by `cq-harness-mcp` (src/harness/mcp/) —
-// the SAME shared core (src/harness/surface.ts) claude-agent serves
-// in-process. The driver authors the manifest (workspace realpath, sandbox,
-// selection, harness config, env names); the server re-validates it,
-// scrubs its env to the default child-env allowlist + envAllowlist names
+// the SAME shared core (src/harness/surface.ts) the SDK transport serves
+// in-process. The transport authors the manifest (workspace realpath,
+// sandbox, selection, harness config, env names); the server re-validates
+// it, scrubs its env to the default child-env allowlist + envAllowlist names
 // (route credentials never reach `run` children's env), and enforces
 // containment, allowlists and the read-only mapping. Fail-closed on three
 // fronts, each settling stopReason 'error' with a `HARNESS_ERROR_PREFIX`
-// cause and an `errorClass: 'harness'` narration marker (ADR-0002 §2.2's
-// enum field lands with the W3.3 types bump):
+// cause and an `errorClass: 'harness'` narration marker (ADR-0002 §2.2):
 //   - the FIRST system/init must report exactly the expected surface —
 //     `cq-harness`/connected (or no server) and exactly the qualified
 //     selected tools, plus `StructuredOutput` under --json-schema (pinned
@@ -109,9 +101,10 @@
 // 'stock'` keeps the legacy argv (no --tools/--setting-sources/MCP flags;
 // harness NAMES in --allowedTools, which the CLI does not know — inert,
 // RS-1 J2 C1) and none of the harness enforcement. An option of the
-// directly constructed driver only — never a factory or plan key.
+// directly constructed driver only — never a factory or plan key. Stock
+// mode remains EVAL-ONLY and is not admissible in production.
 //
-// TRUST STATEMENT (issue #28's subprocess half). Harness mode: the harness
+// TRUST STATEMENT (issue #28's CLI half). Harness mode: the harness
 // enforces the TOOL-level sandbox mapping (read-only denials, workspace
 // containment, allowlists); OS confinement stays unenforced, so a
 // requested level with a non-empty surface records `{cq:
@@ -120,7 +113,7 @@
 // CLI's own permission model governs; the legacy `sandbox-level-
 // unenforced` marker (no layer) records that nothing was enforced here.
 //
-// SESSIONS (I6, OUR vocabulary — src/harness/session.ts):
+// SESSIONS (I6, OUR vocabulary — src/harness/session.ts + ./sessions.ts):
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
 //     scratch dir and a fresh record; the CLI runs with cwd = workspace.
 //     When the invocation carries a `workspace` binding (ADR-0002 §2.4),
@@ -131,41 +124,31 @@
 //     never inside the workspace.
 //   - sessionRef → SessionStore.load (unknown → THROW pre-dispatch: a fake
 //     resume is worse than a loud one); the SAME workspace continues, and
-//     `--resume` continues the CLI-side conversation using the CLI session
-//     id recorded in the SESSIONS-STORE sidecar `<sessionsDir>/
-//     <sessionId>.cq-cli-session` (below). A session without a sidecar
-//     (prior run died before the CLI reported a session) resumes the
-//     WORKSPACE only: no --resume flag, an honest partial continuation.
-//   - WHY A SIDECAR, and why it lives in the STORE, not the workspace
-//     (issue #26, candidate design (b)): role 'tool' in a session record
-//     means A TOOL RAN — that is the contract the shared conformance suite
-//     observes (mode 'none' must leave a record with zero tool-role
-//     messages), so the CLI session handle must not masquerade as one. And
-//     it must not live in the WORKSPACE either: the workspace is
-//     MODEL-VISIBLE — the earlier placement there was a tamper vector (the
-//     model could read or alter its own resume handle through the very
-//     tools the policy hands it). Relocated beside the session records and
-//     keyed by sessionId, the handle is exactly as precise and no longer
-//     reachable by the model. Our vocabulary never becomes vendor
-//     vocabulary either way.
+//     `--resume` continues the CLI-side conversation using the substrate
+//     session id recorded in the SESSIONS-STORE sidecar (sessions.ts). A
+//     session without a sidecar (prior run died before the CLI reported a
+//     session) resumes the WORKSPACE only: no --resume flag, an honest
+//     partial continuation. BOTH transports share the sidecar, so a record
+//     created by the SDK transport resumes honestly here and vice versa.
 //   - Persisted per run, post-settle: the user prompt, ONE role 'tool'
 //     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the harness name
 //     — `mcp__cq-harness__read` is recorded as `read`; stock mode: the CLI
 //     tool name; content = { input, ok, output } in plain-JSON
-//     our-vocabulary),
-//     the assistant transcript text (when any), and non-JSON stdout lines
-//     + stderr as narration (toolName 'cli-narration'). OUT-OF-POLICY tool
-//     activity is narration-only: the record reflects the governed tool
-//     surface (what --allowedTools pre-approved), never a tool the policy
-//     withheld.
+//     our-vocabulary), the assistant transcript text (when any), and
+//     non-JSON stdout lines + stderr as narration (toolName
+//     'cli-narration'). OUT-OF-POLICY tool activity is narration-only: the
+//     record reflects the governed tool surface (what --allowedTools
+//     pre-approved), never a tool the policy withheld.
 //
 // EVENT → SEAM MAPPING (stream-json, parsed defensively — a non-JSON line
 // or unknown event shape becomes narration, never a crash):
 //   {type:'system', subtype:'init', session_id}  → CLI session id (marker)
 //   {type:'system', subtype:'init', model}       → servedModel → WorkerResult.model
-//   {type:'assistant', message:{content:[…], usage}} → text blocks →
-//                              transcript; tool_use blocks remembered by id
-//                              → tool names; usage folded (fallback usage)
+//   {type:'assistant', message:{content:[…], usage, stop_reason}} → text
+//                              blocks → transcript; tool_use blocks
+//                              remembered by id → tool names; usage folded
+//                              (fallback usage); stop_reason 'refusal'
+//                              observed (the D-E′ refusal void)
 //   {type:'user', message:{content:[{type:'tool_result', tool_use_id,
 //                              is_error, content}]}}  → tool activity
 //                              (in-policy tools become role 'tool' record
@@ -173,91 +156,28 @@
 //                              a permission/execution DENIAL {tool, reason}
 //                              (frozen ToolDenial shape), deduped per
 //                              tool_use id
-//   {type:'result', subtype, is_error, session_id, usage:{input_tokens,
-//                              output_tokens, cache_read_input_tokens,
-//                              cache_creation_input_tokens},
-//                              structured_output}  → frozen Usage;
-//                              structuredOutput (when --json-schema);
-//                              the terminal status
+//   {type:'result', subtype, is_error, session_id, usage | modelUsage,
+//                              stop_reason, structured_output}  → the
+//                              shared accounting fold (usage.ts: per-model
+//                              aggregates preferred — subagent spend
+//                              included); structuredOutput (when
+//                              --json-schema, refusal-voided); the
+//                              terminal status
 //   {type:'result', model}      → servedModel → WorkerResult.model (init
 //                              first; the result event may overwrite/confirm)
 //   anything else               → narration (collected, persisted)
 //
-// STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
-//   1. the run signal fired (already-aborted at entry, or mid-run through
-//      the ladder the signal triggers) → 'aborted'
-//   2. harness surface/transport failure → 'error'
-//   3. oversized stdout/stderr line → 'error'
-//   4. real usage folded ≥ Budget.maxTokens → 'budget'
-//   5. result event present: subtype 'success' (and is_error ≠ true)
-//      → 'complete'; any other result status → 'error'
-//   6. no result event (spawn failure, nonzero exit, silent death) → 'error'
 // Once spawned, run() NEVER throws: every failure lands in an honest
 // 'error' verdict carrying the sessionId + denials gathered so far — and a
-// SYNCHRONOUS SPAWN FAILURE is a verdict too (issue #19): a spawnImpl that
-// throws (empty argv → ERR_INVALID_ARG_TYPE, a hostile test override)
-// returns stopReason 'error' with the spawn error recorded as narration,
-// never a rejection. A spawn failure reports zero usage (nothing was
-// measured); an 'error' verdict from a real result event KEEPS the
-// CLI-reported usage (real evidence). Every 'error' verdict also POPULATES
-// WorkerResult.error (bounded + secret-redacted, issue #208): the CLI result
-// event's own cause, else the child's exit code/signal or spawn error, plus
-// the retained stderr tail — so a 0-token failure is diagnosable from the
-// journal instead of an unexplained "driver reported no cause".
-// Only PRE-DISPATCH validation throws
-// (unknown provider — the routing config error; the model-allowlist miss is
-// RETIRED, §2.6 — and missing key
-// env, each a DispatchError('config'); unknown sessionRef; a workspace
-// binding that is not an absolute existing directory or disagrees with the
-// resumed record's realpath — a DispatchError('config'); a non-positive
-// Budget.maxTokens; invalid grace windows or binary template at
-// construction).
-//
-// ERROR CLASSES (seam v2, ADR-0002 §2.2): every error verdict carries
-// `errorClass`, classified ONLY from structured signals — the close cause
-// (spawn error / death signal / non-zero exit), the result-frame
-// subtype/errors, and the CLI's limit vocabulary where the vendor exposes
-// no structure (anchored patterns only; the unanchored numeric-status
-// style is banned). Cut order: an oversized output line is a protocol
-// break → 'harness'; the funded-allowance rows (claude session/weekly
-// limit text, gateway "spend limit reached", opencode "Insufficient
-// account funds") → 'quota', with the reset instant in
-// `providerSignals.windows[*].resetAt` when the claude limit text carries
-// an extractable one; the throttle rows ("Server is temporarily limiting
-// requests", "Request rejected (429)") → 'rate-limit'; a result-event
-// error → 'provider-error' (except a codex non-zero exit that folded real
-// usage with no result event — the provider's failure surfaced through
-// the CLI → 'provider-error'); spawn error / signal death / other
-// non-zero exit / silent death → 'harness'; anything unresolved is
-// 'unknown', NEVER a guessed 'transient'. Abort-shaped runs are excluded
-// (they are 'aborted', not errors). `providerSignals` rides ANY verdict,
-// only with structurally present data — never invented.
-//
-// BUDGET — the subprocess floor is honest about what a headless CLI cannot
-// do: there is NO mid-run token hook, so Budget.maxTokens is enforced only
-// against the FOLDED result usage (pre-verdict check — it can classify a
-// finished run 'budget' but cannot stop one early; stopping early on tokens
-// is the governor's/admission's business). maxUsd is caller-side derived
-// accounting; maxAttempts is the runner's; wallClockMs is the governor's.
-//
-// COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
-// model id ({ ...modelSpec, model: servedModel ?? modelSpec.model }; the
-// provider handle stays ModelSpec.provider — the price table's key), so a
-// gateway that silently remaps is priced off the id the CLI actually
-// reported — present only when the price map knows that id (overridable via
-// the `pricing` constructor option, same arithmetic over the injected
-// rates), and only on a verdict carrying REAL usage. A served/reported
-// mismatch with the requested id is recorded as a served-model-mismatch
-// narration marker (observable, issue #19) — the conformance suite fails a
-// mismatching run loudly; production runs record it and price off the
-// served id. Error/abort verdicts without a measurement report NO costUSD:
-// 0 would be a fabricated fact. The derived figure is api-equivalent
-// (modeled — list price for the tokens consumed), never presented as billed
-// (DD-9; docs/dd-9-api-equivalent-budget.md).
+// SYNCHRONOUS SPAWN FAILURE is a verdict too (issue #19). A spawn failure
+// reports zero usage (nothing was measured); an 'error' verdict from a real
+// result event KEEPS the CLI-reported usage (real evidence). Every 'error'
+// verdict also POPULATES WorkerResult.error (bounded + secret-redacted,
+// issue #208). Only PRE-DISPATCH validation throws.
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
@@ -276,17 +196,11 @@ import { harnessServerLaunch } from '../../harness/mcp/launch.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../../shared/json-schema.js';
-import { boundedErrorText, describeError } from '../error-text.js';
+import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
 import { boundWorkspacePath, resumedRecordOrThrow } from '../common/workspace.js';
-import {
-  compileOutputSchema,
-  uncompilableSchemaVerdict,
-  validateStructured,
-} from '../common/structured.js';
-import { computeCostUSD } from '../pricing/index.js';
-import type { PerMillionRates } from '../pricing/index.js';
+import { compileOutputSchema, uncompilableSchemaVerdict } from '../common/structured.js';
 import type {
   Driver,
   ModelSpec,
@@ -299,35 +213,38 @@ import type {
   WorkerErrorClass,
   WorkerResult,
 } from '../types.js';
-import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
+import type { PerMillionRates } from '../pricing/index.js';
+import {
+  addUsage,
+  computeDerivedCost,
+  costField,
+  measureResultUsage,
+  usageFromWire,
+  usageProvenanceMarker,
+  resumedUsageSemanticsMarker,
+  zeroUsage,
+} from './usage.js';
+import type { MeasuredUsage } from './usage.js';
+import { classifyFailure, isCodexBinary } from './failures.js';
+import { RoutingTableSchema, defaultRoutingTable, resolveRoute, authEnvPlan } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
-import { redactSensitiveText } from '../error-text.js';
 import { spawnManaged, terminateGracefully } from '../../shared/proc.js';
-import type {
-  ManagedChild,
-  ProcessClose,
-  SpawnOptions,
-  TerminationRungMarker,
-} from '../../shared/proc.js';
+import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from '../../shared/proc.js';
+import { readCliSessionId, writeCliSessionId, CLI_NARRATION_TOOL } from './sessions.js';
+import {
+  frameCarriesRefusal,
+  judgeStructuredOutput,
+  refusalNarrationMarker,
+  resultStatusOf,
+  signalAborted,
+  stopReasonOf,
+  HARNESS_ERROR_PREFIX,
+  STRUCTURED_OUTPUT_TOOL,
+} from './verdict.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
-
-/**
- * The file-name SUFFIX of the CLI-session sidecar — the `--resume` handle
- * for the NEXT run on the SAME sessionRef, stored as
- * `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26, design (b)). A
- * sidecar, not a record message: role 'tool' in a session record means a
- * tool ran (header). And NOT in the workspace: the workspace is
- * model-visible — the earlier placement there let the model read or alter
- * its own resume handle (the tamper vector); beside the session records the
- * handle is out of its reach.
- */
-export const CLI_SESSION_FILE = '.cq-cli-session';
-
-/** Session-message toolName under which non-JSON stdout narration is recorded. */
-export const NARRATION_TOOL = 'cli-narration';
 
 /**
  * The file-name SUFFIX of the per-run MCP config (W1.4, Annex A.4):
@@ -341,49 +258,14 @@ export const NARRATION_TOOL = 'cli-narration';
 export const HARNESS_MCP_CONFIG_FILE = '.cq-harness-mcp.json';
 
 /**
- * CLI-internal tools the `claude` CLI adds to `init.tools` even under
- * `--tools ""`, pinned by the W1.4 live leg (A.5a, CLI 2.1.280): with
- * `--json-schema` the CLI injects exactly `StructuredOutput` (its native
- * structured-output tool, auto-approved). Nothing is added without it.
- */
-export const CLI_STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
-
-/**
- * The stable leading text of every harness-classified error verdict
- * (`WorkerResult.error`). ADR-0002 §2.2's `errorClass: 'harness'` lands with
- * the seam-v2 types bump (W3.3); until then this prefix — and the
- * `errorClass: 'harness'` field on the narration marker — is the
- * machine-readable classification.
- */
-export const HARNESS_ERROR_PREFIX = 'subprocess driver: harness failure';
-
-/**
- * The tool surface the lane runs with:
- *   - 'harness' (default) — the CLOSED surface (W1.4): every CLI builtin is
- *     removed (`--tools ""`), ambient settings and MCP servers are ignored,
- *     and the only tools are the harness's, served by `cq-harness-mcp` and
- *     enforced by the shared core.
- *   - 'stock' — the NULL-HYPOTHESIS EVAL mode only (plan D6): the CLI's own
- *     builtin surface with the legacy argv, where `--allowedTools` carries
- *     harness names the CLI does not know (inert — RS-1 J2 C1) and NOTHING
- *     the harness enforces applies. An option of the DIRECTLY CONSTRUCTED
- *     driver only (ADVISORY, ADR-0002 §2.5) — never a factory or plan key.
- */
-export type SubprocessToolSurface = 'harness' | 'stock';
-
-/**
  * The spawn seam: `spawnManaged` by default; tests inject a fake (the
- * conformance suite's scripted CLI, slice 2) through the constructor's
- * `spawn` option.
+ * conformance suite's scripted CLI) through the driver's `spawn` option.
  */
 export type SpawnFn = (opts: SpawnOptions) => ManagedChild;
 
-/** Constructor options — everything optional; defaults are production-real. */
-export interface SubprocessDriverOptions {
-  /**
-   * The CLI to spawn: a bare command/path, or a full leading-argv template
-   * (`['claude', '--fallback-flag']`). Default 'claude'.
-   */
+/** CLI-transport constructor options (a subset of ClaudeCodeDriverOptions). */
+export interface CliTransportOptions {
+  /** The CLI to spawn: a bare command/path, or a full leading-argv template. Default 'claude'. */
   binary?: string | readonly string[];
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
   routingTable?: RoutingTable;
@@ -395,37 +277,32 @@ export interface SubprocessDriverOptions {
   sessionsDir?: string;
   /** Harness config — the tool surface mapped onto --allowedTools + the temp-workspace root. Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
-  /**
-   * Price-lookup override for the derived-only costUSD rule (default:
-   * `computeCostUSD` over the vendored models.dev table via `priceOf`).
-   * A lookup returning undefined keeps costUSD absent.
-   */
+  /** Price-lookup override for the derived-only costUSD rule. */
   pricing?: (modelSpec: ModelSpec) => PerMillionRates | undefined;
   /**
    * Extra parent-env NAMES copied into every spawned CLI worker on top of
-   * the default-deny allowlist (issue #183). Everything else in the entry
-   * process env stays out: a GH_TOKEN or repo secret is NOT inherited unless
-   * a Route's auth plan injects it explicitly or it is named here. Names
-   * only, never values.
+   * the default-deny allowlist (issue #183). Names only, never values.
    */
   envAllowlist?: readonly string[];
   /**
-   * The tool surface (see SubprocessToolSurface). Default 'harness' — the
-   * closed surface. 'stock' exists for null-hypothesis evals only and is
-   * reachable solely by constructing this class directly.
+   * The tool surface: 'harness' (default, the closed surface) or 'stock'
+   * (null-hypothesis evals only, direct construction only).
    */
-  toolSurface?: SubprocessToolSurface;
+  toolSurface?: 'harness' | 'stock';
   /** Spawn override hook for tests. Default: the real spawnManaged. */
   spawn?: SpawnFn;
 }
 
+/** The tool surface the CLI transport runs with (see CliTransportOptions). */
+export type CliToolSurface = NonNullable<CliTransportOptions['toolSurface']>;
+
 /**
- * The subprocess driver on the frozen Driver seam. One instance is
- * stateless across runs — all per-run state (session record, event
- * observation, denials) lives in the run call — so a single instance can
- * serve many isolated invocations.
+ * The CLI transport on the frozen Driver seam. One instance is stateless
+ * across runs — all per-run state (session record, event observation,
+ * denials) lives in the run call — so a single instance can serve many
+ * isolated invocations.
  */
-export class SubprocessDriver implements Driver {
+export class ClaudeCodeCliTransport implements Driver {
   private readonly binary: readonly string[];
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
@@ -436,17 +313,17 @@ export class SubprocessDriver implements Driver {
     | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
     | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
-  private readonly toolSurface: SubprocessToolSurface;
+  private readonly toolSurface: CliToolSurface;
   private readonly spawnImpl: SpawnFn;
 
-  constructor(options: SubprocessDriverOptions = {}) {
+  constructor(options: CliTransportOptions = {}) {
     this.binary =
       typeof options.binary === 'string' ? [options.binary] : (options.binary ?? ['claude']);
     // An empty binary template cannot spawn anything — invalid argv would
     // only explode at spawn time (post-dispatch). Validate HERE, loudly.
     if (this.binary.length === 0 || this.binary.some((part) => part === '')) {
       throw new Error(
-        `subprocess driver: binary must be a non-empty string or a non-empty array of non-empty strings, got ${JSON.stringify(options.binary)}`,
+        `claude-code driver: binary must be a non-empty string or a non-empty array of non-empty strings, got ${JSON.stringify(options.binary)}`,
       );
     }
     // An env-allowlist entry is a NAME copied from the parent env; a name
@@ -458,7 +335,7 @@ export class SubprocessDriver implements Driver {
       options.envAllowlist.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
     ) {
       throw new Error(
-        `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
+        `claude-code driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
     // An invalid table throws HERE (construction is the closest thing to
@@ -472,7 +349,9 @@ export class SubprocessDriver implements Driver {
       ['killGraceMs', options.killGraceMs],
     ] as const) {
       if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
-        throw new Error(`subprocess driver: ${name} must be an integer >= 0, got ${String(value)}`);
+        throw new Error(
+          `claude-code driver: ${name} must be an integer >= 0, got ${String(value)}`,
+        );
       }
     }
     this.termGraceMs = options.termGraceMs;
@@ -491,7 +370,7 @@ export class SubprocessDriver implements Driver {
       options.toolSurface !== 'stock'
     ) {
       throw new Error(
-        `subprocess driver: toolSurface must be 'harness' or 'stock', got ${JSON.stringify(options.toolSurface)}`,
+        `claude-code driver: toolSurface must be 'harness' or 'stock', got ${JSON.stringify(options.toolSurface)}`,
       );
     }
     this.toolSurface = options.toolSurface ?? 'harness';
@@ -511,18 +390,18 @@ export class SubprocessDriver implements Driver {
     if (signalAborted(signal)) {
       return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
     }
-    assertStrictTokenBudgetSupported(opInvocation.budget, 'subprocess');
+    assertStrictTokenBudgetSupported(opInvocation.budget, 'claude-code');
 
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
     // spawned and (except routing/key checks) before any session exists.
-    const route = routeFor(modelSpec, this.routingTable); // unknown provider → the config throw
+    const route = resolveRoute(modelSpec, this.routingTable); // unknown provider → the config throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
     if (
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
     ) {
       throw new Error(
-        `subprocess driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
+        `claude-code driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
     // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
@@ -530,7 +409,7 @@ export class SubprocessDriver implements Driver {
     const boundWorkspace =
       opInvocation.workspace === undefined
         ? undefined
-        : boundWorkspacePath(opInvocation.workspace, 'subprocess driver');
+        : boundWorkspacePath(opInvocation.workspace, 'claude-code driver');
 
     // --- Governed-cancellation LATE recheck (I8): the signal was read at
     // entry; recheck the SAME live RunOptions.signal after lane setup, so an
@@ -549,7 +428,7 @@ export class SubprocessDriver implements Driver {
     if (opInvocation.outputSchema !== undefined) {
       const compiled = compileOutputSchema(opInvocation.outputSchema);
       if ('fault' in compiled) {
-        return uncompilableSchemaVerdict('subprocess', compiled.fault);
+        return uncompilableSchemaVerdict('claude-code', compiled.fault);
       }
     }
 
@@ -564,7 +443,7 @@ export class SubprocessDriver implements Driver {
         ? await store.create(
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
           )
-        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'subprocess driver');
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'claude-code driver');
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -599,8 +478,9 @@ export class SubprocessDriver implements Driver {
     // mode: nothing the harness enforces applies — the legacy marker.
     const sandboxUnenforced = sandboxPolicy.level !== 'none' && allowed.length > 0;
 
-    // --- CLI-level resume: the CLI session id recorded in the SESSIONS ---
-    // STORE sidecar by a prior run (absent → workspace-only continuation).
+    // --- CLI-level resume: the substrate session id recorded in the
+    // SESSIONS STORE sidecar by a prior run (absent → workspace-only
+    // continuation).
     const resumeCliSessionId = await readCliSessionId(sessionsDir, record.sessionId);
 
     // --- The per-run MCP config (harness mode, non-empty selection):
@@ -642,7 +522,7 @@ export class SubprocessDriver implements Driver {
       observation.expectedSurface = {
         harness: manifest !== undefined,
         tools: allowed,
-        internalTools: outputSchema === undefined ? [] : [CLI_STRUCTURED_OUTPUT_TOOL],
+        internalTools: outputSchema === undefined ? [] : [STRUCTURED_OUTPUT_TOOL],
       };
     }
     if (sandboxUnenforced) {
@@ -672,7 +552,7 @@ export class SubprocessDriver implements Driver {
       try {
         await store.appendMessage(record.sessionId, {
           role: 'tool',
-          toolName: NARRATION_TOOL,
+          toolName: CLI_NARRATION_TOOL,
           content: JSON.stringify([
             JSON.stringify({
               cq: 'spawn-failed',
@@ -690,7 +570,7 @@ export class SubprocessDriver implements Driver {
         sessionId: record.sessionId,
         denials: [],
         stopReason: 'error',
-        error: boundedErrorText(`subprocess driver: spawn failed — ${describeError(err)}`),
+        error: boundedErrorText(`claude-code driver: spawn failed — ${describeError(err)}`),
         // A spawn failure is a local (harness) failure — the producer rule
         // (ADR-0002 §2.2): every error verdict carries its class.
         errorClass: 'harness',
@@ -737,8 +617,8 @@ export class SubprocessDriver implements Driver {
     const onAbort = (): void => startTermination('governed');
     if (signal !== undefined) {
       signal.addEventListener('abort', onAbort, { once: true });
-      // ATTACH-TIME RECHECK (the acp lane's Codex P1 pattern, and
-      // claude-agent's abortRootFollowing): abort events are NOT replayed —
+      // ATTACH-TIME RECHECK (the acp lane's Codex P1 pattern, and the SDK
+      // transport's abortRootFollowing): abort events are NOT replayed —
       // a signal that fired while the record/manifest/MCP-config awaits were
       // in flight (between the pre-dispatch aborted check and THIS attach)
       // lands the listener on an ALREADY-aborted signal, never invoked, and
@@ -807,11 +687,13 @@ export class SubprocessDriver implements Driver {
       observation.narration.push(JSON.stringify(observation.harnessFailure));
     }
 
-    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared validator
-    // judges the payload over the SAME document that was sent. A miss after
-    // the CLI's own retry settles the uniform error/'output-invalid' verdict
-    // (usage and cost kept, rejection in the bounded error text) — the old
-    // "complete with the payload dropped to narration" behaviour is deleted.
+    // --- Usage accounting (usage.ts: the ONE fold) + its provenance.
+    recordUsageProvenance(observation, resumeCliSessionId !== undefined);
+
+    // --- Structured output (ADR-0002 §2.3, S3): the ONE shared judge over
+    // the SAME document that was sent (refusal-voided — verdict.ts). A miss
+    // after the CLI's own retry settles the uniform error/'output-invalid'
+    // verdict (usage and cost kept, rejection in the bounded error text).
     // A harness failure voids the payload outright: output produced on an
     // unverified or broken tool surface is not a model outcome.
     let structured: unknown;
@@ -822,32 +704,20 @@ export class SubprocessDriver implements Driver {
       observation.harnessFailure === undefined &&
       observation.result !== undefined
     ) {
-      const subtype = asString(observation.result['subtype']);
-      if (subtype === 'error_max_structured_output_retries') {
-        structuredMiss =
-          `the CLI exhausted its native structured-output retries ` +
-          `(subtype '${subtype}') without producing the required object`;
-      } else if (resultStatusOf(observation.result) === 'success') {
-        const raw = observation.result['structured_output'];
-        if (raw === undefined) {
-          structuredMiss =
-            'the result event carried no structured_output (the CLI never produced the required object)';
-        } else {
-          const check = validateStructured(outputSchema, raw);
-          if (check.ok) {
-            structured = check.value;
-          } else {
-            structuredMiss = `the result does not validate against schema '${outputSchema.name}' — ${check.reason}`;
-          }
-        }
-      }
+      const judged = judgeStructuredOutput(
+        outputSchema,
+        observation.result,
+        observation.refusalSeen,
+      );
+      structured = judged.structured;
+      structuredMiss = judged.miss;
     }
 
     // The served model is OBSERVED, never requested: when the CLI reports a
     // different id than ModelSpec.model asked for, the mismatch is recorded
     // as narration (issue #19 — the corruption is now observable). The
     // conformance suite fails a mismatching run loudly (leg m); production
-    // runs record the mismatch and price off the served id (below).
+    // runs record it and price off the served id (below).
     if (observation.servedModel !== undefined && observation.servedModel !== modelSpec.model) {
       observation.narration.push(
         JSON.stringify({
@@ -893,14 +763,14 @@ export class SubprocessDriver implements Driver {
    */
   private resolveChildEnv(route: Route): Record<string, string> {
     const childEnv: Record<string, string> = { ANTHROPIC_BASE_URL: route.baseUrl };
-    for (const [childVar, hostVar] of Object.entries(route.env)) {
+    for (const [childVar, hostVar] of Object.entries(authEnvPlan(route.keyEnv))) {
       const value = process.env[hostVar];
       if (value === undefined || value === '') {
         // Pre-dispatch misconfiguration carries its class as structured data
         // (ADR-0002 §2.2): errorClassOf → 'config'.
         throw new DispatchError(
           'config',
-          `subprocess driver: route to '${route.endpoint}' requires ${hostVar} in the environment`,
+          `claude-code driver: route to '${route.endpoint}' requires ${hostVar} in the environment`,
         );
       }
       childEnv[childVar] = value;
@@ -910,19 +780,17 @@ export class SubprocessDriver implements Driver {
 
   /**
    * Fold the observation into the frozen WorkerResult (header tables:
-   * stop reasons, cost, usage). Real usage (CLI-reported) is kept on any
-   * verdict that observed it; unmeasured verdicts (spawn failure, abort)
-   * report zeros and NEVER a cost. A served/reported model mismatch with
-   * the requested id is the narration marker's business (run()); the
-   * PRICING here keys on the served id either way (issue #24).
+   * stop reasons, cost, usage). Real usage (CLI-reported, per-model
+   * aggregates preferred — usage.ts) is kept on any verdict that observed
+   * it; unmeasured verdicts (spawn failure, abort) report zeros and NEVER a
+   * cost. A served/reported model mismatch with the requested id is the
+   * narration marker's business (run()); the PRICING here keys on the
+   * served id either way (issue #24).
    *
    * ERROR CLASSES (seam v2, ADR-0002 §2.2): every 'error' verdict carries
-   * `errorClass` — the producer rule — and nothing else does. Cut order:
-   * a harness failure → 'harness'; a structured-output miss →
-   * 'output-invalid'; otherwise the §2.2 classifier over the close cause,
-   * the result frame and the CLI's cause texts. Abort/budget carve-outs
-   * carry no class: the missing object is their consequence, not their
-   * cause.
+   * `errorClass`, from the ONE shared classifier (failures.ts). Abort and
+   * budget carve-outs carry no class: the missing object is their
+   * consequence, not their cause.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -934,8 +802,8 @@ export class SubprocessDriver implements Driver {
     structuredMiss: string | undefined,
     codexBinary: boolean,
   ): WorkerResult {
-    const measured =
-      observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
+    const measuredFrame = measureResultUsage(observation.result);
+    const measured = measuredFrame !== undefined ? measuredFrame.usage : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
@@ -954,7 +822,7 @@ export class SubprocessDriver implements Driver {
     // frozen contract allows `error` only with stopReason 'error'): the cause
     // is derived from the result frame, else the child's exit evidence, else
     // the narration tail — a bare 'error' tells the caller nothing (issue
-    // #208, mirroring the claude-agent derivation).
+    // #208).
     let error: string | undefined;
     let errorClass: WorkerErrorClass | undefined;
     let providerSignals: ProviderSignals | undefined;
@@ -963,7 +831,7 @@ export class SubprocessDriver implements Driver {
         // Fail-closed surface/transport assertions are always 'harness'.
         errorClass = 'harness';
       } else if (structuredMiss !== undefined) {
-        error = `subprocess driver: structured output invalid — ${structuredMiss}`;
+        error = `claude-code driver: structured output invalid — ${structuredMiss}`;
         errorClass = 'output-invalid';
       } else {
         const result = observation.result;
@@ -978,8 +846,8 @@ export class SubprocessDriver implements Driver {
         const classified = classifyFailure({
           kind: resultFailed ? 'result-frame' : 'close',
           texts: [...(resultFailed ? [resultCause, subtype ?? ''] : []), ...observation.stderr],
-          oversizedLine: observation.close?.oversizedLine === true,
-          close: observation.close,
+          ...(observation.close?.oversizedLine === true ? { oversizedLine: true } : {}),
+          ...(observation.close !== undefined ? { close: observation.close } : {}),
           measuredUsage: measured !== undefined || observation.assistantUsage !== undefined,
           codexBinary,
         });
@@ -990,7 +858,7 @@ export class SubprocessDriver implements Driver {
       if (error !== undefined && observation.stderr.length > 0) {
         error = `${error}; stderr: ${observation.stderr.slice(-3).join(' | ')}`;
       }
-      error = boundedErrorText(error ?? 'subprocess driver: the CLI failed without a cause');
+      error = boundedErrorText(error ?? 'claude-code driver: the CLI failed without a cause');
     }
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/spawn-failure verdict.
@@ -1005,7 +873,11 @@ export class SubprocessDriver implements Driver {
     const cost =
       measured === undefined && observation.assistantUsage === undefined
         ? {}
-        : costField(this.costUSDOf.bind(this), pricedModel, usage);
+        : costField(
+            (spec, fold) => computeDerivedCost(this.pricingOverride, spec, fold),
+            pricedModel,
+            usage,
+          );
     return {
       // The observed served model: what the endpoint reports it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
@@ -1026,29 +898,10 @@ export class SubprocessDriver implements Driver {
       ...(providerSignals !== undefined ? { providerSignals } : {}),
     };
   }
-
-  /** Derived-only cost: computeCostUSD by default; the same fold over an injected price lookup. */
-  private costUSDOf(modelSpec: ModelSpec, usage: Usage): number | undefined {
-    if (this.pricingOverride === undefined) {
-      return computeCostUSD(modelSpec, usage);
-    }
-    const rates = this.pricingOverride(modelSpec);
-    if (rates === undefined) {
-      return undefined; // unknown model — never fabricate
-    }
-    const perMillion = (tokens: number, rate: number | undefined): number =>
-      rate === undefined ? 0 : (tokens / 1_000_000) * rate;
-    return (
-      perMillion(usage.input, rates.input) +
-      perMillion(usage.output, rates.output) +
-      perMillion(usage.cacheRead, rates.cacheRead) +
-      perMillion(usage.cacheWrite, rates.cacheWrite)
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
-// Module-level helpers — pure, exported only where slice-2 tests need them
+// Module-level helpers — pure, exported only where the tests need them
 // ---------------------------------------------------------------------------
 
 /** ISO-8601 timestamp for session messages. */
@@ -1057,7 +910,7 @@ function nowIso(): string {
 }
 
 /** Default sessions dir (sibling of the harness temp-workspace root). */
-function defaultSessionsDir(): string {
+export function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
 }
 
@@ -1119,7 +972,7 @@ async function removeMcpConfig(path: string | undefined): Promise<void> {
 export interface ArgBuildInputs {
   route: Route;
   /** The tool surface. Default 'harness' (the closed surface). */
-  toolSurface?: SubprocessToolSurface;
+  toolSurface?: CliToolSurface;
   /**
    * The --allowedTools names, verbatim: harness mode passes the QUALIFIED
    * spellings (`mcp__cq-harness__<name>`); stock mode the legacy harness names.
@@ -1179,7 +1032,7 @@ export function buildArgs(inputs: ArgBuildInputs): string[] {
 type ResultEvent = Record<string, unknown>;
 
 /** Per-run observation state folded from stdout lines. */
-interface RunObservation {
+export interface RunObservation {
   /** CLI-side session id (init/result events) — recorded as a marker message. */
   cliSessionId: string | undefined;
   /** The model id the CLI reports as served (init/result events) — the observed, never requested id. */
@@ -1216,6 +1069,11 @@ interface RunObservation {
   permissionDeniedIds: Set<string>;
   /** The first harness failure (surface mismatch / transport failure) — terminates the run. */
   harnessFailure: HarnessFailure | undefined;
+  /**
+   * True once any wire frame carried the substrate's structured refusal
+   * stop reason (the D-E′ refusal void — verdict.ts).
+   */
+  refusalSeen: boolean;
 }
 
 /** A harness-classified failure marker (narration + error cause), `errorClass: 'harness'`. */
@@ -1252,7 +1110,30 @@ function newObservation(): RunObservation {
     harnessConnected: false,
     permissionDeniedIds: new Set(),
     harnessFailure: undefined,
+    refusalSeen: false,
   };
+}
+
+/**
+ * Record the run's usage provenance + resume semantics markers (usage.ts):
+ * a marker only when the fold came from a NON-DEFAULT channel (per-model
+ * aggregates vs assistant fallback — absence means the result channel),
+ * and — on a resumed session — the version-gated per-call/cumulative
+ * boundary note. Markers go to the narration, so they persist with the
+ * session evidence.
+ */
+function recordUsageProvenance(observation: RunObservation, resumed: boolean): void {
+  const measuredFrame: MeasuredUsage | undefined = measureResultUsage(observation.result);
+  const provenance =
+    measuredFrame !== undefined
+      ? usageProvenanceMarker(measuredFrame)
+      : observation.assistantUsage !== undefined
+        ? usageProvenanceMarker({ usage: observation.assistantUsage, channel: 'assistant' })
+        : undefined;
+  if (provenance !== undefined) observation.narration.push(provenance);
+  if (resumed && (measuredFrame !== undefined || observation.assistantUsage !== undefined)) {
+    observation.narration.push(resumedUsageSemanticsMarker());
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1265,43 +1146,8 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-/**
- * CLI-reported numeric fields must be finite non-negative INTEGERS: a
- * negative or fractional "token count" is a lying measurement — accepting
- * it folded negative usage (→ negative cost) and a NEGATIVE token total
- * that could never trip the `>= maxTokens` budget check (the bypass,
- * issue #19). Invalid → undefined → the fold sites' `?? 0` maps it to an
- * honest zero.
- */
-function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
-}
-
 function asArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;
-}
-
-/** The CLI usage vocabulary → frozen Usage (missing numeric fields map to 0). */
-export function usageFromCli(raw: unknown): Usage | undefined {
-  const rec = asRecord(raw);
-  if (rec === undefined) return undefined;
-  return {
-    input: asNumber(rec['input_tokens']) ?? 0,
-    output: asNumber(rec['output_tokens']) ?? 0,
-    cacheRead: asNumber(rec['cache_read_input_tokens']) ?? 0,
-    cacheWrite: asNumber(rec['cache_creation_input_tokens']) ?? 0,
-  };
-}
-
-/** Fold one usage observation into an accumulator. */
-function addUsage(a: Usage | undefined, b: Usage): Usage {
-  if (a === undefined) return b;
-  return {
-    input: a.input + b.input,
-    output: a.output + b.output,
-    cacheRead: a.cacheRead + b.cacheRead,
-    cacheWrite: a.cacheWrite + b.cacheWrite,
-  };
 }
 
 /** tool_result content → the denial reason text (string or text-block array). */
@@ -1365,7 +1211,14 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.narration.push(line);
         return;
       }
-      const usage = usageFromCli(message['usage']);
+      // The refusal stop reason rides the inner Anthropic Messages API
+      // Message shape (`message.stop_reason`) — the D-E′ refusal void's
+      // CLI-transport observation point.
+      if (frameCarriesRefusal(message) && !observation.refusalSeen) {
+        observation.refusalSeen = true;
+        observation.narration.push(refusalNarrationMarker());
+      }
+      const usage = usageFromWire(message['usage']);
       if (usage !== undefined) {
         observation.assistantUsage = addUsage(observation.assistantUsage, usage);
       }
@@ -1404,7 +1257,7 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         if (rec['is_error'] !== true || observation.deniedToolUseIds.has(id)) continue;
         observation.deniedToolUseIds.add(id);
         const rawName = observation.toolUseNameById.get(id) ?? 'unknown';
-        // Harness names in OUR vocabulary (the claude-agent lane's too).
+        // Harness names in OUR vocabulary (the SDK transport's too).
         const tool = harnessToolName(rawName);
         if (
           observation.expectedSurface !== undefined &&
@@ -1437,6 +1290,12 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
       observation.result = event;
       observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
       observation.servedModel = asString(event['model']) ?? observation.servedModel;
+      // The result frame can carry the refusal stop reason too — observe it
+      // wherever the substrate states it (the void is channel-agnostic).
+      if (frameCarriesRefusal(event) && !observation.refusalSeen) {
+        observation.refusalSeen = true;
+        observation.narration.push(refusalNarrationMarker());
+      }
       return;
     }
     default:
@@ -1488,23 +1347,7 @@ async function persistObservation(
   resumeCliSessionId: string | undefined,
   allowedNames: ReadonlySet<string>,
 ): Promise<void> {
-  const cliSessionId = observation.cliSessionId;
-  if (cliSessionId !== undefined && cliSessionId !== resumeCliSessionId) {
-    // Best-effort: the sidecar is the NEXT run's --resume handle; a failed
-    // write costs a workspace-only continuation, never this run's verdict.
-    // Stored beside the session records, keyed by sessionId (issue #26) —
-    // NOT in the model-visible workspace (the tamper vector, header) — and
-    // 0o600 like the records it sits beside (never world-readable).
-    try {
-      await writeFile(
-        join(store.sessionsDir, `${record.sessionId}${CLI_SESSION_FILE}`),
-        `${cliSessionId}\n`,
-        { encoding: 'utf8', mode: 0o600 },
-      );
-    } catch {
-      // deliberately swallowed — resume degrades honestly (no --resume flag)
-    }
-  }
+  await writeCliSessionId(store, record, observation.cliSessionId, resumeCliSessionId);
   for (const outcome of observation.toolResults) {
     const rawName = observation.toolUseNameById.get(outcome.toolUseId);
     // Harness mode: only the QUALIFIED harness spellings are the governed
@@ -1539,42 +1382,12 @@ async function persistObservation(
   if (diagnostics.length > 0) {
     const message: SessionMessage = {
       role: 'tool',
-      toolName: NARRATION_TOOL,
+      toolName: CLI_NARRATION_TOOL,
       content: JSON.stringify(diagnostics),
       at: nowIso(),
     };
     await store.appendMessage(record.sessionId, message);
   }
-}
-
-/**
- * The CLI session id recorded by a prior run of THIS session — the
- * `--resume` argument of the current run — read from the relocated store
- * sidecar `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26). Missing/
- * unreadable → undefined (an honest workspace-only continuation, never a
- * fabricated resume).
- */
-async function readCliSessionId(
-  sessionsDir: string,
-  sessionId: string,
-): Promise<string | undefined> {
-  try {
-    const raw = await readFile(join(sessionsDir, `${sessionId}${CLI_SESSION_FILE}`), 'utf8');
-    const trimmed = raw.trim();
-    return trimmed === '' ? undefined : trimmed;
-  } catch {
-    return undefined; // no sidecar — nothing to resume CLI-side
-  }
-}
-
-/** The terminal result event's status class for the stop-reason table. */
-export type ResultStatus = 'success' | 'error' | 'none';
-
-/** 'success' iff the result event says so; anything else (or no event) is not. */
-export function resultStatusOf(result: ResultEvent | undefined): ResultStatus {
-  if (result === undefined) return 'none';
-  if (result['is_error'] === true) return 'error';
-  return asString(result['subtype']) === 'success' ? 'success' : 'error';
 }
 
 /**
@@ -1611,322 +1424,23 @@ function errorCauseOf(observation: RunObservation): string {
         : errorEntries.length > 0
           ? errorEntries.join('; ')
           : `subtype '${subtype ?? 'unknown'}'`;
-    return `subprocess driver: result event error — ${cause}`;
+    return `claude-code driver: result event error — ${cause}`;
   }
   const close = observation.close;
   if (close?.oversizedLine === true) {
-    return 'subprocess driver: child emitted an oversized stdout/stderr line';
+    return 'claude-code driver: child emitted an oversized stdout/stderr line';
   }
   if (close?.spawnError !== undefined) {
-    return `subprocess driver: spawn failed — ${describeError(close.spawnError)}`;
+    return `claude-code driver: spawn failed — ${describeError(close.spawnError)}`;
   }
   if (close !== undefined && (close.code !== 0 || close.signal !== null)) {
     if (close.signal !== null) {
-      return `subprocess driver: CLI killed by signal ${String(close.signal)}`;
+      return `claude-code driver: CLI killed by signal ${String(close.signal)}`;
     }
-    return `subprocess driver: CLI exited with code ${String(close.code)}`;
+    return `claude-code driver: CLI exited with code ${String(close.code)}`;
   }
   const narration = observation.narration.at(-1);
   return narration !== undefined && narration !== ''
-    ? `subprocess driver: no result event — ${narration}`
-    : 'subprocess driver: no result event';
-}
-
-/** Σ of the frozen Usage fields — the fold Budget.maxTokens is checked against. */
-function totalTokensOf(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
-}
-
-// ---------------------------------------------------------------------------
-// Error-class classifier (seam v2, ADR-0002 §2.2; RS-14 §4 CLI rows)
-// ---------------------------------------------------------------------------
-
-/** Inputs to the subprocess failure classifier — structured signals only. */
-export interface FailureClassInputs {
-  /** Which channel reported the failure (the classifier's kind signal). */
-  kind: 'result-frame' | 'close';
-  /**
-   * The CLI's cause texts: a failed result frame's result string / subtype,
-   * plus the retained stderr tail. The stream-json surface exposes no HTTP
-   * headers or status codes, so the vendor rows below match ONLY through
-   * these anchored patterns.
-   */
-  texts: readonly string[];
-  /** The child flushed an oversized stdout/stderr line (a protocol break). */
-  oversizedLine: boolean;
-  /** The child's settled close (spawn error / exit code / signal), when known. */
-  close: ProcessClose | undefined;
-  /** A real usage measurement was folded (the codex row's evidence). */
-  measuredUsage: boolean;
-  /** The spawned binary is a codex CLI (the codex row's structured signal). */
-  codexBinary: boolean;
-}
-
-/** The classifier's verdict: the frozen class plus any limit observations. */
-export interface FailureClassification {
-  errorClass: WorkerErrorClass;
-  providerSignals?: ProviderSignals;
-}
-
-/**
- * The vendor limit texts, ANCHORED — never a bare numeric-status scan:
- *   - the claude CLI's session/weekly usage-limit result ("You've hit your
- *     … limit · resets …") — quota, reset when extractable;
- *   - gateway funded-allowance prose ("spend limit reached") and the
- *     opencode funded-balance row ("Insufficient account funds") — quota;
- *   - the throttle rows ("Server is temporarily limiting requests",
- *     "Request rejected (429)") — rate-limit.
- */
-const CLI_LIMIT_TEXT = /you(?:'ve| have) hit your [a-z ]{1,32}limit · resets /i;
-const RATE_LIMIT_TEXTS: ReadonlyArray<RegExp> = [
-  /server is temporarily limiting requests/i,
-  /request rejected \(429\)/i,
-];
-const QUOTA_TEXTS: ReadonlyArray<RegExp> = [
-  /\bspend limit reached\b/i,
-  /\bInsufficient account funds\b/,
-];
-
-/**
- * The class of a subprocess failure (header cut order):
- *   1. an oversized output line is a protocol break → 'harness';
- *   2. the funded-allowance rows → 'quota' (+ the claude reset window);
- *   3. the throttle rows → 'rate-limit';
- *   4. a result-event error → 'provider-error';
- *   5. a codex CLI that folded real usage and exited non-zero with no
- *      result event surfaced the PROVIDER's failure → 'provider-error';
- *   6. a spawn error, a signal death, any other non-zero exit, or a
- *      silent death → 'harness'.
- * Abort-shaped runs never reach this function (they are 'aborted').
- */
-export function classifyFailure(inputs: FailureClassInputs): FailureClassification {
-  if (inputs.oversizedLine) {
-    return { errorClass: 'harness' };
-  }
-  const joined = inputs.texts.join('\n');
-  if (CLI_LIMIT_TEXT.test(joined)) {
-    return quotaWithResetSignal(joined);
-  }
-  if (QUOTA_TEXTS.some((pattern) => pattern.test(joined))) {
-    return { errorClass: 'quota' };
-  }
-  if (RATE_LIMIT_TEXTS.some((pattern) => pattern.test(joined))) {
-    return { errorClass: 'rate-limit' };
-  }
-  if (inputs.kind === 'result-frame') {
-    return { errorClass: 'provider-error' };
-  }
-  const close = inputs.close;
-  const exitFailure =
-    close !== undefined &&
-    close.spawnError === undefined &&
-    close.signal === null &&
-    close.code !== 0;
-  if (inputs.codexBinary && exitFailure && inputs.measuredUsage) {
-    // RS-14 §4 codex row: the CLI reported usage, then died before the
-    // result event — the provider's failure, surfaced through the CLI.
-    return { errorClass: 'provider-error' };
-  }
-  return { errorClass: 'harness' };
-}
-
-/** Quota + the claude unified-window reset observation, when extractable. */
-function quotaWithResetSignal(text: string): FailureClassification {
-  const resetAt = resetAtFromLimitText(text);
-  return {
-    errorClass: 'quota',
-    ...(resetAt !== undefined
-      ? { providerSignals: { windows: [{ id: unifiedWindowIdOf(text), resetAt }] } }
-      : {}),
-  };
-}
-
-/**
- * The unified-limit window id for a claude limit text: the vendor names the
- * window ('use limit'/'session limit' = the 5h unified window, 'weekly
- * limit' = the 7d one); anything else is honestly bucketed 'unified' rather
- * than guessed.
- */
-function unifiedWindowIdOf(text: string): string {
-  if (/\b(?:weekly|7d)\b/i.test(text)) return '7d';
-  if (/\b(?:use|session|5h)\b/i.test(text)) return '5h';
-  return 'unified';
-}
-
-/**
- * The reset instant from a claude limit text's "· resets <when>" tail, when
- * the vendor's form is parseable: an absolute date, a relative duration
- * ('1h30m'), or the CLI's wall-clock form ("3pm (Asia/Singapore)" — resolved
- * against the named IANA zone). Anything ambiguous (bare digits, a zoneless
- * wall clock) is left OUT — never invent a reset.
- */
-export function resetAtFromLimitText(text: string): string | undefined {
-  // The capture stops at the line end: the classifier may join several
-  // cause texts (result frame + subtype + stderr) into one string.
-  const tail = /· resets ([^\n]+)/i.exec(text)?.[1]?.trim();
-  if (tail === undefined || tail === '' || /^\d+$/.test(tail)) return undefined;
-  const parsed = Date.parse(tail);
-  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
-  const duration =
-    /^((?<days>\d+)d)?((?<hours>\d+)h)?((?<minutes>\d+)m)?((?<seconds>\d+)s)?$/i.exec(tail);
-  if (duration?.groups !== undefined) {
-    const { days, hours, minutes, seconds } = duration.groups;
-    const totalMs =
-      Number(days ?? 0) * 86_400_000 +
-      Number(hours ?? 0) * 3_600_000 +
-      Number(minutes ?? 0) * 60_000 +
-      Number(seconds ?? 0) * 1000;
-    return totalMs > 0 ? new Date(Date.now() + totalMs).toISOString() : undefined;
-  }
-  const wall =
-    /^(?:(?<date>\d{4}-\d{2}-\d{2})\s+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?\s*(?<meridiem>am|pm)?\s*\((?<zone>[^)]+)\)$/i.exec(
-      tail,
-    );
-  if (wall?.groups === undefined) return undefined;
-  const { date, hour, minute, meridiem, zone } = wall.groups;
-  if (zone === undefined) return undefined; // a zoneless wall clock is no instant
-  let hours = Number(hour);
-  const minutes = Number(minute ?? '0');
-  if (!Number.isInteger(hours) || hours <= 0 || hours > 23) return undefined;
-  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) return undefined;
-  if (meridiem !== undefined) {
-    if (hours > 12) return undefined;
-    hours = (hours % 12) + (meridiem.toLowerCase() === 'pm' ? 12 : 0);
-  }
-  return instantOfWallClock(hours, minutes, zone.trim(), date);
-}
-
-/**
- * The UTC instant of the NEXT occurrence of `hour:minute` wall-clock time in
- * `zone` (or of the named calendar date in that zone), best effort: the
- * zone's offset is read through Intl and corrected twice for DST edges. An
- * unknown zone yields undefined — a reset is never invented.
- */
-function instantOfWallClock(
-  hour: number,
-  minute: number,
-  zone: string,
-  date: string | undefined,
-): string | undefined {
-  try {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: zone,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-    const offsetAt = (at: number): number => {
-      const parts: Record<string, number> = {};
-      for (const part of formatter.formatToParts(new Date(at))) {
-        if (part.type !== 'literal') parts[part.type] = Number(part.value);
-      }
-      return (
-        Date.UTC(
-          parts['year'] ?? 1970,
-          (parts['month'] ?? 1) - 1,
-          parts['day'] ?? 1,
-          parts['hour'] ?? 0,
-          parts['minute'] ?? 0,
-          parts['second'] ?? 0,
-        ) -
-        Math.floor(at / 1000) * 1000
-      );
-    };
-    const DAY_MS = 86_400_000;
-    const timeOfDay = hour * 3_600_000 + minute * 60_000;
-    // The wall-clock midnight of the target date as-if-UTC, then the target
-    // instant: solve midnightInstant + offset(midnightInstant) === U twice.
-    const midnightAsUtc =
-      date === undefined
-        ? Math.floor((Date.now() + offsetAt(Date.now())) / DAY_MS) * DAY_MS
-        : (() => {
-            const parsed = Date.parse(`${date}T00:00:00Z`);
-            return Number.isFinite(parsed) ? parsed : Number.NaN;
-          })();
-    if (!Number.isFinite(midnightAsUtc)) return undefined;
-    let midnight = midnightAsUtc;
-    midnight -= offsetAt(midnight);
-    midnight = midnightAsUtc - offsetAt(midnight);
-    let target = midnight + timeOfDay;
-    if (date === undefined && target <= Date.now() - 60_000) {
-      // Already past today: the reset means tomorrow (best effort — across a
-      // DST edge the roll may be off by the shift; it is an observation, not
-      // a contract).
-      const tomorrow = midnightAsUtc + DAY_MS;
-      let next = tomorrow;
-      next -= offsetAt(next);
-      next = tomorrow - offsetAt(next);
-      target = next + timeOfDay;
-    }
-    return new Date(target).toISOString();
-  } catch {
-    return undefined; // unknown zone — no reset invented
-  }
-}
-
-/**
- * Whether the spawned binary is a codex CLI: the basename of the binary
- * template's first element (a CONFIG field, not free text). The codex row
- * needs it — a codex exit carries no result event to classify from.
- */
-function isCodexBinary(binary: string): boolean {
-  return /^codex/i.test(basename(binary));
-}
-
-/**
- * The LIVE aborted state of the run signal. Deliberately a function, never an
- * inline `signal?.aborted === true` at a use site: the entry and late rechecks
- * read the SAME RunOptions.signal through this boundary, so TypeScript cannot
- * narrow the property to `false | undefined` after the entry check and reject
- * the late recheck as an impossible comparison (the setup between them may have
- * aborted the signal asynchronously).
- */
-function signalAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true;
-}
-
-/** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
-function zeroUsage(): Usage {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-}
-
-/**
- * Derived-only cost field (DD-2): present only when the price lookup knows
- * the model. A present costUSD is labeled `costBasis: 'modeled'` — the
- * api-equivalent list-price figure for the tokens consumed, never a claim of
- * billed spend; an unpriced model gets neither field (never fabricate).
- */
-function costField(
-  costUSDOf: (modelSpec: ModelSpec, usage: Usage) => number | undefined,
-  modelSpec: ModelSpec,
-  usage: Usage,
-): { costUSD?: number; costBasis?: 'modeled' } {
-  const costUSD = costUSDOf(modelSpec, usage);
-  return costUSD === undefined ? {} : { costUSD, costBasis: 'modeled' as const };
-}
-
-/** Inputs to the frozen stop-reason mapping (header table). */
-export interface StopReasonInputs {
-  aborted: boolean;
-  /** A harness failure terminated or invalidated the run (always an 'error'). */
-  harnessFailure?: boolean;
-  maxTokens: number | undefined;
-  usage: Usage;
-  resultStatus: ResultStatus;
-  oversizedLine?: boolean;
-}
-
-/** THE mapping: aborted → harness failure → oversized line → budget → error → complete. */
-export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
-  if (inputs.aborted) return 'aborted';
-  if (inputs.harnessFailure === true) return 'error';
-  if (inputs.oversizedLine === true) return 'error';
-  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
-    return 'budget';
-  if (inputs.resultStatus !== 'success') return 'error';
-  return 'complete';
+    ? `claude-code driver: no result event — ${narration}`
+    : 'claude-code driver: no result event';
 }

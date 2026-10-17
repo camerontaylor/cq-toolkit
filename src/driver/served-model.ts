@@ -24,10 +24,12 @@ import { boundedErrorText } from './error-text.js';
 import type { Driver, OpInvocation, RunOptions, WorkerResult } from './types.js';
 
 /**
- * The four first-party lanes (ADR-0002 §2.5/§2.6). One definition, shared
- * with the driver factory — never duplicated per module.
+ * The first-party lanes (ADR-0002 §2.5/§2.6; Phase 1.9 merged the former
+ * 'subprocess' and 'claude-agent' lanes into the one 'claude-code' lane).
+ * One definition, shared with the driver factory — never duplicated per
+ * module.
  */
-export type LaneId = 'ai-sdk' | 'claude-agent' | 'subprocess' | 'acp';
+export type LaneId = 'ai-sdk' | 'claude-code' | 'acp';
 
 /**
  * The lane set as a RUNTIME value — the single statement of the union
@@ -35,7 +37,7 @@ export type LaneId = 'ai-sdk' | 'claude-agent' | 'subprocess' | 'acp';
  * config value must be checked against this, since types don't exist at
  * runtime). Adding a lane updates exactly this line.
  */
-export const LANE_IDS: readonly LaneId[] = ['ai-sdk', 'claude-agent', 'subprocess', 'acp'];
+export const LANE_IDS: readonly LaneId[] = ['ai-sdk', 'claude-code', 'acp'];
 
 /**
  * Per-lane served-model policy (ADR-0002 §2.6):
@@ -66,7 +68,7 @@ export interface ServedModelOptions {
 
 /**
  * Lane-declared, ANCHORED model-id normalisation (ADR-0002 §2.6):
- *   - ai-sdk / claude-agent / subprocess — IDENTITY (no case-folding: model
+ *   - ai-sdk / claude-code — IDENTITY (no case-folding: model
  *     ids are compared byte-exactly, as the lanes report them);
  *   - acp — strips EXACTLY ONE leading `builtin:<provider>\` namespace
  *     (the ACP wire qualifies the served id with its provider) and

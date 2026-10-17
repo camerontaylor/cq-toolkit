@@ -1,9 +1,9 @@
-// The claude-agent driver instantiation — T1.6 slice 1.
+// The claude-code lane's SDK transport — Phase 1.9 (from T1.6 slice 1).
 //
 // Two layers, mirroring test/driver/ai-sdk.test.ts and
 // test/driver/subprocess.test.ts:
 //   1. THE CONFORMANCE SUITE (test/driver/conformance.ts, verbatim) run
-//      against the real ClaudeAgentDriver with a MOCK SDK module injected
+//      against the real ClaudeCodeDriver with a MOCK SDK module injected
 //      through the driver's `sdkLoader` seam — no @anthropic-ai/claude-agent-sdk
 //      dependency, no network, no real CLI (the module is OUR code: plain
 //      objects satisfying the driver's minimal structural AgentSdkModule).
@@ -38,43 +38,38 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
+import { foldMessage, runHarnessTool, sandboxOption } from '../../../src/driver/claude-code/sdk.js';
+import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
+import type { SdkTransportOptions } from '../../../src/driver/claude-code/sdk.js';
+import { allowedToolNames } from '../../../src/driver/claude-code/cli.js';
+import { classifyFailure, resetAtFromLimitText } from '../../../src/driver/claude-code/failures.js';
 import {
-  AGENT_SESSION_FILE,
-  allowedToolNames,
-  ClaudeAgentDriver,
-  classifyFailure,
-  foldMessage,
   HARNESS_ERROR_PREFIX,
-  resetAtFromLimitText,
   resultStatusOf,
-  runHarnessTool,
-  sandboxOption,
   stopReasonOf,
-  usageFromAgent,
-} from '../../src/driver/claude-agent/index.js';
-import type {
-  ClaudeAgentDriverOptions,
-  FailureClassInputs,
-  StopReasonInputs,
-} from '../../src/driver/claude-agent/index.js';
+} from '../../../src/driver/claude-code/verdict.js';
+import type { StopReasonInputs } from '../../../src/driver/claude-code/verdict.js';
+import type { FailureClassInputs } from '../../../src/driver/claude-code/failures.js';
+import { CLI_SESSION_FILE } from '../../../src/driver/claude-code/sessions.js';
+import { usageFromWire as usageFromAgent } from '../../../src/driver/claude-code/usage.js';
 import {
-  EndpointTableSchema,
-  defaultEndpointTable,
-  resolveEndpoint,
-} from '../../src/driver/claude-agent/routing.js';
-import type { EndpointTable } from '../../src/driver/claude-agent/routing.js';
-import { runDriverConformance } from '../../src/driver/conformance.js';
-import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
-import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from '../../src/driver/conformance.js';
-import { runGovernedAbortLeg } from './conformance-kernel.js';
-import { defaultHarnessConfig } from '../../src/harness/config.js';
-import { SessionStore } from '../../src/harness/session.js';
-import { buildManifest, createHarnessSurface } from '../../src/harness/surface.js';
-import { runLadder } from '../../src/kernel/governor.js';
-import { toOutputSchema } from '../../src/driver/common/structured.js';
-import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
-import { WorkerResultSchema } from '../../src/kernel/schema.js';
-import type { OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
+  RoutingTableSchema,
+  defaultRoutingTable,
+  resolveRoute,
+} from '../../../src/driver/claude-code/routing.js';
+import type { RoutingTable as EndpointTable } from '../../../src/driver/claude-code/routing.js';
+import { runDriverConformance } from '../../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../../src/driver/conformance.js';
+import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from '../../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from '../conformance-kernel.js';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
+import { SessionStore } from '../../../src/harness/session.js';
+import { buildManifest, createHarnessSurface } from '../../../src/harness/surface.js';
+import { runLadder } from '../../../src/kernel/governor.js';
+import { toOutputSchema } from '../../../src/driver/common/structured.js';
+import { DispatchError, errorClassOf } from '../../../src/driver/errors.js';
+import { WorkerResultSchema } from '../../../src/kernel/schema.js';
+import type { OpInvocation, OutputSchema, WorkerResult } from '../../../src/driver/types.js';
 
 // The driver reads key VALUES from the environment at run() time (the
 // endpoint carries names only); the conformance endpoint's fake key is set
@@ -328,10 +323,14 @@ async function* runScriptedQuery(
     usage,
     modelUsage: {
       [model]: {
-        inputTokens: 120,
-        outputTokens: 12,
-        cacheReadInputTokens: 15,
-        cacheCreationInputTokens: 5,
+        // The per-model aggregate derives from the SAME effective usage the
+        // flat channel reports (no subagents in this mock): an override of
+        // `usage` moves both channels together, which is what the
+        // lying-usage and budget legs script.
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadInputTokens: usage.cache_read_input_tokens,
+        cacheCreationInputTokens: usage.cache_creation_input_tokens,
         thinkingTokens: 2, // realistic: the SDK counts thinking INSIDE output — the driver must not lift it into reasoning
         webSearchRequests: 0,
         costUSD: 0,
@@ -397,9 +396,9 @@ function mockSdkModule(script: {
  * black-hole URL no agent ever contacts (the mock module IS the model).
  */
 function conformanceEndpointTable(): EndpointTable {
-  return EndpointTableSchema.parse({
+  return RoutingTableSchema.parse({
     endpoints: {
-      ...defaultEndpointTable().endpoints,
+      ...defaultRoutingTable().endpoints,
       conformance: {
         baseUrlEnv: 'CONFORMANCE_BASE_URL',
         baseUrlDefault: 'http://127.0.0.1:1/anthropic',
@@ -419,7 +418,7 @@ function conformanceEndpointTable(): EndpointTable {
 /** Conformance harness config: the conformance write permitted via an anchored re: pattern (token patterns deny redirects by design); workspaces inside scratchDir. */
 function conformanceHarnessConfig(
   scratchDir: string,
-): NonNullable<ClaudeAgentDriverOptions['harnessConfig']> {
+): NonNullable<SdkTransportOptions['harnessConfig']> {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
@@ -437,15 +436,16 @@ function conformanceHarnessConfig(
   };
 }
 
-/** Fresh mock-backed ClaudeAgentDriver honoring the ConformanceSpec contract. */
-function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
-  return new ClaudeAgentDriver({
+/** Fresh mock-backed ClaudeCodeDriver honoring the ConformanceSpec contract. */
+function makeDriver(spec: ConformanceSpec): ClaudeCodeDriver {
+  return new ClaudeCodeDriver({
+    transport: 'sdk',
     sdkLoader: async () =>
       mockSdkModule({
         ...(spec.directive === undefined ? {} : { directive: spec.directive }),
         calls: [],
       }),
-    endpointTable: conformanceEndpointTable(),
+    routingTable: conformanceEndpointTable(),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
     ...(spec.pricedModel !== undefined
@@ -468,7 +468,7 @@ function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
 runDriverConformance(
   makeDriver,
   { describe, test, expect },
-  { label: 'claude-agent driver (mock sdk)' },
+  { label: 'claude-code driver, sdk transport (mock sdk)' },
 );
 runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
@@ -496,11 +496,12 @@ function driverWithCalls(
     servedModel?: string;
     envAllowlist?: readonly string[];
   } = {},
-): { driver: ClaudeAgentDriver; calls: MockQueryCall[] } {
+): { driver: ClaudeCodeDriver; calls: MockQueryCall[] } {
   const calls: MockQueryCall[] = [];
-  const driver = new ClaudeAgentDriver({
+  const driver = new ClaudeCodeDriver({
+    transport: 'sdk',
     sdkLoader: async () => mockSdkModule({ ...opts, calls }),
-    endpointTable: conformanceEndpointTable(),
+    routingTable: conformanceEndpointTable(),
     sessionsDir: join(scratchDir, SESSIONS_DIR),
     harnessConfig: conformanceHarnessConfig(scratchDir),
     ...(opts.envAllowlist === undefined ? {} : { envAllowlist: opts.envAllowlist }),
@@ -515,7 +516,7 @@ function optionsOf(calls: MockQueryCall[], nth = 0): Record<string, unknown> {
   return options;
 }
 
-describe('claude-agent driver specifics (mock sdk)', () => {
+describe('claude-code sdk transport specifics (mock sdk)', () => {
   test.each(['explicit', 'configured'])(
     'child env is scrubbed and passes through only %s named values',
     async (mode) => {
@@ -556,7 +557,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test.each(['BAD=VALUE', 'BAD NAME', '', 'BAD;NAME'])(
     'rejects invalid envAllowlist name %j before dispatch',
     (name) => {
-      expect(() => new ClaudeAgentDriver({ envAllowlist: [name] })).toThrow(/envAllowlist/);
+      expect(() => new ClaudeCodeDriver({ transport: 'sdk', envAllowlist: [name] })).toThrow(
+        /envAllowlist/,
+      );
     },
   );
 
@@ -564,11 +567,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const sessionsDir = join(scratchDir, 'sessions');
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => {
           throw new Error(`Cannot find package '${'@anthropic-ai/claude-agent-sdk'}'`);
         },
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir,
       });
       const err = await thrownBy(driver.run(invocation()));
@@ -587,9 +591,10 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const sessionsDir = join(scratchDir, 'sessions');
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({ query: 'not a function', version: '9.9.9-fake' }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir,
       });
       const err = await thrownBy(driver.run(invocation()));
@@ -632,9 +637,10 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const saved = process.env[keyName];
     delete process.env[keyName];
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => mockSdkModule({ calls: [] }),
-        endpointTable: EndpointTableSchema.parse({
+        routingTable: RoutingTableSchema.parse({
           endpoints: {
             conformance: {
               baseUrlEnv: 'CONFORMANCE_BASE_URL',
@@ -768,7 +774,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const sidecarPath = join(
         scratchDir,
         SESSIONS_DIR,
-        `${run1.sessionId as string}${AGENT_SESSION_FILE}`,
+        `${run1.sessionId as string}${CLI_SESSION_FILE}`,
       );
       await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
       // 0o600 — the sidecar is evidence like the records it sits beside,
@@ -776,7 +782,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
       const noSidecarInWorkspace = async (): Promise<void> => {
         const files = await readdir(record1!.workspace);
-        expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);
+        expect(files.filter((f) => f.endsWith(CLI_SESSION_FILE))).toEqual([]);
       };
       await noSidecarInWorkspace();
       if (run1.sessionId === undefined) throw new Error('Expected a resumable session');
@@ -799,12 +805,13 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const schema = z.object({ answer: z.string() }).strict();
       const calls: MockQueryCall[] = [];
       const base = {
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       };
       // First run: a schema-valid payload — the happy path lands it.
-      const ok = await new ClaudeAgentDriver({
+      const ok = await new ClaudeCodeDriver({
+        transport: 'sdk',
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
@@ -830,7 +837,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // Second run: a payload that fails the schema is NOT a model score —
       // the uniform §2.3 miss verdict (the old "complete with the payload
       // dropped to narration" behaviour is deleted).
-      const bad = await new ClaudeAgentDriver({
+      const bad = await new ClaudeCodeDriver({
+        transport: 'sdk',
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"nope":true}' }, calls }),
@@ -855,10 +863,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('pricing override: costUSD derived and labeled modeled; unpriced → both absent', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const priced = new ClaudeAgentDriver({
+      const priced = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         pricing: () => ({ input: 3, output: 15 }),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
@@ -868,10 +877,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expect(result.costUSD).toBeCloseTo(0.00054, 12);
       expect(result.costBasis).toBe('modeled');
 
-      const unpriced = new ClaudeAgentDriver({
+      const unpriced = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         pricing: () => undefined, // the map does not know the model
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
@@ -911,7 +921,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -932,7 +943,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         pricing: () => ({ input: 3, output: 15 }),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
@@ -954,7 +965,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a failed result frame derives its cause from the errors array (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -975,7 +987,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -991,7 +1003,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a failed result frame prefers the result string over the errors array (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1013,7 +1026,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1030,7 +1043,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a failed result frame with no text falls back to the subtype (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1050,7 +1064,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1066,14 +1080,15 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a query throw surfaces its cause on the error verdict (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: () => {
             throw new Error('sdk boundary exploded');
           },
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1090,12 +1105,13 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a query that yields no result event says so on the error verdict (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: (): AsyncGenerator<unknown, void> => (async function* () {})(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1137,7 +1153,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // for the signal itself — deterministic under any machine load, no
       // fixed-sleep race). The mapping table says a fired governed signal →
       // 'aborted', so 'complete' would be a false verdict.
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1178,7 +1195,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1198,14 +1215,15 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('cost prices the SERVED model when one was observed (remap rates, not requested rates)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: { kind: 'reply', text: 'ok' },
             calls: [],
             servedModel: 'gateway-default-served-instead',
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         // The price map knows ONLY the served id — pricing the REQUESTED id
         // would return undefined and the verdict would carry no cost.
         pricing: (modelSpec) =>
@@ -1234,7 +1252,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // (type 'user') delivering the tool_result → success result. The
       // execute boundary records the outcome in OUR vocabulary; the user
       // frame must be dropped, not narrated as raw vendor JSON.
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1310,7 +1329,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1343,7 +1362,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const unusualText = 'cq-unusual-user-text-evidence';
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1379,7 +1399,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1401,7 +1421,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('a MALFORMED SDK user frame (message not a record) is dropped — the subprocess lane drop-if-unshapeable posture', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1430,7 +1451,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1451,11 +1472,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
 
   test('endpoint lookup rejects prototype keys — constructor/toString are not providers', () => {
     expect(() =>
-      resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable()),
+      resolveRoute({ provider: 'constructor', model: 'm' }, defaultRoutingTable()),
     ).toThrow(/unknown provider 'constructor'/);
-    expect(() =>
-      resolveEndpoint({ provider: 'toString', model: 'm' }, defaultEndpointTable()),
-    ).toThrow(/unknown provider 'toString'/);
+    expect(() => resolveRoute({ provider: 'toString', model: 'm' }, defaultRoutingTable())).toThrow(
+      /unknown provider 'toString'/,
+    );
   });
 
   test('unknown sessionRef throws pre-dispatch — never a fake resume', async () => {
@@ -1577,7 +1598,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: { kind: 'reply', text: 'lying usage' },
@@ -1592,7 +1614,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
               cache_creation_input_tokens: 0,
             },
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1614,10 +1636,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // The mock's result usage totals 152 (120+12+15+5) and its modelUsage
       // reports thinkingTokens: 2. With the old double-count (152 + 2 = 154)
       // a cap of 153 would misclassify 'budget'; the true total is below it.
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1665,6 +1688,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expectedSurface: undefined,
       initSeen: false,
       harnessFailure: undefined,
+      refusalSeen: false,
     };
     foldMessage(observation, 'not even an object');
     foldMessage(observation, { type: 'system', subtype: 'init', session_id: 's1', model: 'm-1' });
@@ -1759,14 +1783,15 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: { kind: 'reply', text: 'ok' },
             calls,
             subscriptionConnectors: true,
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1795,7 +1820,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       let handlerCalled = false;
       let framesAfterInit = 0;
       let generatorClosed = false;
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -1852,7 +1878,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               }
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1890,7 +1916,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: {
@@ -1905,7 +1932,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               mcp_servers: [...surface.mcp_servers, MOCK_CONNECTOR_SERVER],
             }),
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1922,7 +1949,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
   test('MISSING harness server (status failed) → error with the harness prefix and marker', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: { kind: 'reply', text: 'ok' },
@@ -1933,7 +1961,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               mcp_servers: surface.mcp_servers.map((server) => ({ ...server, status: 'failed' })),
             }),
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1961,7 +1989,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
   test('a harness tool the init frame does not list (only a subset connected) → mismatch', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({
             directive: { kind: 'reply', text: 'ok' },
@@ -1971,7 +2000,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               tools: surface.tools.filter((t) => t !== 'mcp__cq-harness__run'),
             }),
           }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -1986,7 +2015,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
   test('MISSING init frame: a run with a result but no init → unverified harness error', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -2017,7 +2047,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -2048,7 +2078,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
     try {
       const schema = z.object({ answer: z.string() }).strict();
       const base = {
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       };
@@ -2057,7 +2087,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         outputSchema: toOutputSchema('test/init-surface/v1', schema),
       });
       const calls: MockQueryCall[] = [];
-      const ok = await new ClaudeAgentDriver({
+      const ok = await new ClaudeCodeDriver({
+        transport: 'sdk',
         ...base,
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
@@ -2069,7 +2100,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
         'StructuredOutput',
       ]);
 
-      const missing = await new ClaudeAgentDriver({
+      const missing = await new ClaudeCodeDriver({
+        transport: 'sdk',
         ...base,
         sdkLoader: async () =>
           mockSdkModule({
@@ -2086,8 +2118,9 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       expect(missing.structuredOutput).toBeUndefined();
 
       // And without outputFormat a StructuredOutput entry is an EXTRA tool.
-      const extra = await new ClaudeAgentDriver({
-        endpointTable: conformanceEndpointTable(),
+      const extra = await new ClaudeCodeDriver({
+        transport: 'sdk',
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sdkLoader: async () =>
@@ -2115,8 +2148,9 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       const none = await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
       expect(none.stopReason).toBe('complete');
 
-      const structured = await new ClaudeAgentDriver({
-        endpointTable: conformanceEndpointTable(),
+      const structured = await new ClaudeCodeDriver({
+        transport: 'sdk',
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sdkLoader: async () =>
@@ -2134,8 +2168,9 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       });
 
       // Any server at all in mode none is a mismatch — even a connected harness.
-      const leaked = await new ClaudeAgentDriver({
-        endpointTable: conformanceEndpointTable(),
+      const leaked = await new ClaudeCodeDriver({
+        transport: 'sdk',
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sdkLoader: async () =>
@@ -2152,8 +2187,9 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       expect(leaked.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
 
       // A leaked builtin (tools: [] no longer stripping) is a mismatch too.
-      const builtin = await new ClaudeAgentDriver({
-        endpointTable: conformanceEndpointTable(),
+      const builtin = await new ClaudeCodeDriver({
+        transport: 'sdk',
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
         sdkLoader: async () =>
@@ -2174,7 +2210,8 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
     try {
       // Settles CLEANLY with a result but NO init frame, only after the
       // governed signal fired: aborted outranks the unverified check.
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -2203,7 +2240,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
               };
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -2251,6 +2288,7 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       expectedSurface: { harness: true, tools: ['read'], internalTools: [] },
       initSeen: false,
       harnessFailure: undefined,
+      refusalSeen: false,
     };
     foldMessage(observation, {
       type: 'system',
@@ -2329,7 +2367,7 @@ async function thrownBy(run: Promise<unknown>): Promise<unknown> {
   }
 }
 
-describe('claude-agent driver seam v2: RunOptions.signal + workspace binding', () => {
+describe('claude-code sdk transport seam v2: RunOptions.signal + workspace binding', () => {
   test('a PRE-ABORTED options.signal never dispatches: aborted, zero usage, no session state', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s2-'));
     try {
@@ -2494,8 +2532,9 @@ function streamDriver(
   scratchDir: string,
   frames: (options: Record<string, unknown>) => unknown[],
   opts: { outputSchema?: ZodType; directive?: ModelDirective } = {},
-): ClaudeAgentDriver {
-  return new ClaudeAgentDriver({
+): ClaudeCodeDriver {
+  return new ClaudeCodeDriver({
+    transport: 'sdk',
     sdkLoader: async () => ({
       ...mockAdapters,
       query: ({
@@ -2509,22 +2548,23 @@ function streamDriver(
           for (const frame of frames(options)) yield frame;
         })(),
     }),
-    endpointTable: conformanceEndpointTable(),
+    routingTable: conformanceEndpointTable(),
     ...(opts.outputSchema === undefined ? {} : { outputSchema: opts.outputSchema }),
     sessionsDir: join(scratchDir, SESSIONS_DIR),
     harnessConfig: conformanceHarnessConfig(scratchDir),
   });
 }
 
-describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
+describe('claude-code sdk transport seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
   test('round-trip: an invocation outputSchema rides outputFormat and the validated payload completes', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-s3-'));
     try {
       const calls: MockQueryCall[] = [];
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -2867,7 +2907,8 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
       // The funded-allowance 429 surfaces as a DISPATCH THROW (the SDK's
       // stream dies on it): the code alone decides the class (ADR §2.2
       // rule 2 — whatever the status).
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({
@@ -2886,7 +2927,7 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
               );
             })(),
         }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -2973,10 +3014,11 @@ describe('claude-agent driver seam v2 §2.3 (S3): invocation outputSchema + outp
       runs.push({ label: 'fail', result: await failDriver.run(invocation()) });
 
       // 2. a structured-output miss → error/'output-invalid'.
-      const missDriver = new ClaudeAgentDriver({
+      const missDriver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () =>
           mockSdkModule({ directive: { kind: 'reply', text: '{"nope":1}' }, calls: [] }),
-        endpointTable: conformanceEndpointTable(),
+        routingTable: conformanceEndpointTable(),
         sessionsDir: join(freshDir(), SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(freshDir()),
       });

@@ -283,42 +283,62 @@ export { AiSdkDriver } from './driver/ai-sdk/index.js';
 export type { PerMillionRates, PriceTable } from './driver/pricing/index.js';
 export { computeCostUSD, priceOf } from './driver/pricing/index.js';
 export { PRICE_TABLE } from './driver/pricing/data.js';
-// Subprocess driver (T1.5) — re-export only, no logic: the out-of-process
-// driver that runs an existing agent CLI headless on the frozen seam, its
-// env-based model routing (CONFIG, with the DeepSeek silent-remap footgun
-// enforced at route time), and its process-lifecycle helpers — the
-// documented extension surface for future CLI drivers (I8: the grace
-// ladder lives in src/shared/proc.ts and only executes already-decided
-// kills; the hygiene scan's driver/<name>/process.ts exemption covers the
-// in-driver lifecycle helpers).
+// Claude Code lane (Phase 1.9, D-E′ option A) — re-export only, no logic:
+// the merged lane (the former subprocess + claude-agent drivers) on the
+// frozen seam: the headless CLI transport primary, the agent-SDK transport
+// optional (a lazily loaded optional peer — importing THIS barrel never
+// requires it to be installed; the install-matrix workflow proves both
+// halves). Its env-based model routing (CONFIG — model/provider choices are
+// never src literals), the ONE shared worker-accounting fold (per-model
+// aggregates, provenance, resumed-session semantics) and failure classifier,
+// and the process-lifecycle helpers — the documented extension surface for
+// future CLI drivers (I8: the grace ladder lives in
+// driver/<name>/process.ts, the hygiene scan's one exempt path).
+export type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './driver/claude-code/index.js';
+export { ClaudeCodeDriver } from './driver/claude-code/index.js';
 export type {
   ArgBuildInputs,
-  ResultStatus,
+  CliToolSurface,
+  CliTransportOptions,
   SpawnFn,
-  StopReasonInputs,
-  SubprocessDriverOptions,
-  SubprocessToolSurface,
-} from './driver/subprocess/index.js';
-export {
-  allowedToolNames,
-  buildArgs,
-  CLI_SESSION_FILE,
-  CLI_STRUCTURED_OUTPUT_TOOL,
-  HARNESS_ERROR_PREFIX,
-  HARNESS_MCP_CONFIG_FILE,
-  NARRATION_TOOL,
-  resultStatusOf,
-  stopReasonOf,
-  SubprocessDriver,
-  usageFromCli,
-} from './driver/subprocess/index.js';
-export type { Route, RoutingEndpoint, RoutingTable } from './driver/subprocess/routing.js';
+} from './driver/claude-code/cli.js';
+export { allowedToolNames, buildArgs, HARNESS_MCP_CONFIG_FILE } from './driver/claude-code/cli.js';
+export type {
+  AgentSdkModule,
+  SdkLoader,
+  SdkTransportOptions,
+  SdkToolCallResult,
+} from './driver/claude-code/sdk.js';
+export { SDK_MODULE_SPECIFIER } from './driver/claude-code/sdk.js';
+export type { Route, RoutingEndpoint, RoutingTable } from './driver/claude-code/routing.js';
 export {
   defaultRoutingTable,
-  routeFor,
+  resolveRoute,
   RoutingEndpointSchema,
   RoutingTableSchema,
-} from './driver/subprocess/routing.js';
+} from './driver/claude-code/routing.js';
+export type { ResultStatus, StopReasonInputs } from './driver/claude-code/verdict.js';
+export {
+  HARNESS_ERROR_PREFIX,
+  resultStatusOf,
+  stopReasonOf,
+  STRUCTURED_OUTPUT_TOOL,
+} from './driver/claude-code/verdict.js';
+export type { FailureClassInputs, FailureClassification } from './driver/claude-code/failures.js';
+export {
+  classifyFailure,
+  isCodexBinary,
+  resetAtFromLimitText,
+} from './driver/claude-code/failures.js';
+export { CLI_SESSION_FILE } from './driver/claude-code/sessions.js';
+export type { MeasuredUsage } from './driver/claude-code/usage.js';
+export {
+  addUsage,
+  measureResultUsage,
+  totalTokensOf,
+  usageFromWire,
+  zeroUsage,
+} from './driver/claude-code/usage.js';
 export type {
   GraceLadderOptions,
   ManagedChild,
@@ -329,33 +349,13 @@ export type {
 } from './shared/proc.js';
 export {
   // Aliased: the governor's DEFAULT_KILL_GRACE_MS (the escalation ladder's
-  // rung-2→3 grace) is already exported above; this is the subprocess
-  // grace ladder's SIGKILL→force-resolve window.
-  DEFAULT_KILL_GRACE_MS as SUBPROCESS_DEFAULT_KILL_GRACE_MS,
+  // rung-2→3 grace) is already exported above; this is the grace ladder's
+  // SIGKILL→force-resolve window.
+  DEFAULT_KILL_GRACE_MS as CLAUDE_CODE_DEFAULT_KILL_GRACE_MS,
   DEFAULT_TERM_GRACE_MS,
   spawnManaged,
   terminateGracefully,
 } from './shared/proc.js';
-// Claude-agent driver (T1.6) — re-export only, no logic: the THIRD lane, the
-// OPTIONAL-PEER agent-SDK driver on the frozen seam. The peer
-// (@anthropic-ai/claude-agent-sdk) is loaded lazily by dynamic import at
-// run() time and feature-detected — importing THIS barrel never requires it
-// to be installed (the install-matrix workflow proves both halves). No model
-// allowlist: routing is by provider endpoint only; the observed-model check
-// is the silent-remap defence.
-export type { ClaudeAgentDriverOptions } from './driver/claude-agent/index.js';
-export { ClaudeAgentDriver } from './driver/claude-agent/index.js';
-export type {
-  EndpointEntry,
-  EndpointTable,
-  ResolvedEndpoint,
-} from './driver/claude-agent/routing.js';
-export {
-  defaultEndpointTable,
-  resolveEndpoint,
-  EndpointEntrySchema,
-  EndpointTableSchema,
-} from './driver/claude-agent/routing.js';
 // Acp driver (T1.8) — re-export only, no logic: the FOURTH lane, speaking
 // OUR transcription of the Agent Client Protocol (newline-delimited
 // JSON-RPC 2.0 over stdio) to operator-installed vendor harness binaries

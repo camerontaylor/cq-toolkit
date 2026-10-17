@@ -150,9 +150,9 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     // caller's harness reaches the lane through the DriverRequest (the loop
     // passes reviewFixHarness, so the live default is unchanged).
     const drivers = createDriverFactory({
-      bindings: { fixer: { [FIXTURE_ENDPOINT]: 'subprocess' } },
+      bindings: { fixer: { [FIXTURE_ENDPOINT]: 'claude-code' } },
       lanes: {
-        subprocess: {
+        claudeCode: {
           binary: ['node', agentPath],
           routingTable: fixtureRoutingTable(),
           sessionsDir: join(f.root, 'fixer-sessions'),

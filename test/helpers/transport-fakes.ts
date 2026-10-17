@@ -4,8 +4,12 @@ import { relative, resolve } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import type { AcpSpawnFn, AcpSpawnOptions } from '../../src/driver/acp/process.js';
-import type { ManagedChild, ProcessClose, SpawnOptions } from '../../src/shared/proc.js';
-import type { SpawnFn } from '../../src/driver/subprocess/index.js';
+import type {
+  ManagedChild,
+  ProcessClose,
+  SpawnOptions,
+} from '../../src/shared/proc.js';
+import type { SpawnFn } from '../../src/driver/claude-code/cli.js';
 
 export type JsonLineFrame = Record<string, unknown>;
 

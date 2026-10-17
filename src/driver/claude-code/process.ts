@@ -1,4 +1,4 @@
-// Process-lifecycle helpers for the claude-agent driver — T1.6.
+// Process-lifecycle helpers for the Claude Code SDK transport — T1.6.
 //
 // THE I8 EXEMPT FILE (same posture as shared/proc.ts — the subprocess
 // lane's former process.ts): the driver-hygiene scan bans driver-owned

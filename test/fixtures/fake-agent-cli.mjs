@@ -2,7 +2,7 @@
 // (T1.5 slice 2, W1.4) and the T1.7 smoke lane. Dependency-free, node:
 // builtins only, run as `node test/fixtures/fake-agent-cli.mjs`.
 //
-// It speaks the headless contract the driver parses (src/driver/subprocess)
+// It speaks the headless contract the driver parses (src/driver/claude-code — the CLI transport)
 // in TWO surfaces, selected by argv exactly as the real `claude` CLI is:
 //
 //   HARNESS MODE — `--tools ""` present (the driver's default closed surface):

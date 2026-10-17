@@ -45,12 +45,12 @@ const invocation = (model = 'construction-model', provider = 'construction'): Op
   budget: {},
 });
 
-/** Subprocess-lane factory config driving the offline fake CLI through `env`. */
+/** Claude-code-lane factory config driving the offline fake CLI through `env`. */
 const subprocessConfig = (dir: string, cliEnv: string[]): DriverFactoryConfig => ({
-  bindings: { fixer: { construction: 'subprocess' } },
+  bindings: { fixer: { construction: 'claude-code' } },
   sessionsDir: join(dir, 'sessions'),
   lanes: {
-    subprocess: {
+    claudeCode: {
       binary: ['env', ...cliEnv, process.execPath, FAKE_CLI],
       routingTable: {
         endpoints: {
@@ -117,13 +117,13 @@ describe('driver factory — resolution', () => {
   );
 
   test('a configured binding wins over the default; unconfigured roles keep it', async () => {
-    const factory = createDriverFactory({ bindings: { fixer: { zai: 'subprocess' } } });
+    const factory = createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } });
     const resolved = factory.resolve({
       role: 'fixer',
       modelSpec: { provider: 'zai', model: 'glm-4.6' },
     });
-    expect(resolved.lane).toBe('subprocess');
-    await probe(resolved.driver, /routing: unknown provider/); // the SUBPROCESS router ran
+    expect(resolved.lane).toBe('claude-code');
+    await probe(resolved.driver, /claude-code driver: unknown provider/); // the CLI transport's router ran
     expect(
       factory.resolve({ role: 'classifier', modelSpec: { provider: 'zai', model: 'glm-4.6' } })
         .lane,
@@ -131,22 +131,22 @@ describe('driver factory — resolution', () => {
   });
 
   test("the '*' wildcard binds every provider for its role", async () => {
-    const factory = createDriverFactory({ bindings: { classifier: { '*': 'claude-agent' } } });
+    const factory = createDriverFactory({ bindings: { classifier: { '*': 'claude-code' } } });
     for (const provider of ['zai', 'openai', 'anything-at-all']) {
       const resolved = factory.resolve({
         role: 'classifier',
         modelSpec: { provider, model: 'm' },
       });
-      expect(resolved.lane).toBe('claude-agent');
+      expect(resolved.lane).toBe('claude-code');
     }
     await probe(
       factory.resolve({ role: 'classifier', modelSpec: { provider: 'zai', model: 'm' } }).driver,
-      /claude-agent driver: unknown provider/,
+      /claude-code driver: unknown provider/,
     );
   });
 
-  test('subprocess is never a default: an unbound non-default provider is a config throw', () => {
-    const factory = createDriverFactory({ bindings: { fixer: { zai: 'subprocess' } } });
+  test('claude-code is never a default: an unbound non-default provider is a config throw', () => {
+    const factory = createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } });
     const thrownBy = (): unknown => {
       try {
         factory.resolve({ role: 'classifier', modelSpec: { provider: 'nope', model: 'm' } });
@@ -244,7 +244,7 @@ describe('driver factory — resolution', () => {
     // so): a fixer/zai→subprocess override must catch only a LITERAL
     // provider 'zai', never re-route the legacy alias — while the resolved
     // spec still normalises to 'zai' (the alias never reaches a lane).
-    const factory = createDriverFactory({ bindings: { fixer: { zai: 'subprocess' } } });
+    const factory = createDriverFactory({ bindings: { fixer: { zai: 'claude-code' } } });
     const resolved = factory.resolve({
       role: 'fixer',
       modelSpec: { provider: 'ai-sdk', model: 'glm-4.6' },
@@ -255,12 +255,12 @@ describe('driver factory — resolution', () => {
     // The override still binds the literal provider it names.
     expect(
       factory.resolve({ role: 'fixer', modelSpec: { provider: 'zai', model: 'glm-4.6' } }).lane,
-    ).toBe('subprocess');
+    ).toBe('claude-code');
   });
 
-  test('the acp and claude-agent lanes exist only through explicit bindings', async () => {
+  test('the acp and claude-code lanes exist only through explicit bindings', async () => {
     const factory = createDriverFactory({
-      bindings: { remediator: { vendor: 'acp' }, fixer: { vendor: 'claude-agent' } },
+      bindings: { remediator: { vendor: 'acp' }, fixer: { vendor: 'claude-code' } },
       lanes: {
         acp: {
           // A deliberately unresolvable binary: the lane's own pre-dispatch
@@ -285,8 +285,8 @@ describe('driver factory — resolution', () => {
     expect(acp.lane).toBe('acp');
     await probe(acp.driver, /acp driver: the harness binary '.*vendor-acp' was not found/);
     const agent = factory.resolve({ role: 'fixer', modelSpec: { provider: 'vendor', model: 'm' } });
-    expect(agent.lane).toBe('claude-agent');
-    await probe(agent.driver, /claude-agent driver: unknown provider/);
+    expect(agent.lane).toBe('claude-code');
+    await probe(agent.driver, /claude-code driver: unknown provider/);
   });
 });
 
@@ -491,7 +491,7 @@ describe('driver factory — knobs reach the constructed lane', () => {
     const laneDir = join(dir, 'lane-sessions');
     const factory = createDriverFactory({
       ...config,
-      lanes: { ...config.lanes, subprocess: { ...config.lanes?.subprocess, sessionsDir: laneDir } },
+      lanes: { ...config.lanes, claudeCode: { ...config.lanes?.claudeCode, sessionsDir: laneDir } },
     });
     const verdict = await factory
       .resolve({

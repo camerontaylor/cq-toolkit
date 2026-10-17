@@ -36,7 +36,7 @@ first-party producer already emits nonnegative values —
 - ai-sdk `retryAfterMsFromValue` (`src/driver/ai-sdk/index.ts:1599`):
   delay-seconds form matches `\d+` only; HTTP-date form is floored with
   `Math.max(0, at - Date.now())`.
-- claude-agent `retryAfterMsFromText` (`src/driver/claude-agent/index.ts:1525`):
+- claude-code `retryAfterMsFromText` (`src/driver/claude-code/failures.ts`):
   captures `\d+` seconds only.
 - acp, subprocess and harness: no `retryAfterMs` producer exists.
 

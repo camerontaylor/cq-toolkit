@@ -6,13 +6,13 @@
 //        --concurrency=2 --max-tokens=10000 --ops-root=test/fixtures/cli-smoke-ops
 //
 // as a child, consumer-style (stdio piped, streams inspected), and asserts
-// the contracts the CLI + kernel + governor + subprocess driver are supposed
+// the contracts the CLI + kernel + governor + claude-code driver are supposed
 // to honor end-to-end. The plan's `agent-run` op resolves through the BUILT
 // CLI's registry from the fixture op family (test/fixtures/cli-smoke-ops —
 // the documented family convention as plain ESM .js), whose op delegates to
-// the REAL SubprocessDriver spawning the fake agent CLI fixture
+// the REAL ClaudeCodeDriver (CLI transport) spawning the fake agent CLI fixture
 // (test/fixtures/fake-agent-cli.mjs — the same stream-json fixture the
-// subprocess conformance suite drives) through the driver's `binary` config
+// CLI-transport conformance suite drives) through the driver's `binary` config
 // with its REAL spawn — no test overrides: the fixture is a real child
 // process in a real workspace, only the model is fake (the fixture's
 // default 'ok' completion, fixed usage). The governed composition itself is
@@ -80,7 +80,7 @@
 //      least one budget-exhausted row in its counts.
 //
 // SECRETS: the fixture route's key env var (SMOKE_API_KEY) is set here to a
-// FAKE value — the subprocess driver reads key VALUES from the environment
+// FAKE value — the driver reads key VALUES from the environment
 // at dispatch time and the fixture never contacts anything (the URL is a
 // black hole); no real credential exists in this lane.
 //
@@ -513,7 +513,7 @@ async function runCliChild(argv, env) {
       timedOut = true;
       // Negative pid = the process GROUP (spawn detached above): the CLI
       // child and any same-group descendants die together. (The driver's
-      // OWN agent children lead their own groups — src/driver/subprocess/
+      // OWN agent children lead their own groups — src/driver/claude-code/
       // process.ts — and are that ladder's kill business; the bound here is
       // about the parent never STALLING on the CLI child.)
       if (child.pid !== undefined) {

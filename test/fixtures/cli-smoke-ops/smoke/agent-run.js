@@ -1,6 +1,6 @@
 // smoke-only op — proves the FROM-SOURCE path: the built CLI's registry
 // resolves this fixture family via --ops-root, the governed composition
-// drives a REAL SubprocessDriver spawning the fake agent CLI child
+// drives a REAL ClaudeCodeDriver (the CLI transport) spawning the fake agent CLI child
 // (test/fixtures/fake-agent-cli.mjs — the same stream-json fixture the
 // subprocess conformance suite drives) through the driver's `binary` config
 // with its REAL spawn — no test overrides: the fixture is a real child
@@ -34,7 +34,7 @@ const DIST = join(HERE, '..', '..', '..', '..', 'dist', 'index.js');
 const FAKE_CLI = join(HERE, '..', '..', 'fake-agent-cli.mjs');
 
 const {
-  SubprocessDriver,
+  ClaudeCodeDriver,
   RoutingTableSchema,
   defaultRoutingTable,
   defaultHarnessConfig,
@@ -73,7 +73,7 @@ const routingTable = RoutingTableSchema.parse({
     },
   },
 });
-const driver = new SubprocessDriver({
+const driver = new ClaudeCodeDriver({
   binary: ['node', FAKE_CLI],
   routingTable,
   sessionsDir: join(scratchDir, 'sessions'),
