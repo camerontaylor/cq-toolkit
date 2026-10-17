@@ -21,7 +21,7 @@
 // FAIL-CLOSED AND PURE: a malformed current application is `invalid`; nothing
 // here throws, performs I/O, or reads an ambient clock.
 import { z } from 'zod';
-import type { SettleState } from '../../selfhost/settle-state.js';
+import type { SettleState } from '../../policy/queue/settle-state.js';
 
 /** The label whose current application is the override record. */
 export const OVERRIDE_LABEL = 'cq-override';

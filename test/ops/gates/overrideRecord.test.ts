@@ -10,7 +10,7 @@ import {
   headObservationEpoch,
   parseC3Attestation,
 } from '../../../src/ops/gates/overrideRecord.js';
-import type { SettleState } from '../../../src/selfhost/settle-state.js';
+import type { SettleState } from '../../../src/policy/queue/settle-state.js';
 
 const OWNER_ID = 1001;
 const SUBJECT = 'a'.repeat(40);

@@ -212,6 +212,10 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
  * posture comes from the project env / per-call opt-in at dispatch
  * (RS-15 Annex B §B.1), never from plan JSON or op input, so a subject
  * cannot relax its own check. Numeric ids are positive integers.
+ * `settleStatePath` is the settle-ledger's path on the settle ref (selfhost
+ * configuration, passed through by the dispatching workflow; the op applies
+ * the deployed wire default when omitted — a relocated path can only fail
+ * closed, since a non-ledger blob discards to no observations).
  */
 export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
   .object({
@@ -225,6 +229,7 @@ export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
     ownerId: z.number().int().positive().exactOptional(),
     labelEventsPath: z.string().min(1).exactOptional(),
     settleRef: z.string().min(1).exactOptional(),
+    settleStatePath: z.string().min(1).exactOptional(),
   })
   .strict();
 
