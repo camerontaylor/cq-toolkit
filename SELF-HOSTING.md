@@ -260,12 +260,14 @@ Owner steps, in order (the RS-11 wizard outline):
    classic branch protection, delete `merge-queue-gate.yml`.
 6. **C3:** land the D11 attestation, then retire the interim PATs.
 
-> **C3 record.** `policy/attestations/c3.json` attests C3 at `2026-10-17T21:03:14Z`. Runtime
+> **C3 record.** `policy/attestations/c3.json` attests C3 at `2026-10-17T21:16:36Z`. Runtime
 > PATs were removed from the repository (tokens remain in use elsewhere), not
 > revoked (owner ruling 2026-10-16). Rulesets R0 `25287785`, R1 `25287792` and
 > R2 `25319106` are active, classic branch protection is deleted, and the
 > Actions event policy is `7809`. The `live-merge` and `live-review` drills are
-> disabled at C3.
+> disabled at C3 (owner ruling on T4): their PAT secrets are absent, so neither
+> can perform its credentialed live run, though both workflow files stay
+> enabled in Actions.
 
 Fails closed, and when: the legacy gate once `PROMOTE_TOKEN` leaves the
 repository level (step 3); `cq-gate` whenever neither the promoter App nor
