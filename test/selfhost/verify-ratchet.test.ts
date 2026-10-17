@@ -11,7 +11,7 @@ import type {
   VerifyRatchetInput,
   VerifyRatchetOutcome,
 } from '../../src/ops/ratchet/verifyRatchet.js';
-import type { GhFn } from '../../src/ops/review/gh.js';
+import type { GhFn } from '../../src/adapters/forge-github/gh.js';
 import type { GateGit } from '../../src/selfhost/promote-gate.js';
 import {
   mainWith,
