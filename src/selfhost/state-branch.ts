@@ -170,6 +170,7 @@ async function readLedgerAt(
   base: string,
   fullName: string,
   commit: string,
+  missingIsDiscarded = false,
 ): Promise<{ state: SettleState; discarded: string[] }> {
   let fileWire: unknown;
   try {
@@ -178,7 +179,16 @@ async function readLedgerAt(
       `${base}/contents/${SETTLE_STATE_PATH}?ref=${commit}`,
     ]);
   } catch (err) {
-    if (isNotFound(err)) return { state: emptySettleState(fullName), discarded: [] };
+    if (isNotFound(err)) {
+      // At the tip, a missing file is an empty ledger. At a commit the
+      // history listed as touching it, missing is an anomaly (a barrier).
+      return {
+        state: emptySettleState(fullName),
+        discarded: missingIsDiscarded
+          ? [`${SETTLE_STATE_PATH} missing at listed history commit ${commit}`]
+          : [],
+      };
+    }
     throw err;
   }
   const file = asRecord(fileWire);
@@ -207,7 +217,8 @@ async function readLedgerAt(
  * it). `exhausted`: the history ran out before `enough` held. An absent
  * branch is an empty history. A version with ANY discarded content (an
  * unreadable or malformed ledger, or a dropped record) is a lookup BARRIER:
- * it is kept and reading stops there (`barrier`), so a PR it may have held
+ * it is kept and reading stops there (`barrier`); a listed commit whose
+ * ledger file is missing counts as discarded. A PR the barrier may have held
  * never falls through to an older, possibly stale observation — the PR gets
  * no epoch and its D11 record is invalid (fail closed). THROWS on any
  * non-404 transport failure or a listed commit that is not a 40-hex sha.
@@ -247,7 +258,7 @@ export async function readSettleHistory(
         `selfhost state-branch: ${STATE_BRANCH} history listed a non-sha commit ${JSON.stringify(commit.slice(0, 80))}`,
       );
     }
-    const read = await readLedgerAt(deps, base, fullName, commit);
+    const read = await readLedgerAt(deps, base, fullName, commit, true);
     versions.push(read.state);
     discarded.push(...read.discarded);
     if (read.discarded.length > 0) return { versions, discarded, exhausted: false, barrier: true };

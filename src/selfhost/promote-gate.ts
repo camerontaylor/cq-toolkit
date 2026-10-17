@@ -521,22 +521,69 @@ export interface VerifiedRunCheck {
   reason: string;
 }
 
+/** The effective job set, or why it cannot be decided. */
+type EffectiveJobs =
+  | { ok: true; jobs: unknown[] }
+  | { ok: false; state: 'failure' | 'pending'; why: string };
+
 /**
- * The effective job set of a run read with `filter=all`: for each job name,
- * every execution at that name's highest `run_attempt` (a missing attempt
- * counts as 1). Keeping all executions at the newest attempt, not one per
- * name, means two jobs sharing a display name can never hide a failure.
+ * The effective job set of a run read with `filter=all`, bound to the run
+ * snapshot's `runAttempt`: for each job name (the raw API name, never a
+ * sanitized one) the execution at that name's highest `run_attempt`.
+ * Fail closed on anything that makes that ambiguous:
+ *   - a row with no name or no integer `run_attempt` (never inferred);
+ *   - two rows with the same name in one attempt (a shared display name
+ *     could otherwise let one execution stand for another);
+ *   - a row newer than the snapshot, or no row at the snapshot's attempt
+ *     when it is a rerun (`pending`: the rerun is in flight or not listed).
  */
-function effectiveJobs(jobs: readonly unknown[]): unknown[] {
-  const nameOf = (raw: unknown): string =>
-    clean(asString(asRecord(raw)['name'])) || String(asInt(asRecord(raw)['id']));
-  const attemptOf = (raw: unknown): number => asInt(asRecord(raw)['run_attempt']) ?? 1;
+function effectiveJobs(jobs: readonly unknown[], runAttempt: number): EffectiveJobs {
   const newest = new Map<string, number>();
+  const seen = new Set<string>();
+  let atSnapshot = false;
   for (const raw of jobs) {
-    const name = nameOf(raw);
-    newest.set(name, Math.max(newest.get(name) ?? 0, attemptOf(raw)));
+    const job = asRecord(raw);
+    const name = asString(job['name']);
+    const attempt = asInt(job['run_attempt']);
+    if (name === '') {
+      return { ok: false, state: 'failure', why: `job ${String(asInt(job['id']))} has no name` };
+    }
+    if (attempt === null || attempt < 1) {
+      return { ok: false, state: 'failure', why: `job '${clean(name)}' has no run_attempt` };
+    }
+    if (attempt > runAttempt) {
+      return {
+        ok: false,
+        state: 'pending',
+        why: `job '${clean(name)}' is from attempt ${String(attempt)}, newer than the run read (attempt ${String(runAttempt)}): a rerun is in flight`,
+      };
+    }
+    const key = JSON.stringify([name, attempt]);
+    if (seen.has(key)) {
+      return {
+        ok: false,
+        state: 'failure',
+        why: `two jobs named '${clean(name)}' in attempt ${String(attempt)}: ambiguous, fail closed`,
+      };
+    }
+    seen.add(key);
+    if (attempt === runAttempt) atSnapshot = true;
+    newest.set(name, Math.max(newest.get(name) ?? 0, attempt));
   }
-  return jobs.filter((raw) => attemptOf(raw) === newest.get(nameOf(raw)));
+  if (runAttempt > 1 && !atSnapshot) {
+    return {
+      ok: false,
+      state: 'pending',
+      why: `no job of attempt ${String(runAttempt)} listed yet`,
+    };
+  }
+  return {
+    ok: true,
+    jobs: jobs.filter((raw) => {
+      const job = asRecord(raw);
+      return asInt(job['run_attempt']) === newest.get(asString(job['name']));
+    }),
+  };
 }
 
 /**
@@ -551,8 +598,10 @@ function effectiveJobs(jobs: readonly unknown[]): unknown[] {
  * runner proves nothing), and every `requiredJobs` name present. `jobs` is
  * null until the run is known green. `jobs` is every execution
  * (`filter=all`): after a partial rerun each job name is judged by its
- * NEWEST attempt (see effectiveJobs), so a job green in attempt 1 and not
- * rerun still counts, and a rerun's result supersedes its earlier attempt.
+ * NEWEST attempt up to the run's own `run_attempt` (see effectiveJobs), so
+ * a job green in attempt 1 and not rerun still counts, a rerun's result
+ * supersedes its earlier attempt, and a rerun newer than the run snapshot
+ * is pending, never evidence.
  */
 export function checkVerifiedRun(
   run: unknown,
@@ -587,7 +636,15 @@ export function checkVerifiedRun(
   }
   if (jobs === null) return { state: 'pending', reason: `run ${id}: jobs not read yet` };
   if (jobs.length === 0) return fail('no jobs');
-  const effective = effectiveJobs(jobs);
+  const runAttempt = asInt(r['run_attempt']);
+  if (runAttempt === null || runAttempt < 1) return fail('the run has no run_attempt');
+  const decided = effectiveJobs(jobs, runAttempt);
+  if (!decided.ok) {
+    return decided.state === 'pending'
+      ? { state: 'pending', reason: `run ${id}: ${decided.why}` }
+      : fail(decided.why);
+  }
+  const effective = decided.jobs;
   for (const raw of effective) {
     const job = asRecord(raw);
     const name = clean(asString(job['name'])) || String(asInt(job['id']));
@@ -1477,6 +1534,25 @@ async function awaitVerdicts(
           repositoryId: cfg.repositoryId,
           requiredJobs: Object.hasOwn(requiredJobs, file) ? (requiredJobs[file] ?? []) : [],
         });
+        // The jobs must belong to the run snapshot they were judged against:
+        // re-read the run, and anything but the same completed, successful
+        // attempt (a rerun started meanwhile) is pending, never evidence.
+        if (check.state === 'success') {
+          const again = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
+          const after = [...again].sort(newestFirst('created_at'))[0] ?? null;
+          const same =
+            after !== null &&
+            asInt(after['id']) === id &&
+            asInt(after['run_attempt']) === asInt(newest['run_attempt']) &&
+            after['status'] === 'completed' &&
+            after['conclusion'] === 'success';
+          if (!same) {
+            check = {
+              state: 'pending',
+              reason: `run ${String(id)}: the run changed while its jobs were read (rerun?)`,
+            };
+          }
+        }
       }
       lines.push(`verified ${file}: ${check.state} — ${check.reason}`);
       if (check.state === 'failure') {

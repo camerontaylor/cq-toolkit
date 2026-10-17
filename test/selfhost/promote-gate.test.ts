@@ -401,6 +401,7 @@ describe('checkVerifiedRun', () => {
   const want = { file: 'ci.yml', tip: TIP, repositoryId: REPO_ID };
   const wf = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 77,
+    run_attempt: 1,
     path: '.github/workflows/ci.yml',
     event: 'push',
     head_branch: 'merge-queue',
@@ -412,6 +413,7 @@ describe('checkVerifiedRun', () => {
   });
   const job = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 1,
+    run_attempt: 1,
     name: 'static',
     status: 'completed',
     conclusion: 'success',
@@ -450,7 +452,11 @@ describe('checkVerifiedRun', () => {
   test('job shape: runner_id null, zero steps, skipped job, no jobs', () => {
     expect(checkVerifiedRun(wf(), [job({ runner_id: null })], want).reason).toMatch(/no runner_id/);
     expect(checkVerifiedRun(wf(), [job({ steps: [] })], want).reason).toMatch(/no steps/);
-    const skipped = checkVerifiedRun(wf(), [job(), job({ conclusion: 'skipped' })], want);
+    const skipped = checkVerifiedRun(
+      wf(),
+      [job(), job({ id: 2, name: 'b', conclusion: 'skipped' })],
+      want,
+    );
     expect(skipped.state).toBe('failure');
     expect(skipped.reason).toMatch(/completed\/skipped/);
     expect(checkVerifiedRun(wf(), [], want).reason).toMatch(/no jobs/);
@@ -470,27 +476,59 @@ describe('checkVerifiedRun', () => {
 
   test('a partial rerun (filter=all): each job is judged by its newest attempt', () => {
     const named = { ...want, requiredJobs: ['static', 'from-source'] };
+    const run2 = wf({ run_attempt: 2 });
     // static green in attempt 1 and not rerun; from-source failed, then passed on rerun.
     const rerun = [
       job({ name: 'static', run_attempt: 1 }),
-      job({ name: 'from-source', run_attempt: 1, conclusion: 'failure' }),
-      job({ name: 'from-source', run_attempt: 2 }),
+      job({ id: 2, name: 'from-source', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 3, name: 'from-source', run_attempt: 2 }),
     ];
-    expect(checkVerifiedRun(wf(), rerun, named).state).toBe('success');
+    expect(checkVerifiedRun(run2, rerun, named).state).toBe('success');
     // A rerun's failure supersedes its earlier success.
     const regressed = [
       job({ name: 'static', run_attempt: 1 }),
-      job({ name: 'static', run_attempt: 2, conclusion: 'failure' }),
+      job({ id: 2, name: 'static', run_attempt: 2, conclusion: 'failure' }),
     ];
-    expect(checkVerifiedRun(wf(), regressed, want).reason).toMatch(
+    expect(checkVerifiedRun(run2, regressed, want).reason).toMatch(
       /job 'static' is completed\/failure/,
     );
-    // Two jobs sharing a display name at the newest attempt are both judged.
+  });
+
+  test('job attribution fails closed: no attempt, duplicates, colliding names', () => {
+    // run_attempt is never inferred.
+    const bare = { ...job(), run_attempt: undefined };
+    expect(checkVerifiedRun(wf(), [bare], want).reason).toMatch(/job 'static' has no run_attempt/);
+    expect(checkVerifiedRun(wf({ run_attempt: undefined }), [job()], want).reason).toMatch(
+      /the run has no run_attempt/,
+    );
+    // Twins sharing a display name in one attempt are ambiguous, even when
+    // only one of them is rerun later.
     const twins = [
-      job({ name: 'static', id: 1 }),
-      job({ name: 'static', id: 2, conclusion: 'failure' }),
+      job({ id: 1, name: 'x', run_attempt: 1, conclusion: 'failure' }),
+      job({ id: 2, name: 'x', run_attempt: 1 }),
+      job({ id: 3, name: 'x', run_attempt: 2 }),
     ];
-    expect(checkVerifiedRun(wf(), twins, want).state).toBe('failure');
+    expect(checkVerifiedRun(wf({ run_attempt: 2 }), twins, want).reason).toMatch(
+      /two jobs named 'x' in attempt 1: ambiguous/,
+    );
+    // Names that only collide after sanitization are distinct jobs.
+    const lookalikes = [
+      job({ id: 1, name: 'lint\u0007' }),
+      job({ id: 2, name: 'lint', conclusion: 'failure' }),
+    ];
+    expect(checkVerifiedRun(wf(), lookalikes, want).state).toBe('failure');
+  });
+
+  test('jobs are bound to the run snapshot: a newer or unlisted attempt is pending', () => {
+    // A rerun started after the run was read: its rows are never evidence.
+    const newer = [job({ run_attempt: 1 }), job({ id: 2, name: 'b', run_attempt: 2 })];
+    const inFlight = checkVerifiedRun(wf(), newer, want);
+    expect(inFlight.state).toBe('pending');
+    expect(inFlight.reason).toMatch(/newer than the run read \(attempt 1\)/);
+    // The run says attempt 2, but no attempt-2 job is listed yet.
+    const unlisted = checkVerifiedRun(wf({ run_attempt: 2 }), [job()], want);
+    expect(unlisted.state).toBe('pending');
+    expect(unlisted.reason).toMatch(/no job of attempt 2 listed yet/);
   });
 });
 
@@ -783,6 +821,7 @@ function fakeGh(world: World, calls: string[][]): GhFn {
 
 const greenRun = (file: string, tip: string): Record<string, unknown> => ({
   id: 100,
+  run_attempt: 1,
   path: `.github/workflows/${file}`,
   event: 'push',
   head_branch: 'merge-queue',
@@ -795,6 +834,7 @@ const greenRun = (file: string, tip: string): Record<string, unknown> => ({
 
 const greenJob = {
   id: 1,
+  run_attempt: 1,
   name: 'j',
   status: 'completed',
   conclusion: 'success',
@@ -2198,6 +2238,26 @@ describe('bindQueueAuthorization — the object cq-verify consumes', () => {
     expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
   });
 
+  test('a listed ledger version whose file is missing (404) is a barrier too', async () => {
+    const { h } = d11Harness({
+      timeline: () => [ownerLabel()],
+      settle: [
+        { sha: sha('1'), ledger: ledger({}) },
+        { sha: sha('2'), ledger: ledger({ '7': H1 }) },
+      ],
+    });
+    const gh = h.deps.gh;
+    h.deps.gh = (args) =>
+      (args[1] ?? '').includes(`settle-state.json?ref=${sha('1')}`)
+        ? Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 404: Not Found' })
+        : gh(args);
+    const lines: string[] = [];
+    const auth = await bindQueueAuthorization(h.deps, cfg(), MAIN, M1, lines);
+    expect(lines.join('\n')).toMatch(/missing at listed history commit/);
+    expect(lines.join('\n')).toMatch(/lookup barrier/);
+    expect(auth.contributions[0]?.record.status).toBe('invalid');
+  });
+
   test('a malformed newest ledger version is a barrier: no stale epoch from an older one', async () => {
     const { h } = d11Harness({
       timeline: () => [ownerLabel()],
@@ -2211,6 +2271,27 @@ describe('bindQueueAuthorization — the object cq-verify consumes', () => {
     expect(lines.join('\n')).toMatch(/malformed version is a lookup barrier/);
     expect(auth.contributions[0]?.record.status).toBe('invalid');
     expect(authorizePaths(auth, [CHANGED]).authorized).toBe(false);
+  });
+
+  test('a run that changes while its jobs are read is never evidence (pending, then timeout)', async () => {
+    const h = harness(world());
+    const gh = h.deps.gh;
+    let ciReads = 0;
+    h.deps.gh = async (args) => {
+      const result = await gh(args);
+      if (!/actions\/workflows\/ci\.yml\/runs/.test(args[1] ?? '')) return result;
+      ciReads += 1;
+      if (ciReads < 2) return result;
+      // Every later read sees a rerun (attempt 2) of the same run.
+      const pages = JSON.parse(result.stdout) as { workflow_runs: Record<string, unknown>[] }[];
+      for (const page of pages) for (const run of page.workflow_runs) run['run_attempt'] = 2;
+      return { ...result, stdout: JSON.stringify(pages) };
+    };
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('refused');
+    expect(r.report.join('\n')).toMatch(
+      /the run changed while its jobs were read|no job of attempt 2/,
+    );
   });
 
   test('the gate reads every job execution (filter=all) of a verified run', async () => {
