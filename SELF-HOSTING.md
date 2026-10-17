@@ -256,8 +256,9 @@ Owner steps, in order (the RS-11 wizard outline):
 4. Delete the remaining repository-level secrets; run `settings-drift` until
    the only drift left is the rulesets.
 5. **C2:** apply the rulesets from `github-settings.json` (R2 requires
-   `cq/policy`, `cq/ratchet`, `cq/acceptance` from the verdict App), remove
-   classic branch protection, delete `merge-queue-gate.yml`.
+   `cq/policy` and `cq/acceptance` from the verdict App, plus `denylist` from
+   the GitHub Actions app, integration `15368`), remove classic branch
+   protection, delete `merge-queue-gate.yml`.
 6. **C3:** land the D11 attestation, then retire the interim PATs.
 
 > **C3 record.** `policy/attestations/c3.json` attests C3 at `2026-10-17T21:16:36Z`. Runtime
