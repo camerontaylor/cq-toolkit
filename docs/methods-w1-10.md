@@ -96,7 +96,14 @@ paths stay in use, as ADR-0004 D-G.4 allows.
    (0 everywhere; a timer on `promote` would stall every gate run into its timeout). Any
    other protection rule type, such as a custom deployment protection rule, is drift. The target state has no repository-level secrets
    (`total_count == 0`). Environment secret names must be in a committed allowlist, and the
-   interim PAT names are listed separately and reported until C3.
+   interim PAT names are listed separately and reported as notices until
+   `policy/attestations/c3.json` is present in the checked-out trust ref; thereafter they
+   are drift. Repository secrets must remain empty at every stage. Environment variables
+   use name allowlists too (the existing `variables` arrays); values are not read into
+   the comparison, and absent optional names are allowed, matching the secret policy.
+   Unlisted names, refused API reads and truncated lists cannot silently pass.
+   The merge and review drills stay disabled at C3; their PAT names are no longer in
+   the `drill` allowlist. Their App identity follows C3.
 
 9. **Sync goes through a PR (D-I), and every dispatch uses the default ref (D-A.2).** In the
    behind and diverged cases, `sync-merge-queue` opens or reuses a `main → merge-queue` PR

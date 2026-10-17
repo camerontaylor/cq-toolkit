@@ -201,10 +201,17 @@ async function readLive(repo, expected, requireEventPolicy) {
       secretPage?.secrets,
       secretPage?.total_count,
     );
+    const variablePage = await ghGet(`${base}/variables?per_page=${PAGE}`);
+    const variables = complete(
+      `environment ${name} variables`,
+      variablePage?.variables,
+      variablePage?.total_count,
+    );
     environments[name] = environmentFromApi(
       env,
       policies,
       secrets.map((s) => String(s.name)),
+      variables.map((v) => String(v.name)),
     );
   }
 
@@ -273,7 +280,16 @@ async function main() {
     throw new UsageError(error.message);
   }
   const live = await readLive(opts.repo, expected, opts.requireEventPolicy);
-  const { drift, notices } = compareSettings(expected, live);
+  // settings-drift checks out the trust ref, never a PR head. Only ENOENT
+  // means pre-C3; unreadable attestations must fail closed.
+  let c3Attested = false;
+  try {
+    readFileSync(join(ROOT, 'policy', 'attestations', 'c3.json'));
+    c3Attested = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const { drift, notices } = compareSettings(expected, live, { c3Attested });
   for (const line of drift) console.log(`drift: ${line}`);
   for (const line of notices) console.log(`notice: ${line}`);
   console.log(

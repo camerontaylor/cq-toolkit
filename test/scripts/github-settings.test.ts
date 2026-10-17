@@ -7,7 +7,15 @@
 // (no App ids), which must exit before any gh call, and against a fake `gh`
 // (CQ_GH_BIN) serving a clean live state — never the network.
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +71,7 @@ function liveFrom(settings: GithubSettings): LiveSettings {
       wait_timer: env.wait_timer,
       other_rules: [],
       secrets: [...env.secrets],
+      variables: [...(env.variables ?? [])],
     };
   }
   return {
@@ -339,6 +348,7 @@ describe('compareSettings', () => {
       wait_timer: 0,
       other_rules: [],
       secrets: [],
+      variables: [],
     };
     expect(driftOf(live)).toEqual([
       'environment promote: missing',
@@ -407,6 +417,36 @@ describe('compareSettings', () => {
         'environment automation: interim secret GH_TOKEN present (allowed until the ADR-0004 D-H.3 C3 attestation)',
       ],
     });
+  });
+
+  it('rejects every interim secret after C3 and both drill PAT names at every stage', () => {
+    const settings = target();
+    const live = liveFrom(settings);
+    for (const [name, env] of Object.entries(settings.environments)) {
+      live.environments[name]?.secrets.push(...env.interimSecrets);
+    }
+    live.environments['drill']?.secrets.push('CQ_DRILL_MERGE_TOKEN', 'GH_TOKEN');
+    const result = compareSettings(settings, live, { c3Attested: true });
+    expect(result.notices).toEqual([]);
+    expect(result.drift).toHaveLength(
+      Object.values(settings.environments).reduce((n, env) => n + env.interimSecrets.length, 2),
+    );
+    expect(compareSettings(settings, live).drift).toEqual([
+      'environment drill: secret CQ_DRILL_MERGE_TOKEN is not in the allowlist',
+      'environment drill: secret GH_TOKEN is not in the allowlist',
+    ]);
+  });
+
+  it('allows optional environment variable names and rejects unlisted names deterministically', () => {
+    const live = liveFrom(target());
+    live.environments['automation']?.variables.push('UNLISTED_B', 'UNLISTED_A');
+    live.environments['drill']?.variables.push('UNLISTED');
+    live.environments['adversarial-scratch']!.variables = [];
+    expect(driftOf(live)).toEqual([
+      'environment automation: variable UNLISTED_A is not in the allowlist',
+      'environment automation: variable UNLISTED_B is not in the allowlist',
+      'environment drill: variable UNLISTED is not in the allowlist',
+    ]);
   });
 
   it('reports a repository-level secret', () => {
@@ -495,6 +535,7 @@ describe('environmentFromApi', () => {
       wait_timer: 0,
       other_rules: [],
       secrets: ['GH_TOKEN'],
+      variables: [],
     });
     const guarded = environmentFromApi(
       {
@@ -608,6 +649,10 @@ describe('github-settings-drift CLI: the Actions event policy read', () => {
         total_count: env.branch_policies.length,
         branch_policies: env.branch_policies,
       };
+      out[`${base}/variables?${PAGE}`] = {
+        total_count: (env.variables ?? []).length,
+        variables: (env.variables ?? []).map((name) => ({ name, value: 'not compared' })),
+      };
       out[`${base}/secrets?${PAGE}`] = {
         total_count: env.secrets.length,
         secrets: env.secrets.map((n) => ({ name: n })),
@@ -653,12 +698,27 @@ exit 1
 `;
 
   /** Write the fake gh and its responses into a fresh dir; the CLI's argv and env. */
-  function fakeSetup(extra: string[], status: Record<string, number>) {
+  function fakeSetup(extra: string[], status: Record<string, number>, c3Attested = false) {
     const dir = mkdtempSync(join(tmpdir(), 'settings-drift-gh-'));
     const bin = join(dir, 'gh');
+    mkdirSync(join(dir, 'scripts', 'lib'), { recursive: true });
+    mkdirSync(join(dir, 'policy', 'attestations'), { recursive: true });
+    writeFileSync(join(dir, 'scripts', 'github-settings-drift.mjs'), readFileSync(SCRIPT));
+    writeFileSync(
+      join(dir, 'scripts', 'lib', 'github-settings.mjs'),
+      readFileSync(join(ROOT, 'scripts', 'lib', 'github-settings.mjs')),
+    );
+    if (c3Attested) writeFileSync(join(dir, 'policy', 'attestations', 'c3.json'), '{}');
     writeFileSync(bin, FAKE_GH);
     chmodSync(bin, 0o755);
-    const index = Object.entries(apiResponses()).map(([path, body], i) => {
+    const responses = apiResponses();
+    if (c3Attested) {
+      responses[`${REPO}/environments/promote/secrets?${PAGE}`] = {
+        total_count: 1,
+        secrets: [{ name: 'PROMOTE_TOKEN' }],
+      };
+    }
+    const index = Object.entries(responses).map(([path, body], i) => {
       const file = `r${String(i)}.json`;
       writeFileSync(join(dir, file), JSON.stringify(body));
       return `${file}\t${path}\n`;
@@ -673,7 +733,8 @@ exit 1
     return {
       dir,
       args: [
-        SCRIPT,
+        join(dir, 'scripts', 'github-settings-drift.mjs'),
+        `--template=${TEMPLATE_PATH}`,
         '--repository=o/r',
         `--verdict-app-id=${VERDICT}`,
         `--promoter-app-id=${PROMOTER}`,
@@ -683,14 +744,29 @@ exit 1
     };
   }
 
-  function runFake(extra: string[], status: Record<string, number>) {
-    const { dir, args, env } = fakeSetup(extra, status);
+  function runFake(extra: string[], status: Record<string, number>, c3Attested = false) {
+    const { dir, args, env } = fakeSetup(extra, status, c3Attested);
     try {
       return spawnSync(process.execPath, args, { encoding: 'utf8', env });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+
+  it('reads C3 from its trust-ref checkout and rejects an interim secret', () => {
+    const result = runFake([], {}, true);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(
+      'drift: environment promote: secret PROMOTE_TOKEN is not in the allowlist',
+    );
+    expect(result.stdout).not.toContain('notice:');
+  });
+
+  it('fails closed when the environment-variable read is refused', () => {
+    const result = runFake([], { [`${REPO}/environments/drill/variables?${PAGE}`]: 403 });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('variables');
+  });
 
   interface CliResult {
     status: number | null;

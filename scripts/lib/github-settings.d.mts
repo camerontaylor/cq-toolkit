@@ -44,6 +44,8 @@ export interface EnvironmentTarget {
   wait_timer: number;
   secrets: string[];
   interimSecrets: string[];
+  /** Allowed names; values and absent optional variables are not compared. */
+  variables?: string[];
 }
 
 export interface ActionsSettings {
@@ -73,6 +75,7 @@ export interface LiveEnvironment {
   /** Protection-rule types other than required_reviewers/wait_timer/branch_policy (drift). */
   other_rules: string[];
   secrets: string[];
+  variables: string[];
 }
 
 /** The live settings the CLI assembles from its `gh api` reads. */
@@ -97,9 +100,11 @@ export function environmentFromApi(
   env: Record<string, unknown>,
   branchPolicies: Record<string, unknown>[],
   secretNames: string[],
+  variableNames?: string[],
 ): LiveEnvironment;
 
 export function compareSettings(
   expected: GithubSettings,
   actual: LiveSettings,
+  options?: { c3Attested?: boolean },
 ): { drift: string[]; notices: string[] };

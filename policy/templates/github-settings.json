@@ -144,7 +144,7 @@
       "reviewers": "any",
       "prevent_self_review": false,
       "wait_timer": 0,
-      "secrets": ["CQ_DRILL_MERGE_TOKEN", "GH_TOKEN", "Z_AI_API_KEY", "DEEPSEEK_API_KEY"],
+      "secrets": ["Z_AI_API_KEY", "DEEPSEEK_API_KEY"],
       "interimSecrets": []
     }
   },
