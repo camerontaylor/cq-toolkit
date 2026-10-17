@@ -275,7 +275,7 @@ import { HARNESS_MCP_SERVER_NAME } from '../../harness/surface.js';
 import { harnessServerLaunch } from '../../harness/mcp/launch.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
-import { stripMetaSchema } from '../json-schema.js';
+import { stripMetaSchema } from '../../shared/json-schema.js';
 import { boundedErrorText, describeError } from '../error-text.js';
 import { DispatchError } from '../errors.js';
 import { assertStrictTokenBudgetSupported } from '../common/strict-budget.js';
@@ -302,8 +302,13 @@ import type {
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
 import { redactSensitiveText } from '../error-text.js';
-import { spawnManaged, terminateGracefully } from './process.js';
-import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from './process.js';
+import { spawnManaged, terminateGracefully } from '../../shared/proc.js';
+import type {
+  ManagedChild,
+  ProcessClose,
+  SpawnOptions,
+  TerminationRungMarker,
+} from '../../shared/proc.js';
 
 // ---------------------------------------------------------------------------
 // Public surface

@@ -64,6 +64,7 @@ function fixture(prefix = 'cq-static-conformance-'): string {
     '.oxlintrc.json',
     'lint/plugin.mjs',
     'lint/rules/no-cli-beyond-registry-kernel.mjs',
+    'lint/rules/no-driver-import-in-harness.mjs',
     'lint/rules/no-vendor-sdk-in-kernel.mjs',
     'scripts/ratchet-typecheck.mjs',
     'scripts/ratchet-lib.mjs',

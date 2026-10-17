@@ -385,7 +385,7 @@ Process groups (#19): on POSIX the child is spawned `detached` (its own
 process-group leader) and the driver's kill signals the WHOLE group
 (`process.kill(-pid)`), so agent-spawned descendants die with the CLI;
 Windows has no Job Object in v1 (descendants can survive there —
-recorded limitation in `src/driver/subprocess/process.ts`). Stdout/stderr
+recorded limitation in `src/shared/proc.ts`). Stdout/stderr
 retention is bounded to a 1 MiB tail (`DEFAULT_MAX_RETAINED_BYTES`,
 `SpawnOptions.maxRetainedBytes`) with the dropped byte count on
 `ProcessClose.droppedBytes` — the verdict path folds evidence from the
