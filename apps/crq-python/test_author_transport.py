@@ -130,7 +130,6 @@ class TransportTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertEqual(result.stdout, b"")
 
-    @unittest.skipUnless(hasattr(crq, "author_lease_command"), "P3 dependency not yet merged")
     def test_p3_real_enrollment_and_replayed_fallback_are_single_dispatch(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
