@@ -216,11 +216,9 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
  * cannot relax its own check. Numeric ids are positive integers. Equally
  * without `authorization`: a D11Authorization ('./d11Authorization.js') is
  * bound in-process only, by the promotion gate and cq-verify's
- * `selfhost/verify-ratchet`, never carried by a CLI or plan input.
- * `settleStatePath` is the settle-ledger's path on the settle ref (selfhost
- * configuration, passed through by the dispatching workflow; the op applies
- * the deployed wire default when omitted — a relocated path can only fail
- * closed, since a non-ledger blob discards to no observations).
+ * `selfhost/verify-ratchet`, never carried by a CLI or plan input. The
+ * settle-ledger path is likewise absent: it is composition-owned
+ * (`createPolicyDiff` options), never dispatch data.
  */
 export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
   .object({
@@ -234,7 +232,6 @@ export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
     ownerId: z.number().int().positive().exactOptional(),
     labelEventsPath: z.string().min(1).exactOptional(),
     settleRef: z.string().min(1).exactOptional(),
-    settleStatePath: z.string().min(1).exactOptional(),
   })
   .strict();
 

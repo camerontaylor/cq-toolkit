@@ -115,8 +115,9 @@ import {
   type AcceptanceInput,
   type AcceptanceResult,
 } from './acceptance.js';
-import type { SettleState } from './settle-state.js';
+import type { SettleState } from '../policy/queue/settle-state.js';
 import { readSettleHistory } from './state-branch.js';
+import { SETTLE_STATE_PATH } from './config.js';
 
 /** The branch promotion advances. */
 export const MAIN_BRANCH = 'main';
@@ -1824,7 +1825,11 @@ export async function mainWith(
       args.name,
     );
     const trust = resolveAcceptanceTrust(env);
-    const policyDiff = createPolicyDiff(resolveProtectedPathsConfig({ env }));
+    // The settle-ledger location is this composition's configuration, passed
+    // as the parameter migration 1.2 introduced — never op input.
+    const policyDiff = createPolicyDiff(resolveProtectedPathsConfig({ env }), {
+      settleStatePath: SETTLE_STATE_PATH,
+    });
     const gh = deps.makeGh();
     const result = await runGate(
       {
