@@ -9,10 +9,13 @@
 //     validated by the entry's strict zod schema. Values stay strings
 //     (unlike the CLI, nothing is JSON-parsed), so the schema decides each
 //     type.
-//   - I1 (policy/DOCTRINE.md): stdout is ONE JSON line, the OpResult; exit
+//   - I1 (policy/DOCTRINE.md): stdout is ONE JSON line, the OpResult (the
+//     CLI pretty-printed it; the workflows' `jq -s` checks accept both); exit
 //     0 ok, 1 failed or thrown, 2 arg error, 3 needs-human. An arg error
 //     still prints a failed result, so a workflow that validates stdout
-//     reads a failure, never nothing.
+//     reads a failure, never nothing. Unlike the CLI, the result is not
+//     schema-checked before printing: each workflow step re-validates the
+//     line with jq, and anything malformed is a failure there.
 import { z } from 'zod';
 import type { OpResult } from '../kernel/types.js';
 
@@ -103,6 +106,15 @@ export async function runEntry<T>(
     result = { status: 'failed', error: error instanceof Error ? error.message : String(error) };
     code = error instanceof EntryUsageError ? 2 : 1;
   }
-  write(`${JSON.stringify(result)}\n`);
+  let line: string;
+  try {
+    line = JSON.stringify(result);
+  } catch (error) {
+    // A result JSON cannot carry (a BigInt, a cycle) is a failure, not an empty stdout.
+    const message = error instanceof Error ? error.message : String(error);
+    line = JSON.stringify({ status: 'failed', error: `result is not JSON: ${message}` });
+    code = 1;
+  }
+  write(`${line}\n`);
   return code;
 }

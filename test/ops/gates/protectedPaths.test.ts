@@ -267,46 +267,68 @@ describe('every trusted job runs a protected entry point with a protected closur
       .filter((line) => !/^\s*#/.test(line) && !/^\s*(?:-\s+)?name:/.test(line))
       .join('\n');
 
-  /** Every job that builds or runs the trust checkout, as `<workflow>:<job>`. */
+  /** A job builds or runs the trust checkout when its commands name `trust` as a path. */
+  const TRUST_PATH = /(?:^|[\s"'=:])trust(?:\/|[ \t]*$)/m;
+
+  /** Every job that builds or runs the trust checkout, with its workflow's head (env, defaults). */
   const trustedJobs = workflows.flatMap(({ file, text }) => {
     const scan = scanWorkflow(text);
     if (!scan.ok) throw new Error(`${file}: workflow does not scan`);
+    const head = commandLines(text.slice(0, Math.max(0, text.search(/^jobs:/m))));
     return [...scan.jobs.values()]
-      .map((job) => ({ key: `${file}:${job.id}`, code: commandLines(job.text) }))
-      .filter((job) => /(?:^|[\s"'=:])trust\//m.test(job.code));
+      .map((job) => ({
+        key: `${file}:${job.id}`,
+        code: commandLines(job.text),
+        head,
+        localUses: job.localUses,
+      }))
+      .filter((job) => TRUST_PATH.test(job.code));
   });
 
   /** The one `node` form a trusted job may use, and the `pnpm` forms that build it. */
-  const NODE_TOKEN = /(?<![\w./-])node(?![\w.-])/g;
+  const NODE_TOKEN = /(?<![\w-])node(?![\w.-])/g;
   const NODE_ENTRY = /^node\s+trust\/dist\/selfhost\/([\w-]+)\.js(?=[\s\\"';|)]|$)/;
   const PNPM_TOKEN = /(?<![\w./-])pnpm(?![\w./-])/g;
   const PNPM_FORMS = /^pnpm (?:install --frozen-lockfile --ignore-scripts|run build)[ \t]*$/m;
-  /** Ways to load code a job's argv does not name. */
+  /** Ways to load or run code a job's argv does not name, in the job or its workflow head. */
   const LOADERS =
-    /\b(?:NODE_OPTIONS|NODE_PATH|npx|pnpx|bunx?|deno|tsx|ts-node)\b|--(?:import|require|loader|experimental-loader)\b/;
+    /\b(?:NODE_OPTIONS|NODE_PATH|nodejs|npx|pnpx|bunx?|deno|tsx|ts-node)\b|--(?:import|require|loader|experimental-loader)\b|\$\{?NODE\b|node_modules\/\.bin\b|^\s*shell:(?![ \t]*bash[ \t]*$)/m;
 
-  /** Each trusted job's selfhost entries, and every invocation of any other form. */
-  function trustedEntries(): { entries: Map<string, string[]>; unclassified: string[] } {
-    const out = new Map<string, string[]>();
+  /** One trusted job's selfhost entries, and every invocation of any other form. */
+  function classifyTrustedJob(job: {
+    key: string;
+    code: string;
+    head: string;
+    localUses: readonly string[];
+  }): { entries: string[]; unclassified: string[] } {
+    const { key, code } = job;
+    const entries: string[] = [];
     const unclassified: string[] = [];
-    for (const { key, code } of trustedJobs) {
-      const entries: string[] = [];
-      for (const m of code.matchAll(NODE_TOKEN)) {
-        const entry = NODE_ENTRY.exec(code.slice(m.index))?.[1];
-        if (entry === undefined) unclassified.push(`${key}: ${code.slice(m.index, m.index + 60)}`);
-        else entries.push(entry);
-      }
-      for (const m of code.matchAll(PNPM_TOKEN)) {
-        if (!PNPM_FORMS.test(code.slice(m.index).split('\n')[0]!)) {
-          unclassified.push(`${key}: ${code.slice(m.index).split('\n')[0]!}`);
-        }
-      }
-      const loader = LOADERS.exec(code);
-      if (loader !== null) unclassified.push(`${key}: loads code via ${loader[0]}`);
-      out.set(key, entries);
+    for (const m of code.matchAll(NODE_TOKEN)) {
+      const entry = NODE_ENTRY.exec(code.slice(m.index))?.[1];
+      // `/usr/bin/node …`: a node named by path is not the runner's `node`.
+      if (entry === undefined || code[m.index - 1] === '/') {
+        unclassified.push(`${key}: ${code.slice(Math.max(0, m.index - 20), m.index + 60)}`);
+      } else entries.push(entry);
     }
-    return { entries: out, unclassified };
+    for (const m of code.matchAll(PNPM_TOKEN)) {
+      if (!PNPM_FORMS.test(code.slice(m.index).split('\n')[0]!)) {
+        unclassified.push(`${key}: ${code.slice(m.index).split('\n')[0]!}`);
+      }
+    }
+    for (const [where, text] of [
+      ['job', code],
+      ['workflow head', job.head],
+    ] as const) {
+      const loader = LOADERS.exec(text);
+      if (loader !== null) unclassified.push(`${key}: ${where} loads code via ${loader[0].trim()}`);
+    }
+    for (const local of job.localUses) unclassified.push(`${key}: runs local action ./${local}`);
+    return { entries, unclassified };
   }
+
+  /** Each trusted job's entries, computed once. */
+  const TRUSTED = trustedJobs.map((job) => ({ key: job.key, ...classifyTrustedJob(job) }));
 
   test('no workflow runs trust/dist/cli.js (residual R1)', () => {
     for (const { file, text } of workflows) {
@@ -315,11 +337,10 @@ describe('every trusted job runs a protected entry point with a protected closur
   });
 
   test('trusted jobs run node only as `node trust/dist/selfhost/<entry>.js`', () => {
+    expect(TRUSTED.flatMap((job) => job.unclassified)).toEqual([]);
     // Pinned, so the derived entry set cannot shrink to vacuity: adding or
     // removing a trusted job, or an entry it runs, updates this table.
-    const { entries, unclassified } = trustedEntries();
-    expect(unclassified).toEqual([]);
-    expect(Object.fromEntries(entries)).toEqual({
+    expect(Object.fromEntries(TRUSTED.map((job) => [job.key, job.entries]))).toEqual({
       'cq-accept.yml:judge': ['acceptance'],
       'cq-policy.yml:judge': ['policy-diff'],
       'cq-verify.yml:compute': ['recompute-typecheck'],
@@ -329,23 +350,57 @@ describe('every trusted job runs a protected entry point with a protected closur
   });
 
   test('the invocation rules refuse other forms', () => {
-    const accepts = (line: string): boolean => NODE_ENTRY.test(line);
-    expect(accepts('node trust/dist/selfhost/acceptance.js \\')).toBe(true);
-    expect(accepts('node trust/dist/cli.js gates.policyDiff')).toBe(false);
-    expect(accepts('node --import ./x.js trust/dist/selfhost/acceptance.js')).toBe(false);
-    expect(accepts('node -e "import(\'./x.js\')"')).toBe(false);
-    expect(accepts('node dist/selfhost/acceptance.js')).toBe(false);
-    expect(accepts('node trust/dist/selfhost/$ENTRY.js')).toBe(false);
-    expect(PNPM_FORMS.test('pnpm run build')).toBe(true);
-    expect(PNPM_FORMS.test('pnpm run build && node x.js')).toBe(false);
-    expect(PNPM_FORMS.test('pnpm install --frozen-lockfile')).toBe(false);
-    expect(LOADERS.test('NODE_OPTIONS: --import ./hook.js')).toBe(true);
+    const refused = (code: string, head = '', localUses: string[] = []): string[] =>
+      classifyTrustedJob({ key: 'w:j', code, head, localUses }).unclassified;
+    expect(TRUST_PATH.test('        working-directory: trust')).toBe(true);
+    expect(TRUST_PATH.test('          git init trust')).toBe(true);
+    expect(TRUST_PATH.test('      trusted: yes')).toBe(false);
+    expect(refused('node trust/dist/selfhost/acceptance.js \\')).toEqual([]);
+    expect(refused('pnpm install --frozen-lockfile --ignore-scripts\npnpm run build')).toEqual([]);
+    for (const code of [
+      'node trust/dist/cli.js gates.policyDiff',
+      'node --import ./x.js trust/dist/selfhost/acceptance.js',
+      `node -e "import('./x.js')"`,
+      'node dist/cli.js gates.policyDiff',
+      'node trust/dist/selfhost/$ENTRY.js',
+      '/usr/bin/node trust/dist/selfhost/acceptance.js',
+      '"$NODE" trust/dist/selfhost/acceptance.js',
+      'nodejs trust/dist/cli.js',
+      'trust/node_modules/.bin/tsx x.ts',
+      'pnpm run build && node x.js',
+      'pnpm install --frozen-lockfile',
+      'pnpm exec vitest',
+      '    NODE_OPTIONS: --import ./hook.js',
+      '        shell: node {0}',
+    ]) {
+      expect(refused(code), code).not.toEqual([]);
+    }
+    expect(refused('', 'env:\n  NODE_OPTIONS: --import ./hook.js')).not.toEqual([]);
+    expect(refused('', 'defaults:\n  run:\n    shell: node {0}')).not.toEqual([]);
+    expect(refused('        shell: bash')).toEqual([]);
+    expect(refused('', '', ['trust/.github/actions/x'])).not.toEqual([]);
+  });
+
+  test("the trust build runs only protected scripts (package.json's build)", () => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    const build = pkg.scripts['build'] ?? '';
+    const scripts = [...build.matchAll(/(?:^|[\s'"])(?:\.\/)?(scripts\/[\w./-]+\.m?js)\b/g)].map(
+      (m) => m[1]!,
+    );
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const script of scripts) expect(isProtectedPolicyPath(script), script).toBe(true);
+    // Nothing else runs: every command is node on a script, or the build tsc.
+    for (const command of build.split('&&').map((c) => c.trim())) {
+      expect(command, command).toMatch(
+        /^(?:node (?:scripts\/|--input-type=module -e )|tsc -p tsconfig\.build\.json$)/,
+      );
+    }
   });
 
   const ENTRY_POINTS = [
-    ...[...new Set([...trustedEntries().entries.values()].flat())].map(
-      (e) => `src/selfhost/${e}.ts`,
-    ),
+    ...[...new Set(TRUSTED.flatMap((job) => job.entries))].map((e) => `src/selfhost/${e}.ts`),
     // The prebuilt engine `scripts/ratchet-propose.mjs` loads in its
     // `automation`-environment job (scripts/ratchet-lib.mjs `loadEngine`).
     ...engineModules(),
@@ -439,6 +494,19 @@ describe('every trusted job runs a protected entry point with a protected closur
     expect(scan("const r = createRequire(import.meta.url); r('./x.cjs');").problems).toHaveLength(
       1,
     );
+    // A from-clause cannot span a call: the computed import stays visible.
+    expect(
+      scan("export const f = (n) => import(n)\nexport { x } from './x.js';").problems,
+    ).toHaveLength(1);
+    for (const text of [
+      "register('./hooks.mjs', import.meta.url);",
+      "new Function('return 1')();",
+      "eval('1');",
+      "process.dlopen(m, './x.node');",
+    ]) {
+      expect(scan(text).problems, text).toHaveLength(1);
+    }
+    expect(scan("export * from 'node:fs';")).toEqual({ specifiers: ['node:fs'], problems: [] });
     // The package self-import resolves through dist/index.js, the whole SDK.
     expect(packageOf('@camerontaylor/cq-toolkit')).toBe('@camerontaylor/cq-toolkit');
     expect(DEPENDENCIES.has(packageOf('@camerontaylor/cq-toolkit'))).toBe(false);

@@ -113,8 +113,8 @@ and none runs the CLI:
 The two new entries take the op's own input schema (`policyDiffInput.ts`,
 `recomputeTypecheckInput.ts`, shared with the registry, so the two carriers
 cannot drift), resolve the posture from the env exactly as the registry
-importer does, and keep the CLI's output: one JSON line, the OpResult, which
-the workflows validate unchanged. They share `trusted-entry.ts` for strict
+importer does, and print the CLI's OpResult (as one compact JSON line),
+which the workflows validate unchanged. They share `trusted-entry.ts` for strict
 `--name=value` argv and the I1 exit codes. Unlike the CLI, they do not
 JSON-parse flag values, so a SHA that happens to parse as a number stays a
 string. The CLI registry entries remain for library and plan use, and for
@@ -154,28 +154,35 @@ privileged executor therefore fails CI until someone classifies it.
 ## How the scope stays honest
 
 `test/ops/gates/protectedPaths.test.ts` derives the trusted entry points
-from the rendered workflows: every job that builds or runs the trust
-checkout. In those jobs, `node` may appear only as
-`node trust/dist/selfhost/<entry>.js`, `pnpm` only as the frozen,
-script-free install and `pnpm run build`, and no loader hook
-(`NODE_OPTIONS`, `--import`, `npx` and the like) may appear. Any other form
-fails, as does any `trust/dist/cli.js` in a workflow. The job-to-entry
-table is pinned, so the derived set cannot shrink to nothing unnoticed.
+from the rendered workflows: every job whose commands name the `trust`
+checkout as a path. In those jobs, every `node` token must be
+`node trust/dist/selfhost/<entry>.js`, a `node` named by path is refused,
+and `pnpm` may appear only as the frozen, script-free install and
+`pnpm run build`. A listed loader (`NODE_OPTIONS`, `NODE_PATH`, `--import`,
+`npx`, `tsx`, `node_modules/.bin`, a non-`bash` `shell:` and similar),
+in the job or in its workflow's top-level `env:` and `defaults:`, is
+refused, and so is a local action. Any `trust/dist/cli.js` in a workflow
+fails the test. The job-to-entry table is pinned, so the derived set cannot
+shrink to nothing unnoticed. The `build` script may run only protected
+scripts and the build `tsc`.
 
 The test then walks each entry's module-loading closure, plus the ratchet
 engine that `loadEngine` imports (parsed from the script), and fails when a
 file is unprotected. The scan fails closed (`test/helpers/import-closure.ts`).
 Node's own type stripper erases the type-only imports, and comments and
-string contents are lexed away. Every remaining `import`, `from`,
-`require` or loader-hook token must then be a recognised form with a literal
-specifier. Each specifier must be relative under `src/`, a `node:` builtin,
-or a declared dependency (the lockfile and `package.json` are protected by
-the built-in taxonomy). A computed `import()`, `createRequire`, a package
-self-import or a `#` import fails the walk.
+string contents are lexed away. Every remaining `import` or `from` token
+must then be a recognised form with a literal specifier. The listed runtime
+loaders (`require`, `createRequire`, `register`, `registerHooks`, `Worker`,
+`dlopen`, `eval`, `Function`) are refused outright. Each specifier must be
+relative under `src/`, a `node:` builtin, or a declared dependency (the
+lockfile and `package.json` are protected by the built-in taxonomy). A
+computed `import()`, a package self-import or a `#` import fails the walk.
 
-The walk covers module loading. It does not cover the processes a closure
-file spawns: `git`, `gh`, and `tsc` from the trust checkout's locked
-install.
+These are guards against an honest mistake. They are not a sandbox: every
+workflow and every closure file is itself protected, so evading them takes
+a D11-authorized edit. The walk covers module loading. It does not cover
+the processes a closure file spawns: `git`, `gh`, and `tsc` from the trust
+checkout's locked install.
 
 `test/ops/gates/policyDiff.test.ts` fails if a protected entry matches no
 tracked file. A pending entry, one whose tree has not landed yet, must be

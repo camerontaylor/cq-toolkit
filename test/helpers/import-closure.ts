@@ -7,11 +7,15 @@
  * Method: Node's own type stripper erases the type-only imports (they never
  * execute), then a single-pass lexer drops comments and replaces every
  * string literal with a numbered placeholder, so prose and string contents
- * cannot look like code. Every `import`, `from '…'`, `require` and
- * loader-hook token left in the code must belong to a recognised form with
- * a LITERAL specifier; anything else is a problem the caller fails on,
- * never a silently skipped edge. That over-approximates (a value import
- * that tsc would elide is still walked), which errs toward protection.
+ * cannot look like code. Every `import` and `from '…'` token left in the
+ * code must belong to a recognised form with a LITERAL specifier, and the
+ * listed runtime loaders (`require`, `createRequire`, `register`,
+ * `registerHooks`, `Worker`, `dlopen`, `eval`, `Function`) are refused
+ * outright; anything else is a problem the caller fails on, never a
+ * silently skipped edge. That over-approximates (a value import that tsc
+ * would elide is still walked), which errs toward protection. Child
+ * processes are not modelled: a closure file that spawns `node` on another
+ * script is reviewed, not scanned.
  */
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -157,8 +161,9 @@ export function scanModuleLoads(source: string): ModuleScan {
   const claimed = new Set<number>();
   const LIT = String.raw`'@(\d+)'`;
   const forms = [
-    // import … from / export … from: the clause holds no string, `;` or template.
-    new RegExp(String.raw`\b(?:import|export)\b[^;'\`]*?\bfrom\s*${LIT}`, 'g'),
+    // import … from / export … from: the clause holds no string, `;`,
+    // template or parenthesis, so it cannot span a call such as `import(n)`.
+    new RegExp(String.raw`\b(?:import|export)\b[^;'\`()]*?\bfrom\s*${LIT}`, 'g'),
     // Side-effect import.
     new RegExp(String.raw`\bimport\s*${LIT}`, 'g'),
     // Dynamic import of a literal (no template, no expression, no options).
@@ -182,7 +187,11 @@ export function scanModuleLoads(source: string): ModuleScan {
   for (const m of code.matchAll(/\bfrom\s*'@/g)) {
     if (!claimed.has(m.index)) problems.push(`unrecognised from-clause: ${at(m.index)}`);
   }
-  for (const m of code.matchAll(/\b(?:require|createRequire|registerHooks|Worker)\b/g)) {
+  // Loading code by other means: CommonJS, loader hooks, workers, native
+  // addons, and source evaluation (which can hold an import of its own).
+  const RUNTIME =
+    /\b(?:require|createRequire|register|registerHooks|Worker|dlopen|eval|Function)\b/g;
+  for (const m of code.matchAll(RUNTIME)) {
     problems.push(`runtime module loading: ${at(m.index)}`);
   }
   return { specifiers, problems };

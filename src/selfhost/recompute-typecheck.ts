@@ -10,7 +10,7 @@
 // it to policy/protected-paths.json.
 //
 // INPUT: the CLI op's own flags (`ratchet.recomputeTypecheck`), strict.
-// OUTPUT: one JSON line, the same OpResult the CLI printed, so the compute
+// OUTPUT: the same OpResult the CLI printed, as one JSON line, so the compute
 // step's validation (`.status == "ok"`, a numeric `.value.count`) is
 // unchanged. Bad arguments or a throw are a failed result, never a count;
 // exit codes follow I1 (./trusted-entry.ts).

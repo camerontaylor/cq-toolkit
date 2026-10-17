@@ -20,7 +20,7 @@
 // in-process, and a PR-level check never carries one. It deliberately does
 // not import the gates registry, whose lazy importers reach ops no trusted
 // job runs.
-// OUTPUT: one JSON line, the same OpResult the CLI printed, so the judge
+// OUTPUT: the same OpResult the CLI printed, as one JSON line, so the judge
 // step's validation and check-run steps are unchanged; exit codes follow I1
 // (./trusted-entry.ts).
 import { pathToFileURL } from 'node:url';

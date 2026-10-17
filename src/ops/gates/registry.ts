@@ -4,12 +4,12 @@
 // against the FROZEN OpRegistryEntry (src/kernel/types.ts). The probe's
 // importer binds the default subprocess runner — the lane's only I/O
 // wiring — through DYNAMIC imports, so loading the registry never loads an
-// op module: module scope imports only zod,
-// types (the type-only imports are erased at compile time) and the
-// schema-only './policyDiffInput.js', keeping the lazy-import pattern. The zod schemas are registry-time mirrors of the
-// lane's types and live HERE (the shared spot, C1's CheckRunnerInputSchema
-// precedent) because `inputSchema` must exist eagerly while the ops may
-// not.
+// op module: module scope imports only zod, types (the type-only imports
+// are erased at compile time) and the schema-only './policyDiffInput.js',
+// keeping the lazy-import pattern. The zod schemas are registry-time
+// mirrors of the lane's types and live HERE (the shared spot, C1's
+// CheckRunnerInputSchema precedent) because `inputSchema` must exist
+// eagerly while the ops may not.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { BaselineProbeInput } from './baselineProbe.js';

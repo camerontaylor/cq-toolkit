@@ -3,6 +3,7 @@
 // line on stdout, and the I1 exit codes (policy/DOCTRINE.md).
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
+import { exitCodeForOpResult } from '../../src/cli/exit.js';
 import type { OpResult } from '../../src/kernel/types.js';
 import {
   decimalFlag,
@@ -57,8 +58,11 @@ describe('exitCodeFor (I1)', () => {
     ['needs-human', 3],
     ['budget-exhausted', 3],
     ['something-new', 1],
-  ])('%s → %i', (status, code) => {
-    expect(exitCodeFor({ status } as unknown as OpResult<unknown>)).toBe(code);
+  ])('%s → %i, as the CLI maps it', (status, code) => {
+    const result = { status } as unknown as OpResult<unknown>;
+    expect(exitCodeFor(result)).toBe(code);
+    // The entries restate the CLI's table without importing it (R1).
+    expect(exitCodeFor(result)).toBe(exitCodeForOpResult(result));
   });
 });
 
@@ -84,6 +88,12 @@ describe('runEntry', () => {
       throw new EntryUsageError('--x: bad');
     });
     expect(out).toEqual({ code: 2, result: { status: 'failed', error: '--x: bad' } });
+  });
+
+  test('a result JSON cannot carry is a failed line, exit 1, never an empty stdout', async () => {
+    const out = await run(() => Promise.resolve({ status: 'ok', value: { n: 1n } }));
+    expect(out.code).toBe(1);
+    expect(out.result).toMatchObject({ status: 'failed' });
   });
 
   test('any other throw is a failed result, exit 1', async () => {
