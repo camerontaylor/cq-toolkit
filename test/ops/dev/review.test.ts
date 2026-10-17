@@ -46,7 +46,7 @@ describe('dev.review worker admission (no local issuer)', () => {
     expect(() => sshAuthorTransport('-oProxyCommand=bad')).toThrow();
   });
 
-  it('disables SSH sharing before sending admission to the author identity', async () => {
+  it('disables SSH sharing and unrelated agent keys for the author identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cq-author-ssh-'));
     try {
       await writeFile(
@@ -55,6 +55,12 @@ describe('dev.review worker admission (no local issuer)', () => {
           '#!/bin/sh',
           '[ "$1" = "-T" ] || exit 20',
           '[ "$2" = "-S" ] && [ "$3" = "none" ] || exit 21',
+          'identity_only=no; connect_timeout=no; attempts=no',
+          'for arg do [ "$arg" != "IdentitiesOnly=yes" ] || identity_only=yes; done',
+          'for arg do [ "$arg" != "ConnectTimeout=15" ] || connect_timeout=yes; done',
+          'for arg do [ "$arg" != "ConnectionAttempts=1" ] || attempts=yes; done',
+          '[ "$identity_only" = yes ] || exit 22',
+          '[ "$connect_timeout" = yes ] && [ "$attempts" = yes ] || exit 23',
           'cat >/dev/null',
           `printf '%s\\n' '${JSON.stringify(waiting)}'`,
           '',

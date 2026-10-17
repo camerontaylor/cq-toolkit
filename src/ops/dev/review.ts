@@ -42,6 +42,12 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
           '-o',
           'BatchMode=yes',
           '-o',
+          'IdentitiesOnly=yes',
+          '-o',
+          'ConnectTimeout=15',
+          '-o',
+          'ConnectionAttempts=1',
+          '-o',
           'ClearAllForwardings=yes',
           '-o',
           'RequestTTY=no',
@@ -56,7 +62,7 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
         reject(new Error('author transport timeout; decision unknown'));
-      }, 30_000);
+      }, 45_000);
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > 8192) {

@@ -18,7 +18,9 @@ admission, preventing target aliases from charging twice for the same diff. Neit
 accepted from the worker. No model or provider is hard-coded. Do not permit
 arbitrary environment forwarding, PTYs, port/agent forwarding or a general shell.
 The worker disables SSH connection multiplexing (`-S none`), so a shared master
-cannot substitute another authenticated identity. The exact SSH original command must be `author-v1`; spool commands are refused.
+cannot substitute another authenticated identity. It also sets `IdentitiesOnly=yes`
+to exclude unrelated agent keys. Configure the alias with only the author key as
+its `IdentityFile`; do not inherit additional `IdentityFile` entries. The exact SSH original command must be `author-v1`; spool commands are refused.
 
 Configure the worker's `CQ_AUTHOR_SSH_ALIAS` for this separate identity. The CLI
 uses the normal dotted-command flag grammar:
@@ -32,7 +34,11 @@ Use `--action=status` with the same complete binding to observe the lease, and
 deadline. This P4 command returns **admission**, not a completed review cycle;
 it does not replace the review ledger/readiness orchestration. The chosen agent
 may start only when a fallback response explicitly says `dispatch:true`.
-Timeout, disconnect, lock contention, malformed response, or `dispatch:false`
+SSH connection/initial handshake setup is limited to one 15-second attempt; the
+client allows 45 seconds for that setup plus the server's 30-second operation
+alarm. Configure a direct alias without interactive authentication or proxy
+commands; unexpected authentication/network stalls still return an indeterminate
+outcome. Timeout, disconnect, lock contention, malformed response, or `dispatch:false`
 never authorizes any local CLI/agent run. Lost fallback replies sacrifice
 liveness rather than duplicate an effect. Recover by inspecting the same
 request; never create another request ID to bypass an uncertain outcome.
