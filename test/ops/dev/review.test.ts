@@ -1,38 +1,35 @@
-// dev.review op tests — scripted effects + a stub scanner. Pinned: the base
-// pin (merge-base against the intended target, or the explicit sha resolved
-// once), the secret scan BEFORE any reviewer run, the host-lock span, the
-// honest completion recording (terminal vs blocked with the reason), the
-// finding id minting, and the log written outside the repository.
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+// dev.review op tests over a REAL git repo (repo.ts) with a scripted
+// reviewer CLI and a stub or capturing scanner. Pinned: the base pin, the
+// per-path scan components (committed/staged/unstaged/untracked, binary
+// bytes included), the scan BEFORE any reviewer run, honest completion
+// recording, drift refusal, and the finding-id minting in the ledger.
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest';
 import { DevReviewInputSchema, registry } from '../../../src/ops/dev/registry.js';
-import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
+import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import {
   makeDevReview,
+  SCAN_COMPONENT_CAP_BYTES,
   type DevCycleInput,
   type DevReviewReport,
 } from '../../../src/ops/dev/review.js';
 import { sshAuthorTransport, type AuthorTransport } from '../../../src/ops/dev/review-transport.js';
-import { BASE, BRANCH, failResult, HEAD, makeFakeEffects, okResult, stubScanner } from './fakes.js';
+import type { CommandResult } from '../../../src/ops/dev/effects.js';
+import { makeFakeEffects, stubScanner } from './fakes.js';
+import { makeTestRepo, repoEffects, type CommandHandler, type TestRepo } from './repo.js';
 
-/**
- * The cycle action under test: the composed op bound to the given
- * effects/scanner (and no transport — the cycle never reads one). A cycle
- * input produces the cycle result, so the test-side view is the cycle
- * branch of the op's result union.
- */
-const cycleReview = (effects: ReturnType<typeof makeFakeEffects>, scanSecrets: DiffSecretScanner) =>
-  makeDevReview({ effects, scanSecrets }) as Op<DevCycleInput, DevReviewReport>;
+/** The cycle branch of the composed op. */
+const cycleReview = (
+  effects: Parameters<typeof makeDevReview>[0]['effects'],
+  scanSecrets: DiffSecretScanner,
+) => makeDevReview({ effects, scanSecrets }) as Op<DevCycleInput, DevReviewReport>;
 
-/**
- * The admission action under test: the composed op with the given transport
- * and inert effects/scanner deps (an admission action never touches them).
- */
+/** The admission branch: the composed op with the given transport (effects never touched). */
 const admissionReview = (transport: AuthorTransport) =>
   makeDevReview({ transport, effects: makeFakeEffects(), scanSecrets: stubScanner() });
 
@@ -44,414 +41,265 @@ const NDJSON_OK = [
   '',
 ].join('\n');
 
-/** Effects whose reviewer run produces the given NDJSON and exit code. */
-function reviewEffects(ndjson: string, exitCode: number) {
-  return makeFakeEffects((command, args) => {
-    if (command === 'coderabbit') {
-      expect(args[0]).toBe('review');
-      expect(args[1]).toBe('--agent');
-      expect(args[2]).toBe('--base-commit');
-      return { exitCode, stdout: ndjson, stderr: '', timedOut: false };
-    }
-    if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
-      return okResult('patchtext', '');
-    }
-    return undefined;
-  });
+const ran = (
+  exitCode: number | null,
+  stdout = NDJSON_OK,
+  extra: Partial<CommandResult> = {},
+): CommandResult => ({
+  exitCode,
+  stdout,
+  stderr: '',
+  timedOut: false,
+  ...extra,
+});
+
+/** A scripted reviewer: `coderabbit` answers with `result`; everything else is real git. */
+const reviewer =
+  (result: CommandResult | (() => CommandResult | Promise<CommandResult>)): CommandHandler =>
+  async (command) =>
+    command === 'coderabbit' ? (typeof result === 'function' ? result() : result) : undefined;
+
+/** A scanner that records the components it was handed. */
+function capturingScanner(): DiffSecretScanner & { seen: ScanComponentInput[] } {
+  const seen: ScanComponentInput[] = [];
+  const scan = ((components: readonly ScanComponentInput[]) => {
+    seen.push(...components);
+    return components.map((c) => ({ component: c.component, hits: [] }));
+  }) as unknown as DiffSecretScanner & { seen: ScanComponentInput[] };
+  scan.seen = seen;
+  return scan;
 }
 
-describe('dev.review', () => {
-  test.each([1, null, {}, false])(
-    'SDK reviewer %j is a failed input before effects',
-    async (reviewer) => {
-      const effects = makeFakeEffects();
-      const result = await cycleReview(
-        effects,
-        stubScanner(),
-      )({ repoRoot: '/repo', reviewer } as unknown as DevCycleInput);
-      expect(result).toEqual({ status: 'failed', error: 'dev.review: reviewer must be a string' });
-      expect(effects.commands).toEqual([]);
+let repo: TestRepo;
+beforeEach(async () => {
+  repo = await makeTestRepo();
+});
+afterEach(async () => {
+  await repo.cleanup();
+});
+
+const reviewerCalls = (effects: { calls: { command: string; args: readonly string[] }[] }) =>
+  effects.calls.filter((call) => call.command === 'coderabbit');
+
+describe('dev.review cycle', () => {
+  test('a terminal cycle: ok report with completion, pinned base, recorded ids and log', async () => {
+    const effects = repoEffects(repo, reviewer(ran(0)));
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    const base = repo.git('rev-parse', 'origin/merge-queue').trim();
+    const head = repo.git('rev-parse', 'HEAD').trim();
+    expect(result.value).toMatchObject({
+      reviewer: 'coderabbit',
+      scope: 'full',
+      target: 'merge-queue',
+      base,
+      head,
+      dirtySha256: 'clean-tree',
+      completion: { kind: 'terminal' },
+    });
+    expect(result.value.cycleId).toBe(`c001-${head.slice(0, 8)}`);
+    expect(result.value.findings.map((f) => [f.id, f.severity])).toEqual([
+      [`c001-${head.slice(0, 8)}#f1`, 'major'],
+      [`c001-${head.slice(0, 8)}#f2`, 'minor'],
+    ]);
+    expect(reviewerCalls(effects)[0]?.args).toEqual(['review', '--agent', '--base-commit', base]);
+    expect(effects.logs[0]).toContain(`base: ${base}`);
+    const ledger = effects.openLedger('feature/x').load();
+    expect(ledger.records.map((r) => r.kind)).toEqual(['cycle']);
+  });
+
+  test('scan components: one per (leg, path) with its path; binary bytes visible; untracked read', async () => {
+    await repo.write('bin/blob.dat', Buffer.from([0, 1, 2, ...Buffer.from('TOKEN-in-binary'), 0]));
+    repo.commitAll('binary');
+    await repo.write('src/staged.ts', 'export const s = 1;\n');
+    repo.git('add', 'src/staged.ts');
+    await repo.write('README.md', '# edited\n');
+    await repo.write('notes/new.env', 'KEY=1\n');
+    const scanner = capturingScanner();
+    const result = await cycleReview(
+      repoEffects(repo, reviewer(ran(0))),
+      scanner,
+    )({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(scanner.seen.map((c) => [c.component, c.path])).toEqual([
+      ['committed:bin/blob.dat', 'bin/blob.dat'],
+      ['committed:src/a.ts', 'src/a.ts'],
+      ['staged:src/staged.ts', 'src/staged.ts'],
+      ['unstaged:README.md', 'README.md'],
+      ['untracked:notes/new.env', 'notes/new.env'],
+    ]);
+    expect(scanner.seen[0]?.text).toContain('TOKEN-in-binary');
+    expect(scanner.seen[3]?.text).toContain('-# fixture');
+    expect(scanner.seen[4]?.text).toBe('KEY=1\n');
+  });
+
+  test("the scanner's own corpus file is skipped but still counts as a non-empty scope", async () => {
+    repo.git('reset', '-q', '--hard', 'origin/merge-queue');
+    await repo.write('policy/denylist/patterns.yml', 'rules:\n');
+    repo.commitAll('corpus only');
+    const scanner = capturingScanner();
+    const result = await cycleReview(
+      repoEffects(repo, reviewer(ran(0))),
+      scanner,
+    )({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(scanner.seen).toEqual([]);
+  });
+
+  test('THE SCAN GATES THE UPLOAD: a hit or a scanner fault refuses before the reviewer runs', async () => {
+    const hit = repoEffects(repo, reviewer(ran(0)));
+    const refused = await cycleReview(
+      hit,
+      stubScanner([{ component: 'committed:src/a.ts', ruleId: 'class:secret' }]),
+    )({ repoRoot: repo.root });
+    expect(refused.status).toBe('needs-human');
+    if (refused.status === 'needs-human')
+      expect(refused.reason).toContain('class:secret in committed:src/a.ts');
+    expect(reviewerCalls(hit)).toEqual([]);
+
+    const fault = repoEffects(repo, reviewer(ran(0)));
+    const faulted = await cycleReview(fault, () => {
+      throw new Error('gitleaks missing');
+    })({ repoRoot: repo.root });
+    expect(faulted.status).toBe('needs-human');
+    if (faulted.status === 'needs-human') expect(faulted.reason).toContain('gitleaks missing');
+    expect(reviewerCalls(fault)).toEqual([]);
+    expect(fault.openLedger('feature/x').load().records).toEqual([]);
+  });
+
+  test('an unscannable untracked file (symlink, oversized) refuses — never silently skipped', async () => {
+    await symlink('/etc/hostname', join(repo.root, 'link'));
+    const linked = repoEffects(repo, reviewer(ran(0)));
+    const result = await cycleReview(linked, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain("untracked file 'link'");
+    expect(reviewerCalls(linked)).toEqual([]);
+
+    await rm(join(repo.root, 'link'));
+    await repo.write('big.txt', 'x'.repeat(SCAN_COMPONENT_CAP_BYTES + 1));
+    const big = await cycleReview(
+      repoEffects(repo, reviewer(ran(0))),
+      stubScanner(),
+    )({
+      repoRoot: repo.root,
+    });
+    expect(big.status).toBe('needs-human');
+    if (big.status === 'needs-human') expect(big.reason).toContain('per-file scan cap');
+  });
+
+  test('an explicit base resolves once; an unresolvable one is needs-human with no run', async () => {
+    const base = repo.git('rev-parse', 'HEAD~1').trim();
+    const pinned = repoEffects(repo, reviewer(ran(0)));
+    const ok = await cycleReview(
+      pinned,
+      stubScanner(),
+    )({ repoRoot: repo.root, base: base.slice(0, 10) });
+    expect(ok.status === 'ok' && ok.value.base).toBe(base);
+
+    const missing = repoEffects(repo, reviewer(ran(0)));
+    const result = await cycleReview(
+      missing,
+      stubScanner(),
+    )({ repoRoot: repo.root, base: 'deadbeef' });
+    expect(result.status).toBe('needs-human');
+    expect(reviewerCalls(missing)).toEqual([]);
+  });
+
+  test.each([
+    ['a non-zero exit', ran(2), 'exited 2'],
+    ['a malformed stream', ran(0, 'garbage\n'), 'MALFORMED'],
+    ['a timeout', ran(null, '', { timedOut: true }), 'timed out'],
+  ])(
+    '%s is a BLOCKED cycle: recorded with the reason, never ok',
+    async (_label, outcome, reason) => {
+      const effects = repoEffects(repo, reviewer(outcome));
+      const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') expect(result.reason).toContain(reason);
+      const [cycle] = effects.openLedger('feature/x').load().records;
+      expect(cycle?.kind === 'cycle' && cycle.completion.kind).toBe('blocked');
     },
   );
 
-  test('a terminal cycle: ok report, ledger record with minted ids, log outside the repo', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') return;
-    expect(result.value.cycleId).toBe('c001-aaaaaaaa');
-    expect(result.value.base).toBe(BASE);
-    expect(result.value.head).toBe(HEAD);
-    expect(result.value.dirtySha256).not.toBe('clean-tree');
-    expect(result.value.findings).toHaveLength(2);
-    expect(result.value.findings[0]).toMatchObject({
-      id: 'c001-aaaaaaaa#f1',
-      severity: 'major',
-      fileName: 'src/a.ts',
+  test('a reviewer spawn fault is a blocked cycle naming the fault, not a crash', async () => {
+    const effects = repoEffects(repo, (command) => {
+      if (command === 'coderabbit') throw new Error('coderabbit could not be spawned — ENOENT');
+      return undefined;
     });
-    expect(result.value.logPath).toContain('/tmp/fake-cq-dev-review/');
-
-    const ledger = effects.openLedger(BRANCH).load();
-    expect(ledger.records).toHaveLength(1);
-    const record = ledger.records[0];
-    expect(record?.kind).toBe('cycle');
-    if (record?.kind === 'cycle') {
-      expect(record.completion).toEqual({ kind: 'terminal' });
-      expect(record.reviewer).toBe('coderabbit');
-      expect(record.scope).toBe('full');
-      expect(record.logPath).toBe(result.value.logPath);
-    }
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('ENOENT');
   });
 
-  test('the pinned base is the merge-base of origin/<target> and HEAD', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    await cycleReview(effects, stubScanner())({ repoRoot: '/repo', target: 'main' });
-    const mergeBase = effects.commands.find((entry) => entry.args[0] === 'merge-base');
-    expect(mergeBase?.args).toEqual(['merge-base', 'origin/main', 'HEAD']);
-  });
-
-  test('an explicit base resolves once to a commit (the immutable pin)', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const result = await cycleReview(
-      effects,
-      stubScanner(),
-    )({ repoRoot: '/repo', base: '1234567' });
-    expect(result.status).toBe('ok');
-    const resolve = effects.commands.find(
-      (entry) => entry.args[0] === 'rev-parse' && entry.args[1] === '1234567^{commit}',
+  test('drift DURING the run refuses the cycle and records nothing', async () => {
+    const effects = repoEffects(
+      repo,
+      reviewer(async () => {
+        await repo.write('src/a.ts', 'export const a = 99;\n');
+        return ran(0);
+      }),
     );
-    expect(resolve).toBeDefined();
-    if (result.status === 'ok') expect(result.value.base).toBe(BASE);
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('during the review run');
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 
-  test('an explicit base that does not resolve is needs-human, no reviewer run', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'rev-parse' && args[1] === 'deadbeef^{commit}') {
-        return failResult(128, '', 'unknown revision');
-      }
-      return undefined;
-    });
+  test('the uncommitted scope reads no committed leg and passes --uncommitted', async () => {
+    await repo.write('README.md', '# edited\n');
+    const scanner = capturingScanner();
+    const effects = repoEffects(repo, reviewer(ran(0)));
+    const result = await cycleReview(effects, scanner)({ repoRoot: repo.root, uncommitted: true });
+    expect(result.status === 'ok' && result.value.scope).toBe('uncommitted');
+    expect(scanner.seen.map((c) => c.component)).toEqual(['unstaged:README.md']);
+    expect(reviewerCalls(effects)[0]?.args.at(-1)).toBe('--uncommitted');
+  });
+
+  test('an empty scope is needs-human before the scan or the run', async () => {
+    const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
       stubScanner(),
-    )({ repoRoot: '/repo', base: 'deadbeef' });
+    )({ repoRoot: repo.root, uncommitted: true });
     expect(result.status).toBe('needs-human');
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-  });
-
-  test('THE SCAN GATES THE UPLOAD: a secret hit refuses before the reviewer runs, nothing recorded', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const scanner = stubScanner([{ component: 'committed', ruleId: 'class:token-ssh-plumbing' }]);
-    const result = await cycleReview(effects, scanner)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('class:token-ssh-plumbing');
-      expect(result.reason).toContain('committed');
-    }
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
-  });
-
-  test('a scanner fault refuses the review too', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const result = await cycleReview(effects, () => {
-      throw new Error('patterns.yml malformed');
-    })({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('malformed');
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-  });
-
-  test('blocked variants are recorded honestly with the reason and never ok', async () => {
-    const cases: { name: string; ndjson: string; exitCode: number; why: RegExp }[] = [
-      {
-        name: 'non-zero exit',
-        ndjson: NDJSON_OK,
-        exitCode: 3,
-        why: /exited 3/,
-      },
-      {
-        name: 'error event',
-        ndjson: `${JSON.stringify({ type: 'error', message: 'quota' })}\n`,
-        exitCode: 0,
-        why: /error event/,
-      },
-      {
-        name: 'skipped',
-        ndjson: `${JSON.stringify({ type: 'complete', status: 'review_skipped' })}\n`,
-        exitCode: 0,
-        why: /review_skipped/,
-      },
-      {
-        name: 'action required',
-        ndjson: `${JSON.stringify({ type: 'action_required' })}\n${JSON.stringify({ type: 'complete', status: 'review_completed' })}\n`,
-        exitCode: 0,
-        why: /action/,
-      },
-      {
-        name: 'no terminal event',
-        ndjson: `${JSON.stringify({ type: 'heartbeat' })}\n`,
-        exitCode: 0,
-        why: /without a terminal/,
-      },
-    ];
-    for (const testCase of cases) {
-      const effects = reviewEffects(testCase.ndjson, testCase.exitCode);
-      const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-      expect(result.status, testCase.name).toBe('needs-human');
-      if (result.status === 'needs-human') {
-        expect(result.reason, testCase.name).toMatch(testCase.why);
-        expect(result.reason, testCase.name).toContain('c001-aaaaaaaa');
-      }
-      const ledger = effects.openLedger(BRANCH).load();
-      const record = ledger.records[0];
-      expect(record?.kind, testCase.name).toBe('cycle');
-      if (record?.kind === 'cycle') {
-        expect(record.completion.kind, testCase.name).toBe('blocked');
-        if (record.completion.kind === 'blocked') {
-          expect(record.completion.reason, testCase.name).toMatch(testCase.why);
-        }
-      }
-    }
-  });
-
-  test('a TIMED-OUT reviewer run blocks naming the timeout, not a spawn fault', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'coderabbit') {
-        return { exitCode: null, stdout: '', stderr: '', timedOut: true };
-      }
-      return original(command, args, opts);
-    };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('timed out');
-      expect(result.reason).not.toContain('did not run');
-    }
-  });
-
-  test('a spawn fault (missing binary) is a blocked cycle naming the fault, not a crash', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'coderabbit') throw new Error('spawn coderabbit ENOENT');
-      // A non-empty unstaged patch so the run reaches the reviewer.
-      if (command === 'git' && args[0] === 'diff' && args.length === 1)
-        return okResult('patch text');
-      return undefined;
-    });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('BLOCKED');
-    const record = effects.openLedger(BRANCH).load().records[0];
-    expect(record?.kind).toBe('cycle');
-    if (record?.kind === 'cycle' && record.completion.kind === 'blocked') {
-      expect(record.completion.reason).toContain('did not run');
-    }
-  });
-
-  test('the SCANNER ITSELF sees the index split change (capture-time binding): refused, no reviewer run', async () => {
-    // The attack the capture-time binding exists for: the index split
-    // changes DURING scanner execution. The scanner stub mutates the
-    // simulated index on invocation, so the SECOND `git diff --cached`
-    // read (the in-lock rebind) diverges from the text the scan saw —
-    // while the aggregate HEAD→worktree diff stays byte-identical
-    // throughout. A post-scan baseline would bless the unscanned content;
-    // the capture-time hash must refuse.
-    const effects = reviewEffects(NDJSON_OK, 0);
-    let indexMutated = false;
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached' && indexMutated) {
-        return okResult('unscanned secret-bearing staged patch');
-      }
-      return original(command, args, opts);
-    };
-    const mutatingScanner = (components: readonly { component: string }[]) => {
-      // The scan itself observes the index flip: content it will be asked
-      // to have scanned is no longer what the next read returns.
-      indexMutated = true;
-      return components.map((component) => ({ component: component.component, hits: [] }));
-    };
-    const result = await cycleReview(effects, mutatingScanner)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('staged patch changed since the scan');
-    }
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
-  });
-
-  test('an absent staged patch that APPEARS in-lock diverges from the empty capture', async () => {
-    // Empty-string capture: the scan saw NO staged patch; the recheck finds
-    // one — the hash of '' must not match.
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached') {
-        return okResult(''); // capture: empty
-      }
-      if (command === 'coderabbit') return okResult(NDJSON_OK);
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary')
-        return okResult('aggregate-unchanged');
-      if (command === 'git' && args[0] === 'diff' && args.length === 1) {
-        // unstaged: capture '' (read 1); the in-lock recheck (read 2)
-        // suddenly carries content.
-        return okResult('late-appearing unstaged patch');
-      }
-      return undefined;
-    });
-    const reads: number[] = [];
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached') reads.push(0);
-      if (command === 'git' && args[0] === 'diff' && args[1] === undefined && args.length === 1) {
-        reads.push(1);
-        if (reads.filter((r) => r === 1).length >= 2)
-          return okResult('late-appearing unstaged patch');
-        return okResult('');
-      }
-      return original(command, args, opts);
-    };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('unstaged patch changed since the scan');
-    }
-  });
-
-  test('a failed dirty-diff read is needs-human, never a fabricated clean tree', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (
-        command === 'git' &&
-        args[0] === 'diff' &&
-        args[1] === '--binary' &&
-        args[2] === '--full-index' &&
-        args[3] === 'HEAD'
-      ) {
-        return { exitCode: 128, stdout: '', stderr: 'fatal: bad object HEAD', timedOut: false };
-      }
-      return original(command, args, opts);
-    };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('dirty-diff identity');
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-  });
-
-  test('worktree drift while waiting on the host lock refuses before the reviewer runs', async () => {
-    let headCalls = 0;
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'rev-parse' && args[1] === 'HEAD') {
-        headCalls += 1;
-        if (headCalls >= 2) return okResult('9999999999999999999999999999999999999999\n');
-      }
-      return original(command, args, opts);
-    };
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('HEAD moved');
-      expect(result.reason).toContain('waiting for the review lock');
-    }
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
-    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
+    if (result.status === 'needs-human') expect(result.reason).toContain('no diff to review');
+    expect(reviewerCalls(effects)).toEqual([]);
   });
 
   test('the agent fallback is refused by name — never a substitute for the CLI cycle', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
+    const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
       stubScanner(),
     )({
-      repoRoot: '/repo',
-      reviewer: 'agent:zai/glm-4.7',
+      repoRoot: repo.root,
+      reviewer: 'agent:some/model',
     });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('agent');
-      expect(result.reason).toContain('fallback');
-    }
-    expect(effects.commands).toHaveLength(0);
+    if (result.status === 'needs-human') expect(result.reason).toContain('vendor-down fallback');
+    expect(effects.calls).toEqual([]);
   });
 
-  test('an unknown reviewer word is a failed result', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
-    const result = await cycleReview(
-      effects,
-      stubScanner(),
-    )({ repoRoot: '/repo', reviewer: 'mystery' });
+  test.each([
+    [{ repoRoot: '/repo', reviewer: 1 }],
+    [{ repoRoot: '/repo', reviewer: 'gpt' }],
+    [{ repoRoot: '' }],
+    [{ repoRoot: '/repo', action: 'bogus' }],
+  ])('a schema-bypassing input %j is a failed result before any effect', async (input) => {
+    const effects = makeFakeEffects();
+    const result = await cycleReview(effects, stubScanner())(input as unknown as DevCycleInput);
     expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('dev.review: invalid input');
+    expect(effects.commands).toEqual([]);
   });
 
-  test('an empty selected scope is needs-human before the scan or the run', async () => {
-    const effects = makeFakeEffects(() => undefined);
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('no diff to review');
-  });
-
-  test('uncommitted scope skips the committed patch component and flags --uncommitted', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'coderabbit') {
-        expect(args).toContain('--uncommitted');
-        return okResult(NDJSON_OK);
-      }
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached')
-        return okResult('staged-patch');
-      if (command === 'git' && args[0] === 'diff') return okResult('unstaged-patch');
-      return undefined;
-    });
-    const seenComponents: string[] = [];
-    const result = await cycleReview(effects, (components) => {
-      seenComponents.push(...components.map((component) => component.component));
-      return components.map((component) => ({ component: component.component, hits: [] }));
-    })({ repoRoot: '/repo', uncommitted: true });
-    expect(result.status).toBe('ok');
-    expect(seenComponents).toEqual(['staged', 'unstaged']);
-    // The identity still pins the merge-base (the record's triple), but the
-    // committed patch component is absent from the uncommitted scope.
-    const mergeBase = effects.commands.find((entry) => entry.args[0] === 'merge-base');
-    expect(mergeBase).toBeDefined();
-  });
-
-  test('untracked files are scanned and recorded in the cycle', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'coderabbit') return okResult(NDJSON_OK);
-      if (command === 'git' && args[0] === 'ls-files') return okResult('notes.md\n');
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary')
-        return okResult('patch');
-      return undefined;
-    });
-    effects.readWorktreeFile = async (path) =>
-      path === 'notes.md'
-        ? { ok: true as const, text: 'content' }
-        : { ok: false as const, reason: 'unreadable' };
-    const seen: string[] = [];
-    const result = await cycleReview(effects, (components) => {
-      seen.push(...components.map((component) => component.component));
-      return components.map((component) => ({ component: component.component, hits: [] }));
-    })({ repoRoot: '/repo' });
-    expect(result.status).toBe('ok');
-    expect(seen).toContain('untracked:notes.md');
-    const record = effects.openLedger(BRANCH).load().records[0];
-    if (record?.kind === 'cycle') expect(record.untracked).toEqual(['notes.md']);
-  });
-
-  test('an unreadable untracked file refuses the review (never silently skipped)', async () => {
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'ls-files') return okResult('gone.md\n');
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary')
-        return okResult('patch');
-      return undefined;
-    });
-    effects.readWorktreeFile = async () => ({ ok: false as const, reason: 'unreadable' });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('gone.md');
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
+  test('a null input is failed, never a TypeError', async () => {
+    const result = await cycleReview(
+      makeFakeEffects(),
+      stubScanner(),
+    )(null as unknown as DevCycleInput);
+    expect(result.status).toBe('failed');
   });
 });
 
@@ -610,32 +458,29 @@ describe('dev.review worker admission (no local issuer)', () => {
 
 describe('dev.review — one op discriminated on action', () => {
   it('accepts an explicit action "cycle" as the review cycle', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
+    const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
       stubScanner(),
     )({
-      repoRoot: '/repo',
+      repoRoot: repo.root,
       action: 'cycle',
     });
     expect(result.status).toBe('ok');
   });
 
   it('refuses an unknown action with the failed taxonomy (never a silent cycle)', async () => {
-    const effects = reviewEffects(NDJSON_OK, 0);
+    const effects = repoEffects(repo, reviewer(ran(0)));
     const result = await cycleReview(
       effects,
       stubScanner(),
     )({
-      repoRoot: '/repo',
+      repoRoot: repo.root,
       action: 'bogus',
     } as unknown as DevCycleInput);
     expect(result.status).toBe('failed');
-    if (result.status === 'failed') {
-      expect(result.error).toContain("unknown action 'bogus'");
-      expect(result.error).toContain("'enroll' | 'status' | 'fallback'");
-    }
-    expect(effects.commands.find((entry) => entry.command === 'coderabbit')).toBeUndefined();
+    if (result.status === 'failed') expect(result.error).toContain('action');
+    expect(reviewerCalls(effects)).toEqual([]);
   });
 
   it('the union schema refuses branch-crossing spellings', () => {
@@ -688,177 +533,3 @@ describe('dev.review — one op discriminated on action', () => {
 // Late-thread hardening: exact-byte identity hashing, binary blob scanning,
 // and the post-run drift refusal.
 // ---------------------------------------------------------------------------
-
-describe('dev.review — late-thread hardening', () => {
-  test('the dirty-diff identity hashes the EXACT bytes (no trim)', async () => {
-    const run = (diffText: string) => {
-      const effects = makeFakeEffects((command, args) => {
-        if (command === 'coderabbit')
-          return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
-        if (command === 'git' && args[0] === 'diff' && args[1] === '--binary')
-          return okResult(diffText);
-        return undefined;
-      });
-      return cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    };
-    const plain = await run('patch\n');
-    const padded = await run('patch   \n');
-    expect(plain.status).toBe('ok');
-    expect(padded.status).toBe('ok');
-    if (plain.status === 'ok' && padded.status === 'ok') {
-      // Trailing whitespace on the final patch line is real content — a
-      // trimmed hash would keep an earlier green run current across it.
-      expect(plain.value.dirtySha256).not.toBe(padded.value.dirtySha256);
-    }
-  });
-
-  test('a staged BINARY file is scanned from its BLOB, not the placeholder', async () => {
-    const binaryPatch = [
-      'diff --git a/keys.dat b/keys.dat',
-      'GIT binary patch',
-      'literal 10',
-      'cmZ~1#x==',
-      '',
-    ].join('\n');
-    const seen: { component: string; kind: string; text: string }[] = [];
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') return okResult('');
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached')
-        return okResult(binaryPatch);
-      if (command === 'git' && args[0] === 'cat-file') return okResult('STAGED-BLOB-BYTES-ff77');
-      if (command === 'coderabbit')
-        return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
-      return undefined;
-    });
-    const result = await cycleReview(effects, async (components) => {
-      for (const component of components) {
-        seen.push({ component: component.component, kind: component.kind, text: component.text });
-      }
-      return components.map((component) => ({ component: component.component, hits: [] }));
-    })({ repoRoot: '/repo' });
-    expect(result.status).toBe('ok');
-    const blobComponent = seen.find((entry) => entry.component === 'binary:staged:keys.dat');
-    expect(blobComponent).toBeDefined();
-    expect(blobComponent?.kind).toBe('file');
-    expect(blobComponent?.text).toBe('STAGED-BLOB-BYTES-ff77');
-  });
-
-  test.each(['staged', 'unstaged'] as const)(
-    'a %s binary deletion scans the removed bytes',
-    async (leg) => {
-      const patch =
-        'diff --git a/asset.dat b/asset.dat\nBinary files a/asset.dat and /dev/null differ\n';
-      const requested: string[] = [];
-      const effects = makeFakeEffects((command, args) => {
-        if (command === 'git' && args[0] === 'diff') {
-          if (
-            (leg === 'staged' && args[1] === '--cached') ||
-            (leg === 'unstaged' && args.length === 1)
-          )
-            return okResult(patch);
-          return okResult('');
-        }
-        if (command === 'git' && args[0] === 'cat-file') {
-          requested.push(args[2] ?? '');
-          if (args[2] === (leg === 'staged' ? `${HEAD}:asset.dat` : ':asset.dat'))
-            return okResult('REMOVED-BYTES');
-          return failResult(128);
-        }
-        if (command === 'coderabbit') return okResult(NDJSON_OK);
-        return undefined;
-      });
-      effects.readWorktreeFile = async () => ({ ok: false, reason: 'ENOENT: deleted' });
-      const scanned: string[] = [];
-      const result = await cycleReview(effects, async (components) => {
-        scanned.push(
-          ...components
-            .filter((component) => component.kind === 'file')
-            .map((component) => component.text),
-        );
-        return components.map((component) => ({ component: component.component, hits: [] }));
-      })({ repoRoot: '/repo' });
-      expect(result.status).toBe('ok');
-      expect(scanned).toContain('REMOVED-BYTES');
-      expect(requested).toContain(leg === 'staged' ? `${HEAD}:asset.dat` : ':asset.dat');
-    },
-  );
-
-  test('a committed BINARY file is scanned from BOTH blobs; a hit refuses the upload', async () => {
-    const binaryPatch = [
-      'diff --git a/keys.dat b/keys.dat',
-      'GIT binary patch',
-      'literal 10',
-      'cmZ~1#x==',
-      '',
-    ].join('\n');
-    const requested: string[] = [];
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
-        // The committed leg is `diff … <base> HEAD` — the pinned base sits
-        // at args[3]; the dirty-diff leg ends at HEAD directly.
-        if (args[3] === BASE) return okResult(binaryPatch);
-        return okResult('');
-      }
-      if (command === 'git' && args[0] === 'cat-file') {
-        requested.push(args[2] ?? '');
-        return okResult('BLOBBYTES');
-      }
-      return undefined;
-    });
-    const result = await cycleReview(effects, async (components) =>
-      components.map((component) => ({
-        component: component.component,
-        hits: component.component.startsWith('binary:')
-          ? [{ ruleId: 'class:pem', lines: [1] }]
-          : [],
-      })),
-    )({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('class:pem');
-      expect(result.reason).toContain('binary:committed(base):keys.dat');
-    }
-    expect(requested).toContain(`${BASE}:keys.dat`);
-    expect(requested).toContain(`${HEAD}:keys.dat`);
-    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
-  });
-
-  test('identity drift DURING the review refuses the cycle — nothing recorded', async () => {
-    let dirtyReads = 0;
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
-        dirtyReads += 1;
-        // Reads: 1 the identity, 2 the pre-lock recheck, 3 the post-run
-        // recheck — the worktree changes between the pre-lock recheck and
-        // the reviewer's completion.
-        return okResult(dirtyReads >= 3 ? 'patch-after-drift' : 'patch');
-      }
-      if (command === 'coderabbit')
-        return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
-      return undefined;
-    });
-    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('could not run to a recorded outcome');
-      expect(result.reason).toContain('working-tree diff changed');
-    }
-    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
-  });
-});
-
-test('scanning and reviewer execution use the same captured effects rather than live source', async () => {
-  const source = reviewEffects('', 0);
-  const captured = reviewEffects(
-    JSON.stringify({ type: 'complete', status: 'review_completed' }),
-    0,
-  );
-  source.runCommand = async () => {
-    throw new Error('live source must not execute');
-  };
-  source.withSnapshot = async (fn) => fn(captured);
-  const result = await cycleReview(source, stubScanner())({ repoRoot: '/repo' });
-  expect(result.status).toBe('ok');
-  expect(source.commands).toEqual([]);
-  expect(captured.commands.some((entry) => entry.command === 'coderabbit')).toBe(true);
-});

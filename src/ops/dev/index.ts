@@ -22,8 +22,10 @@ export type {
 } from './record.js';
 export type { DevCheckInput, DevCheckReport } from './check.js';
 export type { DevDispositionInput } from './disposition.js';
-export type { DevReadyInput } from './ready.js';
-export type { DevReviewInput, DevReviewReport } from './review.js';
+export type { DevReadyInput, ReadinessRead } from './ready.js';
+export type { DevCycleInput, DevReviewDeps, DevReviewInput, DevReviewReport } from './review.js';
+export type { WorkState, WorkStateRead } from './internal/workState.js';
+export { CLEAN_TREE, dirtyIdentity, readWorkState } from './internal/workState.js';
 export {
   assembleReadiness,
   AUTHOR_EVIDENCE_CAVEAT,
@@ -39,8 +41,7 @@ export {
 } from './record.js';
 export type { CommandResult, DevEffects, RunCommand } from './effects.js';
 export {
-  branchFromRevParse,
-  gitOut,
+  guardDevOp,
   hostReviewLockPath,
   makeSubprocessDevEffects,
   mapSpawnFault,
@@ -52,9 +53,11 @@ export type {
   DenylistPatterns,
   DenylistRule,
   DiffSecretScanner,
+  ScanComponentInput,
 } from './denylist.js';
 export {
-  diffPathsOf,
+  composeScanners,
+  makeGitleaksDefaultsScanner,
   makeRepoDiffScanner,
   parseDenylistPatterns,
   scanComponents,
@@ -67,10 +70,10 @@ export {
   decideCompletion,
   parseReviewerStream,
 } from './coderabbit.js';
-export { makeDevCheck, rangeFault } from './check.js';
-export { makeDevReview } from './review.js';
+export { knipTrigger, makeDevCheck, rangeFault } from './check.js';
+export { isAdmissionInput, makeDevReview } from './review.js';
 export { makeDevDisposition } from './disposition.js';
-export { makeDevReady } from './ready.js';
+export { makeDevReady, readReadiness } from './ready.js';
 export {
   DevIdentitySchema,
   registry as devRegistry,
@@ -78,4 +81,8 @@ export {
   DevDispositionInputSchema,
   DevReadyInputSchema,
   DevReviewInputSchema,
+  DevTransportInputSchema,
 } from './registry.js';
+export type { DevTransportInput } from './registry.js';
+export type { AuthorDecision, AuthorTransport } from './review-transport.js';
+export { makeAuthorAdmission, sshAuthorTransport } from './review-transport.js';

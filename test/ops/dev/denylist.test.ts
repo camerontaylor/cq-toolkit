@@ -8,12 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   composeScanners,
-  decodeGitPath,
-  diffHeaderPaths,
-  diffPathsOf,
   makeGitleaksDefaultsScanner,
   parseDenylistPatterns,
-  patchSegments,
   scanComponents,
   scanText,
 } from '../../../src/ops/dev/denylist.js';
@@ -89,96 +85,6 @@ describe('parseDenylistPatterns', () => {
     ).toThrow(/unsupported scalar spelling/);
   });
 
-  test('MIXED quoted/plain headers parse per-side (rename ASCII ↔ non-ASCII)', () => {
-    const header = 'diff --git a/foo.env "b/caf\\303\\251.env"';
-    expect(diffHeaderPaths(header)).toEqual(['foo.env', 'café.env']);
-    const mirrored = 'diff --git "a/caf\\303\\251.env" b/foo.env';
-    expect(diffHeaderPaths(mirrored)).toEqual(['café.env', 'foo.env']);
-    // A binary patch with a mixed header is path-scoped for the rules.
-    const patch = [header, 'GIT binary patch', 'literal 10', 'cmZ~1#x==', ''].join('\n');
-    const rules = [{ id: 'class:env', description: 'd', regex: '.+', path: '(^|/)[^/]*\.env' }];
-    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], rules);
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
-  });
-
-  test('QUOTED text headers (---/+++) decode too', () => {
-    const patch = [
-      'diff --git "a/caf\\303\\251.env" "b/caf\\303\\251.env"',
-      '--- "a/caf\\303\\251.env"',
-      '+++ "b/caf\\303\\251.env"',
-      '+KEY=x',
-    ].join('\n');
-    const segments = patchSegments(patch);
-    expect(segments[0]?.paths).toEqual(['café.env']);
-  });
-
-  test('git QUOTED header paths decode (C-escaped octal utf-8) and scope rules', () => {
-    // `caf\303\251.env` = café.env in git's core.quotePath spelling.
-    const header = 'diff --git "a/caf\\303\\251.env" "b/caf\\303\\251.env"';
-    expect(diffHeaderPaths(header)).toEqual(['café.env', 'café.env']);
-    const patch = [header, 'GIT binary patch', 'literal 10', 'cmZ~1#x==', ''].join('\n');
-    const rules = [{ id: 'class:env', description: 'd', regex: '.+', path: '(^|/)[^/]*\.env' }];
-    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], rules);
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
-  });
-
-  test('UNQUOTED headers with a filename-internal " b/" parse by self-consistency', () => {
-    // A binary file literally named `.claude/memory.db b/notes.txt`: git
-    // spells the SAME plain path on both sides, and that self-consistency
-    // pins the split by parity — the interior ` b/` cannot hijack it (a
-    // last-` b/` search read both sides as `notes.txt`, the agent-scratch
-    // rule never fired, and the patch uploaded).
-    const path = '.claude/memory.db b/notes.txt';
-    const header = `diff --git a/${path} b/${path}`;
-    expect(diffHeaderPaths(header)).toEqual([path, path]);
-    // A binary segment has no ---/+++ fallback — the header is the ONLY
-    // path source, and the path-scoped scratch rule must fire on it.
-    const patch = [header, 'GIT binary patch', 'literal 10', 'cmZ~1#x==', ''].join('\n');
-    const rules = [{ id: 'class:scratch', description: 'd', regex: '.+', path: '(^|/)\\.claude/' }];
-    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], rules);
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:scratch');
-  });
-
-  test('a plain-sided rename yields no header split; rename/copy lines carry the segment paths', () => {
-    // Two DIFFERENT plain paths are not self-consistent, so the header
-    // yields no split — the segment's unambiguous per-side `rename from`/
-    // `rename to` (or `copy`) lines are the path source, binary patches
-    // included.
-    expect(diffHeaderPaths('diff --git a/old dir/asset.bin b/new dir/asset.bin')).toBeNull();
-    const renamePatch = [
-      'diff --git a/old dir/asset.bin b/new dir/asset.bin',
-      'similarity index 100%',
-      'rename from old dir/asset.bin',
-      'rename to new dir/asset.bin',
-      'GIT binary patch',
-      'literal 10',
-      'cmZ~1#x==',
-      '',
-    ].join('\n');
-    expect(patchSegments(renamePatch)[0]?.paths).toEqual([
-      'old dir/asset.bin',
-      'new dir/asset.bin',
-    ]);
-    const copyPatch = [
-      'diff --git a/old.bin b/new.bin',
-      'similarity index 100%',
-      'copy from old.bin',
-      'copy to new.bin',
-      'GIT binary patch',
-      'literal 10',
-      'cmZ~1#x==',
-      '',
-    ].join('\n');
-    expect(patchSegments(copyPatch)[0]?.paths).toEqual(['old.bin', 'new.bin']);
-  });
-
-  test('decodeGitPath is exact on escapes and multibyte sequences', () => {
-    expect(decodeGitPath('plain.env')).toBe('plain.env');
-    expect(decodeGitPath('caf\\303\\251.env')).toBe('café.env');
-    expect(decodeGitPath('a\\\\b')).toBe('a\\b');
-    expect(decodeGitPath('q\"uote.env')).toBe('q"uote.env');
-  });
-
   test('a zero-rule denylist fails closed at parse time', () => {
     expect(() => parseDenylistPatterns('rules:\nclean_probes:\n', 'f.yml')).toThrow(
       /no rules defined/,
@@ -240,124 +146,45 @@ describe('the shipped patterns.yml corpus', () => {
   });
 });
 
-describe('the diff scan', () => {
+describe('the component scan', () => {
   const rules = [
     { id: 'class:one', description: 'd', regex: 'se\\|cret|secret-token' },
     { id: 'class:env', description: 'd', regex: '.+', path: '(^|/)[^/]*\\.env' },
   ];
-  // (the double backslash above keeps the alternation literal in a string)
-
-  test('diffPathsOf extracts +++ b/ paths, skipping /dev/null, deduped', () => {
-    const patch = [
-      'diff --git a/a.txt b/a.txt',
-      '--- a/a.txt',
-      '+++ b/a.txt',
-      'diff --git a/a.txt b/a.txt',
-      '+++ b/a.txt',
-      '+++ /dev/null',
-    ].join('\n');
-    expect(diffPathsOf(patch)).toEqual(['a.txt']);
-  });
 
   test('matches report rule id + 1-based lines, never the matched content', () => {
-    const scan = scanText('t', 'harmless\nhas a secret-token here\nmore\n', rules, []);
-    expect(scan.hits).toEqual([{ ruleId: 'class:one', lines: [2] }]);
-    expect(JSON.stringify(scan.hits)).not.toContain('secret-token');
+    const hits = scanText('harmless\nhas a secret-token here\nmore\n', rules, 'notes.txt');
+    expect(hits).toEqual([{ ruleId: 'class:one', lines: [2] }]);
+    expect(JSON.stringify(hits)).not.toContain('secret-token');
   });
 
-  test('a path rule fires only on matching paths and never on a flat text', () => {
-    const patch = 'diff --git a/notes b/prod.env\n--- a/notes\n+++ b/prod.env\n+API_KEY=whatever\n';
-    const scoped = scanText('patch', patch, rules, diffPathsOf(patch));
-    expect(scoped.hits.map((hit) => hit.ruleId)).toContain('class:env');
-    const flat = scanText('flat', 'API_KEY=whatever\n', rules, []);
-    expect(flat.hits.map((hit) => hit.ruleId)).not.toContain('class:env');
-  });
-
-  test('untracked file components carry their own path as path-rule context', () => {
-    const rules = [{ id: 'class:env', description: 'd', regex: '.+', path: '(^|/)[^/]*\.env' }];
-    const scans = scanComponents(
-      [{ component: 'untracked:new.env', text: 'KEY=value\n', kind: 'file', path: 'new.env' }],
-      rules,
+  test('a path rule fires only when the component path matches', () => {
+    expect(scanText('API_KEY=whatever\n', rules, 'prod.env').map((hit) => hit.ruleId)).toContain(
+      'class:env',
     );
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
+    expect(scanText('API_KEY=whatever\n', rules, 'notes.txt')).toEqual([]);
+    expect(scanText('API_KEY=whatever\n', rules, undefined)).toEqual([]);
   });
 
-  test('an uncompilable rule regex throws naming the rule (never a silent skip)', () => {
-    const broken = [{ id: 'class:bad', description: 'd', regex: '([unclosed' }];
-    expect(() => scanText('t', 'text\n', broken, [])).toThrow(/class:bad.*does not compile/);
+  test('an uncompilable rule regex or path throws naming the rule (never a silent skip)', () => {
+    expect(() =>
+      scanText('text\n', [{ id: 'class:bad', description: 'd', regex: '([unclosed' }], 'x'),
+    ).toThrow(/class:bad.*does not compile/);
+    expect(() =>
+      scanText('text\n', [{ id: 'class:badpath', description: 'd', regex: 'x', path: '(' }], 'x'),
+    ).toThrow(/class:badpath.*does not compile/);
   });
 
-  test('a BINARY segment carries its paths from the diff --git header', () => {
-    const patch = [
-      'diff --git a/secrets.env b/secrets.env',
-      'GIT binary patch',
-      'literal 10',
-      'cmZ~1#randombase64==',
-      '',
-    ].join('\n');
-    const segments = patchSegments(patch);
-    expect(segments[0]?.paths).toEqual(['secrets.env']);
-    const rules = [{ id: 'class:env', description: 'd', regex: '.+', path: '(^|/)[^/]*\.env' }];
-    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], rules);
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
-  });
-
-  test('patchSegments splits at diff --git with both paths and whole-patch offsets', () => {
-    const patch = [
-      'diff --git a/a.env b/a.env',
-      '--- a/a.env',
-      '+++ b/a.env',
-      '+alpha',
-      'diff --git a/renamed.txt b/renamed-elsewhere.txt',
-      '--- a/renamed.txt',
-      '+++ b/renamed-elsewhere.txt',
-      '+beta',
-    ].join('\n');
-    const segments = patchSegments(patch);
-    expect(segments).toHaveLength(2);
-    expect(segments[0]?.paths).toEqual(['a.env']);
-    expect(segments[1]?.paths).toEqual(['renamed.txt', 'renamed-elsewhere.txt']);
-    expect(segments[1]?.startLine).toBe(5);
-    expect(segments[1]?.text).toContain('+beta');
-  });
-
-  test('a path rule fires ONLY on its own file segment; line numbers stay absolute', () => {
-    const patch = [
-      'diff --git a/plain.txt b/plain.txt',
-      '--- a/plain.txt',
-      '+++ b/plain.txt',
-      '+plain KEY=value',
-      '+plain KEY=value again',
-      'diff --git a/real.env b/real.env',
-      '--- a/real.env',
-      '+++ b/real.env',
-      '+safe line',
-      '+KEY=value',
-    ].join('\n');
-    const envRule = { id: 'class:env', description: 'd', regex: 'KEY=', path: '(^|/)[^/]*\.env' };
-    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], [envRule]);
-    // The plain.txt KEY= lines (4, 5) never match: the env rule scopes to
-    // the real.env segment only, and the line numbers stay absolute.
-    expect(scans[0]?.hits).toEqual([{ ruleId: 'class:env', lines: [10] }]);
-  });
-
-  test('scanComponents scans every component in order, files flat and patches path-scoped', () => {
+  test('scanComponents gives one verdict per component, in order, each scoped by its own path', () => {
     const scans = scanComponents(
       [
-        {
-          component: 'committed',
-          text: '--- a/x\n+++ b/x.env\n+key material here\n',
-          kind: 'patch',
-        },
-        { component: 'untracked:new.env', text: 'plain line\n', kind: 'file' },
+        { component: 'committed:x.env', text: '+key material here\n', path: 'x.env' },
+        { component: 'untracked:notes.txt', text: 'plain line\n', path: 'notes.txt' },
       ],
       rules,
     );
-    expect(scans).toHaveLength(2);
-    expect(scans[0]?.component).toBe('committed');
-    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
-    // A flat (file) component gives path rules no context: the env rule
-    // cannot fire on 'new.env' content alone.
+    expect(scans.map((scan) => scan.component)).toEqual(['committed:x.env', 'untracked:notes.txt']);
+    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toEqual(['class:env']);
     expect(scans[1]?.hits).toEqual([]);
   });
 });
@@ -368,8 +195,8 @@ describe('the diff scan', () => {
 
 describe('makeGitleaksDefaultsScanner', () => {
   const components = [
-    { component: 'committed', text: 'line one\nline two\n', kind: 'patch' as const },
-    { component: 'staged', text: 'single line\n', kind: 'patch' as const },
+    { component: 'committed', text: 'line one\nline two\n', path: 'a.txt' },
+    { component: 'staged', text: 'single line\n', path: 'b.txt' },
   ];
 
   function gitleaksEffects(exitCode: number, report: unknown, reportUnreadable = false) {
@@ -477,8 +304,8 @@ describe('composeScanners', () => {
       }));
     const composed = composeScanners(defaultsScanner, projectScanner);
     const merged = await composed([
-      { component: 'a', text: 'has AKIA and secret-token', kind: 'patch' },
-      { component: 'b', text: 'clean', kind: 'patch' },
+      { component: 'a', text: 'has AKIA and secret-token', path: 'a' },
+      { component: 'b', text: 'clean', path: 'b' },
     ]);
     expect(
       merged
@@ -487,35 +314,5 @@ describe('composeScanners', () => {
         .sort(),
     ).toEqual(['aws-access-token', 'class:one']);
     expect(merged.find((scan) => scan.component === 'b')?.hits).toEqual([]);
-  });
-});
-
-describe('canonical corpus patch allowlist', () => {
-  test('skips only the exact corpus segment, preserving other paths and rename sides', () => {
-    const rules = parseDenylistPatterns(FIXTURE, 'fixture').rules;
-    const patch = (oldPath: string, newPath: string) =>
-      `diff --git a/${oldPath} b/${newPath}\n--- a/${oldPath}\n+++ b/${newPath}\n@@ -0,0 +1 @@\n+secret\n`;
-    const corpus = 'policy/denylist/patterns.yml';
-    const scanned = scanComponents(
-      [
-        {
-          component: 'mixed',
-          kind: 'patch',
-          text: patch(corpus, corpus) + patch('src/leak.ts', 'src/leak.ts'),
-        },
-      ],
-      rules,
-    );
-    expect(scanned[0]?.hits).toHaveLength(1);
-    expect(scanned[0]?.hits[0]?.lines[0]).toBeGreaterThan(5);
-    for (const text of [
-      patch(corpus, 'copy.yml'),
-      patch('copy.yml', corpus),
-      patch(`${corpus}.bak`, `${corpus}.bak`),
-    ]) {
-      expect(
-        scanComponents([{ component: 'renamed', kind: 'patch', text }], rules)[0]?.hits,
-      ).toHaveLength(1);
-    }
   });
 });

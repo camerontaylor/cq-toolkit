@@ -1,74 +1,80 @@
-import { makeDevCheck } from '../../../src/ops/dev/check.js';
-import { makeDevReady } from '../../../src/ops/dev/ready.js';
-import { makeDevReview } from '../../../src/ops/dev/review.js';
-import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
-import { makePrOpen } from '../../../src/ops/pr/open.js';
-import { makeFakeEffects, stubScanner } from './fakes.js';
-import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+// The subprocess effects adapter (real processes, temp dirs) and the op
+// boundary: git hardening, ran-vs-spawn semantics, fail-closed file reads,
+// the private review-log directory, and every public op mapping a spawn
+// fault into the taxonomy instead of rejecting.
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, test } from 'vitest';
-import { makeSubprocessDevEffects, requireGitOutRaw } from '../../../src/ops/dev/effects.js';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { makeDevCheck } from '../../../src/ops/dev/check.js';
+import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
+import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
+import { makeDevReady } from '../../../src/ops/dev/ready.js';
+import { makeDevReview } from '../../../src/ops/dev/review.js';
+import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
+import { makePrOpen } from '../../../src/ops/pr/open.js';
+import { makeFakeEffects, stubScanner } from './fakes.js';
 
-const roots: string[] = [];
+let dir: string;
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'cq-dev-effects-'));
+});
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  await rm(dir, { recursive: true, force: true });
 });
 
-test('private snapshot preserves index/worktree split and binary/untracked bytes through live ABA edits', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'cq-snapshot-test-'));
-  roots.push(root);
-  const effects = makeSubprocessDevEffects(root);
-  const git = async (...args: string[]) =>
-    requireGitOutRaw(await effects.runCommand('git', args, { timeoutMs: 10000 }), args.join(' '));
-  await git('init', '-b', 'test/snapshot');
-  await writeFile(join(root, 'tracked'), 'head\n');
-  await writeFile(join(root, 'secret.env'), Buffer.from([0, 1, 2]));
-  await git('add', '.');
-  await git(
-    '-c',
-    'user.name=Test',
-    '-c',
-    'user.email=test@example.invalid',
-    'commit',
-    '-m',
-    'fixture',
-  );
-  await git('config', 'diff.noprefix', 'true');
-  await git('config', 'diff.mnemonicPrefix', 'true');
-  await writeFile(join(root, 'tracked'), 'index\n');
-  await git('add', 'tracked');
-  await writeFile(join(root, 'tracked'), 'worktree\n');
-  await writeFile(join(root, 'untracked'), Buffer.from([0, 255, 1]));
-  await writeFile(join(root, 'secret.env'), Buffer.from([0, 2, 3]));
-  const binary = await git('diff', '--binary');
-  expect(binary).toContain('diff --git a/secret.env b/secret.env');
-  let snapshotRoot = '';
-  await effects.withSnapshot(async (snapshot) => {
-    const run = async (command: string, args: string[]) =>
-      requireGitOutRaw(await snapshot.runCommand(command, args, { timeoutMs: 10000 }), command);
-    snapshotRoot = (await run('node', ['-p', 'process.cwd()'])).trim();
-    expect(snapshotRoot).not.toBe(root);
-    await writeFile(join(root, 'tracked'), 'temporary unscanned contents\n');
-    await git('add', 'tracked');
-    expect(await run('git', ['show', ':tracked'])).toBe('index\n');
-    expect(await readFile(join(snapshotRoot, 'tracked'), 'utf8')).toBe('worktree\n');
-    expect(await readFile(join(snapshotRoot, 'untracked'))).toEqual(Buffer.from([0, 255, 1]));
-    expect(await run('git', ['diff', '--binary'])).toContain('a/secret.env b/secret.env');
-    await writeFile(join(root, 'tracked'), 'index\n');
-    await git('add', 'tracked');
-    await writeFile(join(root, 'tracked'), 'worktree\n');
-    expect(await readFile(join(snapshotRoot, 'tracked'), 'utf8')).toBe('worktree\n');
+test('git runs with the shared global hardening; a non-zero exit resolves, a missing binary rejects', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  const quote = await effects.runCommand('git', ['config', '--get', 'core.quotePath'], {
+    timeoutMs: 10_000,
   });
-  await expect(readFile(join(snapshotRoot, 'tracked'))).rejects.toThrow();
-  expect(await readFile(join(root, 'tracked'), 'utf8')).toBe('worktree\n');
+  expect(quote.stdout.trim()).toBe('true');
+  const missing = await effects.runCommand('git', ['rev-parse', '--verify', 'nope'], {
+    timeoutMs: 10_000,
+  });
+  expect(missing.exitCode).not.toBe(0);
+  await expect(effects.runCommand('cq-no-such-binary', [], { timeoutMs: 10_000 })).rejects.toThrow(
+    /could not be spawned/,
+  );
 });
 
-test('initial Git spawn faults resolve through each public operation taxonomy', async () => {
+test('readWorktreeFile refuses symlinks, escapes and oversized files; reads the rest', async () => {
+  const effects = makeSubprocessDevEffects(dir);
+  await writeFile(join(dir, 'ok.txt'), 'hello\n');
+  await writeFile(join(dir, 'big.txt'), 'x'.repeat(20));
+  await symlink(join(dir, 'ok.txt'), join(dir, 'link'));
+  expect(await effects.readWorktreeFile('ok.txt', 100)).toEqual({ ok: true, text: 'hello\n' });
+  expect((await effects.readWorktreeFile('big.txt', 10)).ok).toBe(false);
+  expect((await effects.readWorktreeFile('link', 100)).ok).toBe(false);
+  expect((await effects.readWorktreeFile('../outside', 100)).ok).toBe(false);
+});
+
+test('the review log is private: 0600 in a 0700 dir; a permissive squatted dir is refused', async () => {
+  vi.stubEnv('TMPDIR', dir);
+  const effects = makeSubprocessDevEffects(dir);
+  const path = await effects.writeReviewLog('feature/x', '1', 'raw diff\n');
+  expect(path.startsWith(join(dir, 'cq-dev-review'))).toBe(true);
+  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  await chmod(join(dir, 'cq-dev-review'), 0o755);
+  await expect(effects.writeReviewLog('feature/x', '2', 'x')).rejects.toThrow(/group\/other/);
+});
+
+test('removeScratchDir removes only strict descendants of the temp root', async () => {
+  vi.stubEnv('TMPDIR', dir);
+  const effects = makeSubprocessDevEffects(dir);
+  const scratch = await effects.makeScratchDir('t');
+  await mkdir(join(scratch, 'inner'));
+  await effects.removeScratchDir(scratch);
+  await expect(stat(scratch)).rejects.toThrow();
+  await expect(effects.removeScratchDir(dir)).rejects.toThrow(/outside the temp root/);
+  await expect(effects.removeScratchDir('/etc')).rejects.toThrow(/outside the temp root/);
+});
+
+test('a spawn fault on the first read resolves through every public op as needs-human', async () => {
   const effects = makeFakeEffects();
   effects.runCommand = async () => {
-    throw new Error('git spawn ENOENT');
+    throw new Error('git could not be spawned — ENOENT');
   };
   const operations = [
     () => makeDevCheck(effects)({ repoRoot: '/missing' }),

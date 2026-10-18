@@ -1,10 +1,12 @@
 // Dev family registry slice (strategy §8 lane 1) — the `dev.check`,
 // `dev.review`, `dev.disposition`, and `dev.ready` op entries, typed against
 // the FROZEN OpRegistryEntry (src/kernel/types.ts). THE LAZY RULE (the
-// pr/merge precedent, kept exactly): module scope imports ONLY zod plus
-// type-only imports (erased at compile time) — loading this registry never
-// loads an op module, the subprocess effects, or the denylist parser; every
-// op is reached through its entry's dynamic import at dispatch.
+// pr/merge precedent): module scope imports only zod, type-only imports, and
+// the pure reviewer-name constant — loading this registry never loads an op
+// module, the subprocess effects, or the denylist parser; every op is
+// reached through its entry's dynamic import at dispatch. The ops parse
+// their input with these schemas at their own boundary (effects.ts
+// guardDevOp), so the SDK and the CLI validate identically.
 //
 // DRIFT PINNING: every mirror is annotated `z.ZodType<T>` against the op's
 // hand-written input type (type-only import) — a schema whose output drifts
@@ -44,8 +46,10 @@ export const DevCheckInputSchema: z.ZodType<DevCheckInput> = z
   .object({
     repoRoot: z.string().min(1),
     target: z.string().min(1).exactOptional(),
-    range: z.string().min(3).exactOptional(),
-    knip: z.enum(['auto', 'force']).exactOptional(),
+    range: z
+      .string()
+      .regex(/^[^-\s.][^\s]*\.\.[^-\s.][^\s]*$/, "range must be '<ref>..<ref>'")
+      .exactOptional(),
   })
   .strict();
 
@@ -104,7 +108,9 @@ export const DevDispositionInputSchema: z.ZodType<DevDispositionInput> = z
     repoRoot: z.string().min(1),
     findingId: z.string().min(1),
     action: z.enum(['fixed', 'rejected', 'deferred']),
-    why: z.string().min(1),
+    why: z
+      .string()
+      .regex(/\S/, 'why must name the fix, the false-positive mechanism, or the tracking issue'),
   })
   .strict();
 
@@ -150,11 +156,10 @@ export const registry: OpRegistryEntry[] = [
     name: 'dev.review',
     inputSchema: DevReviewInputSchema,
     // ONE ENTRY, TWO BRANCHES (the composition ruling): an admission action
-    // binds only the ambient SSH alias (the transport input carries no
-    // repoRoot, so no repo state is read); the cycle branch binds the
+    // binds only the ambient SSH alias (#332's adapter, unchanged — the
+    // transport input carries no repoRoot); the cycle branch binds the
     // subprocess effects and the two-layer secret scanner from the
-    // dispatched repoRoot. Both binds stay inert closures — resolution
-    // never touches env, the network, the host lock, or the filesystem.
+    // dispatched repoRoot.
     importer: () =>
       Promise.all([
         import('./review.js'),
@@ -164,24 +169,18 @@ export const registry: OpRegistryEntry[] = [
       ]).then(
         ([m, admission, effects, denylist]) =>
           (async (input: DevReviewInput) => {
-            const action =
-              typeof input === 'object' && input !== null && 'action' in input
-                ? (input as { action?: unknown }).action
-                : undefined;
-            if (action === 'enroll' || action === 'status' || action === 'fallback') {
-              return admission.envAuthorAdmission(input as DevTransportInput);
-            }
-            const cycleInput = input as DevCycleInput;
-            const dev = effects.makeSubprocessDevEffects(cycleInput.repoRoot);
+            if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
+            const { repoRoot } = input as DevCycleInput;
+            const dev = effects.makeSubprocessDevEffects(repoRoot);
             // THE PRE-UPLOAD NET IS TWO-LAYERED: gitleaks DEFAULT rules AND
             // the repo's project denylist classes — either firing refuses
             // the upload (the protected scripts/denylist-scan is untouched;
             // this binds its rule FILE read-only).
-            const scanner = denylist.composeScanners(
+            const scanSecrets = denylist.composeScanners(
               denylist.makeGitleaksDefaultsScanner(dev),
-              denylist.makeRepoDiffScanner(cycleInput.repoRoot),
+              denylist.makeRepoDiffScanner(repoRoot),
             );
-            return m.makeDevReview({ effects: dev, scanSecrets: scanner })(input);
+            return m.makeDevReview({ effects: dev, scanSecrets })(input);
           }) as Op<unknown, unknown>,
       ),
   },

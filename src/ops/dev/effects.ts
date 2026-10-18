@@ -5,7 +5,8 @@
 //
 // Conventions kept consistent with the sweep/pr families:
 //   - execFile with an ARGS ARRAY — never a shell string (no input value is
-//     ever re-parsed as shell syntax).
+//     ever re-parsed as shell syntax); every git call carries the shared
+//     global hardening (`GIT_HARDEN`), and diff call sites name their flags.
 //   - A command that RAN resolves with its exit code whatever it is (gates
 //     classify red/green themselves); only a SPAWN failure rejects.
 //   - One wall clock per invocation: a call exceeding timeoutMs is SIGKILLed
@@ -17,22 +18,16 @@
 //     the scarce-reviewer quota is host-wide, not per-worktree.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, realpathSync, writeFile } from 'node:fs';
-import {
-  lstat,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile as writeFileAsync,
-  mkdir,
-  symlink,
-} from 'node:fs/promises';
+import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { loadavg, tmpdir, uptime } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import type { Op } from '../../kernel/types.js';
+import type { z } from 'zod';
+import type { Op, OpResult } from '../../kernel/types.js';
+import { GIT_HARDEN } from '../../shared/gitHarden.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 import type { DevLedgerStore } from './record.js';
 import { pathDevLedgerStore } from './record.js';
-import { makeGitMutex } from '../../shared/gitMutex.js';
 
 /** The result of one ran command: exit code (null when SIGKILLed), captured streams. */
 export interface CommandResult {
@@ -48,8 +43,8 @@ const GATE_OUTPUT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 /**
  * Run one command. Resolves with the result for ANY exit (a red gate is a
  * verdict, not a fault); rejects only when the command could not be SPAWNED
- * (binary missing) — a missing tool is an environment fault the op reports,
- * never a silently green gate.
+ * (binary missing) or overflowed the capture ceiling — an environment fault
+ * the op reports, never a silently green gate.
  */
 export type RunCommand = (
   command: string,
@@ -61,8 +56,6 @@ export type RunCommand = (
 export interface DevEffects {
   /** Run one command in the repo root (the only process runner the ops see). */
   runCommand: RunCommand;
-  /** Execute against a private captured Git index/worktree; ledger remains at the source. */
-  withSnapshot<T>(fn: (snapshot: DevEffects) => Promise<T>): Promise<T>;
   /** ISO-8601 now (injectable for deterministic tests). */
   nowIso(): string;
   /** The host load stamp (uptime + 1-minute load average + sample time). */
@@ -80,11 +73,10 @@ export interface DevEffects {
   writeReviewLog(branch: string, cycleStamp: string, content: string): Promise<string>;
   /**
    * Read one repo-relative worktree file's content for the secret scan.
-   * FAIL-CLOSED with a reason: an unreadable file, a SYMLINK (its target is
-   * outside this scan's containment model — realpath-verified inside the
-   * repo root before any byte is read), or content exceeding `capBytes` all
-   * refuse with the cause named — an oversized file is never silently
-   * truncated into a scan declared complete.
+   * FAIL-CLOSED with a reason: an unreadable file, a SYMLINK (never
+   * followed), a path resolving outside the root, or content exceeding
+   * `capBytes` all refuse with the cause named — an oversized file is never
+   * silently truncated into a scan declared complete.
    */
   readWorktreeFile(
     path: string,
@@ -92,16 +84,14 @@ export interface DevEffects {
   ): Promise<{ ok: true; text: string } | { ok: false; reason: string }>;
   /**
    * Create a unique scratch directory OUTSIDE the worktree (the system
-   * temp root) for archive extraction and scanner runs; the caller removes
-   * it via {@link DevEffects.removeScratchDir}.
+   * temp root); the caller removes it via {@link DevEffects.removeScratchDir}.
    */
   makeScratchDir(prefix: string): Promise<string>;
   /** Create a directory (recursive) through node:fs — never an external mkdir. */
   ensureDir(path: string): Promise<void>;
   /**
-   * Remove a directory this seam's makeScratchDir created. Containment:
-   * only paths under the system temp root are removed — a worktree path is
-   * refused.
+   * Remove a directory under the system temp root (a strict descendant —
+   * the temp root itself and any worktree path are refused).
    */
   removeScratchDir(path: string): Promise<void>;
   /** Open the branch's dev-record store inside the repo root. */
@@ -109,10 +99,9 @@ export interface DevEffects {
 }
 
 /**
- * Map an execFile failure onto the gate runner's fault taxonomy (the
- * worktree/gh adapter branch order): maxBuffer overflow first, then the
- * SIGKILL timeout, then the spawn failure itself. Exported for the
- * fault-mapping pins.
+ * Map an execFile failure onto the runner's fault taxonomy: maxBuffer
+ * overflow first (an overflow also kills the child), then the SIGKILL
+ * timeout, then the spawn failure itself.
  */
 export function mapSpawnFault(
   command: string,
@@ -144,81 +133,34 @@ export function reviewLogDir(): string {
   return join(tmpdir(), 'cq-dev-review');
 }
 
-/** Flatten a branch name into a filename-safe slug for log files (not paths inside the repo). */
-function logSlug(branch: string): string {
-  return branch.replace(/[^A-Za-z0-9._-]+/g, '_');
-}
-
 /**
  * The bounded log filename stem for a branch: a readable flattened prefix
- * plus a 16-hex sha256 of the full branch — the ledger filename's strategy.
- * A valid git-maximal hierarchical branch must never produce a log
- * component over the filesystem's 255-byte limit AFTER the (paid) review
- * has run.
+ * plus a 16-hex sha256 of the full branch (the ledger filename's strategy),
+ * so a git-maximal branch never exceeds the 255-byte name limit after the
+ * (paid) review has run.
  */
 function boundedLogStem(branch: string): string {
   const hash = createHash('sha256').update(branch, 'utf8').digest('hex').slice(0, 16);
-  return `${logSlug(branch).slice(0, 64)}-${hash}`;
+  return `${branch.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64)}-${hash}`;
 }
 
-// --- Git reading helpers (pure, over CommandResult) -------------------------
-
-/**
- * Trimmed stdout of a git read, or null when the command failed. A git
- * read that printed nothing but exited 0 is the empty string (real absence
- * is a non-zero exit — git's convention for "no such ref").
- */
-export function gitOut(result: CommandResult): string | null {
-  if (result.exitCode !== 0) return null;
-  return result.stdout.trim();
-}
-
-/**
- * Trimmed stdout of a REQUIRED git read: a non-zero exit (or a kill)
- * THROWS — a failed read must never fold into absent data (an empty diff is
- * not a clean tree, and an unreadable file list is not an empty one). The
- * callers map the throw onto their own refusal class (needs-human before
- * the run; the lock-span catch inside a review).
- */
-export function requireGitOut(result: CommandResult, what: string): string {
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw gitReadFailure(result, what);
+/** Create the owner-only log directory, refusing a squatted or permissive one. */
+function ensurePrivateLogDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stats = lstatSync(dir);
+  if (!stats.isDirectory()) throw new Error(`the review-log path is not a directory: '${dir}'`);
+  // POSIX only: Windows mode bits are not Unix permission semantics.
+  if (process.getuid === undefined) return;
+  if (stats.uid !== process.getuid()) {
+    throw new Error(
+      `the review-log directory '${dir}' is owned by uid ${String(stats.uid)}, not this process — refusing to write logs into another user's directory`,
+    );
   }
-  return result.stdout.trim();
-}
-
-/**
- * UNTRIMMED stdout of a required git read — for the HASHING-sensitive reads
- * (the dirty-diff identity): {@link requireGitOut}'s trim would give two
- * dirty patches differing only in trailing whitespace on the final line the
- * SAME recorded identity, so an earlier green check could stay current for a
- * worktree whose present diff would fail `git diff --check`. Scalar reads
- * (rev-parse, branch names) keep the trimmed variant.
- */
-export function requireGitOutRaw(result: CommandResult, what: string): string {
-  if (result.exitCode !== 0 || result.timedOut) {
-    throw gitReadFailure(result, what);
+  if ((stats.mode & 0o077) !== 0) {
+    throw new Error(
+      `the review-log directory '${dir}' is readable by group/other — refusing to write diff content there`,
+    );
   }
-  return result.stdout;
-}
-
-function gitReadFailure(result: CommandResult, what: string): Error {
-  const why = result.timedOut
-    ? 'timed out'
-    : `exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}`;
-  const tail = `${result.stderr || result.stdout}`.trim().slice(0, 200);
-  return new Error(`git ${what} failed (${why})${tail === '' ? '' : ` — ${tail}`}`);
-}
-
-/**
- * The current branch from `git rev-parse --abbrev-ref HEAD`: null when
- * detached (git prints the literal `HEAD`) — the ops refuse detached heads
- * rather than guess a record file name.
- */
-export function branchFromRevParse(result: CommandResult): string | null {
-  const out = gitOut(result);
-  if (out === null || out === 'HEAD' || out === '') return null;
-  return out;
 }
 
 /**
@@ -227,78 +169,39 @@ export function branchFromRevParse(result: CommandResult): string | null {
  * entry never touches the host.
  */
 export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
-  // The root is canonicalized LAZILY (first use, then cached) so effect
-  // construction stays INERT — the registry contract: resolving an entry
-  // never touches the filesystem, even for an input that would fail the op
-  // boundary. realpath-to-realpath keeps a symlinked ancestor (macOS
-  // /var → /private/var) a normalization, never a false refusal.
-  let rootRealCache: string | undefined;
-  const rootReal = (): string => {
-    if (rootRealCache === undefined) rootRealCache = realpathSync(resolve(repoRoot));
-    return rootRealCache;
-  };
   const runCommand: RunCommand = (command, args, opts) =>
-    new Promise<CommandResult>((resolve, reject) => {
+    new Promise<CommandResult>((resolvePromise, reject) => {
       execFile(
         command,
-        command === 'git' && args[0] === 'diff'
-          ? [
-              'diff',
-              '--no-ext-diff',
-              '--no-textconv',
-              '--src-prefix=a/',
-              '--dst-prefix=b/',
-              ...args.slice(1),
-            ]
-          : [...args],
+        command === 'git' ? [...GIT_HARDEN, ...args] : [...args],
         {
           cwd: repoRoot,
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
-            ),
-            GIT_CONFIG_NOSYSTEM: '1',
-            GIT_CONFIG_GLOBAL: '/dev/null',
-            GIT_NO_REPLACE_OBJECTS: '1',
-            GIT_TERMINAL_PROMPT: '0',
-          },
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
           maxBuffer: GATE_OUTPUT_MAX_BUFFER_BYTES,
           timeout: opts.timeoutMs,
           killSignal: 'SIGKILL',
         },
         (error, stdout, stderr) => {
-          if (error !== null) {
-            // MaxBuffer FIRST (the mapSpawnFault branch order): an overflow
-            // kills the child, so the killed/exit branch below would
-            // misclassify it as a timeout verdict instead of the
-            // output-too-large fault it is.
-            if (error.message.includes('maxBuffer')) {
-              reject(mapSpawnFault(command, error, opts.timeoutMs));
-              return;
-            }
-            if (typeof (error as { code?: unknown }).code === 'number' || error.killed === true) {
-              // The command RAN and exited non-zero (or was killed on
-              // timeout): a verdict the gates classify, not a fault.
-              resolve({
-                exitCode:
-                  typeof (error as { code?: unknown }).code === 'number'
-                    ? ((error as { code?: number }).code as number)
-                    : null,
-                stdout: stdout.toString(),
-                stderr: stderr.toString(),
-                timedOut: error.killed === true,
-              });
-              return;
-            }
-            reject(mapSpawnFault(command, error, opts.timeoutMs));
+          if (error === null) {
+            resolvePromise({ exitCode: 0, stdout, stderr, timedOut: false });
             return;
           }
-          resolve({
-            exitCode: 0,
-            stdout: stdout.toString(),
-            stderr: stderr.toString(),
-            timedOut: false,
-          });
+          const code = (error as { code?: unknown }).code;
+          if (
+            !error.message.includes('maxBuffer') &&
+            (typeof code === 'number' || error.killed === true)
+          ) {
+            // The command RAN and exited non-zero (or was killed on
+            // timeout): a verdict the caller classifies, not a fault.
+            resolvePromise({
+              exitCode: typeof code === 'number' ? code : null,
+              stdout,
+              stderr,
+              timedOut: error.killed === true,
+            });
+            return;
+          }
+          reject(mapSpawnFault(command, error, opts.timeoutMs));
         },
       );
     });
@@ -307,96 +210,43 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
 
   return {
     runCommand,
-    withSnapshot: async (fn) => {
-      const path = await mkdtemp(join(tmpdir(), 'cq-dev-snapshot-'));
-      try {
-        const snapshot = await materializeSnapshot(repoRoot, path, runCommand);
-        return await fn({
-          ...snapshot,
-          openLedger: (branch) => pathDevLedgerStore(repoRoot, branch),
-        });
-      } finally {
-        await rm(path, { recursive: true, force: true });
-      }
-    },
     nowIso: () => new Date().toISOString(),
     loadStamp: () => ({
-      // Sampled together so one stamp describes one instant (the contract's
-      // stamp pairs uptime with the load average at measurement time).
+      // Sampled together so one stamp describes one instant.
       uptimeSeconds: uptime(),
       load1: loadavg()[0] ?? 0,
       at: new Date().toISOString(),
     }),
     withHostLock: (fn) => mutex.withLock(fn),
     writeReviewLog: async (branch, cycleStamp, content) => {
-      // Owner-only dir and file: the log carries raw diff content, so it
-      // gets the ledger's restrictive posture (0700/0600, chmod-exact —
-      // creation modes are umask-masked). mkdirSync succeeds silently on a
-      // pre-existing directory, so the dir is then VERIFIED: a real
-      // directory, owned by this user, with no group/other bits — a
-      // squatted /tmp directory belonging to another user refuses the log.
+      // Owner-only dir and file: the log carries raw diff content.
       const dir = reviewLogDir();
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const dirStats = lstatSync(dir);
-      if (!dirStats.isDirectory()) {
-        throw new Error(`the review-log path is not a directory: '${dir}'`);
-      }
-      // POSIX ONLY: Windows node does not implement Unix permission
-      // semantics — Stats.mode there normally retains group/other bits and
-      // ownership checks are meaningless, so unconditional enforcement
-      // would refuse every log write. POSIX gets the full squatter check.
-      if (process.getuid !== undefined) {
-        if (dirStats.uid !== process.getuid()) {
-          throw new Error(
-            `the review-log directory '${dir}' is owned by uid ${String(dirStats.uid)}, not this process (${String(process.getuid())}) — refusing to write logs into another user's directory`,
-          );
-        }
-        if ((dirStats.mode & 0o077) !== 0) {
-          throw new Error(
-            `the review-log directory '${dir}' is too permissive (mode ${String(dirStats.mode & 0o777).padStart(3, 'o')}) — refusing to write diff content where group/other can read it`,
-          );
-        }
-      }
+      ensurePrivateLogDir(dir);
       const path = join(dir, `${boundedLogStem(branch)}-${cycleStamp}.log`);
-      await new Promise<void>((resolve, reject) => {
-        writeFile(path, content, { encoding: 'utf8', mode: 0o600 }, (err) =>
-          err === null ? resolve() : reject(err),
-        );
-      });
+      await writeFile(path, content, { encoding: 'utf8', mode: 0o600 });
       chmodSync(path, 0o600);
       return path;
     },
     readWorktreeFile: async (path, capBytes) => {
-      const root = rootReal();
+      const root = realpathSync(resolve(repoRoot));
+      const inside = (candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
       const resolved = resolve(root, path);
-      if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
-        return { ok: false, reason: `path escapes the repository root: ${path}` };
-      }
+      if (!inside(resolved)) return { ok: false, reason: `path escapes the repository: ${path}` };
       try {
-        // Lstat FIRST: a symlink is refused (its target is outside this
-        // scan's containment model), never followed. The REAL path is then
-        // re-verified inside the root before the read.
         const stats = await lstat(resolved);
-        if (stats.isSymbolicLink()) {
-          return { ok: false, reason: `untracked symlink (refused, not followed): ${path}` };
-        }
+        if (stats.isSymbolicLink()) return { ok: false, reason: `symlink (not followed): ${path}` };
         if (stats.size > capBytes) {
           return {
             ok: false,
-            reason: `untracked file exceeds the per-file scan cap (${String(stats.size)} > ${String(capBytes)} bytes): ${path} — split, ignore, or remove it; the scan refuses rather than truncate`,
+            reason: `file exceeds the per-file scan cap (${String(stats.size)} > ${String(capBytes)} bytes): ${path} — split, ignore, or remove it; the scan refuses rather than truncate`,
           };
         }
-        const real = realpathSync(resolved);
-        if (real !== root && !real.startsWith(`${root}${sep}`)) {
-          return { ok: false, reason: `path escapes the repository root through a link: ${path}` };
+        if (!inside(realpathSync(resolved))) {
+          return { ok: false, reason: `path escapes the repository through a link: ${path}` };
         }
-        const text = await readFile(real, 'utf8');
-        return { ok: true, text };
+        return { ok: true, text: await readFile(resolved, 'utf8') };
       } catch (err) {
-        return {
-          ok: false,
-          reason: `unreadable: ${err instanceof Error ? err.message : String(err)}`,
-        };
+        return { ok: false, reason: `unreadable: ${faultText(err)}` };
       }
     },
     makeScratchDir: async (prefix) => mkdtemp(join(tmpdir(), `cq-${prefix}-`)),
@@ -404,12 +254,8 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       mkdirSync(path, { recursive: true });
     },
     removeScratchDir: async (path) => {
-      const tempRoot = tmpdir();
       const resolved = resolve(path);
-      // STRICT descendant: the temp root itself is never a removal target —
-      // a caller passing tmpdir() must fault, not recursively delete the
-      // system temporary directory.
-      if (resolved === tempRoot || !resolved.startsWith(`${tempRoot}${sep}`)) {
+      if (!resolved.startsWith(`${tmpdir()}${sep}`)) {
         throw new Error(`refusing to remove a path outside the temp root: ${path}`);
       }
       await rm(resolved, { recursive: true, force: true });
@@ -418,105 +264,41 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
   };
 }
 
-/** Map environment faults at every public dev operation boundary. */
-export function guardDevOp<I, O>(name: string, op: Op<I, O>): Op<I, O> {
+/** One-line text of a caught fault. */
+export function faultText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The ONE boundary every public dev op goes through:
+ *   - the input is parsed with the op's registry schema first, so an SDK
+ *     caller that bypasses the CLI gets the `failed` taxonomy naming the
+ *     schema issues — never a TypeError, never a spawn against a bad
+ *     repoRoot;
+ *   - any fault the body throws (a git spawn failure, an unreadable
+ *     ledger) maps to `needs-human` naming it — the environment is the
+ *     human's to fix — never a rejected promise outside the taxonomy.
+ */
+export function guardDevOp<S extends z.ZodType, O>(
+  name: string,
+  schema: S,
+  body: (input: z.output<S>) => Promise<OpResult<O>>,
+): Op<z.input<S>, O> {
   return async (input) => {
+    const parsed = schema.safeParse(input);
+    if (!parsed.success) {
+      const issues = parsed.error.issues
+        .map((issue) => `${issue.path.map(String).join('.') || '(input)'}: ${issue.message}`)
+        .join('; ');
+      return { status: 'failed', error: `${name}: invalid input — ${issues}` };
+    }
     try {
-      return await op(input);
-    } catch (error) {
+      return await body(parsed.data);
+    } catch (err) {
       return {
         status: 'needs-human',
-        reason: `${name}: environment read or execution failed — ${error instanceof Error ? error.message : String(error)}`,
+        reason: `${name}: environment read or execution failed — ${faultText(err)}`,
       };
     }
   };
-}
-
-/** Capture bytes first, then scan and execute only the materialized copy. No live source reads follow. */
-async function materializeSnapshot(
-  root: string,
-  path: string,
-  run: RunCommand,
-): Promise<DevEffects> {
-  const git = async (args: string[]) =>
-    requireGitOutRaw(await run('git', args, { timeoutMs: 60_000 }), args.join(' '));
-  const head = (await git(['rev-parse', 'HEAD'])).trim();
-  const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
-  const staged = await git(['diff', '--binary', '--full-index', '--cached']);
-  const unstaged = await git(['diff', '--binary', '--full-index']);
-  const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z']))
-    .split('\0')
-    .filter(Boolean);
-  const files: { path: string; data: Buffer; mode: number }[] = [];
-  let total = Buffer.byteLength(staged) + Buffer.byteLength(unstaged);
-  if (total > GATE_OUTPUT_MAX_BUFFER_BYTES) throw new Error('snapshot content exceeds cap');
-  for (const file of untracked) {
-    const absolute = resolve(root, file);
-    if (!absolute.startsWith(resolve(root) + sep))
-      throw new Error('snapshot path escapes repository');
-    const stats = await lstat(absolute);
-    if (!stats.isFile() || stats.isSymbolicLink())
-      throw new Error('snapshot refuses nonregular untracked files');
-    if (stats.size > 4 * 1024 * 1024) throw new Error('snapshot untracked file exceeds cap');
-    const data = await readFile(absolute);
-    total += data.length;
-    if (total > GATE_OUTPUT_MAX_BUFFER_BYTES) throw new Error('snapshot content exceeds cap');
-    files.push({ path: file, data, mode: stats.mode & 0o777 });
-  }
-  // --no-local prevents hardlinks/alternates to the changing source object store.
-  await git([
-    'clone',
-    '--no-local',
-    '--no-hardlinks',
-    '--no-checkout',
-    '--',
-    resolve(root),
-    join(path, 'repo'),
-  ]);
-  const captured = makeSubprocessDevEffects(join(path, 'repo'));
-  const exec = async (args: string[]) =>
-    requireGitOutRaw(
-      await captured.runCommand('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-        timeoutMs: 60_000,
-      }),
-      args.join(' '),
-    );
-  await exec(['checkout', '--detach', head]);
-  if (branch !== 'HEAD') await exec(['checkout', '-B', branch, head]);
-  // Preserve remote-tracking base objects/refs used by the focused runner.
-  if ((await git(['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/'])).trim() !== '') {
-    await exec([
-      'fetch',
-      '--no-tags',
-      resolve(root),
-      '+refs/remotes/origin/*:refs/remotes/origin/*',
-    ]);
-  }
-  const origin = gitOut(
-    await run('git', ['config', '--get', 'remote.origin.url'], { timeoutMs: 60_000 }),
-  );
-  if (origin !== null && origin !== '') await exec(['remote', 'set-url', 'origin', origin]);
-  for (const [name, patch, index] of [
-    ['staged', staged, true],
-    ['unstaged', unstaged, false],
-  ] as const) {
-    if (patch === '') continue;
-    const patchPath = join(path, name + '.patch');
-    await writeFileAsync(patchPath, patch, { mode: 0o600 });
-    await exec(['apply', ...(index ? ['--index'] : []), '--binary', '--', patchPath]);
-  }
-  for (const file of files) {
-    const destination = join(path, 'repo', file.path);
-    await mkdir(resolve(destination, '..'), { recursive: true });
-    await writeFileAsync(destination, file.data, { mode: file.mode });
-  }
-  // Dependencies are installed artifacts; source/config/index are private copies.
-  try {
-    const dependencies = join(resolve(root), 'node_modules');
-    await lstat(dependencies);
-    await symlink(dependencies, join(path, 'repo', 'node_modules'), 'dir');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  return captured;
 }

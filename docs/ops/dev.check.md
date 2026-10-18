@@ -16,15 +16,8 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "knip": {
-      "enum": [
-        "auto",
-        "force"
-      ],
-      "type": "string"
-    },
     "range": {
-      "minLength": 3,
+      "pattern": "^[^-\\s.][^\\s]*\\.\\.[^-\\s.][^\\s]*$",
       "type": "string"
     },
     "repoRoot": {

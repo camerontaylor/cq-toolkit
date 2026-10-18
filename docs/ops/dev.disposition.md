@@ -33,7 +33,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "type": "string"
     },
     "why": {
-      "minLength": 1,
+      "pattern": "\\S",
       "type": "string"
     }
   },

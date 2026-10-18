@@ -3,16 +3,16 @@
 // the first quality cycle ran in the worktree and yielded a record, and a
 // PR is opened from that record).
 //
-// THE REMOTE IS THE AUTHORITY FOR WHAT A PR WOULD CARRY: before ANY
-// mutation the op reads the branch's REMOTE head (`git ls-remote origin
-// refs/heads/<branch>`) and requires it to EQUAL the reviewed local head.
-// A branch that was never pushed, or whose remote head differs from the
-// reviewed head, is a needs-human refusal — the readiness record describes
-// ONE head, and posting it for (or opening a PR from) a different head
-// would be evidence about a state nobody reviewed. The worktree identity is
-// also RE-VALIDATED immediately before the gh mutation (the record and gh
-// reads take time; a drift between assembly and mutation must abort, never
-// post).
+// THE REMOTE IS THE AUTHORITY FOR WHAT A PR WOULD CARRY: the op requires a
+// CLEAN tree (no staged, unstaged or untracked change — a PR carries pushed
+// commits only) and the branch's REMOTE head (`git ls-remote`) to EQUAL the
+// reviewed local head before any GitHub write. A never-pushed branch or a
+// differing remote head is a needs-human refusal.
+//
+// ONE PASS, AUTHOR TIER (strategy §2.4): the state is read once, then the PR
+// is written. A push racing the write is not defended here — the rendered
+// record names its head, and pr.verify reports that head without trusting
+// it; verification is required CI and the reviewer bots at the exact head.
 //
 // WHAT IT DOES: assemble the author-tier readiness record (the same core
 // dev.ready uses — not-ready is a needs-human refusal naming the gaps,
@@ -28,24 +28,16 @@
 // evidence caveat verbatim — a claim produced in the worktree, never
 // verification (strategy §2.4; verification is green required CI at the
 // exact head plus the reviewer bots' PR review).
-import { guardDevOp } from '../dev/effects.js';
-import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from '../dev/effects.js';
-import { branchFromRevParse, gitOut, requireGitOut, requireGitOutRaw } from '../dev/effects.js';
-import type { DevCheckRecord, DevLedgerFile, DevReadinessRecord } from '../dev/record.js';
-import {
-  AUTHOR_EVIDENCE_CAVEAT,
-  assembleReadiness,
-  DEFAULT_DEV_TARGET,
-  objectInputFault,
-  repoRootFault,
-} from '../dev/record.js';
+import { faultText, guardDevOp } from '../dev/effects.js';
+import type { DevCheckGate, DevLedgerFile, DevReadinessRecord } from '../dev/record.js';
+import { AUTHOR_EVIDENCE_CAVEAT, DEFAULT_DEV_TARGET } from '../dev/record.js';
+import { readReadiness } from '../dev/ready.js';
+import { CLEAN_TREE, git, gitStdout } from '../dev/internal/workState.js';
 import { composeSection, mdSafe } from './assemblePrs.js';
 import type { PrEffects } from './assemblePrs.js';
-
-/** Git read wall-clock cap. */
-export const GIT_TIMEOUT_MS = 60 * 1000;
+import { PrOpenInputSchema } from './registry.js';
 
 /** Input of the `pr.open` op (plain JSON; the registry schema mirrors it). */
 export interface PrOpenInput {
@@ -98,7 +90,7 @@ function mdLine(text: string): string {
 export function renderReadinessSection(
   record: DevReadinessRecord,
   ledger: DevLedgerFile,
-  gates: { name: string; status: string; durationMs: number }[],
+  gates: readonly Pick<DevCheckGate, 'name' | 'status' | 'durationMs'>[],
 ): string {
   const cycles = ledger.records.filter((entry) => entry.kind === 'cycle');
   const dispositions = ledger.records.filter((entry) => entry.kind === 'disposition');
@@ -163,300 +155,67 @@ export function renderDispositionsComment(ledger: DevLedgerFile): string {
 /**
  * Build the `pr.open` op over the dev effects (git reads, the ledger, the
  * clock) and the gh effects (search/create/edit/comment). Per call:
- * assemble readiness → render → adopt-or-create → comment dispositions.
+ * readiness → clean tree → remote head → adopt-or-create → dispositions.
  */
 export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOpenReport> {
-  return guardDevOp('pr.open', async (input) => {
-    // Library boundary BEFORE any effect: the input itself, then repoRoot
-    // (a null/undefined input maps to the failed taxonomy, never a
-    // TypeError outside it).
-    const objectFault = objectInputFault(input);
-    if (objectFault !== null) return { status: 'failed', error: `pr.open: ${objectFault}` };
-    const rootFault = repoRootFault(input.repoRoot);
-    if (rootFault !== null) return { status: 'failed', error: `pr.open: ${rootFault}` };
+  return guardDevOp('pr.open', PrOpenInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
+    const ready = await readReadiness(dev, 'pr.open', target);
+    if (!ready.ok) return ready.result;
+    const { state, ledger, record } = ready.read;
+    const { branch, head } = state;
 
-    const branch = branchFromRevParse(
-      await dev.runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        timeoutMs: GIT_TIMEOUT_MS,
-      }),
-    );
-    if (branch === null) {
+    if (state.dirtySha256 !== CLEAN_TREE) {
       return {
         status: 'needs-human',
-        reason:
-          'pr.open records evidence per branch and HEAD is detached — check out a branch and re-run',
+        reason: `pr.open: the tree has staged, unstaged or untracked changes — a PR carries pushed commits only, so it would not contain what the record describes; commit, re-run the cycle at the new head, push, and re-open`,
       };
     }
-    const head = gitOut(
-      await dev.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
-    );
-    if (head === null) {
-      return {
-        status: 'needs-human',
-        reason: 'git rev-parse HEAD failed — is this a git worktree?',
-      };
-    }
-    const base = gitOut(
-      await dev.runCommand('git', ['merge-base', `origin/${target}`, 'HEAD'], {
-        timeoutMs: GIT_TIMEOUT_MS,
-      }),
-    );
-    if (base === null) {
-      return {
-        status: 'needs-human',
-        reason: `cannot pin the merge-base: 'origin/${target}' did not resolve — fetch the target and re-run`,
-      };
-    }
-    let dirtySha256: string;
-    let untracked: string[];
-    try {
-      for (const args of [['diff', '--cached'], ['diff']]) {
-        if (
-          requireGitOutRaw(
-            await dev.runCommand('git', args, { timeoutMs: GIT_TIMEOUT_MS }),
-            'independent index/worktree cleanliness',
-          ) !== ''
-        ) {
-          return {
-            status: 'needs-human',
-            reason: 'the index and worktree must each be clean before pr.open publishes evidence',
-          };
-        }
-      }
-      const dirtyDiff = await dev.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
-        timeoutMs: GIT_TIMEOUT_MS,
-      });
-      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
-      dirtySha256 =
-        diffText === '' ? 'clean-tree' : createHash('sha256').update(diffText).digest('hex');
-      const untrackedOut = requireGitOut(
-        await dev.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
-        'ls-files --others',
-      );
-      untracked = untrackedOut.split('\n').filter((line) => line.trim() !== '');
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the diff identity could not be read — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    let ledger: DevLedgerFile;
-    try {
-      ledger = dev.openLedger(branch).load();
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the branch dev-record could not be read — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    // THE REMOTE HEAD IS THE AUTHORITY: a PR carries the REMOTE branch, so
-    // it must equal the reviewed local head before anything is mutated.
-    const lsRemote = await dev.runCommand('git', ['ls-remote', 'origin', `refs/heads/${branch}`], {
-      timeoutMs: GIT_TIMEOUT_MS,
-    });
-    if (lsRemote.exitCode !== 0) {
-      return {
-        status: 'needs-human',
-        reason: `the remote head of '${branch}' could not be read — ${lsRemote.stderr.trim().slice(0, 300)}`,
-      };
-    }
-    const remoteLine = lsRemote.stdout
+    const remoteRef = `refs/heads/${branch}`;
+    const remoteHead = gitStdout(
+      await git(dev, ['ls-remote', 'origin', remoteRef]),
+      'ls-remote origin',
+    )
       .split('\n')
-      .find((line) => line.trim().endsWith(`refs/heads/${branch}`));
-    const remoteHead = remoteLine === undefined ? undefined : remoteLine.split('\t')[0]?.trim();
-    if (remoteHead === undefined || remoteHead === '') {
+      .find((line) => line.endsWith(`\t${remoteRef}`))
+      ?.split('\t')[0];
+    if (remoteHead === undefined) {
       return {
         status: 'needs-human',
-        reason: `branch '${branch}' was never pushed — the readiness record describes local head ${head}, and a PR cannot carry a branch the remote does not have; push the reviewed head and re-run`,
+        reason: `pr.open: branch '${branch}' was never pushed — push the reviewed head ${head} and re-run`,
       };
     }
     if (remoteHead !== head) {
       return {
         status: 'needs-human',
-        reason: `the remote branch '${branch}' is at ${remoteHead}, but the reviewed local head is ${head} — the readiness record describes the reviewed head only; push the reviewed head and re-run (never post readiness for a different head)`,
+        reason: `pr.open: the remote branch '${branch}' is at ${remoteHead}, but the reviewed head is ${head} — push the reviewed head and re-run (readiness is never posted for a different head)`,
       };
     }
 
-    const assembled = assembleReadiness({
-      branch,
-      target,
-      identity: { base, head, dirtySha256 },
-      ledger,
-      untracked,
-      nowIso: dev.nowIso(),
-    });
-    if (!assembled.ready) {
-      return {
-        status: 'needs-human',
-        reason: `pr.open refuses: the branch is not dev.ready — ${assembled.gaps
-          .map((gap) => `${gap.field}: ${gap.detail}`)
-          .join(' | ')}`,
-      };
-    }
-    let record: DevReadinessRecord = assembled.record;
-
-    // THE MUTATION BOUNDARY: everything above read the ledger, the remote,
-    // and the worktree at different instants. Before ANY gh mutation:
-    //   (a) the ledger is RELOADED and readiness RE-ASSEMBLED (a concurrent
-    //       dev.check/dev.review appending a red check or a blocked cycle
-    //       must abort the publish, never ride a stale green snapshot);
-    //   (b) the REMOTE head is re-read and must still equal the reviewed
-    //       head (a push or force-push during the reads must abort);
-    //   (c) the worktree identity recheck below covers the tree itself.
-    try {
-      const freshLedger = dev.openLedger(branch).load();
-      const reassembled = assembleReadiness({
-        branch,
-        target,
-        identity: { base, head, dirtySha256 },
-        ledger: freshLedger,
-        untracked,
-        nowIso: dev.nowIso(),
-      });
-      if (!reassembled.ready) {
-        return {
-          status: 'needs-human',
-          reason: `pr.open refuses at the mutation boundary: the branch ledger changed and is no longer ready — ${reassembled.gaps
-            .map((gap) => `${gap.field}: ${gap.detail}`)
-            .join(' | ')}`,
-        };
-      }
-      ledger = freshLedger;
-      record = reassembled.record;
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `pr.open could not re-read the branch ledger at the mutation boundary — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    const remoteRecheck = await dev.runCommand(
-      'git',
-      ['ls-remote', 'origin', `refs/heads/${branch}`],
-      { timeoutMs: GIT_TIMEOUT_MS },
-    );
-    if (remoteRecheck.exitCode !== 0) {
-      return {
-        status: 'needs-human',
-        reason: `the remote head of '${branch}' could not be re-read at the mutation boundary — ${remoteRecheck.stderr.trim().slice(0, 300)}`,
-      };
-    }
-    const remoteRecheckLine = remoteRecheck.stdout
-      .split('\n')
-      .find((line) => line.trim().endsWith(`refs/heads/${branch}`));
-    const remoteRecheckHead =
-      remoteRecheckLine === undefined ? undefined : remoteRecheckLine.split('\t')[0]?.trim();
-    if (remoteRecheckHead !== head) {
-      return {
-        status: 'needs-human',
-        reason: `the remote branch '${branch}' moved during pr.open's reads (now ${remoteRecheckHead ?? 'gone'}, reviewed head ${head}) — nothing was posted; re-run for the new state`,
-      };
-    }
-
-    // THE PR CARRIES PUSHED COMMITS ONLY: a readiness record describing a
-    // dirty worktree would describe uncommitted content the PR cannot
-    // contain. A clean tree is required before any mutation.
-    if (dirtySha256 !== 'clean-tree') {
-      return {
-        status: 'needs-human',
-        reason: `pr.open refuses: the worktree still has uncommitted changes (dirty-diff ${dirtySha256.slice(0, 12)}) — a PR carries pushed commits only, so it would not contain everything the reviewed record describes; commit the work, re-run the cycle at the new state, and re-open`,
-      };
-    }
-
-    // RE-VALIDATE the identity immediately before the gh mutation — FAIL
-    // CLOSED: the recheck reads (head, dirty diff, untracked list) must all
-    // SUCCEED and all MATCH the assembled identity. A failed read is a
-    // refusal (it can never fold into clean/empty and pass); any drift
-    // aborts before a byte is posted.
-    try {
-      for (const args of [['diff', '--cached'], ['diff']]) {
-        if (
-          requireGitOutRaw(
-            await dev.runCommand('git', args, { timeoutMs: GIT_TIMEOUT_MS }),
-            'independent index/worktree cleanliness',
-          ) !== ''
-        ) {
-          return {
-            status: 'needs-human',
-            reason: 'the index and worktree must each be clean before pr.open publishes evidence',
-          };
-        }
-      }
-      const recheckHead = requireGitOut(
-        await dev.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
-        'rev-parse HEAD (recheck)',
-      );
-      const recheckDiff = requireGitOutRaw(
-        await dev.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
-        'dirty diff (recheck)',
-      );
-      const recheckSha =
-        recheckDiff === '' ? 'clean-tree' : createHash('sha256').update(recheckDiff).digest('hex');
-      const recheckUntracked = requireGitOut(
-        await dev.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
-        'ls-files --others (recheck)',
-      )
-        .split('\n')
-        .filter((line) => line.trim() !== '');
-      const sameUntracked =
-        recheckUntracked.length === untracked.length &&
-        recheckUntracked.every((path, index) => path === untracked[index]);
-      if (
-        recheckHead !== head ||
-        recheckSha !== dirtySha256 ||
-        !sameUntracked ||
-        dirtySha256 !== 'clean-tree'
-      ) {
-        return {
-          status: 'needs-human',
-          reason: `the worktree changed (or does not match the reviewed state) while pr.open read the record (head ${recheckHead} vs ${head}, dirty ${recheckSha.slice(0, 8)} vs ${dirtySha256.slice(0, 8)}, untracked ${String(recheckUntracked.length)} vs ${String(untracked.length)}) — nothing was posted; re-run the cycle for the new state`,
-        };
-      }
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the pre-mutation identity recheck failed — nothing was posted: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    // The PR title: the explicit input, else the head commit's subject.
     let title = input.title;
     if (title === undefined) {
-      const subject = gitOut(
-        await dev.runCommand('git', ['log', '-1', '--format=%s'], { timeoutMs: GIT_TIMEOUT_MS }),
-      );
-      if (subject === null || subject.trim() === '') {
+      title = gitStdout(await git(dev, ['log', '-1', '--format=%s', head]), 'log -1').trim();
+      if (title === '') {
         return {
           status: 'needs-human',
-          reason: 'no PR title and the head commit subject is unreadable — pass --title',
+          reason: 'pr.open: the head commit subject is empty — pass --title',
         };
       }
-      title = subject;
     }
 
-    // The body: the managed readiness section composed over any existing
-    // body (an adopted PR's prose survives the refresh).
-    const lastCheck = [...ledger.records]
-      .reverse()
-      .find((entry): entry is DevCheckRecord => entry.kind === 'check' && entry.passed);
-    const gates =
-      lastCheck?.gates.map((gate) => ({
-        name: gate.name,
-        status: gate.status,
-        durationMs: gate.durationMs,
-      })) ?? [];
-    const section = renderReadinessSection(record, ledger, gates);
+    // The body: the managed readiness section (with the gates of the check
+    // the record rests on) composed over any existing body.
+    const check = ledger.records.find(
+      (entry) => entry.kind === 'check' && entry.checkId === record.checkId,
+    );
+    const section = renderReadinessSection(
+      record,
+      ledger,
+      check?.kind === 'check' ? check.gates : [],
+    );
 
-    // Adopt-or-create: an OPEN PR for this head+base is refreshed in place
-    // (never a second PR); a non-open one is a landed record — refused.
+    // Adopt-or-create: an OPEN same-repo PR for this head+base is refreshed
+    // in place (never a second PR); a closed/merged or fork PR is refused.
     let number: number;
     let url: string | undefined;
     let created: boolean;
@@ -466,48 +225,36 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         if (existing.isCrossRepository || existing.state !== 'open') {
           return {
             status: 'failed',
-            error: `pr: a PR for branch '${branch}' already exists (PR #${String(existing.number)}, state '${existing.state}'${existing.isCrossRepository ? ', foreign fork' : ''}) — refusing: a landed record is never rewritten and a fork's PR is never adopted`,
+            error: `pr.open: a PR for branch '${branch}' already exists (PR #${String(existing.number)}, state '${existing.state}'${existing.isCrossRepository ? ', foreign fork' : ''}) — a landed record is never rewritten and a fork's PR is never adopted`,
           };
         }
-        number = existing.number;
-        url = existing.url;
+        ({ number, url } = existing);
         created = false;
-        const currentBody = await gh.getPrBody(number);
-        await gh.editPrBody(number, composeSection(currentBody, section));
+        await gh.editPrBody(number, composeSection(await gh.getPrBody(number), section));
       } else {
-        const result = await gh.createPr({
+        ({ number, url } = await gh.createPr({
           head: branch,
           base: target,
           title,
           body: section,
           draft: input.draft === true,
-        });
-        number = result.number;
-        url = result.url;
+        }));
         created = true;
       }
     } catch (err) {
-      return {
-        status: 'failed',
-        error: `pr: the PR could not be opened — ${err instanceof Error ? err.message : String(err)}`,
-      };
+      return { status: 'failed', error: `pr.open: the PR could not be opened — ${faultText(err)}` };
     }
 
-    // The dispositions comment posts ONCE, on creation — the dispositions
-    // themselves live in the managed body section, which every re-run
-    // updates in place, so the evidence stays reachable without ever
-    // accumulating duplicate comments.
+    // The dispositions comment posts ONCE, on creation; the managed body
+    // section carries them too and is refreshed in place on every re-run,
+    // so the evidence never accumulates duplicate comments.
     if (created && ledger.records.some((entry) => entry.kind === 'disposition')) {
       try {
         await gh.comment(number, renderDispositionsComment(ledger));
       } catch (err) {
-        // The PR exists and the body section already carries the
-        // dispositions; the courtesy comment failed. Honest failure, no
-        // idempotency claim: the caller may re-run to update the body (the
-        // adopt path posts no comment).
         return {
           status: 'failed',
-          error: `pr: PR #${String(number)} is open with the dispositions in its body, but the creation comment failed — ${err instanceof Error ? err.message : String(err)}`,
+          error: `pr.open: PR #${String(number)} is open with the dispositions in its body, but the creation comment failed — ${faultText(err)}`,
         };
       }
     }

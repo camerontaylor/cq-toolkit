@@ -1,82 +1,85 @@
 // Dev lane — `dev.review`: ONE pre-PR review cycle with recorded evidence
-// (strategy §3, dev.review row; docs/coderabbit-review.md is the protocol
-// this op mechanizes). NEW logic, but the rules are the protocol's:
+// (strategy §3, dev.review row; §6 "Now": one CodeRabbit cycle, D-J).
+// docs/coderabbit-review.md is the protocol this op mechanizes:
 //
-//   1. THE BASE PIN: BASE is the merge-base of `origin/<target>` and HEAD —
-//      an immutable sha, never a moving branch tip — unless the input pins
-//      an explicit base (resolved to a full sha once, then immutable).
-//   2. THE SECRET SCAN GATES THE UPLOAD: every diff component — the
-//      base-to-HEAD patch, the staged patch, the unstaged patch, and the
-//      full content of every untracked non-ignored file — is scanned against
-//      the repo's denylist classes BEFORE the reviewer runs. Any hit refuses
-//      the review (needs-human naming the rule and component); a scan fault
-//      refuses it too. Nothing that failed the scan is ever uploaded.
+//   1. THE BASE PIN: `merge-base(origin/<target>, HEAD)`, or an explicit
+//      base resolved once to a commit sha (workState.ts).
+//   2. THE SECRET SCAN GATES THE UPLOAD: every diff component the reviewer
+//      can upload — each file's committed (base..HEAD), staged and unstaged
+//      patch, and every untracked non-ignored file — is scanned BEFORE the
+//      reviewer runs. Patches are read with `--text`, so binary files
+//      contribute their removed and added bytes like any other file. Any
+//      hit, oversized component, or scanner fault refuses the review.
 //   3. THE HOST LOCK: the CLI reviewer is the scarce quota; cycles serialize
-//      host-wide (one lock per host, not per worktree).
-//   4. THE COMPLETION HONESTY: the recorded completion is what ACTUALLY
-//      happened — terminal, or blocked with the reason (CLI exit, error /
-//      action_required stream events, review_skipped, missing terminal
-//      event). A blocked cycle is still recorded (findings, log, identity)
-//      but never counts toward readiness.
-//   5. THE EVIDENCE: the raw stream log is saved OUTSIDE the repository;
-//      the cycle record carries the log path, the pinned base, the HEAD,
-//      the dirty-diff sha256, and the normalized findings.
+//      host-wide.
+//   4. COMPLETION HONESTY: the recorded completion is what actually
+//      happened — terminal, or blocked with the reason (coderabbit.ts). A
+//      blocked cycle is still recorded but never counts toward readiness.
+//   5. THE EVIDENCE: the raw stream log is saved OUTSIDE the repository; the
+//      cycle record carries the log path, base, head, dirty identity, and
+//      the normalized findings.
 //
-// THE REVIEWER CHOICE IS CONFIGURATION, NEVER A CONSTANT (strategy §2.7):
-// `--reviewer coderabbit` (the shipped default — the CodeRabbit CLI is the
-// pre-PR reviewer, D-J) or `--reviewer agent:<provider/model>`. The agent
-// route is the vendor-down FALLBACK and this build ships no agent runner —
-// an `agent:` request is refused naming exactly that, so no SDK consumer
-// can mistake a fallback for the required CLI cycle.
+// DRIFT, NOT ISOLATION (strategy §2.4): the reviewer reads the live
+// worktree. The identity is re-read after the components are captured, on
+// entering the lock, and after the run; any drift refuses the cycle and
+// nothing is recorded. This catches the implementor's own accidental edits
+// during a long review. It is not a boundary against a concurrent process
+// on the same machine — author evidence is a claim, and verification is
+// required CI plus the reviewer bots at the exact head.
 //
-// ONE OP, TWO ACTIONS (the dev.review composition ruling): `dev.review` is
-// a single registry op discriminated on `action`. No action — or
-// `action: 'cycle'` — runs THIS module's CodeRabbit review cycle (the
-// contract below); `action: 'enroll' | 'status' | 'fallback'` runs the
-// author-admission transport (review-transport.js, carried over unchanged
-// from the merged worker-transport PR — same wire shapes, same crq
-// invocation). The transport adapter lives in its own module; this factory
-// is the single dispatcher.
-import { guardDevOp } from './effects.js';
-import { createHash } from 'node:crypto';
-import type { Op } from '../../kernel/types.js';
-import type { CommandResult, DevEffects } from './effects.js';
-import { branchFromRevParse, gitOut, requireGitOut, requireGitOutRaw } from './effects.js';
-import {
-  makeAuthorAdmission,
-  AUTHOR_TRANSPORT_HINT,
-  type AuthorDecision,
-  type AuthorTransport,
-} from './review-transport.js';
-import type { DevTransportInput } from './registry.js';
+// THE REVIEWER CHOICE IS CONFIGURATION (strategy §2.7): `coderabbit` (the
+// default) or `agent:<provider/model>`, the vendor-down fallback. This build
+// ships no agent runner, so an `agent:` request is a needs-human refusal and
+// can never stand in for the CLI cycle.
+//
+// ONE OP, TWO ACTIONS: no action (or `cycle`) runs this module's review
+// cycle; `enroll | status | fallback` runs the author-admission transport
+// (review-transport.ts, unchanged from #332 — same wire shapes, same crq
+// invocation `cq dev.review --action=enroll …`).
+import type { Op, OpResult } from '../../kernel/types.js';
+import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
   coderabbitReviewArgv,
   decideCompletion,
   parseReviewerStream,
 } from './coderabbit.js';
+import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
+import type { CommandResult, DevEffects } from './effects.js';
+import { faultText, guardDevOp } from './effects.js';
 import {
   DEFAULT_DEV_TARGET,
-  objectInputFault,
-  repoRootFault,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   DEV_LEDGER_VERSION,
   type DevCycleRecord,
   type DevFinding,
-  type DevIdentity,
+  type DevReviewCompletion,
 } from './record.js';
+import { DevCycleInputSchema, type DevTransportInput } from './registry.js';
 import {
-  binaryPathsOf,
-  type ComponentScan,
-  type DiffSecretScanner,
-  type ScanComponentInput,
-} from './denylist.js';
+  AUTHOR_TRANSPORT_HINT,
+  makeAuthorAdmission,
+  type AuthorDecision,
+  type AuthorTransport,
+} from './review-transport.js';
+import {
+  driftSince,
+  git,
+  gitStdout,
+  readWorkState,
+  zList,
+  type WorkState,
+} from './internal/workState.js';
 
-/** Per-file cap for reading untracked content into the scan (huge scratch files are truncated, visibly). */
-export const UNTRACKED_SCAN_FILE_CAP_BYTES = 1024 * 1024;
+/** Per-component scan cap: a bigger file patch or untracked file is refused, never truncated. */
+export const SCAN_COMPONENT_CAP_BYTES = 4 * 1024 * 1024;
 
-/** Git read wall-clock cap. */
-export const GIT_TIMEOUT_MS = 60 * 1000;
+/**
+ * The authoritative scanner's own intentional corpus (its tree allowlist
+ * entry in scripts/denylist-scan): the rule samples are published by
+ * design, so neither scanner layer reads this one path.
+ */
+const PATTERNS_FILE = 'policy/denylist/patterns.yml';
 
 /** Input of the `dev.review` cycle action (plain JSON; the registry schema mirrors it). */
 export interface DevCycleInput {
@@ -88,7 +91,7 @@ export interface DevCycleInput {
   target?: string;
   /** Explicit immutable base sha overriding the merge-base pin. */
   base?: string;
-  /** The reviewer choice: the shipped CLI reviewer (default) or `agent:<provider/model>`. */
+  /** The reviewer choice: `coderabbit` (default) or `agent:<provider/model>`. */
   reviewer?: string;
   /** Review only staged+unstaged work (the protocol's --uncommitted scope). */
   uncommitted?: boolean;
@@ -96,9 +99,8 @@ export interface DevCycleInput {
 
 /**
  * Input of the ONE `dev.review` op: the review cycle above, or the
- * author-admission transport (`enroll | status | fallback` — the shape is
- * pinned by `DevTransportInputSchema`, unchanged from the merged
- * worker-transport PR). The registry schema mirrors this union.
+ * author-admission transport (`enroll | status | fallback`, pinned by
+ * `DevTransportInputSchema`, unchanged from #332).
  */
 export type DevReviewInput = DevCycleInput | DevTransportInput;
 
@@ -110,8 +112,7 @@ export interface DevReviewDeps {
   scanSecrets: DiffSecretScanner;
   /**
    * The author-admission transport (admission actions). When omitted, the
-   * admission actions report the configuration gap — the cycle itself never
-   * needs a transport and never reads the ambient alias.
+   * admission actions report the configuration gap.
    */
   transport?: AuthorTransport;
 }
@@ -126,482 +127,134 @@ export interface DevReviewReport {
   base: string;
   head: string;
   dirtySha256: string;
+  completion: DevReviewCompletion;
   findings: DevFinding[];
   logPath: string;
   untracked: string[];
   at: string;
 }
 
-/** One diff component prepared for the secret scan. */
-type ScanComponent = ScanComponentInput;
-
 /**
- * Build the ONE `dev.review` op over its injected deps. THE DISPATCH: an
- * admission action (`enroll | status | fallback`) routes to the
- * author-admission transport (review-transport.js) and never touches the
- * repo; any other action — none, or `'cycle'` — runs the review cycle. The
- * object boundary comes first, so a schema-bypassing null input maps to the
- * `failed` taxonomy whatever action was meant.
+ * Build the ONE `dev.review` op. An admission action routes to the
+ * author-admission transport and never touches the repo; anything else is
+ * the review cycle (whose schema refuses an unknown action).
  */
 export function makeDevReview(
   deps: DevReviewDeps,
 ): Op<DevReviewInput, DevReviewReport | AuthorDecision> {
-  const cycle = runCycleReview(deps.effects, deps.scanSecrets);
+  const cycle = makeReviewCycle(deps.effects, deps.scanSecrets);
   return async (input) => {
-    const objectFault = objectInputFault(input);
-    if (objectFault !== null) return { status: 'failed', error: `dev.review: ${objectFault}` };
     if (isAdmissionInput(input)) {
       if (deps.transport === undefined) {
         return { status: 'needs-human', reason: AUTHOR_TRANSPORT_HINT };
       }
       return makeAuthorAdmission(deps.transport)(input);
     }
-    return cycle(input);
+    return cycle(input as DevCycleInput);
   };
 }
 
-/** The admission branch of the union — every other spelling is the cycle contract. */
-function isAdmissionInput(input: DevReviewInput): input is DevTransportInput {
-  return input.action === 'enroll' || input.action === 'status' || input.action === 'fallback';
+/** The admission branch of the union (the registry dispatch uses the same test). */
+export function isAdmissionInput(input: unknown): input is DevTransportInput {
+  if (typeof input !== 'object' || input === null) return false;
+  const action = (input as { action?: unknown }).action;
+  return action === 'enroll' || action === 'status' || action === 'fallback';
 }
 
-/**
- * Build the review-cycle action over injected effects and the injected
- * secret scanner (the denylist classes are the repo's own; tests inject a
- * stub).
- */
-function runCycleReview(
+function needsHuman(reason: string): OpResult<never> {
+  return { status: 'needs-human', reason: `dev.review: ${reason}` };
+}
+
+/** The review cycle over injected effects and the injected secret scanner. */
+function makeReviewCycle(
   effects: DevEffects,
   scanSecrets: DiffSecretScanner,
-  captured = false,
 ): Op<DevCycleInput, DevReviewReport> {
-  return guardDevOp('dev.review', async (input) => {
-    // Library boundary BEFORE any effect: the input itself, then the action
-    // spelling, then repoRoot (a null/undefined input maps to the failed
-    // taxonomy, never a TypeError outside it; an unknown action is a
-    // `failed` input fault, never a silently rerun cycle).
-    const objectFault = objectInputFault(input);
-    if (objectFault !== null) return { status: 'failed', error: `dev.review: ${objectFault}` };
-    if (input.action !== undefined && input.action !== 'cycle') {
-      return {
-        status: 'failed',
-        error: `dev.review: unknown action '${String(
-          input.action,
-        )}' — the review cycle takes no action or 'cycle'; the author-admission transport takes 'enroll' | 'status' | 'fallback'`,
-      };
-    }
-    const rootFault = repoRootFault(input.repoRoot);
-    if (rootFault !== null) return { status: 'failed', error: `dev.review: ${rootFault}` };
+  return guardDevOp('dev.review', DevCycleInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
-    const scope: 'full' | 'uncommitted' = input.uncommitted === true ? 'uncommitted' : 'full';
-    if (input.reviewer !== undefined && typeof input.reviewer !== 'string') {
-      return { status: 'failed', error: 'dev.review: reviewer must be a string' };
-    }
+    const scope = input.uncommitted === true ? 'uncommitted' : 'full';
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
-
-    if (reviewer.startsWith('agent:')) {
-      return {
-        status: 'needs-human',
-        reason:
-          'the agent reviewer is the vendor-down fallback and this build ships no agent runner — the pre-PR reviewer is the CodeRabbit CLI (D-J); never a substitute for a real CLI cycle',
-      };
-    }
     if (reviewer !== CODERABBIT_REVIEWER) {
-      return {
-        status: 'failed',
-        error: `dev.review: unknown reviewer '${reviewer}' — the shipped choice is '${CODERABBIT_REVIEWER}' (or agent:<provider/model>, unconfigured here)`,
-      };
+      return needsHuman(
+        'the agent reviewer is the vendor-down fallback (D-J) and this build ships no agent runner — the pre-PR reviewer is the CodeRabbit CLI; a fallback never substitutes for a real CLI cycle',
+      );
     }
 
-    if (!captured)
-      return effects.withSnapshot((snapshot) => runCycleReview(snapshot, scanSecrets, true)(input));
+    const read = await readWorkState(effects, {
+      target,
+      ...(input.base !== undefined ? { base: input.base } : {}),
+    });
+    if (!read.ok) return needsHuman(read.reason);
+    const state = read.state;
 
-    // Identity: branch, HEAD, pinned base, dirty-diff sha256.
-    const branch = branchFromRevParse(
-      await effects.runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-        timeoutMs: GIT_TIMEOUT_MS,
-      }),
-    );
-    if (branch === null) {
-      return {
-        status: 'needs-human',
-        reason:
-          'dev.review records evidence per branch and HEAD is detached — check out a branch and re-run',
-      };
-    }
-    const head = gitOut(
-      await effects.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
-    );
-    if (head === null) {
-      return {
-        status: 'needs-human',
-        reason: 'git rev-parse HEAD failed — is this a git worktree?',
-      };
-    }
-    let base: string;
-    if (input.base !== undefined) {
-      const resolved = gitOut(
-        await effects.runCommand('git', ['rev-parse', `${input.base}^{commit}`], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
+    const collected = await collectScanComponents(effects, state, scope);
+    if (!collected.ok) return needsHuman(`review refused — ${collected.reason}`);
+    if (collected.paths === 0) {
+      return needsHuman(
+        'no diff to review — the selected scope is empty (stage or commit the work first, or pass the right scope)',
       );
-      if (resolved === null) {
-        return {
-          status: 'needs-human',
-          reason: `the explicit base '${input.base}' did not resolve to a commit — pin an immutable sha`,
-        };
-      }
-      base = resolved;
-    } else {
-      const mergeBase = gitOut(
-        await effects.runCommand('git', ['merge-base', `origin/${target}`, 'HEAD'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
-      );
-      if (mergeBase === null) {
-        return {
-          status: 'needs-human',
-          reason: `cannot pin the merge-base: 'origin/${target}' did not resolve — fetch the target and re-run`,
-        };
-      }
-      base = mergeBase;
     }
-    // FAIL-CLOSED identity reads: a failed read is a refusal, never a
-    // fabricated clean tree (requireGitOut throws; mapped below).
-    let dirtySha256: string;
-    try {
-      const dirtyDiff = await effects.runCommand(
-        'git',
-        ['diff', '--binary', '--full-index', 'HEAD'],
-        {
-          timeoutMs: GIT_TIMEOUT_MS,
-        },
-      );
-      // THE IDENTITY HASHES THE EXACT BYTES (requireGitOutRaw, not the
-      // trimmed variant): two dirty patches differing only in trailing
-      // whitespace on the final line must never share a recorded identity.
-      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
-      dirtySha256 = diffText === '' ? 'clean-tree' : createDirtyHash(diffText);
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the dirty-diff identity could not be read — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    const identity: DevIdentity = { base, head, dirtySha256 };
-
-    // Untracked non-ignored files: outside the CLI's default scope and the
-    // dirty-diff hash; their CONTENT still gets scanned (a secret there
-    // would reach a later commit), and their names are recorded in the
-    // cycle so dev.ready can hold the line until they are staged/committed.
-    let untracked: string[];
-    try {
-      const untrackedOut = requireGitOut(
-        await effects.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        }),
-        'ls-files --others',
-      );
-      untracked = untrackedOut.split('\n').filter((line) => line.trim() !== '');
-    } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the untracked file list could not be read — ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    // The diff components, per scope (protocol §1's component list).
-    const components: ScanComponent[] = [];
-    let committedText = '';
-    if (scope === 'full') {
-      const committed = await effects.runCommand(
-        'git',
-        ['diff', '--binary', '--full-index', base, 'HEAD'],
-        {
-          timeoutMs: GIT_TIMEOUT_MS,
-        },
-      );
-      if (committed.exitCode !== 0) {
-        return {
-          status: 'needs-human',
-          reason: `the committed patch against the pinned base could not be read — ${committed.stderr.trim().slice(0, 400)}`,
-        };
-      }
-      committedText = committed.stdout;
-      if (committedText !== '') {
-        components.push({ component: 'committed', text: committedText, kind: 'patch' });
-      }
-    }
-    // The scanned components are BOUND AT CAPTURE TIME: the staged and
-    // unstaged texts hash exactly as they enter the scan — NEVER from a
-    // post-scan re-read, which would let a split change during scanner
-    // execution crown the NEW (unscanned) content as the trusted baseline.
-    // Absent components hash the empty string, so a recheck that finds
-    // content where the scan saw none diverges too.
-    let stagedSha = createHash('sha256').update('').digest('hex');
-    let unstagedSha = createHash('sha256').update('').digest('hex');
-    let stagedText = '';
-    let unstagedText = '';
-    for (const [name, args] of [
-      ['staged', ['diff', '--cached']],
-      ['unstaged', ['diff']],
-    ] as const) {
-      const result = await effects.runCommand('git', args, { timeoutMs: GIT_TIMEOUT_MS });
-      if (result.exitCode !== 0) {
-        return {
-          status: 'needs-human',
-          reason: `the ${name} patch could not be read — ${result.stderr.trim().slice(0, 400)}`,
-        };
-      }
-      // THE SCAN-INPUT BINDING: the hash of the EXACT text that enters the
-      // scan — captured here, before scanSecrets runs. (An empty patch
-      // hashes the empty string; the in-lock recheck compares against
-      // THESE hashes.)
-      if (name === 'staged') {
-        stagedText = result.stdout;
-        stagedSha = createHash('sha256').update(stagedText).digest('hex');
-      } else {
-        unstagedText = result.stdout;
-        unstagedSha = createHash('sha256').update(unstagedText).digest('hex');
-      }
-      if (result.stdout !== '') {
-        components.push({ component: name, text: result.stdout, kind: 'patch' });
-      }
-    }
-    for (const path of untracked) {
-      const read = await effects.readWorktreeFile(path, UNTRACKED_SCAN_FILE_CAP_BYTES);
-      if (!read.ok) {
-        return {
-          status: 'needs-human',
-          reason: `the untracked file '${path}' was refused by the secret scan — ${read.reason}`,
-        };
-      }
-      // The file's own path rides as path context so path-scoped classes
-      // (the *.env rule, the scratch-dir class) apply to untracked content
-      // exactly as they would after commit.
-      components.push({ component: `untracked:${path}`, text: read.text, kind: 'file', path });
-    }
-    // BINARY BLOBS, NOT PLACEHOLDERS: a textual patch represents a binary
-    // change only as a `GIT binary patch` encoding or a `Binary files …
-    // differ` placeholder — neither exposes the file's bytes to a regex or
-    // to gitleaks, while the reviewer's default scope WOULD upload them.
-    // Every binary path a scanned component names is fetched per leg and
-    // scanned as a FILE component (path context included): the committed
-    // side from BOTH blobs (removed bytes are scanned too), the staged side
-    // from HEAD and the index, the unstaged side from index and worktree.
-    for (const [leg, patchText] of [
-      ['committed', committedText],
-      ['staged', stagedText],
-      ['unstaged', unstagedText],
-    ] as const) {
-      if (patchText === '') continue;
-      for (const path of binaryPathsOf(patchText)) {
-        if (leg === 'unstaged') {
-          const read = await effects.readWorktreeFile(path, UNTRACKED_SCAN_FILE_CAP_BYTES);
-          if (!read.ok && !read.reason.includes('ENOENT')) {
-            return {
-              status: 'needs-human',
-              reason: `the binary file '${path}' was refused by the secret scan — ${read.reason}`,
-            };
-          }
-          if (read.ok) {
-            components.push({
-              component: `binary:unstaged:${path}`,
-              text: read.text,
-              kind: 'file',
-              path,
-            });
-          }
-        }
-        const blobs =
-          leg === 'committed'
-            ? [`${base}:${path}`, `${head}:${path}`]
-            : leg === 'staged'
-              ? [`${head}:${path}`, `:${path}`]
-              : [`:${path}`];
-        let readAny = components.some(
-          (component) => component.component === `binary:unstaged:${path}`,
+    const refuseDrift = async (when: string): Promise<void> => {
+      const drifted = await driftSince(effects, state);
+      if (drifted.length > 0) {
+        throw new Error(
+          `${drifted.join('; ')} ${when} — the record would not describe what the reviewer saw; re-run dev.review on a stable tree`,
         );
-        for (const spec of blobs) {
-          const blob = await effects.runCommand('git', ['cat-file', 'blob', spec], {
-            timeoutMs: GIT_TIMEOUT_MS,
-          });
-          if (blob.exitCode === 0) {
-            readAny = true;
-            if (blob.stdout.length > UNTRACKED_SCAN_FILE_CAP_BYTES) {
-              return {
-                status: 'needs-human',
-                reason: `the binary blob '${spec}' exceeds the per-file scan cap (${String(blob.stdout.length)} bytes) — split or remove it; the scan refuses rather than truncate`,
-              };
-            }
-            const side =
-              leg === 'committed' ? (spec.startsWith(`${base}:`) ? 'base' : 'head') : leg;
-            components.push({
-              component: `binary:${leg === 'committed' ? `committed(${side})` : leg === 'staged' && spec.startsWith(`${head}:`) ? 'staged(head)' : leg === 'unstaged' ? 'unstaged(index)' : leg}:${path}`,
-              text: blob.stdout,
-              kind: 'file',
-              path,
-            });
-          } else if (blob.exitCode !== 128 || blob.timedOut) {
-            return {
-              status: 'needs-human',
-              reason: `the binary blob '${spec}' could not be read — ${
-                blob.stderr.trim().slice(0, 200) ||
-                `exit ${blob.exitCode === null ? 'none (killed)' : String(blob.exitCode)}`
-              }`,
-            };
-          }
-          // exit 128 = absent on that side (an add or a delete) — the other
-          // side carries the bytes; if NO side reads, the refusal below
-          // keeps a named binary path from silently going unscanned.
-        }
-        if (!readAny) {
-          return {
-            status: 'needs-human',
-            reason: `the binary file '${path}' named by the ${leg} patch could not be read from the repository — review refused rather than upload unscanned binary content`,
-          };
-        }
       }
-    }
-    if (components.length === 0) {
-      return {
-        status: 'needs-human',
-        reason:
-          'no diff to review — the selected scope is empty (stage or commit the work first, or pass the right scope)',
-      };
-    }
+    };
 
-    // THE SCAN BEFORE THE UPLOAD: any hit (or a scanner fault) refuses the
-    // review — the components are never sent anywhere once flagged.
     let scans: ComponentScan[];
     try {
-      scans = await scanSecrets(components);
+      await refuseDrift('while the scan components were read');
+      scans = await scanSecrets(collected.components);
     } catch (err) {
-      return {
-        status: 'needs-human',
-        reason: `the secret scan faulted — review refused: ${err instanceof Error ? err.message : String(err)}`,
-      };
+      return needsHuman(`the secret scan could not complete — review refused: ${faultText(err)}`);
     }
     const flagged = scans.flatMap((scan) =>
       scan.hits.map((hit) => `${hit.ruleId} in ${scan.component} (lines ${hit.lines.join(', ')})`),
     );
     if (flagged.length > 0) {
-      return {
-        status: 'needs-human',
-        reason: `secret scan found denylist-class content — review refused, remove it and re-run: ${flagged.join('; ')}`,
-      };
+      return needsHuman(
+        `secret scan found denylist-class content — review refused, remove it and re-run: ${flagged.join('; ')}`,
+      );
     }
 
-    // The cycle under the HOST lock: the scarce reviewer is serialized
-    // host-wide. The completion is decided and the log written inside this
-    // span; the record append follows under the store mutex. The identity
-    // is RE-VERIFIED inside the lock span — the wait for a contended
-    // reviewer can be long, and a worktree that changed meanwhile would
-    // make the record's identity describe a state the reviewer never saw.
+    // The run under the HOST lock; the completion is decided and the log
+    // written inside the span, the record appended after it.
     const at = effects.nowIso();
+    const argv = coderabbitReviewArgv(state.base, scope);
     let span: {
-      completion: DevCycleRecord['completion'];
+      completion: DevReviewCompletion;
       logPath: string;
       findings: Omit<DevFinding, 'id'>[];
     };
     try {
       span = await effects.withHostLock(async () => {
-        // The rechecks are FAIL-CLOSED too: a failed read THROWS through
-        // requireGitOutRaw — a failed recheck can never compare as equal.
-        const verifyStable = async (when: string): Promise<void> => {
-          const [recheckHead, recheckDirty, recheckUntracked] = await Promise.all([
-            effects.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
-            effects.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
-              timeoutMs: GIT_TIMEOUT_MS,
-            }),
-            effects.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
-              timeoutMs: GIT_TIMEOUT_MS,
-            }),
-          ]);
-          const drifted: string[] = [];
-          if (requireGitOut(recheckHead, 'rev-parse HEAD (recheck)') !== head)
-            drifted.push('HEAD moved');
-          const recheckDiff = requireGitOutRaw(recheckDirty, 'dirty diff (recheck)');
-          const recheckSha = recheckDiff === '' ? 'clean-tree' : createDirtyHash(recheckDiff);
-          if (recheckSha !== dirtySha256) drifted.push('the working-tree diff changed');
-          // The scanned PATCH COMPONENTS are re-bound here too: the staged
-          // and unstaged patches must be byte-identical to what passed the
-          // secret scan before the lock — the aggregate hash above cannot
-          // see an index/worktree split move (a scan-restore would otherwise
-          // upload content that never passed the scan).
-          const recheckStaged = await effects.runCommand('git', ['diff', '--cached'], {
-            timeoutMs: GIT_TIMEOUT_MS,
-          });
-          const recheckUnstaged = await effects.runCommand('git', ['diff'], {
-            timeoutMs: GIT_TIMEOUT_MS,
-          });
-          const recheckStagedSha = createHash('sha256')
-            .update(recheckStaged.exitCode === 0 ? recheckStaged.stdout : '\u0000read-failed-2')
-            .digest('hex');
-          const recheckUnstagedSha = createHash('sha256')
-            .update(recheckUnstaged.exitCode === 0 ? recheckUnstaged.stdout : '\u0000read-failed-3')
-            .digest('hex');
-          if (recheckStagedSha !== stagedSha)
-            drifted.push('the staged patch changed since the scan');
-          if (recheckUnstagedSha !== unstagedSha) {
-            drifted.push('the unstaged patch changed since the scan');
-          }
-          const recheckUntrackedList = requireGitOut(
-            recheckUntracked,
-            'ls-files --others (recheck)',
-          )
-            .split('\n')
-            .filter((line) => line.trim() !== '');
-          const sameUntracked =
-            recheckUntrackedList.length === untracked.length &&
-            recheckUntrackedList.every((path, index) => path === untracked[index]);
-          if (!sameUntracked) {
-            drifted.push('the untracked file set changed');
-          }
-          if (drifted.length > 0) {
-            throw new Error(
-              `${drifted.join('; ')} ${when} — the recorded identity would not match what the reviewer saw; re-run dev.review`,
-            );
-          }
-        };
-        await verifyStable('while waiting for the review lock');
-        const raw = await runReviewer(
-          effects,
-          coderabbitReviewArgv(base, scope),
-          DEFAULT_REVIEWER_TIMEOUT_MS,
+        await refuseDrift('while waiting for the review lock');
+        const raw = await runReviewer(effects, argv, DEFAULT_REVIEWER_TIMEOUT_MS);
+        await refuseDrift(
+          'during the review run (content the scan never saw may have been uploaded)',
         );
-        // THE POST-RUN RECHECK: the CLI's default scope reads the LIVE
-        // repository, so a concurrent index/worktree edit DURING the run
-        // would be reviewed and uploaded without ever passing the scan.
-        // The upload itself cannot be retracted, but the cycle is REFUSED —
-        // nothing is recorded — so drifted state can never become author
-        // evidence, and the author re-runs against a stable tree.
-        await verifyStable(
-          'after the review ran (content the scan never saw may have been uploaded)',
-        );
-        // A run that produced no exit (SIGKILLed on the timeout, or a spawn
-        // fault) is a BLOCKED cycle naming WHICH — never a completion and
-        // never a crash.
         const parsed = raw.exitCode === null ? null : parseReviewerStream(raw.stdout);
-        const completion =
+        const completion: DevReviewCompletion =
           raw.exitCode === null || parsed === null
-            ? ({
+            ? {
                 kind: 'blocked',
                 reason: raw.timedOut
                   ? `the reviewer CLI timed out after ${String(DEFAULT_REVIEWER_TIMEOUT_MS)}ms and was stopped — no review completed`
                   : `the reviewer CLI did not run — ${raw.stderr.trim().slice(0, 300)}`,
-              } as const)
+              }
             : decideCompletion(raw.exitCode, parsed);
         const logPath = await effects.writeReviewLog(
-          branch,
+          state.branch,
           `${Date.now()}`,
           [
-            `# dev.review cycle log`,
+            '# dev.review cycle log',
             `reviewer: ${reviewer}`,
-            `argv: ${CODERABBIT_REVIEWER} ${coderabbitReviewArgv(base, scope).join(' ')}`,
-            `base: ${base}`,
-            `head: ${head}`,
-            `dirtySha256: ${dirtySha256}`,
+            `argv: ${CODERABBIT_REVIEWER} ${argv.join(' ')}`,
+            `base: ${state.base}`,
+            `head: ${state.head}`,
+            `dirtySha256: ${state.dirtySha256}`,
             `scope: ${scope}`,
             `exitCode: ${raw.exitCode === null ? 'none (killed)' : String(raw.exitCode)}`,
             `timedOut: ${String(raw.timedOut)}`,
@@ -614,48 +267,37 @@ function runCycleReview(
             '',
           ].join('\n'),
         );
-        return { raw, parsed, completion, logPath, findings: parsed?.findings ?? [] };
+        return { completion, logPath, findings: parsed?.findings ?? [] };
       });
     } catch (err) {
-      // A host-lock, identity-drift, or log-write fault: the reviewer never
-      // ran (or its outcome could not be captured) — nothing is recorded,
-      // and the author re-runs. The message names the cause.
-      return {
-        status: 'needs-human',
-        reason: `the review cycle could not run to a recorded outcome — ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      };
+      // A host-lock, drift, or log-write fault: nothing is recorded, and
+      // the author re-runs. The message names the cause.
+      return needsHuman(`the review cycle could not run to a recorded outcome — ${faultText(err)}`);
     }
 
-    // Mint the cycle id and append the record under the store mutex. The
-    // reviewer quota is ALREADY spent at this point, so a store fault must
-    // still report the verdict and the log path — a thrown fault would bury
-    // a finished (or blocked) cycle the author paid for.
-    let cycleRecord: DevCycleRecord;
+    // The reviewer quota is ALREADY spent, so a store fault still reports
+    // the verdict and the log path rather than burying the paid cycle.
+    let record: DevCycleRecord;
     try {
-      const store = effects.openLedger(branch);
-      cycleRecord = await store.mutate((ledger) => {
+      record = await effects.openLedger(state.branch).mutate((ledger) => {
         const cycleCount = ledger.records.filter((entry) => entry.kind === 'cycle').length;
-        const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${head.slice(0, 8)}`;
+        const cycleId = `c${String(cycleCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`;
         const entry: DevCycleRecord = {
           kind: 'cycle',
           cycleId,
           reviewer,
           scope,
           target,
-          base: identity.base,
-          head: identity.head,
-          dirtySha256: identity.dirtySha256,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
           completion: span.completion,
           findings: span.findings.map((finding, index) => ({
+            ...finding,
             id: `${cycleId}#f${String(index + 1)}`,
-            severity: finding.severity,
-            ...(finding.fileName !== undefined ? { fileName: finding.fileName } : {}),
-            ...(finding.excerpt !== undefined ? { excerpt: finding.excerpt } : {}),
           })),
           logPath: span.logPath,
-          untracked,
+          untracked: state.untracked,
           at,
         };
         return {
@@ -671,43 +313,94 @@ function runCycleReview(
       const verdict =
         span.completion.kind === 'terminal'
           ? 'the cycle TERMINAL'
-          : `the cycle BLOCKED (${span.completion.kind === 'blocked' ? span.completion.reason : 'unknown'})`;
+          : `the cycle BLOCKED (${span.completion.reason})`;
       return {
         status: 'failed',
-        error: `dev.review: ${verdict} with ${String(span.findings.length)} finding(s), but the record could not be persisted — ${
-          err instanceof Error ? err.message : String(err)
-        }; log: ${span.logPath}`,
+        error: `dev.review: ${verdict} with ${String(span.findings.length)} finding(s), but the record could not be persisted — ${faultText(err)}; log: ${span.logPath}`,
       };
     }
 
-    if (cycleRecord.completion.kind === 'terminal') {
-      return {
-        status: 'ok',
-        value: {
-          cycleId: cycleRecord.cycleId,
-          reviewer,
-          scope,
-          target,
-          base,
-          head,
-          dirtySha256,
-          findings: cycleRecord.findings,
-          logPath: cycleRecord.logPath,
-          untracked,
-          at,
-        },
-      };
+    if (record.completion.kind === 'blocked') {
+      return needsHuman(
+        `review cycle ${record.cycleId} was BLOCKED (${record.completion.reason}) — the cycle is recorded with ${String(record.findings.length)} finding(s); log: ${record.logPath}`,
+      );
     }
     return {
-      status: 'needs-human',
-      reason: `review cycle ${cycleRecord.cycleId} was BLOCKED (${cycleRecord.completion.kind === 'blocked' ? cycleRecord.completion.reason : 'unknown'}) — the cycle is recorded with ${String(cycleRecord.findings.length)} finding(s); log: ${cycleRecord.logPath}`,
+      status: 'ok',
+      value: {
+        cycleId: record.cycleId,
+        reviewer,
+        scope,
+        target,
+        base: record.base,
+        head: record.head,
+        dirtySha256: record.dirtySha256,
+        completion: record.completion,
+        findings: record.findings,
+        logPath: record.logPath,
+        untracked: record.untracked,
+        at,
+      },
     };
   });
 }
 
-/** sha256 of the dirty diff (the protocol's dirty-diff identity). */
-function createDirtyHash(diffText: string): string {
-  return createHash('sha256').update(diffText).digest('hex');
+/**
+ * The scan components for the scope: one per (leg, path) from git's own
+ * NUL-separated path list — so no patch header is parsed for a path — plus
+ * one per untracked file. `paths` counts every path the scope touches
+ * (including the scanner's own corpus file), so an empty scope is told
+ * apart from a scope whose only change is that file.
+ */
+async function collectScanComponents(
+  effects: DevEffects,
+  state: WorkState,
+  scope: 'full' | 'uncommitted',
+): Promise<
+  { ok: true; components: ScanComponentInput[]; paths: number } | { ok: false; reason: string }
+> {
+  const legs: { name: string; args: string[] }[] = [
+    ...(scope === 'full' ? [{ name: 'committed', args: [state.base, state.head] }] : []),
+    { name: 'staged', args: ['--cached'] },
+    { name: 'unstaged', args: [] },
+  ];
+  const components: ScanComponentInput[] = [];
+  let paths = 0;
+  for (const leg of legs) {
+    const names = zList(
+      gitStdout(
+        await git(effects, ['diff', '--name-only', '-z', ...HARDENED_DIFF_FLAGS, ...leg.args]),
+        `diff --name-only (${leg.name})`,
+      ),
+    );
+    paths += names.length;
+    for (const path of names) {
+      if (path === PATTERNS_FILE) continue;
+      const text = gitStdout(
+        await git(effects, ['diff', ...HARDENED_DIFF_FLAGS, ...leg.args, '--', path]),
+        `diff (${leg.name}) -- ${path}`,
+      );
+      if (Buffer.byteLength(text) > SCAN_COMPONENT_CAP_BYTES) {
+        return {
+          ok: false,
+          reason: `the ${leg.name} patch of '${path}' exceeds the per-file scan cap (${String(SCAN_COMPONENT_CAP_BYTES)} bytes) — split or remove it; the scan refuses rather than truncate`,
+        };
+      }
+      components.push({ component: `${leg.name}:${path}`, text, path });
+    }
+  }
+  paths += state.untracked.length;
+  for (const path of state.untracked) {
+    const file = await effects.readWorktreeFile(path, SCAN_COMPONENT_CAP_BYTES);
+    if (!file.ok) {
+      return {
+        ok: false,
+        reason: `the untracked file '${path}' cannot be scanned — ${file.reason}`,
+      };
+    }
+    components.push({ component: `untracked:${path}`, text: file.text, path });
+  }
+  return { ok: true, components, paths };
 }
 
 /** Run one reviewer invocation; a spawn fault becomes a synthetic killed result. */
@@ -721,7 +414,7 @@ async function runReviewer(
     .catch((err: unknown): CommandResult => ({
       exitCode: null,
       stdout: '',
-      stderr: `spawn fault: ${err instanceof Error ? err.message : String(err)}`,
+      stderr: `spawn fault: ${faultText(err)}`,
       timedOut: false,
     }));
 }

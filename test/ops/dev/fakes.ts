@@ -46,10 +46,9 @@ export function failResult(exitCode: number, stdout = '', stderr = ''): CommandR
 }
 
 /**
- * The scripted effects. `handlers` maps a matcher on (command, args) to a
- * result or a plain stdout string; the default git identity answers a
- * normal checkout, and any unhandled command fails LOUDLY (throw) so a test
- * never silently depends on an unscripted process.
+ * Fully scripted effects (no process ever spawns): `handlers` answers a
+ * command or returns undefined, and any unhandled command fails LOUDLY.
+ * For op tests that need git, prefer the real-git harness in repo.ts.
  */
 export function makeFakeEffects(
   handlers: (command: string, args: readonly string[]) => CommandResult | string | undefined = () =>
@@ -58,71 +57,30 @@ export function makeFakeEffects(
 ): DevEffects & {
   commands: { command: string; args: readonly string[] }[];
   store: ReturnType<typeof memoryLedgerStore>;
-  logs: string[];
 } {
-  const branch = options.branch ?? BRANCH;
-  const store = memoryLedgerStore(branch);
+  const store = memoryLedgerStore(options.branch ?? BRANCH);
   const commands: { command: string; args: readonly string[] }[] = [];
-  const logs: string[] = [];
-  const defaultGit = (args: readonly string[]): CommandResult | undefined => {
-    if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return okResult(`${branch}\n`);
-    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return okResult(`${HEAD}\n`);
-    if (args[0] === 'rev-parse' && args[1]?.endsWith('^{commit}')) {
-      const ref = args[1].slice(0, -'^{commit}'.length);
-      return okResult(`${ref === 'HEAD' ? HEAD : BASE}\n`);
-    }
-    if (args[0] === 'rev-parse') return okResult(`${BASE}\n`);
-    if (args[0] === 'merge-base') return okResult(`${BASE}\n`);
-    if (args[0] === 'diff' && args[1] === '--binary') return okResult('');
-    if (args[0] === '-C' && args[2] === 'apply') return okResult('');
-    if (args[0] === 'ls-files') return okResult('');
-    if (args[0] === 'diff') return okResult('');
-    if (args[0] === 'archive') return okResult('');
-    if (args[0] === 'ls-remote') return okResult(`${HEAD}\trefs/heads/${branch}\n`);
-    return undefined;
-  };
-  const defaultNonGit = (command: string): CommandResult | undefined => {
-    if (command === 'tar' || command === 'mkdir') return okResult('');
-    return undefined;
-  };
-  const effects: DevEffects & {
-    commands: typeof commands;
-    store: typeof store;
-    logs: typeof logs;
-  } = {
-    withSnapshot: async (fn) => fn(effects),
+  return {
     commands,
     store,
-    logs,
     runCommand: async (command, args) => {
       commands.push({ command, args: [...args] });
       const scripted = handlers(command, args);
-      if (scripted !== undefined)
-        return typeof scripted === 'string' ? okResult(scripted) : scripted;
-      if (command === 'git') {
-        const fallback = defaultGit(args);
-        if (fallback !== undefined) return fallback;
-      } else {
-        const fallback = defaultNonGit(command);
-        if (fallback !== undefined) return fallback;
+      if (scripted === undefined) {
+        throw new Error(`fake effects: unscripted command ${command} ${args.join(' ')}`);
       }
-      throw new Error(`fake effects: unscripted command ${command} ${args.join(' ')}`);
+      return typeof scripted === 'string' ? okResult(scripted) : scripted;
     },
     nowIso: () => '2026-10-17T00:00:00.000Z',
     loadStamp: () => ({ uptimeSeconds: 1000, load1: 1.5, at: '2026-10-17T00:00:00.000Z' }),
     withHostLock: async (fn) => fn(),
-    writeReviewLog: async (_branch, stamp, content) => {
-      const path = `/tmp/fake-cq-dev-review/${stamp}.log`;
-      logs.push(`${path}\n${content}`);
-      return path;
-    },
+    writeReviewLog: async (_branch, stamp) => `/tmp/fake-cq-dev-review/${stamp}.log`,
     readWorktreeFile: async () => ({ ok: false as const, reason: 'unreadable (fake default)' }),
     makeScratchDir: async (prefix) => `/tmp/fake-scratch-${prefix}`,
     ensureDir: async () => undefined,
     removeScratchDir: async () => undefined,
     openLedger: () => store,
   };
-  return effects;
 }
 
 /** A secret scanner stub: no hits, or the hits given. */

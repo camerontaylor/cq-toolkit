@@ -16,12 +16,11 @@
 // parser exists so the dev.review gate can apply the same rule classes to
 // diff components without touching the (protected) scan script.
 //
-// THE SCAN: non-path rules match the component text whole; a rule carrying a
-// `path` regex applies only to the segments of a patch whose file path
-// matches it (a path rule can never carry its context on a flat text).
-// Findings name the rule id, the component, and the 1-based line numbers —
-// never the matched content (inspect locally without printing secret
-// contents).
+// THE SCAN: every component is ONE file's text (a per-path patch leg or an
+// untracked file) with its repo-relative path; a rule carrying a `path`
+// regex applies only to components whose path matches it. Findings name
+// the rule id, the component, and the 1-based line numbers — never the
+// matched content (inspect locally without printing secret contents).
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -220,341 +219,65 @@ export function parseDenylistPatterns(text: string, sourceName: string): Denylis
 
 // --- The scan ---------------------------------------------------------------
 
-/** One file's segment of a unified diff: its old/new paths and its raw text. */
-export interface PatchSegment {
-  /** Old and new paths from the segment's headers, /dev/null excluded. */
-  paths: string[];
-  /** The segment's raw text, starting at its `diff --git` line. */
+/**
+ * One component to scan: a single file's patch on one diff leg, or one
+ * untracked file's content — always with its repo-relative path, so
+ * path-scoped rules (the *.env class, the scratch-dir class) apply exactly
+ * as they would after commit. dev.review builds one component per (leg,
+ * path) from git's own NUL-separated path lists, so no patch header is ever
+ * parsed for a path.
+ */
+export interface ScanComponentInput {
+  /** The component's name in evidence (`<leg>:<path>`). */
+  component: string;
   text: string;
-  /** The segment's first line's 1-based index in the WHOLE patch. */
-  startLine: number;
+  path: string;
 }
 
 /**
- * Decode one git path: `core.quotePath` C-escapes non-ASCII bytes as
- * `\303\251` (and `"`/`\` as `\"`/`\\`) inside QUOTED header paths. The
- * escapes are OCTET escapes — decoded through a byte buffer so multi-byte
- * UTF-8 sequences reassemble as characters, not latin-1 mojibake.
- */
-export function decodeGitPath(path: string): string {
-  if (!path.includes('\\')) return path;
-  const bytes: number[] = [];
-  for (let index = 0; index < path.length; index++) {
-    const char: string = path[index] ?? '';
-    if (char === '') break;
-    if (char === '\\') {
-      const next = path[index + 1];
-      if (next === undefined) break;
-      if (next === 'n') {
-        bytes.push(0x0a);
-        index += 1;
-      } else if (next === 't') {
-        bytes.push(0x09);
-        index += 1;
-      } else if (next === 'r') {
-        bytes.push(0x0d);
-        index += 1;
-      } else if (next >= '0' && next <= '7') {
-        const octal = path.slice(index + 1, index + 4);
-        if (/^[0-7]{3}$/.test(octal)) {
-          bytes.push(Number.parseInt(octal, 8));
-          index += 3;
-        } else {
-          bytes.push(next.charCodeAt(0));
-          index += 1;
-        }
-      } else {
-        bytes.push(next.charCodeAt(0));
-        index += 1;
-      }
-    } else {
-      const code = char.charCodeAt(0);
-      if (code < 0x80) {
-        bytes.push(code);
-      } else {
-        // Unescaped non-ASCII: already a character — encode it UTF-8 so the
-        // single final decode is lossless.
-        bytes.push(...Buffer.from(char, 'utf8'));
-      }
-    }
-  }
-  return Buffer.from(bytes).toString('utf8');
-}
-
-/**
- * Parse ONE header path token: an optional pair of double quotes (git
- * quotes a side when it carries non-ASCII/specials) and the `a/` or `b/`
- * prefix. Both quoted and plain spellings decode through
- * {@link decodeGitPath}.
- */
-function headerToken(token: string): string {
-  const unquoted =
-    token.length >= 2 && token.startsWith('"') && token.endsWith('"') ? token.slice(1, -1) : token;
-  const stripped =
-    unquoted.startsWith('a/') || unquoted.startsWith('b/') ? unquoted.slice(2) : unquoted;
-  return decodeGitPath(stripped);
-}
-
-/**
- * Parse the two paths out of a `diff --git` header line. Git quotes each
- * side INDEPENDENTLY (a rename between an ASCII and a non-ASCII path emits
- * a MIXED header: `diff --git a/foo.env "b/caf\303\251.env"`), so the two
- * tokens are parsed per-side after the `diff --git ` prefix — each either
- * double-quoted (greedy to its closing quote) or plain. For PLAIN sides
- * there is exactly one shape git emits for every non-rename header
- * (modification, add, delete, mode change): `a/<P> b/<P>` — the SAME path
- * both sides — and that self-consistency pins the split uniquely: the
- * remainder `<P> b/<P>` has odd length, so `<P>`'s length is forced by
- * parity and a filename-internal ` b/` (a binary file literally named
- * `.claude/memory.db b/notes.txt`) can never be mistaken for the
- * separator. A plain header that is NOT self-consistent is a true
- * rename/copy and yields null here — its paths arrive from the segment's
- * own `rename from`/`rename to` (or `copy`) lines, which {@link
- * patchSegments} parses. Every side decodes through {@link decodeGitPath};
- * a malformed line yields null (the text headers remain the fallback path
- * source for text files).
- */
-export function diffHeaderPaths(line: string): [string, string] | null {
-  const prefix = 'diff --git ';
-  if (!line.startsWith(prefix)) return null;
-  const rest = line.slice(prefix.length);
-  // Each side: optionally-quoted token, then the a/ b/ prefixes.
-  const mixedQuotedOld = /^"a\/(.*)"\s+b\/(.*)$/.exec(rest);
-  if (mixedQuotedOld !== null) {
-    return [decodeGitPath(mixedQuotedOld[1] ?? ''), headerToken(`b/${mixedQuotedOld[2] ?? ''}`)];
-  }
-  const mixedQuotedNew = /^a\/(.*?)\s+"b\/(.*)"$/.exec(rest);
-  if (mixedQuotedNew !== null) {
-    return [headerToken(`a/${mixedQuotedNew[1] ?? ''}`), decodeGitPath(mixedQuotedNew[2] ?? '')];
-  }
-  const bothQuoted = /^"a\/(.*)"\s+"b\/(.*)"$/.exec(rest);
-  if (bothQuoted !== null) {
-    return [decodeGitPath(bothQuoted[1] ?? ''), decodeGitPath(bothQuoted[2] ?? '')];
-  }
-  if (!rest.startsWith('a/')) return null;
-  const remainder = rest.slice(2);
-  const pathLength = (remainder.length - 3) / 2;
-  if (
-    Number.isInteger(pathLength) &&
-    pathLength > 0 &&
-    remainder.slice(pathLength, pathLength + 3) === ' b/' &&
-    remainder.slice(pathLength + 3) === remainder.slice(0, pathLength)
-  ) {
-    const path = remainder.slice(0, pathLength);
-    return [headerToken(`a/${path}`), headerToken(`b/${path}`)];
-  }
-  return null;
-}
-
-/**
- * Split a unified diff at `diff --git` boundaries into per-file segments,
- * each carrying BOTH header paths (old and new — a rename's rule match must
- * consider either) and its offset in the whole patch, so a path-scoped rule
- * applies ONLY to the segment of the file it names and hit line numbers stay
- * absolute in the patch.
- */
-export function patchSegments(patch: string): PatchSegment[] {
-  const lines = patch.split('\n');
-  const segments: PatchSegment[] = [];
-  let current: { paths: string[]; lines: string[]; startLine: number } | null = null;
-  const flush = (): void => {
-    if (current === null) return;
-    segments.push({
-      paths: current.paths,
-      text: current.lines.join('\n'),
-      startLine: current.startLine,
-    });
-    current = null;
-  };
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index] as string;
-    if (line.startsWith('diff --git ')) {
-      flush();
-      current = { paths: [], lines: [line], startLine: index + 1 };
-      // The header itself names both paths — the ONLY path source for a
-      // BINARY segment (no ---/+++ text headers follow it), so a binary
-      // file's encoded patch is still path-scoped for the rules. Quoted
-      // (C-escaped) header spellings decode too.
-      const header = diffHeaderPaths(line);
-      if (header !== null) {
-        for (const candidate of header) {
-          if (candidate !== '/dev/null' && candidate !== '' && !current.paths.includes(candidate)) {
-            current.paths.push(candidate);
-          }
-        }
-      }
-      continue;
-    }
-    if (current === null) continue; // preamble before the first header
-    current.lines.push(line);
-    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
-      const raw = line.slice(4).trim();
-      const path = headerToken(
-        raw.startsWith('"') && raw.endsWith('"') ? `"${raw.slice(1, -1)}"` : raw,
-      );
-      if (path !== '/dev/null' && path !== '' && !current.paths.includes(path)) {
-        current.paths.push(path);
-      }
-      continue;
-    }
-    // Rename/copy lines carry ONE path each, unambiguously — the per-side
-    // source a rename segment falls back to when its `diff --git` header is
-    // not self-consistent (a plain-sided rename, binary renames included,
-    // where no ---/+++ headers exist to fall back on).
-    const renameCopy = /^(rename|copy) (from|to) (.+?)\r?$/.exec(line);
-    if (renameCopy !== null) {
-      const raw = renameCopy[3] ?? '';
-      const path = decodeGitPath(
-        raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw,
-      );
-      if (path !== '' && !current.paths.includes(path)) {
-        current.paths.push(path);
-      }
-    }
-  }
-  flush();
-  if (segments.length === 0 && patch !== '') {
-    // No `diff --git` boundaries (a headerless patch): the whole text is
-    // ONE segment with every header path — content is never silently
-    // dropped for lack of a boundary to split at.
-    const paths: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith('--- ') || line.startsWith('+++ ')) {
-        const path = line.slice(4).trim();
-        const stripped = path.startsWith('b/') || path.startsWith('a/') ? path.slice(2) : path;
-        if (stripped !== '/dev/null' && stripped !== '' && !paths.includes(stripped)) {
-          paths.push(stripped);
-        }
-      }
-    }
-    segments.push({ paths, text: patch, startLine: 1 });
-  }
-  return segments;
-}
-
-/** Segment paths named by a unified-diff header, in file order. */
-export function diffPathsOf(patch: string): string[] {
-  const paths: string[] = [];
-  for (const segment of patchSegments(patch)) {
-    for (const path of segment.paths) {
-      if (!paths.includes(path)) paths.push(path);
-    }
-  }
-  return paths;
-}
-
-/**
- * Repo-relative paths of the patch's BINARY segments — a `GIT binary patch`
- * body or a `Binary files … differ` placeholder carries none of the file's
- * bytes, so the scanners must see the blob contents separately (fetched per
- * leg by the review gate) instead of trusting the textual representation.
- */
-export function binaryPathsOf(patch: string): string[] {
-  const paths: string[] = [];
-  for (const segment of patchSegments(patch)) {
-    const binary =
-      segment.text.includes('GIT binary patch') || /^Binary files .+ differ$/m.test(segment.text);
-    if (!binary) continue;
-    for (const path of segment.paths) {
-      if (!paths.includes(path)) paths.push(path);
-    }
-  }
-  return paths;
-}
-
-/**
- * Scan one text with the rules, restricting `path`-carrying rules to the
- * given file paths (empty for a flat text — a path rule then cannot fire).
- * Regexes compile here (never at parse time); an uncompilable rule throws,
- * naming the rule id — a broken pattern is a gate fault, never a silent
- * skip. Returns hits grouped per rule, with 1-based line numbers.
+ * Scan one text with the rules; a `path`-carrying rule applies only when
+ * the component's path matches it. Regexes compile here (never at parse
+ * time); an uncompilable rule throws naming the rule id — a broken pattern
+ * is a scan fault, never a silent skip. Hits carry 1-based line numbers,
+ * never the matched content.
  */
 export function scanText(
-  component: string,
   text: string,
   rules: readonly DenylistRule[],
-  paths: readonly string[],
-): ComponentScan {
-  return { component, hits: scanLinesWithOffset(text, rules, paths, 0) };
-}
-
-/** The compiled-rule scan of one text with line numbers offset by `lineOffset`. */
-function scanLinesWithOffset(
-  text: string,
-  rules: readonly DenylistRule[],
-  paths: readonly string[],
-  lineOffset: number,
+  path: string | undefined,
 ): DenylistHit[] {
   const lines = text.split('\n');
   const hits: DenylistHit[] = [];
   for (const rule of rules) {
     let re: RegExp;
+    let pathRe: RegExp | undefined;
     try {
-      re = new RegExp(rule.regex, 'g');
+      re = new RegExp(rule.regex);
+      if (rule.path !== undefined) pathRe = new RegExp(rule.path);
     } catch (err) {
       throw new Error(
         `denylist: rule '${rule.id}' does not compile — ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    if (rule.path !== undefined) {
-      let pathRe: RegExp;
-      try {
-        pathRe = new RegExp(rule.path);
-      } catch (err) {
-        throw new Error(
-          `denylist: rule '${rule.id}' path does not compile — ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      if (!paths.some((path) => pathRe.test(path))) continue;
-    }
+    if (pathRe !== undefined && (path === undefined || !pathRe.test(path))) continue;
     const matched: number[] = [];
-    for (let index = 0; index < lines.length; index++) {
-      re.lastIndex = 0;
-      if (re.test(lines[index] as string)) matched.push(index + 1 + lineOffset);
+    for (const [index, line] of lines.entries()) {
+      if (re.test(line)) matched.push(index + 1);
     }
     if (matched.length > 0) hits.push({ ruleId: rule.id, lines: matched });
   }
   return hits;
 }
 
-/** A component to scan: a patch, or a flat file with its repo-relative path. */
-export interface ScanComponentInput {
-  component: string;
-  text: string;
-  kind: 'patch' | 'file';
-  /** The repo-relative path of a `file` component — path-scoped rules use it as context. */
-  path?: string;
-}
-
-/**
- * Scan every component; returns one verdict per component in input order. A
- * patch component is scanned PER FILE SEGMENT ({@link patchSegments}): a
- * path-scoped rule fires only on the segment of the file it names — never
- * across the whole patch because some other file matched — and hit line
- * numbers stay absolute in the patch. A flat file component (untracked file
- * content) is scanned whole with ITS OWN PATH as the path context, so a
- * path-scoped rule (the *.env class, the scratch-dir class) applies to the
- * untracked file exactly as it would after commit.
- */
+/** Scan every component with the project rules; one verdict per component, in input order. */
 export function scanComponents(
   components: readonly ScanComponentInput[],
   rules: readonly DenylistRule[],
 ): ComponentScan[] {
-  return components.map(({ component, text, kind, path }) => {
-    if (kind !== 'patch') return scanText(component, text, rules, path === undefined ? [] : [path]);
-    const hits: DenylistHit[] = [];
-    for (const segment of patchSegments(text)) {
-      // The authoritative scanner allowlists this exact intentional corpus.
-      // A rename to/from another path still scans the entire segment.
-      if (
-        segment.paths.length > 0 &&
-        segment.paths.every((entry) => entry === 'policy/denylist/patterns.yml')
-      )
-        continue;
-      hits.push(...scanLinesWithOffset(segment.text, rules, segment.paths, segment.startLine - 1));
-    }
-    return { component, hits };
-  });
+  return components.map(({ component, text, path }) => ({
+    component,
+    hits: scanText(text, rules, path),
+  }));
 }
 
 /** A reusable scanner over the component set (the injected seam). */

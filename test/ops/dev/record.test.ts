@@ -12,7 +12,6 @@ import {
   devLedgerPath,
   parseDevLedger,
   pathDevLedgerStore,
-  repoRootFault,
   serializeDevLedger,
 } from '../../../src/ops/dev/record.js';
 import type {
@@ -145,15 +144,6 @@ describe('branchPathFault', () => {
   });
 });
 
-describe('repoRootFault (the library boundary)', () => {
-  test('a non-string, empty, or control-character root fails', () => {
-    expect(repoRootFault(undefined)).not.toBeNull();
-    expect(repoRootFault('')).not.toBeNull();
-    expect(repoRootFault('a\nb')).not.toBeNull();
-    expect(repoRootFault('/repo')).toBeNull();
-  });
-});
-
 // ---------------------------------------------------------------------------
 // The fs store
 // ---------------------------------------------------------------------------
@@ -216,12 +206,8 @@ function assemble(
 }
 
 describe('assembleReadiness', () => {
-  test('ready: two cycles + green check at the current identity', () => {
-    const result = assemble([
-      cycleRecord({ cycleId: 'c000-aaaaaaaa', head: 'before-fixes' }),
-      cycleRecord(),
-      checkRecord(),
-    ]);
+  test('ready: ONE terminal full-scope cycle (D-J) + green check at the current identity', () => {
+    const result = assemble([cycleRecord(), checkRecord()]);
     expect(result.ready).toBe(true);
     if (result.ready) {
       expect(result.record).toMatchObject({
@@ -239,26 +225,16 @@ describe('assembleReadiness', () => {
     }
   });
 
-  test('one cycle, duplicate ids, and cycles at another base/target cannot satisfy two cycles', () => {
-    for (const prior of [
-      undefined,
+  test('the anchor is the LATEST terminal full-scope cycle: an older match never rescues it', () => {
+    const result = assemble([
       cycleRecord(),
-      cycleRecord({ cycleId: 'c000-aaaaaaaa', base: 'other' }),
-      cycleRecord({ cycleId: 'c000-aaaaaaaa', target: 'main' }),
-      cycleRecord({ cycleId: 'c000-aaaaaaaa', scope: 'uncommitted' }),
-      cycleRecord({
-        cycleId: 'c000-aaaaaaaa',
-        completion: { kind: 'blocked', reason: 'unavailable' },
-      }),
-    ]) {
-      const result = assemble([
-        ...(prior === undefined ? [] : [prior]),
-        cycleRecord(),
-        checkRecord(),
-      ]);
-      expect(result.ready).toBe(false);
-      if (!result.ready)
-        expect(result.gaps.map((gap) => gap.field)).toContain('review-cycle-count');
+      cycleRecord({ cycleId: 'c002-bbbbbbbb', head: 'newer-head' }),
+      checkRecord(),
+    ]);
+    expect(result.ready).toBe(false);
+    if (!result.ready) {
+      expect(result.gaps.map((gap) => gap.field)).toEqual(['stale-review-identity']);
+      expect(result.gaps[0]?.detail).toContain('c002-bbbbbbbb');
     }
   });
 
@@ -445,18 +421,13 @@ describe('assembleReadiness', () => {
   });
 });
 
-test('blocked attempts retain adjudicable major findings after two successful cycles', () => {
+test('a blocked attempt keeps its major findings open after a later terminal cycle', () => {
   const blocked = cycleRecord({
     cycleId: 'c000-aaaaaaaa',
     completion: { kind: 'blocked', reason: 'CLI error' },
     findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'major' }],
   });
-  const records = [
-    blocked,
-    cycleRecord(),
-    cycleRecord({ cycleId: 'c002-aaaaaaaa' }),
-    checkRecord(),
-  ];
+  const records = [blocked, cycleRecord(), checkRecord()];
   const open = assemble(records);
   expect(open.ready).toBe(false);
   if (!open.ready)

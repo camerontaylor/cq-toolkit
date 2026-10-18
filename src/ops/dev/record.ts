@@ -97,7 +97,7 @@ export interface DevCycleRecord {
   base: string;
   /** The reviewed HEAD sha. */
   head: string;
-  /** sha256 of `git diff --binary --full-index HEAD` — the dirty-diff identity. */
+  /** The dirty identity (staged, unstaged, untracked; workState.ts) the review saw. */
   dirtySha256: string;
   completion: DevReviewCompletion;
   findings: DevFinding[];
@@ -391,37 +391,6 @@ export function devLedgerPath(repoRoot: string, branch: string): string {
   return resolve(repoRoot, '.cq', 'dev', `${encodeBranchForFilename(branch)}.json`);
 }
 
-// --- Library-level input boundary ------------------------------------------
-
-/**
- * The FIRST boundary every dev-side op checks: the input itself must be an
- * object before any field read — a null/undefined/non-object from an
- * untyped or JavaScript SDK caller maps to the `failed` taxonomy, never a
- * TypeError outside it.
- */
-export function objectInputFault(input: unknown): string | null {
-  if (input === null || typeof input !== 'object') {
-    return 'input must be an object';
-  }
-  return null;
-}
-
-/**
- * The repoRoot boundary every dev-side op checks BEFORE any effect call
- * (the assemblePrs inputFaultOf pattern): a schema-bypassing SDK caller
- * gets a `failed` result, never a process spawn against an undefined
- * working directory.
- */
-export function repoRootFault(value: unknown): string | null {
-  if (typeof value !== 'string' || value === '') {
-    return 'repoRoot must be a non-empty string';
-  }
-  if (/[\p{Cc}]/u.test(value)) {
-    return 'repoRoot must not contain control characters — the subprocess effects run with it as the working directory';
-  }
-  return null;
-}
-
 // --- The store --------------------------------------------------------------
 
 /** The read/write/lock surface the dev ops use; `mutate` serializes RMW spans. */
@@ -549,27 +518,23 @@ export interface AssembleReadinessInput {
 /**
  * The dev.ready / pr.open shared core: assemble the author-tier readiness
  * record from the ledger, or name every gap. The requirements (strategy §3,
- * dev.ready row):
- *   - ≥ 2 distinct TERMINAL FULL-SCOPE review cycles at the pinned base and
- *     target, with the latest at the CURRENT identity (base,
- *     head and dirty-diff sha256 all three — any mismatch is a stale
- *     identity; a blocked or uncommitted-scope cycle never counts);
- *   - zero OPEN blocking findings across EVERY cycle (including blocked attempts) in
- *     the ledger: a blocking-severity finding is open until a fixed/rejected
- *     disposition names it. A newer cycle re-reviews the CURRENT state — it
- *     does not adjudicate the past, so an older cycle's finding does not
- *     vanish because the latest cycle reports none; it stays open until the
- *     author records its disposition (the mechanism: dispositions are keyed
- *     by findingId, whose cycleId prefix binds it to the cycle that
- *     reported it; a `fixed` disposition on a superseded-identity finding
- *     records the head where the fix landed). A deferred disposition does
- *     NOT close one — deferral is a recorded decision for a later task;
- *   - the LATEST check record in the ledger (by append order, whatever its
- *     verdict) must be GREEN and at the current identity — a green check
- *     followed by a red one at the same identity is NOT ready (the red run
- *     is the current verdict), and no filtering may skip past it;
+ * dev.ready row; ONE completed CodeRabbit cycle per ruling D-J, §6 "Now"):
+ *   - the latest TERMINAL FULL-SCOPE review cycle is at the CURRENT identity
+ *     and target (base, head and dirty identity all three — any mismatch is
+ *     a stale identity; a blocked or uncommitted-scope cycle never counts);
+ *     a stacked branch pins its stack parent by naming it as the target;
+ *   - the latest review ATTEMPT was not blocked (a blocker is reported, never
+ *     papered over by an older terminal cycle);
+ *   - zero OPEN blocking findings across EVERY cycle in the ledger, blocked
+ *     attempts included: a blocking-severity finding is open until a
+ *     fixed/rejected disposition names it. A newer cycle re-reviews the
+ *     current state — it does not adjudicate the past. A deferred
+ *     disposition does NOT close one;
+ *   - the LATEST check record (whatever its verdict — a red run after a
+ *     green one is the current verdict) is GREEN at the current identity
+ *     and target;
  *   - no untracked non-ignored files (their content is outside every
- *     recorded review scope and outside the dirty-diff hash).
+ *     recorded review scope).
  */
 export function assembleReadiness(
   input: AssembleReadinessInput,
@@ -585,17 +550,6 @@ export function assembleReadiness(
     (record): record is DevCycleRecord =>
       record.kind === 'cycle' && record.scope === 'full' && record.completion.kind === 'terminal',
   );
-  const qualifyingIds = new Set(
-    terminalCycles
-      .filter((entry) => entry.target === input.target && entry.base === identity.base)
-      .map((entry) => entry.cycleId),
-  );
-  if (qualifyingIds.size < 2) {
-    gaps.push({
-      field: 'review-cycle-count',
-      detail: `two distinct terminal full-scope review cycles at the pinned base and target are required; found ${String(qualifyingIds.size)}`,
-    });
-  }
   const cycle = terminalCycles[terminalCycles.length - 1];
   if (cycle === undefined) {
     gaps.push({
@@ -623,11 +577,10 @@ export function assembleReadiness(
         detail: `review ${cycle.cycleId} is stale: ${stale.join('; ')}`,
       });
     }
-    // EVERY cycle's blocking findings (including blocked attempts) — ANY scope — must be closed
-    // by a disposition: the readiness ANCHOR must be full-scope, but an
-    // uncommitted-scope cycle's critical finding is just as open. The
-    // latest cycle does not adjudicate the past (the mechanism is in the
-    // doc comment above).
+    // EVERY cycle's blocking findings — any scope, blocked attempts
+    // included — must be closed by a disposition: the readiness anchor must
+    // be full-scope, but an uncommitted-scope cycle's critical finding is
+    // just as open.
     const blocking = new Set(
       (input.blockingSeverities ?? DEFAULT_BLOCKING_SEVERITIES).map((s) => s.toLowerCase()),
     );

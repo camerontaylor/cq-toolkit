@@ -52,10 +52,19 @@ describe('dev family registry entries', () => {
     expect(schema.safeParse({ repoRoot: '/repo', base: 'origin/merge-queue' }).success).toBe(false);
   });
 
-  test('dev.check: the knip mode is auto or force only', () => {
+  test('dev.check: a range is <ref>..<ref>, never option-shaped', () => {
     const schema = entryByName('dev.check').inputSchema;
-    expect(schema.safeParse({ repoRoot: '/repo', knip: 'force' }).success).toBe(true);
-    expect(schema.safeParse({ repoRoot: '/repo', knip: 'skip' }).success).toBe(false);
+    expect(schema.safeParse({ repoRoot: '/repo', range: 'origin/main..HEAD' }).success).toBe(true);
+    for (const range of ['--output=x..HEAD', 'HEAD', 'a.. b', '..HEAD']) {
+      expect(schema.safeParse({ repoRoot: '/repo', range }).success).toBe(false);
+    }
+  });
+
+  test('dev.disposition: a blank reason is refused at the schema', () => {
+    const schema = entryByName('dev.disposition').inputSchema;
+    expect(schema.safeParse({ ...minimalInput('dev.disposition'), why: '   ' }).success).toBe(
+      false,
+    );
   });
 
   test('dev.disposition: the action verb set is exactly fixed|rejected|deferred', () => {

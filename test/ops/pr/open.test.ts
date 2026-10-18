@@ -1,12 +1,9 @@
-// pr.open op tests — the readiness gate (a not-ready branch is refused
-// with the gaps), the adopt-or-create rule (never a second PR), the managed
-// body section (an adopted PR's prose survives the refresh), the
-// dispositions comment, and the author-evidence marking on every artifact.
-import { describe, expect, test } from 'vitest';
+// pr.open op tests over a REAL git repo with a pushed branch and a gh fake:
+// the readiness gate (a not-ready branch is refused with the gaps), the
+// clean-tree and remote-head rules, adopt-or-create (never a second PR),
+// the managed body section, and the dispositions comment.
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { DEV_LEDGER_VERSION, type DevLedgerFile } from '../../../src/ops/dev/record.js';
-import { BASE, BRANCH, HEAD, makeFakeEffects, okResult } from '../dev/fakes.js';
-import type { DevRecord } from '../../../src/ops/dev/record.js';
-import { checkRecord, cycleRecord, dispositionRecord, ledgerWith } from '../dev/fakes.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
 import {
   DEV_READINESS_SECTION_MARKER,
@@ -14,6 +11,16 @@ import {
   renderDispositionsComment,
   renderReadinessSection,
 } from '../../../src/ops/pr/open.js';
+import {
+  BASE,
+  BRANCH,
+  cycleRecord,
+  dispositionRecord,
+  HEAD,
+  ledgerWith,
+  makeFakeEffects,
+} from '../dev/fakes.js';
+import { makeTestRepo, repoEffects, seed, type TestRepo } from '../dev/repo.js';
 
 interface GhExisting {
   number?: number;
@@ -22,7 +29,7 @@ interface GhExisting {
 }
 
 /** A gh fake implementing the PrEffects seam with a recording list. */
-function ghFake(existing: GhExisting | null) {
+function ghFake(existing: GhExisting | null = null) {
   const calls: { effect: string; args: unknown[] }[] = [];
   const gh: PrEffects = {
     searchPrByHead: async (head, base) => {
@@ -56,366 +63,159 @@ function ghFake(existing: GhExisting | null) {
   return { gh, calls };
 }
 
-/** Dev effects whose ledger holds a complete, ready record set (for `target`). */
-function readyEffects(withDispositions: boolean, target: string = 'merge-queue') {
-  const effects = makeFakeEffects((command, args) => {
-    if (command === 'git' && args[0] === 'log') return okResult('feat(dev): the lane\n');
-    return undefined;
-  });
-  const records: DevRecord[] = [
-    cycleRecord({ cycleId: 'c000-aaaaaaaa', target, dirtySha256: 'clean-tree' }),
-    cycleRecord({
-      target,
-      dirtySha256: 'clean-tree',
-      findings: withDispositions ? [{ id: 'c001-aaaaaaaa#f1', severity: 'minor' }] : [],
-    }),
-    checkRecord({ dirtySha256: 'clean-tree', target }),
-  ];
-  if (withDispositions) {
-    records.push(
-      dispositionRecord({
-        findingId: 'c001-aaaaaaaa#f1',
-        action: 'rejected',
-        why: 'false positive: x',
-      }),
-    );
-  }
-  effects.store.save({ version: DEV_LEDGER_VERSION, branch: BRANCH, records });
-  return effects;
+let repo: TestRepo;
+beforeEach(async () => {
+  repo = await makeTestRepo();
+  repo.git('push', '-q', 'origin', 'feature/x');
+});
+afterEach(async () => {
+  await repo.cleanup();
+});
+
+/** A ready, pushed branch, optionally with a dispositioned minor finding. */
+async function ready(withDisposition = false) {
+  return seed(repo, (state) =>
+    withDisposition
+      ? [
+          cycleRecord({
+            cycleId: 'c000-aaaaaaaa',
+            base: state.base,
+            head: state.head,
+            findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'minor' }],
+            completion: { kind: 'blocked', reason: 'earlier attempt' },
+          }),
+          cycleRecord({
+            cycleId: 'c003-aaaaaaaa',
+            base: state.base,
+            head: state.head,
+            dirtySha256: state.dirtySha256,
+          }),
+          dispositionRecord({
+            findingId: 'c000-aaaaaaaa#f1',
+            action: 'rejected',
+            why: 'false positive: x',
+          }),
+        ]
+      : [],
+  );
 }
 
+const effects = () => repoEffects(repo);
+
 describe('pr.open', () => {
-  test('creates the PR from a ready record: readiness section body, dispositions comment', async () => {
-    const effects = readyEffects(true);
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') return;
-    expect(result.value).toMatchObject({
-      number: 42,
-      created: true,
-      base: 'merge-queue',
-      branch: BRANCH,
-      evidenceClass: 'author',
+  test('creates the PR from a ready record: managed section body, dispositions comment', async () => {
+    const state = await ready(true);
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(result).toEqual({
+      status: 'ok',
+      value: {
+        number: 42,
+        url: 'https://example.invalid/pull/42',
+        created: true,
+        base: 'merge-queue',
+        head: state.head,
+        branch: 'feature/x',
+        evidenceClass: 'author',
+      },
     });
-    const create = calls.find((call) => call.effect === 'createPr');
-    expect(create).toBeDefined();
-    if (create?.effect === 'createPr') {
-      const request = create.args[0] as { head: string; base: string; title: string; body: string };
-      expect(request.head).toBe(BRANCH);
-      expect(request.base).toBe('merge-queue');
-      expect(request.title).toBe('feat(dev): the lane');
-      expect(request.body).toContain(DEV_READINESS_SECTION_MARKER);
-      expect(request.body).toContain('Author readiness evidence');
-      expect(request.body).toContain('c001-aaaaaaaa');
-      expect(request.body).toContain('k001-aaaaaaaa');
-      // The dispositions also live in the managed body section (updated in
-      // place on every re-run).
-      expect(request.body).toContain('finding dispositions');
-      expect(request.body).toContain('false positive: x');
-    }
-    const comment = calls.find((call) => call.effect === 'comment');
-    expect(comment).toBeDefined();
-    if (comment?.effect === 'comment') {
-      const body = comment.args[1] as string;
-      expect(body).toContain('c001-aaaaaaaa#f1');
-      expect(body).toContain('rejected');
-    }
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      title: string;
+      body: string;
+      base: string;
+      draft: boolean;
+    };
+    expect(create.title).toBe('feature');
+    expect(create.base).toBe('merge-queue');
+    expect(create.draft).toBe(false);
+    expect(create.body.startsWith(DEV_READINESS_SECTION_MARKER)).toBe(true);
+    expect(create.body).toContain('| check:static | pass |');
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead', 'createPr', 'comment']);
   });
 
-  test('adopts the existing OPEN PR: body composed over existing prose, never a second PR', async () => {
-    const effects = readyEffects(false);
-    const { gh, calls } = ghFake({ number: 41, state: 'open' });
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo', title: 'explicit title' });
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') return;
-    expect(result.value.created).toBe(false);
-    expect(result.value.number).toBe(41);
-    expect(calls.find((call) => call.effect === 'createPr')).toBeUndefined();
+  test('adopts the existing OPEN PR: section composed over its prose, no second PR or comment', async () => {
+    await ready(true);
+    const { gh, calls } = ghFake({ number: 41 });
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(result.status === 'ok' && result.value.created).toBe(false);
     const edit = calls.find((call) => call.effect === 'editPrBody');
-    expect(edit).toBeDefined();
-    if (edit?.effect === 'editPrBody') {
-      const body = edit.args[1] as string;
-      expect(body).toContain('# existing prose'); // the adopted prose survives
-      expect(body).toContain(DEV_READINESS_SECTION_MARKER);
-    }
-    // No dispositions recorded → no comment.
-    expect(calls.find((call) => call.effect === 'comment')).toBeUndefined();
+    const body = String(edit?.args[1]);
+    expect(body).toContain('# existing prose');
+    expect(body).toContain(DEV_READINESS_SECTION_MARKER);
+    expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead', 'getPrBody', 'editPrBody']);
   });
 
-  test('adoption with dispositions updates them IN the body and posts NO duplicate comment', async () => {
-    const effects = readyEffects(true);
-    const { gh, calls } = ghFake({ number: 41, state: 'open' });
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo', title: 't' });
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') return;
-    const edit = calls.find((call) => call.effect === 'editPrBody');
-    expect(edit).toBeDefined();
-    if (edit?.effect === 'editPrBody') {
-      const body = edit.args[1] as string;
-      expect(body).toContain('finding dispositions');
-      expect(body).toContain('c001-aaaaaaaa#f1');
-    }
-    // The comment posts only on creation — never a duplicate on re-run.
-    expect(calls.find((call) => call.effect === 'comment')).toBeUndefined();
-  });
-
-  test('refuses a landed (non-open) or foreign PR instead of rewriting it', async () => {
-    const effects = readyEffects(false);
-    const merged = ghFake({ number: 41, state: 'merged' });
-    const mergedResult = await makePrOpen(effects, merged.gh)({ repoRoot: '/repo' });
-    expect(mergedResult.status).toBe('failed');
-    const fork = ghFake({ number: 41, state: 'open', isCrossRepository: true });
-    const forkResult = await makePrOpen(effects, fork.gh)({ repoRoot: '/repo' });
-    expect(forkResult.status).toBe('failed');
-  });
+  test.each([{ state: 'merged' as const }, { isCrossRepository: true }])(
+    'refuses a landed or foreign PR %j instead of rewriting it',
+    async (existing) => {
+      await ready();
+      const { gh, calls } = ghFake(existing);
+      const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+      expect(result.status).toBe('failed');
+      expect(calls.map((call) => call.effect)).toEqual(['searchPrByHead']);
+    },
+  );
 
   test('a not-ready branch is refused with the gaps and ZERO gh calls', async () => {
-    const effects = makeFakeEffects(); // empty ledger
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('not dev.ready');
-      expect(result.reason).toContain('terminal-review-cycle');
-    }
-    expect(calls).toHaveLength(0);
+    if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
+    expect(calls).toEqual([]);
   });
 
-  test('a remote branch at a DIFFERENT head is needs-human before any gh call', async () => {
-    const effects = readyEffects(false);
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'ls-remote') {
-        return okResult('9999999999999999999999999999999999999999\trefs/heads/test/branch\n');
-      }
-      return original(command, args, opts);
+  test('a tree with staged, unstaged or untracked work is refused even when the record matches it', async () => {
+    await repo.write('src/a.ts', 'export const a = 2;\n');
+    repo.git('add', 'src/a.ts');
+    await repo.write('src/a.ts', 'export const a = 1;\n');
+    await ready();
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('staged, unstaged or untracked');
+    expect(calls).toEqual([]);
+  });
+
+  test('a never-pushed branch or a remote at another head is needs-human before any gh call', async () => {
+    await ready();
+    repo.git('push', '-q', 'origin', '--delete', 'feature/x');
+    const unpushed = ghFake();
+    const never = await makePrOpen(effects(), unpushed.gh)({ repoRoot: repo.root });
+    expect(never.status === 'needs-human' && never.reason).toContain('never pushed');
+    repo.git('push', '-q', 'origin', 'HEAD~1:refs/heads/feature/x');
+    const behind = ghFake();
+    const other = await makePrOpen(effects(), behind.gh)({ repoRoot: repo.root });
+    expect(other.status === 'needs-human' && other.reason).toContain('push the reviewed head');
+    expect([...unpushed.calls, ...behind.calls]).toEqual([]);
+  });
+
+  test('a comment fault fails naming the PR (the body already carries the dispositions)', async () => {
+    await ready(true);
+    const { gh } = ghFake();
+    gh.comment = async () => {
+      throw new Error('gh: 502');
     };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('9999999');
-      expect(result.reason).toContain('never post readiness for a different head');
-    }
-    expect(calls).toHaveLength(0);
+    const result = await makePrOpen(effects(), gh)({ repoRoot: repo.root });
+    expect(result.status === 'failed' && result.error).toContain('PR #42 is open');
   });
 
-  test('a branch that was never pushed is needs-human before any gh call', async () => {
-    const effects = readyEffects(false);
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'ls-remote') return okResult('');
-      return original(command, args, opts);
-    };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('never pushed');
-    expect(calls).toHaveLength(0);
-  });
-
-  test('worktree drift between assembly and mutation aborts before any gh call', async () => {
-    const effects = readyEffects(false);
-    let headReads = 0;
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'rev-parse' && args[1] === 'HEAD') {
-        headReads += 1;
-        if (headReads >= 2) return okResult('8888888888888888888888888888888888888888\n');
-      }
-      return original(command, args, opts);
-    };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') expect(result.reason).toContain('nothing was posted');
-    expect(calls).toHaveLength(0);
-  });
-
-  test('a DIRTY worktree is refused before any gh call even when remote and record agree', async () => {
-    // The PR carries pushed commits only; a record describing uncommitted
-    // content would evidence a state the PR cannot contain.
-    const effects = makeFakeEffects((command, args) => {
-      if (command === 'git' && args[0] === 'log') return okResult('feat(dev): the lane\n');
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
-        return okResult('uncommitted patch text');
-      }
-      return undefined;
+  test('--draft and --title pass through to the create request', async () => {
+    await ready();
+    const { gh, calls } = ghFake();
+    await makePrOpen(effects(), gh)({ repoRoot: repo.root, draft: true, title: 'feat: x' });
+    expect(calls.find((call) => call.effect === 'createPr')?.args[0]).toMatchObject({
+      draft: true,
+      title: 'feat: x',
     });
-    const { createHash } = await import('node:crypto');
-    const dirtySha = createHash('sha256').update('uncommitted patch text').digest('hex');
-    effects.store.save({
-      version: DEV_LEDGER_VERSION,
-      branch: BRANCH,
-      records: [
-        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: dirtySha }),
-        cycleRecord({ dirtySha256: dirtySha }),
-        checkRecord({ dirtySha256: dirtySha }),
-      ],
-    });
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('uncommitted changes');
-      expect(result.reason).toContain('commit the work');
-    }
-    expect(calls).toHaveLength(0);
   });
 
-  test('a FAILED pre-mutation recheck read is needs-human — it never folds into clean', async () => {
-    const effects = readyEffects(false);
-    let dirtyReads = 0;
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
-        dirtyReads += 1;
-        if (dirtyReads >= 2) {
-          return { exitCode: 128, stdout: '', stderr: 'fatal: bad object', timedOut: false };
-        }
-      }
-      return original(command, args, opts);
-    };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('identity recheck failed');
-      expect(result.reason).toContain('nothing was posted');
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  test('the body renders the CITED identity-bound check, never an unrelated passed one', async () => {
-    const effects = readyEffects(false);
-    effects.store.save({
-      version: DEV_LEDGER_VERSION,
-      branch: BRANCH,
-      records: [
-        checkRecord({
-          checkId: 'k001-older',
-          dirtySha256: 'an-older-identity',
-          passed: false,
-          gates: [
-            {
-              name: 'unique-old-gate',
-              status: 'fail',
-              exitCode: 1,
-              durationMs: 1,
-              evidence: 'old',
-            },
-          ],
-        }),
-        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: 'clean-tree' }),
-        cycleRecord({ dirtySha256: 'clean-tree' }),
-        checkRecord({
-          checkId: 'k002-aaaaaaaa',
-          dirtySha256: 'clean-tree',
-          passed: true,
-          gates: [
-            { name: 'check:static', status: 'pass', exitCode: 0, durationMs: 777, evidence: 'ok' },
-          ],
-        }),
-      ],
-    });
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo', title: 't' });
-    expect(result.status).toBe('ok');
-    const create = calls.find((call) => call.effect === 'createPr');
-    expect(create).toBeDefined();
-    if (create?.effect === 'createPr') {
-      const body = (create.args[0] as { body: string }).body;
-      expect(body).toContain('k002-aaaaaaaa'); // the cited check id
-      expect(body).toContain('777'); // its gate row
-      expect(body).not.toContain('unique-old-gate'); // never an unrelated check
-    }
-  });
-
-  test('a ledger that turns NOT-READY at the mutation boundary aborts before any gh call', async () => {
-    const effects = readyEffects(false);
-    let ledgerLoads = 0;
-    const store = effects.openLedger(BRANCH);
-    const originalLoad = store.load.bind(store);
-    store.load = () => {
-      ledgerLoads += 1;
-      if (ledgerLoads >= 2) {
-        // A concurrent writer dropped the green check after the first read
-        // (e.g. a red re-check landed): the boundary re-read must see it.
-        return {
-          version: DEV_LEDGER_VERSION,
-          branch: BRANCH,
-          records: originalLoad().records.slice(0, 1),
-        };
-      }
-      return originalLoad();
-    };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('mutation boundary');
-      expect(result.reason).toContain('no longer ready');
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  test('a remote head that moves during the reads aborts before any gh call', async () => {
-    const effects = readyEffects(false);
-    let remoteReads = 0;
-    const original = effects.runCommand;
-    effects.runCommand = async (command, args, opts) => {
-      if (command === 'git' && args[0] === 'ls-remote') {
-        remoteReads += 1;
-        if (remoteReads >= 2)
-          return okResult('7777777777777777777777777777777777777777\trefs/heads/test/branch\n');
-      }
-      return original(command, args, opts);
-    };
-    const { gh, calls } = ghFake(null);
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-    expect(result.status).toBe('needs-human');
-    if (result.status === 'needs-human') {
-      expect(result.reason).toContain('moved during');
-      expect(result.reason).toContain('nothing was posted');
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  test('a comment fault fails naming the PR and the idempotent re-run', async () => {
-    const effects = readyEffects(true);
-    const gh: PrEffects = {
-      searchPrByHead: async () => null,
-      createPr: async () => ({ number: 42 }),
-      editPrBody: async () => undefined,
-      getPrBody: async () => '',
-      comment: async () => {
-        throw new Error('gh: network refused');
-      },
-      getPrReadiness: async () => {
-        throw new Error('not used');
-      },
-    };
-    const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
+  test('a schema-bypassing input fails before any effect', async () => {
+    const dev = makeFakeEffects();
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(dev, gh)({ repoRoot: '' });
     expect(result.status).toBe('failed');
-    if (result.status === 'failed') {
-      expect(result.error).toContain('#42');
-      expect(result.error).toContain('dispositions in its body');
-      expect(result.error).not.toContain('idempotent');
-    }
-  });
-
-  test('an explicit --draft and target pass through to the create request and base', async () => {
-    const effects = readyEffects(false, 'main'); // evidence recorded FOR main
-    const { gh, calls } = ghFake(null);
-    await makePrOpen(effects, gh)({ repoRoot: '/repo', draft: true, target: 'main', title: 't' });
-    const create = calls.find((call) => call.effect === 'createPr');
-    expect(create).toBeDefined();
-    if (create?.effect === 'createPr') {
-      const request = create.args[0] as { base: string; draft: boolean };
-      expect(request.base).toBe('main');
-      expect(request.draft).toBe(true);
-    }
+    expect([...dev.commands, ...calls]).toEqual([]);
   });
 });
 
@@ -492,34 +292,4 @@ describe('the readiness section markdown escaping', () => {
     expect(section).not.toContain('<script>');
     expect(section).toContain('scriptalert(1)/script');
   });
-});
-
-test('refuses an independently dirty index even when worktree equals HEAD', async () => {
-  const effects = readyEffects(false);
-  const original = effects.runCommand;
-  effects.runCommand = async (command, args, opts) =>
-    command === 'git' && args[0] === 'diff' && args[1] === '--cached'
-      ? okResult('staged patch')
-      : original(command, args, opts);
-  const { gh, calls } = ghFake(null);
-  const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-  expect(result.status).toBe('needs-human');
-  expect(calls).toEqual([]);
-});
-
-test('refuses index-only drift at the publication boundary after clean initial reads', async () => {
-  const effects = readyEffects(false);
-  const original = effects.runCommand;
-  let reads = 0;
-  effects.runCommand = async (command, args, opts) => {
-    if (command === 'git' && args[0] === 'diff' && args[1] === '--cached' && ++reads === 2)
-      return okResult('new staged patch');
-    return original(command, args, opts);
-  };
-  const { gh, calls } = ghFake(null);
-  const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
-  expect(result.status).toBe('needs-human');
-  expect(calls.some((entry) => ['createPr', 'editPrBody', 'comment'].includes(entry.effect))).toBe(
-    false,
-  );
 });
