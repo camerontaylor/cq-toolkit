@@ -175,6 +175,13 @@ class TransportTest(unittest.TestCase):
                 self.assertEqual(q["starts"], [])
 
 
+    def test_runner_errors_are_one_sanitized_refusal(self):
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", "from test_author_transport import failing_fixture_main; failing_fixture_main()"],
+            cwd=Path(__file__).resolve().parent, input=request(), capture_output=True, timeout=20)
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertEqual(result.stderr, b"author-transport: request refused; no permission\n")
+
     def test_deadline_kills_the_runner_scan_and_releases_the_lock(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -218,3 +225,19 @@ def deadline_fixture_main():
     sys.argv = [transport.__file__]
     with mock.patch.multiple(crq, STATE=state, LOCK=state / "tick.lock"):
         raise SystemExit(transport.main())
+
+
+def failing_fixture_main():
+    """Production entry point whose runner fails with a host-path-bearing error."""
+    backend = Backend()
+
+    def broken(fn):
+        raise RuntimeError("git show … exit 128: fatal: /srv/private/clone missing policy")
+    backend.with_lock = broken
+    sys.modules["crq"] = backend
+    os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
+                      CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
+                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
+                      CRQ_AUTHOR_TARGET=BINDING["target"])
+    sys.argv = [transport.__file__]
+    raise SystemExit(transport.main())
