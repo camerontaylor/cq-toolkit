@@ -18,6 +18,13 @@
 // auditable before it has any effect. The APPROVED-review record form is
 // W1.10's.
 //
+// NEVER RETROACTIVE: an armed record must ALSO have been applied strictly
+// after the attestation's `attestedAt`, the durable activation instant the
+// owner recorded on the trust ref (never the attestation commit's timestamp,
+// which is author-supplied). A label seeded while interim owner credentials
+// were still live therefore cannot become honoured when C3 lands; it is
+// `invalid`, and the owner re-applies it.
+//
 // FAIL-CLOSED AND PURE: a malformed current application is `invalid`; nothing
 // here throws, performs I/O, or reads an ambient clock.
 import { z } from 'zod';
@@ -71,10 +78,13 @@ const C3AttestationSchema = z
   })
   .strict();
 
-/** Whether attestation text arms D-G.4 records; `reason` says why not. */
+/**
+ * Whether attestation text arms D-G.4 records, and from which instant
+ * (`attestedAt`, canonical UTC); `reason` says why not.
+ */
 export function parseC3Attestation(
   text: string,
-): { armed: true } | { armed: false; reason: string } {
+): { armed: true; attestedAt: string } | { armed: false; reason: string } {
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -82,7 +92,7 @@ export function parseC3Attestation(
     return { armed: false, reason: 'not valid JSON' };
   }
   const parsed = C3AttestationSchema.safeParse(data);
-  if (parsed.success) return { armed: true };
+  if (parsed.success) return { armed: true, attestedAt: parsed.data.attestedAt };
   const issues = parsed.error.issues
     .map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
     .join('; ');
@@ -162,14 +172,18 @@ export function headObservationEpochInHistory(
  * issue-events API objects, in API (chronological) order. The current
  * application is the last `labeled` event with no later `unlabeled`; none is
  * `absent`. Every failing check adds a reason and makes the record `invalid`;
- * a record passing all checks is `honoured` when `attested`, else `dormant`.
+ * a record passing all checks is `honoured` when `attestedAt` is set (the C3
+ * attestation is armed at the trust ref), else `dormant`. An armed record
+ * applied at or before `attestedAt` is `invalid`: the attestation never
+ * blesses a label retroactively.
  */
 export function evaluateOverrideLabel(input: {
   events: readonly unknown[];
   ownerId: number;
   subject: string;
   headObservedAt: string | undefined;
-  attested: boolean;
+  /** The armed C3 attestation's `attestedAt`, or undefined when not armed. */
+  attestedAt: string | undefined;
 }): OverrideEvaluation {
   let current: unknown;
   for (const raw of input.events) {
@@ -221,9 +235,19 @@ export function evaluateOverrideLabel(input: {
       );
     }
   }
+  if (input.attestedAt !== undefined) {
+    const attestedMs = Date.parse(input.attestedAt);
+    if (!Number.isFinite(attestedMs)) {
+      reasons.push(`C3 attestedAt '${clean(input.attestedAt)}' is not a timestamp`);
+    } else if (!(Date.parse(createdAt) > attestedMs)) {
+      reasons.push(
+        `label created_at ${createdAt} is not after the C3 attestation attestedAt ${clean(input.attestedAt)}`,
+      );
+    }
+  }
 
   if (reasons.length > 0) return { status: 'invalid', reasons, event };
-  return { status: input.attested ? 'honoured' : 'dormant', reasons, event };
+  return { status: input.attestedAt !== undefined ? 'honoured' : 'dormant', reasons, event };
 }
 
 /** Run-report lines for the override record; always emitted, whatever the status. */

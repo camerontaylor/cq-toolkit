@@ -13,7 +13,8 @@
 // PURE AND FAIL-CLOSED: callers read the label events, the attestation at
 // the trust ref and the settle-ledger epoch, and pass them in as data.
 // Nothing here throws or performs I/O; every doubt leaves a path
-// unauthorized, and a record is honoured only when the C3 attestation parsed.
+// unauthorized, and a record is honoured only when the C3 attestation parsed
+// and the label was applied after its `attestedAt`.
 import {
   C3_ATTESTATION_PATH,
   evaluateOverrideLabel,
@@ -79,7 +80,7 @@ export function bindD11Authorization(input: {
   prs: readonly D11PrEvidence[];
 }): D11Authorization {
   const report: string[] = [];
-  let attested = false;
+  let attestedAt: string | undefined;
   if (input.attestation.state === 'absent') {
     report.push(`attestation: ${C3_ATTESTATION_PATH} absent at the trust ref — records dormant`);
   } else if (input.attestation.state === 'unreadable') {
@@ -88,13 +89,14 @@ export function bindD11Authorization(input: {
     );
   } else {
     const check = parseC3Attestation(input.attestation.text);
-    attested = check.armed;
+    if (check.armed) attestedAt = check.attestedAt;
     report.push(
       check.armed
-        ? `attestation: ${C3_ATTESTATION_PATH} valid at the trust ref — records honoured`
+        ? `attestation: ${C3_ATTESTATION_PATH} valid at the trust ref — records honoured when applied after attestedAt ${check.attestedAt}`
         : `attestation: ${C3_ATTESTATION_PATH} present but invalid (${check.reason}) — records dormant`,
     );
   }
+  const attested = attestedAt !== undefined;
 
   const count = (key: (e: D11PrEvidence) => string): Map<string, number> => {
     const seen = new Map<string, number>();
@@ -121,7 +123,7 @@ export function bindD11Authorization(input: {
         ownerId: input.ownerId,
         subject: e.head,
         headObservedAt: e.headObservedAt,
-        attested,
+        attestedAt,
       });
     }
     report.push(`override PR #${String(e.pr)} (merge ${e.merge}, head ${e.head}):`);

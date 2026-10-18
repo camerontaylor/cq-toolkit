@@ -189,7 +189,9 @@ the committed bytes only; the pipe crosses ssh so the bytes that land on
 queue-host are exactly the pinned ones. Hash before and after install
 (`sha256sum`), and record the hashes + PIN in the S2 record doc; on any
 redeploy, pin a NEW commit and repeat. The unit's `ExecStart` points at the
-installed path — never a repo path.
+installed path — never a repo path. `DEPLOY.md` is the authoritative
+redeploy procedure; this block records the original S2 install, with the
+sibling `record_ids.py` the daemon loads at start.
 
 ```sh
 # ON worker-host — push the pinned tree to queue-host:
@@ -199,12 +201,14 @@ git -C "$CQ" archive "$PIN" signer/ | ssh queue-host 'rm -rf /tmp/crq-install &&
 
 # ON queue-host — hash, install, verify (root):
 T=/tmp/crq-install/signer
-sha256sum "$T"/crq-signer.py "$T"/crq-override "$T"/crq-signer.service "$T"/spool-shell  # record BEFORE installing
+sha256sum "$T"/crq-signer.py "$T"/record_ids.py "$T"/crq-override "$T"/crq-signer.service \
+          "$T"/spool-shell                                                               # record BEFORE installing
 pacman -Qo /usr/bin/python3                                                              # interpreter is pacman-owned
 install -o root -g root -m 755 -d /opt/cq-reviewer/bin
 install -o root -g root -m 755 "$T/crq-signer.py" "$T/crq-override" "$T/spool-shell" /opt/cq-reviewer/
+install -o root -g root -m 644 "$T/record_ids.py" /opt/cq-reviewer/                    # imported at daemon start
 install -o root -g root -m 755 "$T/crq-signer.service" /etc/systemd/system/crq-signer.service
-sha256sum /opt/cq-reviewer/crq-signer.py /opt/cq-reviewer/crq-override \
+sha256sum /opt/cq-reviewer/crq-signer.py /opt/cq-reviewer/record_ids.py /opt/cq-reviewer/crq-override \
           /opt/cq-reviewer/spool-shell /etc/systemd/system/crq-signer.service           # record AFTER
 rm -rf /tmp/crq-install
 ```

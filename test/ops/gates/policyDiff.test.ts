@@ -208,6 +208,8 @@ let root: string;
 let repo: string;
 let trust: string;
 let attestedTrust: string;
+/** C3 attested AFTER the override tests' label: the #338 P1 no-retroactive case. */
+let lateAttestedTrust: string;
 let placeholderTrust: string;
 let eventsDir: string;
 let savedPath: string | undefined;
@@ -441,12 +443,18 @@ beforeAll(() => {
   const attestations = importCommits(repo, {
     attested: {
       files: {
+        'policy/attestations/c3.json': `${JSON.stringify({ schemaVersion: 1, attests: 'C3', attestedAt: '2026-09-20T00:00:00Z' })}\n`,
+      },
+    },
+    'late-attestation': {
+      files: {
         'policy/attestations/c3.json': `${JSON.stringify({ schemaVersion: 1, attests: 'C3', attestedAt: '2026-09-26T00:00:00Z' })}\n`,
       },
     },
     'placeholder-attestation': { files: { 'policy/attestations/c3.json': '{}\n' } },
   });
   attestedTrust = attestations['attested']!;
+  lateAttestedTrust = attestations['late-attestation']!;
   placeholderTrust = attestations['placeholder-attestation']!;
 }, HOOK_MS);
 
@@ -794,7 +802,7 @@ describe('policyDiff: workflows', SLOW, () => {
         text: JSON.stringify({
           schemaVersion: 1,
           attests: 'C3',
-          attestedAt: '2026-10-01T00:00:00Z',
+          attestedAt: '2026-09-20T00:00:00Z',
         }),
       },
       prs: [
@@ -1514,6 +1522,19 @@ describe('policyDiff: the override record', SLOW, () => {
     );
   });
 
+  test('#338 P1: a label applied before C3 attestedAt is invalid, never honoured', async () => {
+    const out = await run(
+      subject,
+      'human',
+      withRecord(events('valid.json', [labelEvent()]), lateAttestedTrust),
+    );
+    expect(out.override.status).toBe('invalid');
+    expect(out.verdict).toBe('needs-human');
+    expect(out.report).toContain(
+      '  reason: label created_at 2026-09-20T11:00:00Z is not after the C3 attestation attestedAt 2026-09-26T00:00:00Z',
+    );
+  });
+
   test('a placeholder attestation file does not arm records (F5): dormant, noted', async () => {
     const out = await run(
       subject,
@@ -1599,7 +1620,7 @@ describe('policyDiff: the override record', SLOW, () => {
   const C3 = JSON.stringify({
     schemaVersion: 1,
     attests: 'C3',
-    attestedAt: '2026-10-01T00:00:00Z',
+    attestedAt: '2026-09-20T00:00:00Z',
   });
   const authorization = (
     over: { paths?: string[]; attested?: boolean; events?: unknown[] } = {},
