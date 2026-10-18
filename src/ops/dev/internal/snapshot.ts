@@ -62,10 +62,7 @@ export async function captureSnapshot(
     (await git(['cat-file', '-t', tree])).toString().trim() !== 'tree'
   )
     throw new Error('snapshot requires a commit base and tree');
-  const commit = Buffer.from(
-    `tree ${tree}\nparent ${base}\nauthor cq snapshot <snapshot@localhost> 0 +0000\ncommitter cq snapshot <snapshot@localhost> 0 +0000\n\ncq author snapshot v1\n`,
-  );
-  const head = (await git(['hash-object', '-w', '-t', 'commit', '--stdin'], commit))
+  const head = (await git(['hash-object', '-w', '-t', 'commit', '--stdin'], commitBody(base, tree)))
     .toString()
     .trim();
   const ids = (await git(['rev-list', '--objects', '--no-object-names', head, '^' + base]))
@@ -130,10 +127,15 @@ export async function captureSnapshot(
   return { head, snapshot };
 }
 
-export function snapshotHead(base: string, tree: string): string {
-  const body = Buffer.from(
+/** The deterministic synthetic commit binding `tree` to `base` (ops/tree-snapshots.md). */
+function commitBody(base: string, tree: string): Buffer {
+  return Buffer.from(
     `tree ${tree}\nparent ${base}\nauthor cq snapshot <snapshot@localhost> 0 +0000\ncommitter cq snapshot <snapshot@localhost> 0 +0000\n\ncq author snapshot v1\n`,
   );
+}
+
+export function snapshotHead(base: string, tree: string): string {
+  const body = commitBody(base, tree);
   return createHash('sha1')
     .update(Buffer.from(`commit ${body.length}\0`))
     .update(body)

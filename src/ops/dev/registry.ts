@@ -24,7 +24,9 @@ export const DevReviewInputSchema = z
     'binding must not contain whitespace or controls',
   )
   .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
-  .refine((i) => i.base !== i.head, 'base and head must differ');
+  .refine((i) => i.base !== i.head, 'base and head must differ')
+  // Published as JSON Schema too: a refinement alone is invisible to schema consumers.
+  .meta({ oneOf: [{ required: ['head'] }, { required: ['tree'] }] });
 
 export type DevReviewInput = z.infer<typeof DevReviewInputSchema>;
 
