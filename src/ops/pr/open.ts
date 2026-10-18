@@ -40,7 +40,7 @@ import {
   objectInputFault,
   repoRootFault,
 } from '../dev/record.js';
-import { composeSection } from './assemblePrs.js';
+import { composeSection, mdSafe } from './assemblePrs.js';
 import type { PrEffects } from './assemblePrs.js';
 
 /** Git read wall-clock cap. */
@@ -75,12 +75,20 @@ export interface PrOpenReport {
 /** The managed body section's START marker. */
 export const DEV_READINESS_SECTION_MARKER = '<!-- cq:dev-readiness -->';
 
-/** One-line markdown-safe text (Cc runs become spaces, pipes escaped for tables). */
+/**
+ * One-line markdown-safe text (Cc runs become spaces, pipes escaped for
+ * tables). Markdown DELIMITERS go through the tracker manifest's `mdSafe`:
+ * a backtick or angle bracket in a recorded field (a target ref, a
+ * disposition reason) would otherwise close or rewrite the code spans and
+ * let the managed readiness section carry fabricated markup.
+ */
 function mdLine(text: string): string {
-  return text
-    .split(/[\p{Cc}]/u)
-    .join(' ')
-    .replace(/\|/g, '\\|')
+  return mdSafe(
+    text
+      .split(/[\p{Cc}]/u)
+      .join(' ')
+      .replace(/\|/g, '\\|'),
+  )
     .replace(/\s+/g, ' ')
     .trim();
 }

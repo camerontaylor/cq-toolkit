@@ -670,3 +670,127 @@ describe('dev.review — one op discriminated on action', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Late-thread hardening: exact-byte identity hashing, binary blob scanning,
+// and the post-run drift refusal.
+// ---------------------------------------------------------------------------
+
+describe('dev.review — late-thread hardening', () => {
+  test('the dirty-diff identity hashes the EXACT bytes (no trim)', async () => {
+    const run = (diffText: string) => {
+      const effects = makeFakeEffects((command, args) => {
+        if (command === 'coderabbit')
+          return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
+        if (command === 'git' && args[0] === 'diff' && args[1] === '--binary')
+          return okResult(diffText);
+        return undefined;
+      });
+      return cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
+    };
+    const plain = await run('patch\n');
+    const padded = await run('patch   \n');
+    expect(plain.status).toBe('ok');
+    expect(padded.status).toBe('ok');
+    if (plain.status === 'ok' && padded.status === 'ok') {
+      // Trailing whitespace on the final patch line is real content — a
+      // trimmed hash would keep an earlier green run current across it.
+      expect(plain.value.dirtySha256).not.toBe(padded.value.dirtySha256);
+    }
+  });
+
+  test('a staged BINARY file is scanned from its BLOB, not the placeholder', async () => {
+    const binaryPatch = [
+      'diff --git a/keys.dat b/keys.dat',
+      'GIT binary patch',
+      'literal 10',
+      'cmZ~1#x==',
+      '',
+    ].join('\n');
+    const seen: { component: string; kind: string; text: string }[] = [];
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') return okResult('');
+      if (command === 'git' && args[0] === 'diff' && args[1] === '--cached')
+        return okResult(binaryPatch);
+      if (command === 'git' && args[0] === 'cat-file')
+        return okResult('-----BEGIN PRIVATE KEY-----');
+      if (command === 'coderabbit')
+        return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
+      return undefined;
+    });
+    const result = await cycleReview(effects, async (components) => {
+      for (const component of components) {
+        seen.push({ component: component.component, kind: component.kind, text: component.text });
+      }
+      return components.map((component) => ({ component: component.component, hits: [] }));
+    })({ repoRoot: '/repo' });
+    expect(result.status).toBe('ok');
+    const blobComponent = seen.find((entry) => entry.component === 'binary:staged:keys.dat');
+    expect(blobComponent).toBeDefined();
+    expect(blobComponent?.kind).toBe('file');
+    expect(blobComponent?.text).toBe('-----BEGIN PRIVATE KEY-----');
+  });
+
+  test('a committed BINARY file is scanned from BOTH blobs; a hit refuses the upload', async () => {
+    const binaryPatch = [
+      'diff --git a/keys.dat b/keys.dat',
+      'GIT binary patch',
+      'literal 10',
+      'cmZ~1#x==',
+      '',
+    ].join('\n');
+    const requested: string[] = [];
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
+        // The committed leg is `diff … <base> HEAD` — the pinned base sits
+        // at args[3]; the dirty-diff leg ends at HEAD directly.
+        if (args[3] === BASE) return okResult(binaryPatch);
+        return okResult('');
+      }
+      if (command === 'git' && args[0] === 'cat-file') {
+        requested.push(args[2] ?? '');
+        return okResult('BLOBBYTES');
+      }
+      return undefined;
+    });
+    const result = await cycleReview(effects, async (components) =>
+      components.map((component) => ({
+        component: component.component,
+        hits: component.component.startsWith('binary:')
+          ? [{ ruleId: 'class:pem', lines: [1] }]
+          : [],
+      })),
+    )({ repoRoot: '/repo' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('class:pem');
+      expect(result.reason).toContain('binary:committed(base):keys.dat');
+    }
+    expect(requested).toContain(`${BASE}:keys.dat`);
+    expect(requested).toContain(`${HEAD}:keys.dat`);
+    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
+  });
+
+  test('identity drift DURING the review refuses the cycle — nothing recorded', async () => {
+    let dirtyReads = 0;
+    const effects = makeFakeEffects((command, args) => {
+      if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') {
+        dirtyReads += 1;
+        // Reads: 1 the identity, 2 the pre-lock recheck, 3 the post-run
+        // recheck — the worktree changes between the pre-lock recheck and
+        // the reviewer's completion.
+        return okResult(dirtyReads >= 3 ? 'patch-after-drift' : 'patch');
+      }
+      if (command === 'coderabbit')
+        return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
+      return undefined;
+    });
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('could not run to a recorded outcome');
+      expect(result.reason).toContain('working-tree diff changed');
+    }
+    expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
+  });
+});

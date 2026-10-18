@@ -171,13 +171,32 @@ export function gitOut(result: CommandResult): string | null {
  */
 export function requireGitOut(result: CommandResult, what: string): string {
   if (result.exitCode !== 0 || result.timedOut) {
-    const why = result.timedOut
-      ? 'timed out'
-      : `exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}`;
-    const tail = `${result.stderr || result.stdout}`.trim().slice(0, 200);
-    throw new Error(`git ${what} failed (${why})${tail === '' ? '' : ` — ${tail}`}`);
+    throw gitReadFailure(result, what);
   }
   return result.stdout.trim();
+}
+
+/**
+ * UNTRIMMED stdout of a required git read — for the HASHING-sensitive reads
+ * (the dirty-diff identity): {@link requireGitOut}'s trim would give two
+ * dirty patches differing only in trailing whitespace on the final line the
+ * SAME recorded identity, so an earlier green check could stay current for a
+ * worktree whose present diff would fail `git diff --check`. Scalar reads
+ * (rev-parse, branch names) keep the trimmed variant.
+ */
+export function requireGitOutRaw(result: CommandResult, what: string): string {
+  if (result.exitCode !== 0 || result.timedOut) {
+    throw gitReadFailure(result, what);
+  }
+  return result.stdout;
+}
+
+function gitReadFailure(result: CommandResult, what: string): Error {
+  const why = result.timedOut
+    ? 'timed out'
+    : `exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}`;
+  const tail = `${result.stderr || result.stdout}`.trim().slice(0, 200);
+  return new Error(`git ${what} failed (${why})${tail === '' ? '' : ` — ${tail}`}`);
 }
 
 /**

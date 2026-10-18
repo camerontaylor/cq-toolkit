@@ -337,4 +337,19 @@ describe('decideCompletion — the three-part protocol definition', () => {
     // Severities are preserved whatever the completion verdict.
     expect(stream.findings[0]?.severity).toBe('minor');
   });
+
+  test('a finding event WITHOUT a severity is malformed — never a fabricated nonblocking none', () => {
+    const stream = parseReviewerStream(
+      [
+        JSON.stringify({ type: 'finding', comment: 'truncated event — no severity word' }),
+        JSON.stringify({ type: 'complete', status: 'review_completed' }),
+      ].join('\n'),
+    );
+    // The malformed event is unparsed (decideCompletion fails closed on any
+    // unparsed line) and no finding is recorded, so no classification —
+    // blocking or otherwise — is invented from schema drift.
+    expect(stream.findings).toHaveLength(0);
+    expect(stream.unparsedLines).toBe(1);
+    expect(decideCompletion(0, stream).kind).toBe('blocked');
+  });
 });

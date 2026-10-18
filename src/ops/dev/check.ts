@@ -33,7 +33,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects, CommandResult } from './effects.js';
-import { branchFromRevParse, gitOut, requireGitOut } from './effects.js';
+import { branchFromRevParse, gitOut, requireGitOutRaw } from './effects.js';
 import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
 import {
   DEFAULT_DEV_TARGET,
@@ -284,6 +284,15 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
     const rootFault = repoRootFault(input.repoRoot);
     if (rootFault !== null) return { status: 'failed', error: `dev.check: ${rootFault}` };
     if (input.range !== undefined) {
+      // The boundary validates the FIELD TYPE first: a schema-bypassing SDK
+      // caller passing a non-string range gets the failed taxonomy, never a
+      // TypeError out of the helper's string operations.
+      if (typeof input.range !== 'string') {
+        return {
+          status: 'failed',
+          error: `dev.check: range must be a string — got '${String(input.range)}'`,
+        };
+      }
       const fault = rangeFault(input.range);
       if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
     }
@@ -372,7 +381,10 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
           timeoutMs: GIT_TIMEOUT_MS,
         },
       );
-      const diffText = requireGitOut(dirtyDiff, 'diff --binary --full-index HEAD');
+      // UNTRIMMED (the review-side identity reads the same way): a trim
+      // would give two dirty patches differing only in trailing whitespace
+      // on the final line the same recorded identity.
+      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
       dirtySha256 =
         diffText === '' ? 'clean-tree' : createHash('sha256').update(diffText).digest('hex');
     } catch (err) {

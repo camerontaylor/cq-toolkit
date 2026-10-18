@@ -444,6 +444,25 @@ export function diffPathsOf(patch: string): string[] {
 }
 
 /**
+ * Repo-relative paths of the patch's BINARY segments — a `GIT binary patch`
+ * body or a `Binary files … differ` placeholder carries none of the file's
+ * bytes, so the scanners must see the blob contents separately (fetched per
+ * leg by the review gate) instead of trusting the textual representation.
+ */
+export function binaryPathsOf(patch: string): string[] {
+  const paths: string[] = [];
+  for (const segment of patchSegments(patch)) {
+    const binary =
+      segment.text.includes('GIT binary patch') || /^Binary files .+ differ$/m.test(segment.text);
+    if (!binary) continue;
+    for (const path of segment.paths) {
+      if (!paths.includes(path)) paths.push(path);
+    }
+  }
+  return paths;
+}
+
+/**
  * Scan one text with the rules, restricting `path`-carrying rules to the
  * given file paths (empty for a flat text — a path rule then cannot fire).
  * Regexes compile here (never at parse time); an uncompilable rule throws,
