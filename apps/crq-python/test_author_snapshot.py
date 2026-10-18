@@ -330,3 +330,47 @@ class SnapshotTransport(SnapshotBaseline):
             with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
                 snapshot.install(req["snapshot"], req["binding"], crq)
         self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+
+    def install_refused(self, tree, pattern):
+        req = envelope(self.repo, self.base, tree)
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            with self.assertRaisesRegex(author_quota.AuthorRefused, pattern):
+                snapshot.install(req["snapshot"], req["binding"], crq)
+        self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+    def test_regular_mode_entry_naming_a_tree_object_is_refused(self):
+        inner = self.git("mktree", data=f"100644 blob {self.git('hash-object', '-w', '--stdin', data=b'x')}\ta\n".encode())
+        # ls-tree labels by mode, so a hash-valid 100644 entry naming a tree reads as a blob.
+        crafted = self.git("hash-object", "-w", "-t", "tree", "--stdin",
+                           data=b"100644 f\0" + bytes.fromhex(inner))
+        self.install_refused(crafted, "mode disagrees with object type")
+
+    def test_unrepresentable_symlink_targets_are_refused(self):
+        for contents in (b"", b"target\0truncated"):
+            blob = self.git("hash-object", "-w", "--stdin", data=contents)
+            tree = self.git("mktree", data=f"120000 blob {blob}\tlink\n".encode())
+            with self.subTest(contents=contents):
+                self.install_refused(tree, "symlink target")
+
+    def test_install_batches_object_writes_per_type(self):
+        files = [(f"f{i}.txt", self.git("hash-object", "-w", "--stdin", data=b"blob %d\n" % i))
+                 for i in range(40)]
+        tree = self.git("mktree", data="".join(f"100644 blob {oid}\t{name}\n" for name, oid in files).encode())
+        req = envelope(self.repo, self.base, tree)
+        calls = []
+        real = snapshot.git
+        def counting(repo, *args, **kwargs):
+            calls.append(args)
+            return real(repo, *args, **kwargs)
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(snapshot, "git", counting), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            snapshot.install(req["snapshot"], req["binding"], crq)
+        writes = [args for args in calls if args[0] == "hash-object"]
+        self.assertLessEqual(len(writes), 6)  # <=3 types, quarantine + clone
+        self.assertTrue(all("--stdin-paths" in args for args in writes))
+        self.assertEqual(snapshot.git(self.destination, "cat-file", "-t", req["binding"]["head"]).strip(), b"commit")

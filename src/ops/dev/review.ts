@@ -1,4 +1,4 @@
-import { captureSnapshot, snapshotHead } from './internal/snapshot.js';
+import { captureSnapshot, SnapshotConfigError, snapshotHead } from './internal/snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
@@ -137,7 +137,12 @@ export function makeDevReview(
       if (decision.issuer !== 'agent' && decision.reviewer !== null)
         throw new Error('invalid reviewer assignment');
       return { status: 'ok', value: decision };
-    } catch {
+    } catch (error) {
+      if (error instanceof SnapshotConfigError)
+        return {
+          status: 'needs-human',
+          reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+        };
       return {
         status: 'indeterminate',
         detail:
