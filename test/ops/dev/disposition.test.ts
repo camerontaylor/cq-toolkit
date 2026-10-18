@@ -2,7 +2,7 @@
 // and the finding-exists check (a typo fails naming the ledger, never
 // writes an orphan disposition).
 import { describe, expect, test } from 'vitest';
-import { makeDevDisposition } from '../../../src/ops/dev/disposition.js';
+import { makeDevDisposition, type DevDispositionInput } from '../../../src/ops/dev/disposition.js';
 import { DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
 import { BRANCH, HEAD, makeFakeEffects, okResult } from './fakes.js';
 import { cycleRecord } from './fakes.js';
@@ -18,6 +18,50 @@ function effectsWithCycle() {
 }
 
 describe('dev.disposition', () => {
+  test('a schema-bypassing object missing the required fields fails, never throws', async () => {
+    const effects = effectsWithCycle();
+    // `{ repoRoot }` alone: the field reads (why.trim, the action verb set)
+    // must map to the failed taxonomy, never a TypeError outside it.
+    const result = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+    } as unknown as DevDispositionInput);
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('findingId must be a non-empty string');
+    }
+    expect(effects.openLedger(BRANCH).load().records).toHaveLength(1);
+  });
+
+  test('a non-string why fails at the boundary (never a trim TypeError)', async () => {
+    const effects = effectsWithCycle();
+    const result = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'fixed',
+      why: 42 as unknown as string,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('why must be a string');
+    expect(effects.openLedger(BRANCH).load().records).toHaveLength(1);
+  });
+
+  test('an off-verb-set action fails at the boundary and can never reach the store', async () => {
+    const effects = effectsWithCycle();
+    const result = await makeDevDisposition(effects)({
+      repoRoot: '/repo',
+      findingId: 'c001-aaaaaaaa#f1',
+      action: 'bogus' as unknown as 'fixed',
+      why: 'a reason',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("'fixed' | 'rejected' | 'deferred'");
+      expect(result.error).toContain('bogus');
+    }
+    // A persisted off-verb action would break every later ledger parse.
+    expect(effects.openLedger(BRANCH).load().records).toHaveLength(1);
+  });
+
   test('records a disposition and returns it as the ok value', async () => {
     const effects = effectsWithCycle();
     const result = await makeDevDisposition(effects)({

@@ -71,6 +71,27 @@ describe('dev.ready', () => {
     }
   });
 
+  test('a cycle recorded for ANOTHER target is stale even at an identical identity', async () => {
+    // When main and merge-queue share a merge-base, base/head/dirty alone
+    // cannot tell the evidence apart — the recorded target must match the
+    // requested one (the check record's rule, mirrored for review cycles).
+    const effects = readyEffects();
+    effects.store.save({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [
+        cycleRecord({ target: 'main', dirtySha256: 'clean-tree' }),
+        checkRecord({ target: 'merge-queue', dirtySha256: 'clean-tree' }),
+      ],
+    });
+    const result = await makeDevReady(effects)({ repoRoot: '/repo' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('stale-review-identity');
+      expect(result.reason).toContain("recorded for target 'main', not 'merge-queue'");
+    }
+  });
+
   test('untracked files hold readiness with their names', async () => {
     const effects = makeFakeEffects((command, args) => {
       if (command === 'git' && args[0] === 'ls-files') return okResult('scratch.ts\n');

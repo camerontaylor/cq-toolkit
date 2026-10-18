@@ -42,8 +42,14 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { makeGitMutex } from '../sweep/gitMutex.js';
 
-/** The persisted record format version — the only one parseDevLedger accepts. */
-export const DEV_LEDGER_VERSION = 1;
+/**
+ * The persisted record format version — the only one parseDevLedger accepts.
+ * v2 adds `target` to cycle records: review evidence is bound to the
+ * intended PR target it was recorded against (the check record's existing
+ * rule), and a v1 ledger — whose cycles cannot prove their target — refuses
+ * to parse rather than silently re-labeling its evidence.
+ */
+export const DEV_LEDGER_VERSION = 2;
 
 /**
  * Built-in defaults (strategy §5, first cut): the policy file
@@ -85,6 +91,8 @@ export interface DevCycleRecord {
   reviewer: string;
   /** Which diff scope the cycle reviewed. */
   scope: 'full' | 'uncommitted';
+  /** The intended PR target the cycle was recorded against. */
+  target: string;
   /** The pinned immutable base the review ran against. */
   base: string;
   /** The reviewed HEAD sha. */
@@ -197,6 +205,7 @@ const DevCycleRecordSchema = z
     cycleId: z.string().min(1),
     reviewer: z.string().min(1),
     scope: z.enum(['full', 'uncommitted']),
+    target: z.string().min(1),
     base: z.string().min(1),
     head: z.string().min(1),
     dirtySha256: z.string().min(1),
@@ -584,6 +593,13 @@ export function assembleReadiness(
     });
   } else {
     const stale: string[] = [];
+    // The cycle's RECORDED TARGET must be the requested one — the same rule
+    // the check record enforces: when two targets share a merge-base,
+    // identity alone cannot tell the evidence apart, and attributing a
+    // cycle to a target it never ran against would fabricate readiness.
+    if (cycle.target !== input.target) {
+      stale.push(`recorded for target '${cycle.target}', not '${input.target}'`);
+    }
     if (cycle.base !== identity.base) stale.push(`base ${cycle.base} → ${identity.base}`);
     if (cycle.head !== identity.head) stale.push(`head ${cycle.head} → ${identity.head}`);
     if (cycle.dirtySha256 !== identity.dirtySha256) {

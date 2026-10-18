@@ -74,6 +74,7 @@ export function makeFakeEffects(
     if (args[0] === 'rev-parse') return okResult(`${BASE}\n`);
     if (args[0] === 'merge-base') return okResult(`${BASE}\n`);
     if (args[0] === 'diff' && args[1] === '--binary') return okResult('');
+    if (args[0] === '-C' && args[2] === 'apply') return okResult('');
     if (args[0] === 'ls-files') return okResult('');
     if (args[0] === 'diff') return okResult('');
     if (args[0] === 'archive') return okResult('');
@@ -144,6 +145,7 @@ export function cycleRecord(overrides: Partial<DevCycleRecord> = {}): DevCycleRe
     cycleId: 'c001-aaaaaaaa',
     reviewer: 'coderabbit',
     scope: 'full',
+    target: 'merge-queue',
     base: BASE,
     head: HEAD,
     dirtySha256: 'dirty',

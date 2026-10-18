@@ -50,13 +50,37 @@ export function makeDevDisposition(
   effects: DevEffects,
 ): Op<DevDispositionInput, DevDispositionReport> {
   return async (input) => {
-    // Library boundary BEFORE any effect: the input itself, then repoRoot
-    // (a null/undefined input maps to the failed taxonomy, never a
-    // TypeError outside it).
+    // Library boundary BEFORE any effect: the input itself, then every
+    // required field — a schema-bypassing SDK caller gets the `failed`
+    // taxonomy for a missing/ill-typed findingId, action or why (never a
+    // TypeError at the field read), and an off-verb set action can never
+    // reach the store, where it would break every later ledger parse.
     const objectFault = objectInputFault(input);
     if (objectFault !== null) return { status: 'failed', error: `dev.disposition: ${objectFault}` };
     const rootFault = repoRootFault(input.repoRoot);
     if (rootFault !== null) return { status: 'failed', error: `dev.disposition: ${rootFault}` };
+    if (typeof input.findingId !== 'string' || input.findingId === '') {
+      return {
+        status: 'failed',
+        error:
+          'dev.disposition: findingId must be a non-empty string — the id a dev.review cycle recorded',
+      };
+    }
+    if (input.action !== 'fixed' && input.action !== 'rejected' && input.action !== 'deferred') {
+      return {
+        status: 'failed',
+        error: `dev.disposition: action must be one of 'fixed' | 'rejected' | 'deferred', got '${String(
+          input.action,
+        )}'`,
+      };
+    }
+    if (typeof input.why !== 'string') {
+      return {
+        status: 'failed',
+        error:
+          'dev.disposition: why must be a string — the mandatory reason, fix note, or deferral pointer',
+      };
+    }
     const why = input.why.trim();
     if (why === '') {
       return {
