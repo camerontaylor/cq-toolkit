@@ -13,7 +13,7 @@
 // no CLI start; bounded 8 KiB responses; private remote stderr never
 // reflected. The crq-side invocation (`cq dev.review --action=enroll …`)
 // keeps working byte-for-byte.
-import { captureSnapshot, snapshotHead } from './snapshot.js';
+import { captureSnapshot, snapshotHead } from './internal/snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op, OpResult } from '../../kernel/types.js';
