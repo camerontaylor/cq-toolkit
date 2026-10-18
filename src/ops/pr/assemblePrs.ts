@@ -509,7 +509,7 @@ export function composeSection(existing: string | undefined, section: string): s
  * Angle brackets are stripped so nothing interpolated can smuggle HTML
  * into the tracker body.
  */
-function mdSafe(text: string): string {
+export function mdSafe(text: string): string {
   return text.replace(/`/g, '’').replace(/[<>]/g, '');
 }
 

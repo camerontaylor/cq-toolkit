@@ -143,6 +143,16 @@ describe('dev.check', () => {
     if (result.status === 'needs-human') expect(result.reason).toContain('did not resolve');
   });
 
+  test('a schema-bypassing non-string range fails at the boundary (never a TypeError)', async () => {
+    const effects = greenEffects();
+    const result = await makeDevCheck(effects)({
+      repoRoot: '/repo',
+      range: 1 as unknown as string,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('range must be a string');
+  });
+
   test('a malformed range fails at the boundary before any command runs', async () => {
     const effects = greenEffects();
     const result = await makeDevCheck(effects)({ repoRoot: '/repo', range: 'nope' });

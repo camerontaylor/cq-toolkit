@@ -128,7 +128,17 @@ export function parseReviewerStream(stdout: string): ParsedReviewerStream {
     const type = stringAt(event, 'type');
     switch (type) {
       case 'finding': {
-        const severity = stringAt(event, 'severity') ?? 'none';
+        const severity = stringAt(event, 'severity');
+        if (severity === undefined) {
+          // A finding event without a severity word is MALFORMED output
+          // (truncation or CLI schema drift): fabricating the nonblocking
+          // 'none' would let such a stream pass as a clean cycle with the
+          // finding exempt from dispositions. It counts as an unparsed
+          // line, and decideCompletion fails closed on any unparsed line.
+          parsed.unparsedLines += 1;
+          if (parsed.sawComplete) parsed.trailingAfterComplete += 1;
+          break;
+        }
         const comment = stringAt(event, 'comment');
         const suggestion = event['suggestions'];
         const firstSuggestion =

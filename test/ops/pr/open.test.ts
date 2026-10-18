@@ -6,7 +6,7 @@ import { describe, expect, test } from 'vitest';
 import { DEV_LEDGER_VERSION, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import { BASE, BRANCH, HEAD, makeFakeEffects, okResult } from '../dev/fakes.js';
 import type { DevRecord } from '../../../src/ops/dev/record.js';
-import { checkRecord, cycleRecord, dispositionRecord } from '../dev/fakes.js';
+import { checkRecord, cycleRecord, dispositionRecord, ledgerWith } from '../dev/fakes.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
 import {
   DEV_READINESS_SECTION_MARKER,
@@ -454,5 +454,36 @@ describe('the readiness renderers', () => {
   test('an empty disposition list renders the explicit none-note, never a bare section', () => {
     const body = renderDispositionsComment({ ...ledger, records: [] });
     expect(body).toContain('No findings were dispositioned');
+  });
+});
+
+describe('the readiness section markdown escaping', () => {
+  const baseRecord = {
+    ready: true as const,
+    evidenceClass: 'author' as const,
+    caveat: 'the caveat',
+    branch: BRANCH,
+    target: 'merge-`queue`',
+    base: BASE,
+    head: HEAD,
+    dirtySha256: 'dirty',
+    cycleId: 'c001-aaaaaaaa',
+    checkId: 'k001-aaaaaaaa',
+    at: '2026-10-17T00:00:00.000Z',
+  };
+
+  test('a backtick in a recorded field cannot close the managed code span', () => {
+    const section = renderReadinessSection(baseRecord, ledgerWith([], BRANCH), []);
+    // mdSafe's spelling: backticks become typographic apostrophes — the
+    // field stays inert inside the generated span.
+    expect(section).toContain('`merge-’queue’`');
+    expect(section).not.toContain('merge-`queue`');
+  });
+
+  test('angle brackets in a disposition reason are stripped, not rendered', () => {
+    const ledger = ledgerWith([dispositionRecord({ why: '<script>alert(1)</script>' })], BRANCH);
+    const section = renderReadinessSection(baseRecord, ledger, []);
+    expect(section).not.toContain('<script>');
+    expect(section).toContain('scriptalert(1)/script');
   });
 });

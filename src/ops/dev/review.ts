@@ -40,7 +40,7 @@
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { CommandResult, DevEffects } from './effects.js';
-import { branchFromRevParse, gitOut, requireGitOut } from './effects.js';
+import { branchFromRevParse, gitOut, requireGitOut, requireGitOutRaw } from './effects.js';
 import {
   makeAuthorAdmission,
   AUTHOR_TRANSPORT_HINT,
@@ -64,7 +64,12 @@ import {
   type DevFinding,
   type DevIdentity,
 } from './record.js';
-import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
+import {
+  binaryPathsOf,
+  type ComponentScan,
+  type DiffSecretScanner,
+  type ScanComponentInput,
+} from './denylist.js';
 
 /** Per-file cap for reading untracked content into the scan (huge scratch files are truncated, visibly). */
 export const UNTRACKED_SCAN_FILE_CAP_BYTES = 1024 * 1024;
@@ -264,7 +269,10 @@ function runCycleReview(
           timeoutMs: GIT_TIMEOUT_MS,
         },
       );
-      const diffText = requireGitOut(dirtyDiff, 'diff --binary --full-index HEAD');
+      // THE IDENTITY HASHES THE EXACT BYTES (requireGitOutRaw, not the
+      // trimmed variant): two dirty patches differing only in trailing
+      // whitespace on the final line must never share a recorded identity.
+      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
       dirtySha256 = diffText === '' ? 'clean-tree' : createDirtyHash(diffText);
     } catch (err) {
       return {
@@ -296,6 +304,7 @@ function runCycleReview(
 
     // The diff components, per scope (protocol §1's component list).
     const components: ScanComponent[] = [];
+    let committedText = '';
     if (scope === 'full') {
       const committed = await effects.runCommand(
         'git',
@@ -310,8 +319,9 @@ function runCycleReview(
           reason: `the committed patch against the pinned base could not be read — ${committed.stderr.trim().slice(0, 400)}`,
         };
       }
-      if (committed.stdout !== '') {
-        components.push({ component: 'committed', text: committed.stdout, kind: 'patch' });
+      committedText = committed.stdout;
+      if (committedText !== '') {
+        components.push({ component: 'committed', text: committedText, kind: 'patch' });
       }
     }
     // The scanned components are BOUND AT CAPTURE TIME: the staged and
@@ -322,6 +332,8 @@ function runCycleReview(
     // content where the scan saw none diverges too.
     let stagedSha = createHash('sha256').update('').digest('hex');
     let unstagedSha = createHash('sha256').update('').digest('hex');
+    let stagedText = '';
+    let unstagedText = '';
     for (const [name, args] of [
       ['staged', ['diff', '--cached']],
       ['unstaged', ['diff']],
@@ -337,8 +349,13 @@ function runCycleReview(
       // scan — captured here, before scanSecrets runs. (An empty patch
       // hashes the empty string; the in-lock recheck compares against
       // THESE hashes.)
-      if (name === 'staged') stagedSha = createHash('sha256').update(result.stdout).digest('hex');
-      else unstagedSha = createHash('sha256').update(result.stdout).digest('hex');
+      if (name === 'staged') {
+        stagedText = result.stdout;
+        stagedSha = createHash('sha256').update(stagedText).digest('hex');
+      } else {
+        unstagedText = result.stdout;
+        unstagedSha = createHash('sha256').update(unstagedText).digest('hex');
+      }
       if (result.stdout !== '') {
         components.push({ component: name, text: result.stdout, kind: 'patch' });
       }
@@ -355,6 +372,80 @@ function runCycleReview(
       // (the *.env rule, the scratch-dir class) apply to untracked content
       // exactly as they would after commit.
       components.push({ component: `untracked:${path}`, text: read.text, kind: 'file', path });
+    }
+    // BINARY BLOBS, NOT PLACEHOLDERS: a textual patch represents a binary
+    // change only as a `GIT binary patch` encoding or a `Binary files …
+    // differ` placeholder — neither exposes the file's bytes to a regex or
+    // to gitleaks, while the reviewer's default scope WOULD upload them.
+    // Every binary path a scanned component names is fetched per leg and
+    // scanned as a FILE component (path context included): the committed
+    // side from BOTH blobs (removed bytes are scanned too), the staged side
+    // from the index, the unstaged side from the worktree.
+    for (const [leg, patchText] of [
+      ['committed', committedText],
+      ['staged', stagedText],
+      ['unstaged', unstagedText],
+    ] as const) {
+      if (patchText === '') continue;
+      for (const path of binaryPathsOf(patchText)) {
+        if (leg === 'unstaged') {
+          const read = await effects.readWorktreeFile(path, UNTRACKED_SCAN_FILE_CAP_BYTES);
+          if (!read.ok) {
+            return {
+              status: 'needs-human',
+              reason: `the binary file '${path}' was refused by the secret scan — ${read.reason}`,
+            };
+          }
+          components.push({
+            component: `binary:unstaged:${path}`,
+            text: read.text,
+            kind: 'file',
+            path,
+          });
+          continue;
+        }
+        const blobs = leg === 'committed' ? [`${base}:${path}`, `${head}:${path}`] : [`:${path}`];
+        let readAny = false;
+        for (const spec of blobs) {
+          const blob = await effects.runCommand('git', ['cat-file', 'blob', spec], {
+            timeoutMs: GIT_TIMEOUT_MS,
+          });
+          if (blob.exitCode === 0) {
+            readAny = true;
+            if (blob.stdout.length > UNTRACKED_SCAN_FILE_CAP_BYTES) {
+              return {
+                status: 'needs-human',
+                reason: `the binary blob '${spec}' exceeds the per-file scan cap (${String(blob.stdout.length)} bytes) — split or remove it; the scan refuses rather than truncate`,
+              };
+            }
+            const side =
+              leg === 'committed' ? (spec.startsWith(`${base}:`) ? 'base' : 'head') : leg;
+            components.push({
+              component: `binary:${leg === 'committed' ? `committed(${side})` : leg}:${path}`,
+              text: blob.stdout,
+              kind: 'file',
+              path,
+            });
+          } else if (blob.exitCode !== 128 || blob.timedOut) {
+            return {
+              status: 'needs-human',
+              reason: `the binary blob '${spec}' could not be read — ${
+                blob.stderr.trim().slice(0, 200) ||
+                `exit ${blob.exitCode === null ? 'none (killed)' : String(blob.exitCode)}`
+              }`,
+            };
+          }
+          // exit 128 = absent on that side (an add or a delete) — the other
+          // side carries the bytes; if NO side reads, the refusal below
+          // keeps a named binary path from silently going unscanned.
+        }
+        if (!readAny) {
+          return {
+            status: 'needs-human',
+            reason: `the binary file '${path}' named by the ${leg} patch could not be read from the repository — review refused rather than upload unscanned binary content`,
+          };
+        }
+      }
     }
     if (components.length === 0) {
       return {
@@ -400,61 +491,77 @@ function runCycleReview(
     try {
       span = await effects.withHostLock(async () => {
         // The rechecks are FAIL-CLOSED too: a failed read THROWS through
-        // requireGitOut — a failed recheck can never compare as equal.
-        const [recheckHead, recheckDirty, recheckUntracked] = await Promise.all([
-          effects.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
-          effects.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
+        // requireGitOutRaw — a failed recheck can never compare as equal.
+        const verifyStable = async (when: string): Promise<void> => {
+          const [recheckHead, recheckDirty, recheckUntracked] = await Promise.all([
+            effects.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
+            effects.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
+              timeoutMs: GIT_TIMEOUT_MS,
+            }),
+            effects.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
+              timeoutMs: GIT_TIMEOUT_MS,
+            }),
+          ]);
+          const drifted: string[] = [];
+          if (requireGitOut(recheckHead, 'rev-parse HEAD (recheck)') !== head)
+            drifted.push('HEAD moved');
+          const recheckDiff = requireGitOutRaw(recheckDirty, 'dirty diff (recheck)');
+          const recheckSha = recheckDiff === '' ? 'clean-tree' : createDirtyHash(recheckDiff);
+          if (recheckSha !== dirtySha256) drifted.push('the working-tree diff changed');
+          // The scanned PATCH COMPONENTS are re-bound here too: the staged
+          // and unstaged patches must be byte-identical to what passed the
+          // secret scan before the lock — the aggregate hash above cannot
+          // see an index/worktree split move (a scan-restore would otherwise
+          // upload content that never passed the scan).
+          const recheckStaged = await effects.runCommand('git', ['diff', '--cached'], {
             timeoutMs: GIT_TIMEOUT_MS,
-          }),
-          effects.runCommand('git', ['ls-files', '--others', '--exclude-standard'], {
+          });
+          const recheckUnstaged = await effects.runCommand('git', ['diff'], {
             timeoutMs: GIT_TIMEOUT_MS,
-          }),
-        ]);
-        const drifted: string[] = [];
-        if (requireGitOut(recheckHead, 'rev-parse HEAD (recheck)') !== head)
-          drifted.push('HEAD moved');
-        const recheckDiff = requireGitOut(recheckDirty, 'dirty diff (recheck)');
-        const recheckSha = recheckDiff === '' ? 'clean-tree' : createDirtyHash(recheckDiff);
-        if (recheckSha !== dirtySha256) drifted.push('the working-tree diff changed');
-        // The scanned PATCH COMPONENTS are re-bound here too: the staged
-        // and unstaged patches must be byte-identical to what passed the
-        // secret scan before the lock — the aggregate hash above cannot see
-        // an index/worktree split move (a scan-restore would otherwise
-        // upload content that never passed the scan).
-        const recheckStaged = await effects.runCommand('git', ['diff', '--cached'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        });
-        const recheckUnstaged = await effects.runCommand('git', ['diff'], {
-          timeoutMs: GIT_TIMEOUT_MS,
-        });
-        const recheckStagedSha = createHash('sha256')
-          .update(recheckStaged.exitCode === 0 ? recheckStaged.stdout : '\u0000read-failed-2')
-          .digest('hex');
-        const recheckUnstagedSha = createHash('sha256')
-          .update(recheckUnstaged.exitCode === 0 ? recheckUnstaged.stdout : '\u0000read-failed-3')
-          .digest('hex');
-        if (recheckStagedSha !== stagedSha) drifted.push('the staged patch changed since the scan');
-        if (recheckUnstagedSha !== unstagedSha) {
-          drifted.push('the unstaged patch changed since the scan');
-        }
-        const recheckUntrackedList = requireGitOut(recheckUntracked, 'ls-files --others (recheck)')
-          .split('\n')
-          .filter((line) => line.trim() !== '');
-        const sameUntracked =
-          recheckUntrackedList.length === untracked.length &&
-          recheckUntrackedList.every((path, index) => path === untracked[index]);
-        if (!sameUntracked) {
-          drifted.push('the untracked file set changed');
-        }
-        if (drifted.length > 0) {
-          throw new Error(
-            `${drifted.join('; ')} while waiting for the review lock — the recorded identity would not match what the reviewer saw; re-run dev.review`,
-          );
-        }
+          });
+          const recheckStagedSha = createHash('sha256')
+            .update(recheckStaged.exitCode === 0 ? recheckStaged.stdout : '\u0000read-failed-2')
+            .digest('hex');
+          const recheckUnstagedSha = createHash('sha256')
+            .update(recheckUnstaged.exitCode === 0 ? recheckUnstaged.stdout : '\u0000read-failed-3')
+            .digest('hex');
+          if (recheckStagedSha !== stagedSha)
+            drifted.push('the staged patch changed since the scan');
+          if (recheckUnstagedSha !== unstagedSha) {
+            drifted.push('the unstaged patch changed since the scan');
+          }
+          const recheckUntrackedList = requireGitOut(
+            recheckUntracked,
+            'ls-files --others (recheck)',
+          )
+            .split('\n')
+            .filter((line) => line.trim() !== '');
+          const sameUntracked =
+            recheckUntrackedList.length === untracked.length &&
+            recheckUntrackedList.every((path, index) => path === untracked[index]);
+          if (!sameUntracked) {
+            drifted.push('the untracked file set changed');
+          }
+          if (drifted.length > 0) {
+            throw new Error(
+              `${drifted.join('; ')} ${when} — the recorded identity would not match what the reviewer saw; re-run dev.review`,
+            );
+          }
+        };
+        await verifyStable('while waiting for the review lock');
         const raw = await runReviewer(
           effects,
           coderabbitReviewArgv(base, scope),
           DEFAULT_REVIEWER_TIMEOUT_MS,
+        );
+        // THE POST-RUN RECHECK: the CLI's default scope reads the LIVE
+        // repository, so a concurrent index/worktree edit DURING the run
+        // would be reviewed and uploaded without ever passing the scan.
+        // The upload itself cannot be retracted, but the cycle is REFUSED —
+        // nothing is recorded — so drifted state can never become author
+        // evidence, and the author re-runs against a stable tree.
+        await verifyStable(
+          'after the review ran (content the scan never saw may have been uploaded)',
         );
         // A run that produced no exit (SIGKILLed on the timeout, or a spawn
         // fault) is a BLOCKED cycle naming WHICH — never a completion and
