@@ -363,6 +363,13 @@ function exactDecimal(value: number): ExactDecimal {
 }
 
 /**
+ * The most fractional digits any finite double can need: the smallest
+ * subnormal (5e-324) written out with 17 significant digits. A lexical scale
+ * beyond this is not a real precision.
+ */
+const MAX_FILE_PRECISION = 340;
+
+/**
  * The exact decimal scale of a raw JSON number token: the written
  * fractional digits shifted by the written exponent ('94.20' → 2, '9.42e1'
  * → 0, '9.42e-1' → 3). null for anything outside the strict JSON number
@@ -373,6 +380,21 @@ function tokenScale(token: string): number | null {
   if (match === null) return null;
   const exponent = match[2] === undefined ? 0 : Number(match[2]);
   return Math.max(0, (match[1]?.length ?? 0) - exponent);
+}
+
+/**
+ * A quoted JSON key literal decoded the way JSON.parse decodes it, so an
+ * escaped spelling ("\u0076alue") reads as the key it is. null on a literal
+ * JSON.parse would refuse (parseBaseline has already parsed the text, so
+ * that is unreachable; null simply never matches).
+ */
+function decodedKey(quoted: string): string | null {
+  try {
+    const key: unknown = JSON.parse(quoted);
+    return typeof key === 'string' ? key : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -401,7 +423,7 @@ function rawValueToken(text: string): string | null {
       if (i >= n) return null;
       const keyEnd = i;
       i += 1;
-      if (depth === 1 && text.slice(keyStart + 1, keyEnd) === 'value') {
+      if (depth === 1 && decodedKey(text.slice(keyStart, keyEnd + 1)) === 'value') {
         while (i < n && /\s/.test(text.charAt(i))) i += 1;
         if (text.charAt(i) !== ':') continue;
         i += 1;
@@ -440,7 +462,10 @@ function fileValuePrecision(text: string, parsed: number): number {
   const token = rawValueToken(text);
   if (token !== null) {
     const scale = tokenScale(token);
-    if (scale !== null) return scale;
+    // A scale no double can express (1e-1000000000 parses to 0) is exponent
+    // abuse, not precision: fall back to the canonical scale — coarser, so
+    // it can only absorb a proposal, never loosen one or size a huge pad.
+    if (scale !== null && scale <= MAX_FILE_PRECISION) return scale;
   }
   return exactDecimal(parsed).scale;
 }
@@ -498,14 +523,18 @@ const COVERAGE_MIN_PRECISION = 1;
  * next run reads its precision off the written token, so an unpadded
  * proposal would silently coarsen the file (the next 94.39 absorbed at one
  * decimal). Padding only appends fractional zeros: the JSON value is
- * unchanged, and an exponent-form number is left alone.
+ * unchanged, and an exponent-form number is expanded to plain decimal to carry it.
  */
 function padValueToken(content: string, value: number, precision: number): string {
-  const literal = String(value);
-  if (/[eE]/.test(literal)) return content;
-  const scale = exactDecimal(value).scale;
-  if (scale >= precision) return content;
-  const padded = (scale === 0 ? `${literal}.` : literal) + '0'.repeat(precision - scale);
+  const exact = exactDecimal(value);
+  if (exact.scale >= precision) return content;
+  // Plain-decimal expansion from the exact digits, so an exponent-form
+  // number (1e-7 → 0.0000001000) is padded too instead of losing the scale.
+  const scaled = exact.unscaled * 10n ** BigInt(precision - exact.scale);
+  const digits = scaled.toString().padStart(precision + 1, '0');
+  const padded =
+    (exact.negative ? '-' : '') +
+    (precision === 0 ? digits : `${digits.slice(0, -precision)}.${digits.slice(-precision)}`);
   // renderBaseline emits the flat schema at two-space indent, one key per
   // line; string values are JSON-escaped, so no other line can start this way.
   return content.replace(/^( {2}"value": )[^,\n]+(,?)$/m, `$1${padded}$2`);
