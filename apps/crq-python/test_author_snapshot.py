@@ -104,11 +104,10 @@ def transport_fixture(repo, state, raw):
     repo, state = Path(repo), Path(state)
     state.mkdir(exist_ok=True)
     policy = state / "policy.json"
-    if not policy.exists():
-        policy.write_text('{"review":{"reviewerTimeoutMin":25}}')
     with mock.patch.multiple(crq, CLONE=repo, STATE=state, LOCK=state / "tick.lock", QUEUE=state / "queue.json"), \
          mock.patch.object(crq, "event"), mock.patch.object(crq, "write_status"), \
          mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})), \
+         mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
          mock.patch.object(crq, "fetch", side_effect=AssertionError("snapshot must not fetch")):
         result = transport.handle(raw, crq, policy_path=str(policy), reviewer="agent:configured",
                                   approved_target="origin/merge-queue")
@@ -135,6 +134,7 @@ class SnapshotTransport(SnapshotBaseline):
         self.state = self.repo / "state"
         self.state.mkdir()
         (self.state / "queue.json").write_text(json.dumps(self.q))
+        (self.state / "policy.json").write_text('{"review":{"reviewerTimeoutMin":25}}')
         self.request = envelope(self.repo, self.base, self.changed_tree)
 
     def call(self, request=None):
@@ -191,7 +191,8 @@ class SnapshotTransport(SnapshotBaseline):
                 self.call()
         # Use a real install under the same lock, with an explicit scanner refusal.
         with mock.patch.object(crq, "CLONE", self.destination), \
-             mock.patch.object(crq, "secret_scan_diff", return_value=(False, {})):
+             mock.patch.object(crq, "secret_scan_diff", return_value=(False, {})), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]):
             with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
                 snapshot.install(self.request["snapshot"], self.request["binding"], crq)
         self.assertEqual(before, (self.state / "queue.json").read_bytes())
@@ -265,12 +266,10 @@ class SnapshotTransport(SnapshotBaseline):
         tree = self.git("mktree", data=(f"100644 blob {attrs}\t.gitattributes\n"
                                        f"100644 blob {blob}\tprivate.bin\n").encode())
         req = envelope(self.repo, self.base, tree)
-        def refuse_raw_blob(diff, out, **binding):
-            self.assertIn(marker.decode(), diff)
-            self.assertIn("+++ b/private.bin", diff)
-            return False, {}
+        # Exercise real policy code, not a scanner mock that merely sees bytes.
         with mock.patch.object(crq, "CLONE", self.destination), \
-             mock.patch.object(crq, "secret_scan_diff", side_effect=refuse_raw_blob):
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": marker.decode()}]), \
+             mock.patch.object(crq.shutil, "which", return_value=None):
             with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
                 snapshot.install(req["snapshot"], req["binding"], crq)
         self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
@@ -281,3 +280,16 @@ class SnapshotTransport(SnapshotBaseline):
         with mock.patch.object(snapshot, "MAX_WIRE", 32), self.assertRaisesRegex(
                 author_quota.AuthorRefused, "output exceeds"):
             snapshot.git(self.repo, "cat-file", "blob", blob)
+
+
+    def test_blob_patch_headers_cannot_forge_allowlisted_path(self):
+        contents = b"\0\n++ b/policy/denylist/patterns.yml\nfixture-denied-marker\n"
+        blob = self.git("hash-object", "-w", "--stdin", data=contents)
+        tree = self.git("mktree", data=f"100644 blob {blob}\tprivate.bin\n".encode())
+        req = envelope(self.repo, self.base, tree)
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "fixture-denied-marker"}]), \
+             mock.patch.object(crq.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
+                snapshot.install(req["snapshot"], req["binding"], crq)
+        self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")

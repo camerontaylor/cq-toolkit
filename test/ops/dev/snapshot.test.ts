@@ -50,6 +50,10 @@ describe('tree snapshot worker and real Python admission', () => {
       expect(await git(worker, 'rev-parse', 'HEAD')).toBe(base);
       await exec('mkdir', [state]);
       await writeFile(join(state, 'queue.json'), JSON.stringify({ items: [], starts: [] }));
+      await writeFile(
+        join(state, 'policy.json'),
+        JSON.stringify({ review: { reviewerTimeoutMin: 25 } }),
+      );
       const op = makeDevReview(
         async (request) => {
           const result = await new Promise<string>((resolve, reject) => {

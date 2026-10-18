@@ -142,6 +142,12 @@ def install(snapshot, binding, runner):
         # Feed every incoming blob through the existing path-aware scan policy,
         # independently of the worker's operator-configured pre-upload scan.
         blobs = {oid: data for oid, kind, data in objects if kind == "blob"}
+        rules = runner.denylist_rules()
+        if not rules:
+            raise AuthorRefused("snapshot scan policy absent")
+        compiled = [(re.compile(rule["regex"]), re.compile(rule["path"]) if "path" in rule else None)
+                    for rule in rules]
+        allow = [re.compile(pattern) for pattern in runner.ALLOWLIST_PATHS]
         scan_parts = [diff]
         scan_size = len(diff.encode())
         for entry in entries:
@@ -154,8 +160,15 @@ def install(snapshot, binding, runner):
                 raise AuthorRefused("unsafe snapshot path")
             oid = meta.rsplit(b" ", 1)[1].decode()
             contents = blobs.get(oid, b"").decode("utf-8", errors="replace")
-            part = ("diff --git a/" + path + " b/" + path + "\n+++ b/" + path + "\n+" + path + "\n" +
-                    "\n".join("+" + line for line in contents.splitlines()) + "\n")
+            # Never encode untrusted contents as patch headers for policy checks:
+            # a blob line beginning '++ b/...' could forge an allowlisted path.
+            if not any(pattern.search(path) for pattern in allow):
+                for regex, path_regex in compiled:
+                    if path_regex is None or path_regex.search(path):
+                        if regex.search(path) or any(regex.search(line) for line in contents.splitlines()):
+                            raise AuthorRefused("snapshot secret scan refused")
+            # Existing gitleaks stdin sees all bytes, independently of patch syntax.
+            part = path + "\n" + contents + "\n"
             scan_size += len(part.encode())
             if scan_size > MAX_WIRE:
                 raise AuthorRefused("snapshot scan exceeds bound")
