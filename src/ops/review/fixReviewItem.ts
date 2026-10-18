@@ -226,88 +226,91 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
 export const MAX_SUMMARY_CHARS = 1_000;
 
 /**
- * An optional first-person or sequencing lead on a progress announcement
- * ("I am reading the anchored file first.", "First, reading the code.",
- * "Currently checking the diff."). The whole-summary anchors stay, so outcome
- * text that merely opens with one of these ("Now guards the abort.") is not
- * caught: a gerund plus a review-context object must still follow.
- */
-const PROGRESS_LEAD =
-  "(?:(?:i am|i'm|we are|we're|i have started|i've started)(?: now| currently| just)? |(?:first|now|currently|next),? )?";
-
-/**
  * NON-ANSWER SUMMARIES (PR #336 incident, 2026-10-17/18): a worker that
- * answers the contract on its FIRST turn — before reading anything — hands
- * back a schema-valid `{changed:false}` whose summary is a preamble
- * ("Reading the anchored code first.", "Starting work on the reviewed
- * item.") or filler ("placeholder", "start"). That is no outcome at all,
- * and the loop composed it into a posted reply on every scheduled run. A
- * summary whose NORMALIZED form (trimmed, whitespace-collapsed, lowercased,
- * trailing punctuation dropped) matches any pattern below is a contract
- * violation → `failed`, so nothing is posted. Every pattern matches the
- * WHOLE normalized summary, so outcome text that merely opens with one of
- * these words ("Checking the guard confirmed no change was needed.", "Now
- * guards the abort.") is never caught:
- *   - filler ("placeholder", "start", "n/a");
- *   - a start announcement ("starting work on the reviewed item");
- *   - a read announcement whose object is only the review's own context
- *     ("reading the anchored file first");
- *   - "working on it" / "working on the fix";
- *   - declared intent ("let me …", "i will …", "going to …").
- * A real disposition reports what was done or found, never what is about to
- * happen.
+ * answers the contract on its FIRST turn, before reading anything, hands back
+ * a schema-valid `{changed:false}` whose summary is a preamble ("Reading the
+ * anchored code first.", "Starting work on the reviewed item.") or filler
+ * ("placeholder", "start"). That is no outcome, yet the loop composed it into
+ * a posted reply on every scheduled run.
+ *
+ * The gate judges the summary SENTENCE BY SENTENCE (split at . ! ? ; : before
+ * a space or the end, and at line breaks). A sentence is NARRATION when it is
+ *   - filler (NARRATION_FILLER: "placeholder", "n/a", "on it");
+ *   - a PROGRESS report whose object, if any, is only the review's own
+ *     context (NARRATION_PROGRESS: "I am reading the anchored file first.",
+ *     "Starting work on the reviewed item.", "Working on it.");
+ *   - declared INTENT (NARRATION_INTENT: "Let me look at the file.", "I will
+ *     fix the guard."), unless it declines a change ("I will make no changes
+ *     because line 3 already rejects empty input.").
+ * The OUTCOME is what remains once narration is dropped. No outcome is a
+ * contract violation → `failed`, so nothing is posted; so is an UNCHANGED
+ * outcome shorter than MIN_UNCHANGED_SUMMARY_WORDS. A progress sentence that
+ * reports a finding ("Checking the guard confirmed no change was needed.") is
+ * outcome, because only a context-only object counts as narration.
  */
-export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
-  /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
-  new RegExp(
-    `^${PROGRESS_LEAD}(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of) (?:it|the (?:reviewed |review |anchored )?(?:item|thread|comment|issue|fix|code|file)))?(?: now)?$`,
-  ),
-  new RegExp(
-    `^${PROGRESS_LEAD}(?:reading|looking at|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating) (?:the )?(?:(?:anchored|reviewed|relevant|target|referenced) )?(?:code|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes)(?: first)?(?: now)?$`,
-  ),
-  new RegExp(
-    `^${PROGRESS_LEAD}working on (?:it|this|the (?:fix|item|reviewed item|review item|thread))(?: now)?$`,
-  ),
-  // Declared intent: a future-tense lead plus an ACTION verb ("I will fix",
-  // "Let me look at"). A lead followed by anything else is a disposition with
-  // its reason ("I will not change this because the guard already holds").
-  /^(?:let me|let's|i will|i'll|i am going to|i'm going to|going to) (?:first |now |also )?(?:read|look|check|inspect|examine|review|open|analy[sz]e|investigate|start|begin|fix|address|work|take|dig|try|see|figure|make|update|add|change|handle|go|verify|trace|find|search)\b/,
-]);
+const NARRATION_FILLER =
+  /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress)$/;
+
+/** An optional first-person or sequencing lead ("i am now", "first,"). */
+const PROGRESS_LEAD =
+  "(?:(?:i am|i'm|we are|we're|i have started|i've started)(?: now| currently| just| first)? |(?:first|now|next|then|currently),? )?";
+
+/** The review's own context as an object: "the anchored code", "it", "the diff and the tests". */
+const CONTEXT_NOUN =
+  '(?:(?:the|this|that|its|my) )?(?:(?:anchored|reviewed|review|relevant|target|referenced|current|flagged) )*(?:code|codebase|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes|fix|issue|feedback|finding|suggestion|request|review|repo|repository|test|tests|it|this|that)';
+const CONTEXT_OBJECT = `${CONTEXT_NOUN}(?:,? and ${CONTEXT_NOUN})*`;
+
+const NARRATION_PROGRESS = new RegExp(
+  `^${PROGRESS_LEAD}(?:(?:reading|re-reading|looking (?:at|into|over)|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating|exploring|scanning|tracing|studying|verifying|going (?:over|through)|digging into|working on)(?: ${CONTEXT_OBJECT})?|(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of|with) ${CONTEXT_OBJECT})?)(?: (?:first|now|next|again|closely|carefully|in detail))*$`,
+);
+
+const NARRATION_INTENT =
+  /^(?:(?:i|we) (?:will|shall|am going to|are going to|need to|want to)|i'll|we'll|i'm going to|we're going to|going to|let me|let's)\b/;
+
+/** A sentence that DECLINES a change is a disposition, whatever its tense. */
+const DECLINES_CHANGE = /\b(?:no|not|nothing|never|none)\b|n't\b/;
+
+const isNarration = (sentence: string): boolean =>
+  NARRATION_FILLER.test(sentence) ||
+  NARRATION_PROGRESS.test(sentence) ||
+  (NARRATION_INTENT.test(sentence) && !DECLINES_CHANGE.test(sentence));
 
 /**
- * The floor for an UNCHANGED summary, in words. "changed:false" is the loop's
- * honest no-change answer, posted as the thread's reply — it must carry a
+ * The floor for an UNCHANGED outcome, in words. "changed:false" is the loop's
+ * honest no-change answer, posted as the thread's reply. It must carry a
  * disposition AND its reason ("Already satisfied: line 691 rounds to one
- * decimal."), which no one-to-three-word summary does ("n/a", "No change
- * needed."). A changed:true summary is backed by verified commits, so the
- * floor applies to the unchanged case only.
+ * decimal."), which no one-to-three-word summary does ("No change needed.").
+ * A changed:true summary is backed by verified commits, so the floor applies
+ * to the unchanged case only.
  */
 export const MIN_UNCHANGED_SUMMARY_WORDS = 4;
 
-/** The normalized form the non-answer patterns judge (module doc above). */
-const normalizeSummary = (summary: string): string =>
+/** The summary's sentences, normalized (lowercase, ASCII apostrophes, collapsed space). */
+const summarySentences = (summary: string): string[] =>
   summary
-    .trim()
     // Typographic apostrophes (models often emit U+2019) match the ASCII patterns.
-    .replace(/[\u2018\u2019\u02BC]/gu, "'")
-    .replace(/\s+/g, ' ')
+    .replace(/[‘’ʼ]/gu, "'")
     .toLowerCase()
-    .replace(/[\s.!…:;,-]+$/u, '');
+    .split(/[.!?;:…]+(?=\s|$)|\n/u)
+    .map((sentence) => sentence.replace(/\s+/g, ' ').replace(/^[\s,*>#-]+|[\s.!?…:;,-]+$/gu, ''))
+    .filter((sentence) => /[\p{L}\p{N}]/u.test(sentence));
 
 /**
- * Why a summary is not an outcome, or null when it is one. Exported so the
- * gate is pinned directly against the live incident bodies.
+ * Why a summary is not an outcome, or null when it is one (module constants
+ * above). Exported so the gate is pinned directly against the live bodies.
  */
 export const nonAnswerSummaryReason = (summary: string, changed: boolean): string | null => {
-  const normalized = normalizeSummary(summary);
-  if (normalized === '') {
+  const sentences = summarySentences(summary);
+  if (sentences.length === 0) {
     return 'empty summary';
   }
-  if (NON_ANSWER_SUMMARY_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  const outcome = sentences.filter((sentence) => !isNarration(sentence));
+  if (outcome.length === 0) {
     return 'summary is a preamble or placeholder, not an outcome';
   }
-  if (!changed && normalized.split(' ').length < MIN_UNCHANGED_SUMMARY_WORDS) {
-    return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words)`;
+  const words = outcome.reduce((total, sentence) => total + sentence.split(' ').length, 0);
+  if (!changed && words < MIN_UNCHANGED_SUMMARY_WORDS) {
+    return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words of outcome)`;
   }
   return null;
 };
