@@ -489,3 +489,33 @@ describe('composeScanners', () => {
     expect(merged.find((scan) => scan.component === 'b')?.hits).toEqual([]);
   });
 });
+
+describe('canonical corpus patch allowlist', () => {
+  test('skips only the exact corpus segment, preserving other paths and rename sides', () => {
+    const rules = parseDenylistPatterns(FIXTURE, 'fixture').rules;
+    const patch = (oldPath: string, newPath: string) =>
+      `diff --git a/${oldPath} b/${newPath}\n--- a/${oldPath}\n+++ b/${newPath}\n@@ -0,0 +1 @@\n+secret\n`;
+    const corpus = 'policy/denylist/patterns.yml';
+    const scanned = scanComponents(
+      [
+        {
+          component: 'mixed',
+          kind: 'patch',
+          text: patch(corpus, corpus) + patch('src/leak.ts', 'src/leak.ts'),
+        },
+      ],
+      rules,
+    );
+    expect(scanned[0]?.hits).toHaveLength(1);
+    expect(scanned[0]?.hits[0]?.lines[0]).toBeGreaterThan(5);
+    for (const text of [
+      patch(corpus, 'copy.yml'),
+      patch('copy.yml', corpus),
+      patch(`${corpus}.bak`, `${corpus}.bak`),
+    ]) {
+      expect(
+        scanComponents([{ component: 'renamed', kind: 'patch', text }], rules)[0]?.hits,
+      ).toHaveLength(1);
+    }
+  });
+});

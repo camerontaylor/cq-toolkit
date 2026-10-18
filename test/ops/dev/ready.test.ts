@@ -24,6 +24,7 @@ describe('dev.ready', () => {
       version: DEV_LEDGER_VERSION,
       branch: BRANCH,
       records: [
+        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: 'clean-tree' }),
         cycleRecord({ dirtySha256: 'clean-tree' }),
         checkRecord({ dirtySha256: 'clean-tree' }),
       ],
@@ -52,7 +53,11 @@ describe('dev.ready', () => {
     effects.store.save({
       version: DEV_LEDGER_VERSION,
       branch: BRANCH,
-      records: [cycleRecord({ dirtySha256 }), checkRecord({ dirtySha256 })],
+      records: [
+        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256 }),
+        cycleRecord({ dirtySha256 }),
+        checkRecord({ dirtySha256 }),
+      ],
     });
     const result = await makeDevReady(effects)({ repoRoot: '/repo' });
     expect(result.status).toBe('ok');
@@ -117,6 +122,7 @@ describe('dev.ready', () => {
       version: DEV_LEDGER_VERSION,
       branch: BRANCH,
       records: [
+        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: 'clean-tree' }),
         cycleRecord({ dirtySha256: 'clean-tree' }),
         checkRecord({ dirtySha256: 'clean-tree' }),
       ],

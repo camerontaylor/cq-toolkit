@@ -550,7 +550,8 @@ export interface AssembleReadinessInput {
  * The dev.ready / pr.open shared core: assemble the author-tier readiness
  * record from the ledger, or name every gap. The requirements (strategy §3,
  * dev.ready row):
- *   - ≥ 1 TERMINAL FULL-SCOPE review cycle at the CURRENT identity (base,
+ *   - ≥ 2 distinct TERMINAL FULL-SCOPE review cycles at the pinned base and
+ *     target, with the latest at the CURRENT identity (base,
  *     head and dirty-diff sha256 all three — any mismatch is a stale
  *     identity; a blocked or uncommitted-scope cycle never counts);
  *   - zero OPEN blocking findings across EVERY full-scope terminal cycle in
@@ -584,6 +585,17 @@ export function assembleReadiness(
     (record): record is DevCycleRecord =>
       record.kind === 'cycle' && record.scope === 'full' && record.completion.kind === 'terminal',
   );
+  const qualifyingIds = new Set(
+    terminalCycles
+      .filter((entry) => entry.target === input.target && entry.base === identity.base)
+      .map((entry) => entry.cycleId),
+  );
+  if (qualifyingIds.size < 2) {
+    gaps.push({
+      field: 'review-cycle-count',
+      detail: `two distinct terminal full-scope review cycles at the pinned base and target are required; found ${String(qualifyingIds.size)}`,
+    });
+  }
   const cycle = terminalCycles[terminalCycles.length - 1];
   if (cycle === undefined) {
     gaps.push({

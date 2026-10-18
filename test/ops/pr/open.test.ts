@@ -63,6 +63,7 @@ function readyEffects(withDispositions: boolean, target: string = 'merge-queue')
     return undefined;
   });
   const records: DevRecord[] = [
+    cycleRecord({ cycleId: 'c000-aaaaaaaa', target, dirtySha256: 'clean-tree' }),
     cycleRecord({
       target,
       dirtySha256: 'clean-tree',
@@ -247,7 +248,11 @@ describe('pr.open', () => {
     effects.store.save({
       version: DEV_LEDGER_VERSION,
       branch: BRANCH,
-      records: [cycleRecord({ dirtySha256: dirtySha }), checkRecord({ dirtySha256: dirtySha })],
+      records: [
+        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: dirtySha }),
+        cycleRecord({ dirtySha256: dirtySha }),
+        checkRecord({ dirtySha256: dirtySha }),
+      ],
     });
     const { gh, calls } = ghFake(null);
     const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
@@ -302,6 +307,7 @@ describe('pr.open', () => {
             },
           ],
         }),
+        cycleRecord({ cycleId: 'c000-aaaaaaaa', dirtySha256: 'clean-tree' }),
         cycleRecord({ dirtySha256: 'clean-tree' }),
         checkRecord({
           checkId: 'k002-aaaaaaaa',

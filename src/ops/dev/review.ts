@@ -192,6 +192,9 @@ function runCycleReview(
     if (rootFault !== null) return { status: 'failed', error: `dev.review: ${rootFault}` };
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const scope: 'full' | 'uncommitted' = input.uncommitted === true ? 'uncommitted' : 'full';
+    if (input.reviewer !== undefined && typeof input.reviewer !== 'string') {
+      return { status: 'failed', error: 'dev.review: reviewer must be a string' };
+    }
     const reviewer = input.reviewer ?? CODERABBIT_REVIEWER;
 
     if (reviewer.startsWith('agent:')) {

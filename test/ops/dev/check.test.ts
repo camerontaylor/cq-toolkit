@@ -213,6 +213,24 @@ describe('dev.check', () => {
     ).toBeDefined();
   });
 
+  test.each(['import {', 'export {'])(
+    'an interior multiline %s edit runs Knip',
+    async (opening) => {
+      const effects = greenEffects((command, args) => {
+        if (command === 'git' && args[0] === 'diff' && args.includes('--unified=1000000')) {
+          return okResult(
+            `diff --git a/src/internal.ts b/src/internal.ts\n@@ -1,7 +1,7 @@\n ${opening}\n   one,\n   two,\n   three,\n-  removed,\n+  added,\n } from './module.js';\n`,
+          );
+        }
+        return undefined;
+      });
+      const result = await makeDevCheck(effects)({ repoRoot: '/repo' });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.gates.find((gate) => gate.name === 'knip')?.status).toBe('pass');
+    },
+  );
+
   test('a RENAME row inspects both old and new paths for the knip condition', async () => {
     const effects = makeFakeEffects((command, args) => {
       if (command === 'git' && args[0] === 'diff' && args[1] === '--name-status') {

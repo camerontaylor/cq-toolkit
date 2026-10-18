@@ -61,6 +61,19 @@ function reviewEffects(ndjson: string, exitCode: number) {
 }
 
 describe('dev.review', () => {
+  test.each([1, null, {}, false])(
+    'SDK reviewer %j is a failed input before effects',
+    async (reviewer) => {
+      const effects = makeFakeEffects();
+      const result = await cycleReview(
+        effects,
+        stubScanner(),
+      )({ repoRoot: '/repo', reviewer } as unknown as DevCycleInput);
+      expect(result).toEqual({ status: 'failed', error: 'dev.review: reviewer must be a string' });
+      expect(effects.commands).toEqual([]);
+    },
+  );
+
   test('a terminal cycle: ok report, ledger record with minted ids, log outside the repo', async () => {
     const effects = reviewEffects(NDJSON_OK, 0);
     const result = await cycleReview(effects, stubScanner())({ repoRoot: '/repo' });

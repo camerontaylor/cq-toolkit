@@ -252,16 +252,34 @@ async function diffShape(
       }
     }
   }
-  const patch = await effects.runCommand('git', ['diff', ...diffArgs], {
+  const patch = await effects.runCommand('git', ['diff', '--unified=1000000', ...diffArgs], {
     timeoutMs: GIT_TIMEOUT_MS,
   });
   let importChanged = readsFailed;
   if (patch.exitCode === 0) {
+    // Full file context keeps the opening keyword visible even when only
+    // an interior specifier changes. Track old/new sides separately because
+    // removed and added closing lines need not occur in the same order.
+    let oldDeclaration = false;
+    let newDeclaration = false;
     for (const line of patch.stdout.split('\n')) {
-      if (/^[+-]/.test(line) && !/^[+-][+-]/.test(line) && /\b(import|export)\b/.test(line)) {
-        importChanged = true;
-        break;
+      if (/^(diff |index |---|\+\+\+|@@|\\)/.test(line)) {
+        oldDeclaration = false;
+        newDeclaration = false;
+        continue;
       }
+      const sign = line[0];
+      if (sign !== '+' && sign !== '-' && sign !== ' ') continue;
+      const text = line.slice(1);
+      const opens = /^\s*(?:import\s+(?!\()|export\s+(?:type\s+)?[{}*])/.test(text);
+      const closes = /;|\bfrom\s*['"]|^\s*import\s*['"]/.test(text);
+      if (sign === '+' && (newDeclaration || /\b(import|export)\b/.test(text)))
+        importChanged = true;
+      if (sign === '-' && (oldDeclaration || /\b(import|export)\b/.test(text)))
+        importChanged = true;
+      if (sign !== '+') oldDeclaration = (oldDeclaration || opens) && !closes;
+      if (sign !== '-') newDeclaration = (newDeclaration || opens) && !closes;
+      if (importChanged) break;
     }
   } else {
     importChanged = true;

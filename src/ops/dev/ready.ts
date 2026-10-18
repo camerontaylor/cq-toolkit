@@ -1,7 +1,8 @@
 // Dev lane — `dev.ready`: assemble the author-tier readiness record from
 // dev.check's green run plus the review ledger (strategy §3, dev.ready row).
 // The requirements are the assembly core's (record.ts assembleReadiness):
-//   - ≥ 1 TERMINAL review cycle at the CURRENT identity (a blocked cycle,
+//   - ≥ 2 TERMINAL full-scope cycles at the pinned base/target, with the
+//     latest at the CURRENT identity (a blocked cycle,
 //     or one at a stale base/head/dirty-sha, never counts);
 //   - zero OPEN blocking findings (fixed or rejected close one; deferred
 //     does not);

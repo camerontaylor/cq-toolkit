@@ -216,8 +216,12 @@ function assemble(
 }
 
 describe('assembleReadiness', () => {
-  test('ready: terminal cycle + green check at the current identity', () => {
-    const result = assemble([cycleRecord(), checkRecord()]);
+  test('ready: two cycles + green check at the current identity', () => {
+    const result = assemble([
+      cycleRecord({ cycleId: 'c000-aaaaaaaa', head: 'before-fixes' }),
+      cycleRecord(),
+      checkRecord(),
+    ]);
     expect(result.ready).toBe(true);
     if (result.ready) {
       expect(result.record).toMatchObject({
@@ -232,6 +236,29 @@ describe('assembleReadiness', () => {
       });
       expect(result.record.caveat).toContain('not verification');
       expect(result.record.caveat).toContain('candidate SHA');
+    }
+  });
+
+  test('one cycle, duplicate ids, and cycles at another base/target cannot satisfy two cycles', () => {
+    for (const prior of [
+      undefined,
+      cycleRecord(),
+      cycleRecord({ cycleId: 'c000-aaaaaaaa', base: 'other' }),
+      cycleRecord({ cycleId: 'c000-aaaaaaaa', target: 'main' }),
+      cycleRecord({ cycleId: 'c000-aaaaaaaa', scope: 'uncommitted' }),
+      cycleRecord({
+        cycleId: 'c000-aaaaaaaa',
+        completion: { kind: 'blocked', reason: 'unavailable' },
+      }),
+    ]) {
+      const result = assemble([
+        ...(prior === undefined ? [] : [prior]),
+        cycleRecord(),
+        checkRecord(),
+      ]);
+      expect(result.ready).toBe(false);
+      if (!result.ready)
+        expect(result.gaps.map((gap) => gap.field)).toContain('review-cycle-count');
     }
   });
 
@@ -309,6 +336,7 @@ describe('assembleReadiness', () => {
       ],
     });
     const result = assemble([
+      cycleRecord({ cycleId: 'c000-aaaaaaaa' }),
       cycle,
       checkRecord(),
       dispositionRecord({ findingId: 'c001-aaaaaaaa#f1', action: 'fixed' }),
@@ -356,6 +384,7 @@ describe('assembleReadiness', () => {
     }
     const closed = assemble([
       uncommitted,
+      cycleRecord({ cycleId: 'c000-aaaaaaaa' }),
       cycleRecord(),
       checkRecord(),
       dispositionRecord({ findingId: 'c001-aaaaaaaa#f1', action: 'fixed' }),

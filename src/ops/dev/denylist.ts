@@ -544,6 +544,13 @@ export function scanComponents(
     if (kind !== 'patch') return scanText(component, text, rules, path === undefined ? [] : [path]);
     const hits: DenylistHit[] = [];
     for (const segment of patchSegments(text)) {
+      // The authoritative scanner allowlists this exact intentional corpus.
+      // A rename to/from another path still scans the entire segment.
+      if (
+        segment.paths.length > 0 &&
+        segment.paths.every((entry) => entry === 'policy/denylist/patterns.yml')
+      )
+        continue;
       hits.push(...scanLinesWithOffset(segment.text, rules, segment.paths, segment.startLine - 1));
     }
     return { component, hits };
