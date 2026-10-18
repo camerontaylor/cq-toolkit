@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // PR lane (ws-d item 4, goal D3; UC §1 row 22) — the TRACKER-FIRST PR
 // assembler: one tracker PR per fleet run, opened BEFORE any per-package PR
 // and updated IN PLACE forever after (never a second tracker), with the
@@ -28,6 +27,7 @@ import { messageOf } from '../../shared/messageOf.js';
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
 //     style).
+import { messageOf } from '../../shared/messageOf.js';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';

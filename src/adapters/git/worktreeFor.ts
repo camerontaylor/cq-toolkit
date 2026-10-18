@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // Sweep lane (WS-D, goal D1) — the worktree PROVIDER (ADOPT git worktree +
 // thin COPY; UC §1 rows 20, 23; R2 D2): derive the run's branch and checkout
 // path from config-grade naming inputs, RESERVE the namespace (refuse, never
@@ -29,6 +28,7 @@ import { messageOf } from '../../shared/messageOf.js';
 //   - Derived paths cannot escape worktreesDir: kind/slug/runPrefix must be
 //     safe path segments (no separators, no '..', no leading dash — which
 //     also keeps them out of git's flag namespace in the args array).
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { lstat, realpath, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';

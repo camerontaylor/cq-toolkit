@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // BaselinePrEffects over the `gh` + `git` subprocesses — the DEFAULT binding
 // the `ratchet.proposeBaselineUpdate` registry importer constructs per
 // dispatch (the sweep/merge input-driven precedent: nothing is wired at
@@ -28,6 +27,7 @@ import { messageOf } from '../../shared/messageOf.js';
 // place (a fast-forward no-op for byte-identical files) instead of recreating
 // it from the base and failing the push non-fast-forward. The checkout is
 // restored to its original branch in a `finally`.
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve as pathResolve } from 'node:path';

@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // Sweep lane (WS-D, goal D2) — the AGE-BASED CLEANUP of run-prefixed
 // worktrees and branches (UC §1 row 13): enumerate candidate worktrees whose
 // branch sits under the reserved run prefix AND whose path sits inside the
@@ -33,6 +32,7 @@ import { messageOf } from '../../shared/messageOf.js';
 //   - Canonicalized path comparisons throughout (the worktreeFor realpath
 //     idiom), so porcelain-reported realpaths and caller-supplied dirs meet
 //     on equal terms.
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
