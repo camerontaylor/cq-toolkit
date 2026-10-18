@@ -374,3 +374,21 @@ class SnapshotTransport(SnapshotBaseline):
         self.assertLessEqual(len(writes), 6)  # <=3 types, quarantine + clone
         self.assertTrue(all("--stdin-paths" in args for args in writes))
         self.assertEqual(snapshot.git(self.destination, "cat-file", "-t", req["binding"]["head"]).strip(), b"commit")
+
+    def test_blob_reused_from_base_is_scanned_at_its_new_path(self):
+        blob = self.git("rev-parse", f"{self.base}:file.txt")
+        tree = self.git("mktree", data=f"100644 blob {blob}\tcopy.txt\n100644 blob {blob}\tfile.txt\n".encode())
+        req = envelope(self.repo, self.base, tree)
+        self.assertFalse(any(obj["type"] == "blob" for obj in req["snapshot"]["objects"]))
+        rules = [{"id": "fixture", "regex": "baseline", "path": r"^copy\.txt$"}]
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(crq, "denylist_rules", return_value=rules), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
+                snapshot.install(req["snapshot"], req["binding"], crq)
+        self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+    def test_paths_that_cannot_be_checked_out_are_refused(self):
+        blob = self.git("hash-object", "-w", "--stdin", data=b"x\n")
+        tree = self.git("mktree", data=f"100644 blob {blob}\t{'n' * 300}\n".encode())
+        self.install_refused(tree, "too long to check out")
