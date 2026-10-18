@@ -437,3 +437,22 @@ class SnapshotTransport(SnapshotBaseline):
         blob = self.git("hash-object", "-w", "--stdin", data=b"t" * os.pathconf(self.destination, "PC_PATH_MAX"))
         tree = self.git("mktree", data=f"120000 blob {blob}\tlink\n".encode())
         self.install_refused(tree, "symlink target")
+
+    def test_scan_bound_counts_part_separators(self):
+        blobs = [self.git("hash-object", "-w", "--stdin", data=(b"line %d\n" % i) * 100) for i in range(3)]
+        tree = self.git("mktree", data="".join(f"100644 blob {oid}\tf{i}.txt\n" for i, oid in enumerate(blobs)).encode())
+        req = envelope(self.repo, self.base, tree)
+        scanned = []
+        def capture(text, *args, **kwargs):
+            scanned.append(text)
+            return True, {}
+        def run(limit):
+            with mock.patch.object(crq, "CLONE", self.destination), mock.patch.object(snapshot, "MAX_WIRE", limit), \
+                 mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
+                 mock.patch.object(crq, "secret_scan_diff", capture):
+                snapshot.install(req["snapshot"], req["binding"], crq)
+        run(snapshot.MAX_WIRE)
+        exact = len(scanned[0].encode())
+        run(exact)  # the real joined input fits exactly at its own length
+        with self.assertRaisesRegex(author_quota.AuthorRefused, "scan exceeds"):
+            run(exact - 1)
