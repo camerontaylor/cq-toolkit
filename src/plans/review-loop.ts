@@ -108,6 +108,7 @@ import { replyAndResolve } from '../ops/review/replyAndResolve.js';
 import type { VerifyOutcome } from '../ops/review/verifyReviewOutcome.js';
 import { snapshotPrState } from '../adapters/forge-github/snapshotPrState.js';
 import { verifyPrOutcome } from '../ops/review/verifyReviewOutcome.js';
+import type { ThreadComment } from '../ops/review/threads.js';
 
 /** Cap for the composed push-failure reason — a push can spew pages of output. */
 const PUSH_REASON_MAX = 500;
@@ -142,6 +143,52 @@ export const replySignature = (owner: string, repo: string, pr: number): string 
 
 /** The content key recognizing the signature (the composed line's prefix). */
 const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
+
+/**
+ * The reply's HEAD STAMP: the line right after the signature on every loop
+ * reply, naming the PR head the reply answers for (the pushed head when the
+ * row's fix published commits, else the fetched head). It is what makes the
+ * loop idempotent per thread AND head — see {@link loopReplySettled}.
+ */
+export const replyHeadStamp = (sha: string): string =>
+  `<!-- cq-review-loop-head:${sha.toLowerCase()} -->`;
+
+/** Reads a stamp back out of a posted reply body. */
+const REPLY_HEAD_STAMP_PATTERN = /^<!-- cq-review-loop-head:([0-9a-f]{40}) -->$/m;
+
+/**
+ * THE THREAD SETTLE GATE (PR #336 incident, 2026-10-17/18): true when this
+ * loop already answered the thread and nothing has changed since — the
+ * thread's latest reply opens with THIS PR's signature (no reviewer input
+ * after the loop's own word) and its head stamp names the current head.
+ *
+ * Why a content gate and not the dispatch log alone: the round fingerprint
+ * keys on the thread's LATEST comment, which after a post IS the loop's own
+ * reply, so every run computed a fresh reply actionId and the dispatch-log
+ * dedupe never matched; and classify row 5 never reads the reply as the
+ * responder's last word in deployment (the responder is the PR author, the
+ * replies come from the automation identity). The posted reply is the
+ * durable record (the dispatch log is a runner cache), so the gate reads it.
+ *
+ * Fail-closed toward silence: a loop reply WITHOUT a stamp (posted before
+ * the stamp existed) or an unknown current head cannot prove the head moved,
+ * so the thread stays settled until a reviewer speaks again.
+ */
+export const loopReplySettled = (
+  replies: readonly ThreadComment[],
+  signature: string,
+  headSha: string | null,
+): boolean => {
+  const latest = replies[replies.length - 1];
+  if (latest === undefined || !latest.body.startsWith(signature)) {
+    return false;
+  }
+  const stamp = REPLY_HEAD_STAMP_PATTERN.exec(latest.body)?.[1];
+  if (stamp === undefined || headSha === null) {
+    return true;
+  }
+  return stamp === headSha.toLowerCase();
+};
 
 /**
  * The loop's shipped classify DEFAULT: defaultClassifyConfig plus the
@@ -659,14 +706,13 @@ const attributionMatches = (message: string, itemId: string): boolean => {
  * a thread that was not verifiably addressed. Unexpected throws propagate —
  * a bug must look like one (I5).
  *
- * DEPLOYMENT REQUIREMENT (round-3 adjudication): configure `responderLogin`
- * as the loop's own identity. The two self-reply suppressions split by
- * surface: THREAD-kind feedback rides RESPONDER AUTHORSHIP (classify row
- * 5, the thread last-word rule — with responderLogin configured, the loop
- * never re-answers a thread it already replied to); COMMENT-kind feedback
- * (top-level issue comments, which cannot thread) rides the reply
- * SIGNATURE — a different surface needing a different mechanism, see
- * {@link replySignature}.
+ * SELF-REPLY SUPPRESSION splits by surface. THREAD-kind feedback rides the
+ * settle gate ({@link loopReplySettled}: the thread's latest word is this
+ * loop's signature-led reply stamped with the current head). `responderLogin`
+ * feeds verify's attribution only. It never reaches classify, whose row 5
+ * reads the PR AUTHOR, so it cannot suppress the automation identity's own
+ * replies. COMMENT-kind feedback (top-level issue comments, which cannot
+ * thread) rides the reply SIGNATURE skip pattern, see {@link replySignature}.
  */
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
   const reasons: string[] = [];
@@ -749,10 +795,22 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const dispatched = new Set(
     (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
   );
+  const signature = replySignature(opts.owner, opts.repo, opts.pr);
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
   const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
+    // THE SETTLE GATE FIRST (loopReplySettled): a thread whose latest word
+    // is this loop's reply for the current head gets no fix job, no reply,
+    // and no carried action — never another answer for the same head
+    // without new reviewer input.
+    if (entry.source.kind === 'thread') {
+      const thread = state.threads.find((candidate) => candidate.id === entry.source.itemId);
+      if (thread !== undefined && loopReplySettled(thread.replies, signature, state.headRefOid)) {
+        skipped.push({ id: entry.source.itemId, reason: 'loop-replied-this-head' });
+        continue;
+      }
+    }
     const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
     if (dispatched.has(replyActionId)) {
       const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${entry.source.roundFingerprint}`;
@@ -1159,9 +1217,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // The SELF-REPLY SIGNATURE LEADS every reply body (drill 8, cycle-1
     // major — see replySignature): REPLY_SIGNATURE_PATTERN is
     // START-anchored, so the marker must be the body's FIRST line for a
-    // re-run to recognize its own words as skip-class content.
-    const signature = replySignature(opts.owner, opts.repo, opts.pr);
-    const body = `${signature}\n\n${
+    // re-run to recognize its own words as skip-class content. The HEAD
+    // STAMP follows it (replyHeadStamp): the head this reply answers for —
+    // the pushed worktree head when this run published commits, else the
+    // fetched head the worker read.
+    const answeredHead = commits.length > 0 ? headAfter.stdout.trim() : state.headRefOid;
+    const stamp =
+      answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
+        ? `\n${replyHeadStamp(answeredHead)}`
+        : '';
+    const body = `${signature}${stamp}\n\n${
       value.changed && value.commits.length > 0
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
         : value.summary
