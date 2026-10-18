@@ -85,6 +85,26 @@ def write_objects(repo, objects, message):
                 raise AuthorRefused(message)
 
 
+def read_blobs(repo, oids):
+    """Contents of the given blob OIDs from one `cat-file --batch`, bounded by git()'s output limit."""
+    oids = sorted(set(oids))
+    if not oids:
+        return {}
+    out = git(repo, "cat-file", "--batch", data=("\n".join(oids) + "\n").encode())
+    blobs, pos = {}, 0
+    for oid in oids:
+        nl = out.find(b"\n", pos)
+        header = out[pos:nl].split(b" ") if nl >= 0 else []
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob" or not header[2].isdigit():
+            raise AuthorRefused("snapshot entry is not a readable blob")
+        size = int(header[2])
+        if nl + 1 + size >= len(out):
+            raise AuthorRefused("snapshot entry is not a readable blob")
+        blobs[oid] = out[nl + 1:nl + 1 + size]
+        pos = nl + 1 + size + 1
+    return blobs
+
+
 def decode(snapshot, binding):
     if not isinstance(snapshot, dict) or set(snapshot) != {"v", "tree", "objects", "sha256"}:
         raise AuthorRefused("invalid snapshot fields")
@@ -168,6 +188,10 @@ def install(snapshot, binding, runner):
         # Feed every incoming blob through the existing path-aware scan policy,
         # independently of the worker's operator-configured pre-upload scan.
         blobs = {oid: data for oid, kind, data in objects if kind == "blob"}
+        # Blobs reused from base are not in the transferred closure but still land at new paths.
+        blobs.update(read_blobs(quarantine, [oid.decode() for oid in entry_oids if oid.decode() not in blobs]))
+        name_max = os.pathconf(clone, "PC_NAME_MAX")
+        path_max = os.pathconf(clone, "PC_PATH_MAX") - len(str(runner.WT_ROOT)) - 256
         rules = runner.denylist_rules()
         if not rules:
             raise AuthorRefused("snapshot scan policy absent")
@@ -184,11 +208,14 @@ def install(snapshot, binding, runner):
             if any(ord(c) < 32 or ord(c) == 127 for c in path) or any(
                     part in (".", "..") or part.lower() == ".git" for part in path.split("/")):
                 raise AuthorRefused("unsafe snapshot path")
+            # A later `git worktree add` must be able to create every path on the runner filesystem.
+            if len(raw_path) > path_max or any(len(part) > name_max for part in raw_path.split(b"/")):
+                raise AuthorRefused("snapshot path too long to check out")
             oid = meta.rsplit(b" ", 1)[1].decode()
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
-            if meta.startswith(b"120000 ") and oid in blobs and (not blobs[oid] or b"\0" in blobs[oid]):
+            if meta.startswith(b"120000 ") and (not blobs[oid] or b"\0" in blobs[oid]):
                 raise AuthorRefused("snapshot symlink target is not representable")
-            contents = blobs.get(oid, b"").decode("utf-8", errors="replace")
+            contents = blobs[oid].decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:
             # a blob line beginning '++ b/...' could forge an allowlisted path.
             if not any(pattern.search(path) for pattern in allow):
