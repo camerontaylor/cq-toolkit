@@ -30,7 +30,7 @@ const temporary: string[] = [];
 // (changed false ⇔ empty commits, non-empty summary).
 const FIX_CONTRACT = {
   changed: false,
-  summary: 'Already satisfied: the anchored guard exists.',
+  summary: 'Already satisfied: the guard at src/a.ts:3 exists.',
   commits: [],
 };
 
@@ -109,7 +109,7 @@ describe('S4b review.fixItem served-model construction', () => {
         if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
         expect(result.value).toMatchObject({
           changed: false,
-          summary: 'Already satisfied: the anchored guard exists.',
+          summary: 'Already satisfied: the guard at src/a.ts:3 exists.',
           commits: [],
         });
       } else {
@@ -121,7 +121,7 @@ describe('S4b review.fixItem served-model construction', () => {
         // (the parsed fix contract) never surfaces.
         expect(result).not.toHaveProperty('value');
         expect(JSON.stringify(result)).not.toContain(
-          'Already satisfied: the anchored guard exists.',
+          'Already satisfied: the guard at src/a.ts:3 exists.',
         );
       }
     },

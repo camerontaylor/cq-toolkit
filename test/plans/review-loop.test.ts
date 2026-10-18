@@ -1470,7 +1470,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(true, 'Fixed A.', [NEW_SHA])),
-        completeWorker(fixLine(false, 'Nothing to change for B.', [])),
+        completeWorker(
+          fixLine(false, 'Nothing to change for B: src/b.ts line 8 already guards it.', []),
+        ),
       ],
       gitLog,
     });
@@ -1621,7 +1623,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
-        completeWorker(fixLine(false, 'A: nothing to change.', [])),
+        completeWorker(
+          fixLine(false, 'A: nothing to change, src/a.ts line 3 already guards it.', []),
+        ),
         completeWorker(fixLine(true, 'Fixed B.', [NEW_SHA])),
       ],
       ghLog,
@@ -1814,8 +1818,12 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8, cy
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
-        completeWorker(fixLine(false, 'The checks comment: noted.', [])),
-        completeWorker(fixLine(false, 'Noted; nothing to change in code.', [])),
+        completeWorker(
+          fixLine(false, 'The checks comment: noted, the `static` job already covers it.', []),
+        ),
+        completeWorker(
+          fixLine(false, 'Noted; nothing to change, src/a.ts line 3 already guards it.', []),
+        ),
       ],
       ghLog,
     });
@@ -2906,6 +2914,12 @@ describe('thread settle gate (PR #336 incident)', () => {
     'Starting work.',
     // Progress-only sentences joined (PR #343 independent review, finding 1).
     'Reading the anchored code first. Starting work on the reviewed item.',
+    // The independent review's probes at c95807ca: an activity whose object
+    // names a condition, and a negation inside what is being investigated.
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+    // A reason that cites nothing it checked.
+    'The existing null check already covers the empty input case.',
   ])('a worker answering the live non-answer %j posts NOTHING and records why', async (live) => {
     const world = settleWorld();
     const ghLog: string[][] = [];
@@ -2918,6 +2932,36 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(outcome.actionsPosted).toBe(0);
     expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
   });
+
+  test.each([
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+  ])(
+    'a probe non-answer %j never settles the thread: the next run at the same head still answers it (independent review at c95807ca)',
+    async (probe) => {
+      const ghLog1: string[][] = [];
+      const run1 = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(fixLine(false, probe, []))],
+        ghLog: ghLog1,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(run1.outcome.actionsPosted).toBe(0);
+      expect(ghLog1.filter((args) => isGhMutation(args))).toEqual([]);
+      // Nothing was posted, so nothing can settle: run 2 dispatches the worker again.
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+        invocations,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(invocations).toHaveLength(1);
+      expect(run2.outcome.skipped).not.toContainEqual({
+        id: 'T1',
+        reason: 'loop-replied-this-head',
+      });
+      expect(run2.outcome.actionsPosted).toBe(1);
+    },
+  );
 
   test('a future-tense disposition that declines a change posts once (PR #343 independent review, finding 2)', async () => {
     const summary = 'I will make no changes because line 3 already rejects empty input.';

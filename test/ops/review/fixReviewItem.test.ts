@@ -138,7 +138,7 @@ const completeWorker = (
 });
 
 /** A real no-change disposition: the outcome AND its reason. */
-const NO_CHANGE = 'Already satisfied: the anchored line handles this case.';
+const NO_CHANGE = 'Already satisfied: src/a.ts line 3 already handles this case.';
 
 /** Minimal valid input overridable field by field. */
 const baseInput = (extra?: Partial<FixReviewItemInput>): FixReviewItemInput => ({
@@ -398,7 +398,7 @@ describe('fixReviewItem structured output', () => {
   test('a one-line JSON STRING parses into the triple', async () => {
     const { op } = scriptedOp([
       completeWorker(
-        '{"changed": false, "summary": "Already satisfied: the anchored line handles this case.", "commits": []}',
+        '{"changed": false, "summary": "Already satisfied: src/a.ts line 3 already handles this case.", "commits": []}',
       ),
     ]);
     const value = expectOk(await op(baseInput()));
@@ -715,7 +715,7 @@ describe('summary contract (round-2 finding 5+7)', () => {
     const { op } = scriptedOp([
       completeWorker({
         changed: false,
-        summary: 'Already satisfied by the guard. '.repeat(40),
+        summary: 'Already satisfied by the guard at line 3. '.repeat(40),
         commits: [],
       }),
     ]);
@@ -816,23 +816,54 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     expect((await op(baseInput())).status).toBe('failed');
   });
 
+  // FAIL CLOSED (PR #343 independent review at c95807ca): an unchanged answer
+  // is an outcome only when it positively carries a cited reason.
+  test.each([
+    // The reviewer's two probes: an activity whose object merely mentions a
+    // condition, and a negation inside what is being investigated.
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+    // Every unreported activity lead, whatever its verb or object.
+    'Tracing how the retry loop handles EBUSY.',
+    'Comparing the guard with the reviewer request.',
+    // A progressive main clause is ongoing work, even with a trailing finding.
+    'I am reading the anchored file, which already guards the abort, so nothing changed.',
+  ])('an unchanged activity report %j is a non-answer', (summary) => {
+    expect(nonAnswerSummaryReason(summary, false)).toContain('preamble or placeholder');
+  });
+
+  test.each([
+    'Checking the anchored guard confirmed no change was needed.',
+    'I will not change this because the existing guard already handles the case.',
+    'The existing null check already covers the empty input case.',
+  ])('an unchanged reason %j that cites nothing it checked → no outcome', (summary) => {
+    expect(nonAnswerSummaryReason(summary, false)).toContain('must cite what it checked');
+  });
+
   test.each([
     [NO_CHANGE, false],
     ['No change needed: proposeBaselineUpdate already keeps one decimal for coverage.', false],
     ['Guarded the abort.', true],
     ['Rounded coverage proposals to one decimal.', true],
     // Outcome text that merely OPENS with a narration word (PR #343 review).
-    ['Checking the anchored guard confirmed no change was needed.', false],
+    ['Checking the guard at src/a.ts:3 confirmed no change was needed.', false],
     ['Now guards the abort signal in the retry loop.', true],
-    ['I will not change this because the existing guard already handles the case.', false],
+    [
+      'I will not change this because the existing guard at line 3 already handles the case.',
+      false,
+    ],
     ["I'm not going to change it: line 3 already guards the case.", false],
-    ['I am reading the anchored file, which already guards the abort, so nothing changed.', false],
     ['First, the retry loop was fixed to honor the abort signal.', true],
     // A future-tense lead that DECLINES a change is a disposition (independent review, finding 2).
     ['I will make no changes because line 3 already rejects empty input.', false],
     ['Let me explain why nothing changes: line 3 already rejects empty input.', false],
     // Narration beside a real outcome: the outcome is what gets judged.
     ['Reading the anchored code first. Line 3 already rejects empty input.', false],
+    // A cited reason in any form: a symbol, a code span, a path.
+    ['Already handled: `parseConfig()` rejects an empty path before the read.', false],
+    ['The guard in MAX_SUMMARY_CHARS already caps the reply length.', false],
+    // changed:true is backed by its commits: a gerund-led summary is still an outcome.
+    ['Adding a null check to the abort path.', true],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {
     expect(nonAnswerSummaryReason(summary, changed)).toBeNull();
   });
