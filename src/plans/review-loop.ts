@@ -959,10 +959,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // (at most one answer per thread, head and round); its one carried action
   // is a resolve its posting run queued but did not record, under the
   // posting run's actionId (the dispatch round without the trailing loop
-  // reply) so a recorded resolve dedupes. A STALE thread, or a settled one
-  // whose recorded resolve was undone (fetched unresolved: a reviewer
-  // reopened it), is answered again. An UNPROVEN reply leaves classify's
-  // verdict standing.
+  // reply) so a recorded resolve dedupes. A STALE thread, or a settled
+  // marked one whose resolve is not provably pending (recorded already, so
+  // a reviewer reopened it, or no record at all), is answered again. An
+  // UNPROVEN reply leaves classify's verdict standing.
   const settledItems = classification.items.map((item): ClassifiedItem => {
     if (item.kind !== 'thread' || (item.verdict !== 'actionable' && item.verdict !== 'responded')) {
       return item;
@@ -980,12 +980,20 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       return item;
     }
     if (verdict.kind === 'settled') {
-      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
-        item.id,
-        { body: thread.body, comments: thread.replies.slice(0, -1) },
-      )}`;
-      const reopened = verdict.carryResolve && dispatched.has(resolveActionId);
-      if (!reopened) {
+      const postingRound = `${item.id}-${roundFingerprint(item.id, {
+        body: thread.body,
+        comments: thread.replies.slice(0, -1),
+      })}`;
+      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${postingRound}`;
+      // A carry needs POSITIVE proof the resolve is pending: the posting
+      // run's reply recorded and its resolve not. A recorded resolve on a
+      // thread fetched unresolved means a reviewer reopened it; with no
+      // record at all (a lost runner cache) the two cannot be told apart.
+      // Either way the thread is looked at again, never silently re-closed.
+      const pendingResolve =
+        dispatched.has(`review-loop:${String(opts.pr)}:reply:${postingRound}`) &&
+        !dispatched.has(resolveActionId);
+      if (!verdict.carryResolve || pendingResolve) {
         if (verdict.carryResolve) {
           carriedResolves.push({
             kind: 'resolve_thread',

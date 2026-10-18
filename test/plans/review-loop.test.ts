@@ -2797,6 +2797,28 @@ describe('thread settle gate (PR #336 incident)', () => {
     });
   });
 
+  test('a marked reply with no dispatch record (lost cache) is looked at again, never silently re-resolved (PR #343 Codex review)', async () => {
+    const world = publishedWorld();
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply', 'resolve_thread']);
+    // A reviewer reopened the thread; the runner cache holding run 1's
+    // records is gone (a fresh dispatch log per runLoop).
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(postedKinds(outcome)).toEqual(['review_reply']);
+  });
+
   test('a thread reopened after its recorded resolve is looked at again (PR #343 review)', async () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-review-reopen-'));
     scratchDirs.push(scratch);
