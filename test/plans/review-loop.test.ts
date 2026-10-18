@@ -2320,7 +2320,12 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(settle([reply(stamped)], { headSha: OLD_HEAD })).toEqual(unsettled);
     // Unknown current head / legacy unstamped reply: silence, never a mutation.
     expect(settle([reply(marked)], { headSha: null, ownLogin: LOOP_LOGIN })).toEqual(settledOnly);
-    expect(settle([reply(`${SIG}\n\nplaceholder`)])).toEqual(settledOnly);
+    // A legacy reply binds nothing: it settles only for the KNOWN identity.
+    expect(settle([reply(`${SIG}\n\nplaceholder`)], { ownLogin: LOOP_LOGIN })).toEqual(settledOnly);
+    expect(settle([reply(`${SIG}\n\nplaceholder`)])).toEqual(unsettled);
+    expect(
+      settle([reply(`${SIG}\n\nplaceholder`, iso(REPLY_AGE), 'mallory')], { ownLogin: LOOP_LOGIN }),
+    ).toEqual(unsettled);
     // Reviewer input after the loop's reply re-opens the thread.
     expect(settle([reply(stamped), reply('Still wrong.', iso(1), 'reviewer')])).toEqual(unsettled);
     // Feedback that landed before the reply but after the posting run's fetch.

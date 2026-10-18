@@ -224,9 +224,10 @@ const readReplyHeader = (
  * durable record (the dispatch log is a runner cache), so the gate reads it.
  *
  * Fail-closed toward silence: a loop reply WITHOUT a stamp (posted before
- * the stamp existed) or an unknown current head cannot prove the head moved,
- * so the thread stays settled — without any carried mutation — until a
- * reviewer speaks again.
+ * the stamp existed, settled only when authored by the KNOWN loop identity)
+ * or an unknown current head cannot prove the head moved, so the thread
+ * stays settled — without any carried mutation — until a reviewer speaks
+ * again.
  */
 export const loopReplySettlement = (
   replies: readonly ThreadComment[],
@@ -255,7 +256,10 @@ export const loopReplySettlement = (
     return unsettled;
   }
   if (header.head === null || header.round === null) {
-    return { settled: true, carryResolve: false };
+    // A LEGACY (unstamped) reply binds no round or head, so it settles only
+    // when its author is the loop's KNOWN identity — anyone can type the
+    // public signature.
+    return ownLogin === null ? unsettled : { settled: true, carryResolve: false };
   }
   if (header.round !== opts.roundOf(replies.slice(0, -1))) {
     return unsettled;
