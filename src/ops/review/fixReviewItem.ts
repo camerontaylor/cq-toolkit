@@ -239,7 +239,7 @@ export const MAX_SUMMARY_CHARS = 1_000;
  * was done or found, never what is about to happen.
  */
 export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
-  /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|done|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
+  /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
   /^(?:starting|reading|looking|checking|investigating|examining|inspecting|reviewing|analy[sz]ing|working|beginning|opening|let me|let's|i will|i'll|i am going to|i'm going to|going to|first|now|next)\b/,
 ]);
 

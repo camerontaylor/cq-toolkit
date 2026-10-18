@@ -28,7 +28,11 @@ const temporary: string[] = [];
 
 // The strict op-side parse accepts exactly this no-change fix contract
 // (changed false ⇔ empty commits, non-empty summary).
-const FIX_CONTRACT = { changed: false, summary: 'Already addressed.', commits: [] };
+const FIX_CONTRACT = {
+  changed: false,
+  summary: 'Already satisfied: the anchored guard exists.',
+  commits: [],
+};
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'review-served-construction-'));
@@ -105,7 +109,7 @@ describe('S4b review.fixItem served-model construction', () => {
         if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
         expect(result.value).toMatchObject({
           changed: false,
-          summary: 'Already addressed.',
+          summary: 'Already satisfied: the anchored guard exists.',
           commits: [],
         });
       } else {
@@ -116,7 +120,9 @@ describe('S4b review.fixItem served-model construction', () => {
         // The mismatch verdict outranks the valid payload: the ok value
         // (the parsed fix contract) never surfaces.
         expect(result).not.toHaveProperty('value');
-        expect(JSON.stringify(result)).not.toContain('Already addressed.');
+        expect(JSON.stringify(result)).not.toContain(
+          'Already satisfied: the anchored guard exists.',
+        );
       }
     },
   );
