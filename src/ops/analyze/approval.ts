@@ -74,9 +74,9 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
-import { GIT_HARDEN } from '../../adapters/git/ratchetGit.js';
+import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import { realpathOrSelf } from '../../adapters/store/nonceLedger.js';
-import { makeGitMutex } from '../sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
 
 /**

@@ -581,7 +581,7 @@ describe('verifyRatchet: a bound D11 authorization (shared with the gate)', SLOW
   const C3 = JSON.stringify({
     schemaVersion: 1,
     attests: 'C3',
-    attestedAt: '2026-10-01T00:00:00Z',
+    attestedAt: '2026-09-20T00:00:00Z',
   });
   let head: string;
   beforeAll(() => {

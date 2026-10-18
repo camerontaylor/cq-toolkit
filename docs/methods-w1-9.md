@@ -78,6 +78,9 @@ event that no later `unlabeled` event follows. It is **valid** only if all of th
 A valid record is **honoured**, turning needs-human into pass, only when the C3 attestation file
 (`policy/attestations/c3.json`) is on the trust ref **and** has exactly the shape
 `{ "schemaVersion": 1, "attests": "C3", "attestedAt": "<canonical ISO 8601 UTC>", "note"?: … }`.
+An armed record must also be later than that `attestedAt`: the durable activation instant on
+the trust ref, never the attestation commit's timestamp. A label applied at or before it is
+**invalid**, so C3 never honours a label retroactively; the owner re-applies it.
 A stray, empty or placeholder file does not arm records; the report notes why. Until then the
 report logs the label as `dormant`, with every field it checked. The APPROVED-review record form belongs to W1.10,
 alongside the acceptance check.

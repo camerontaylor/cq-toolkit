@@ -32,8 +32,8 @@ import { execFile } from 'node:child_process';
 import { lstat, realpath, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
-import { makeGitMutex } from '../../ops/sweep/gitMutex.js';
-import type { GitMutex, GitMutexConfig } from '../../ops/sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
+import type { GitMutex, GitMutexConfig } from '../../shared/gitMutex.js';
 
 /** JSON-serializable input of the `sweep.worktreeFor` op. */
 export interface WorktreeForInput {

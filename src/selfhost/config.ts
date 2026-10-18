@@ -19,7 +19,7 @@
 // pretend to exist).
 import { join } from 'node:path';
 import type { ModelSpec } from '../driver/types.js';
-import { deepFreeze } from '../harness/config.js';
+import { deepFreeze } from '../shared/deepFreeze.js';
 
 /**
  * The shape of the frozen self-hosting defaults. Plain data only — the

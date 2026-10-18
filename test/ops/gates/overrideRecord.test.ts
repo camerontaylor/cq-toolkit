@@ -23,6 +23,8 @@ const OWNER_ID = 1001;
 const SUBJECT = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 const EPOCH = '2026-09-20T10:00:00.000Z';
+/** C3 activation before EPOCH and every default label, so `attested: true` honours them. */
+const ATTESTED_AT = '2026-09-20T00:00:00Z';
 
 interface EventOpts {
   event?: string;
@@ -52,14 +54,19 @@ function labelEvent(opts: EventOpts = {}): Record<string, unknown> {
 
 const evaluate = (
   events: readonly unknown[],
-  over: Partial<{ headObservedAt: string | undefined; attested: boolean; ownerId: number }> = {},
+  over: Partial<{
+    headObservedAt: string | undefined;
+    attested: boolean;
+    attestedAt: string;
+    ownerId: number;
+  }> = {},
 ) =>
   evaluateOverrideLabel({
     events,
     ownerId: over.ownerId ?? OWNER_ID,
     subject: SUBJECT,
     headObservedAt: 'headObservedAt' in over ? over.headObservedAt : EPOCH,
-    attested: over.attested ?? false,
+    attestedAt: over.attestedAt ?? (over.attested === true ? ATTESTED_AT : undefined),
   });
 
 describe('headObservationEpoch', () => {
@@ -131,6 +138,50 @@ describe('evaluateOverrideLabel', () => {
 
   test('a valid owner label after the epoch is honoured when attested', () => {
     expect(evaluate([labelEvent()], { attested: true }).status).toBe('honoured');
+  });
+
+  describe('#338 P1: C3 never honours a label applied before attestedAt', () => {
+    // After the head epoch (10:00) but before C3 (10:30): a label seeded while
+    // interim owner credentials were live.
+    const seeded = [labelEvent({ at: '2026-09-20T10:15:00Z' })];
+    const C3_AT = '2026-09-20T10:30:00Z';
+
+    test('a valid pre-C3 label is dormant before C3 and invalid, not honoured, after it', () => {
+      expect(evaluate(seeded).status).toBe('dormant');
+      const result = evaluate(seeded, { attestedAt: C3_AT });
+      expect(result.status).toBe('invalid');
+      expect(result.reasons).toEqual([
+        `label created_at 2026-09-20T10:15:00Z is not after the C3 attestation attestedAt ${C3_AT}`,
+      ]);
+    });
+
+    test('a label at the attestedAt second is not strictly after it', () => {
+      expect(evaluate([labelEvent({ at: C3_AT })], { attestedAt: C3_AT }).status).toBe('invalid');
+    });
+
+    test('the owner re-applying the label after C3 is honoured', () => {
+      const relabel = [
+        ...seeded,
+        labelEvent({ event: 'unlabeled', at: '2026-09-20T10:40:00Z' }),
+        labelEvent({ at: '2026-09-20T10:45:00Z' }),
+      ];
+      expect(evaluate(relabel, { attestedAt: C3_AT }).status).toBe('honoured');
+    });
+
+    test('both floors apply: after C3 but before the head epoch is still invalid', () => {
+      const result = evaluate([labelEvent({ at: '2026-09-20T09:00:00Z' })], {
+        attestedAt: '2026-09-20T08:00:00Z',
+      });
+      expect(result.status).toBe('invalid');
+      expect(result.reasons).toHaveLength(1);
+      expect(result.reasons[0]).toMatch(/not after the head observation epoch/);
+    });
+
+    test('an unparseable attestedAt fails closed', () => {
+      const result = evaluate([labelEvent()], { attestedAt: 'nope' });
+      expect(result.status).toBe('invalid');
+      expect(result.reasons).toEqual([`C3 attestedAt 'nope' is not a timestamp`]);
+    });
   });
 
   test('A14: an App-token label (Bot via cq-automation) is invalid even when attested', () => {
@@ -301,9 +352,13 @@ describe('parseC3Attestation: presence alone never arms D-G.4 records (compositi
   const valid = { schemaVersion: 1, attests: 'C3', attestedAt: '2026-09-26T00:00:00Z' };
 
   test('the exact shape arms', () => {
-    expect(parseC3Attestation(JSON.stringify(valid))).toEqual({ armed: true });
+    expect(parseC3Attestation(JSON.stringify(valid))).toEqual({
+      armed: true,
+      attestedAt: valid.attestedAt,
+    });
     expect(parseC3Attestation(JSON.stringify({ ...valid, note: 'PATs revoked' }))).toEqual({
       armed: true,
+      attestedAt: valid.attestedAt,
     });
   });
 
@@ -353,11 +408,7 @@ describe('headObservationEpochInHistory (merged PRs are pruned from the ledger t
 });
 
 describe('D11 authorization (bindD11Authorization + authorizePaths)', () => {
-  const C3 = JSON.stringify({
-    schemaVersion: 1,
-    attests: 'C3',
-    attestedAt: '2026-10-01T00:00:00Z',
-  });
+  const C3 = JSON.stringify({ schemaVersion: 1, attests: 'C3', attestedAt: ATTESTED_AT });
   const evidence = (over: Partial<D11PrEvidence> = {}): D11PrEvidence => ({
     pr: 7,
     merge: 'c'.repeat(40),
@@ -412,6 +463,26 @@ describe('D11 authorization (bindD11Authorization + authorizePaths)', () => {
     expect(none.contributions[0]?.record.reasons).toEqual([
       `no durable head observation for ${SUBJECT}`,
     ]);
+  });
+
+  test('#338 P1: a label applied before attestedAt never authorizes (no retroactive C3)', () => {
+    const late = JSON.stringify({
+      schemaVersion: 1,
+      attests: 'C3',
+      attestedAt: '2026-10-01T00:00:00Z',
+    });
+    const auth = bind([evidence()], { state: 'present', text: late });
+    expect(auth.attested).toBe(true);
+    expect(auth.report[0]).toBe(
+      `attestation: ${C3_ATTESTATION_PATH} valid at the trust ref — records honoured when applied after attestedAt 2026-10-01T00:00:00Z`,
+    );
+    expect(auth.contributions[0]?.record).toMatchObject({
+      status: 'invalid',
+      reasons: [
+        'label created_at 2026-09-20T11:00:00Z is not after the C3 attestation attestedAt 2026-10-01T00:00:00Z',
+      ],
+    });
+    expect(authorizePaths(auth, ['vitest.config.ts']).authorized).toBe(false);
   });
 
   test('an App-applied label is invalid even when attested (A14)', () => {

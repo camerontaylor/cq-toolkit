@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const srcDir = path.join(repoRoot, 'src', 'ops', 'merge', 'prompts');
 const distDir = path.join(repoRoot, 'dist', 'ops', 'merge', 'prompts');
+const reviewPrompt = path.join(repoRoot, 'src', 'ops', 'review', 'prompts', 'fix.default.md');
+const reviewDistDir = path.join(repoRoot, 'dist', 'ops', 'review', 'prompts');
 
 await mkdir(distDir, { recursive: true });
 const files = (await readdir(srcDir)).filter((file) => file.endsWith('.md'));
@@ -31,3 +33,7 @@ if (files.length === 0) {
     `copy-prompt-assets: ${String(files.length)} prompt asset(s) → dist/ops/merge/prompts/`,
   );
 }
+
+await mkdir(reviewDistDir, { recursive: true });
+await copyFile(reviewPrompt, path.join(reviewDistDir, 'fix.default.md'));
+console.log('copy-prompt-assets: 1 prompt asset(s) → dist/ops/review/prompts/');

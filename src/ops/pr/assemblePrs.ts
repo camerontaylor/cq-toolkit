@@ -30,8 +30,8 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
-import { makeGitMutex } from '../sweep/gitMutex.js';
-import type { GitMutexConfig } from '../sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
+import type { GitMutexConfig } from '../../shared/gitMutex.js';
 
 /**
  * The injected `gh` seam — the ONE place this family touches GitHub. All

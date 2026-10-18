@@ -84,7 +84,8 @@ import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
-import { deepFreeze, defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
+import { deepFreeze } from '../../shared/deepFreeze.js';
+import { defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type {
   Budget,
@@ -97,7 +98,7 @@ import type {
 } from '../../driver/types.js';
 import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
-import { defaultFixPrompt } from './prompts/fix.default.js';
+import { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
 import type { ThreadComment } from './threads.js';
 
 /**
