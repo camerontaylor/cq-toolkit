@@ -13,6 +13,11 @@
 // no CLI start; bounded 8 KiB responses; private remote stderr never
 // reflected. The crq-side invocation (`cq dev.review --action=enroll …`)
 // keeps working byte-for-byte.
+//
+// P5 TREE SNAPSHOTS (apps/crq-python/ops/tree-snapshots.md): `--tree`
+// replaces `--head` with a synthetic commit binding tree to base. Only a tree
+// `enroll` sends the v2 envelope carrying the scanned object closure; a
+// `--head` request and every status/fallback still send the v1 bytes above.
 import { captureSnapshot, SnapshotConfigError, snapshotHead } from './internal/snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';

@@ -69,9 +69,9 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
 
 /**
  * The author-admission branch of the `dev.review` union (the worker
- * transport's wire shape, carried over UNCHANGED from the merged
- * worker-transport PR — the crq-side invocation
- * `cq dev.review --action=enroll …` keeps working byte-for-byte).
+ * transport's wire shape from the merged worker-transport PR — the crq-side
+ * invocation `cq dev.review --action=enroll --head=…` keeps working
+ * byte-for-byte). P5 adds `tree` as the alternative to `head`: exactly one.
  */
 export const DevTransportInputSchema = z
   .object({
