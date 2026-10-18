@@ -40,7 +40,7 @@ import {
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { makeGitMutex } from '../sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 
 /**
  * The persisted record format version — the only one parseDevLedger accepts.

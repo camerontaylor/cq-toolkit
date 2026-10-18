@@ -32,7 +32,7 @@ import { join, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import type { DevLedgerStore } from './record.js';
 import { pathDevLedgerStore } from './record.js';
-import { makeGitMutex } from '../sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 
 /** The result of one ran command: exit code (null when SIGKILLed), captured streams. */
 export interface CommandResult {
