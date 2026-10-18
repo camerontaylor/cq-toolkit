@@ -226,6 +226,16 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
 export const MAX_SUMMARY_CHARS = 1_000;
 
 /**
+ * An optional first-person or sequencing lead on a progress announcement
+ * ("I am reading the anchored file first.", "First, reading the code.",
+ * "Currently checking the diff."). The whole-summary anchors stay, so outcome
+ * text that merely opens with one of these ("Now guards the abort.") is not
+ * caught: a gerund plus a review-context object must still follow.
+ */
+const PROGRESS_LEAD =
+  "(?:(?:i am|i'm|we are|we're|i have started|i've started)(?: now| currently| just)? |(?:first|now|currently|next),? )?";
+
+/**
  * NON-ANSWER SUMMARIES (PR #336 incident, 2026-10-17/18): a worker that
  * answers the contract on its FIRST turn — before reading anything — hands
  * back a schema-valid `{changed:false}` whose summary is a preamble
@@ -249,9 +259,15 @@ export const MAX_SUMMARY_CHARS = 1_000;
  */
 export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
   /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
-  /^(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of) (?:it|the (?:reviewed |review |anchored )?(?:item|thread|comment|issue|fix|code|file)))?(?: now)?$/,
-  /^(?:reading|looking at|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating) (?:the )?(?:(?:anchored|reviewed|relevant|target|referenced) )?(?:code|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes)(?: first)?(?: now)?$/,
-  /^working on (?:it|this|the (?:fix|item|reviewed item|review item|thread))(?: now)?$/,
+  new RegExp(
+    `^${PROGRESS_LEAD}(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of) (?:it|the (?:reviewed |review |anchored )?(?:item|thread|comment|issue|fix|code|file)))?(?: now)?$`,
+  ),
+  new RegExp(
+    `^${PROGRESS_LEAD}(?:reading|looking at|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating) (?:the )?(?:(?:anchored|reviewed|relevant|target|referenced) )?(?:code|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes)(?: first)?(?: now)?$`,
+  ),
+  new RegExp(
+    `^${PROGRESS_LEAD}working on (?:it|this|the (?:fix|item|reviewed item|review item|thread))(?: now)?$`,
+  ),
   /^(?:let me|let's|i will|i'll|i am going to|i'm going to|going to) /,
 ]);
 

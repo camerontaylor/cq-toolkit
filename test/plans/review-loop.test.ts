@@ -2027,9 +2027,11 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     const world = defaultWorld();
     world.resolveReviewThreadFails = true; // run 1: the reply posts; the resolve fails
     const invocations1: OpInvocation[] = [];
+    const ghLog1: string[][] = [];
     const run1 = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
       invocations: invocations1,
+      ghLog: ghLog1,
       dispatchLogPath,
     });
     expect(run1.outcome.status).toBe('needs-human');
@@ -2044,14 +2046,18 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     // classifies 'responded' → the carried resolve posts from the
     // classification walk.
     world.resolveReviewThreadFails = false;
+    world.sha = SHA; // the fix pushed: the PR head is the stamped head now
     world.pullsComments = [
       restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
-      // The loop's OWN reply, exactly as it composed it: the signature
-      // LEADS the body — that is the carry's authorization (jNfip).
+      // The loop's OWN reply, exactly as run 1 composed it (signature, head
+      // stamp, resolve marker), re-fetched under the single-identity
+      // deployment (authored by the PR author, who is also the responder) —
+      // that is the carry's authorization (jNfip).
       restComment(
         201,
         'prauthor',
-        '<!-- cq-review-loop:octo/widget#7 -->\n\nFixed with a pushed commit.',
+        ghLog1.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'))[0] ??
+          '',
         iso(REPLY_AGE),
         101,
       ),
@@ -2061,6 +2067,7 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
       driverResults: [],
       invocations: invocations2,
       dispatchLogPath,
+      responderLogin: 'prauthor',
     });
     expect(run2.outcome.status).toBe('ok');
     expect(run2.outcome.reasons).toEqual([]);
@@ -2075,6 +2082,7 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
       driverResults: [],
       invocations: invocations3,
       dispatchLogPath,
+      responderLogin: 'prauthor',
     });
     expect(run3.outcome.status).toBe('ok');
     expect(run3.outcome.plan.jobs).toEqual([]);
@@ -2110,6 +2118,83 @@ describe('carried-resolve authorization (jNfip)', () => {
     expect(invocations).toHaveLength(0);
     expect(run.outcome.actionsPosted).toBe(0);
     expect(run.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('carried-resolve authorization under the single identity (PR #343 review)', () => {
+  const SIG = '<!-- cq-review-loop:octo/widget#7 -->';
+  const postedBodies = (ghLog: string[][]): string[] =>
+    ghLog.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'));
+  const root = () => restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+  /** Run 1 over T1: returns the exact reply body the loop posted. */
+  const answerOnce = async (result: WorkerResult): Promise<string> => {
+    const world = defaultWorld();
+    world.pullsComments = [root()];
+    const ghLog: string[][] = [];
+    await runLoop(world, { driverResults: [result], ghLog });
+    return postedBodies(ghLog)[0] ?? '';
+  };
+  /** Run 2: the single-identity world (replies authored by the PR author). */
+  const rerun = async (comments: ReturnType<typeof restComment>[], responderLogin?: string) => {
+    const world = defaultWorld();
+    world.pullsComments = comments;
+    const ghLog: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      invocations,
+      ...(responderLogin !== undefined ? { responderLogin } : {}),
+    });
+    return { outcome, mutations: ghLog.filter((args) => isGhMutation(args)), invocations };
+  };
+  const selfReply = (body: string, id = 9001) =>
+    restComment(id, 'prauthor', body, iso(REPLY_AGE), 101);
+
+  test('a changed:false reply (no resolve marker) never resolves the thread', async () => {
+    const body = await answerOnce(
+      completeWorker(fixLine(false, 'Already satisfied: line 3 already guards the case.', [])),
+    );
+    expect(body).not.toContain('cq-review-loop-resolve');
+    for (const responderLogin of [undefined, 'prauthor']) {
+      const { mutations, invocations } = await rerun([root(), selfReply(body)], responderLogin);
+      expect(mutations).toEqual([]);
+      expect(invocations).toHaveLength(0);
+    }
+  });
+
+  test('a legacy signature-led reply (no stamp, no marker) never resolves the thread', async () => {
+    for (const responderLogin of [undefined, 'prauthor']) {
+      const { mutations } = await rerun(
+        [root(), selfReply(`${SIG}\n\nFixed with a pushed commit.`)],
+        responderLogin,
+      );
+      expect(mutations).toEqual([]);
+    }
+  });
+
+  test('a marked reply posted over unseen reviewer input does not resolve (round binding)', async () => {
+    const body = await answerOnce(completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])));
+    expect(body).toContain('cq-review-loop-resolve');
+    const { mutations } = await rerun(
+      [
+        root(),
+        restComment(9002, 'reviewer', 'Also handle EBUSY.', iso(REPLY_AGE + 30_000), 101),
+        selfReply(body),
+      ],
+      'prauthor',
+    );
+    expect(mutations).toEqual([]);
+  });
+
+  test('a marked reply stamped for an older head does not resolve', async () => {
+    const body = await answerOnce(completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])));
+    const world = defaultWorld();
+    world.sha = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
+    world.pullsComments = [root(), selfReply(body)];
+    const ghLog: string[][] = [];
+    await runLoop(world, { driverResults: [], ghLog, responderLogin: 'prauthor' });
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
   });
 });
 
