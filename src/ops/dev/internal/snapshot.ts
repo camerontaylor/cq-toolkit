@@ -5,12 +5,15 @@ const MAX_CONTENT = 4 * 1024 * 1024;
 const MAX_OBJECTS = 4096;
 const MAX_WIRE = 6 * 1024 * 1024;
 
+/** Operator misconfiguration (not a runtime refusal): surfaces as needs-human, never indeterminate. */
+export class SnapshotConfigError extends Error {}
+
 /** Private object-only capture: never changes HEAD, the index or working files. */
 export async function captureSnapshot(repo: string, base: string, tree: string, scanner?: string) {
   if (![base, tree].every((oid) => /^[0-9a-f]{40}$/.test(oid)))
     throw new Error('invalid snapshot identity');
   if (!scanner?.startsWith('/'))
-    throw new Error('configure an absolute snapshot scanner executable');
+    throw new SnapshotConfigError('configure an absolute snapshot scanner executable');
   const deadline = Date.now() + 30_000;
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
@@ -66,15 +69,25 @@ export async function captureSnapshot(repo: string, base: string, tree: string, 
   const objects: { oid: string; type: string; data: string }[] = [];
   let total = 0;
   const digest = createHash('sha256');
+  // One batched read for every object, in sorted-id order; each header is validated before its body is taken.
+  const out = ids.length
+    ? await git(['cat-file', '--batch'], Buffer.from(ids.join('\n') + '\n'))
+    : Buffer.alloc(0);
+  let pos = 0;
   for (const oid of ids) {
-    const type = (await git(['cat-file', '-t', oid])).toString().trim();
-    if (!['blob', 'tree', 'commit'].includes(type)) throw new Error('invalid snapshot object');
-    const size = Number((await git(['cat-file', '-s', oid])).toString().trim());
+    const nl = out.indexOf(0x0a, pos);
+    if (nl < 0) throw new Error('invalid snapshot object');
+    const [gotOid, type, sizeText] = out.subarray(pos, nl).toString().split(' ');
+    if (gotOid !== oid || !['blob', 'tree', 'commit'].includes(type ?? ''))
+      throw new Error('invalid snapshot object');
+    const size = Number(sizeText);
     total += size;
     if (!Number.isSafeInteger(size) || size < 0 || total > MAX_CONTENT)
       throw new Error('snapshot content exceeds bound');
-    const data = (await git(['cat-file', type, oid])).toString('base64');
-    objects.push({ oid, type, data });
+    if (nl + 1 + size >= out.length) throw new Error('invalid snapshot object');
+    const data = out.subarray(nl + 1, nl + 1 + size).toString('base64');
+    pos = nl + 1 + size + 1;
+    objects.push({ oid, type: type!, data });
     digest.update(oid + '\0' + type + '\0' + data + '\n');
   }
   // Operator-owned executable, no shell. It must scan all outgoing object content,
