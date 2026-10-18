@@ -1,4 +1,4 @@
-import { captureSnapshot, snapshotHead } from './snapshot.js';
+import { captureSnapshot, snapshotHead } from './internal/snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
