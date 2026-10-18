@@ -146,4 +146,26 @@ describe('tree snapshot worker and real Python admission', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('asks the operator to configure the scanner instead of reporting an unknown admission', async () => {
+    let sent = false;
+    const op = makeDevReview(
+      async () => {
+        sent = true;
+        return '';
+      },
+      (base, tree) => captureSnapshot('/nonexistent-repo', base, tree, undefined),
+    );
+    const result = await op({
+      action: 'enroll',
+      requestId: 'scanner-unset',
+      base: 'a'.repeat(40),
+      tree: 'b'.repeat(40),
+      target: 'merge-queue',
+      cycle: 1,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(result).toMatchObject({ reason: expect.stringContaining('CQ_AUTHOR_SNAPSHOT_SCANNER') });
+    expect(sent).toBe(false);
+  });
 });

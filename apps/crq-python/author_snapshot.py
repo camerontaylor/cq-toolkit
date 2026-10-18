@@ -64,6 +64,27 @@ def git(repo, *args, data=None):
     return bytes(result)
 
 
+def write_objects(repo, objects, message):
+    """Write all objects with one hash-object process per type (not per object).
+
+    Each object's returned OID must equal its declared OID, in order.
+    """
+    with tempfile.TemporaryDirectory(prefix="cq-author-objects-") as temp:
+        for kind in ("blob", "tree", "commit"):
+            group = [(oid, data) for oid, k, data in objects if k == kind]
+            if not group:
+                continue
+            paths = []
+            for index, (_, data) in enumerate(group):
+                path = Path(temp) / f"{kind}-{index}"
+                path.write_bytes(data)
+                paths.append(str(path))
+            written = git(repo, "hash-object", "-w", "-t", kind, "--stdin-paths",
+                          data=("\n".join(paths) + "\n").encode()).decode().split()
+            if written != [oid for oid, _ in group]:
+                raise AuthorRefused(message)
+
+
 def decode(snapshot, binding):
     if not isinstance(snapshot, dict) or set(snapshot) != {"v", "tree", "objects", "sha256"}:
         raise AuthorRefused("invalid snapshot fields")
@@ -124,9 +145,7 @@ def install(snapshot, binding, runner):
         quarantine = Path(temp)
         git(quarantine, "init", "--bare", "--template=", "-q")
         (quarantine / "objects/info/alternates").write_text(str(object_dir) + "\n")
-        for oid, kind, data in objects:
-            if git(quarantine, "hash-object", "-w", "-t", kind, "--stdin", data=data).decode().strip() != oid:
-                raise AuthorRefused("snapshot import identity mismatch")
+        write_objects(quarantine, objects, "snapshot import identity mismatch")
         needed = set(git(quarantine, "rev-list", "--objects", "--no-object-names",
                          binding["head"], "^" + binding["base"]).decode().split())
         if needed != {oid for oid, _, _ in objects}:
@@ -134,6 +153,13 @@ def install(snapshot, binding, runner):
         entries = git(quarantine, "ls-tree", "-r", "-z", binding["head"]).split(b"\0")
         if any(entry and entry.split(b" ", 1)[0] not in (b"100644", b"100755", b"120000") for entry in entries):
             raise AuthorRefused("snapshot gitlinks or unsupported modes refused")
+        # ls-tree labels entries by mode, not by object: a 100644 entry may name a tree.
+        # Require every entry to resolve to a real blob so it can be scanned and checked out.
+        entry_oids = [entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1] for entry in entries if entry]
+        kinds = git(quarantine, "cat-file", "--batch-check=%(objecttype)",
+                    data=b"".join(oid + b"\n" for oid in entry_oids)).split()
+        if len(kinds) != len(entry_oids) or any(kind != b"blob" for kind in kinds):
+            raise AuthorRefused("snapshot entry mode disagrees with object type")
         diff = git(quarantine, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
                    binding["base"], binding["head"]).decode("utf-8", errors="replace")
         if not diff:
@@ -159,6 +185,9 @@ def install(snapshot, binding, runner):
                     part in (".", "..") or part.lower() == ".git" for part in path.split("/")):
                 raise AuthorRefused("unsafe snapshot path")
             oid = meta.rsplit(b" ", 1)[1].decode()
+            # A symlink must be materializable exactly: non-empty target, no NUL truncation.
+            if meta.startswith(b"120000 ") and oid in blobs and (not blobs[oid] or b"\0" in blobs[oid]):
+                raise AuthorRefused("snapshot symlink target is not representable")
             contents = blobs.get(oid, b"").decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:
             # a blob line beginning '++ b/...' could forge an allowlisted path.
@@ -177,7 +206,5 @@ def install(snapshot, binding, runner):
                                         base=binding["base"], head=binding["head"])
         if not ok:
             raise AuthorRefused("snapshot secret scan refused")
-        for oid, kind, data in objects:
-            if git(clone, "hash-object", "-w", "-t", kind, "--stdin", data=data).decode().strip() != oid:
-                raise AuthorRefused("snapshot installation mismatch")
+        write_objects(clone, objects, "snapshot installation mismatch")
         git(clone, "update-ref", "refs/crq/author-snapshots/v1/" + binding["head"], binding["head"])
