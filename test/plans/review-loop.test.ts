@@ -200,6 +200,8 @@ interface LoopWorld {
    * DEFAULT_WORLD_FILES.
    */
   files?: Record<string, number>;
+  /** Per-commit trees overriding `files` for `git cat-file`/`git show` at that sha. */
+  filesAt?: Record<string, Record<string, number>>;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -392,6 +394,9 @@ const DEFAULT_WORLD_FILES: Record<string, number> = {
 };
 
 const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
+  /** The tree at `<sha>:<path>`'s sha: a per-commit override, else the world's files. */
+  const treeAt = (object: string): Record<string, number> =>
+    world.filesAt?.[object.slice(0, 40)] ?? world.files ?? DEFAULT_WORLD_FILES;
   let pushCount = 0;
   let worktreeHeadReads = 0;
   return async (args) => {
@@ -498,7 +503,7 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
     }
     if (rest[0] === 'cat-file' && rest[1] === '-s' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
-      const lines = (world.files ?? DEFAULT_WORLD_FILES)[(rest[2] ?? '').slice(41)];
+      const lines = treeAt(rest[2] ?? '')[(rest[2] ?? '').slice(41)];
       // Each served line is 'line N\n': about 8 bytes; -1 marks a huge blob.
       return lines === undefined
         ? { code: 128, stdout: '', stderr: 'fatal: not a valid object\n' }
@@ -506,7 +511,7 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     }
     if (rest[0] === 'cat-file' && rest[1] === '-t' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
       const path = (rest[2] ?? '').slice(41);
-      const files = Object.keys(world.files ?? DEFAULT_WORLD_FILES);
+      const files = Object.keys(treeAt(rest[2] ?? ''));
       return files.includes(path)
         ? ok('blob\n')
         : files.some((file) => file.startsWith(`${path}/`))
@@ -515,7 +520,7 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     }
     if (rest[0] === 'show' && /^[0-9a-f]{40}:/.test(rest[1] ?? '')) {
       const path = (rest[1] ?? '').slice(41);
-      const files = world.files ?? DEFAULT_WORLD_FILES;
+      const files = treeAt(rest[1] ?? '');
       const lines = files[path];
       const entries = Object.keys(files).filter((file) => file.startsWith(`${path}/`));
       // Like git: showing a TREE succeeds and lists its entries.
@@ -2910,6 +2915,31 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(postedKinds(outcome)).toEqual(['review_reply', 'resolve_thread']);
     expect(postedBodies(ghLog)).toHaveLength(1);
     expect(postedBodies(ghLog)[0]).toContain('Guarded the abort.');
+  });
+
+  test('unchanged evidence is verified at the head the reply is stamped with, not a sibling commit (PR #343 Codex review)', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    // Only the sibling's pushed tree has src/new.ts; the inspected head does not.
+    world.filesAt = { [SHA]: { ...DEFAULT_WORLD_FILES, 'src/new.ts': 5 } };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, DISPOSITION, [], [{ path: 'src/new.ts', line: 1 }])),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+    });
+    expect(outcome.reasons.some((reason) => reason.includes('evidence does not verify'))).toBe(
+      true,
+    );
+    const bodies = postedBodies(ghLog);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain('Guarded the abort.');
   });
 
   test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {

@@ -1415,14 +1415,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       value.truncated !== true &&
       rowVerified.get(row.jobId) === true;
     // EVIDENCE (THE FIX OUTCOME CONTRACT): an unchanged answer posts only
-    // when every code location it cites exists in the tree it speaks for,
-    // the worktree tip. Otherwise nothing posts and the thread stays
-    // unsettled: an unverified reason is no outcome.
+    // when every code location it cites exists in the tree its stamp names
+    // (answeredHead: the checked-out head it inspected), so a later
+    // sibling's commit can neither supply nor remove a citation. Otherwise
+    // nothing posts and the thread stays unsettled: an unverified reason is
+    // no outcome.
     if (value.disposition === 'unchanged_with_reason') {
       const failure = await evidenceFailure(
         opts.git,
         worktree.path,
-        headAfter.stdout.trim(),
+        answeredHead ?? '',
         value.evidence,
       );
       if (failure !== null) {
