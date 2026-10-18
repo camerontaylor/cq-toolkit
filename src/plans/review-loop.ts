@@ -725,8 +725,9 @@ type CommitVerificationFailure =
 
 /**
  * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
- * every cited `{path, line}` must name a file in the tree at `tip` (read
- * through the git seam, `git show <tip>:<path>`) with at least `line` lines.
+ * every cited `{path, line}` must name a FILE (a blob, never a directory) in
+ * the tree at `tip`, read through the git seam (`git cat-file -t`, then
+ * `git show <tip>:<path>`), with at least `line` lines.
  */
 const evidenceFailure = async (
   git: GhFn,
@@ -738,9 +739,14 @@ const evidenceFailure = async (
     return 'the worktree tip is unreadable';
   }
   for (const { path, line } of evidence) {
+    // A FILE, not a tree: `git show <tip>:<dir>` succeeds on a directory too.
+    const kind = await git(['-C', worktreePath, 'cat-file', '-t', `${tip}:${path}`]);
+    if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
+      return `${path} is not a file at ${tip.slice(0, 12)}`;
+    }
     const shown = await git(['-C', worktreePath, 'show', `${tip}:${path}`]);
     if (shown.code !== 0) {
-      return `${path} does not exist at ${tip.slice(0, 12)}`;
+      return `${path} is unreadable at ${tip.slice(0, 12)}`;
     }
     const lines = shown.stdout.endsWith('\n')
       ? shown.stdout.slice(0, -1).split('\n')

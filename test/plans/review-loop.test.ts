@@ -484,9 +484,26 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     if (rest[0] === 'status' && rest[1] === '--porcelain') {
       return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
     }
+    if (rest[0] === 'cat-file' && rest[1] === '-t' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
+      const path = (rest[2] ?? '').slice(41);
+      const files = Object.keys(world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 });
+      return files.includes(path)
+        ? ok('blob\n')
+        : files.some((file) => file.startsWith(`${path}/`))
+          ? ok('tree\n')
+          : { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` };
+    }
     if (rest[0] === 'show' && /^[0-9a-f]{40}:/.test(rest[1] ?? '')) {
       const path = (rest[1] ?? '').slice(41);
-      const lines = (world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 })[path];
+      const files = world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 };
+      const lines = files[path];
+      const entries = Object.keys(files).filter((file) => file.startsWith(`${path}/`));
+      // Like git: showing a TREE succeeds and lists its entries.
+      if (lines === undefined && entries.length > 0) {
+        return ok(
+          `tree ${rest[1] ?? ''}\n\n${entries.map((file) => file.slice(path.length + 1)).join('\n')}\n`,
+        );
+      }
       return lines === undefined
         ? { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` }
         : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
@@ -3036,6 +3053,8 @@ describe('thread settle gate (PR #336 incident)', () => {
     ['no evidence at all', []],
     ['a file that does not exist', [{ path: 'src/zzz.ts', line: 1 }]],
     ['a line past the end of the file', [{ path: 'src/a.ts', line: 99 }]],
+    // A directory is no file (PR #343 CodeRabbit cycle on fa64d9b8).
+    ['a directory', [{ path: 'src', line: 1 }]],
   ] as const)(
     'an unchanged answer citing %s posts NOTHING and stays unsettled',
     async (_name, evidence) => {
