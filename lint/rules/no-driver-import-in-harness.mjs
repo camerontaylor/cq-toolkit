@@ -19,10 +19,13 @@
 // Same resolve-then-contain discipline as no-cli-beyond-registry-kernel:
 // relative sources are resolved LEXICALLY (posix join + normalize against
 // the importing file's repo-relative directory — no fs, no extension
-// guessing) before containment, so traversal spellings cannot dodge the
+// guessing) before containment. URL path escapes are decoded once; malformed
+// escapes and encoded separators fail closed. Traversal spellings cannot dodge the
 // prefix ('../shared/../driver/types.js' resolves into src/driver/ and is
 // reported). Bare specifiers ('zod', 'node:*') are out of scope — this rule
-// guards the INTERNAL layer edge only. COMPUTED sources fail closed: an
+// guards the INTERNAL layer edge. Module-loader imports (`node:module` and
+// `module`) are prohibited conservatively: createRequire bridges can hide
+// targets behind aliases, member access, or direct calls. COMPUTED sources fail closed: an
 // import whose source is not a plain string literal or a substitution-free
 // template hides its real target from resolve-then-contain and is reported
 // outright. The rule core checks every import source it sees; file scoping
@@ -64,6 +67,20 @@ function resolveRelative(source, importerPath) {
   return path.posix.normalize(path.posix.join(importerDir, source));
 }
 
+// ESM URL paths may spell driver or traversal segments with percent escapes.
+// Decode once (never recursively), and remove URL query/fragment components
+// before path containment. Node rejects encoded path separators; reject them
+// here too rather than letting either slash style hide a layer boundary.
+function canonicalPath(source) {
+  const pathname = source.split(/[?#]/, 1)[0];
+  if (/%(?:2f|5c)/i.test(pathname)) return null;
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+}
+
 function isRelativeSpecifier(source) {
   return source === '.' || source === '..' || source.startsWith('./') || source.startsWith('../');
 }
@@ -95,11 +112,25 @@ function checkSource(context, sourceNode, reportNode) {
     });
     return;
   }
-  if (isRelativeSpecifier(source) && isInside(resolveRelative(source, importerPath), DRIVER_DIR)) {
+  // Prevent acquisition of the Node module-loader bridge, independently of
+  // how createRequire (or its returned require function) is named or called.
+  if (source === 'node:module' || source === 'module') {
+    context.report({ node: reportNode, messageId: 'moduleLoader' });
+    return;
+  }
+  const canonical = canonicalPath(source);
+  if (canonical === null) {
+    context.report({ node: reportNode, messageId: 'invalidSource' });
+    return;
+  }
+  if (
+    isRelativeSpecifier(canonical) &&
+    isInside(resolveRelative(canonical, importerPath), DRIVER_DIR)
+  ) {
     context.report({
       node: reportNode,
       messageId: 'driverImport',
-      data: { source, resolved: resolveRelative(source, importerPath) },
+      data: { source, resolved: resolveRelative(canonical, importerPath) },
     });
   }
 }
@@ -115,6 +146,10 @@ export default {
     messages: {
       driverImport:
         "Harness code must not import the driver tree: '{{source}}' resolves to '{{resolved}}' (migration 1.1 boundary — import from src/shared/** or contracts instead).",
+      moduleLoader:
+        'Harness code must not import node:module or module: module-loader bridges such as createRequire hide import targets from the driver boundary. Use literal imports from shared/contracts instead.',
+      invalidSource:
+        'Harness import paths must have valid URL escapes and no encoded path separators (the driver-import boundary cannot safely resolve this source).',
       computedSource:
         'Computed import sources must be literal inside the harness layer (the driver-import boundary cannot be resolved from a computed source).',
     },

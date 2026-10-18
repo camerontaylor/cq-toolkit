@@ -19,6 +19,18 @@ const ruleTester = new RuleTester({
 ruleTester.run('no-driver-import-in-harness', rule, {
   valid: [
     {
+      code: "import '../%73hared/proc.js?mode=test#part';",
+      filename: 'src/harness/tools.ts',
+    },
+    {
+      code: "import '../%64river-x/types.js';",
+      filename: 'src/harness/tools.ts',
+    },
+    {
+      code: "const createRequire = () => (_source: string) => {}; createRequire()('../driver/types.js');",
+      filename: 'src/harness/tools.ts',
+    },
+    {
       code: "type T = import('../shared/proc.js').ChildEnv;",
       filename: 'src/harness/tools.ts',
     },
@@ -82,6 +94,39 @@ ruleTester.run('no-driver-import-in-harness', rule, {
     },
   ],
   invalid: [
+    ...[
+      "import '../%64river/types.js';",
+      "export * from '../%64river/types.js?mode=test#part';",
+      "await import('../shared/%2e%2e/%64river/types.js');",
+      "type T = import('../%64river/types.js').SandboxLevel;",
+      "import T = require('../%64river/types.js');",
+    ].map((code) => ({
+      code,
+      filename: 'src/harness/tools.ts',
+      errors: [{ messageId: 'driverImport' }],
+    })),
+    ...[
+      "import '../%ZZdriver/types.js';",
+      "import '../%E0%A4%A/types.js';",
+      "import '../driver%2ftypes.js';",
+      "import '../driver%5Ctypes.js';",
+    ].map((code) => ({
+      code,
+      filename: 'src/harness/tools.ts',
+      errors: [{ messageId: 'invalidSource' }],
+    })),
+    ...[
+      "import { createRequire } from 'node:module'; const load = createRequire(import.meta.url); load('../driver/types.js');",
+      "import { createRequire as makeLoader } from 'module'; makeLoader(import.meta.url)('../driver/types.js');",
+      "import * as Module from 'node:module'; Module.createRequire(import.meta.url)('../driver/types.js');",
+      "const { createRequire: makeLoader } = await import('node:module'); makeLoader(import.meta.url)('../driver/types.js');",
+      "const { createRequire } = require('module'); const load = createRequire(import.meta.url); load('../driver/types.js');",
+      "export { createRequire as loader } from 'node:module';",
+    ].map((code) => ({
+      code,
+      filename: 'src/harness/tools.ts',
+      errors: [{ messageId: 'moduleLoader' }],
+    })),
     {
       code: "type T = import('../shared/../driver/types.js').SandboxLevel;",
       filename: 'src/harness/tools.ts',
