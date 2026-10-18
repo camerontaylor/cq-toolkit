@@ -439,7 +439,13 @@ export function pathDevLedgerStore(repoRoot: string, branch: string): DevLedgerS
       return null; // genuinely absent — the empty-ledger case
     }
     containedOrThrow(realFile, 'read');
-    return parseDevLedger(readFileSync(realFile, 'utf8'));
+    const ledger = parseDevLedger(readFileSync(realFile, 'utf8'));
+    if (ledger.branch !== branch) {
+      throw new Error(
+        `dev-record: the ledger at '${realFile}' belongs to branch '${ledger.branch}', not '${branch}' — refusing to read another branch's evidence`,
+      );
+    }
+    return ledger;
   };
 
   const publish = (file: DevLedgerFile): void => {

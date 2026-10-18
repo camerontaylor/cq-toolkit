@@ -185,6 +185,21 @@ describe('pathDevLedgerStore', () => {
     await writeFile(path, 'not json', 'utf8');
     expect(() => pathDevLedgerStore(root, BRANCH).load()).toThrow(/not valid JSON/);
   });
+
+  test("a ledger recording ANOTHER branch refuses to load (never another branch's evidence)", async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cq-dev-record-'));
+    tmpDirs.push(root);
+    const path = devLedgerPath(root, BRANCH);
+    await mkdir(path.slice(0, path.lastIndexOf('/')), { recursive: true });
+    await writeFile(
+      path,
+      serializeDevLedger({ version: DEV_LEDGER_VERSION, branch: 'other/branch', records: [] }),
+      'utf8',
+    );
+    expect(() => pathDevLedgerStore(root, BRANCH).load()).toThrow(
+      /belongs to branch 'other\/branch'/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -235,9 +235,11 @@ function makeReviewCycle(
         await refuseDrift(
           'during the review run (content the scan never saw may have been uploaded)',
         );
-        const parsed = raw.exitCode === null ? null : parseReviewerStream(raw.stdout);
+        // A killed run is blocked, but whatever findings it emitted before
+        // the kill are still recorded: they stay open until dispositioned.
+        const parsed = parseReviewerStream(raw.stdout);
         const completion: DevReviewCompletion =
-          raw.exitCode === null || parsed === null
+          raw.exitCode === null
             ? {
                 kind: 'blocked',
                 reason: raw.timedOut
@@ -267,7 +269,7 @@ function makeReviewCycle(
             '',
           ].join('\n'),
         );
-        return { completion, logPath, findings: parsed?.findings ?? [] };
+        return { completion, logPath, findings: parsed.findings };
       });
     } catch (err) {
       // A host-lock, drift, or log-write fault: nothing is recorded, and

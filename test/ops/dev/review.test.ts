@@ -222,6 +222,15 @@ describe('dev.review cycle', () => {
     },
   );
 
+  test('a TIMED-OUT run is blocked but keeps the findings it emitted before the kill', async () => {
+    const partial = `${JSON.stringify({ type: 'finding', severity: 'critical', comment: 'early' })}\n`;
+    const effects = repoEffects(repo, reviewer(ran(null, partial, { timedOut: true })));
+    const result = await cycleReview(effects, stubScanner())({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    const [cycle] = effects.openLedger('feature/x').load().records;
+    expect(cycle?.kind === 'cycle' && cycle.findings.map((f) => f.severity)).toEqual(['critical']);
+  });
+
   test('a reviewer spawn fault is a blocked cycle naming the fault, not a crash', async () => {
     const effects = repoEffects(repo, (command) => {
       if (command === 'coderabbit') throw new Error('coderabbit could not be spawned — ENOENT');
