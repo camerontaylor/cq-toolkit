@@ -104,11 +104,32 @@ describe('dev.review pre-upload project scan fails closed', () => {
       '',
     ].join('\n');
 
+  /** The policy with one raw byte spliced in right after the sentinel inside the quoted regex. */
+  const withByteAfterSentinel = (byte: number): Buffer => {
+    const text = patterns(`'${SENTINEL}'`);
+    const at = text.indexOf(SENTINEL) + SENTINEL.length;
+    return Buffer.concat([
+      Buffer.from(text.slice(0, at)),
+      Buffer.from([byte]),
+      Buffer.from(text.slice(at)),
+    ]);
+  };
+
   test.each([
-    ['a valid rule', `'${SENTINEL}'`],
-    ['a malformed single-quoted rule', `'${SENTINEL}' # typo'`],
-  ])('%s refuses the review with zero uploads', async (_label, regex) => {
-    await repo.write('policy/denylist/patterns.yml', patterns(regex));
+    ['a valid rule', patterns(`'${SENTINEL}'`), 'class:review334-probe in committed:src/a.ts'],
+    [
+      'a malformed single-quoted rule',
+      patterns(`'${SENTINEL}' # typo'`),
+      'unterminated single-quoted value',
+    ],
+    ['invalid UTF-8 inside the rule regex', withByteAfterSentinel(0xff), 'not valid UTF-8'],
+    [
+      'a truncated UTF-8 sequence in the rule regex',
+      withByteAfterSentinel(0xc3),
+      'not valid UTF-8',
+    ],
+  ])('%s refuses the review with zero uploads', async (_label, policy, reason) => {
+    await repo.write('policy/denylist/patterns.yml', policy);
     await repo.write('src/a.ts', `export const leak = '${SENTINEL}';\n`);
     repo.commitAll('sentinel');
     let uploads = 0;
@@ -124,6 +145,7 @@ describe('dev.review pre-upload project scan fails closed', () => {
       repoRoot: repo.root,
     });
     expect({ status: result.status, uploads }).toEqual({ status: 'needs-human', uploads: 0 });
+    expect(result.status === 'needs-human' && result.reason).toContain(reason);
     expect(effects.openLedger('feature/x').load().records).toEqual([]);
   });
 });

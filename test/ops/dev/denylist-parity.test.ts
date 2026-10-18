@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { parseDenylistPatterns } from '../../../src/ops/dev/denylist.js';
+import { parseDenylistPatterns, PatternsFormatError } from '../../../src/ops/dev/denylist.js';
 
 const scriptText = readFileSync(
   fileURLToPath(new URL('../../../scripts/denylist-scan', import.meta.url)),
@@ -36,10 +36,13 @@ const buildOracle = new Function(
     slice('const TOP_KEYS =', '// Real invariant'),
     slice('class ConfigError', '// Known gitleaks invocation failure'),
     slice('function parseScalar', 'function loadPatterns'),
-    'return parsePatterns;',
+    'return { parsePatterns, ConfigError };',
   ].join('\n'),
-) as (pathModule: typeof path) => (text: string) => { rules: Record<string, string>[] };
-const authoritative = buildOracle(path);
+) as (pathModule: typeof path) => {
+  parsePatterns: (text: string) => { rules: Record<string, string>[] };
+  ConfigError: new (message: string) => Error;
+};
+const { parsePatterns: authoritative, ConfigError } = buildOracle(path);
 
 type Verdict = { ok: false } | { ok: true; rules: { id: string; regex: string; path?: string }[] };
 
@@ -54,8 +57,10 @@ function oracle(text: string): Verdict {
         ...(r['path'] !== undefined ? { path: r['path'] } : {}),
       })),
     };
-  } catch {
-    return { ok: false };
+  } catch (err) {
+    // Only a format error is a rejection; any other throw is a parser defect.
+    if (err instanceof ConfigError) return { ok: false };
+    throw err;
   }
 }
 
@@ -70,8 +75,9 @@ function port(text: string): Verdict {
         ...(r.path !== undefined ? { path: r.path } : {}),
       })),
     };
-  } catch {
-    return { ok: false };
+  } catch (err) {
+    if (err instanceof PatternsFormatError) return { ok: false };
+    throw err;
   }
 }
 

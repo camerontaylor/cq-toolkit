@@ -491,17 +491,35 @@ export function makeRepoDiffScanner(repoRoot: string): DiffSecretScanner {
   return (components) => {
     if (scanner === undefined) {
       const patternsPath = join(repoRoot, 'policy', 'denylist', 'patterns.yml');
-      let text: string;
+      let bytes: Buffer;
       try {
-        text = readFileSync(patternsPath, 'utf8');
+        bytes = readFileSync(patternsPath);
       } catch (err) {
         throw new Error(
           `denylist: cannot read the patterns file at '${patternsPath}' — ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      const patterns = parseDenylistPatterns(text, 'policy/denylist/patterns.yml');
+      const patterns = parseDenylistPatterns(
+        decodePolicyUtf8(bytes, 'policy/denylist/patterns.yml'),
+        'policy/denylist/patterns.yml',
+      );
       scanner = (given) => scanComponents(given, patterns.rules);
     }
     return scanner(components);
   };
+}
+
+/**
+ * Decode the policy bytes as STRICT UTF-8: an invalid sequence throws
+ * instead of becoming U+FFFD, which would silently turn a rule such as
+ * `'secret'` into the never-matching `'secret\uFFFD'` and let the content
+ * through (independent review of #356). A leading BOM is kept in the text,
+ * so the parser rejects it as the authoritative parser does.
+ */
+export function decodePolicyUtf8(bytes: Uint8Array, sourceName: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new PatternsFormatError(`${sourceName}: not valid UTF-8 — the policy file is corrupt`);
+  }
 }

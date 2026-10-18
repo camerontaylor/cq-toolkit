@@ -3,11 +3,15 @@
 // the hits), and the shipped corpus: the REAL policy/denylist/patterns.yml
 // must parse and every rule regex must compile (the parser and the gate
 // cannot drift from the format the scan script owns).
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   composeScanners,
+  decodePolicyUtf8,
+  makeRepoDiffScanner,
   makeGitleaksDefaultsScanner,
   parseDenylistPatterns,
   scanComponents,
@@ -314,5 +318,69 @@ describe('composeScanners', () => {
         .sort(),
     ).toEqual(['aws-access-token', 'class:one']);
     expect(merged.find((scan) => scan.component === 'b')?.hits).toEqual([]);
+  });
+});
+
+describe('makeRepoDiffScanner reads the policy as STRICT UTF-8 (fail closed)', () => {
+  const POLICY = [
+    'rules:',
+    '  - id: class:probe',
+    '    description: d',
+    "    regex: 'review356_probe'",
+    "    sample: 'review356_probe'",
+    'clean_probes:',
+    "  - 'ordinary'",
+    '',
+  ].join('\n');
+  const component = { component: 'committed:a.ts', text: '+review356_probe\n', path: 'a.ts' };
+
+  function scannerOver(bytes: Buffer) {
+    const root = mkdtempSync(join(tmpdir(), 'cq-dev-policy-'));
+    mkdirSync(join(root, 'policy', 'denylist'), { recursive: true });
+    writeFileSync(join(root, 'policy', 'denylist', 'patterns.yml'), bytes);
+    return {
+      scan: makeRepoDiffScanner(root),
+      cleanup: () => rmSync(root, { recursive: true, force: true }),
+    };
+  }
+
+  test('valid bytes parse and the rule fires', async () => {
+    const { scan, cleanup } = scannerOver(Buffer.from(POLICY));
+    try {
+      expect((await scan([component]))[0]?.hits.map((hit) => hit.ruleId)).toEqual(['class:probe']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test.each([
+    ['a raw FF byte after the sentinel', 0xff],
+    ['a truncated two-byte sequence', 0xc3],
+    ['a lone continuation byte', 0x80],
+  ])('%s throws instead of weakening the rule', (_label, byte) => {
+    const at = POLICY.indexOf('review356_probe') + 'review356_probe'.length;
+    const bytes = Buffer.concat([
+      Buffer.from(POLICY.slice(0, at)),
+      Buffer.from([byte]),
+      Buffer.from(POLICY.slice(at)),
+    ]);
+    const { scan, cleanup } = scannerOver(bytes);
+    try {
+      expect(() => scan([component])).toThrow(/not valid UTF-8/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('a leading BOM is kept and rejected, as the authoritative parser rejects it', () => {
+    expect(decodePolicyUtf8(Buffer.from(`\uFEFF${POLICY}`), 'p.yml').startsWith('\uFEFF')).toBe(
+      true,
+    );
+    const { scan, cleanup } = scannerOver(Buffer.from(`\uFEFF${POLICY}`));
+    try {
+      expect(() => scan([component])).toThrow(/content before the first section/);
+    } finally {
+      cleanup();
+    }
   });
 });
