@@ -829,6 +829,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // Every unreported activity lead, whatever its verb or object.
     'Tracing how the retry loop handles EBUSY.',
     'Comparing the guard with the reviewer request.',
+    // A hyphenated activity is still an activity (PR #343 Codex review).
+    'Re-reading `src/a.ts` before making changes.',
+    "I'm re-checking `src/a.ts` line 3.",
     // A progressive main clause is ongoing work, even with a trailing finding.
     'I am reading the anchored file, which already guards the abort, so nothing changed.',
   ])('an unchanged activity report %j is a non-answer', (summary) => {
