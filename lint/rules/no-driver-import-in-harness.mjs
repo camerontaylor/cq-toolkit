@@ -22,8 +22,8 @@
 // join + normalize against the importing file's repo-relative directory — no
 // fs, no extension guessing) before containment, so traversal spellings
 // cannot dodge the prefix ('../shared/../driver/types.js' is still a driver
-// path). Bare specifiers ('zod', 'node:*') are out of scope — this rule guards
-// the INTERNAL layer edge. COMPUTED sources fail closed: an import whose
+// path). Bare ('zod', 'node:*') and filesystem-absolute specifiers are out of
+// scope — this rule guards the INTERNAL, relative layer edge. COMPUTED sources fail closed: an import whose
 // source is not a plain string literal or a substitution-free template hides
 // its real target and is reported outright. Specifiers tsc cannot resolve
 // (percent escapes, ?query/#fragment suffixes) already fail the typecheck, and
