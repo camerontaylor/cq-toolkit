@@ -962,11 +962,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // (no fix job, no reply — the reply already posted; the resolve pushes
   // nothing). Deduped against the planned carry by thread id; the
   // fingerprint is computed over the thread's fetched data exactly the way
-  // stage 6 computes it. AUTHORIZATION (jNfip): the carry fires only when
-  // the thread's LATEST reply opens with the loop's own signature — the
-  // signature-led reply is the evidence that a resolve was queued by THIS
-  // loop; any other latest reply is not carried, and the feedback stays
-  // outstanding instead of being closed without a verified fix.
+  // stage 6 computes it. AUTHORIZATION (jNfip): the carry fires only for a
+  // reply that passes the settle gate AND carries the resolve marker — the
+  // evidence that THIS loop queued a resolve for a verified fix; any other
+  // latest reply is not carried, and the feedback stays outstanding.
   const carriedIds = new Set(carriedResolves.map((resolve) => resolve.threadId));
   for (const item of classification.items) {
     if (item.kind !== 'thread' || item.verdict !== 'responded') {
@@ -979,26 +978,35 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     if (thread === undefined) {
       continue; // vanished between fetch and classify — nothing to resolve
     }
-    // AUTHORIZATION (jNfip): the thread's LATEST reply must open with the
-    // loop's own signature — the signature-led reply is the evidence that a
-    // resolve was queued by this loop. Any other latest reply (a PR-author
-    // or third-party reply) is not carried; the feedback stays outstanding.
-    const latestReply = thread.replies[thread.replies.length - 1];
-    if (latestReply === undefined || !REPLY_SIGNATURE_PATTERN.test(latestReply.body)) {
-      continue;
-    }
-    // Same shape enrichItem builds (body + replies) — identical fingerprint
-    // to the stage-6 resolve of the posting run.
-    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
-      item.id,
-      {
+    // AUTHORIZATION: the SAME settle gate the planned items pass
+    // (loopReplySettlement). A responded thread is excluded from batching, so
+    // the correlated-entry gate above never sees it — in the single-identity
+    // deployment (automation shares the PR author's login) EVERY loop reply
+    // lands here. The carry therefore needs the full proof, not just a
+    // leading signature: the latest reply is the loop identity's own, its
+    // stamped round and head still match, and its header carries the resolve
+    // marker. A bare changed:false reply, a foreign signature-led reply or a
+    // reply posted over unseen reviewer input queues nothing.
+    const roundOf = (prior: readonly ThreadComment[]): string =>
+      roundFingerprint(item.id, {
         id: thread.id,
         path: thread.path,
         line: thread.line,
         body: thread.body,
-        comments: thread.replies,
-      },
-    )}`;
+        comments: [...prior],
+      });
+    const settlement = loopReplySettlement(thread.replies, {
+      signature,
+      headSha: state.headRefOid,
+      ownLogin: opts.responderLogin ?? null,
+      roundOf,
+    });
+    if (!settlement.settled || !settlement.carryResolve) {
+      continue;
+    }
+    // The posting run's round: the thread as it saw it, without the trailing
+    // loop reply — the same actionId the planned carry above computes.
+    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundOf(thread.replies.slice(0, -1))}`;
     if (dispatched.has(resolveActionId)) {
       continue; // already resolved-and-recorded — a full no-op for this item
     }

@@ -784,6 +784,20 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     expect(nonAnswerSummaryReason(summary, true)).not.toBeNull();
   });
 
+  test.each([
+    'I am reading the anchored file first.',
+    "I'm reading the anchored code first.",
+    'I am now checking the diff.',
+    'First, reading the anchored file.',
+    'Currently inspecting the thread.',
+    'Now reviewing the reviewed comment.',
+    'We are working on the fix.',
+    'I am starting work on the reviewed item.',
+  ])('first-person or sequenced progress %j is a non-answer (PR #343 review)', (summary) => {
+    expect(nonAnswerSummaryReason(summary, false)).toContain('preamble or placeholder');
+    expect(nonAnswerSummaryReason(summary, true)).toContain('preamble or placeholder');
+  });
+
   test('a one-line JSON string carrying a live preamble fails the same way', async () => {
     const { op } = scriptedOp([
       completeWorker('{"changed":false,"summary":"Reading the anchored code first.","commits":[]}'),
@@ -807,6 +821,8 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // Outcome text that merely OPENS with a narration word (PR #343 review).
     ['Checking the anchored guard confirmed no change was needed.', false],
     ['Now guards the abort signal in the retry loop.', true],
+    ['I am reading the anchored file, which already guards the abort, so nothing changed.', false],
+    ['First, the retry loop was fixed to honor the abort signal.', true],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {
     expect(nonAnswerSummaryReason(summary, changed)).toBeNull();
   });
