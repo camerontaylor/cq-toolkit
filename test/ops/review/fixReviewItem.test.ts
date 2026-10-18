@@ -804,6 +804,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     ['No change needed: proposeBaselineUpdate already keeps one decimal for coverage.', false],
     ['Guarded the abort.', true],
     ['Rounded coverage proposals to one decimal.', true],
+    // Outcome text that merely OPENS with a narration word (PR #343 review).
+    ['Checking the anchored guard confirmed no change was needed.', false],
+    ['Now guards the abort signal in the retry loop.', true],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {
     expect(nonAnswerSummaryReason(summary, changed)).toBeNull();
   });

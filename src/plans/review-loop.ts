@@ -146,15 +146,18 @@ const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
 
 /**
  * The reply's HEAD STAMP: the line right after the signature on every loop
- * reply, naming the PR head the reply answers for (the pushed head when the
- * row's fix published commits, else the fetched head). It is what makes the
- * loop idempotent per thread AND head — see {@link loopReplySettled}.
+ * reply. It names the PR head the reply answers for (the pushed head when
+ * the row's fix published commits, else the fetched head) and the ROUND the
+ * worker answered (roundFingerprint over the thread as fetched). Together
+ * they make the loop idempotent per thread AND head — see
+ * {@link loopReplySettlement}.
  */
-export const replyHeadStamp = (sha: string): string =>
-  `<!-- cq-review-loop-head:${sha.toLowerCase()} -->`;
+export const replyHeadStamp = (sha: string, round: string): string =>
+  `<!-- cq-review-loop-head:${sha.toLowerCase()} round:${round} -->`;
 
-/** Reads a stamp back out of a posted reply body. */
-const REPLY_HEAD_STAMP_PATTERN = /^<!-- cq-review-loop-head:([0-9a-f]{40}) -->$/m;
+/** Reads a stamp back out of a reply HEADER line (exact, whole line). */
+const REPLY_HEAD_STAMP_PATTERN =
+  /^<!-- cq-review-loop-head:([0-9a-f]{40}) round:([0-9a-f]{8}) -->$/;
 
 /**
  * The RESOLVE-INTENT marker: rides (after the head stamp) a thread reply
@@ -166,10 +169,51 @@ const REPLY_HEAD_STAMP_PATTERN = /^<!-- cq-review-loop-head:([0-9a-f]{40}) -->$/
 export const REPLY_RESOLVE_MARKER = '<!-- cq-review-loop-resolve -->';
 
 /**
- * THE THREAD SETTLE GATE (PR #336 incident, 2026-10-17/18): true when this
- * loop already answered the thread and nothing has changed since — the
- * thread's latest reply opens with THIS PR's signature (no reviewer input
- * after the loop's own word) and its head stamp names the current head.
+ * The metadata HEADER of a loop reply: the lines after the signature line up
+ * to the first blank line (the composed body is header, blank line, then
+ * the worker summary). Read ONLY from that position — the summary is
+ * worker-controlled text, so a stamp or marker quoted in it never counts.
+ * Null when the body does not open with exactly this PR's signature line.
+ */
+const readReplyHeader = (
+  body: string,
+  signature: string,
+): { head: string | null; round: string | null; resolve: boolean } | null => {
+  const lines = body.split('\n');
+  if (lines[0] !== signature) {
+    return null;
+  }
+  let head: string | null = null;
+  let round: string | null = null;
+  let resolve = false;
+  for (const line of lines.slice(1)) {
+    if (line.trim() === '') {
+      break;
+    }
+    const stamp = REPLY_HEAD_STAMP_PATTERN.exec(line);
+    if (stamp !== null) {
+      head = stamp[1] ?? null;
+      round = stamp[2] ?? null;
+    } else if (line === REPLY_RESOLVE_MARKER) {
+      resolve = true;
+    }
+  }
+  return { head, round, resolve };
+};
+
+/**
+ * THE THREAD SETTLE GATE (PR #336 incident, 2026-10-17/18): `settled` when
+ * this loop already answered the thread and nothing has changed since —
+ *   - the thread's latest reply opens with THIS PR's signature line, carries
+ *     a REAL timestamp (attachRestReplies sorts undated replies last, so an
+ *     undated reply is not provably the latest word), and — when the loop's
+ *     identity is known — is AUTHORED by it;
+ *   - its stamped ROUND equals the round of the replies before it (feedback
+ *     that landed between the posting run's fetch and its post changes that
+ *     round, so the thread re-opens instead of settling over unseen input);
+ *   - its stamped HEAD equals the current head.
+ * `carryResolve` (only when settled, the identity is known and the head is
+ * known to match): the reply's header carries REPLY_RESOLVE_MARKER.
  *
  * Why a content gate and not the dispatch log alone: the round fingerprint
  * keys on the thread's LATEST comment, which after a post IS the loop's own
@@ -181,22 +225,48 @@ export const REPLY_RESOLVE_MARKER = '<!-- cq-review-loop-resolve -->';
  *
  * Fail-closed toward silence: a loop reply WITHOUT a stamp (posted before
  * the stamp existed) or an unknown current head cannot prove the head moved,
- * so the thread stays settled until a reviewer speaks again.
+ * so the thread stays settled — without any carried mutation — until a
+ * reviewer speaks again.
  */
-export const loopReplySettled = (
+export const loopReplySettlement = (
   replies: readonly ThreadComment[],
-  signature: string,
-  headSha: string | null,
-): boolean => {
+  opts: {
+    signature: string;
+    headSha: string | null;
+    ownLogin: string | null;
+    roundOf: (prior: readonly ThreadComment[]) => string;
+  },
+): { settled: boolean; carryResolve: boolean } => {
+  const unsettled = { settled: false, carryResolve: false };
   const latest = replies[replies.length - 1];
-  if (latest === undefined || !latest.body.startsWith(signature)) {
-    return false;
+  if (
+    latest === undefined ||
+    latest.createdAt === null ||
+    Number.isNaN(Date.parse(latest.createdAt))
+  ) {
+    return unsettled;
   }
-  const stamp = REPLY_HEAD_STAMP_PATTERN.exec(latest.body)?.[1];
-  if (stamp === undefined || headSha === null) {
-    return true;
+  const ownLogin = opts.ownLogin?.toLowerCase() ?? null;
+  if (ownLogin !== null && latest.authorLogin?.toLowerCase() !== ownLogin) {
+    return unsettled;
   }
-  return stamp === headSha.toLowerCase();
+  const header = readReplyHeader(latest.body, opts.signature);
+  if (header === null) {
+    return unsettled;
+  }
+  if (header.head === null || header.round === null) {
+    return { settled: true, carryResolve: false };
+  }
+  if (header.round !== opts.roundOf(replies.slice(0, -1))) {
+    return unsettled;
+  }
+  if (opts.headSha === null) {
+    return { settled: true, carryResolve: false };
+  }
+  if (header.head !== opts.headSha.toLowerCase()) {
+    return unsettled;
+  }
+  return { settled: true, carryResolve: header.resolve && ownLogin !== null };
 };
 
 /**
@@ -716,7 +786,7 @@ const attributionMatches = (message: string, itemId: string): boolean => {
  * a bug must look like one (I5).
  *
  * SELF-REPLY SUPPRESSION splits by surface. THREAD-kind feedback rides the
- * settle gate ({@link loopReplySettled}: the thread's latest word is this
+ * settle gate ({@link loopReplySettlement}: the thread's latest word is this
  * loop's signature-led reply stamped with the current head). `responderLogin`
  * feeds verify's attribution only. It never reaches classify, whose row 5
  * reads the PR AUTHOR, so it cannot suppress the automation identity's own
@@ -809,42 +879,39 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const sources = new Map<string, EnrichedSource>();
   const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
-    // THE SETTLE GATE FIRST (loopReplySettled): a thread whose latest word
-    // is this loop's reply for the current head gets no fix job and no
-    // reply — never another answer for the same head without new reviewer
-    // input. The ONE carried action: a reply marked REPLY_RESOLVE_MARKER
-    // queued a resolve, and that resolve is re-carried until it records
-    // (it failed or was withheld in the posting run). Its actionId is the
-    // posting run's — the fingerprint over the thread as that run saw it,
-    // i.e. without the trailing loop reply — so a recorded resolve dedupes.
-    // AUTHORIZATION: only a marker in a reply AUTHORED by the loop's own
-    // identity (responderLogin) carries; a forged signature-led comment can
-    // silence the loop on a thread but never get it resolved.
+    // THE SETTLE GATE FIRST (loopReplySettlement): a thread whose latest
+    // word is this loop's reply for the current head and round gets no fix
+    // job and no reply — never another answer for the same head without new
+    // reviewer input. The ONE carried action: a reply whose header carries
+    // REPLY_RESOLVE_MARKER queued a resolve, re-carried until it records (it
+    // failed or was withheld in the posting run). Its actionId is the posting
+    // run's — the round over the thread as that run saw it, i.e. without the
+    // trailing loop reply — so a recorded resolve dedupes. AUTHORIZATION: the
+    // carry needs the loop's own identity (responderLogin) as the reply's
+    // author and a known, matching head.
     if (entry.source.kind === 'thread') {
       const thread = state.threads.find((candidate) => candidate.id === entry.source.itemId);
-      if (thread !== undefined && loopReplySettled(thread.replies, signature, state.headRefOid)) {
-        const latest = thread.replies[thread.replies.length - 1];
-        const ownLogin = opts.responderLogin?.toLowerCase() ?? null;
-        if (
-          latest !== undefined &&
-          latest.body.includes(REPLY_RESOLVE_MARKER) &&
-          ownLogin !== null &&
-          latest.authorLogin?.toLowerCase() === ownLogin
-        ) {
-          const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${roundFingerprint(
-            entry.source.itemId,
-            { ...entry.item, comments: thread.replies.slice(0, -1) },
-          )}`;
-          if (!dispatched.has(resolveActionId)) {
+      if (thread !== undefined) {
+        const roundOf = (prior: readonly ThreadComment[]): string =>
+          roundFingerprint(entry.source.itemId, { ...entry.item, comments: [...prior] });
+        const settlement = loopReplySettlement(thread.replies, {
+          signature,
+          headSha: state.headRefOid,
+          ownLogin: opts.responderLogin ?? null,
+          roundOf,
+        });
+        if (settlement.settled) {
+          const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${roundOf(thread.replies.slice(0, -1))}`;
+          if (settlement.carryResolve && !dispatched.has(resolveActionId)) {
             carriedResolves.push({
               kind: 'resolve_thread',
               actionId: resolveActionId,
               threadId: entry.source.itemId,
             });
           }
+          skipped.push({ id: entry.source.itemId, reason: 'loop-replied-this-head' });
+          continue;
         }
-        skipped.push({ id: entry.source.itemId, reason: 'loop-replied-this-head' });
-        continue;
       }
     }
     const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
@@ -1260,7 +1327,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     const answeredHead = commits.length > 0 ? headAfter.stdout.trim() : state.headRefOid;
     const stamp =
       answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
-        ? `\n${replyHeadStamp(answeredHead)}`
+        ? `\n${replyHeadStamp(answeredHead, source.roundFingerprint)}`
         : '';
     // RESOLVE INTENT (REPLY_RESOLVE_MARKER): exactly the rows the resolve
     // branch below queues a resolve for — a thread's verified, untruncated
