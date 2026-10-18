@@ -420,3 +420,15 @@ class SnapshotTransport(SnapshotBaseline):
              mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
             snapshot.install(req["snapshot"], req["binding"], crq)
         self.assertNotIn(unchanged, seen)
+
+    def test_unchanged_baseline_paths_are_not_rescanned(self):
+        added = self.git("hash-object", "-w", "--stdin", data=b"new\n")
+        unchanged = self.git("rev-parse", f"{self.base}:file.txt")
+        tree = self.git("mktree", data=(f"100644 blob {added}\tadded.txt\n"
+                                       f"100644 blob {unchanged}\tfile.txt\n").encode())
+        req = envelope(self.repo, self.base, tree)
+        # A rule matching only the unchanged base path must not refuse a snapshot that leaves it alone.
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": r"^file\.txt$"}]), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            snapshot.install(req["snapshot"], req["binding"], crq)
