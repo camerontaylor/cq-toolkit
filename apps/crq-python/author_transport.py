@@ -126,8 +126,9 @@ def main():
                         approved_target=os.environ.get("CRQ_AUTHOR_TARGET"))
         sys.stdout.buffer.write(result)
         return 0
-    except (AuthorRefused, OSError, ValueError, SystemExit):
-        # Avoid reflecting host paths or exception/config contents to workers.
+    except (Exception, SystemExit):
+        # Avoid reflecting host paths or exception/config contents to workers:
+        # any failure (e.g. a missing scan policy raising RuntimeError) is one refusal.
         print("author-transport: request refused; no permission", file=sys.stderr)
         return 2
     finally:

@@ -203,9 +203,7 @@ def install(snapshot, binding, runner):
         name_max = os.pathconf(limits, "PC_NAME_MAX")
         fs_path_max = os.pathconf(limits, "PC_PATH_MAX")
         path_max = fs_path_max - len(str(runner.WT_ROOT)) - 256
-        rules = runner.denylist_rules()
-        if not rules:
-            raise AuthorRefused("snapshot scan policy absent")
+        rules = runner.denylist_rules()  # raises (fail closed) when the policy is absent
         compiled = [(re.compile(rule["regex"]), re.compile(rule["path"]) if "path" in rule else None)
                     for rule in rules]
         allow = [re.compile(pattern) for pattern in runner.ALLOWLIST_PATHS]
