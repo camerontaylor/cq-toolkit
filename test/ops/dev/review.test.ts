@@ -730,6 +730,46 @@ describe('dev.review — late-thread hardening', () => {
     expect(blobComponent?.text).toBe('STAGED-BLOB-BYTES-ff77');
   });
 
+  test.each(['staged', 'unstaged'] as const)(
+    'a %s binary deletion scans the removed bytes',
+    async (leg) => {
+      const patch =
+        'diff --git a/asset.dat b/asset.dat\nBinary files a/asset.dat and /dev/null differ\n';
+      const requested: string[] = [];
+      const effects = makeFakeEffects((command, args) => {
+        if (command === 'git' && args[0] === 'diff') {
+          if (
+            (leg === 'staged' && args[1] === '--cached') ||
+            (leg === 'unstaged' && args.length === 1)
+          )
+            return okResult(patch);
+          return okResult('');
+        }
+        if (command === 'git' && args[0] === 'cat-file') {
+          requested.push(args[2] ?? '');
+          if (args[2] === (leg === 'staged' ? `${HEAD}:asset.dat` : ':asset.dat'))
+            return okResult('REMOVED-BYTES');
+          return failResult(128);
+        }
+        if (command === 'coderabbit') return okResult(NDJSON_OK);
+        return undefined;
+      });
+      effects.readWorktreeFile = async () => ({ ok: false, reason: 'ENOENT: deleted' });
+      const scanned: string[] = [];
+      const result = await cycleReview(effects, async (components) => {
+        scanned.push(
+          ...components
+            .filter((component) => component.kind === 'file')
+            .map((component) => component.text),
+        );
+        return components.map((component) => ({ component: component.component, hits: [] }));
+      })({ repoRoot: '/repo' });
+      expect(result.status).toBe('ok');
+      expect(scanned).toContain('REMOVED-BYTES');
+      expect(requested).toContain(leg === 'staged' ? `${HEAD}:asset.dat` : ':asset.dat');
+    },
+  );
+
   test('a committed BINARY file is scanned from BOTH blobs; a hit refuses the upload', async () => {
     const binaryPatch = [
       'diff --git a/keys.dat b/keys.dat',

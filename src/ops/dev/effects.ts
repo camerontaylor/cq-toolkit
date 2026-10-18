@@ -18,7 +18,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, realpathSync, writeFile } from 'node:fs';
-import { lstat, readFile, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { loadavg, tmpdir, uptime } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import type { DevLedgerStore } from './record.js';
@@ -358,14 +358,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
         };
       }
     },
-    makeScratchDir: async (prefix) => {
-      const dir = join(
-        tmpdir(),
-        `cq-${prefix}-${process.pid}-${String(Math.random()).slice(2, 10)}`,
-      );
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      return dir;
-    },
+    makeScratchDir: async (prefix) => mkdtemp(join(tmpdir(), `cq-${prefix}-`)),
     ensureDir: async (path) => {
       mkdirSync(path, { recursive: true });
     },
