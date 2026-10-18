@@ -13,6 +13,12 @@
 // no CLI start; bounded 8 KiB responses; private remote stderr never
 // reflected. The crq-side invocation (`cq dev.review --action=enroll …`)
 // keeps working byte-for-byte.
+//
+// P5 TREE SNAPSHOTS (apps/crq-python/ops/tree-snapshots.md): `--tree`
+// replaces `--head` with a synthetic commit binding tree to base. Only a tree
+// `enroll` sends the v2 envelope carrying the scanned object closure; a
+// `--head` request and every status/fallback still send the v1 bytes above.
+import { captureSnapshot, SnapshotConfigError, snapshotHead } from './internal/snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -114,18 +120,45 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
 /** One request only. No timeout-based local dispatch, automatic retry or CLI start. */
 export function makeAuthorAdmission(
   transport: AuthorTransport,
+  capture = (base: string, tree: string) =>
+    captureSnapshot(
+      process.env['CQ_AUTHOR_REPO'] ?? process.cwd(),
+      base,
+      tree,
+      process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'],
+    ),
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
+    let i: DevTransportInput;
+    let binding: AuthorDecision['binding'];
+    let request: string;
+    // Everything before transport is local, so a failure here is definitive for this call:
+    // it sent nothing. It is no evidence about an earlier call with the same binding.
     try {
-      const i = DevTransportInputSchema.parse(input);
-      const binding = {
-        request_id: i.requestId,
-        base: i.base,
-        head: i.head,
-        target: i.target,
-        cycle: i.cycle,
+      i = DevTransportInputSchema.parse(input);
+      const head = i.tree ? snapshotHead(i.base, i.tree) : i.head!;
+      binding = { request_id: i.requestId, base: i.base, head, target: i.target, cycle: i.cycle };
+      let envelope: object = { v: 1, op: i.action, binding };
+      if (i.tree && i.action === 'enroll') {
+        const captured = await capture(i.base, i.tree);
+        if (captured.head !== head) throw new Error('snapshot identity mismatch');
+        envelope = { v: 2, op: i.action, binding, snapshot: captured.snapshot };
+      }
+      request = JSON.stringify(envelope) + '\n';
+    } catch (error) {
+      if (error instanceof SnapshotConfigError)
+        return {
+          status: 'needs-human',
+          reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+        };
+      return {
+        status: 'failed',
+        error:
+          'Not sent: invalid input, or snapshot capture or pre-upload scan refused. This call sent nothing to the author.',
       };
-      const raw = await transport(JSON.stringify({ v: 1, op: i.action, binding }) + '\n');
+    }
+    try {
+      const raw = await transport(request);
       if (Buffer.byteLength(raw) > 8192) throw new Error('oversized author response');
       const decision = DecisionSchema.parse(JSON.parse(raw));
       if (

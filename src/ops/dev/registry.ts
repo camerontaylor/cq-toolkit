@@ -69,25 +69,35 @@ export const DevCycleInputSchema: z.ZodType<DevCycleInput> = z
 
 /**
  * The author-admission branch of the `dev.review` union (the worker
- * transport's wire shape, carried over UNCHANGED from the merged
- * worker-transport PR — the crq-side invocation
- * `cq dev.review --action=enroll …` keeps working byte-for-byte).
+ * transport's wire shape from the merged worker-transport PR — the crq-side
+ * invocation `cq dev.review --action=enroll --head=…` keeps working
+ * byte-for-byte). P5 adds `tree` as the alternative to `head`: exactly one.
  */
 export const DevTransportInputSchema = z
   .object({
     action: z.enum(['enroll', 'status', 'fallback']),
     requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/),
     base: z.string().regex(/^[0-9a-f]{40}$/),
-    head: z.string().regex(/^[0-9a-f]{40}$/),
+    head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    tree: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
     target: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/),
     cycle: z.number().int().min(1).max(2),
   })
   .strict()
   .refine(
-    (i) => [i.requestId, i.base, i.head, i.target].every((v) => v.trim() === v),
+    (i) => [i.requestId, i.base, i.head ?? i.tree ?? '', i.target].every((v) => v.trim() === v),
     'binding must not contain whitespace or controls',
   )
-  .refine((i) => i.base !== i.head, 'base and head must differ');
+  .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
+  .refine((i) => i.base !== i.head, 'base and head must differ')
+  // Published as JSON Schema too: a refinement alone is invisible to schema consumers.
+  .meta({ oneOf: [{ required: ['head'] }, { required: ['tree'] }] });
 
 export type DevTransportInput = z.infer<typeof DevTransportInputSchema>;
 

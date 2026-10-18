@@ -1,11 +1,14 @@
 """Offline wire/lock tests. Never touches live state or starts any reviewer."""
 import copy
+import fcntl
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -58,6 +61,13 @@ class TransportTest(unittest.TestCase):
         return json.loads(transport.handle(raw, backend or Backend(),
                                           policy_path="operator-policy.json", reviewer="agent:configured",
                                           approved_target=BINDING["target"]))
+
+    def test_v1_response_bytes_remain_exact(self):
+        backend = Backend()
+        raw = transport.handle(request(), backend, policy_path="operator-policy.json",
+                               reviewer="agent:configured", approved_target=BINDING["target"])
+        expected = backend.with_lock(lambda: backend.author_lease_command("worker-1", False))
+        self.assertEqual(raw, (json.dumps(expected, separators=(",", ":"), sort_keys=True) + "\n").encode())
 
     def test_enrollment_is_pending_no_start_and_stdout_is_one_json(self):
         backend = Backend()
@@ -166,9 +176,128 @@ class TransportTest(unittest.TestCase):
                 self.assertEqual(q["starts"], [])
 
 
+    def test_runner_errors_are_one_sanitized_refusal(self):
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", "from test_author_transport import failing_fixture_main; failing_fixture_main()"],
+            cwd=Path(__file__).resolve().parent, input=request(), capture_output=True, timeout=20)
+        self.assertEqual((result.returncode, result.stdout), (2, b""))
+        self.assertEqual(result.stderr, b"author-transport: request refused; no permission\n")
+
+    def test_request_process_group_dies_before_the_lock_is_released(self):
+        # (scanner body, expected exit): a direct child and a backgrounded grandchild past the
+        # deadline, and a grandchild left behind by a scanner that exits successfully.
+        cases = {"direct": ('sleep 2\ntouch "$1"\n', 2),
+                 "grandchild": ('(sleep 2; touch "$1") &\nwait\n', 2),
+                 "left-behind": ('(sleep 2; touch "$1") >/dev/null 2>&1 &\nexit 0\n', 0)}
+        with tempfile.TemporaryDirectory() as d:
+            root, runs = Path(d), {}
+            (root / "request").write_bytes(request())
+            for name, (body, _) in cases.items():
+                state = root / name
+                state.mkdir()
+                (state / "scan").write_text("#!/bin/sh\n" + body)
+                (state / "scan").chmod(0o700)
+                with (root / "request").open("rb") as source:  # one file offset per process
+                    runs[name] = subprocess.Popen(
+                        [sys.executable, "-B", "-c",
+                         "from test_author_transport import deadline_fixture_main; deadline_fixture_main()",
+                         str(state)],
+                        cwd=Path(__file__).resolve().parent, stdin=source,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            outputs = {name: run.communicate(timeout=20) for name, run in runs.items()}
+            time.sleep(2.5)
+            for name, (_, code) in cases.items():
+                with self.subTest(name):
+                    self.assertEqual(runs[name].returncode, code, outputs[name][1])
+                    self.assertEqual(bool(outputs[name][0]), code == 0)
+                    self.assertFalse((root / name / "marker").exists())
+                    with (root / name / "tick.lock").open("w") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+    def test_supervised_group_is_gone_when_the_lock_is_released(self):
+        for name, body, deadline in (("deadline", "sleep 30 & wait", True),
+                                     ("left-behind", "sleep 30 >/dev/null 2>&1 &", False)):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                pgid_file, alive = Path(d) / "pgid", []
+
+                class Runner:
+                    def with_lock(self, fn):
+                        try:
+                            return fn()
+                        finally:  # the release point: probe the request's process group
+                            try:
+                                os.killpg(int(pgid_file.read_text()), 0)
+                                alive.append(True)
+                            except ProcessLookupError:
+                                alive.append(False)
+
+                def work(runner):
+                    pgid_file.write_text(str(os.getpgrp()))
+                    subprocess.run(["sh", "-c", body], check=False)
+                    return b"{}\n"
+
+                def expired(signum, frame):
+                    raise author_quota.AuthorRefused("deadline")
+                previous = signal.signal(signal.SIGALRM, expired)
+                try:
+                    if deadline:
+                        signal.alarm(1)
+                        with self.assertRaises(author_quota.AuthorRefused):
+                            transport.supervised(work, Runner())
+                    else:
+                        self.assertEqual(transport.supervised(work, Runner()), b"{}\n")
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                self.assertEqual(alive, [False])
+
 def fixture_main():
     """Production forced-command entry point; only the queue backend is fake."""
     sys.modules["crq"] = Backend()
+    os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
+                      CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
+                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
+                      CRQ_AUTHOR_TARGET=BINDING["target"])
+    sys.argv = [transport.__file__]
+    raise SystemExit(transport.main())
+
+
+def deadline_fixture_main():
+    """Production entry point under the real tick.lock; enrollment runs the state dir's scanner."""
+    state = Path(sys.argv[1])
+    backend = Backend()
+
+    def with_lock(fn):
+        backend.locked = True
+        try:
+            return crq.with_lock(fn)
+        finally:
+            backend.locked = False
+
+    def enroll_author(**kwargs):
+        crq.run([str(state / "scan"), str(state / "marker")], check=False)
+        Backend.enroll_author(backend, **kwargs)
+    backend.with_lock, backend.enroll_author = with_lock, enroll_author
+    sys.modules["crq"] = backend
+    transport.DEADLINE_S = 1
+    os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
+                      CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
+                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
+                      CRQ_AUTHOR_TARGET=BINDING["target"])
+    sys.argv = [transport.__file__]
+    with mock.patch.multiple(crq, STATE=state, LOCK=state / "tick.lock"):
+        raise SystemExit(transport.main())
+
+
+def failing_fixture_main():
+    """Production entry point whose runner fails with a host-path-bearing error."""
+    backend = Backend()
+
+    def broken(fn):
+        raise RuntimeError("git show … exit 128: fatal: /srv/private/clone missing policy")
+    backend.with_lock = broken
+    sys.modules["crq"] = backend
     os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
                       CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
                       CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
