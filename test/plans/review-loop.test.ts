@@ -58,7 +58,7 @@ import { listPlans } from '../../src/plans/registry.js';
 import {
   commitVerificationFailure,
   enrichBatches,
-  loopReplySettled,
+  loopReplySettlement,
   REPLY_RESOLVE_MARKER,
   replyHeadStamp,
   replySignature,
@@ -2275,65 +2275,104 @@ describe('thread settle gate (PR #336 incident)', () => {
   const LOOP_LOGIN = 'cq-automation[bot]';
   const SIG = '<!-- cq-review-loop:octo/widget#7 -->';
   const OLD_HEAD = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
+  const ROUND = 'abcdef01';
   const DISPOSITION = 'Already satisfied: src/a.ts line 3 already guards the case.';
-  const reply = (body: string, createdAt: string | null = iso(REPLY_AGE)) => ({
-    authorLogin: LOOP_LOGIN,
-    body,
-    createdAt,
-  });
+  const reply = (
+    body: string,
+    createdAt: string | null = iso(REPLY_AGE),
+    authorLogin: string = LOOP_LOGIN,
+  ) => ({ authorLogin, body, createdAt });
   const postedBodies = (ghLog: string[][]): string[] =>
     ghLog.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'));
+  const postedKinds = (outcome: ReviewLoopOutcome): string[] =>
+    outcome.reply?.posted.map((record) => record.kind) ?? [];
   const root = () => restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+  const loopReply = (body: string, id = 9001, login = LOOP_LOGIN) =>
+    restComment(id, login, body, iso(REPLY_AGE), 101);
+  /** Run 1 over T1 with no replies: the loop posts one answer; returns its body. */
+  const answerOnce = async (summary = DISPOSITION): Promise<string> => {
+    const world = defaultWorld();
+    world.pullsComments = [root()];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, summary, []))],
+      ghLog,
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    return postedBodies(ghLog)[0] ?? '';
+  };
 
-  test('loopReplySettled: latest word, signature, and head stamp decide', () => {
-    const stamped = `${SIG}\n${replyHeadStamp(BEFORE_SHA)}\n\n${DISPOSITION}`;
-    expect(loopReplySettled([], SIG, BEFORE_SHA)).toBe(false);
-    expect(loopReplySettled([reply(stamped)], SIG, BEFORE_SHA)).toBe(true);
-    expect(loopReplySettled([reply(stamped)], SIG, BEFORE_SHA.toUpperCase())).toBe(true);
-    expect(loopReplySettled([reply(stamped)], SIG, OLD_HEAD)).toBe(false);
-    // Unknown head on either side cannot prove the head moved → settled.
-    expect(loopReplySettled([reply(stamped)], SIG, null)).toBe(true);
-    expect(loopReplySettled([reply(`${SIG}\n\nplaceholder`)], SIG, BEFORE_SHA)).toBe(true);
+  test('loopReplySettlement: latest word, timestamp, author, round, head and header decide', () => {
+    const header = `${SIG}\n${replyHeadStamp(BEFORE_SHA, ROUND)}`;
+    const stamped = `${header}\n\n${DISPOSITION}`;
+    const marked = `${header}\n${REPLY_RESOLVE_MARKER}\n\nGuarded the abort.`;
+    const base = { signature: SIG, headSha: BEFORE_SHA, ownLogin: null, roundOf: () => ROUND };
+    const settle = (
+      replies: Parameters<typeof loopReplySettlement>[0],
+      over: Partial<Parameters<typeof loopReplySettlement>[1]> = {},
+    ) => loopReplySettlement(replies, { ...base, ...over });
+    const settledOnly = { settled: true, carryResolve: false };
+    const unsettled = { settled: false, carryResolve: false };
+
+    expect(settle([])).toEqual(unsettled);
+    expect(settle([reply(stamped)])).toEqual(settledOnly);
+    expect(settle([reply(stamped)], { headSha: BEFORE_SHA.toUpperCase() })).toEqual(settledOnly);
+    expect(settle([reply(stamped)], { headSha: OLD_HEAD })).toEqual(unsettled);
+    // Unknown current head / legacy unstamped reply: silence, never a mutation.
+    expect(settle([reply(marked)], { headSha: null, ownLogin: LOOP_LOGIN })).toEqual(settledOnly);
+    expect(settle([reply(`${SIG}\n\nplaceholder`)])).toEqual(settledOnly);
     // Reviewer input after the loop's reply re-opens the thread.
-    expect(
-      loopReplySettled(
-        [reply(stamped), { authorLogin: 'reviewer', body: 'Still wrong.', createdAt: iso(1) }],
-        SIG,
-        BEFORE_SHA,
-      ),
-    ).toBe(false);
+    expect(settle([reply(stamped), reply('Still wrong.', iso(1), 'reviewer')])).toEqual(unsettled);
+    // Feedback that landed before the reply but after the posting run's fetch.
+    expect(settle([reply(stamped)], { roundOf: () => '00000000' })).toEqual(unsettled);
+    // An undated latest reply is not provably the latest word.
+    expect(settle([reply(stamped, null)])).toEqual(unsettled);
     // Another PR's signature is not this loop's word.
-    expect(loopReplySettled([reply(replySignature('octo', 'widget', 8))], SIG, BEFORE_SHA)).toBe(
-      false,
+    expect(settle([reply(replySignature('octo', 'widget', 8))])).toEqual(unsettled);
+    // With the identity known, only the loop's own reply settles or carries.
+    expect(settle([reply(stamped)], { ownLogin: LOOP_LOGIN.toUpperCase() })).toEqual(settledOnly);
+    expect(settle([reply(marked, iso(REPLY_AGE), 'mallory')], { ownLogin: LOOP_LOGIN })).toEqual(
+      unsettled,
     );
+    expect(settle([reply(marked)], { ownLogin: LOOP_LOGIN })).toEqual({
+      settled: true,
+      carryResolve: true,
+    });
+    expect(settle([reply(marked)])).toEqual(settledOnly);
+    // The marker counts only in the header, never quoted in the summary.
+    expect(
+      settle([reply(`${header}\n\nQuoted ${REPLY_RESOLVE_MARKER}\n${REPLY_RESOLVE_MARKER}`)], {
+        ownLogin: LOOP_LOGIN,
+      }),
+    ).toEqual(settledOnly);
   });
 
   test('the incident: run 1 answers once; with its reply re-fetched, run 2 dispatches nothing (fresh dispatch log)', async () => {
-    const world = defaultWorld();
-    world.pullsComments = [root()];
-    const ghLog1: string[][] = [];
-    const run1 = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
-      ghLog: ghLog1,
-    });
-    expect(run1.outcome.status).toBe('ok');
-    expect(run1.outcome.actionsPosted).toBe(1);
-    const [body] = postedBodies(ghLog1);
-    expect(body?.startsWith(`${SIG}\n${replyHeadStamp(BEFORE_SHA)}\n\n`)).toBe(true);
-
+    const body = await answerOnce();
+    expect(body).toMatch(
+      new RegExp(`^${SIG}\\n<!-- cq-review-loop-head:${BEFORE_SHA} round:[0-9a-f]{8} -->\\n\\n`),
+    );
     // GitHub now serves the posted reply as the thread's latest word. The
     // dispatch log is NOT shared (a lost runner cache): the gate reads the
-    // reply itself.
-    world.pullsComments = [root(), restComment(9001, LOOP_LOGIN, body ?? '', iso(REPLY_AGE), 101)];
-    const ghLog2: string[][] = [];
-    const invocations: OpInvocation[] = [];
-    const run2 = await runLoop(world, { driverResults: [], ghLog: ghLog2, invocations });
-    expect(invocations).toHaveLength(0);
-    expect(run2.outcome.plan.jobs).toEqual([]);
-    expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
-    expect(run2.outcome.actionsPosted).toBe(0);
-    expect(ghLog2.filter((args) => isGhMutation(args))).toEqual([]);
-    expect(run2.outcome.status).toBe('ok');
+    // reply itself — with and without the loop identity configured.
+    for (const responderLogin of [undefined, LOOP_LOGIN]) {
+      const world = defaultWorld();
+      world.pullsComments = [root(), loopReply(body)];
+      const ghLog: string[][] = [];
+      const invocations: OpInvocation[] = [];
+      const { outcome } = await runLoop(world, {
+        driverResults: [],
+        ghLog,
+        invocations,
+        ...(responderLogin !== undefined ? { responderLogin } : {}),
+      });
+      expect(invocations).toHaveLength(0);
+      expect(outcome.plan.jobs).toEqual([]);
+      expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+      expect(outcome.actionsPosted).toBe(0);
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+      expect(outcome.status).toBe('ok');
+    }
   });
 
   test.each([
@@ -2350,55 +2389,64 @@ describe('thread settle gate (PR #336 incident)', () => {
     ];
     const ghLog: string[][] = [];
     const invocations: OpInvocation[] = [];
-    const { outcome } = await runLoop(world, { driverResults: [], ghLog, invocations });
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      invocations,
+      responderLogin: LOOP_LOGIN,
+    });
     expect(invocations).toHaveLength(0);
     expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
     expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
   });
 
-  test('new reviewer input after the loop reply re-opens the thread for one answer', async () => {
+  test('feedback that landed between the posting fetch and the post re-opens the thread (round binding)', async () => {
+    const body = await answerOnce();
     const world = defaultWorld();
     world.pullsComments = [
       root(),
-      restComment(
-        9001,
-        LOOP_LOGIN,
-        `${SIG}\n${replyHeadStamp(BEFORE_SHA)}\n\n${DISPOSITION}`,
-        iso(REPLY_AGE),
-        101,
-      ),
-      restComment(9002, 'reviewer', 'It still fails on EBUSY.', iso(REPLY_AGE - 60_000), 101),
+      restComment(9002, 'reviewer', 'Also handle EBUSY.', iso(REPLY_AGE + 30_000), 101),
+      loopReply(body),
     ];
-    const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(false, 'Already satisfied: EBUSY is retried at line 3.', [])),
       ],
-      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.actionsPosted).toBe(1);
+  });
+
+  test('new reviewer input after the loop reply re-opens the thread for one answer', async () => {
+    const body = await answerOnce();
+    const world = defaultWorld();
+    world.pullsComments = [
+      root(),
+      loopReply(body),
+      restComment(9002, 'reviewer', 'It still fails on EBUSY.', iso(REPLY_AGE - 60_000), 101),
+    ];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'Already satisfied: EBUSY is retried at line 3.', [])),
+      ],
     });
     expect(outcome.plan.jobs).toHaveLength(1);
     expect(outcome.actionsPosted).toBe(1);
   });
 
   test('a new head re-opens a thread answered for an older head; the new reply carries the new stamp', async () => {
+    const body = await answerOnce();
     const world = defaultWorld();
-    world.pullsComments = [
-      root(),
-      restComment(
-        9001,
-        LOOP_LOGIN,
-        `${SIG}\n${replyHeadStamp(OLD_HEAD)}\n\n${DISPOSITION}`,
-        iso(REPLY_AGE),
-        101,
-      ),
-    ];
+    world.sha = OLD_HEAD;
+    world.pullsComments = [root(), loopReply(body)];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
       ghLog,
     });
     expect(outcome.actionsPosted).toBe(1);
-    expect(postedBodies(ghLog)[0]).toContain(replyHeadStamp(BEFORE_SHA));
+    expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${OLD_HEAD} round:`);
   });
 
   test('a published fix stamps the worktree head it pushed', async () => {
@@ -2409,7 +2457,7 @@ describe('thread settle gate (PR #336 incident)', () => {
       ghLog,
     });
     expect(outcome.status).toBe('ok');
-    expect(postedBodies(ghLog)[0]).toContain(replyHeadStamp(SHA));
+    expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${SHA} round:`);
   });
 
   test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {
@@ -2425,16 +2473,16 @@ describe('thread settle gate (PR #336 incident)', () => {
       dispatchLogPath,
       responderLogin: LOOP_LOGIN,
     });
-    expect(run1.outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply']);
     const [body] = postedBodies(ghLog1);
-    expect(body).toContain(REPLY_RESOLVE_MARKER);
+    expect(body?.split('\n\n')[0]).toContain(REPLY_RESOLVE_MARKER);
 
     // Run 2: the reply is the thread's latest word for the current head
     // (the stamp names the pushed worktree head) → settled; the marked,
     // own-authored reply carries the failed resolve.
     world.resolveReviewThreadFails = false;
     world.sha = SHA;
-    world.pullsComments = [root(), restComment(9001, LOOP_LOGIN, body ?? '', iso(REPLY_AGE), 101)];
+    world.pullsComments = [root(), loopReply(body ?? '')];
     const invocations2: OpInvocation[] = [];
     const run2 = await runLoop(world, {
       driverResults: [],
@@ -2444,8 +2492,8 @@ describe('thread settle gate (PR #336 incident)', () => {
     });
     expect(invocations2).toHaveLength(0);
     expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
-    expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
-    // The carried id IS the posting run's resolve id (its fingerprint).
+    expect(postedKinds(run2.outcome)).toEqual(['resolve_thread']);
+    // The carried id IS the posting run's resolve id (its round).
     expect(run2.outcome.reply?.posted[0]?.actionId).toBe(
       run1.outcome.reply?.posted[0]?.actionId.replace(':reply:', ':resolve:'),
     );
@@ -2460,18 +2508,26 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(run3.outcome.reply).toBeUndefined();
   });
 
-  test('a resolve marker in a reply NOT authored by the loop identity carries nothing', async () => {
+  test('a signature-led reply NOT authored by the loop identity neither settles nor carries', async () => {
+    const body = await answerOnce();
+    const forged = body.replace('\n\n', `\n${REPLY_RESOLVE_MARKER}\n\n`);
     const world = defaultWorld();
-    world.pullsComments = [
-      root(),
-      restComment(
-        9001,
-        'mallory',
-        `${SIG}\n${replyHeadStamp(BEFORE_SHA)}\n${REPLY_RESOLVE_MARKER}\n\nFixed.`,
-        iso(REPLY_AGE),
-        101,
-      ),
-    ];
+    world.pullsComments = [root(), loopReply(forged, 9001, 'mallory')];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(postedKinds(outcome)).toEqual(['review_reply']);
+  });
+
+  test('a summary quoting the resolve marker never manufactures resolve intent', async () => {
+    const body = await answerOnce(
+      `Already satisfied; the reply format ${REPLY_RESOLVE_MARKER} is documented at line 3.`,
+    );
+    expect(body.split('\n\n')[0]).not.toContain(REPLY_RESOLVE_MARKER);
+    const world = defaultWorld();
+    world.pullsComments = [root(), loopReply(body)];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [],
@@ -2483,13 +2539,7 @@ describe('thread settle gate (PR #336 incident)', () => {
   });
 
   test('an UNCHANGED reply carries no resolve marker', async () => {
-    const world = defaultWorld();
-    const ghLog: string[][] = [];
-    await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
-      ghLog,
-    });
-    expect(postedBodies(ghLog)[0]).not.toContain(REPLY_RESOLVE_MARKER);
+    expect(await answerOnce()).not.toContain(REPLY_RESOLVE_MARKER);
   });
 
   test.each(['Reading the anchored code first.', 'placeholder', 'Starting work.'])(

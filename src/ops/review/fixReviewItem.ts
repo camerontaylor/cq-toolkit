@@ -234,14 +234,25 @@ export const MAX_SUMMARY_CHARS = 1_000;
  * and the loop composed it into a posted reply on every scheduled run. A
  * summary whose NORMALIZED form (trimmed, whitespace-collapsed, lowercased,
  * trailing punctuation dropped) matches any pattern below is a contract
- * violation → `failed`, so nothing is posted. Two shapes, both anchored at
- * the start: whole-summary filler, and progress narration that only
- * announces work ("reading …", "let me …"). A real disposition reports what
- * was done or found, never what is about to happen.
+ * violation → `failed`, so nothing is posted. Every pattern matches the
+ * WHOLE normalized summary, so outcome text that merely opens with one of
+ * these words ("Checking the guard confirmed no change was needed.", "Now
+ * guards the abort.") is never caught:
+ *   - filler ("placeholder", "start", "n/a");
+ *   - a start announcement ("starting work on the reviewed item");
+ *   - a read announcement whose object is only the review's own context
+ *     ("reading the anchored file first");
+ *   - "working on it" / "working on the fix";
+ *   - declared intent ("let me …", "i will …", "going to …").
+ * A real disposition reports what was done or found, never what is about to
+ * happen.
  */
 export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
   /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
-  /^(?:starting|reading|looking|checking|investigating|examining|inspecting|reviewing|analy[sz]ing|working|beginning|opening|let me|let's|i will|i'll|i am going to|i'm going to|going to|first|now|next)\b/,
+  /^(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of) (?:it|the (?:reviewed |review |anchored )?(?:item|thread|comment|issue|fix|code|file)))?(?: now)?$/,
+  /^(?:reading|looking at|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating) (?:the )?(?:(?:anchored|reviewed|relevant|target|referenced) )?(?:code|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes)(?: first)?(?: now)?$/,
+  /^working on (?:it|this|the (?:fix|item|reviewed item|review item|thread))(?: now)?$/,
+  /^(?:let me|let's|i will|i'll|i am going to|i'm going to|going to) /,
 ]);
 
 /**
