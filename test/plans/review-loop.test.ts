@@ -194,6 +194,12 @@ interface LoopWorld {
   headReadFailsAt?: number;
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
+  /**
+   * Files in the worktree tree, path → line count, served to `git show
+   * <sha>:<path>` (an unchanged answer's evidence check). Default: the three
+   * anchored files, 20 lines each.
+   */
+  files?: Record<string, number>;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -478,6 +484,13 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     if (rest[0] === 'status' && rest[1] === '--porcelain') {
       return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
     }
+    if (rest[0] === 'show' && /^[0-9a-f]{40}:/.test(rest[1] ?? '')) {
+      const path = (rest[1] ?? '').slice(41);
+      const lines = (world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 })[path];
+      return lines === undefined
+        ? { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` }
+        : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
+    }
     if (rest[0] === 'push') {
       pushCount += 1;
       if (world.pushFailAt !== undefined && pushCount >= world.pushFailAt) {
@@ -527,7 +540,30 @@ const completeWorker = (line: string, extra?: Partial<WorkerResult>): WorkerResu
 });
 
 /** The single-line JSON contract a compliant worker answers with. */
-const fixLine = (changed: boolean, summary: string, commits: string[]): string =>
+/**
+ * One v2 fix contract line (THE FIX OUTCOME CONTRACT): a change is `fixed`;
+ * no change is `unchanged_with_reason` citing `src/a.ts:3` unless `evidence`
+ * says otherwise.
+ */
+const fixLine = (
+  changed: boolean,
+  summary: string,
+  commits: string[],
+  evidence: Array<{ path: string; line: number }> = changed ? [] : [{ path: 'src/a.ts', line: 3 }],
+): string =>
+  JSON.stringify({
+    disposition: changed ? 'fixed' : 'unchanged_with_reason',
+    summary,
+    commits,
+    evidence,
+  });
+
+/** A v2 contract line with an explicit disposition (no commits). */
+const dispositionLine = (disposition: string, summary: string): string =>
+  JSON.stringify({ disposition, summary, commits: [], evidence: [] });
+
+/** The LEGACY v1 shape `{changed, summary, commits}`: free text, no disposition. */
+const legacyFixLine = (changed: boolean, summary: string, commits: string[]): string =>
   JSON.stringify({ changed, summary, commits });
 
 // ---------------------------------------------------------------------------
@@ -2798,14 +2834,14 @@ describe('thread settle gate (PR #336 incident)', () => {
     const gitLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
-        completeWorker(fixLine(false, 'Investigating why the test fails.', [])),
+        completeWorker(dispositionLine('no_outcome', 'Investigating why the test fails.')),
         completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
       ],
       ghLog,
       gitLog,
     });
     expect(outcome.status).toBe('needs-human');
-    expect(outcome.reasons.some((reason) => reason.includes('produced no outcome'))).toBe(true);
+    expect(outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(true);
     expect(
       outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
     ).toBe(false);
@@ -2936,46 +2972,37 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(await answerOnce()).not.toContain(REPLY_RESOLVE_MARKER);
   });
 
+  // THE FIX OUTCOME CONTRACT: free text is never judged. A legacy contract
+  // without a disposition is no outcome, whatever its summary says: every
+  // non-answer from the incident and both independent reviews posts nothing
+  // and leaves the thread unsettled.
   test.each([
     'Reading the anchored code first.',
     'placeholder',
     'Starting work.',
-    // Progress-only sentences joined (PR #343 independent review, finding 1).
     'Reading the anchored code first. Starting work on the reviewed item.',
-    // The independent review's probes at c95807ca: an activity whose object
-    // names a condition, and a negation inside what is being investigated.
     'Investigating why the test fails.',
     'I am investigating why no changes are applied.',
-    // A reason that cites nothing it checked.
-    'The existing null check already covers the empty input case.',
-  ])('a worker answering the live non-answer %j posts NOTHING and records why', async (live) => {
-    const world = settleWorld();
-    const ghLog: string[][] = [];
-    const { outcome } = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, live, []))],
-      ghLog,
-    });
-    expect(outcome.status).toBe('needs-human');
-    expect(outcome.reasons.some((reason) => reason.includes('produced no outcome'))).toBe(true);
-    expect(outcome.actionsPosted).toBe(0);
-    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
-  });
-
-  test.each([
-    'Investigating why the test fails.',
-    'I am investigating why no changes are applied.',
+    'The investigation of `src/a.ts` is still in progress.',
+    'Checking whether `src/a.ts` shows the reported issue.',
+    'The next step is to inspect `src/a.ts` before making any changes.',
+    'No changes are needed in the guard at `src/a.ts:3`.',
   ])(
-    'a probe non-answer %j never settles the thread: the next run at the same head still answers it (independent review at c95807ca)',
-    async (probe) => {
-      const ghLog1: string[][] = [];
+    'a legacy free-text answer %j posts NOTHING, records why, and stays unsettled',
+    async (live) => {
+      const ghLog: string[][] = [];
       const run1 = await runLoop(settleWorld(), {
-        driverResults: [completeWorker(fixLine(false, probe, []))],
-        ghLog: ghLog1,
+        driverResults: [completeWorker(legacyFixLine(false, live, []))],
+        ghLog,
         responderLogin: LOOP_LOGIN,
       });
+      expect(run1.outcome.status).toBe('needs-human');
+      expect(run1.outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(
+        true,
+      );
       expect(run1.outcome.actionsPosted).toBe(0);
-      expect(ghLog1.filter((args) => isGhMutation(args))).toEqual([]);
-      // Nothing was posted, so nothing can settle: run 2 dispatches the worker again.
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+      // Nothing was posted, so nothing settles: run 2 dispatches the worker again.
       const invocations: OpInvocation[] = [];
       const run2 = await runLoop(settleWorld(), {
         driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
@@ -2983,13 +3010,74 @@ describe('thread settle gate (PR #336 incident)', () => {
         responderLogin: LOOP_LOGIN,
       });
       expect(invocations).toHaveLength(1);
-      expect(run2.outcome.skipped).not.toContainEqual({
-        id: 'T1',
-        reason: 'loop-replied-this-head',
-      });
       expect(run2.outcome.actionsPosted).toBe(1);
     },
   );
+
+  test.each([
+    ['needs_human', 'A maintainer must choose between the two retry policies.'],
+    ['no_outcome', 'Reading the anchored code first.'],
+  ])('disposition %s posts NOTHING and leaves the thread unsettled', async (disposition, text) => {
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(settleWorld(), {
+      driverResults: [completeWorker(dispositionLine(disposition, text))],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(
+      outcome.reasons.some((reason) => reason.includes(`worker disposition ${disposition}`)),
+    ).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test.each([
+    ['no evidence at all', []],
+    ['a file that does not exist', [{ path: 'src/zzz.ts', line: 1 }]],
+    ['a line past the end of the file', [{ path: 'src/a.ts', line: 99 }]],
+  ] as const)(
+    'an unchanged answer citing %s posts NOTHING and stays unsettled',
+    async (_name, evidence) => {
+      const ghLog: string[][] = [];
+      const { outcome } = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, [], [...evidence]))],
+        ghLog,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(outcome.status).toBe('needs-human');
+      expect(outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(true);
+      expect(outcome.actionsPosted).toBe(0);
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+    },
+  );
+
+  test('an unchanged answer with verified evidence posts once, shows the evidence, and settles', async () => {
+    // The independent review's P2 at c05577e2: a completed "leaving unchanged" disposition.
+    const summary =
+      'I am leaving `src/a.ts:3` unchanged because its guard already rejects empty input.';
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(settleWorld(), {
+      driverResults: [completeWorker(fixLine(false, summary, []))],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(1);
+    const body = postedBodies(ghLog)[0] ?? '';
+    expect(body).toContain(summary);
+    expect(body).toContain('Evidence: `src/a.ts:3`');
+    const rerun = settleWorld();
+    rerun.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const second = await runLoop(rerun, {
+      driverResults: [],
+      invocations,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations).toHaveLength(0);
+    expect(second.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+  });
 
   test('a future-tense disposition that declines a change posts once (PR #343 independent review, finding 2)', async () => {
     const summary = 'I will make no changes because line 3 already rejects empty input.';
@@ -3001,5 +3089,101 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(outcome.status).toBe('ok');
     expect(outcome.actionsPosted).toBe(1);
     expect(postedBodies(ghLog)[0]).toContain(summary);
+  });
+});
+
+// The independent reviewers' exact probes (PR #343 at c95807ca and c05577e2),
+// folded in from their probe file. The free-text probes send the legacy
+// shape, exactly as the reviewers did; the leave-unchanged one sends v2.
+describe('independent PR343 exact-head regressions', () => {
+  test.each([
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+  ])('progress-only output %j must post nothing and stay retriable', async (summary) => {
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    const root = restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+    world.pullsComments = [root];
+    const ghLog: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(legacyFixLine(false, summary, []))],
+      ghLog,
+      responderLogin: 'cq-automation[bot]',
+    });
+    const body = ghLog
+      .filter((args) => args.includes('-X'))
+      .map((args) => flagValue(args, 'body'))[0];
+    // Observe the suppression consequence without relying on a dispatch log.
+    if (body !== undefined) {
+      const rerun = { ...defaultWorld(), worktreeFollowsOrigin: true };
+      rerun.pullsComments = [
+        root,
+        restComment(9001, 'cq-automation[bot]', body, iso(REPLY_AGE), 101),
+      ];
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(rerun, {
+        driverResults: [],
+        invocations,
+        responderLogin: 'cq-automation[bot]',
+      });
+      expect(run2.outcome.status).toBe('ok');
+      expect(invocations).toHaveLength(0);
+      expect(run2.outcome.skipped).toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    }
+    expect(run1.outcome.actionsPosted).toBe(0);
+    expect(run1.outcome.status).toBe('needs-human');
+  });
+});
+
+describe('independent PR343 c05577 outcome regressions', () => {
+  test.each([
+    'The investigation of `src/a.ts` is still in progress.',
+    'Checking whether `src/a.ts` shows the reported issue.',
+    'The next step is to inspect `src/a.ts` before making any changes.',
+    'No changes are needed in the guard at `src/a.ts:3`.',
+  ])('a non-answer %j must not post or settle', async (summary) => {
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    const root = restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+    world.pullsComments = [root];
+    const ghLog: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(legacyFixLine(false, summary, []))],
+      ghLog,
+      responderLogin: 'cq-automation[bot]',
+    });
+    const body = ghLog
+      .filter((args) => args.includes('-X'))
+      .map((args) => flagValue(args, 'body'))[0];
+    if (body !== undefined) {
+      expect(body).toContain(summary);
+      const rerun = { ...defaultWorld(), worktreeFollowsOrigin: true };
+      rerun.pullsComments = [
+        root,
+        restComment(9001, 'cq-automation[bot]', body, iso(REPLY_AGE), 101),
+      ];
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(rerun, {
+        driverResults: [],
+        invocations,
+        responderLogin: 'cq-automation[bot]',
+      });
+      expect(run2.outcome.status).toBe('ok');
+      expect(invocations).toHaveLength(0);
+      expect(run2.outcome.skipped).toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    }
+    expect(run1.outcome.actionsPosted).toBe(0);
+    expect(run1.outcome.status).toBe('needs-human');
+  });
+
+  test('a completed no-change disposition using leave unchanged should post', async () => {
+    const summary =
+      'I am leaving `src/a.ts:3` unchanged because its guard already rejects empty input.';
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    // v2 contract: the disposition and its evidence, not the wording, make it an outcome.
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, summary, [], [{ path: 'src/a.ts', line: 3 }]))],
+      responderLogin: 'cq-automation[bot]',
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    expect(outcome.status).toBe('ok');
   });
 });

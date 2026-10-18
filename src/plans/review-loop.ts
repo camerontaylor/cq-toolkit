@@ -100,7 +100,8 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../ops/review/fixReviewItem.js';
-import { NO_OUTCOME_ERROR, reviewFixHarness } from '../ops/review/fixReviewItem.js';
+import { NO_OUTCOME_REASON, reviewFixHarness } from '../ops/review/fixReviewItem.js';
+import type { FixEvidence } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
 import type { WorktreeRegistry } from '../adapters/git/prWorktree.js';
@@ -723,6 +724,35 @@ type CommitVerificationFailure =
   | 'attribution-missing';
 
 /**
+ * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
+ * every cited `{path, line}` must name a file in the tree at `tip` (read
+ * through the git seam, `git show <tip>:<path>`) with at least `line` lines.
+ */
+const evidenceFailure = async (
+  git: GhFn,
+  worktreePath: string,
+  tip: string,
+  evidence: readonly FixEvidence[],
+): Promise<string | null> => {
+  if (!COMMIT_SHA_RE.test(tip)) {
+    return 'the worktree tip is unreadable';
+  }
+  for (const { path, line } of evidence) {
+    const shown = await git(['-C', worktreePath, 'show', `${tip}:${path}`]);
+    if (shown.code !== 0) {
+      return `${path} does not exist at ${tip.slice(0, 12)}`;
+    }
+    const lines = shown.stdout.endsWith('\n')
+      ? shown.stdout.slice(0, -1).split('\n')
+      : shown.stdout.split('\n');
+    if (line > lines.length) {
+      return `${path}:${String(line)} is past the end of the file (${String(lines.length)} lines)`;
+    }
+  }
+  return null;
+};
+
+/**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
  * strictly mechanically (exit codes only), hardened against spoofing
  * (round-2 finding 2). Returns null when the commit verifies, else the
@@ -1227,15 +1257,15 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // unreported commit. Publication requires EVERY fix row to be ok; a
   // failed/indeterminate/needs-human sibling withholds the push, and every
   // changed item is recorded (its commit stays local-unpublished). One
-  // failure is ACCOUNTABLE: a NO-OUTCOME row (NO_OUTCOME_ERROR) parsed as a
-  // contract, so nothing about it is unknown. It posts nothing and is a
-  // needs-human reason, but it does not stall its siblings' verified fixes on
-  // every run; any commit it made is unclaimed, so range accountability above
-  // still blocks publication.
+  // non-ok row is ACCOUNTABLE: a NO-OUTCOME row (NO_OUTCOME_REASON) parsed as
+  // a contract that claims no commits, so nothing about it is unknown. It
+  // posts nothing and is a needs-human reason, but it does not stall its
+  // siblings' verified fixes on every run; any commit it made anyway is
+  // unclaimed, so range accountability above still blocks publication.
   const allRowsOk = fixReport.jobs.every(
     (row) =>
       row.result.status === 'ok' ||
-      (row.result.status === 'failed' && row.result.error.startsWith(NO_OUTCOME_ERROR)),
+      (row.result.status === 'needs-human' && row.result.reason.startsWith(NO_OUTCOME_REASON)),
   );
   const publishWithheld = commits.length > 0 && !allRowsOk;
   if (publishWithheld) {
@@ -1355,10 +1385,28 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       value.commits.length > 0 &&
       value.truncated !== true &&
       rowVerified.get(row.jobId) === true;
+    // EVIDENCE (THE FIX OUTCOME CONTRACT): an unchanged answer posts only
+    // when every code location it cites exists in the tree it speaks for,
+    // the worktree tip. Otherwise nothing posts and the thread stays
+    // unsettled: an unverified reason is no outcome.
+    if (value.disposition === 'unchanged_with_reason') {
+      const failure = await evidenceFailure(
+        opts.git,
+        worktree.path,
+        headAfter.stdout.trim(),
+        value.evidence,
+      );
+      if (failure !== null) {
+        reasons.push(
+          `${NO_OUTCOME_REASON} — ${source.itemId}: the unchanged answer's evidence does not verify (${failure}); reply withheld`,
+        );
+        continue;
+      }
+    }
     const body = `${signature}${stamp}${resolveIntended ? `\n${REPLY_RESOLVE_MARKER}` : ''}\n\n${
-      value.changed && value.commits.length > 0
+      value.disposition === 'fixed'
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
-        : value.summary
+        : `${value.summary}\n\nEvidence: ${value.evidence.map(({ path, line }) => `\`${path}:${String(line)}\``).join(' ')}`
     }`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose

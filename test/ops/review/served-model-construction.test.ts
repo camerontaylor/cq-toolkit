@@ -27,11 +27,12 @@ const FAKE_CLI = fileURLToPath(new URL('../../fixtures/fake-agent-cli.mjs', impo
 const temporary: string[] = [];
 
 // The strict op-side parse accepts exactly this no-change fix contract
-// (changed false ⇔ empty commits, non-empty summary).
+// (unchanged_with_reason: no commits, a reason, cited evidence).
 const FIX_CONTRACT = {
-  changed: false,
+  disposition: 'unchanged_with_reason',
   summary: 'Already satisfied: the guard at src/a.ts:3 exists.',
   commits: [],
+  evidence: [{ path: 'src/a.ts', line: 3 }],
 };
 
 async function fixture(): Promise<string> {
