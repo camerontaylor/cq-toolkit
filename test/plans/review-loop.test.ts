@@ -59,6 +59,7 @@ import {
   commitVerificationFailure,
   enrichBatches,
   loopReplySettled,
+  REPLY_RESOLVE_MARKER,
   replyHeadStamp,
   replySignature,
   runReviewLoop,
@@ -540,6 +541,8 @@ const runLoop = async (
     driverRun?: Driver['run'];
     /** Propagated-spend observer (review-debt #186). */
     onSpend?: (usd: number) => void;
+    /** The loop's own identity (the settle gate's resolve-carry authorization). */
+    responderLogin?: string;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -607,6 +610,7 @@ const runLoop = async (
     ...(o.runOptions !== undefined ? { runOptions: o.runOptions } : {}),
     ...(o.governanceOptIn !== undefined ? { governanceOptIn: o.governanceOptIn } : {}),
     ...(o.onSpend !== undefined ? { onSpend: o.onSpend } : {}),
+    ...(o.responderLogin !== undefined ? { responderLogin: o.responderLogin } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
@@ -2406,6 +2410,86 @@ describe('thread settle gate (PR #336 incident)', () => {
     });
     expect(outcome.status).toBe('ok');
     expect(postedBodies(ghLog)[0]).toContain(replyHeadStamp(SHA));
+  });
+
+  test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-carry-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = defaultWorld();
+    world.resolveReviewThreadFails = true;
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(run1.outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
+    const [body] = postedBodies(ghLog1);
+    expect(body).toContain(REPLY_RESOLVE_MARKER);
+
+    // Run 2: the reply is the thread's latest word for the current head
+    // (the stamp names the pushed worktree head) → settled; the marked,
+    // own-authored reply carries the failed resolve.
+    world.resolveReviewThreadFails = false;
+    world.sha = SHA;
+    world.pullsComments = [root(), restComment(9001, LOOP_LOGIN, body ?? '', iso(REPLY_AGE), 101)];
+    const invocations2: OpInvocation[] = [];
+    const run2 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations2,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations2).toHaveLength(0);
+    expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
+    // The carried id IS the posting run's resolve id (its fingerprint).
+    expect(run2.outcome.reply?.posted[0]?.actionId).toBe(
+      run1.outcome.reply?.posted[0]?.actionId.replace(':reply:', ':resolve:'),
+    );
+
+    // Run 3: the resolve recorded → nothing dispatches.
+    const run3 = await runLoop(world, {
+      driverResults: [],
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(run3.outcome.actionsPosted).toBe(0);
+    expect(run3.outcome.reply).toBeUndefined();
+  });
+
+  test('a resolve marker in a reply NOT authored by the loop identity carries nothing', async () => {
+    const world = defaultWorld();
+    world.pullsComments = [
+      root(),
+      restComment(
+        9001,
+        'mallory',
+        `${SIG}\n${replyHeadStamp(BEFORE_SHA)}\n${REPLY_RESOLVE_MARKER}\n\nFixed.`,
+        iso(REPLY_AGE),
+        101,
+      ),
+    ];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test('an UNCHANGED reply carries no resolve marker', async () => {
+    const world = defaultWorld();
+    const ghLog: string[][] = [];
+    await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      ghLog,
+    });
+    expect(postedBodies(ghLog)[0]).not.toContain(REPLY_RESOLVE_MARKER);
   });
 
   test.each(['Reading the anchored code first.', 'placeholder', 'Starting work.'])(
