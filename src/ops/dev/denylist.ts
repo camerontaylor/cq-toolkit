@@ -11,10 +11,11 @@
 // CONSTRAINED format by its own header — top-level `rules` and
 // `clean_probes`, rule keys id/description/regex/sample plus optional
 // path/probe_path, single-quoted or plain scalars, '#' comments — and this
-// module parses exactly that shape, failing closed on any deviation. The
-// scripts/denylist-scan self-test remains the format's authority; this
-// parser exists so the dev.review gate can apply the same rule classes to
-// diff components without touching the (protected) scan script.
+// module ports the protected script's parser exactly (see the parser
+// section), failing closed on any deviation. The script remains the
+// format's authority; this port exists so the dev.review gate can apply the
+// same rule classes to diff components without touching the (protected)
+// scan script, and a parity test pins it to the script's source.
 //
 // THE SCAN: every component is ONE file's text (a per-path patch leg or an
 // untracked file) with its repo-relative path; a rule carrying a `path`
@@ -23,7 +24,7 @@
 // matched content (inspect locally without printing secret contents).
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, win32 } from 'node:path';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -54,167 +55,217 @@ export interface ComponentScan {
   hits: DenylistHit[];
 }
 
-// --- The constrained parser -------------------------------------------------
+// --- The constrained parser: a PORT of scripts/denylist-scan's ---------------
+//
+// PARITY, NOT RESEMBLANCE: this is a line-for-line port of the protected
+// script's parseScalar / splitKeyValue / assertRelativeProbePath /
+// parsePatterns, so the pre-upload scan accepts exactly the files the
+// authoritative scanner accepts and reads the same rules from them.
+// test/ops/dev/denylist-parity.test.ts loads the script's own parser source
+// and fails on any verdict or rule difference. A malformed rule must never
+// parse as a weaker one: every rejection throws, and dev.review refuses the
+// review before any upload (fail closed).
 
-class PatternsFormatError extends Error {
+/** A patterns-file format error (the script's ConfigError). */
+export class PatternsFormatError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PatternsFormatError';
   }
 }
 
-/** The only top-level keys the format defines. */
-const TOP_KEYS = new Set(['rules', 'clean_probes']);
-/** The keys a rule may carry; id/description/regex/sample are required. */
-const RULE_KEYS = new Set(['id', 'description', 'regex', 'sample', 'path', 'probe_path']);
-const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'] as const;
+const TOP_KEYS = ['rules', 'clean_probes'];
+const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
+const RULE_KEYS = [...REQUIRED_RULE_KEYS, 'path', 'probe_path'];
+
+/** Windows device names (reserved with any extension, any case). */
+const WINDOWS_DEVICE_NAMES = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'CONIN$',
+  'CONOUT$',
+  'COM1',
+  'COM2',
+  'COM3',
+  'COM4',
+  'COM5',
+  'COM6',
+  'COM7',
+  'COM8',
+  'COM9',
+  'LPT1',
+  'LPT2',
+  'LPT3',
+  'LPT4',
+  'LPT5',
+  'LPT6',
+  'LPT7',
+  'LPT8',
+  'LPT9',
+]);
 
 /**
- * Parse one scalar (the format's documented spellings: single-quoted or
- * plain): leading/trailing whitespace stripped, `''` inside a single-quoted
- * scalar unescaping to a literal quote. Double quotes, block scalars,
- * anchors/aliases, and inline comments are format errors — never guessed.
+ * One scalar: single-quoted (the COMPLETE grammar — an unescaped quote
+ * inside is malformed, never a longer value) or plain (no `: ` and no ` #`).
+ * Empty and double-quoted values are malformed.
  */
 function parseScalar(raw: string, where: string): string {
-  const text = raw.trim();
-  if (text.startsWith("'")) {
-    if (!text.endsWith("'") || text.length < 2) {
-      throw new PatternsFormatError(`${where}: unterminated single-quoted scalar`);
+  const s = raw.trim();
+  if (s === '' || s === "''") throw new PatternsFormatError(`${where}: empty value`);
+  if (s.startsWith('"')) {
+    throw new PatternsFormatError(
+      `${where}: double-quoted values are not part of the constrained format`,
+    );
+  }
+  if (s.startsWith("'")) {
+    if (!/^'(?:[^']|'')*'$/.test(s)) {
+      throw new PatternsFormatError(`${where}: unterminated single-quoted value`);
     }
-    return text.slice(1, -1).replace(/''/g, "'");
+    return s.slice(1, -1).replace(/''/g, "'");
   }
-  if (/^["|>&*]/.test(text)) {
+  if (/:\s|\s#/.test(s)) {
+    throw new PatternsFormatError(`${where}: plain value contains reserved characters`);
+  }
+  return s;
+}
+
+function splitKeyValue(s: string, where: string): { key: string; value: string } {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t]+(.*))?$/.exec(s);
+  if (m === null) throw new PatternsFormatError(`${where}: expected "key: value"`);
+  return { key: m[1] as string, value: parseScalar(m[2] ?? '', where) };
+}
+
+/** probe_path must be a repo-relative, '/'-separated path of plain Windows-safe names. */
+function assertRelativeProbePath(value: string, where: string): void {
+  if (win32.isAbsolute(value)) {
     throw new PatternsFormatError(
-      `${where}: unsupported scalar spelling — the format allows single-quoted or plain scalars only`,
+      `${where}: probe_path must be repo-relative, got absolute "${value}"`,
     );
   }
-  if (text.includes(' #')) {
-    throw new PatternsFormatError(
-      `${where}: inline comments are not part of the constrained format`,
-    );
+  if (value.includes('\\')) {
+    throw new PatternsFormatError(`${where}: probe_path must be '/'-separated, got "${value}"`);
   }
-  return text;
+  for (const seg of value.split('/')) {
+    if (seg === '') {
+      throw new PatternsFormatError(
+        `${where}: probe_path must not contain empty segments, got "${value}"`,
+      );
+    }
+    const canonical = seg.replace(/[ .]+$/, '');
+    if (canonical !== seg || canonical === '.' || canonical === '..') {
+      throw new PatternsFormatError(`${where}: probe_path segment "${seg}" is not a plain name`);
+    }
+    // eslint-disable-next-line no-control-regex -- C0 controls are exactly what is rejected
+    if (/[<>:"|?*\x00-\x1f]/.test(seg)) {
+      throw new PatternsFormatError(
+        `${where}: probe_path segment ${JSON.stringify(seg)} is not a plain name`,
+      );
+    }
+    const stem = (seg.split('.')[0] ?? '').replace(/[ .]+$/, '').toUpperCase();
+    if (WINDOWS_DEVICE_NAMES.has(stem)) {
+      throw new PatternsFormatError(
+        `${where}: probe_path segment ${JSON.stringify(seg)} is a Windows device name`,
+      );
+    }
+  }
 }
 
 /**
- * Parse the constrained patterns file. Fail-closed: an unknown top-level
- * key, a rule with an unknown or missing key, a list item that is not a
- * mapping where a mapping is required, or an entry before any top-level key
- * all throw — never silently skip. The rules list is order-preserving; the
- * clean_probes list is parsed (the format carries it) but only the rules
- * gate the scan.
+ * Parse the constrained patterns file. Fail closed: unexpected keys,
+ * duplicate sections or keys, malformed nesting or indentation, tabs,
+ * missing required keys, empty or malformed scalars, zero rules, an empty
+ * clean_probes list, or duplicate rule ids all throw — never skip, never
+ * guess. `sourceName` prefixes the line locations in errors.
  */
 export function parseDenylistPatterns(text: string, sourceName: string): DenylistPatterns {
-  const lines = text.split(/\r?\n/);
-  const rules: DenylistRule[] = [];
+  const rules: Record<string, string>[] = [];
   const cleanProbes: string[] = [];
-  let section: 'none' | 'rules' | 'clean_probes' = 'none';
-  // The rule under construction; finalized when the next `- ` item or a
-  // top-level line arrives, and at end of input. Declared as a FUNCTION so
-  // its `never` return narrows the callers (a const arrow would not).
-  let current: Map<string, string> | null = null;
-  function fail(lineNo: number, why: string): never {
-    throw new PatternsFormatError(`${sourceName}:${String(lineNo + 1)}: ${why}`);
-  }
+  const seenSections = new Set<string>();
+  let section: string | null = null;
+  let rule: Record<string, string> | null = null;
 
-  function finishCurrent(): void {
-    if (current === null) return;
-    for (const key of REQUIRED_RULE_KEYS) {
-      if (!current.has(key)) fail(lines.length, `rule is missing required key '${key}'`);
+  for (const [idx, raw] of text.split(/\r?\n/).entries()) {
+    const where = `${sourceName}:${String(idx + 1)}`;
+    if (raw.includes('\t')) {
+      throw new PatternsFormatError(
+        `${where}: tab indentation is not part of the constrained format`,
+      );
     }
-    const rule: DenylistRule = {
-      id: current.get('id') as string,
-      description: current.get('description') as string,
-      regex: current.get('regex') as string,
-    };
-    const path = current.get('path');
-    if (path !== undefined) rule.path = path;
-    rules.push(rule);
-    current = null;
-  }
+    const t = raw.trim();
+    if (t === '' || t.startsWith('#')) continue;
 
-  for (let lineNo = 0; lineNo < lines.length; lineNo++) {
-    const line = lines[lineNo] as string;
-    const stripped = line.trim();
-    if (stripped === '' || stripped.startsWith('#')) continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*:$/.test(raw)) {
+      const key = raw.slice(0, -1);
+      if (!TOP_KEYS.includes(key))
+        throw new PatternsFormatError(`${where}: unexpected top-level key "${key}"`);
+      if (seenSections.has(key))
+        throw new PatternsFormatError(`${where}: duplicate section "${key}"`);
+      seenSections.add(key);
+      section = key;
+      rule = null;
+      continue;
+    }
+    if (section === null)
+      throw new PatternsFormatError(`${where}: content before the first section`);
 
-    if (!line.startsWith(' ')) {
-      // A top-level `key:` line — the only structural form at column 0.
-      // (List items are indented in this format; an unindented `- …` item
-      // fails below as an unexpected top-level line — fail-closed, never
-      // guessed.)
-      finishCurrent();
-      const match = /^([A-Za-z_][A-Za-z0-9_]*):\s*$/.exec(stripped);
-      if (match === null) {
-        fail(lineNo, "unexpected top-level line — expected 'rules:' or 'clean_probes:'");
+    if (/^ {2}- /.test(raw)) {
+      const rest = raw.slice(4);
+      if (section === 'clean_probes') {
+        cleanProbes.push(parseScalar(rest, where));
+      } else {
+        const kv = splitKeyValue(rest.trim(), where);
+        if (kv.key !== 'id') {
+          throw new PatternsFormatError(
+            `${where}: rule item must start with "id", got "${kv.key}"`,
+          );
+        }
+        rule = { id: kv.value };
+        rules.push(rule);
       }
-      const key = match[1] as string;
-      if (!TOP_KEYS.has(key)) {
-        fail(
-          lineNo,
-          `unknown top-level key '${key}' — the format defines rules and clean_probes only`,
-        );
-      }
-      section = key as 'rules' | 'clean_probes';
       continue;
     }
 
-    if (section === 'none') fail(lineNo, 'content before any top-level key');
-
-    if (section === 'clean_probes') {
-      const match = /^-\s+(.*)$/.exec(stripped);
-      if (match === null) {
-        fail(lineNo, 'clean_probes entries must be `- <scalar>` list items');
+    if (/^ {4}[A-Za-z_]/.test(raw)) {
+      if (section !== 'rules' || rule === null) {
+        throw new PatternsFormatError(`${where}: nested key outside a rule item`);
       }
-      if (/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.test(match?.[1] as string)) {
-        fail(lineNo, 'clean_probes entries must be `- <scalar>` list items, not mappings');
-      }
-      cleanProbes.push(parseScalar(match[1] as string, `${sourceName}:${String(lineNo + 1)}`));
+      const kv = splitKeyValue(raw.trim(), where);
+      if (!RULE_KEYS.includes(kv.key))
+        throw new PatternsFormatError(`${where}: unexpected rule key "${kv.key}"`);
+      if (Object.hasOwn(rule, kv.key))
+        throw new PatternsFormatError(`${where}: duplicate rule key "${kv.key}"`);
+      if (kv.key === 'probe_path') assertRelativeProbePath(kv.value, where);
+      rule[kv.key] = kv.value;
       continue;
     }
 
-    // section === 'rules': a `- key: value` list start, or a continuation
-    // `key: value` line belonging to the open rule.
-    const ruleStart = /^-\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(stripped);
-    if (ruleStart !== null) {
-      finishCurrent();
-      current = new Map();
-      const key = ruleStart[1] as string;
-      if (!RULE_KEYS.has(key)) fail(lineNo, `unknown rule key '${key}'`);
-      current.set(key, parseScalar(ruleStart[2] as string, `${sourceName}:${String(lineNo + 1)}`));
-      continue;
-    }
-    const keyLine = /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(stripped);
-    if (keyLine === null || current === null) {
-      fail(lineNo, 'rules entries must be `- key: value` mappings');
-    }
-    const key = keyLine?.[1] as string;
-    if (!RULE_KEYS.has(key)) fail(lineNo, `unknown rule key '${key}'`);
-    if (current?.has(key)) {
-      // The authoritative parser rejects duplicate rule keys; last-value-
-      // wins here would silently WEAKEN the pre-upload net relative to the
-      // gate the repo actually runs.
-      fail(lineNo, `duplicate rule key '${key}' in one rule`);
-    }
-    current?.set(key, parseScalar(keyLine?.[2] as string, `${sourceName}:${String(lineNo + 1)}`));
+    throw new PatternsFormatError(`${where}: malformed line (unexpected indentation or structure)`);
   }
-  finishCurrent();
 
-  // Duplicate rule IDs are rejected too: a disposition or hit names the id,
-  // so two rules sharing one id would be unattributable evidence.
-  const seenIds = new Set<string>();
-  for (const rule of rules) {
-    if (seenIds.has(rule.id)) fail(lines.length, `duplicate rule id '${rule.id}'`);
-    seenIds.add(rule.id);
+  if (rules.length === 0) throw new PatternsFormatError(`${sourceName}: zero rules parsed`);
+  if (cleanProbes.length === 0)
+    throw new PatternsFormatError(`${sourceName}: clean_probes missing or empty`);
+  for (const r of rules) {
+    for (const k of REQUIRED_RULE_KEYS) {
+      if (typeof r[k] !== 'string' || r[k] === '') {
+        throw new PatternsFormatError(`rule "${String(r['id'])}": missing required key "${k}"`);
+      }
+    }
   }
-  // The authoritative parser rejects a zero-rule file: an empty rule set
-  // here would silently disable every repository-specific class while the
-  // scan still ran — the pre-upload net must never degrade to defaults
-  // only through a malformed policy file.
-  if (rules.length === 0) {
-    fail(lines.length, 'no rules defined — the denylist must define at least one rule');
+  if (new Set(rules.map((r) => r['id'])).size !== rules.length) {
+    throw new PatternsFormatError(`${sourceName}: duplicate rule ids`);
   }
-  return { rules, cleanProbes };
+  return {
+    rules: rules.map((r) => ({
+      id: r['id'] as string,
+      description: r['description'] as string,
+      regex: r['regex'] as string,
+      ...(r['path'] !== undefined ? { path: r['path'] } : {}),
+    })),
+    cleanProbes,
+  };
 }
 
 // --- The scan ---------------------------------------------------------------
@@ -440,17 +491,35 @@ export function makeRepoDiffScanner(repoRoot: string): DiffSecretScanner {
   return (components) => {
     if (scanner === undefined) {
       const patternsPath = join(repoRoot, 'policy', 'denylist', 'patterns.yml');
-      let text: string;
+      let bytes: Buffer;
       try {
-        text = readFileSync(patternsPath, 'utf8');
+        bytes = readFileSync(patternsPath);
       } catch (err) {
         throw new Error(
           `denylist: cannot read the patterns file at '${patternsPath}' — ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      const patterns = parseDenylistPatterns(text, 'policy/denylist/patterns.yml');
+      const patterns = parseDenylistPatterns(
+        decodePolicyUtf8(bytes, 'policy/denylist/patterns.yml'),
+        'policy/denylist/patterns.yml',
+      );
       scanner = (given) => scanComponents(given, patterns.rules);
     }
     return scanner(components);
   };
+}
+
+/**
+ * Decode the policy bytes as STRICT UTF-8: an invalid sequence throws
+ * instead of becoming U+FFFD, which would silently turn a rule such as
+ * `'secret'` into the never-matching `'secret\uFFFD'` and let the content
+ * through (independent review of #356). A leading BOM is kept in the text,
+ * so the parser rejects it as the authoritative parser does.
+ */
+export function decodePolicyUtf8(bytes: Uint8Array, sourceName: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new PatternsFormatError(`${sourceName}: not valid UTF-8 — the policy file is corrupt`);
+  }
 }
