@@ -49,6 +49,18 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     },
     {
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "head"
+          ]
+        },
+        {
+          "required": [
+            "tree"
+          ]
+        }
+      ],
       "properties": {
         "action": {
           "enum": [

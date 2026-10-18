@@ -124,34 +124,36 @@ export function makeAuthorAdmission(
     ),
 ): Op<DevTransportInput, AuthorDecision> {
   return async (input) => {
+    let i: DevTransportInput;
+    let binding: AuthorDecision['binding'];
+    let request: string;
+    // Everything before transport is local, so a failure here is definitive for this call:
+    // it sent nothing. It is no evidence about an earlier call with the same binding.
     try {
-      const i = DevTransportInputSchema.parse(input);
-      let captured: Awaited<ReturnType<typeof capture>> | undefined;
-      if (i.tree && i.action === 'enroll') {
-        try {
-          captured = await capture(i.base, i.tree);
-        } catch (error) {
-          if (error instanceof SnapshotConfigError) throw error;
-          // Local capture or pre-upload scan failed before transport: nothing was sent.
-          return {
-            status: 'failed',
-            error: 'Snapshot capture or pre-upload scan refused; nothing was sent to the author.',
-          };
-        }
-      }
+      i = DevTransportInputSchema.parse(input);
       const head = i.tree ? snapshotHead(i.base, i.tree) : i.head!;
-      if (captured && captured.head !== head) throw new Error('snapshot identity mismatch');
-      const binding = {
-        request_id: i.requestId,
-        base: i.base,
-        head,
-        target: i.target,
-        cycle: i.cycle,
+      binding = { request_id: i.requestId, base: i.base, head, target: i.target, cycle: i.cycle };
+      let envelope: object = { v: 1, op: i.action, binding };
+      if (i.tree && i.action === 'enroll') {
+        const captured = await capture(i.base, i.tree);
+        if (captured.head !== head) throw new Error('snapshot identity mismatch');
+        envelope = { v: 2, op: i.action, binding, snapshot: captured.snapshot };
+      }
+      request = JSON.stringify(envelope) + '\n';
+    } catch (error) {
+      if (error instanceof SnapshotConfigError)
+        return {
+          status: 'needs-human',
+          reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
+        };
+      return {
+        status: 'failed',
+        error:
+          'Not sent: invalid input, or snapshot capture or pre-upload scan refused. This call sent nothing to the author.',
       };
-      const envelope = captured
-        ? { v: 2, op: i.action, binding, snapshot: captured.snapshot }
-        : { v: 1, op: i.action, binding };
-      const raw = await transport(JSON.stringify(envelope) + '\n');
+    }
+    try {
+      const raw = await transport(request);
       if (Buffer.byteLength(raw) > 8192) throw new Error('oversized author response');
       const decision = DecisionSchema.parse(JSON.parse(raw));
       if (
@@ -172,12 +174,7 @@ export function makeAuthorAdmission(
       if (decision.issuer !== 'agent' && decision.reviewer !== null)
         throw new Error('invalid reviewer assignment');
       return { status: 'ok', value: decision };
-    } catch (error) {
-      if (error instanceof SnapshotConfigError)
-        return {
-          status: 'needs-human',
-          reason: 'Configure CQ_AUTHOR_SNAPSHOT_SCANNER as an absolute operator scanner path.',
-        };
+    } catch {
       return {
         status: 'indeterminate',
         detail:
