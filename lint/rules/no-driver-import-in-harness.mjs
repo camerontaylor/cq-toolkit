@@ -37,18 +37,18 @@ import path from 'node:path';
 const DRIVER_DIR = 'src/driver';
 const CONTRACTS_SEAM = 'src/driver/types';
 
-// Repo-relative POSIX path of the importing file. RuleTester filenames are
-// already repo-relative; real lint runs hand the rule an absolute path whose
-// repo-relative form starts at the LAST '/src/' segment (the config only
-// applies this rule to 'src/harness/**'). Windows separators are normalized
-// to forward slashes first, and the '/src/' slice is deliberately NOT gated
-// on path.posix.isAbsolute (a Windows absolute path carries a drive prefix,
-// not a leading '/') — the same anchoring no-cli-beyond-registry-kernel uses.
+// Repo-relative POSIX path of the importing file. The config only applies
+// this rule to 'src/harness/**', so the repo-relative form starts at the
+// FIRST '/src/harness/' segment — the outermost one, so a nested directory
+// that is itself named 'src' (src/harness/x/src/probe.ts) cannot re-anchor
+// the importer. RuleTester filenames are already repo-relative (a leading '/'
+// is prepended so they match too). Windows separators are normalized first;
+// a Windows absolute path carries a drive prefix, which the slice drops.
 function repoRelative(filename) {
-  const normalized = filename.split('\\').join('/');
-  const srcIndex = normalized.lastIndexOf('/src/');
-  if (srcIndex !== -1) return normalized.slice(srcIndex + 1);
-  return normalized;
+  const normalized = `/${filename.split('\\').join('/')}`;
+  const harnessIndex = normalized.indexOf('/src/harness/');
+  if (harnessIndex !== -1) return normalized.slice(harnessIndex + 1);
+  return normalized.slice(1);
 }
 
 // True when `child` IS `parent` or lives underneath it — a segment-boundary

@@ -57,6 +57,11 @@ ruleTester.run('no-driver-import-in-harness', rule, {
     tools("import { x } from '../driver-x/types.js';"),
     tools("import type { T } from '../shared/driver/types.js';"),
     {
+      // Resolves to src/harness/nested/driver/, not src/driver/.
+      code: "import { x } from '../driver/errors.js';",
+      filename: 'src/harness/nested/src/probe.ts',
+    },
+    {
       // Windows absolute importer path anchors at the LAST '/src/' segment.
       code: "import { buildChildEnv } from '../shared/proc.js';",
       filename: 'C:\\repo\\src\\harness\\tools.ts',
@@ -83,6 +88,15 @@ ruleTester.run('no-driver-import-in-harness', rule, {
     driverImport(
       "import { buildChildEnv } from '../../driver/subprocess/process.js';",
       'src/harness/mcp/startup.ts',
+    ),
+    // A nested directory named 'src' does not re-anchor the importer.
+    driverImport(
+      "import { E } from '../../../driver/errors.js';",
+      'src/harness/nested/src/probe.ts',
+    ),
+    driverImport(
+      "import { E } from '../../../driver/errors.js';",
+      '/home/u/repo/src/harness/nested/src/probe.ts',
     ),
     // Traversal and separator spellings resolve before containment.
     driverImport("import { t } from '../shared/../driver/errors.js';"),
