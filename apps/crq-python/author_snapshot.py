@@ -79,7 +79,7 @@ def write_objects(repo, objects, message):
                 path = Path(temp) / f"{kind}-{index}"
                 path.write_bytes(data)
                 paths.append(str(path))
-            written = git(repo, "hash-object", "-w", "-t", kind, "--stdin-paths",
+            written = git(repo, "hash-object", "-w", "--no-filters", "-t", kind, "--stdin-paths",
                           data=("\n".join(paths) + "\n").encode()).decode().split()
             if written != [oid for oid, _ in group]:
                 raise AuthorRefused(message)
@@ -188,8 +188,14 @@ def install(snapshot, binding, runner):
         # Feed every incoming blob through the existing path-aware scan policy,
         # independently of the worker's operator-configured pre-upload scan.
         blobs = {oid: data for oid, kind, data in objects if kind == "blob"}
-        # Blobs reused from base are not in the transferred closure but still land at new paths.
-        blobs.update(read_blobs(quarantine, [oid.decode() for oid in entry_oids if oid.decode() not in blobs]))
+        # Blobs reused from base are not in the transferred closure but still land at new paths:
+        # read those (only for changed paths, so a large unchanged baseline is never loaded).
+        changed = {path for path in git(quarantine, "diff", "--no-renames", "--name-only", "-z",
+                                        binding["base"], binding["head"]).split(b"\0") if path}
+        blobs.update(read_blobs(quarantine, [
+            entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1].decode() for entry in entries
+            if entry and entry.split(b"\t", 1)[1] in changed
+            and entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1].decode() not in blobs]))
         name_max = os.pathconf(clone, "PC_NAME_MAX")
         path_max = os.pathconf(clone, "PC_PATH_MAX") - len(str(runner.WT_ROOT)) - 256
         rules = runner.denylist_rules()
@@ -213,9 +219,9 @@ def install(snapshot, binding, runner):
                 raise AuthorRefused("snapshot path too long to check out")
             oid = meta.rsplit(b" ", 1)[1].decode()
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
-            if meta.startswith(b"120000 ") and (not blobs[oid] or b"\0" in blobs[oid]):
+            if meta.startswith(b"120000 ") and oid in blobs and (not blobs[oid] or b"\0" in blobs[oid]):
                 raise AuthorRefused("snapshot symlink target is not representable")
-            contents = blobs[oid].decode("utf-8", errors="replace")
+            contents = blobs.get(oid, b"").decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:
             # a blob line beginning '++ b/...' could forge an allowlisted path.
             if not any(pattern.search(path) for pattern in allow):

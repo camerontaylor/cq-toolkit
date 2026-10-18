@@ -37,7 +37,7 @@ describe('tree snapshot worker and real Python admission', () => {
       const scanner = join(root, 'scan');
       await writeFile(
         scanner,
-        '#!/bin/sh\n[ "$#" = 3 ] || exit 1\ngit -C "$1" cat-file -e "$3^{commit}"\n',
+        '#!/bin/sh\n[ "$#" = 3 ] || exit 1\n[ "$GIT_NO_REPLACE_OBJECTS" = 1 ] || exit 1\ngit -C "$1" cat-file -e "$3^{commit}"\n',
         { mode: 0o700 },
       );
       const captured = await captureSnapshot(worker, base, tree, scanner);

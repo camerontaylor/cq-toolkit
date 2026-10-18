@@ -22,6 +22,8 @@ export async function captureSnapshot(repo: string, base: string, tree: string, 
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_TERMINAL_PROMPT: '0',
+    // The scanner must see the same objects as capture, never attacker-chosen refs/replace.
+    GIT_NO_REPLACE_OBJECTS: '1',
   });
   const git = (args: string[], input?: Buffer) =>
     new Promise<Buffer>((resolve, reject) => {
