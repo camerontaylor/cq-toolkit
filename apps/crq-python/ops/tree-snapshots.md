@@ -76,6 +76,15 @@ are executed. The private temporary directory is cleaned on normal errors;
 SIGKILL may leave an inert OS-temp quarantine for operator cleanup, without queue
 admission. A future retry validates from scratch; a partial transfer is refused.
 
+Admission also refuses what it can cheaply prove cannot be checked out under
+`WT_ROOT`: overlong path components or paths, and empty, NUL-containing or
+overlong symlink targets. Any remaining checkout failure at launch (for example
+a runner-configured required smudge filter that the snapshot's attributes
+activate) refuses that launch without a start or grant. The request stays
+waiting, so its lease deadline authorizes the agent fallback, as for any head
+the queue cannot review. At the 30-second deadline the endpoint unwinds rather
+than dying: runner scan and Git children are killed and `tick.lock` is released.
+
 After validation, objects enter the clone and a versioned ref
 `refs/crq/author-snapshots/v1/<head>` pins the commit **before** enrollment. A crash
 before that pin leaves only unreachable objects; a crash after it leaves a safe

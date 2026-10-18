@@ -18,6 +18,7 @@ from author_quota import AuthorRefused, binding_of, enroll, normalize_binding
 
 MAX_BYTES = 8192
 MAX_SNAPSHOT_BYTES = 6 * 1024 * 1024
+DEADLINE_S = 30
 
 
 def _object(pairs):
@@ -110,8 +111,14 @@ def main():
     if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "author-v1":
         print("author-transport: operation refused", file=sys.stderr)
         return 2
+    def expired(signum, frame):
+        # Unwind instead of dying on SIGALRM: subprocess.run and the snapshot Git helper
+        # kill their children on the way out, and with_lock releases tick.lock.
+        raise AuthorRefused("author transport deadline")
+
+    signal.signal(signal.SIGALRM, expired)
     try:
-        signal.alarm(30)
+        signal.alarm(DEADLINE_S)
         raw = sys.stdin.buffer.read(MAX_SNAPSHOT_BYTES + 1)
         import crq  # Only after the forced-command guard; never imports signer.
         result = handle(raw, crq, policy_path=os.environ.get("CRQ_AUTHOR_REVIEW_POLICY"),
