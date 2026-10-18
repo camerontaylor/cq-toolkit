@@ -98,6 +98,11 @@ ruleTester.run('no-driver-import-in-harness', rule, {
       "import { E } from '../../../driver/errors.js';",
       '/home/u/repo/src/harness/nested/src/probe.ts',
     ),
+    // Nor does a checkout whose parent path contains '/src/harness/'.
+    driverImport(
+      "import { E } from '../driver/errors.js';",
+      '/tmp/src/harness/repo/src/harness/tools.ts',
+    ),
     // Traversal and separator spellings resolve before containment.
     driverImport("import { t } from '../shared/../driver/errors.js';"),
     driverImport("type T = import('../shared/../driver/errors.js').E;"),

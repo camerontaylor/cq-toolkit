@@ -37,18 +37,27 @@ import path from 'node:path';
 const DRIVER_DIR = 'src/driver';
 const CONTRACTS_SEAM = 'src/driver/types';
 
-// Repo-relative POSIX path of the importing file. The config only applies
-// this rule to 'src/harness/**', so the repo-relative form starts at the
-// FIRST '/src/harness/' segment — the outermost one, so a nested directory
-// that is itself named 'src' (src/harness/x/src/probe.ts) cannot re-anchor
-// the importer. RuleTester filenames are already repo-relative (a leading '/'
-// is prepended so they match too). Windows separators are normalized first;
-// a Windows absolute path carries a drive prefix, which the slice drops.
-function repoRelative(filename) {
+// Candidate repo-relative POSIX paths of the importing file. The config only
+// applies this rule to 'src/harness/**', so the repo root sits immediately
+// before SOME '/src/harness/' segment of the path — but the checkout's own
+// parent path, or a nested directory inside the harness, may contain that
+// segment too, and no sentinel search can tell which occurrence is the root.
+// So every occurrence is a candidate, and an import is reported when it lands
+// in src/driver/ under ANY candidate root (failing closed: a false positive
+// needs a nested copy of the src/harness + src/driver layout). RuleTester filenames are
+// already repo-relative (a leading '/' is prepended so they match too).
+// Windows separators are normalized first; a drive prefix is sliced off.
+function repoRelativeCandidates(filename) {
   const normalized = `/${filename.split('\\').join('/')}`;
-  const harnessIndex = normalized.indexOf('/src/harness/');
-  if (harnessIndex !== -1) return normalized.slice(harnessIndex + 1);
-  return normalized.slice(1);
+  const candidates = [];
+  for (
+    let index = normalized.indexOf('/src/harness/');
+    index !== -1;
+    index = normalized.indexOf('/src/harness/', index + 1)
+  ) {
+    candidates.push(normalized.slice(index + 1));
+  }
+  return candidates.length > 0 ? candidates : [normalized.slice(1)];
 }
 
 // True when `child` IS `parent` or lives underneath it — a segment-boundary
@@ -91,14 +100,16 @@ function checkSource(context, sourceNode, reportNode) {
   // Node's file-URL resolution (and tsc) treat '\' as a separator.
   const source = raw.split('\\').join('/');
   if (!isRelativeSpecifier(source)) return;
-  const importerDir = path.posix.dirname(repoRelative(context.filename));
-  const resolved = path.posix.normalize(path.posix.join(importerDir, source));
-  if (isInside(resolved, DRIVER_DIR) && !isContractsSeam(resolved)) {
-    context.report({
-      node: reportNode,
-      messageId: 'driverImport',
-      data: { source: raw, resolved },
-    });
+  for (const importer of repoRelativeCandidates(context.filename)) {
+    const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(importer), source));
+    if (isInside(resolved, DRIVER_DIR) && !isContractsSeam(resolved)) {
+      context.report({
+        node: reportNode,
+        messageId: 'driverImport',
+        data: { source: raw, resolved },
+      });
+      return;
+    }
   }
 }
 
