@@ -19,6 +19,18 @@ const ruleTester = new RuleTester({
 ruleTester.run('no-driver-import-in-harness', rule, {
   valid: [
     {
+      code: "type T = import('../shared/proc.js').ChildEnv;",
+      filename: 'src/harness/tools.ts',
+    },
+    {
+      code: "import proc = require('../shared/proc.js');",
+      filename: 'src/harness/tools.ts',
+    },
+    {
+      code: 'namespace Local { export type T = string; } import T = Local.T;',
+      filename: 'src/harness/tools.ts',
+    },
+    {
       // The post-1.1 correct edges: harness consumes src/shared/**.
       code: "import { stripMetaSchema } from '../shared/json-schema.js';",
       filename: 'src/harness/surface.ts',
@@ -70,6 +82,16 @@ ruleTester.run('no-driver-import-in-harness', rule, {
     },
   ],
   invalid: [
+    {
+      code: "type T = import('../shared/../driver/types.js').SandboxLevel;",
+      filename: 'src/harness/tools.ts',
+      errors: [{ messageId: 'driverImport' }],
+    },
+    {
+      code: "import driver = require('../driver/types.js');",
+      filename: 'src/harness/tools.ts',
+      errors: [{ messageId: 'driverImport' }],
+    },
     {
       // The documented remaining violation shape (type-only driver/types).
       code: "import type { SandboxLevel, ToolPolicy } from '../driver/types.js';",
