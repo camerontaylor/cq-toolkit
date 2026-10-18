@@ -29,6 +29,7 @@
 // A red run maps to the `failed` taxonomy (CLI exit 1); green returns the
 // report as the ok value. The load stamp (contract §5) is sampled at run
 // start; test:narrow's own `result=` line carries its internal stamp.
+import { guardDevOp } from './effects.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
@@ -252,9 +253,14 @@ async function diffShape(
       }
     }
   }
-  const patch = await effects.runCommand('git', ['diff', '--unified=1000000', ...diffArgs], {
-    timeoutMs: GIT_TIMEOUT_MS,
-  });
+  let patch: CommandResult;
+  try {
+    patch = await effects.runCommand('git', ['diff', '--unified=1000000', ...diffArgs], {
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
+  } catch {
+    return { added, configTouched, importChanged: true, entryTouched };
+  }
   let importChanged = readsFailed;
   if (patch.exitCode === 0) {
     // Full file context keeps the opening keyword visible even when only
@@ -293,7 +299,10 @@ async function diffShape(
  * persist the record, and return ok/failed per the verdict.
  */
 export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckReport> {
-  return async (input) => {
+  return buildDevCheck(effects, false);
+}
+function buildDevCheck(effects: DevEffects, captured: boolean): Op<DevCheckInput, DevCheckReport> {
+  return guardDevOp('dev.check', async (input) => {
     // Library boundary BEFORE any effect: the input itself, then repoRoot
     // (a null/undefined input maps to the failed taxonomy, never a
     // TypeError outside it).
@@ -316,6 +325,8 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
     }
     const target = input.target ?? DEFAULT_DEV_TARGET;
     const knipMode: KnipMode = input.knip ?? 'auto';
+
+    if (!captured) return effects.withSnapshot((snapshot) => buildDevCheck(snapshot, true)(input));
 
     // Identity. A detached head has no branch to record evidence under.
     const branchOut = branchFromRevParse(
@@ -697,5 +708,5 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
         .map((gate) => gate.name)
         .join(', ')}) — record ${persisted.checkId} is in the branch dev-record`,
     };
-  };
+  });
 }

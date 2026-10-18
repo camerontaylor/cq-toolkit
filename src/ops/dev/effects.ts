@@ -18,9 +18,18 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, realpathSync, writeFile } from 'node:fs';
-import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile as writeFileAsync,
+  mkdir,
+  symlink,
+} from 'node:fs/promises';
 import { loadavg, tmpdir, uptime } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import type { Op } from '../../kernel/types.js';
 import type { DevLedgerStore } from './record.js';
 import { pathDevLedgerStore } from './record.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
@@ -52,6 +61,8 @@ export type RunCommand = (
 export interface DevEffects {
   /** Run one command in the repo root (the only process runner the ops see). */
   runCommand: RunCommand;
+  /** Execute against a private captured Git index/worktree; ledger remains at the source. */
+  withSnapshot<T>(fn: (snapshot: DevEffects) => Promise<T>): Promise<T>;
   /** ISO-8601 now (injectable for deterministic tests). */
   nowIso(): string;
   /** The host load stamp (uptime + 1-minute load average + sample time). */
@@ -230,9 +241,27 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
     new Promise<CommandResult>((resolve, reject) => {
       execFile(
         command,
-        [...args],
+        command === 'git' && args[0] === 'diff'
+          ? [
+              'diff',
+              '--no-ext-diff',
+              '--no-textconv',
+              '--src-prefix=a/',
+              '--dst-prefix=b/',
+              ...args.slice(1),
+            ]
+          : [...args],
         {
           cwd: repoRoot,
+          env: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')),
+            ),
+            GIT_CONFIG_NOSYSTEM: '1',
+            GIT_CONFIG_GLOBAL: '/dev/null',
+            GIT_NO_REPLACE_OBJECTS: '1',
+            GIT_TERMINAL_PROMPT: '0',
+          },
           maxBuffer: GATE_OUTPUT_MAX_BUFFER_BYTES,
           timeout: opts.timeoutMs,
           killSignal: 'SIGKILL',
@@ -278,6 +307,18 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
 
   return {
     runCommand,
+    withSnapshot: async (fn) => {
+      const path = await mkdtemp(join(tmpdir(), 'cq-dev-snapshot-'));
+      try {
+        const snapshot = await materializeSnapshot(repoRoot, path, runCommand);
+        return await fn({
+          ...snapshot,
+          openLedger: (branch) => pathDevLedgerStore(repoRoot, branch),
+        });
+      } finally {
+        await rm(path, { recursive: true, force: true });
+      }
+    },
     nowIso: () => new Date().toISOString(),
     loadStamp: () => ({
       // Sampled together so one stamp describes one instant (the contract's
@@ -375,4 +416,107 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
     },
     openLedger: (branch) => pathDevLedgerStore(repoRoot, branch),
   };
+}
+
+/** Map environment faults at every public dev operation boundary. */
+export function guardDevOp<I, O>(name: string, op: Op<I, O>): Op<I, O> {
+  return async (input) => {
+    try {
+      return await op(input);
+    } catch (error) {
+      return {
+        status: 'needs-human',
+        reason: `${name}: environment read or execution failed — ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  };
+}
+
+/** Capture bytes first, then scan and execute only the materialized copy. No live source reads follow. */
+async function materializeSnapshot(
+  root: string,
+  path: string,
+  run: RunCommand,
+): Promise<DevEffects> {
+  const git = async (args: string[]) =>
+    requireGitOutRaw(await run('git', args, { timeoutMs: 60_000 }), args.join(' '));
+  const head = (await git(['rev-parse', 'HEAD'])).trim();
+  const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+  const staged = await git(['diff', '--binary', '--full-index', '--cached']);
+  const unstaged = await git(['diff', '--binary', '--full-index']);
+  const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z']))
+    .split('\0')
+    .filter(Boolean);
+  const files: { path: string; data: Buffer; mode: number }[] = [];
+  let total = Buffer.byteLength(staged) + Buffer.byteLength(unstaged);
+  if (total > GATE_OUTPUT_MAX_BUFFER_BYTES) throw new Error('snapshot content exceeds cap');
+  for (const file of untracked) {
+    const absolute = resolve(root, file);
+    if (!absolute.startsWith(resolve(root) + sep))
+      throw new Error('snapshot path escapes repository');
+    const stats = await lstat(absolute);
+    if (!stats.isFile() || stats.isSymbolicLink())
+      throw new Error('snapshot refuses nonregular untracked files');
+    if (stats.size > 4 * 1024 * 1024) throw new Error('snapshot untracked file exceeds cap');
+    const data = await readFile(absolute);
+    total += data.length;
+    if (total > GATE_OUTPUT_MAX_BUFFER_BYTES) throw new Error('snapshot content exceeds cap');
+    files.push({ path: file, data, mode: stats.mode & 0o777 });
+  }
+  // --no-local prevents hardlinks/alternates to the changing source object store.
+  await git([
+    'clone',
+    '--no-local',
+    '--no-hardlinks',
+    '--no-checkout',
+    '--',
+    resolve(root),
+    join(path, 'repo'),
+  ]);
+  const captured = makeSubprocessDevEffects(join(path, 'repo'));
+  const exec = async (args: string[]) =>
+    requireGitOutRaw(
+      await captured.runCommand('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        timeoutMs: 60_000,
+      }),
+      args.join(' '),
+    );
+  await exec(['checkout', '--detach', head]);
+  if (branch !== 'HEAD') await exec(['checkout', '-B', branch, head]);
+  // Preserve remote-tracking base objects/refs used by the focused runner.
+  if ((await git(['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/'])).trim() !== '') {
+    await exec([
+      'fetch',
+      '--no-tags',
+      resolve(root),
+      '+refs/remotes/origin/*:refs/remotes/origin/*',
+    ]);
+  }
+  const origin = gitOut(
+    await run('git', ['config', '--get', 'remote.origin.url'], { timeoutMs: 60_000 }),
+  );
+  if (origin !== null && origin !== '') await exec(['remote', 'set-url', 'origin', origin]);
+  for (const [name, patch, index] of [
+    ['staged', staged, true],
+    ['unstaged', unstaged, false],
+  ] as const) {
+    if (patch === '') continue;
+    const patchPath = join(path, name + '.patch');
+    await writeFileAsync(patchPath, patch, { mode: 0o600 });
+    await exec(['apply', ...(index ? ['--index'] : []), '--binary', '--', patchPath]);
+  }
+  for (const file of files) {
+    const destination = join(path, 'repo', file.path);
+    await mkdir(resolve(destination, '..'), { recursive: true });
+    await writeFileAsync(destination, file.data, { mode: file.mode });
+  }
+  // Dependencies are installed artifacts; source/config/index are private copies.
+  try {
+    const dependencies = join(resolve(root), 'node_modules');
+    await lstat(dependencies);
+    await symlink(dependencies, join(path, 'repo', 'node_modules'), 'dir');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  return captured;
 }

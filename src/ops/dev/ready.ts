@@ -14,6 +14,7 @@
 // whose `evidenceClass: 'author'` and verbatim caveat mark the tier it
 // belongs to (strategy §2.4): this is the implementor's CLAIM a PR is
 // opened from, not verification.
+import { guardDevOp } from './effects.js';
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from './effects.js';
@@ -44,7 +45,7 @@ export interface DevReadyInput {
  * named gaps.
  */
 export function makeDevReady(effects: DevEffects): Op<DevReadyInput, DevReadinessRecord> {
-  return async (input) => {
+  return guardDevOp('dev.ready', async (input) => {
     // Library boundary BEFORE any effect: the input itself, then repoRoot
     // (a null/undefined input maps to the failed taxonomy, never a
     // TypeError outside it).
@@ -142,5 +143,5 @@ export function makeDevReady(effects: DevEffects): Op<DevReadyInput, DevReadines
       };
     }
     return { status: 'ok', value: assembled.record };
-  };
+  });
 }

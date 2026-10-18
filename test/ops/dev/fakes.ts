@@ -85,7 +85,12 @@ export function makeFakeEffects(
     if (command === 'tar' || command === 'mkdir') return okResult('');
     return undefined;
   };
-  return {
+  const effects: DevEffects & {
+    commands: typeof commands;
+    store: typeof store;
+    logs: typeof logs;
+  } = {
+    withSnapshot: async (fn) => fn(effects),
     commands,
     store,
     logs,
@@ -117,6 +122,7 @@ export function makeFakeEffects(
     removeScratchDir: async () => undefined,
     openLedger: () => store,
   };
+  return effects;
 }
 
 /** A secret scanner stub: no hits, or the hits given. */

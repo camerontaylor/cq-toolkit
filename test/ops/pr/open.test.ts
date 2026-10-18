@@ -493,3 +493,33 @@ describe('the readiness section markdown escaping', () => {
     expect(section).toContain('scriptalert(1)/script');
   });
 });
+
+test('refuses an independently dirty index even when worktree equals HEAD', async () => {
+  const effects = readyEffects(false);
+  const original = effects.runCommand;
+  effects.runCommand = async (command, args, opts) =>
+    command === 'git' && args[0] === 'diff' && args[1] === '--cached'
+      ? okResult('staged patch')
+      : original(command, args, opts);
+  const { gh, calls } = ghFake(null);
+  const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
+  expect(result.status).toBe('needs-human');
+  expect(calls).toEqual([]);
+});
+
+test('refuses index-only drift at the publication boundary after clean initial reads', async () => {
+  const effects = readyEffects(false);
+  const original = effects.runCommand;
+  let reads = 0;
+  effects.runCommand = async (command, args, opts) => {
+    if (command === 'git' && args[0] === 'diff' && args[1] === '--cached' && ++reads === 2)
+      return okResult('new staged patch');
+    return original(command, args, opts);
+  };
+  const { gh, calls } = ghFake(null);
+  const result = await makePrOpen(effects, gh)({ repoRoot: '/repo' });
+  expect(result.status).toBe('needs-human');
+  expect(calls.some((entry) => ['createPr', 'editPrBody', 'comment'].includes(entry.effect))).toBe(
+    false,
+  );
+});

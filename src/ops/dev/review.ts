@@ -37,6 +37,7 @@
 // from the merged worker-transport PR — same wire shapes, same crq
 // invocation). The transport adapter lives in its own module; this factory
 // is the single dispatcher.
+import { guardDevOp } from './effects.js';
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { CommandResult, DevEffects } from './effects.js';
@@ -172,8 +173,9 @@ function isAdmissionInput(input: DevReviewInput): input is DevTransportInput {
 function runCycleReview(
   effects: DevEffects,
   scanSecrets: DiffSecretScanner,
+  captured = false,
 ): Op<DevCycleInput, DevReviewReport> {
-  return async (input) => {
+  return guardDevOp('dev.review', async (input) => {
     // Library boundary BEFORE any effect: the input itself, then the action
     // spelling, then repoRoot (a null/undefined input maps to the failed
     // taxonomy, never a TypeError outside it; an unknown action is a
@@ -210,6 +212,9 @@ function runCycleReview(
         error: `dev.review: unknown reviewer '${reviewer}' — the shipped choice is '${CODERABBIT_REVIEWER}' (or agent:<provider/model>, unconfigured here)`,
       };
     }
+
+    if (!captured)
+      return effects.withSnapshot((snapshot) => runCycleReview(snapshot, scanSecrets, true)(input));
 
     // Identity: branch, HEAD, pinned base, dirty-diff sha256.
     const branch = branchFromRevParse(
@@ -697,7 +702,7 @@ function runCycleReview(
       status: 'needs-human',
       reason: `review cycle ${cycleRecord.cycleId} was BLOCKED (${cycleRecord.completion.kind === 'blocked' ? cycleRecord.completion.reason : 'unknown'}) — the cycle is recorded with ${String(cycleRecord.findings.length)} finding(s); log: ${cycleRecord.logPath}`,
     };
-  };
+  });
 }
 
 /** sha256 of the dirty diff (the protocol's dirty-diff identity). */

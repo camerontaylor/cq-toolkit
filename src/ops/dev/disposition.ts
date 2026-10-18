@@ -13,6 +13,7 @@
 // THE FINDING MUST EXIST: the findingId is checked against every cycle in
 // the branch ledger, so a typo fails naming the recorded ids instead of
 // writing an orphan disposition that closes nothing.
+import { guardDevOp } from './effects.js';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from './effects.js';
 import { branchFromRevParse, gitOut } from './effects.js';
@@ -49,7 +50,7 @@ export type DevDispositionReport = DevDispositionRecord;
 export function makeDevDisposition(
   effects: DevEffects,
 ): Op<DevDispositionInput, DevDispositionReport> {
-  return async (input) => {
+  return guardDevOp('dev.disposition', async (input) => {
     // Library boundary BEFORE any effect: the input itself, then every
     // required field — a schema-bypassing SDK caller gets the `failed`
     // taxonomy for a missing/ill-typed findingId, action or why (never a
@@ -166,5 +167,5 @@ export function makeDevDisposition(
         }`,
       };
     }
-  };
+  });
 }

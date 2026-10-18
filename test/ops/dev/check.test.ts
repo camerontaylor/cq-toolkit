@@ -561,3 +561,35 @@ describe('dev.check', () => {
     expect(second.status === 'ok' && second.value.checkId).toBe('k002-aaaaaaaa');
   });
 });
+
+test('oversized full-context diff conservatively runs Knip and persists evidence', async () => {
+  const effects = greenEffects((command, args) => {
+    if (command === 'git' && args.includes('--unified=1000000'))
+      throw new Error('maxBuffer exceeded');
+    return undefined;
+  });
+  const result = await makeDevCheck(effects)({ repoRoot: '/repo' });
+  expect(result.status).toBe('ok');
+  expect(
+    effects.commands.some((entry) => entry.command === 'pnpm' && entry.args[1] === 'knip'),
+  ).toBe(true);
+  expect(effects.store.file().records).toHaveLength(1);
+});
+test('initial Git spawn failure returns needs-human rather than rejecting', async () => {
+  const effects = greenEffects(() => {
+    throw new Error('git ENOENT');
+  });
+  const result = await makeDevCheck(effects)({ repoRoot: '/missing' });
+  expect(result.status).toBe('needs-human');
+  if (result.status === 'needs-human') expect(result.reason).toContain('ENOENT');
+});
+test('gate processes are bound to the captured effects, never the live source runner', async () => {
+  const source = greenEffects(() => {
+    throw new Error('live source must not execute');
+  });
+  const captured = greenEffects();
+  source.withSnapshot = async (fn) => fn(captured);
+  expect((await makeDevCheck(source)({ repoRoot: '/repo' })).status).toBe('ok');
+  expect(source.commands).toEqual([]);
+  expect(captured.commands.some((entry) => entry.command === 'pnpm')).toBe(true);
+});

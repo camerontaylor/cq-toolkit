@@ -846,3 +846,19 @@ describe('dev.review — late-thread hardening', () => {
     expect(effects.openLedger(BRANCH).load().records).toHaveLength(0);
   });
 });
+
+test('scanning and reviewer execution use the same captured effects rather than live source', async () => {
+  const source = reviewEffects('', 0);
+  const captured = reviewEffects(
+    JSON.stringify({ type: 'complete', status: 'review_completed' }),
+    0,
+  );
+  source.runCommand = async () => {
+    throw new Error('live source must not execute');
+  };
+  source.withSnapshot = async (fn) => fn(captured);
+  const result = await cycleReview(source, stubScanner())({ repoRoot: '/repo' });
+  expect(result.status).toBe('ok');
+  expect(source.commands).toEqual([]);
+  expect(captured.commands.some((entry) => entry.command === 'coderabbit')).toBe(true);
+});

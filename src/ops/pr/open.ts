@@ -28,6 +28,7 @@
 // evidence caveat verbatim — a claim produced in the worktree, never
 // verification (strategy §2.4; verification is green required CI at the
 // exact head plus the reviewer bots' PR review).
+import { guardDevOp } from '../dev/effects.js';
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from '../dev/effects.js';
@@ -165,7 +166,7 @@ export function renderDispositionsComment(ledger: DevLedgerFile): string {
  * assemble readiness → render → adopt-or-create → comment dispositions.
  */
 export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOpenReport> {
-  return async (input) => {
+  return guardDevOp('pr.open', async (input) => {
     // Library boundary BEFORE any effect: the input itself, then repoRoot
     // (a null/undefined input maps to the failed taxonomy, never a
     // TypeError outside it).
@@ -210,6 +211,19 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
     let dirtySha256: string;
     let untracked: string[];
     try {
+      for (const args of [['diff', '--cached'], ['diff']]) {
+        if (
+          requireGitOutRaw(
+            await dev.runCommand('git', args, { timeoutMs: GIT_TIMEOUT_MS }),
+            'independent index/worktree cleanliness',
+          ) !== ''
+        ) {
+          return {
+            status: 'needs-human',
+            reason: 'the index and worktree must each be clean before pr.open publishes evidence',
+          };
+        }
+      }
       const dirtyDiff = await dev.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
         timeoutMs: GIT_TIMEOUT_MS,
       });
@@ -359,6 +373,19 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
     // refusal (it can never fold into clean/empty and pass); any drift
     // aborts before a byte is posted.
     try {
+      for (const args of [['diff', '--cached'], ['diff']]) {
+        if (
+          requireGitOutRaw(
+            await dev.runCommand('git', args, { timeoutMs: GIT_TIMEOUT_MS }),
+            'independent index/worktree cleanliness',
+          ) !== ''
+        ) {
+          return {
+            status: 'needs-human',
+            reason: 'the index and worktree must each be clean before pr.open publishes evidence',
+          };
+        }
+      }
       const recheckHead = requireGitOut(
         await dev.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
         'rev-parse HEAD (recheck)',
@@ -497,5 +524,5 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         evidenceClass: 'author',
       },
     };
-  };
+  });
 }

@@ -444,3 +444,28 @@ describe('assembleReadiness', () => {
     }
   });
 });
+
+test('blocked attempts retain adjudicable major findings after two successful cycles', () => {
+  const blocked = cycleRecord({
+    cycleId: 'c000-aaaaaaaa',
+    completion: { kind: 'blocked', reason: 'CLI error' },
+    findings: [{ id: 'c000-aaaaaaaa#f1', severity: 'major' }],
+  });
+  const records = [
+    blocked,
+    cycleRecord(),
+    cycleRecord({ cycleId: 'c002-aaaaaaaa' }),
+    checkRecord(),
+  ];
+  const open = assemble(records);
+  expect(open.ready).toBe(false);
+  if (!open.ready)
+    expect(
+      open.gaps.some(
+        (gap) => gap.field === 'open-blocking-findings' && gap.detail.includes('c000-aaaaaaaa#f1'),
+      ),
+    ).toBe(true);
+  expect(assemble([...records, dispositionRecord({ findingId: 'c000-aaaaaaaa#f1' })]).ready).toBe(
+    true,
+  );
+});

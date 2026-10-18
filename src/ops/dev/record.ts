@@ -554,7 +554,7 @@ export interface AssembleReadinessInput {
  *     target, with the latest at the CURRENT identity (base,
  *     head and dirty-diff sha256 all three — any mismatch is a stale
  *     identity; a blocked or uncommitted-scope cycle never counts);
- *   - zero OPEN blocking findings across EVERY full-scope terminal cycle in
+ *   - zero OPEN blocking findings across EVERY cycle (including blocked attempts) in
  *     the ledger: a blocking-severity finding is open until a fixed/rejected
  *     disposition names it. A newer cycle re-reviews the CURRENT state — it
  *     does not adjudicate the past, so an older cycle's finding does not
@@ -623,7 +623,7 @@ export function assembleReadiness(
         detail: `review ${cycle.cycleId} is stale: ${stale.join('; ')}`,
       });
     }
-    // EVERY terminal cycle's blocking findings — ANY scope — must be closed
+    // EVERY cycle's blocking findings (including blocked attempts) — ANY scope — must be closed
     // by a disposition: the readiness ANCHOR must be full-scope, but an
     // uncommitted-scope cycle's critical finding is just as open. The
     // latest cycle does not adjudicate the past (the mechanism is in the
@@ -636,8 +636,7 @@ export function assembleReadiness(
       if (record.kind === 'disposition') closed.set(record.findingId, record.action);
     }
     const adjudicable = ledger.records.filter(
-      (record): record is DevCycleRecord =>
-        record.kind === 'cycle' && record.completion.kind === 'terminal',
+      (record): record is DevCycleRecord => record.kind === 'cycle',
     );
     const open: string[] = [];
     for (const entry of adjudicable) {
