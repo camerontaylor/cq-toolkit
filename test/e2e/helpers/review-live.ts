@@ -452,8 +452,8 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
  * prompt rides stdin, not argv). It performs the fix IN ITS CWD: rewrites
  * the marker, `git add -A`, commits with the review item id IN THE SUBJECT
  * (the loop's per-item attribution rule), and answers ONE stream-json
- * `result` line whose structured_output is the fix contract
- * {"changed","summary","commits"}. The stream-json envelope is what the
+ * `result` line whose structured_output is the v2 fix contract
+ * {"disposition","summary","commits","evidence"}. The stream-json envelope is what the
  * driver folds: a bare contract JSON line on stdout would be narration and
  * an 'error' verdict, never a fix.
  */
@@ -473,14 +473,14 @@ try {
 }
 const match = /^Review item: (.+)$/m.exec(prompt);
 const itemId = match === null ? null : match[1].trim();
-const emit = (changed, summary, commits) => {
+const emit = (disposition, summary, commits, evidence = []) => {
   console.log(JSON.stringify({
     type: 'result',
     subtype: 'success',
     is_error: false,
     session_id: 'e5-fake-fixer',
     usage: { input_tokens: 1, output_tokens: 1 },
-    structured_output: { changed, summary, commits },
+    structured_output: { disposition, summary, commits, evidence },
   }));
 };
 const git = (args) =>
@@ -491,15 +491,17 @@ let content;
 try {
   content = readFileSync(file, 'utf8');
 } catch {
-  emit(false, '${MARKER_FILE} is not in the workspace; nothing changed', []);
+  emit('no_outcome', '${MARKER_FILE} is not in the workspace; nothing changed', []);
   process.exit(0);
 }
 if (!content.includes('${MARKER_TEXT}')) {
-  emit(false, 'the misspelled marker is already gone; nothing to fix', []);
+  emit('unchanged_with_reason', 'the misspelled marker is already gone; nothing to fix', [], [
+    { path: '${MARKER_FILE}', line: 1 },
+  ]);
   process.exit(0);
 }
 if (itemId === null) {
-  emit(false, 'no Review item id line in the prompt; refusing to commit without attribution', []);
+  emit('needs_human', 'no Review item id line in the prompt; refusing to commit without attribution', []);
   process.exit(0);
 }
 writeFileSync(file, content.split('${MARKER_TEXT}').join('${FIXED_TEXT}'));
@@ -507,7 +509,7 @@ git(['add', '-A']);
 git(['-c', 'user.name=e5-fake-fixer', '-c', 'user.email=e5-fake-fixer@example.invalid',
   'commit', '-m', 'fix ' + itemId + ': apple']);
 const sha = git(['rev-parse', 'HEAD']);
-emit(true, '${FAKE_SUMMARY}', [sha]);
+emit('fixed', '${FAKE_SUMMARY}', [sha]);
 `;
   await writeFile(path, script, { encoding: 'utf8', mode: 0o755 });
   return path;

@@ -726,9 +726,12 @@ type CommitVerificationFailure =
 /**
  * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
  * every cited `{path, line}` must name a FILE (a blob, never a directory) in
- * the tree at `tip`, read through the git seam (`git cat-file -t`, then
- * `git show <tip>:<path>`), with at least `line` lines.
+ * the tree at `tip`, read through the git seam (`git cat-file -t` and `-s`,
+ * then `git show <tip>:<path>`), at most MAX_EVIDENCE_BLOB_BYTES long, with
+ * at least `line` lines.
  */
+const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
+
 const evidenceFailure = async (
   git: GhFn,
   worktreePath: string,
@@ -744,13 +747,25 @@ const evidenceFailure = async (
     if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
       return `${path} is not a file at ${tip.slice(0, 12)}`;
     }
-    const shown = await git(['-C', worktreePath, 'show', `${tip}:${path}`]);
+    // BOUNDED before it is read: the gh seam buffers the whole blob.
+    const size = Number(
+      (await git(['-C', worktreePath, 'cat-file', '-s', `${tip}:${path}`])).stdout.trim(),
+    );
+    if (!Number.isInteger(size) || size < 0 || size > MAX_EVIDENCE_BLOB_BYTES) {
+      return `${path} is too large to verify (over ${String(MAX_EVIDENCE_BLOB_BYTES)} bytes)`;
+    }
+    const shown =
+      size === 0
+        ? { code: 0, stdout: '' }
+        : await git(['-C', worktreePath, 'show', `${tip}:${path}`]);
     if (shown.code !== 0) {
       return `${path} is unreadable at ${tip.slice(0, 12)}`;
     }
-    const lines = shown.stdout.endsWith('\n')
-      ? shown.stdout.slice(0, -1).split('\n')
-      : shown.stdout.split('\n');
+    // An empty blob has no line to cite.
+    const lines =
+      shown.stdout === ''
+        ? []
+        : (shown.stdout.endsWith('\n') ? shown.stdout.slice(0, -1) : shown.stdout).split('\n');
     if (line > lines.length) {
       return `${path}:${String(line)} is past the end of the file (${String(lines.length)} lines)`;
     }

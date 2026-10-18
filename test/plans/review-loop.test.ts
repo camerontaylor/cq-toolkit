@@ -196,8 +196,8 @@ interface LoopWorld {
   dirty?: boolean;
   /**
    * Files in the worktree tree, path → line count, served to `git show
-   * <sha>:<path>` (an unchanged answer's evidence check). Default: the three
-   * anchored files, 20 lines each.
+   * <sha>:<path>` (an unchanged answer's evidence check). Default:
+   * DEFAULT_WORLD_FILES.
    */
   files?: Record<string, number>;
   /** GraphQL thread nodes served to fetchReviewState. */
@@ -378,6 +378,19 @@ const fakeGh =
   };
 
 /** The routed git fake: prWorktree's model (a reusable on-label tree) + pushes. */
+/**
+ * The worktree tree the fake git serves by default (path → line count): the
+ * three anchored files, an empty file, and a huge one (-1: over the
+ * evidence size bound, never meant to be read).
+ */
+const DEFAULT_WORLD_FILES: Record<string, number> = {
+  'src/a.ts': 20,
+  'src/b.ts': 20,
+  'src/c.ts': 20,
+  'src/empty.ts': 0,
+  'src/huge.ts': -1,
+};
+
 const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
   let pushCount = 0;
   let worktreeHeadReads = 0;
@@ -484,9 +497,16 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     if (rest[0] === 'status' && rest[1] === '--porcelain') {
       return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
     }
+    if (rest[0] === 'cat-file' && rest[1] === '-s' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
+      const lines = (world.files ?? DEFAULT_WORLD_FILES)[(rest[2] ?? '').slice(41)];
+      // Each served line is 'line N\n': about 8 bytes; -1 marks a huge blob.
+      return lines === undefined
+        ? { code: 128, stdout: '', stderr: 'fatal: not a valid object\n' }
+        : ok(`${String(lines < 0 ? 10_000_000 : lines * 8)}\n`);
+    }
     if (rest[0] === 'cat-file' && rest[1] === '-t' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
       const path = (rest[2] ?? '').slice(41);
-      const files = Object.keys(world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 });
+      const files = Object.keys(world.files ?? DEFAULT_WORLD_FILES);
       return files.includes(path)
         ? ok('blob\n')
         : files.some((file) => file.startsWith(`${path}/`))
@@ -495,7 +515,7 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     }
     if (rest[0] === 'show' && /^[0-9a-f]{40}:/.test(rest[1] ?? '')) {
       const path = (rest[1] ?? '').slice(41);
-      const files = world.files ?? { 'src/a.ts': 20, 'src/b.ts': 20, 'src/c.ts': 20 };
+      const files = world.files ?? DEFAULT_WORLD_FILES;
       const lines = files[path];
       const entries = Object.keys(files).filter((file) => file.startsWith(`${path}/`));
       // Like git: showing a TREE succeeds and lists its entries.
@@ -506,7 +526,9 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       }
       return lines === undefined
         ? { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` }
-        : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
+        : lines <= 0
+          ? ok('')
+          : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
     }
     if (rest[0] === 'push') {
       pushCount += 1;
@@ -3055,6 +3077,9 @@ describe('thread settle gate (PR #336 incident)', () => {
     ['a line past the end of the file', [{ path: 'src/a.ts', line: 99 }]],
     // A directory is no file (PR #343 CodeRabbit cycle on fa64d9b8).
     ['a directory', [{ path: 'src', line: 1 }]],
+    // An empty file has no line 1; an oversized file is never buffered (PR #343 Codex review).
+    ['line 1 of an empty file', [{ path: 'src/empty.ts', line: 1 }]],
+    ['a file too large to verify', [{ path: 'src/huge.ts', line: 1 }]],
   ] as const)(
     'an unchanged answer citing %s posts NOTHING and stays unsettled',
     async (_name, evidence) => {
