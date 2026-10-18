@@ -196,8 +196,13 @@ def install(snapshot, binding, runner):
         blobs = {oid: data for oid, kind, data in objects if kind == "blob"}
         # Blobs reused from base are not in the transferred closure but still land at new paths.
         blobs.update(read_blobs(quarantine, [oid for _, oid, _ in entries if oid not in blobs]))
-        name_max = os.pathconf(clone, "PC_NAME_MAX")
-        path_max = os.pathconf(clone, "PC_PATH_MAX") - len(str(runner.WT_ROOT)) - 256
+        # Checkout happens under WT_ROOT, which may be on a different filesystem than the clone.
+        limits = Path(runner.WT_ROOT)
+        while not limits.exists() and limits != limits.parent:
+            limits = limits.parent
+        name_max = os.pathconf(limits, "PC_NAME_MAX")
+        fs_path_max = os.pathconf(limits, "PC_PATH_MAX")
+        path_max = fs_path_max - len(str(runner.WT_ROOT)) - 256
         rules = runner.denylist_rules()
         if not rules:
             raise AuthorRefused("snapshot scan policy absent")
@@ -216,7 +221,7 @@ def install(snapshot, binding, runner):
                 raise AuthorRefused("snapshot path too long to check out")
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
             if mode == b"120000" and (
-                    not blobs[oid] or b"\0" in blobs[oid] or len(blobs[oid]) >= os.pathconf(clone, "PC_PATH_MAX")):
+                    not blobs[oid] or b"\0" in blobs[oid] or len(blobs[oid]) >= fs_path_max):
                 raise AuthorRefused("snapshot symlink target is not representable")
             contents = blobs[oid].decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:
@@ -228,7 +233,7 @@ def install(snapshot, binding, runner):
                             raise AuthorRefused("snapshot secret scan refused")
             # Existing gitleaks stdin sees all bytes, independently of patch syntax.
             part = path + "\n" + contents + "\n"
-            scan_size += len(part.encode())
+            scan_size += len(part.encode()) + 1  # +1: the newline joining parts below
             if scan_size > MAX_WIRE:
                 raise AuthorRefused("snapshot scan exceeds bound")
             scan_parts.append(part)
