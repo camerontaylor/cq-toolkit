@@ -126,7 +126,7 @@
     {
       "files": ["src/harness/**"],
       "rules": {
-        "cq/no-driver-import-in-harness": "warn"
+        "cq/no-driver-import-in-harness": "error"
       }
     },
     {

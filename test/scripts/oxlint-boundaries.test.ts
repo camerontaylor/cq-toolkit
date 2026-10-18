@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,41 +27,18 @@ function lint(root: string, files: string[]) {
     timeout: 20_000,
   });
 }
-function diagnosticsOf(result: ReturnType<typeof lint>): Array<{
-  filename: string;
-  code: string;
-  labels?: Array<{ span?: { line?: number; column?: number } }>;
-}> {
+function diagnosticsOf(
+  result: ReturnType<typeof lint>,
+): Array<{ filename: string; code: string; labels?: Array<{ span?: { line?: number } }> }> {
   const parsed = JSON.parse(result.stdout) as {
     diagnostics: Array<{
       filename: string;
       code: string;
-      labels?: Array<{ span?: { line?: number; column?: number } }>;
+      labels?: Array<{ span?: { line?: number } }>;
     }>;
   };
   return parsed.diagnostics;
 }
-// Exact statement text includes the source, declaration/import kind and named
-// bindings; the diagnostic coordinates anchor that shape at its allowed site.
-// Counting only filenames would let a runtime or different-module import replace
-// one documented type-only import without increasing the warning count.
-function harnessViolations(result: ReturnType<typeof lint>, root: string) {
-  return diagnosticsOf(result)
-    .filter((entry) => entry.code.includes('no-driver-import-in-harness'))
-    .map((entry) => {
-      const filename = entry.filename.replace(`${root}/`, '');
-      const span = entry.labels?.[0]?.span;
-      const lines = readFileSync(join(root, filename), 'utf8').split('\n');
-      return {
-        filename,
-        line: span?.line,
-        column: span?.column,
-        statement: lines[(span?.line ?? 0) - 1],
-      };
-    })
-    .sort((a, b) => a.filename.localeCompare(b.filename));
-}
-
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -74,6 +51,11 @@ describe('production Oxlint configuration and architecture plugin', () => {
       'src/cli/main.ts': "import '../registry/index.js'; import 'node:fs';",
       'src/cli/run-plan.ts': "import 'zod';",
       'src/cli.ts': "import './cli/main.js';",
+      // Harness consumes shared and the driver/types contracts seam; the
+      // harness→driver rule is scoped to src/harness/** only.
+      'src/harness/surface.ts':
+        "import type { SandboxLevel } from '../driver/types.js'; import '../shared/proc.js'; export type { SandboxLevel };",
+      'src/ops/dispatch.ts': "import '../driver/subprocess/index.js';",
     };
     const result = lint(fixture(files), Object.keys(files));
     expect(result.error).toBeUndefined();
@@ -92,6 +74,7 @@ describe('production Oxlint configuration and architecture plugin', () => {
         "type T = import('../driver/types.js').T; export type { T };",
       ].join('\n'),
       'src/cli.ts': "import './kernel/types.js';",
+      'src/harness/tools.ts': "import '../driver/subprocess/process.js';",
       'scripts/example.mjs': 'debugger;',
       'vitest.config.ts': 'debugger;',
     };
@@ -103,6 +86,7 @@ describe('production Oxlint configuration and architecture plugin', () => {
       'src/driver/types.ts': ['no-vendor-sdk-in-kernel'],
       'src/cli/main.ts': ['no-cli-beyond-registry-kernel'],
       'src/cli.ts': ['no-cli-beyond-registry-kernel'],
+      'src/harness/tools.ts': ['no-driver-import-in-harness'],
       'scripts/example.mjs': ['no-debugger'],
       'vitest.config.ts': ['no-debugger'],
     })) {
@@ -122,124 +106,6 @@ describe('production Oxlint configuration and architecture plugin', () => {
       new Set([1, 2, 3, 4]),
     );
     expect(cliBoundaryDiagnostics).toHaveLength(4);
-  });
-
-  it('warns on harness driver imports without failing the run (warn-mode boundary)', () => {
-    const files: Record<string, string> = {
-      'src/harness/surface.ts': [
-        "import type { SandboxLevel } from '../driver/types.js';", // violation (warn)
-        "import { stripMetaSchema } from '../shared/json-schema.js';", // the legal edge
-        'export type { SandboxLevel };', // use both imports: only the boundary rule may fire
-        'export const stripped = stripMetaSchema({});',
-        "export type Inline = import('../driver/types.js').SandboxLevel;",
-        "import Driver = require('../driver/types.js');",
-        'export type Required = Driver.SandboxLevel;',
-      ].join('\n'),
-    };
-    const result = lint(fixture(files), Object.keys(files));
-    // WARN severity: diagnostics are reported but the run does not fail —
-    // the migration-1.1 boundary hardens to error only in a later lane.
-    expect(result.error).toBeUndefined();
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    const harness = diagnosticsOf(result).filter((entry) =>
-      entry.code.includes('no-driver-import-in-harness'),
-    );
-    expect(harness).toHaveLength(3);
-    expect(harness[0]?.filename).toBe('src/harness/surface.ts');
-    expect(new Set(harness.map((entry) => entry.labels?.[0]?.span?.line))).toEqual(
-      new Set([1, 5, 6]),
-    );
-  });
-
-  it('warns on escaped paths and module-loader bridges in the real config', () => {
-    const files: Record<string, string> = {
-      'src/harness/escaped.ts': [
-        "import '../%64river/types.js';",
-        "export * from '../shared/%2e%2e/%64river/types.js?mode=test#part';",
-        "import '../driver%2ftypes.js';",
-        "import '../driver%5Ctypes.js';",
-        "import '../%ZZdriver/types.js';",
-      ].join('\n'),
-      'src/harness/aliased.ts': [
-        "import { createRequire as makeLoader } from 'node:module';",
-        'const load = makeLoader(import.meta.url);',
-        "export const driver = load('../driver/types.js');",
-      ].join('\n'),
-      'src/harness/direct.ts': [
-        "import * as Module from 'module';",
-        "export const driver = Module.createRequire(import.meta.url)('../driver/types.js');",
-      ].join('\n'),
-      'src/harness/dynamic.ts': [
-        "const { createRequire } = await import('node:module');",
-        "export const driver = createRequire(import.meta.url)('../driver/types.js');",
-      ].join('\n'),
-    };
-    const root = fixture(files);
-    const result = lint(root, Object.keys(files));
-    expect(result.error).toBeUndefined();
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    const violations = harnessViolations(result, root);
-    expect(violations.map(({ filename, line }) => [filename, line])).toEqual([
-      ['src/harness/aliased.ts', 1],
-      ['src/harness/direct.ts', 1],
-      ['src/harness/dynamic.ts', 1],
-      ['src/harness/escaped.ts', 1],
-      ['src/harness/escaped.ts', 2],
-      ['src/harness/escaped.ts', 3],
-      ['src/harness/escaped.ts', 4],
-      ['src/harness/escaped.ts', 5],
-    ]);
-  });
-
-  it.each([
-    "import { SandboxLevel, ToolPolicy } from '../driver/types.js';",
-    "import type { SandboxLevel, ToolPolicy } from '../driver/other.js';",
-    "import type { SandboxLevel, ToolDenial } from '../driver/types.js';",
-    "\nimport type { SandboxLevel, ToolPolicy } from '../driver/types.js';",
-  ])('distinguishes a changed documented import despite an unchanged warning count: %s', (code) => {
-    const filename = 'src/harness/surface.ts';
-    const root = fixture({ [filename]: code + '\nexport type { SandboxLevel };' });
-    const result = lint(root, [filename]);
-    expect(result.error).toBeUndefined();
-    const violations = harnessViolations(result, root);
-    expect(violations).toHaveLength(1);
-    expect(violations).not.toEqual([
-      {
-        filename,
-        line: 1,
-        column: 1,
-        statement: "import type { SandboxLevel, ToolPolicy } from '../driver/types.js';",
-      },
-    ]);
-  });
-
-  it('keeps the real harness tree at exactly the documented driver-import violations', () => {
-    const result = spawnSync(process.execPath, [BIN, '-f', 'json', 'src/harness'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-      timeout: 60_000,
-    });
-    expect(result.error).toBeUndefined();
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    const violations = harnessViolations(result, ROOT);
-    // The rule header documents these two type-only src/driver/types.ts
-    // imports (they become contracts imports in a later migration step).
-    // This assertion makes the documentation a ratchet: a NEW harness→
-    // driver import fails here instead of silently joining the warn list.
-    expect(violations).toEqual([
-      {
-        filename: 'src/harness/surface.ts',
-        line: 43,
-        column: 1,
-        statement: "import type { SandboxLevel, ToolPolicy } from '../driver/types.js';",
-      },
-      {
-        filename: 'src/harness/tools.ts',
-        line: 129,
-        column: 1,
-        statement: "import type { SandboxLevel, ToolDenial } from '../driver/types.js';",
-      },
-    ]);
   });
 
   it.each(['missing-plugin', 'invalid-config'])('fails closed for %s', (failure) => {

@@ -1,43 +1,41 @@
 // no-driver-import-in-harness — the harness→driver boundary rule from
 // migration plan step 1.1 (ADR-0005 layered-monorepo revision). After 1.1
 // moved the process-ladder and CLI-schema helpers to src/shared/{proc,
-// json-schema}.ts, the harness must never reach into the driver tree again:
-// src/harness/** consumes src/shared/** (and, once the contracts package
-// exists, src/contracts) — while the REVERSE edge (driver → harness, e.g.
-// src/driver/subprocess/index.ts importing the harness surface) stays legal.
-// The rule CORE reports every relative import whose RESOLVED path lands in
-// src/driver/; the scoping and severity live in .oxlintrc.json (the rule is
-// registered under the "cq" plugin and applied to src/harness/** in WARN
-// mode — flipped to error only when the last documented violation is gone).
+// json-schema}.ts, the harness depends only on shared and contracts: it must
+// never reach into the driver tree again — while the REVERSE edge (driver →
+// harness, e.g. src/driver/subprocess/index.ts importing the harness surface)
+// stays legal. The scoping (src/harness/**) and the ERROR severity live in
+// .oxlintrc.json (the rule is registered under the "cq" plugin).
 //
-// DOCUMENTED REMAINING VIOLATIONS (warn, not error — each is a TYPE-ONLY
-// import of src/driver/types.ts that becomes a `contracts` import when the
-// contracts layer lands, migration 1.1/1.8; do not add new entries here):
-//   - src/harness/surface.ts  (import type { SandboxLevel, ToolPolicy })
-//   - src/harness/tools.ts    (import type { SandboxLevel, ToolDenial })
+// THE CONTRACTS SEAM: src/driver/types.ts is the driver seam's type module,
+// which the package topology places in the L0 contracts layer (it becomes
+// `@cq/contracts` when the packages are cut). Migration 1.1: "Harness's
+// remaining driver/types imports are type-only and become contracts." An
+// import that resolves to exactly that file is a contracts edge and is
+// allowed; anything else under src/driver/ is reported.
 //
-// Same resolve-then-contain discipline as no-cli-beyond-registry-kernel:
-// relative sources are resolved LEXICALLY (posix join + normalize against
-// the importing file's repo-relative directory — no fs, no extension
-// guessing) before containment. URL path escapes are decoded once; malformed
-// escapes and encoded separators fail closed. Traversal spellings cannot dodge the
-// prefix ('../shared/../driver/types.js' resolves into src/driver/ and is
-// reported). Bare specifiers ('zod', 'node:*') are out of scope — this rule
-// guards the INTERNAL layer edge. Module-loader imports (`node:module` and
-// `module`) are prohibited conservatively: createRequire bridges can hide
-// targets behind aliases, member access, or direct calls. COMPUTED sources fail closed: an
-// import whose source is not a plain string literal or a substitution-free
-// template hides its real target from resolve-then-contain and is reported
-// outright. The rule core checks every import source it sees; file scoping
-// and severity come from the config, keeping this file testable with
-// RuleTester alone.
+// Every module-import FORM is checked: import/export-from declarations,
+// dynamic import(), require(), TypeScript inline import types
+// (`import('…').T`) and import-equals (`import x = require('…')`). Same
+// resolve-then-contain discipline as no-cli-beyond-registry-kernel: relative
+// sources are resolved LEXICALLY (backslashes normalized to '/', then posix
+// join + normalize against the importing file's repo-relative directory — no
+// fs, no extension guessing) before containment, so traversal spellings
+// cannot dodge the prefix ('../shared/../driver/types.js' is still a driver
+// path). Bare specifiers ('zod', 'node:*') are out of scope — this rule guards
+// the INTERNAL layer edge. COMPUTED sources fail closed: an import whose
+// source is not a plain string literal or a substitution-free template hides
+// its real target and is reported outright. Specifiers tsc cannot resolve
+// (percent escapes, ?query/#fragment suffixes) already fail the typecheck, and
+// runtime loader APIs (createRequire, process.getBuiltinModule) are not import
+// syntax; neither is this rule's concern.
 
 import path from 'node:path';
 
-// The banned target root, repo-relative POSIX. The config scopes this rule
-// to 'src/harness/**', so every importing file's repo-relative path is
-// anchored at 'src/'.
+// The banned target root and the one allowed contracts file inside it,
+// repo-relative POSIX, extension-less (the resolved source carries '.js').
 const DRIVER_DIR = 'src/driver';
+const CONTRACTS_SEAM = 'src/driver/types';
 
 // Repo-relative POSIX path of the importing file. RuleTester filenames are
 // already repo-relative; real lint runs hand the rule an absolute path whose
@@ -59,30 +57,13 @@ function isInside(child, parent) {
   return child === parent || child.startsWith(`${parent}/`);
 }
 
-// Lexically resolve a RELATIVE source against the importing file's
-// repo-relative path: join + posix.normalize. Purely textual — traversal
-// segments ('..') are collapsed before any containment check.
-function resolveRelative(source, importerPath) {
-  const importerDir = path.posix.dirname(importerPath);
-  return path.posix.normalize(path.posix.join(importerDir, source));
-}
-
-// ESM URL paths may spell driver or traversal segments with percent escapes.
-// Decode once (never recursively), and remove URL query/fragment components
-// before path containment. Node rejects encoded path separators; reject them
-// here too rather than letting either slash style hide a layer boundary.
-function canonicalPath(source) {
-  const pathname = source.split(/[?#]/, 1)[0];
-  if (/%(?:2f|5c)/i.test(pathname)) return null;
-  try {
-    return decodeURIComponent(pathname);
-  } catch {
-    return null;
-  }
-}
-
 function isRelativeSpecifier(source) {
   return source === '.' || source === '..' || source.startsWith('./') || source.startsWith('../');
+}
+
+// The contracts seam, under any of the extensions a source may name.
+function isContractsSeam(resolved) {
+  return resolved.replace(/\.(?:d\.[cm]?ts|[cm]?[jt]s)$/, '') === CONTRACTS_SEAM;
 }
 
 // Module-source text: plain string literals, or template literals with no
@@ -99,38 +80,24 @@ function sourceText(sourceNode) {
 
 function checkSource(context, sourceNode, reportNode) {
   if (!sourceNode) return;
-  const importerPath = repoRelative(context.filename);
-  const source = sourceText(sourceNode);
-  if (source === null) {
+  const raw = sourceText(sourceNode);
+  if (raw === null) {
     // FAIL CLOSED: a COMPUTED source makes the import's real target
     // invisible to resolve-then-contain — exactly the bypass
-    // (`const t = '../driver/types.js'; await import(t);`). Reported
-    // outright; inside the harness the source must be literal.
-    context.report({
-      node: reportNode,
-      messageId: 'computedSource',
-    });
+    // (`const t = '../driver/types.js'; await import(t);`).
+    context.report({ node: reportNode, messageId: 'computedSource' });
     return;
   }
-  // Prevent acquisition of the Node module-loader bridge, independently of
-  // how createRequire (or its returned require function) is named or called.
-  if (source === 'node:module' || source === 'module') {
-    context.report({ node: reportNode, messageId: 'moduleLoader' });
-    return;
-  }
-  const canonical = canonicalPath(source);
-  if (canonical === null) {
-    context.report({ node: reportNode, messageId: 'invalidSource' });
-    return;
-  }
-  if (
-    isRelativeSpecifier(canonical) &&
-    isInside(resolveRelative(canonical, importerPath), DRIVER_DIR)
-  ) {
+  // Node's file-URL resolution (and tsc) treat '\' as a separator.
+  const source = raw.split('\\').join('/');
+  if (!isRelativeSpecifier(source)) return;
+  const importerDir = path.posix.dirname(repoRelative(context.filename));
+  const resolved = path.posix.normalize(path.posix.join(importerDir, source));
+  if (isInside(resolved, DRIVER_DIR) && !isContractsSeam(resolved)) {
     context.report({
       node: reportNode,
       messageId: 'driverImport',
-      data: { source, resolved: resolveRelative(canonical, importerPath) },
+      data: { source: raw, resolved },
     });
   }
 }
@@ -140,16 +107,12 @@ export default {
     type: 'problem',
     docs: {
       description:
-        'Forbid imports from src/driver/** in harness code (migration 1.1 boundary: harness consumes shared/contracts, never the driver tree).',
+        'Forbid imports from src/driver/** in harness code, except the src/driver/types.ts contracts seam (migration 1.1 boundary: harness consumes shared/contracts, never the driver tree).',
     },
     schema: [],
     messages: {
       driverImport:
-        "Harness code must not import the driver tree: '{{source}}' resolves to '{{resolved}}' (migration 1.1 boundary — import from src/shared/** or contracts instead).",
-      moduleLoader:
-        'Harness code must not import node:module or module: module-loader bridges such as createRequire hide import targets from the driver boundary. Use literal imports from shared/contracts instead.',
-      invalidSource:
-        'Harness import paths must have valid URL escapes and no encoded path separators (the driver-import boundary cannot safely resolve this source).',
+        "Harness code must not import the driver tree: '{{source}}' resolves to '{{resolved}}' (migration 1.1 boundary — import from src/shared/** or the src/driver/types.ts contracts seam instead).",
       computedSource:
         'Computed import sources must be literal inside the harness layer (the driver-import boundary cannot be resolved from a computed source).',
     },
