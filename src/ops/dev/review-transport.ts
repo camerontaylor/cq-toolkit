@@ -126,7 +126,19 @@ export function makeAuthorAdmission(
   return async (input) => {
     try {
       const i = DevTransportInputSchema.parse(input);
-      const captured = i.tree && i.action === 'enroll' ? await capture(i.base, i.tree) : undefined;
+      let captured: Awaited<ReturnType<typeof capture>> | undefined;
+      if (i.tree && i.action === 'enroll') {
+        try {
+          captured = await capture(i.base, i.tree);
+        } catch (error) {
+          if (error instanceof SnapshotConfigError) throw error;
+          // Local capture or pre-upload scan failed before transport: nothing was sent.
+          return {
+            status: 'failed',
+            error: 'Snapshot capture or pre-upload scan refused; nothing was sent to the author.',
+          };
+        }
+      }
       const head = i.tree ? snapshotHead(i.base, i.tree) : i.head!;
       if (captured && captured.head !== head) throw new Error('snapshot identity mismatch');
       const binding = {
