@@ -769,6 +769,8 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
   test.each([
     'I am reading the anchored file first.',
     "I'm reading the anchored code first.",
+    'I’m reading the anchored code first.',
+    'Let’s read the anchored file first.',
     'I am now checking the diff.',
     'First, reading the anchored file.',
     'Currently inspecting the thread.',
