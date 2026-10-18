@@ -165,7 +165,7 @@ describe('tree snapshot worker and real Python admission', () => {
       cycle: 1,
     });
     expect(result.status).toBe('needs-human');
-    expect(result).toMatchObject({ reason: expect.stringContaining('CQ_AUTHOR_SNAPSHOT_SCANNER') });
+    expect('reason' in result ? result.reason : '').toContain('CQ_AUTHOR_SNAPSHOT_SCANNER');
     expect(sent).toBe(false);
   });
 });
