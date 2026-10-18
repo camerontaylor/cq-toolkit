@@ -288,6 +288,30 @@ describe('a probe can be forged by neither a broken nor a promiscuous launcher',
     expect(record.certified).toBe(false);
   });
 
+  test('a lowercase missing-canary diagnostic is inconclusive, never a pass', async () => {
+    // Docker/OCI report the missing executable lowercase (the shape the
+    // container suite models). With exit 1 the credential-env chain would
+    // otherwise read "ran, secret scrubbed" — a certify of a boundary
+    // printenv never entered — because executed() only excludes 126/127.
+    const adapter = fakeAdapter('fs-only');
+    const confined = adapter.launch;
+    adapter.launch = (request) =>
+      request.argv[0] === '/usr/bin/printenv'
+        ? Promise.resolve(
+            result({
+              exitCode: 1,
+              stderr: 'bwrap: execvp /usr/bin/printenv: no such file or directory',
+            }),
+          )
+        : confined(request);
+    const record = await probeBackend(adapter, seams());
+    expect(verdictOf(record, 'credential-env')).toBe('inconclusive');
+    expect(record.canaries.find((c) => c.id === 'credential-env')?.detail).toMatch(
+      /printenv never ran/,
+    );
+    expect(record.certified).toBe(false);
+  });
+
   test.runIf(process.platform === 'linux')(
     'a proc-link leak fails despite ordinary filesystem denials',
     async () => {

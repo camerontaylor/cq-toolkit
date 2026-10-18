@@ -7,7 +7,7 @@
 import { accessSync, constants } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
@@ -819,7 +819,9 @@ describe('launcher hardening (PR review)', () => {
   // The landlock stand-in helper execs the argv on the HOST, so resolve perl
   // the way a shell would rather than assuming FHS /usr/bin (NixOS has no
   // /usr/bin/perl). Inside a real boundary the FHS path is the point; here it
-  // is not.
+  // is not. Relative PATH entries are skipped like probe.ts's hostTool: the
+  // adapter launches with cwd set to its workspace, so a relative candidate
+  // would not resolve there — the returned path is always absolute.
   const hostPerl = (): string => {
     const executable = (path: string): boolean => {
       try {
@@ -831,7 +833,8 @@ describe('launcher hardening (PR review)', () => {
     };
     if (executable('/usr/bin/perl')) return '/usr/bin/perl';
     for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
-      if (dir !== '' && executable(join(dir, 'perl'))) return join(dir, 'perl');
+      if (dir === '' || !isAbsolute(dir)) continue;
+      if (executable(join(dir, 'perl'))) return join(dir, 'perl');
     }
     return '/usr/bin/perl';
   };

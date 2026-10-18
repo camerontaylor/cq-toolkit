@@ -297,7 +297,10 @@ type CanaryLaunch = SandboxLaunchResult & { readonly canaryMissing?: boolean };
  * never ran.  bwrap reports that as `bwrap: execvp /bin/cat: No such file or
  * directory` with exit 1, which executed() alone would read as a run that
  * failed: once the host control arms (hostTool), denialOutcome would then
- * certify a denial no canary performed.  An EPERM exec refusal is different
+ * certify a denial no canary performed.  Docker/OCI report the same miss
+ * lowercase (`stat /usr/bin/printenv: no such file or directory: unknown`),
+ * so the diagnostic matches case-insensitively.  An EPERM exec refusal is
+ * different
  * — that is the boundary refusing, and keeps its meaning.  A canary that ran
  * and failed to find its TARGET does not match: the launcher anchors name
  * the exact canary binary, not the target.
@@ -308,7 +311,7 @@ function canaryBinaryMissing(
   r: SandboxLaunchResult,
 ): boolean {
   if (!execRefusalAttributable(backend, argv0, r)) return false;
-  return /No such file or directory|ENOENT/.test(`${r.spawnError ?? ''}\n${r.stderr}`);
+  return /no such file or directory|enoent/i.test(`${r.spawnError ?? ''}\n${r.stderr}`);
 }
 
 /**
