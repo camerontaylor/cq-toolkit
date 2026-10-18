@@ -14,6 +14,7 @@ import sys
 from author_quota import AuthorRefused, binding_of, normalize_binding
 
 MAX_BYTES = 8192
+MAX_SNAPSHOT_BYTES = 6 * 1024 * 1024
 
 
 def _object(pairs):
@@ -26,18 +27,26 @@ def _object(pairs):
 
 
 def decode(raw):
-    if not isinstance(raw, bytes) or len(raw) > MAX_BYTES:
+    if not isinstance(raw, bytes) or len(raw) > MAX_SNAPSHOT_BYTES:
         raise AuthorRefused("request exceeds transport bound")
     try:
         req = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
     except (ValueError, UnicodeError) as exc:
         raise AuthorRefused("invalid JSON request") from exc
-    if not isinstance(req, dict) or set(req) != {"v", "op", "binding"}:
+    if not isinstance(req, dict):
+        raise AuthorRefused("invalid request")
+    version = req.get("v")
+    fields = {"v", "op", "binding", "snapshot"} if type(version) is int and version == 2 else {"v", "op", "binding"}
+    if set(req) != fields:
         raise AuthorRefused("unknown request fields")
-    if type(req["v"]) is not int or req["v"] != 1:
+    if type(req["v"]) is not int or req["v"] not in (1, 2):
         raise AuthorRefused("unsupported transport version")
     if req["op"] not in ("enroll", "status", "fallback"):
         raise AuthorRefused("unsupported operation")
+    if req["v"] == 1 and len(raw) > MAX_BYTES:
+        raise AuthorRefused("request exceeds v1 bound")
+    if req["v"] == 2 and req["op"] != "enroll":
+        raise AuthorRefused("snapshots are enrollment only")
     b = req["binding"]
     if not isinstance(b, dict) or set(b) != {"request_id", "base", "head", "target", "cycle"}:
         raise AuthorRefused("invalid binding fields")
@@ -58,6 +67,14 @@ def handle(raw, runner, *, policy_path, reviewer, approved_target):
         raise AuthorRefused("operator-approved author target required")
 
     def locked():
+        # Refuse a conflicting delivery before any object/ref/state mutation.
+        if request["v"] == 2:
+            q = runner.load_queue()
+            entry = q.get("author_requests", {}).get(binding["request_id"])
+            if entry is not None and binding_of(entry) != binding_of(binding):
+                raise AuthorRefused("conflicting snapshot request binding")
+            from author_snapshot import install
+            install(request["snapshot"], binding, runner)
         # Check the binding before status/fallback, not just request_id.
         if request["op"] == "enroll":
             runner.enroll_author(**binding, review_policy=policy_path,
@@ -83,7 +100,7 @@ def main():
         return 2
     try:
         signal.alarm(30)
-        raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+        raw = sys.stdin.buffer.read(MAX_SNAPSHOT_BYTES + 1)
         import crq  # Only after the forced-command guard; never imports signer.
         result = handle(raw, crq, policy_path=os.environ.get("CRQ_AUTHOR_REVIEW_POLICY"),
                         reviewer=os.environ.get("CRQ_AUTHOR_FALLBACK_REVIEWER"),

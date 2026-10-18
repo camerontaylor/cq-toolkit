@@ -7,15 +7,23 @@ export const DevReviewInputSchema = z
     action: z.enum(['enroll', 'status', 'fallback']),
     requestId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/),
     base: z.string().regex(/^[0-9a-f]{40}$/),
-    head: z.string().regex(/^[0-9a-f]{40}$/),
+    head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    tree: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
     target: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/),
     cycle: z.number().int().min(1).max(2),
   })
   .strict()
   .refine(
-    (i) => [i.requestId, i.base, i.head, i.target].every((v) => v.trim() === v),
+    (i) => [i.requestId, i.base, i.head ?? i.tree ?? '', i.target].every((v) => v.trim() === v),
     'binding must not contain whitespace or controls',
   )
+  .refine((i) => Boolean(i.head) !== Boolean(i.tree), 'provide exactly one of head or tree')
   .refine((i) => i.base !== i.head, 'base and head must differ');
 
 export type DevReviewInput = z.infer<typeof DevReviewInputSchema>;

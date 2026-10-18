@@ -59,6 +59,13 @@ class TransportTest(unittest.TestCase):
                                           policy_path="operator-policy.json", reviewer="agent:configured",
                                           approved_target=BINDING["target"]))
 
+    def test_v1_response_bytes_remain_exact(self):
+        backend = Backend()
+        raw = transport.handle(request(), backend, policy_path="operator-policy.json",
+                               reviewer="agent:configured", approved_target=BINDING["target"])
+        expected = backend.with_lock(lambda: backend.author_lease_command("worker-1", False))
+        self.assertEqual(raw, (json.dumps(expected, separators=(",", ":"), sort_keys=True) + "\n").encode())
+
     def test_enrollment_is_pending_no_start_and_stdout_is_one_json(self):
         backend = Backend()
         reply = self.call(request(), backend)

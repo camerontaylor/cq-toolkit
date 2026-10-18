@@ -1,3 +1,4 @@
+import { captureSnapshot, snapshotHead } from './snapshot.js';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
@@ -89,18 +90,33 @@ export function sshAuthorTransport(alias: string): AuthorTransport {
 }
 
 /** One request only. No timeout-based local dispatch, automatic retry or CLI start. */
-export function makeDevReview(transport: AuthorTransport): Op<DevReviewInput, AuthorDecision> {
+export function makeDevReview(
+  transport: AuthorTransport,
+  capture = (base: string, tree: string) =>
+    captureSnapshot(
+      process.env['CQ_AUTHOR_REPO'] ?? process.cwd(),
+      base,
+      tree,
+      process.env['CQ_AUTHOR_SNAPSHOT_SCANNER'],
+    ),
+): Op<DevReviewInput, AuthorDecision> {
   return async (input) => {
     try {
       const i = DevReviewInputSchema.parse(input);
+      const captured = i.tree && i.action === 'enroll' ? await capture(i.base, i.tree) : undefined;
+      const head = i.tree ? snapshotHead(i.base, i.tree) : i.head!;
+      if (captured && captured.head !== head) throw new Error('snapshot identity mismatch');
       const binding = {
         request_id: i.requestId,
         base: i.base,
-        head: i.head,
+        head,
         target: i.target,
         cycle: i.cycle,
       };
-      const raw = await transport(JSON.stringify({ v: 1, op: i.action, binding }) + '\n');
+      const envelope = captured
+        ? { v: 2, op: i.action, binding, snapshot: captured.snapshot }
+        : { v: 1, op: i.action, binding };
+      const raw = await transport(JSON.stringify(envelope) + '\n');
       if (Buffer.byteLength(raw) > 8192) throw new Error('oversized author response');
       const decision = DecisionSchema.parse(JSON.parse(raw));
       if (
