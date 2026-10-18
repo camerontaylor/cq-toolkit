@@ -34,7 +34,7 @@
 //     every file the dep showed it.
 import { execFile } from 'node:child_process';
 import { fingerprintFailure, legacyFingerprintFailure } from '../gates/fingerprint.js';
-import { SWEEP_DIFF_FLAGS } from './internal/gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
 import type { CheckFailure } from '../gates/checkRunner.js';
 import { makeLedgerQuery } from '../ledger/ledger.js';
 import type { LedgerQueryInput, LedgerView } from '../ledger/ledger.js';

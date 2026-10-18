@@ -15,7 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { makeGitMutex } from '../../ops/sweep/gitMutex.js';
+import { makeGitMutex } from '../../shared/gitMutex.js';
 import type { NonceLedger } from '../../ops/analyze/approval.js';
 
 /** A ledger that can also answer the "left UNSPENT" question the tests assert. */

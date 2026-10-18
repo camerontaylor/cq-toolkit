@@ -30,13 +30,13 @@ export {
   makeSubprocessSweepPlannerDeps,
   parseNullDelimitedChangedFiles,
 } from './planSweep.js';
-export type { GitMutex, GitMutexConfig, GitMutexEvent } from './gitMutex.js';
+export type { GitMutex, GitMutexConfig, GitMutexEvent } from '../../shared/gitMutex.js';
 export {
   DEFAULT_GIT_MUTEX_RETRIES,
   DEFAULT_GIT_MUTEX_RETRY_BASE_MS,
   DEFAULT_GIT_MUTEX_STALE_MS,
   makeGitMutex,
-} from './gitMutex.js';
+} from '../../shared/gitMutex.js';
 export type {
   SubprocessWorktreeEffectsOptions,
   WorktreeAddRequest,

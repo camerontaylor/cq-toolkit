@@ -42,7 +42,7 @@ import type {
   LedgerView,
 } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
-import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
+import { SWEEP_DIFF_FLAGS } from '../../../src/shared/gitDiffFlags.js';
 import {
   SWEEP_UNIT_OP,
   changedFilesArgs,

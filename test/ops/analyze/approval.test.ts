@@ -73,7 +73,7 @@ import {
   scriptedStateReader,
 } from './approvalFixtures.js';
 import * as toolkit from '../../../src/index.js';
-import { makeGitMutex } from '../../../src/ops/sweep/gitMutex.js';
+import { makeGitMutex } from '../../../src/shared/gitMutex.js';
 
 const OP = 'analyze.applyRemediation';
 const WORKSPACE = '/ws';

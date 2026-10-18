@@ -84,7 +84,8 @@ import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
 import type { DriverFactory, ResolvedDriver } from '../../driver/factory.js';
-import { deepFreeze, defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
+import { deepFreeze } from '../../shared/deepFreeze.js';
+import { defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type {
   Budget,

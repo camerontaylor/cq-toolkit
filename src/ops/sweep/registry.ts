@@ -33,14 +33,12 @@ import type { SalvageInput } from './salvage.js';
 import type { SweepUnitDispatchInput, SweepUnitReport } from './unit.js';
 import type { WorktreeForInput, WorktreeMutexConfig } from '../../adapters/git/worktreeFor.js';
 
-// TYPE-ONLY re-export of the git-mutation mutex's config type: gitMutex.ts
-// is a LIBRARY utility, never a registered op, and this reference is the
-// family convention's HELPER-REFERENCE excusal (the ledger registry's
-// type-only imports of ledger.js are the precedent) — it marks the module
-// as registry-referenced so the completeness heuristic does not demand a
-// `sweep.gitMutex` entry. Consumers of WorktreeForInputSchema need the
-// config shape to build the input's mutex block anyway.
-export type { GitMutexConfig } from './gitMutex.js';
+// TYPE-ONLY re-export of the git-mutation mutex's config type: the helper
+// itself is a LIBRARY utility, never a registered op, and lives in
+// src/shared/gitMutex.ts (migration Phase 1.3). The re-export stays so
+// consumers of WorktreeForInputSchema keep one import site for the config
+// shape they need to build the input's mutex block.
+export type { GitMutexConfig } from '../../shared/gitMutex.js';
 
 /**
  * Registry-time mirror of {@link PlanSweepPackage}: a non-empty name and a
