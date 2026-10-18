@@ -4,8 +4,10 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import tempfile
+import time
 
 from author_quota import AuthorRefused
 
@@ -26,19 +28,40 @@ def git(repo, *args, data=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
                GIT_TERMINAL_PROMPT="0")
+    command = ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null",
+               "-c", "core.fsmonitor=false", *args]
     try:
-        with tempfile.TemporaryFile() as output:
-            subprocess.run(["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null",
-                                 "-c", "core.fsmonitor=false", *args], cwd=repo, env=env,
-                           input=data, stdout=output, stderr=subprocess.DEVNULL,
-                           timeout=10, check=True)
-            output.seek(0)
-            result = output.read(MAX_WIRE + 1)
+        with tempfile.TemporaryFile() as source:
+            if data is not None:
+                source.write(data)
+                source.seek(0)
+            with subprocess.Popen(command, cwd=repo, env=env, stdin=source,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+                deadline = time.monotonic() + 10
+                result = bytearray()
+                try:
+                    with selectors.DefaultSelector() as ready:
+                        ready.register(process.stdout, selectors.EVENT_READ)
+                        while ready.get_map():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0 or not ready.select(remaining):
+                                raise subprocess.TimeoutExpired(command, 10)
+                            chunk = os.read(process.stdout.fileno(), min(65536, MAX_WIRE + 1 - len(result)))
+                            if not chunk:
+                                ready.unregister(process.stdout)
+                                break
+                            result.extend(chunk)
+                            if len(result) > MAX_WIRE:
+                                raise AuthorRefused("snapshot Git output exceeds bound")
+                    if process.wait(timeout=max(0.001, deadline - time.monotonic())):
+                        raise AuthorRefused("snapshot Git operation refused")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
     except (OSError, subprocess.SubprocessError) as exc:
         raise AuthorRefused("snapshot Git operation refused") from exc
-    if len(result) > MAX_WIRE:
-        raise AuthorRefused("snapshot Git output exceeds bound")
-    return result
+    return bytes(result)
 
 
 def decode(snapshot, binding):
