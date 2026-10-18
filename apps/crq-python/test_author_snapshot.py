@@ -274,3 +274,10 @@ class SnapshotTransport(SnapshotBaseline):
             with self.assertRaisesRegex(author_quota.AuthorRefused, "secret scan"):
                 snapshot.install(req["snapshot"], req["binding"], crq)
         self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+
+
+    def test_git_output_is_stopped_at_bound(self):
+        blob = self.git("hash-object", "-w", "--stdin", data=b"x" * 65536)
+        with mock.patch.object(snapshot, "MAX_WIRE", 32), self.assertRaisesRegex(
+                author_quota.AuthorRefused, "output exceeds"):
+            snapshot.git(self.repo, "cat-file", "blob", blob)
