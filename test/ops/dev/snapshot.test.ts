@@ -140,7 +140,7 @@ describe('tree snapshot worker and real Python admission', () => {
             () => captureSnapshot(worker, base, tree, scanner),
           )(input)
         ).status,
-      ).toBe('indeterminate');
+      ).toBe('failed');
       expect(sentAfterRefusal).toBe(false);
       // An absolute but missing scanner is operator configuration, not an unknown admission.
       const missing = await makeDevReview(

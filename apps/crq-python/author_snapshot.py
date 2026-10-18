@@ -215,7 +215,8 @@ def install(snapshot, binding, runner):
             if len(raw_path) > path_max or any(len(part) > name_max for part in raw_path.split(b"/")):
                 raise AuthorRefused("snapshot path too long to check out")
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
-            if mode == b"120000" and (not blobs[oid] or b"\0" in blobs[oid]):
+            if mode == b"120000" and (
+                    not blobs[oid] or b"\0" in blobs[oid] or len(blobs[oid]) >= os.pathconf(clone, "PC_PATH_MAX")):
                 raise AuthorRefused("snapshot symlink target is not representable")
             contents = blobs[oid].decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:

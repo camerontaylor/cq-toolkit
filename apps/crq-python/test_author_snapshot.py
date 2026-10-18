@@ -432,3 +432,8 @@ class SnapshotTransport(SnapshotBaseline):
              mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": r"^file\.txt$"}]), \
              mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
             snapshot.install(req["snapshot"], req["binding"], crq)
+
+    def test_symlink_target_beyond_filesystem_limit_is_refused(self):
+        blob = self.git("hash-object", "-w", "--stdin", data=b"t" * os.pathconf(self.destination, "PC_PATH_MAX"))
+        tree = self.git("mktree", data=f"120000 blob {blob}\tlink\n".encode())
+        self.install_refused(tree, "symlink target")
