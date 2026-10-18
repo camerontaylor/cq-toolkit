@@ -133,6 +133,14 @@ export default {
       ExportAllDeclaration(node) {
         checkSource(context, node.source, node);
       },
+      TSImportEqualsDeclaration(node) {
+        if (node.moduleReference.type === 'TSExternalModuleReference') {
+          checkSource(context, node.moduleReference.expression, node);
+        }
+      },
+      TSImportType(node) {
+        checkSource(context, node.source ?? { type: 'Identifier' }, node);
+      },
       CallExpression(node) {
         const isRequire =
           (node.callee.type === 'Identifier' && node.callee.name === 'require') ||

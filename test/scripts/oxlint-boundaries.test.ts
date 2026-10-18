@@ -108,6 +108,9 @@ describe('production Oxlint configuration and architecture plugin', () => {
         "import { stripMetaSchema } from '../shared/json-schema.js';", // the legal edge
         'export type { SandboxLevel };', // use both imports: only the boundary rule may fire
         'export const stripped = stripMetaSchema({});',
+        "export type Inline = import('../driver/types.js').SandboxLevel;",
+        "import Driver = require('../driver/types.js');",
+        'export type Required = Driver.SandboxLevel;',
       ].join('\n'),
     };
     const result = lint(fixture(files), Object.keys(files));
@@ -118,9 +121,11 @@ describe('production Oxlint configuration and architecture plugin', () => {
     const harness = diagnosticsOf(result).filter((entry) =>
       entry.code.includes('no-driver-import-in-harness'),
     );
-    expect(harness).toHaveLength(1);
+    expect(harness).toHaveLength(3);
     expect(harness[0]?.filename).toBe('src/harness/surface.ts');
-    expect(harness[0]?.labels?.[0]?.span?.line).toBe(1);
+    expect(new Set(harness.map((entry) => entry.labels?.[0]?.span?.line))).toEqual(
+      new Set([1, 5, 6]),
+    );
   });
 
   it('keeps the real harness tree at exactly the documented driver-import violations', () => {
