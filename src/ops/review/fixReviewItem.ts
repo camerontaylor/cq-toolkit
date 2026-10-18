@@ -271,7 +271,7 @@ const NARRATION_PROGRESS = new RegExp(
 
 /** A first-person PROGRESSIVE: ongoing work, whatever follows ("I am investigating why …"). */
 const NARRATION_ONGOING = new RegExp(
-  `^${SEQUENCE}(?:i am|i'm|we are|we're|i have started|i've started|i have been|i've been|we have been|we've been)(?: (?:now|currently|just|still|first))? \\w+ing\\b`,
+  `^${SEQUENCE}(?:i am|i'm|we are|we're|i have started|i've started|i have been|i've been|we have been|we've been)(?: (?:now|currently|just|still|first))? \\w[\\w-]*ing\\b`,
 );
 
 /** Declared INTENT ("Let me look at the file.", "First, I will inspect …"). */
@@ -294,7 +294,7 @@ const DECLINING_LEAD = new RegExp(
  * "Using the guard …").
  */
 const ACTIVITY_LEAD = new RegExp(
-  `^${SEQUENCE}(?!(?:nothing|something|anything|everything|during|according|string|strings|thing|things|having|using|assuming|including|regarding|considering|given)\\b)\\w+ing\\b`,
+  `^${SEQUENCE}(?!(?:nothing|something|anything|everything|during|according|string|strings|thing|things|having|using|assuming|including|regarding|considering|given)\\b)\\w[\\w-]*ing\\b`,
 );
 
 /** An activity lead that reports its RESULT ("Checking the guard confirmed …"). */
