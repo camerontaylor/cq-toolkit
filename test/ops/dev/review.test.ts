@@ -10,7 +10,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest';
 import { DevReviewInputSchema, registry } from '../../../src/ops/dev/registry.js';
-import type { DiffSecretScanner, ScanComponentInput } from '../../../src/ops/dev/denylist.js';
+import {
+  makeRepoDiffScanner,
+  type DiffSecretScanner,
+  type ScanComponentInput,
+} from '../../../src/ops/dev/denylist.js';
 import type { Op } from '../../../src/kernel/types.js';
 import {
   makeDevReview,
@@ -80,6 +84,49 @@ afterEach(async () => {
 
 const reviewerCalls = (effects: { calls: { command: string; args: readonly string[] }[] }) =>
   effects.calls.filter((call) => call.command === 'coderabbit');
+
+// The independent review's probe (PR #334 review 5562869931): the REAL
+// project scanner over a real repo whose src/a.ts carries a synthetic
+// sentinel. A valid rule must block it before any upload; a MALFORMED rule
+// must fail CLOSED — refuse the review with zero uploads — never parse into
+// a weaker regex that lets the reviewer run.
+describe('dev.review pre-upload project scan fails closed', () => {
+  const SENTINEL = 'review334_forbidden_probe';
+  const patterns = (regex: string): string =>
+    [
+      'rules:',
+      '  - id: class:review334-probe',
+      '    description: synthetic sentinel',
+      `    regex: ${regex}`,
+      `    sample: '${SENTINEL}'`,
+      'clean_probes:',
+      "  - 'an ordinary sentence'",
+      '',
+    ].join('\n');
+
+  test.each([
+    ['a valid rule', `'${SENTINEL}'`],
+    ['a malformed single-quoted rule', `'${SENTINEL}' # typo'`],
+  ])('%s refuses the review with zero uploads', async (_label, regex) => {
+    await repo.write('policy/denylist/patterns.yml', patterns(regex));
+    await repo.write('src/a.ts', `export const leak = '${SENTINEL}';\n`);
+    repo.commitAll('sentinel');
+    let uploads = 0;
+    const effects = repoEffects(repo, (command) => {
+      if (command !== 'coderabbit') return undefined;
+      uploads += 1;
+      return ran(0);
+    });
+    const result = await cycleReview(
+      effects,
+      makeRepoDiffScanner(repo.root),
+    )({
+      repoRoot: repo.root,
+    });
+    expect({ status: result.status, uploads }).toEqual({ status: 'needs-human', uploads: 0 });
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+});
 
 describe('dev.review cycle', () => {
   test('a terminal cycle: ok report with completion, pinned base, recorded ids and log', async () => {

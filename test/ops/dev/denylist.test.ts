@@ -57,7 +57,7 @@ describe('parseDenylistPatterns', () => {
 
   test('unknown top-level key fails closed', () => {
     expect(() => parseDenylistPatterns('extra:\n', 'f.yml')).toThrow(
-      /unknown top-level key 'extra'/,
+      /unexpected top-level key "extra"/,
     );
   });
 
@@ -67,13 +67,13 @@ describe('parseDenylistPatterns', () => {
         "rules:\n  - id: x\n    surprise: 'y'\n    regex: 'z'\n    sample: 's'\n",
         'f.yml',
       ),
-    ).toThrow(/unknown rule key 'surprise'/);
+    ).toThrow(/unexpected rule key "surprise"/);
   });
 
   test('a missing required rule key fails closed', () => {
-    expect(() => parseDenylistPatterns("rules:\n  - id: x\n    regex: 'y'\n", 'f.yml')).toThrow(
-      /missing required key/,
-    );
+    expect(() =>
+      parseDenylistPatterns("rules:\n  - id: x\n    regex: 'y'\nclean_probes:\n  - p\n", 'f.yml'),
+    ).toThrow(/missing required key "description"/);
   });
 
   test('double-quoted scalars fail closed (format allows single-quoted or plain)', () => {
@@ -82,14 +82,14 @@ describe('parseDenylistPatterns', () => {
         'rules:\n  - id: x\n    description: "dq"\n    regex: r\n    sample: s\n',
         'f.yml',
       ),
-    ).toThrow(/unsupported scalar spelling/);
+    ).toThrow(/double-quoted values are not part of the constrained format/);
   });
 
   test('a zero-rule denylist fails closed at parse time', () => {
     expect(() => parseDenylistPatterns('rules:\nclean_probes:\n', 'f.yml')).toThrow(
-      /no rules defined/,
+      /zero rules parsed/,
     );
-    expect(() => parseDenylistPatterns('', 'f.yml')).toThrow(/no rules defined/);
+    expect(() => parseDenylistPatterns('', 'f.yml')).toThrow(/zero rules parsed/);
   });
 
   test('a duplicate rule key within one rule fails closed (last-value-wins would weaken the net)', () => {
@@ -98,27 +98,27 @@ describe('parseDenylistPatterns', () => {
         "rules:\n  - id: x\n    regex: 'a'\n    regex: 'b'\n    description: d\n    sample: s\n",
         'f.yml',
       ),
-    ).toThrow(/duplicate rule key 'regex'/);
+    ).toThrow(/duplicate rule key "regex"/);
   });
 
   test('a duplicate rule id fails closed (hits must be attributable)', () => {
     expect(() =>
       parseDenylistPatterns(
-        "rules:\n  - id: x\n    regex: 'a'\n    description: d\n    sample: s\n  - id: x\n    regex: 'b'\n    description: d\n    sample: s\n",
+        "rules:\n  - id: x\n    regex: 'a'\n    description: d\n    sample: s\n  - id: x\n    regex: 'b'\n    description: d\n    sample: s\nclean_probes:\n  - p\n",
         'f.yml',
       ),
-    ).toThrow(/duplicate rule id 'x'/);
+    ).toThrow(/duplicate rule ids/);
   });
 
   test('content before any top-level key fails closed', () => {
     expect(() => parseDenylistPatterns('  - id: x\n', 'f.yml')).toThrow(
-      /content before any top-level key/,
+      /content before the first section/,
     );
   });
 
   test('a clean_probes entry that is not a scalar list item fails closed', () => {
     expect(() => parseDenylistPatterns('clean_probes:\n  - a: b\n', 'f.yml')).toThrow(
-      /clean_probes entries must be/,
+      /plain value contains reserved characters/,
     );
   });
 });
