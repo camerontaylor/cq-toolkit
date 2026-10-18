@@ -2833,6 +2833,39 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(run3.outcome.reply).toBeUndefined();
   });
 
+  test('an unreadable checked-out head is unknown: the thread settles in silence and no resolve is carried (PR #343 Codex review)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-nohead-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = publishedWorld();
+    world.resolveReviewThreadFails = true;
+    const ghLog1: string[][] = [];
+    await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    // Run 2: GraphQL serves the stamped head, but the pre-fix worktree read
+    // fails, so the gate cannot prove the head and must not carry the resolve.
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.headReadFailsAt = 2;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const ghLog2: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [],
+      ghLog: ghLog2,
+      invocations,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations).toHaveLength(0);
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(ghLog2.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
   test('a signature-led reply NOT authored by the loop identity neither settles nor carries', async () => {
     const body = await answerOnce();
     const forged = body.replace('\n\n', `\n${REPLY_RESOLVE_MARKER}\n\n`);

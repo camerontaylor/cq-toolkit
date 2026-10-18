@@ -889,12 +889,14 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted. It is
   // also the head the workers inspect, so the settle gate below compares a
-  // reply's stamp against it (GraphQL's headRefOid can lag a fresh push).
+  // reply's stamp against it (GraphQL's headRefOid can lag a fresh push). An
+  // unreadable head is UNKNOWN, never the API's: the gate then settles in
+  // silence and carries no resolve, and the run fails closed further down.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const checkedOutHead =
     headBefore.code === 0 && COMMIT_SHA_RE.test(headBefore.stdout.trim())
       ? headBefore.stdout.trim()
-      : state.headRefOid;
+      : null;
   const signature = replySignature(opts.owner, opts.repo, opts.pr);
   const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
 
