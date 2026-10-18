@@ -157,6 +157,15 @@ export const replyHeadStamp = (sha: string): string =>
 const REPLY_HEAD_STAMP_PATTERN = /^<!-- cq-review-loop-head:([0-9a-f]{40}) -->$/m;
 
 /**
+ * The RESOLVE-INTENT marker: rides (after the head stamp) a thread reply
+ * whose row queued a resolve — a verified, untruncated fix. A settled thread
+ * whose latest reply carries it still gets its pending resolve carried, so a
+ * resolve that failed in the posting run is retried instead of stranding the
+ * thread (the settle gate otherwise skips the thread outright).
+ */
+export const REPLY_RESOLVE_MARKER = '<!-- cq-review-loop-resolve -->';
+
+/**
  * THE THREAD SETTLE GATE (PR #336 incident, 2026-10-17/18): true when this
  * loop already answered the thread and nothing has changed since — the
  * thread's latest reply opens with THIS PR's signature (no reviewer input
@@ -801,12 +810,39 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
     // THE SETTLE GATE FIRST (loopReplySettled): a thread whose latest word
-    // is this loop's reply for the current head gets no fix job, no reply,
-    // and no carried action — never another answer for the same head
-    // without new reviewer input.
+    // is this loop's reply for the current head gets no fix job and no
+    // reply — never another answer for the same head without new reviewer
+    // input. The ONE carried action: a reply marked REPLY_RESOLVE_MARKER
+    // queued a resolve, and that resolve is re-carried until it records
+    // (it failed or was withheld in the posting run). Its actionId is the
+    // posting run's — the fingerprint over the thread as that run saw it,
+    // i.e. without the trailing loop reply — so a recorded resolve dedupes.
+    // AUTHORIZATION: only a marker in a reply AUTHORED by the loop's own
+    // identity (responderLogin) carries; a forged signature-led comment can
+    // silence the loop on a thread but never get it resolved.
     if (entry.source.kind === 'thread') {
       const thread = state.threads.find((candidate) => candidate.id === entry.source.itemId);
       if (thread !== undefined && loopReplySettled(thread.replies, signature, state.headRefOid)) {
+        const latest = thread.replies[thread.replies.length - 1];
+        const ownLogin = opts.responderLogin?.toLowerCase() ?? null;
+        if (
+          latest !== undefined &&
+          latest.body.includes(REPLY_RESOLVE_MARKER) &&
+          ownLogin !== null &&
+          latest.authorLogin?.toLowerCase() === ownLogin
+        ) {
+          const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${roundFingerprint(
+            entry.source.itemId,
+            { ...entry.item, comments: thread.replies.slice(0, -1) },
+          )}`;
+          if (!dispatched.has(resolveActionId)) {
+            carriedResolves.push({
+              kind: 'resolve_thread',
+              actionId: resolveActionId,
+              threadId: entry.source.itemId,
+            });
+          }
+        }
         skipped.push({ id: entry.source.itemId, reason: 'loop-replied-this-head' });
         continue;
       }
@@ -1226,7 +1262,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
         ? `\n${replyHeadStamp(answeredHead)}`
         : '';
-    const body = `${signature}${stamp}\n\n${
+    // RESOLVE INTENT (REPLY_RESOLVE_MARKER): exactly the rows the resolve
+    // branch below queues a resolve for — a thread's verified, untruncated
+    // fix — so a later settled run can carry a resolve that did not record.
+    const resolveIntended =
+      source.kind === 'thread' &&
+      value.changed &&
+      value.commits.length > 0 &&
+      value.truncated !== true &&
+      rowVerified.get(row.jobId) === true;
+    const body = `${signature}${stamp}${resolveIntended ? `\n${REPLY_RESOLVE_MARKER}` : ''}\n\n${
       value.changed && value.commits.length > 0
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
         : value.summary
