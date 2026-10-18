@@ -1537,4 +1537,86 @@ describe('proposeBaselineUpdate', () => {
     ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
     expect(absorbed.upsertCalls()).toBe(0);
   });
+
+  test('coverage keeps its one-decimal granularity on an integer-written file: 94 + 94.3 proposes 94.3 (PR review #4304483867)', async () => {
+    // The repository's coverage baseline is written "value": 94. The file's
+    // lexical precision is zero decimals, but coverage's metric-defined
+    // granularity is ONE decimal, so 94.3 floors at one decimal to itself —
+    // a genuine tighten — instead of being absorbed at the integer.
+    await seedBaseline('cov', 'coverage', 94, 'higher-is-better');
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({
+          improvements: [{ target: 'cov', metric: 'coverage', value: 94.3, capturedAt: CAPTURED_AT }],
+        }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94, newValue: 94.3 }] },
+    });
+    expect(effects.prs.values().next().value?.files[0]?.content).toContain('"value": 94.3,');
+    // Still directional at that granularity: 94.29 floors to 94.2, which
+    // tightens 94 and is never the half-up 94.3.
+    const floored = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(floored)(
+        proposeInput({ improvements: [{ target: 'cov', metric: 'coverage', value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94, newValue: 94.2 }] },
+    });
+    // A non-coverage metric keeps the file's own (integer) precision.
+    await seedBaseline('other', METRIC, 94, 'higher-is-better');
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: 'other', metric: METRIC, value: 94.3 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
+  });
+
+  test('the rendered value keeps the file lexical precision: 94.20 + 94.301 writes "94.30", not "94.3" (PR review #4304483873)', async () => {
+    await seedRawBaseline(
+      TARGET,
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        `  "target": "${TARGET}",`,
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": 94.20,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({
+          improvements: [{ target: TARGET, metric: METRIC, value: 94.301, capturedAt: CAPTURED_AT }],
+        }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.3 }] },
+    });
+    const content = effects.prs.values().next().value?.files[0]?.content ?? '';
+    expect(content).toContain('  "value": 94.30,\n');
+    // Same JSON value, still a valid baseline — and the precision survives
+    // the round trip: the next run reads two decimals off the token.
+    expect(parseBaseline(content).value).toBe(94.3);
+    // An integer padded into a two-decimal file keeps its decimals too.
+    const wide = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(wide)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 95 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'created' } });
+    expect(wide.prs.values().next().value?.files[0]?.content).toContain('  "value": 95.00,\n');
+  });
 });

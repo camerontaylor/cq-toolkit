@@ -83,6 +83,12 @@
 // the skip reason names the measurement, the rounding, and the file
 // precision that produced it.
 //
+// Two precision rules ride on top (PR #336 review): coverage's metric-defined
+// ONE decimal is a floor on its proposal precision (an integer-written
+// coverage file still tightens 94 → 94.3), and the rendered value token is
+// re-padded to the file's lexical precision (94.30 stays 94.30, never the
+// 94.3 JSON.stringify would emit, which would coarsen the next run's basis).
+//
 // Failure direction at the op-seam level: input validation failures (null
 // input, non-string ws/base/headPrefix, malformed improvements) are `failed`
 // with arg-error wording; a findOpenPrByHead rejection is `failed` (nothing
@@ -475,6 +481,36 @@ function directionalRound(measurement: number, precision: number, direction: Dir
   return exact.negative ? -rounded : rounded;
 }
 
+/**
+ * The coverage metric id and its metric-defined granularity (format.ts's
+ * roundCoveragePct law: ONE decimal place). The granularity is a FLOOR on a
+ * coverage proposal's precision: an integer-written coverage file ("value":
+ * 94) must not turn a 94.3 reading into a skipped 94 — the evidence, the
+ * ratchet check and the diff guard all speak one decimal for coverage.
+ */
+const COVERAGE_METRIC = 'coverage';
+const COVERAGE_MIN_PRECISION = 1;
+
+/**
+ * Re-pad the rendered value token to the FILE's lexical precision. A number
+ * cannot carry trailing zeros — JSON.stringify(94.3) is "94.3" even when the
+ * proposal was rounded at a two-decimal file's precision (94.30) — and the
+ * next run reads its precision off the written token, so an unpadded
+ * proposal would silently coarsen the file (the next 94.39 absorbed at one
+ * decimal). Padding only appends fractional zeros: the JSON value is
+ * unchanged, and an exponent-form number is left alone.
+ */
+function padValueToken(content: string, value: number, precision: number): string {
+  const literal = String(value);
+  if (/[eE]/.test(literal)) return content;
+  const scale = exactDecimal(value).scale;
+  if (scale >= precision) return content;
+  const padded = (scale === 0 ? `${literal}.` : literal) + '0'.repeat(precision - scale);
+  // renderBaseline emits the flat schema at two-space indent, one key per
+  // line; string values are JSON-escaped, so no other line can start this way.
+  return content.replace(/^( {2}"value": )[^,\n]+(,?)$/m, `$1${padded}$2`);
+}
+
 /** Build the propose op over the injected gh effects seam. */
 export function createProposeBaselineUpdate(
   effects: BaselinePrEffects,
@@ -685,9 +721,12 @@ export function createProposeBaselineUpdate(
         // canonical fallback) — a proposal is never stricter than the
         // evidence that produced it. Exact decimal work; an exact boundary
         // passes through unchanged.
+        const filePrecision = fileValuePrecision(text, baseline.value);
         const proposalValue = directionalRound(
           imp.value,
-          fileValuePrecision(text, baseline.value),
+          imp.metric === COVERAGE_METRIC
+            ? Math.max(filePrecision, COVERAGE_MIN_PRECISION)
+            : filePrecision,
           baseline.direction,
         );
         // The ONLY path into a proposal: a genuine tighten AT THE PROPOSAL'S
@@ -716,15 +755,19 @@ export function createProposeBaselineUpdate(
         // recorded semantics; capturedAt is the improvement's (else the
         // clock). The op NEVER writes to ws — these bytes ride to the
         // effects layer, which commits them.
-        const content = renderBaseline({
-          schemaVersion: 1,
-          target: baseline.target,
-          metric: baseline.metric,
-          direction: baseline.direction,
-          value: proposalValue,
-          ...(baseline.unit === undefined ? {} : { unit: baseline.unit }),
-          capturedAt: imp.capturedAt ?? new Date().toISOString(),
-        });
+        const content = padValueToken(
+          renderBaseline({
+            schemaVersion: 1,
+            target: baseline.target,
+            metric: baseline.metric,
+            direction: baseline.direction,
+            value: proposalValue,
+            ...(baseline.unit === undefined ? {} : { unit: baseline.unit }),
+            capturedAt: imp.capturedAt ?? new Date().toISOString(),
+          }),
+          proposalValue,
+          filePrecision,
+        );
         applied.push({
           path: relPath,
           target: imp.target,
