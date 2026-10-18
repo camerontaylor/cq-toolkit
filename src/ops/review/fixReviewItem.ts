@@ -268,7 +268,10 @@ export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
   new RegExp(
     `^${PROGRESS_LEAD}working on (?:it|this|the (?:fix|item|reviewed item|review item|thread))(?: now)?$`,
   ),
-  /^(?:let me|let's|i will|i'll|i am going to|i'm going to|going to) /,
+  // Declared intent: a future-tense lead plus an ACTION verb ("I will fix",
+  // "Let me look at"). A lead followed by anything else is a disposition with
+  // its reason ("I will not change this because the guard already holds").
+  /^(?:let me|let's|i will|i'll|i am going to|i'm going to|going to) (?:first |now |also )?(?:read|look|check|inspect|examine|review|open|analy[sz]e|investigate|start|begin|fix|address|work|take|dig|try|see|figure|make|update|add|change|handle|go|verify|trace|find|search)\b/,
 ]);
 
 /**
