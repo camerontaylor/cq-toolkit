@@ -170,15 +170,21 @@ def install(snapshot, binding, runner):
                          binding["head"], "^" + binding["base"]).decode().split())
         if needed != {oid for oid, _, _ in objects}:
             raise AuthorRefused("snapshot contains missing or unrelated objects")
-        entries = git(quarantine, "ls-tree", "-r", "-z", binding["head"]).split(b"\0")
-        if any(entry and entry.split(b" ", 1)[0] not in (b"100644", b"100755", b"120000") for entry in entries):
+        # Only entries that differ from base are checked: unchanged entries already exist in the
+        # review clone, and walking the whole tree would bound-fail on large repositories.
+        raw = git(quarantine, "diff-tree", "-r", "-z", "--no-renames", binding["base"], binding["head"]).split(b"\0")
+        entries = []  # (mode, oid, raw_path) for every added or modified path
+        for meta, raw_path in zip(raw[0::2], raw[1::2]):
+            _, new_mode, _, new_oid, _ = meta.split(b" ")
+            if new_mode != b"000000":
+                entries.append((new_mode, new_oid.decode(), raw_path))
+        if any(mode not in (b"100644", b"100755", b"120000") for mode, _, _ in entries):
             raise AuthorRefused("snapshot gitlinks or unsupported modes refused")
-        # ls-tree labels entries by mode, not by object: a 100644 entry may name a tree.
+        # Tree entries are typed by mode, not by object: a 100644 entry may name a tree.
         # Require every entry to resolve to a real blob so it can be scanned and checked out.
-        entry_oids = [entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1] for entry in entries if entry]
         kinds = git(quarantine, "cat-file", "--batch-check=%(objecttype)",
-                    data=b"".join(oid + b"\n" for oid in entry_oids)).split()
-        if len(kinds) != len(entry_oids) or any(kind != b"blob" for kind in kinds):
+                    data="".join(oid + "\n" for _, oid, _ in entries).encode()).split()
+        if len(kinds) != len(entries) or any(kind != b"blob" for kind in kinds):
             raise AuthorRefused("snapshot entry mode disagrees with object type")
         diff = git(quarantine, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
                    binding["base"], binding["head"]).decode("utf-8", errors="replace")
@@ -188,14 +194,8 @@ def install(snapshot, binding, runner):
         # Feed every incoming blob through the existing path-aware scan policy,
         # independently of the worker's operator-configured pre-upload scan.
         blobs = {oid: data for oid, kind, data in objects if kind == "blob"}
-        # Blobs reused from base are not in the transferred closure but still land at new paths:
-        # read those (only for changed paths, so a large unchanged baseline is never loaded).
-        changed = {path for path in git(quarantine, "diff", "--no-renames", "--name-only", "-z",
-                                        binding["base"], binding["head"]).split(b"\0") if path}
-        blobs.update(read_blobs(quarantine, [
-            entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1].decode() for entry in entries
-            if entry and entry.split(b"\t", 1)[1] in changed
-            and entry.split(b"\t", 1)[0].rsplit(b" ", 1)[1].decode() not in blobs]))
+        # Blobs reused from base are not in the transferred closure but still land at new paths.
+        blobs.update(read_blobs(quarantine, [oid for _, oid, _ in entries if oid not in blobs]))
         name_max = os.pathconf(clone, "PC_NAME_MAX")
         path_max = os.pathconf(clone, "PC_PATH_MAX") - len(str(runner.WT_ROOT)) - 256
         rules = runner.denylist_rules()
@@ -206,10 +206,7 @@ def install(snapshot, binding, runner):
         allow = [re.compile(pattern) for pattern in runner.ALLOWLIST_PATHS]
         scan_parts = [diff]
         scan_size = len(diff.encode())
-        for entry in entries:
-            if not entry:
-                continue
-            meta, raw_path = entry.split(b"\t", 1)
+        for mode, oid, raw_path in entries:
             path = raw_path.decode("utf-8", errors="strict")
             if any(ord(c) < 32 or ord(c) == 127 for c in path) or any(
                     part in (".", "..") or part.lower() == ".git" for part in path.split("/")):
@@ -217,11 +214,10 @@ def install(snapshot, binding, runner):
             # A later `git worktree add` must be able to create every path on the runner filesystem.
             if len(raw_path) > path_max or any(len(part) > name_max for part in raw_path.split(b"/")):
                 raise AuthorRefused("snapshot path too long to check out")
-            oid = meta.rsplit(b" ", 1)[1].decode()
             # A symlink must be materializable exactly: non-empty target, no NUL truncation.
-            if meta.startswith(b"120000 ") and oid in blobs and (not blobs[oid] or b"\0" in blobs[oid]):
+            if mode == b"120000" and (not blobs[oid] or b"\0" in blobs[oid]):
                 raise AuthorRefused("snapshot symlink target is not representable")
-            contents = blobs.get(oid, b"").decode("utf-8", errors="replace")
+            contents = blobs[oid].decode("utf-8", errors="replace")
             # Never encode untrusted contents as patch headers for policy checks:
             # a blob line beginning '++ b/...' could forge an allowlisted path.
             if not any(pattern.search(path) for pattern in allow):
