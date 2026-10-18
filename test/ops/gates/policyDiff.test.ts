@@ -2008,6 +2008,9 @@ describe('gates.policyDiff registry entry: the posture comes from config only', 
       false,
     );
     expect(entry!.inputSchema.safeParse({ ...input(), pr: 0 }).success).toBe(false);
+    expect(
+      entry!.inputSchema.safeParse({ ...input(), settleStatePath: 'other.json' }).success,
+    ).toBe(false);
   });
 
   async function dispatch(env: string | undefined, subject: string) {

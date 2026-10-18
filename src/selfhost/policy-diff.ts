@@ -32,6 +32,7 @@ import {
 } from '../ops/gates/policyDiff.js';
 import { PolicyDiffInputObject as OpSchema } from '../ops/gates/policyDiffInput.js';
 import { decimalFlag, parseEntryArgs, runEntry } from './trusted-entry.js';
+import { SETTLE_STATE_PATH } from './config.js';
 
 /** `gates.policyDiff`'s own input schema, as `--name=value` flags. */
 export const PolicyDiffArgsSchema = OpSchema.extend({
@@ -62,7 +63,7 @@ export function mainWith(argv: readonly string[], deps: PolicyDiffMainDeps): Pro
       // The registry importer's mapping: an invalid posture is failed (1).
       return { status: 'failed', error: error instanceof Error ? error.message : String(error) };
     }
-    return (deps.create ?? createPolicyDiff)(config)(input);
+    return (deps.create ?? createPolicyDiff)(config, { settleStatePath: SETTLE_STATE_PATH })(input);
   }, deps.write);
 }
 

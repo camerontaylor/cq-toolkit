@@ -6,7 +6,11 @@
 import { describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
 import type { ProtectedPathsConfig } from '../../src/ops/gates/policyConfig.js';
-import type { PolicyDiffInput, PolicyDiffOutcome } from '../../src/ops/gates/policyDiff.js';
+import type {
+  createPolicyDiff,
+  PolicyDiffInput,
+  PolicyDiffOutcome,
+} from '../../src/ops/gates/policyDiff.js';
 import { PolicyDiffInputObject } from '../../src/ops/gates/policyDiffInput.js';
 import { PolicyDiffInputSchema } from '../../src/ops/gates/registry.js';
 import {
@@ -41,16 +45,18 @@ const OUTCOME: PolicyDiffOutcome = {
 
 function harness(result: OpResult<PolicyDiffOutcome> = { status: 'ok', value: OUTCOME }) {
   const configs: ProtectedPathsConfig[] = [];
+  const options: Parameters<typeof createPolicyDiff>[1][] = [];
   const inputs: PolicyDiffInput[] = [];
   const lines: string[] = [];
-  const create = (config: ProtectedPathsConfig) => {
+  const create = (config: ProtectedPathsConfig, opts?: Parameters<typeof createPolicyDiff>[1]) => {
+    options.push(opts);
     configs.push(config);
     return (input: PolicyDiffInput) => {
       inputs.push(input);
       return Promise.resolve(result);
     };
   };
-  return { configs, inputs, lines, create, write: (line: string) => lines.push(line) };
+  return { configs, options, inputs, lines, create, write: (line: string) => lines.push(line) };
 }
 
 describe('parsePolicyDiffArgs', () => {
@@ -94,6 +100,7 @@ describe('parsePolicyDiffArgs', () => {
   test.each([
     ['--posture=diff-check'],
     ['--authorization={}'],
+    ['--settleStatePath=forged.json'],
     ['--pr=0'],
     ['--pr=1e3'],
     ['--ownerId=-1'],
@@ -117,6 +124,7 @@ describe('mainWith', () => {
     const h = harness();
     expect(await mainWith(ARGV, { env: {}, create: h.create, write: h.write })).toBe(0);
     expect(h.configs).toEqual([{ posture: 'human', layer: 'default' }]);
+    expect(h.options).toEqual([{ settleStatePath: '.cq/settle-state.json' }]);
     expect(h.inputs).toEqual([parsePolicyDiffArgs(ARGV)]);
     expect(h.lines).toHaveLength(1);
     expect(JSON.parse(h.lines[0] ?? '')).toEqual({ status: 'ok', value: OUTCOME });

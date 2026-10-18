@@ -46,7 +46,11 @@
 // empty — harmless for settle, and the subsequent write fails loudly.
 import { GhError, ghJson, ghNameOk } from '../adapters/forge-github/gh.js';
 import type { GhFn } from '../adapters/forge-github/gh.js';
-import { emptySettleState, parseSettleState, serializeSettleState } from '../policy/queue/settle-state.js';
+import {
+  emptySettleState,
+  parseSettleState,
+  serializeSettleState,
+} from '../policy/queue/settle-state.js';
 import type { SettleState } from '../policy/queue/settle-state.js';
 import { SETTLE_STATE_PATH } from './config.js';
 
