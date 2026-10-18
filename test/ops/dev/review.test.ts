@@ -712,8 +712,7 @@ describe('dev.review — late-thread hardening', () => {
       if (command === 'git' && args[0] === 'diff' && args[1] === '--binary') return okResult('');
       if (command === 'git' && args[0] === 'diff' && args[1] === '--cached')
         return okResult(binaryPatch);
-      if (command === 'git' && args[0] === 'cat-file')
-        return okResult('-----BEGIN PRIVATE KEY-----');
+      if (command === 'git' && args[0] === 'cat-file') return okResult('STAGED-BLOB-BYTES-ff77');
       if (command === 'coderabbit')
         return { exitCode: 0, stdout: NDJSON_OK, stderr: '', timedOut: false };
       return undefined;
@@ -728,7 +727,7 @@ describe('dev.review — late-thread hardening', () => {
     const blobComponent = seen.find((entry) => entry.component === 'binary:staged:keys.dat');
     expect(blobComponent).toBeDefined();
     expect(blobComponent?.kind).toBe('file');
-    expect(blobComponent?.text).toBe('-----BEGIN PRIVATE KEY-----');
+    expect(blobComponent?.text).toBe('STAGED-BLOB-BYTES-ff77');
   });
 
   test('a committed BINARY file is scanned from BOTH blobs; a hit refuses the upload', async () => {
