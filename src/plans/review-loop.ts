@@ -1341,11 +1341,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // re-run to recognize its own words as skip-class content. The HEAD
     // STAMP follows it (replyHeadStamp): the head this reply answers for —
     // the pushed worktree head for a row that published its own commits,
-    // else the FETCHED head. An unchanged row never claims a head a sibling's
-    // later commit produced: that head moved under it, so the next run
-    // re-opens the thread once against the new code.
+    // else the head the worker INSPECTED: the worktree's pre-run head (the
+    // fixer only ever sees that tree). An unchanged row never claims a head
+    // a sibling's later commit produced, nor a head pushed between
+    // resolvePrWorktree and fetchReviewState that the worker never read: the
+    // PR head then differs from the stamp, so the next run re-opens the
+    // thread once against the new code. Only an unreadable pre-run head (the
+    // run already fail-closes) falls back to the fetched head.
+    const inspectedHead = headBefore.code === 0 ? headBefore.stdout.trim() : state.headRefOid;
     const answeredHead =
-      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : state.headRefOid;
+      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : inspectedHead;
     const stamp =
       answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
         ? `\n${replyHeadStamp(answeredHead, source.roundFingerprint)}`
