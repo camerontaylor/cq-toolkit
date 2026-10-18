@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { captureSnapshot, snapshotHead } from '../../../src/ops/dev/snapshot.js';
+import { captureSnapshot, snapshotHead } from '../../../src/ops/dev/internal/snapshot.js';
 import { makeDevReview } from '../../../src/ops/dev/review.js';
 import { DevReviewInputSchema } from '../../../src/ops/dev/registry.js';
 
