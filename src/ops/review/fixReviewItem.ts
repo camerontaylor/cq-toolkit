@@ -303,20 +303,26 @@ const REPORTED_RESULT =
 
 /**
  * A BARE disposition: a no-change verdict with no reason ("No changes are
- * currently necessary.", "Already addressed."). It is an outcome, never a
- * reason.
+ * currently necessary.", "Already addressed."), a no-change verdict
+ * optionally scoped by up to two words ("No changes are needed in
+ * `src/foo.ts`."). It is an outcome, never a reason, even when its scope
+ * names a path. "Already handled at line 3." is a reason: it names where.
  */
-const BARE_DISPOSITION =
-  /^(?:(?:no|zero) (?:further |code |additional )?(?:change|changes|fix|fixes|action)(?: is| are| was| were)?(?: currently| really| actually)?(?: needed| necessary| required| warranted)?|nothing (?:to (?:change|fix|do)|(?:needs|needed) (?:to change|changing|fixing))|(?:(?:this|it) (?:is|was) )?(?:already )?(?:addressed|handled|fixed|done|satisfied|resolved|covered|correct|fine)(?: already)?|not applicable|(?:looks|seems) (?:good|fine|correct)|(?:the )?(?:current )?(?:code|implementation|behaviou?r) is (?:already )?(?:fine|correct|ok|okay)(?: as is)?)$/;
+const BARE_DISPOSITION = new RegExp(
+  // A no-change verdict, optionally scoped ("in `src/foo.ts`"): the scope says where, not why.
+  `^(?:(?:(?:no|zero) (?:further |code |additional )?(?:change|changes|fix|fixes|action)(?: is| are| was| were)?(?: currently| really| actually)?(?: needed| necessary| required| warranted)?|nothing (?:to (?:change|fix|do)|(?:needs|needed) (?:to change|changing|fixing))|not applicable|(?:looks|seems) (?:good|fine|correct)|(?:the )?(?:current )?(?:code|implementation|behaviou?r) is (?:already )?(?:fine|correct|ok|okay)(?: as is)?)(?: (?:in|for|to|at|on|within) \\S+(?: \\S+)?)?` +
+    // An "already dealt with" verdict, unscoped: "already handled at line 3" names the evidence.
+    `|(?:(?:this|it) (?:is|was) )?(?:already )?(?:addressed|handled|fixed|done|satisfied|resolved|covered|correct|fine)(?: already)?)$`,
+);
 
 /**
  * Evidence a reason CITES what was checked (matched on the original text): a
  * `code span`, a file with an extension (`src/a.ts`, `a.ts:3`), a path of two
- * or more segments, "line N"/"lines N-M"/"L12", a call (`parse(`), or a
+ * or more segments (`src/Makefile`; not "n/a" or "and/or"), "line N"/"lines N-M"/"L12", a call (`parse(`), or a
  * camelCase, snake_case or SCREAMING_CASE symbol.
  */
 const CITATION =
-  /`[^`\n]+`|\b[\w./-]*\w\.(?:ts|tsx|js|jsx|mjs|cjs|json|ya?ml|md|py|sh|toml|rs|go|java|css|html)\b|\b\w[\w.-]*(?:\/\w[\w.-]*){2,}|\b[Ll]ines? \d+|\bL\d+\b|\b[A-Za-z_$][\w$]*\(|\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/;
+  /`[^`\n]+`|\b[\w./-]*\w\.(?:ts|tsx|js|jsx|mjs|cjs|json|ya?ml|md|py|sh|toml|rs|go|java|css|html)\b|(?!(?:and|either)\/or\b)\b\w[\w.-]+(?:\/[\w.-]*\w)+|\b[Ll]ines? \d+|\bL\d+\b|\b[A-Za-z_$][\w$]*\(|\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/;
 
 /** One summary sentence: `text` normalized for the patterns, `raw` for CITATION. */
 interface SummarySentence {
