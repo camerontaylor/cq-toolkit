@@ -184,6 +184,43 @@ class SnapshotTransport(SnapshotBaseline):
         with self.assertRaises(author_quota.AuthorRefused):
             snapshot.git(self.destination, "cat-file", "-t", other["binding"]["head"])
 
+    def test_rejected_admission_does_not_install_or_change_queue(self):
+        original = (self.state / "queue.json").read_bytes()
+        for policy, queue in (
+            ({"review": {"reviewerTimeoutMin": 0}}, self.q),
+            ({"review": {"reviewerTimeoutMin": 25}},
+             {**self.q, "items": [{"id": "author-snapshot-1"}]}),
+        ):
+            (self.state / "policy.json").write_text(json.dumps(policy))
+            (self.state / "queue.json").write_text(json.dumps(queue))
+            before = (self.state / "queue.json").read_bytes()
+            with mock.patch.object(snapshot, "install") as install:
+                with self.assertRaises(author_quota.AuthorRefused):
+                    self.call()
+                install.assert_not_called()
+            self.assertEqual(before, (self.state / "queue.json").read_bytes())
+        (self.state / "queue.json").write_bytes(original)
+        self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/crq/"), b"")
+        with self.assertRaises(author_quota.AuthorRefused):
+            snapshot.git(self.destination, "cat-file", "-t", self.request["binding"]["head"])
+
+    def test_existing_admission_policy_and_binding_checked_before_install(self):
+        self.call()
+        before = (self.state / "queue.json").read_bytes()
+        (self.state / "policy.json").write_text(json.dumps({"review": {"reviewerTimeoutMin": 30}}))
+        with mock.patch.object(snapshot, "install") as install:
+            with self.assertRaisesRegex(author_quota.AuthorRefused, "lease policy"):
+                self.call()
+            install.assert_not_called()
+        (self.state / "policy.json").write_text(json.dumps({"review": {"reviewerTimeoutMin": 25}}))
+        other = copy.deepcopy(self.request)
+        other["binding"]["request_id"] = "another-request"
+        with mock.patch.object(snapshot, "install") as install:
+            with self.assertRaises(author_quota.AuthorRefused):
+                self.call(other)
+            install.assert_not_called()
+        self.assertEqual(before, (self.state / "queue.json").read_bytes())
+
     def test_secret_scan_and_interrupted_quarantine_never_install(self):
         before = (self.state / "queue.json").read_bytes()
         with mock.patch.object(snapshot, "decode", side_effect=InterruptedError):

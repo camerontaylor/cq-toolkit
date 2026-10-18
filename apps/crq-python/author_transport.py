@@ -5,13 +5,16 @@ be installed before admission is enabled. All request operations delegate under
 the runner's existing tick.lock; a lost response is never fallback permission.
 """
 import contextlib
+import copy
 import io
 import json
 import os
+from pathlib import Path
 import signal
 import sys
 
-from author_quota import AuthorRefused, binding_of, normalize_binding
+import author_lease
+from author_quota import AuthorRefused, binding_of, enroll, normalize_binding
 
 MAX_BYTES = 8192
 MAX_SNAPSHOT_BYTES = 6 * 1024 * 1024
@@ -73,6 +76,15 @@ def handle(raw, runner, *, policy_path, reviewer, approved_target):
             entry = q.get("author_requests", {}).get(binding["request_id"])
             if entry is not None and binding_of(entry) != binding_of(binding):
                 raise AuthorRefused("conflicting snapshot request binding")
+            # Preview P3 admission without persisting or installing objects.
+            # The real enrollment still follows the durable pin, under this lock.
+            lease = author_lease.new_lease(json.loads(Path(policy_path).read_text()),
+                                           reviewer, at=runner.iso())
+            preview = enroll(copy.deepcopy(q), **binding, at=runner.iso())
+            if not preview["created"]:
+                old = author_lease.read(preview["item"])
+                if old is None or any(old[k] != lease[k] for k in ("reviewerTimeoutMin", "reviewer")):
+                    raise AuthorRefused("cannot replace an existing request's lease policy")
             from author_snapshot import install
             install(request["snapshot"], binding, runner)
         # Check the binding before status/fallback, not just request_id.
