@@ -340,10 +340,11 @@ function triggerInjectedGate(): string {
 const PR = 7;
 const OWNER_ID = 1001;
 const EPOCH = '2026-09-20T10:00:00.000Z';
+// C3 attested before the label below: a pre-attestation label is never honoured.
 const C3 = `${JSON.stringify({
   schemaVersion: 1,
   attests: 'C3',
-  attestedAt: '2026-09-26T00:00:00Z',
+  attestedAt: '2026-09-20T00:00:00Z',
 })}\n`;
 
 const events = (name: string, body: unknown): string => {
