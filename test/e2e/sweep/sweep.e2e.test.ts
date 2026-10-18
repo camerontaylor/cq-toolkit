@@ -51,6 +51,7 @@ import {
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
+import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
 import {
@@ -494,6 +495,17 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       await expectUnitOverlap(scene.journalDir, 0, ['sweep-alpha-fix', 'sweep-beta-fix']);
       const journalFiles = readdirSync(scene.journalDir).filter((name) => name.endsWith('.ndjson'));
       expect(journalFiles).toHaveLength(2); // units run + assemble run
+      // Raw-file schema check: openRunLog.read drops an invalid unterminated
+      // tail as a torn write, so parse every line directly and require a
+      // clean trailing newline.
+      for (const name of journalFiles) {
+        const raw = readFileSync(join(scene.journalDir, name), 'utf8');
+        expect(raw.endsWith('\n')).toBe(true);
+        for (const line of raw.split('\n').filter((l) => l !== '')) {
+          const parsed = JournalEventSchema.safeParse(JSON.parse(line));
+          expect(parsed.success, `journal line must parse: ${line}`).toBe(true);
+        }
+      }
 
       // The failures-only DEFAULT output: a clean run names no package.
       expect(outcome.output).not.toMatch(/alpha|beta/);
@@ -896,6 +908,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         ...focusedUnitBindings(scene, {
           run: async () => {
             const worktree = resolve(scene.repo, 'worktrees', 'test-fix', 'beta');
+            mkdirSync(resolve(worktree, 'packages/beta/generated'), { recursive: true });
             writeFileSync(resolve(worktree, 'packages/beta/generated/calculation.js'), BETA_SOURCE);
             rmSync(resolve(worktree, 'packages/beta/src/calculation.js'), { force: true });
             return {
@@ -1201,7 +1214,7 @@ test(
   async () => {
     const scene = await scenario('cq/e2e-uniscope');
     const CROSS = {
-      file: 'packages/beta/test/suite.test.js',
+      file: 'packages/beta/src/calculation.js',
       oldText: 'const expected = 4;',
       newText: 'const expected = 4; // touched by the alpha worker',
     };
@@ -1212,7 +1225,7 @@ test(
     const alpha = unitRow(outcome.run, 'alpha');
     expect(alpha.status).toBe('failed');
     expect(alpha.error).toMatch(/outside the allowlist/);
-    expect(alpha.error).toContain('packages/beta/test/suite.test.js');
+    expect(alpha.error).toContain('packages/beta/src/calculation.js');
     expect(outcome.assembleRun).toBeUndefined();
     expect(scene.gh.created).toHaveLength(0);
   },

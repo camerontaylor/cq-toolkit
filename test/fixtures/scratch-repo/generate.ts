@@ -114,9 +114,19 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
+// Repository-context GIT_* variables are stripped; config-isolation controls
+// are kept so a runner's disabled host config stays disabled.
+const GIT_CONFIG_ISOLATION_VARS = new Set([
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+]);
+
 function scrubbedGitEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+    Object.entries(process.env).filter(
+      ([name]) => !name.startsWith('GIT_') || GIT_CONFIG_ISOLATION_VARS.has(name),
+    ),
   );
 }
 

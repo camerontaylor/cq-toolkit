@@ -35,6 +35,26 @@ async function seedSmokeRepo(repo: string): Promise<void> {
   await git(['-C', repo, 'commit', '-q', '-m', 'seed template'], repo);
 }
 
+describe('scrubbedGitEnv', () => {
+  test('drops repository context but keeps config-isolation variables', () => {
+    const keys = ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'];
+    const saved = keys.map((key) => process.env[key]);
+    try {
+      for (const key of keys) process.env[key] = '/dev/null';
+      const env = scrubbedGitEnv();
+      expect(env.GIT_DIR).toBeUndefined();
+      expect(env.GIT_INDEX_FILE).toBeUndefined();
+      expect(env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+      expect(env.GIT_CONFIG_NOSYSTEM).toBe('/dev/null');
+    } finally {
+      keys.forEach((key, i) => {
+        if (saved[i] === undefined) delete process.env[key];
+        else process.env[key] = saved[i];
+      });
+    }
+  });
+});
+
 describe('git-template clone smoke', () => {
   test(
     'copies a clean template, then worktree-adds, commits, pushes, and publishes the ref',

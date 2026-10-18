@@ -178,12 +178,20 @@ describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () =>
     // Keep the real TS configuration-error classifier live: a valid self-host
     // gate cannot exercise this branch, and the residual regex must be proved
     // against actual TypeScript diagnostics rather than hand-typed text.
+    // Elevate the baseline so only the configuration classifier can fail the
+    // gate: an ordinary below-baseline diagnostic count would pass.
+    const original = readFileSync(join(root, BASELINE), 'utf8');
+    writeFileSync(join(root, BASELINE), original.replace('"value": 0', '"value": 10'));
+    writeFileSync(join(root, 'src/main.ts'), 'export const value: string = "ok";\n');
     writeFileSync(
       join(root, 'tsconfig.json'),
       '{"compilerOptions":{"notAnOption":true},"include":["src"]}',
     );
     const configFailure = gate(root);
     expect(configFailure.status).toBe(1);
+    expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(
+      original.replace('"value": 0', '"value": 10'),
+    );
     expect(configFailure.stderr).toContain('compiler configuration or project-loading failure:');
     expect(configFailure.stderr).toMatch(/TS5023|TS5083/);
   }, 100_000);
