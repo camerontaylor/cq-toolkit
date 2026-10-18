@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // Analyze lane — the APPROVAL AUTHORITY (W4.3; ADR-0003 annex r1 §4b/§4c,
 // §5, §6; resolves the O-5 / O-6 reconciliation rows and guards A16).
 //
@@ -71,6 +70,7 @@ import { messageOf } from '../../shared/messageOf.js';
 // ratchet lane's hardened argv and a scrubbed child env, because a state
 // read a repo-local config redirect could answer wrongly is not a state
 // read. Every seam is injectable, so the direct tests never spawn anything.
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';

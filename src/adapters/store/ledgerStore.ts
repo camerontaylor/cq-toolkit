@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // Ledger lane C4 — the novel-error ledger's flat file format and its pure
 // (de)serialization. The ledger prevents re-fixing known noise: every
 // recurring error signature carries a recurrence COUNT — no timestamps —
@@ -23,6 +22,7 @@ import { messageOf } from '../../shared/messageOf.js';
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
+import { messageOf } from '../../shared/messageOf.js';
 import {
   chmodSync,
   lstatSync,

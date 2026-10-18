@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // Ledger lane C4 — the ledger DECISION ops over an INJECTED store: record a
 // recurring error signature (count-only recurrence) and query the
 // suppression/escalation view dispatch consults. Zero I/O here — persistence
@@ -20,6 +19,7 @@ import { messageOf } from '../../shared/messageOf.js';
 //   - Store I/O failure is `failed` (the op ran and definitively failed to
 //     read or persist), never a fabricated ok and never a thrown error
 //     across the op seam.
+import { messageOf } from '../../shared/messageOf.js';
 import type { Op } from '../../kernel/types.js';
 // The port's data types are DEFINED HERE, owned by ops like the
 // {@link LedgerStore} port itself: the store adapter imports them to

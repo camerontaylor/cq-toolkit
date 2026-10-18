@@ -10,6 +10,7 @@
     "^src/selfhost/(?:acceptance|merge-recheck|policy-diff|promote-gate|recompute-typecheck|settle-state|state-branch|trusted-entry|verify-ratchet)\\.ts$",
     "^src/shared/independent-review\\.ts$",
     "^src/shared/gitHarden\\.ts$",
+    "^src/shared/messageOf\\.ts$",
     "^policy/promotion-reviewer\\.json$",
     "^scripts/ratchet-[^/]+\\.mjs$",
     "^scripts/github-settings-drift\\.mjs$",

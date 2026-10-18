@@ -54,6 +54,10 @@ Three lists feed D11, and this note changes only the third:
 | `apps/crq-python/ops/systemd/**`, `ops/prepare-*.py`                                                                                                                                                                                                                                           | crq's deploy contract: what runs, when, and from which root                                                                                                                                                                                                                                                                                                                                                                            |
 | `apps/crq-python/config.json`                                                                                                                                                                                                                                                                  | crq's live config, which carries its reviewer identity pin (`app_login`, `reviewer_bot_id`)                                                                                                                                                                                                                                                                                                                                            |
 
+`src/shared/messageOf.ts` is also protected: Phase 1 extracts the shared error
+narration helper used by the gate and ratchet entry points above. Its exact
+regex preserves the trusted closure without protecting unrelated helpers.
+
 ## Project list: dropped
 
 | Entry (was)                                                                                                          | Why nothing deployed needs it protected                                                                                              |

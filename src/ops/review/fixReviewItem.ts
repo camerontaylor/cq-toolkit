@@ -1,4 +1,3 @@
-import { messageOf } from '../../shared/messageOf.js';
 // fixReviewItem — E4 slice 1 (goal E4; ws-e item 4): the agentic fix half of
 // the review loop. One review item in, one worker invocation out: the op
 // composes the prompt, maps the harness config onto the frozen driver-seam
@@ -81,6 +80,7 @@ import { messageOf } from '../../shared/messageOf.js';
 //   evidence has no result to ride (the frozen OpResult carries none) —
 //   but its USAGE/COST is still reported to the governor through the job
 //   context, so a bounded run's spend is observed (review-debt #185).
+import { messageOf } from '../../shared/messageOf.js';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
