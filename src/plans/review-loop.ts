@@ -100,7 +100,7 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../ops/review/fixReviewItem.js';
-import { reviewFixHarness } from '../ops/review/fixReviewItem.js';
+import { NO_OUTCOME_ERROR, reviewFixHarness } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
 import type { WorktreeRegistry } from '../adapters/git/prWorktree.js';
@@ -1226,8 +1226,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // pushing HEAD when a sibling row failed would publish that sibling's
   // unreported commit. Publication requires EVERY fix row to be ok; a
   // failed/indeterminate/needs-human sibling withholds the push, and every
-  // changed item is recorded (its commit stays local-unpublished).
-  const allRowsOk = fixReport.jobs.every((row) => row.result.status === 'ok');
+  // changed item is recorded (its commit stays local-unpublished). One
+  // failure is ACCOUNTABLE: a NO-OUTCOME row (NO_OUTCOME_ERROR) parsed as a
+  // contract, so nothing about it is unknown. It posts nothing and is a
+  // needs-human reason, but it does not stall its siblings' verified fixes on
+  // every run; any commit it made is unclaimed, so range accountability above
+  // still blocks publication.
+  const allRowsOk = fixReport.jobs.every(
+    (row) =>
+      row.result.status === 'ok' ||
+      (row.result.status === 'failed' && row.result.error.startsWith(NO_OUTCOME_ERROR)),
+  );
   const publishWithheld = commits.length > 0 && !allRowsOk;
   if (publishWithheld) {
     for (const row of fixReport.jobs) {

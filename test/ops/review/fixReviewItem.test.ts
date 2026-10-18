@@ -862,6 +862,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // A cited reason in any form: a symbol, a code span, a path.
     ['Already handled: `parseConfig()` rejects an empty path before the read.', false],
     ['The guard in MAX_SUMMARY_CHARS already caps the reply length.', false],
+    // -ing leads that report no work in progress (PR #343 CodeRabbit cycle).
+    ['Having checked `src/a.ts:3`, the guard already rejects empty input.', false],
+    ['Using the existing guard at line 3 already handles the empty case.', false],
     // changed:true is backed by its commits: a gerund-led summary is still an outcome.
     ['Adding a null check to the abort path.', true],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {

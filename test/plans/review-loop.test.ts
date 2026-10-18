@@ -2787,6 +2787,34 @@ describe('thread settle gate (PR #336 incident)', () => {
     );
   });
 
+  test('a no-outcome sibling does not withhold a verified fix: the fix publishes, replies and resolves; the run is needs-human (PR #343 CodeRabbit cycle)', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'Investigating why the test fails.', [])),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+      gitLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.includes('produced no outcome'))).toBe(true);
+    expect(
+      outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
+    ).toBe(false);
+    expect(gitLog.some((args) => args.includes('push'))).toBe(true);
+    expect(postedKinds(outcome)).toEqual(['review_reply', 'resolve_thread']);
+    expect(postedBodies(ghLog)).toHaveLength(1);
+    expect(postedBodies(ghLog)[0]).toContain('Guarded the abort.');
+  });
+
   test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-carry-'));
     scratchDirs.push(scratch);
