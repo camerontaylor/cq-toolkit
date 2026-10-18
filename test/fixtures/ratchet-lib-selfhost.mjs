@@ -53,6 +53,23 @@ await check('loadEngine returns the registry + format + guard surface', () => {
   ok(typeof engine.normalizeBaselineDiffValues === 'function');
   ok(typeof engine.roundCoveragePct === 'function');
 });
+await check('loadEngine supplies hardened git argv to the baseline diff guard', () => {
+  const diff = spawnSync(
+    'git',
+    [
+      ...engine.GIT_HARDEN,
+      'diff',
+      ...engine.HARDENED_DIFF_FLAGS,
+      'HEAD',
+      'HEAD',
+      '--',
+      'baselines/',
+    ],
+    { cwd: ROOT, encoding: 'utf8', timeout: 10_000 },
+  );
+  equal(diff.status, 0, diff.stderr);
+  equal(diff.stdout, '');
+});
 await check('the driver-side adapters are the engine-authored ones', () => {
   equal(engine.adapters.typecheckCount.id, 'typecheck-count');
   equal(engine.adapters.typecheckCount.direction, 'lower-is-better');

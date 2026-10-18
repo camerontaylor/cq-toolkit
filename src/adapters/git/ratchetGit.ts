@@ -45,6 +45,9 @@ import { lstat, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 
+// Preserve the script loader's existing hardening-constant surface.
+export { GIT_HARDEN, HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
+
 /** Captured output ceiling for text-returning calls (a full diff or a blob). */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
