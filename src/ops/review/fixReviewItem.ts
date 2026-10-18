@@ -61,9 +61,9 @@
 //     contract keys and value shapes, or a string holding one JSON line)
 //     → ok; a complete run whose structured output is missing, unparseable,
 //     or wrong-shaped is a DEFINITIVE contract violation → failed (never a
-//     guessed ok); so is a schema-valid contract whose summary is a
-//     preamble/placeholder, or an unchanged summary with no reason
-//     (nonAnswerSummaryReason — the run produced no outcome to post).
+//     guessed ok); so is a schema-valid contract whose summary carries no
+//     outcome: a preamble/placeholder, or an unchanged summary without a
+//     cited reason (nonAnswerSummaryReason — nothing to post).
 //   'budget' → budget-exhausted; 'error' → failed with the structured
 //     errorClass named in the text for humans only (ADR-0002 §2.9 — the
 //     class itself is forwarded nowhere); 'aborted' → indeterminate (no
@@ -234,99 +234,121 @@ export const MAX_SUMMARY_CHARS = 1_000;
  * a posted reply on every scheduled run.
  *
  * The gate judges the summary SENTENCE BY SENTENCE (split at . ! ? ; : before
- * a space or the end, and at line breaks). A sentence is NARRATION when it is
- *   - filler (NARRATION_FILLER: "placeholder", "n/a", "on it");
- *   - a PROGRESS report whose object, if any, is only the review's own
- *     context (NARRATION_PROGRESS: "I am reading the anchored file first.",
- *     "Starting work on the reviewed item.", "Working on it.");
- *   - declared INTENT (NARRATION_INTENT: "Let me look at the file.", "I will
- *     fix the guard.", "First, I will inspect the file."), unless it declines
- *     a change (DECLINES_CHANGE: "I will make no changes because line 3
- *     already rejects empty input.");
- *   - an ongoing first-person PROGRESSIVE (NARRATION_ONGOING: "I am
- *     investigating why the test fails."), with the same exception.
- * The OUTCOME is what remains once narration is dropped. No outcome is a
- * contract violation → `failed`, so nothing is posted; so is an UNCHANGED
- * outcome whose reason, the sentences beyond a bare disposition
- * (BARE_DISPOSITION: "No change needed."), is shorter than
- * MIN_UNCHANGED_SUMMARY_WORDS. A progress sentence that reports a finding
- * ("Checking the guard confirmed no change was needed.") is outcome, because
- * only a context-only object counts as narration.
+ * a space or the end, and at line breaks) and decides POSITIVELY whether the
+ * run produced an outcome. What counts depends on the evidence behind it:
+ *   - changed:true is backed by commits the loop verifies, so its summary
+ *     only has to say something besides NARRATION (isNarration): filler, a
+ *     context-only progress report ("Reading the anchored code first."),
+ *     ongoing work ("I am investigating why the test fails.") or intended
+ *     work ("I will fix the guard."), unless the lead declines a change in
+ *     its main clause ("I will make no changes because …").
+ *   - changed:false has no evidence but its text, so the gate FAILS CLOSED.
+ *     Every sentence led by an activity is narration ("Investigating why the
+ *     test fails."), unless it reports that activity's result ("Checking the
+ *     guard confirmed …"). An unchanged answer must then carry a REASON: a
+ *     sentence that is neither narration nor a bare verdict ("No change
+ *     needed."), at least MIN_UNCHANGED_SUMMARY_WORDS words long in total,
+ *     CITING what was checked (CITATION: a path, path:line, "line N", a
+ *     `code span` or a code symbol). A summary the gate cannot recognize as
+ *     such is no outcome.
+ * Either violation is `failed`, so nothing is posted.
  */
 const NARRATION_FILLER =
   /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress)$/;
 
-/** An optional first-person or sequencing lead ("i am now", "first,"). */
-const PROGRESS_LEAD =
-  "(?:(?:i am|i'm|we are|we're|i have started|i've started)(?: now| currently| just| first)? |(?:first|now|next|then|currently),? )?";
+/** An optional sequencing lead ("first,", "now"). */
+const SEQUENCE = '(?:(?:first|now|next|then|currently|still),? )?';
 
 /** The review's own context as an object: "the anchored code", "it", "the diff and the tests". */
 const CONTEXT_NOUN =
   '(?:(?:the|this|that|its|my) )?(?:(?:anchored|reviewed|review|relevant|target|referenced|current|flagged) )*(?:code|codebase|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes|fix|issue|feedback|finding|suggestion|request|review|repo|repository|test|tests|it|this|that)';
 const CONTEXT_OBJECT = `${CONTEXT_NOUN}(?:,? and ${CONTEXT_NOUN})*`;
 
-/** The activity a progress report names ("reading", "looking into", "working on"). */
-const ACTIVITY_GERUND =
-  '(?:reading|re-reading|looking (?:at|into|over)|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating|exploring|scanning|tracing|studying|verifying|going (?:over|through)|digging into|working on|trying to)';
-
+/** A subjectless progress report about the review's own context only ("Reading the anchored code first."). */
 const NARRATION_PROGRESS = new RegExp(
-  `^${PROGRESS_LEAD}(?:${ACTIVITY_GERUND}(?: ${CONTEXT_OBJECT})?|(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of|with) ${CONTEXT_OBJECT})?)(?: (?:first|now|next|again|closely|carefully|in detail))*$`,
+  `^${SEQUENCE}(?:(?:reading|re-reading|looking (?:at|into|over)|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating|exploring|scanning|tracing|studying|verifying|going (?:over|through)|digging into|working on)(?: ${CONTEXT_OBJECT})?|(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of|with) ${CONTEXT_OBJECT})?)(?: (?:first|now|next|again|closely|carefully|in detail))*$`,
 );
 
-/**
- * An explicit first-person PROGRESSIVE ("I am investigating why the test
- * fails.") reports ongoing work whatever follows, unlike a bare gerund lead,
- * which can open a finding ("Checking the guard confirmed …").
- */
+/** A first-person PROGRESSIVE: ongoing work, whatever follows ("I am investigating why …"). */
 const NARRATION_ONGOING = new RegExp(
-  `^(?:(?:first|now|next|then|currently),? )?(?:i am|i'm|we are|we're)(?: now| currently| just| still)? (?:${ACTIVITY_GERUND}|starting|beginning)\\b`,
+  `^${SEQUENCE}(?:i am|i'm|we are|we're|i have started|i've started|i have been|i've been|we have been|we've been)(?: (?:now|currently|just|still|first))? \\w+ing\\b`,
 );
 
-const NARRATION_INTENT =
-  /^(?:(?:first|now|next|then),? )?(?:(?:i|we) (?:will|shall|am going to|are going to|need to|want to)|i'll|we'll|i'm going to|we're going to|going to|let me|let's)\b/;
+/** Declared INTENT ("Let me look at the file.", "First, I will inspect …"). */
+const NARRATION_INTENT = new RegExp(
+  `^${SEQUENCE}(?:(?:i|we) (?:will|shall|am going to|are going to|need to|want to|plan to)|i'll|we'll|i'm going to|we're going to|going to|let me|let's)\\b`,
+);
 
 /**
- * A sentence that DECLINES a change is a disposition, whatever its tense: a
- * negation governing a change verb within three words ("I will make no
- * changes", "I'm not going to change it"). A negation elsewhere ("I will
- * investigate why this is not working") declines nothing.
+ * A lead that DECLINES a change in its MAIN clause ("I will make no changes
+ * because …", "I won't change it: …"). A negation inside what the work is
+ * about ("I am investigating why no changes are applied.") declines nothing.
  */
-const DECLINES_CHANGE =
-  /(?:\b(?:no|not|nothing|never)\b|n't)(?: \S+){0,3} (?:chang|modif|fix|edit|touch|apply|need|necessar|requir)/;
+const DECLINING_LEAD = new RegExp(
+  `^${SEQUENCE}(?:(?:(?:i|we) (?:will|shall|am going to|are going to)|i'll|we'll|i'm going to|we're going to) (?:not|never|make no|leave)\\b|(?:(?:i|we) (?:won't|am not going to|are not going to|do not need to|don't need to)|i'm not going to|we're not going to)\\b)`,
+);
+
+/** A sentence led by an activity gerund ("Investigating …"); -ing words that are no activity excepted. */
+const ACTIVITY_LEAD = new RegExp(
+  `^${SEQUENCE}(?!(?:nothing|something|anything|everything|during|according|string|strings|thing|things)\\b)\\w+ing\\b`,
+);
+
+/** An activity lead that reports its RESULT ("Checking the guard confirmed …"). */
+const REPORTED_RESULT =
+  /\b(?:confirmed|confirms|showed|shows|found|finds|revealed|reveals|proved|proves|established|demonstrated|demonstrates|indicated|indicates)\b/;
 
 /**
  * A BARE disposition: a no-change verdict with no reason ("No changes are
- * currently necessary.", "Already addressed."). It is outcome, but it does not
- * count toward an unchanged summary's reason (MIN_UNCHANGED_SUMMARY_WORDS).
+ * currently necessary.", "Already addressed."). It is an outcome, never a
+ * reason.
  */
 const BARE_DISPOSITION =
   /^(?:(?:no|zero) (?:further |code |additional )?(?:change|changes|fix|fixes|action)(?: is| are| was| were)?(?: currently| really| actually)?(?: needed| necessary| required| warranted)?|nothing (?:to (?:change|fix|do)|(?:needs|needed) (?:to change|changing|fixing))|(?:(?:this|it) (?:is|was) )?(?:already )?(?:addressed|handled|fixed|done|satisfied|resolved|covered|correct|fine)(?: already)?|not applicable|(?:looks|seems) (?:good|fine|correct)|(?:the )?(?:current )?(?:code|implementation|behaviou?r) is (?:already )?(?:fine|correct|ok|okay)(?: as is)?)$/;
 
-const isNarration = (sentence: string): boolean =>
-  NARRATION_FILLER.test(sentence) ||
-  NARRATION_PROGRESS.test(sentence) ||
-  ((NARRATION_INTENT.test(sentence) || NARRATION_ONGOING.test(sentence)) &&
-    !DECLINES_CHANGE.test(sentence));
+/**
+ * Evidence a reason CITES what was checked (matched on the original text): a
+ * `code span`, a file with an extension (`src/a.ts`, `a.ts:3`), a path of two
+ * or more segments, "line N"/"lines N-M"/"L12", a call (`parse(`), or a
+ * camelCase, snake_case or SCREAMING_CASE symbol.
+ */
+const CITATION =
+  /`[^`\n]+`|\b[\w./-]*\w\.(?:ts|tsx|js|jsx|mjs|cjs|json|ya?ml|md|py|sh|toml|rs|go|java|css|html)\b|\b\w[\w.-]*(?:\/\w[\w.-]*){2,}|\b[Ll]ines? \d+|\bL\d+\b|\b[A-Za-z_$][\w$]*\(|\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/;
+
+/** One summary sentence: `text` normalized for the patterns, `raw` for CITATION. */
+interface SummarySentence {
+  text: string;
+  raw: string;
+}
+
+/** Narration under the changed:true rules (module doc above). */
+const isNarration = ({ text }: SummarySentence): boolean =>
+  NARRATION_FILLER.test(text) ||
+  NARRATION_PROGRESS.test(text) ||
+  ((NARRATION_INTENT.test(text) || NARRATION_ONGOING.test(text)) && !DECLINING_LEAD.test(text));
+
+/** Narration under the fail-closed changed:false rules: every unreported activity too. */
+const isUnchangedNarration = (sentence: SummarySentence): boolean =>
+  isNarration(sentence) ||
+  (ACTIVITY_LEAD.test(sentence.text) &&
+    !DECLINING_LEAD.test(sentence.text) &&
+    !REPORTED_RESULT.test(sentence.text));
 
 /**
- * The floor for an UNCHANGED outcome's REASON, in words: outcome sentences
- * other than a bare disposition. "changed:false" is the loop's honest
- * no-change answer, posted as the thread's reply. It must carry a disposition
- * AND its reason ("Already satisfied: line 691 rounds to one decimal."). A
- * changed:true summary is backed by verified commits, so the floor applies to
- * the unchanged case only.
+ * The floor for an UNCHANGED answer's REASON, in words (the reason sentences
+ * together). "changed:false" is the loop's honest no-change answer, posted as
+ * the thread's reply. It must carry a disposition AND its reason ("Already
+ * satisfied: line 691 rounds to one decimal.").
  */
 export const MIN_UNCHANGED_SUMMARY_WORDS = 4;
 
-/** The summary's sentences, normalized (lowercase, ASCII apostrophes, collapsed space). */
-const summarySentences = (summary: string): string[] =>
+const summarySentences = (summary: string): SummarySentence[] =>
   summary
     // Typographic apostrophes (models often emit U+2019) match the ASCII patterns.
     .replace(/[‘’ʼ]/gu, "'")
-    .toLowerCase()
     .split(/[.!?;:…]+(?=\s|$)|\n/u)
     .map((sentence) => sentence.replace(/\s+/g, ' ').replace(/^[\s,*>#-]+|[\s.!?…:;,-]+$/gu, ''))
-    .filter((sentence) => /[\p{L}\p{N}]/u.test(sentence));
+    .filter((raw) => /[\p{L}\p{N}]/u.test(raw))
+    .map((raw) => ({ text: raw.toLowerCase(), raw }));
 
 /**
  * Why a summary is not an outcome, or null when it is one (module constants
@@ -337,15 +359,25 @@ export const nonAnswerSummaryReason = (summary: string, changed: boolean): strin
   if (sentences.length === 0) {
     return 'empty summary';
   }
-  const outcome = sentences.filter((sentence) => !isNarration(sentence));
+  const outcome = sentences.filter(
+    (sentence) => !(changed ? isNarration(sentence) : isUnchangedNarration(sentence)),
+  );
   if (outcome.length === 0) {
     return 'summary is a preamble or placeholder, not an outcome';
   }
-  const reasonWords = outcome
-    .filter((sentence) => !BARE_DISPOSITION.test(sentence))
-    .reduce((total, sentence) => total + sentence.split(' ').length, 0);
-  if (!changed && reasonWords < MIN_UNCHANGED_SUMMARY_WORDS) {
+  if (changed) {
+    return null;
+  }
+  const reason = outcome.filter((sentence) => !BARE_DISPOSITION.test(sentence.text));
+  const reasonWords = reason.reduce(
+    (total, sentence) => total + sentence.text.split(' ').length,
+    0,
+  );
+  if (reasonWords < MIN_UNCHANGED_SUMMARY_WORDS) {
     return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words of reason)`;
+  }
+  if (!reason.some((sentence) => CITATION.test(sentence.raw))) {
+    return 'an unchanged summary must cite what it checked (a path, path:line, line N, `code` or a symbol)';
   }
   return null;
 };
@@ -528,7 +560,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   // NON-overridable like the attribution line below: the op rejects a
   // preamble/placeholder summary, so the worker is told what it must hold.
   lines.push(
-    '"summary" reports the finished outcome — what you fixed, or (when changed is false) why no change is needed, citing what you read. Answer only after doing the work; a preamble such as "Reading the file first." or a placeholder is rejected.',
+    '"summary" reports the finished outcome — what you fixed, or (when changed is false) why no change is needed, citing the file and line or the symbol you checked (for example `src/a.ts:12` or `parseConfig()`). Answer only after doing the work; a preamble, a progress report ("Investigating …"), a bare "No change needed." or an uncited reason is rejected.',
   );
   // NON-overridable attribution requirement (round-3 item 1): the loop
   // verifies per-item attribution by the commit subject, so this line rides
