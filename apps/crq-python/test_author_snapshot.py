@@ -392,3 +392,31 @@ class SnapshotTransport(SnapshotBaseline):
         blob = self.git("hash-object", "-w", "--stdin", data=b"x\n")
         tree = self.git("mktree", data=f"100644 blob {blob}\t{'n' * 300}\n".encode())
         self.install_refused(tree, "too long to check out")
+
+    def test_install_stores_exact_bytes_despite_clean_filters(self):
+        self.git("-C", str(self.destination), "config", "core.autocrlf", "true")
+        blob = self.git("hash-object", "-w", "--stdin", data=b"a\r\nb\r\n")
+        tree = self.git("mktree", data=f"100644 blob {blob}\tcrlf.txt\n".encode())
+        req = envelope(self.repo, self.base, tree)
+        with mock.patch.object(crq, "CLONE", self.destination), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            snapshot.install(req["snapshot"], req["binding"], crq)
+        self.assertEqual(snapshot.git(self.destination, "cat-file", "blob", blob), b"a\r\nb\r\n")
+
+    def test_unchanged_baseline_blobs_are_not_read(self):
+        unchanged = self.git("rev-parse", f"{self.base}:file.txt")
+        added = self.git("hash-object", "-w", "--stdin", data=b"new\n")
+        tree = self.git("mktree", data=(f"100644 blob {added}\tadded.txt\n"
+                                       f"100644 blob {unchanged}\tfile.txt\n").encode())
+        req = envelope(self.repo, self.base, tree)
+        seen = []
+        real = snapshot.read_blobs
+        def spy(repo, oids):
+            seen.extend(oids)
+            return real(repo, oids)
+        with mock.patch.object(crq, "CLONE", self.destination), mock.patch.object(snapshot, "read_blobs", spy), \
+             mock.patch.object(crq, "denylist_rules", return_value=[{"id": "fixture", "regex": "(?!)"}]), \
+             mock.patch.object(crq, "secret_scan_diff", return_value=(True, {})):
+            snapshot.install(req["snapshot"], req["binding"], crq)
+        self.assertNotIn(unchanged, seen)
