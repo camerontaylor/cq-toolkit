@@ -288,8 +288,9 @@ export { PRICE_TABLE } from './driver/pricing/data.js';
 // env-based model routing (CONFIG, with the DeepSeek silent-remap footgun
 // enforced at route time), and its process-lifecycle helpers — the
 // documented extension surface for future CLI drivers (I8: the grace
-// ladder lives in driver/<name>/process.ts, the hygiene scan's one exempt
-// path).
+// ladder lives in src/shared/proc.ts and only executes already-decided
+// kills; the hygiene scan's driver/<name>/process.ts exemption covers the
+// in-driver lifecycle helpers).
 export type {
   ArgBuildInputs,
   ResultStatus,
@@ -325,7 +326,7 @@ export type {
   SpawnOptions,
   TerminationOutcome,
   TerminationRungMarker,
-} from './driver/subprocess/process.js';
+} from './shared/proc.js';
 export {
   // Aliased: the governor's DEFAULT_KILL_GRACE_MS (the escalation ladder's
   // rung-2→3 grace) is already exported above; this is the subprocess
@@ -334,7 +335,7 @@ export {
   DEFAULT_TERM_GRACE_MS,
   spawnManaged,
   terminateGracefully,
-} from './driver/subprocess/process.js';
+} from './shared/proc.js';
 // Claude-agent driver (T1.6) — re-export only, no logic: the THIRD lane, the
 // OPTIONAL-PEER agent-SDK driver on the frozen seam. The peer
 // (@anthropic-ai/claude-agent-sdk) is loaded lazily by dynamic import at

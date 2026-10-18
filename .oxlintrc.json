@@ -124,6 +124,12 @@
       }
     },
     {
+      "files": ["src/harness/**"],
+      "rules": {
+        "cq/no-driver-import-in-harness": "error"
+      }
+    },
+    {
       "files": ["src/cli/**", "src/cli.ts"],
       "rules": {
         "cq/no-cli-beyond-registry-kernel": [

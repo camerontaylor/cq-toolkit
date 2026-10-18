@@ -51,6 +51,11 @@ describe('production Oxlint configuration and architecture plugin', () => {
       'src/cli/main.ts': "import '../registry/index.js'; import 'node:fs';",
       'src/cli/run-plan.ts': "import 'zod';",
       'src/cli.ts': "import './cli/main.js';",
+      // Harness consumes shared and the driver/types contracts seam; the
+      // harness→driver rule is scoped to src/harness/** only.
+      'src/harness/surface.ts':
+        "import type { SandboxLevel } from '../driver/types.js'; import '../shared/proc.js'; export type { SandboxLevel };",
+      'src/ops/dispatch.ts': "import '../driver/subprocess/index.js';",
     };
     const result = lint(fixture(files), Object.keys(files));
     expect(result.error).toBeUndefined();
@@ -69,6 +74,7 @@ describe('production Oxlint configuration and architecture plugin', () => {
         "type T = import('../driver/types.js').T; export type { T };",
       ].join('\n'),
       'src/cli.ts': "import './kernel/types.js';",
+      'src/harness/tools.ts': "import '../driver/subprocess/process.js';",
       'scripts/example.mjs': 'debugger;',
       'vitest.config.ts': 'debugger;',
     };
@@ -80,6 +86,7 @@ describe('production Oxlint configuration and architecture plugin', () => {
       'src/driver/types.ts': ['no-vendor-sdk-in-kernel'],
       'src/cli/main.ts': ['no-cli-beyond-registry-kernel'],
       'src/cli.ts': ['no-cli-beyond-registry-kernel'],
+      'src/harness/tools.ts': ['no-driver-import-in-harness'],
       'scripts/example.mjs': ['no-debugger'],
       'vitest.config.ts': ['no-debugger'],
     })) {
