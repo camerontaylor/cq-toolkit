@@ -11,8 +11,8 @@ import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitBindings } from '../../../src/ops/sweep/unit.js';
 import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
-import type { WorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
-import type { GhFn } from '../../../src/ops/review/gh.js';
+import type { WorktreeEffects } from '../../../src/adapters/git/worktreeFor.js';
+import type { GhFn } from '../../../src/adapters/forge-github/gh.js';
 import { makeSalvage } from '../../../src/ops/sweep/salvage.js';
 import { unitStagePathAllowlist } from '../../../src/plans/sweep.js';
 

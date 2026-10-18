@@ -115,7 +115,7 @@ import type { AnalyzeFileStore } from '../analysisStore.js';
 import type { CodemodFileApplied, CodemodReport } from '../codemod/astGrep.js';
 import { makeAstGrepCodemod } from '../codemod/astGrep.js';
 import type { Playbook, VerifierCommand } from './format.js';
-import type { QuarantineLedger, QuarantineRecord } from './quarantine.js';
+import type { QuarantineLedger, QuarantineRecord } from '../../../adapters/store/quarantine.js';
 import type { PlaybookVerifierOutcome } from './verifier.js';
 import { makePlaybookVerifier } from './verifier.js';
 

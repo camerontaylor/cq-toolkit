@@ -38,39 +38,23 @@ import type { LockOptions } from 'proper-lockfile';
 import { z } from 'zod';
 // Runtime import of the canonical signature order — pulled from the pure
 // decision-ops module (order.ts was folded into ledger.js for lane i's
-// registry-completeness heuristic, PR 64); NO runtime cycle: ledger.js's
-// store.js import is type-only and erased. The field-length bounds ride
-// the same edge so the parse boundary and the record boundary reject the
-// same states from ONE definition.
+// registry-completeness heuristic, PR 64); NO cycle in either direction:
+// the port's data types (LedgerEntry, LedgerFile) are defined THERE and
+// only imported here — adapters → ops (ADR-0005:27), never the reverse
+// (PR #335 review, Codex P1). The field-length bounds ride the same edge
+// so the parse boundary and the record boundary reject the same states
+// from ONE definition.
 import {
   COMPONENT_MAX_CHARS,
   compareSignatures,
   NOTE_MAX_CHARS,
   SIGNATURE_MAX_CHARS,
   sortEntries,
-} from './ledger.js';
-import type { LedgerStore } from './ledger.js';
+} from '../../ops/ledger/ledger.js';
+import type { LedgerEntry, LedgerFile, LedgerStore } from '../../ops/ledger/ledger.js';
 
 /** The canonical signature order lives in the pure decision-ops module (see ledger.js). */
 export { sortEntries };
-
-/** One recurring error signature and its recurrence count (≥ 1). */
-export interface LedgerEntry {
-  /** The error signature — the stable identity of the recurring failure. */
-  signature: string;
-  /** How many times the signature was recorded; starts at 1, grows by 1. */
-  count: number;
-  /** Owning component (e.g. 'src/ops/ledger'); backfilled by the ledger op when first provided. */
-  component?: string;
-  /** Free-form human note; backfilled by the ledger op when first provided. */
-  note?: string;
-}
-
-/** The persisted ledger file. Version 1 — the only version parseLedger accepts. */
-export interface LedgerFile {
-  version: 1;
-  entries: LedgerEntry[];
-}
 
 /**
  * Thrown by {@link parseLedger} (and the write-side guards of

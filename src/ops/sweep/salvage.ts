@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import type { Op } from '../../kernel/types.js';
-import { mapWorktreeGitFault } from './worktreeFor.js';
+import { mapWorktreeGitFault } from '../../adapters/git/worktreeFor.js';
 
 /**
  * One interrupted-tree inventory entry the CALLER scanned — plain JSON, as

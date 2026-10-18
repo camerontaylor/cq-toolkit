@@ -30,9 +30,9 @@ import {
   setAnalyzeApprovalAuthority,
 } from '../../../src/ops/analyze/registry.js';
 import type { ApprovalAuthority, ApprovalState } from '../../../src/ops/analyze/approval.js';
+import { makeInMemoryNonceLedger } from '../../../src/adapters/store/nonceLedger.js';
 import {
   makeApprovalAuthority,
-  makeInMemoryNonceLedger,
   makeProcessLocalMutationLocks,
 } from '../../../src/ops/analyze/approval.js';
 

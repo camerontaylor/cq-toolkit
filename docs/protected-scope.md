@@ -39,20 +39,20 @@ Three lists feed D11, and this note changes only the third:
 
 ## Project list: kept
 
-| Entry                                                                                                                                                                            | Deployed consumer                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/ops/gates/{policyDiff,policyDiffInput,policyConfig,overrideRecord,d11Authorization,workflowScan,protectedPaths,checkRunner,registry}.ts`, `adapters/{eslint,tsc,vitest}.ts` | `cq-policy` runs `policyDiff` in-process (`trust/dist/selfhost/policy-diff.js`), and `gate.yml` recomputes it in-process. `policyDiffInput.ts` is the input schema both share with the CLI binding in `registry.ts`, which no trusted job loads since R1 closed                                                                                                                                                                        |
-| `src/ops/ratchet/**` (unchanged)                                                                                                                                                 | `cq-verify`'s judge runs `verifyRatchet` in-process (`trust/dist/selfhost/verify-ratchet.js`) and posts the `cq/ratchet` verdict the gate requires; its compute job runs `recomputeTypecheck` in-process too (`trust/dist/selfhost/recompute-typecheck.js`). `ratchet-propose` (environment `automation`) loads the engine (`scripts/ratchet-lib.mjs` `loadEngine`). Only the `index`/`effects` barrels are not executed by those jobs |
-| `src/ops/review/{gh,threads}.ts`, `src/shared/independent-review.ts`                                                                                                             | the I2 evidence that `cq-accept` (`trust/dist/selfhost/acceptance.js`) and the gate compute                                                                                                                                                                                                                                                                                                                                            |
-| `src/selfhost/{promote-gate,acceptance,merge-recheck,settle-state,state-branch,verify-ratchet,policy-diff,recompute-typecheck,trusted-entry}.ts`                                 | `gate.yml` `decide` (environment `promote`), `cq-accept`, and the `cq-verify` and `cq-policy` entries. `trusted-entry.ts` is the argv and I1 output contract those entries share                                                                                                                                                                                                                                                       |
-| `policy/promotion-reviewer.json`                                                                                                                                                 | the gate's reviewer pin. The signer test pins it as well (also covered by the built-in `policy/**`)                                                                                                                                                                                                                                                                                                                                    |
-| `scripts/ratchet-*.mjs`                                                                                                                                                          | `pnpm run build` (which builds the trusted dist) and `check:static`, which produces the required `static` check                                                                                                                                                                                                                                                                                                                        |
-| `scripts/github-settings-drift.mjs`, `scripts/lib/github-settings.mjs`                                                                                                           | `settings-drift` (environment `cq-verdict`, App token with admin read), whose output is the C3/T5 evidence                                                                                                                                                                                                                                                                                                                             |
-| `scripts/adversarial-suite.mjs`                                                                                                                                                  | `adversarial-suite` (environment `adversarial-scratch`, scratch App secrets)                                                                                                                                                                                                                                                                                                                                                           |
-| `scripts/denylist-scan`                                                                                                                                                          | the required `denylist` check. Also in the definition set                                                                                                                                                                                                                                                                                                                                                                              |
-| `apps/crq-python/signer/**`                                                                                                                                                      | the queue-host signer: the reviewer App key, the identity pins, `spool-shell`, the root-owned unit, `DEPLOY.md`                                                                                                                                                                                                                                                                                                                        |
-| `apps/crq-python/ops/systemd/**`, `ops/prepare-*.py`                                                                                                                             | crq's deploy contract: what runs, when, and from which root                                                                                                                                                                                                                                                                                                                                                                            |
-| `apps/crq-python/config.json`                                                                                                                                                    | crq's live config, which carries its reviewer identity pin (`app_login`, `reviewer_bot_id`)                                                                                                                                                                                                                                                                                                                                            |
+| Entry                                                                                                                                                                                                                           | Deployed consumer                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/ops/gates/{policyDiff,policyDiffInput,policyConfig,overrideRecord,d11Authorization,workflowScan,protectedPaths,checkRunner,registry}.ts`, `adapters/{eslint,tsc,vitest}.ts`                                                | `cq-policy` runs `policyDiff` in-process (`trust/dist/selfhost/policy-diff.js`), and `gate.yml` recomputes it in-process. `policyDiffInput.ts` is the input schema both share with the CLI binding in `registry.ts`, which no trusted job loads since R1 closed                                                                                                                                                                        |
+| `src/ops/ratchet/**` plus `src/adapters/git/ratchetGit.ts` and `src/adapters/forge-github/ratchetEffects.ts` (Phase 1.4 moved the git plumbing and the baseline PR effects out of `ops/ratchet/`; the regexes follow the files) | `cq-verify`'s judge runs `verifyRatchet` in-process (`trust/dist/selfhost/verify-ratchet.js`) and posts the `cq/ratchet` verdict the gate requires; its compute job runs `recomputeTypecheck` in-process too (`trust/dist/selfhost/recompute-typecheck.js`). `ratchet-propose` (environment `automation`) loads the engine (`scripts/ratchet-lib.mjs` `loadEngine`). Only the `index`/`effects` barrels are not executed by those jobs |
+| `src/adapters/forge-github/gh.ts`, `src/ops/review/threads.ts`, `src/shared/independent-review.ts` (Phase 1.4 moved `gh.ts`; the regex follows the file)                                                                        | the I2 evidence that `cq-accept` (`trust/dist/selfhost/acceptance.js`) and the gate compute                                                                                                                                                                                                                                                                                                                                            |
+| `src/selfhost/{promote-gate,acceptance,merge-recheck,settle-state,state-branch,verify-ratchet,policy-diff,recompute-typecheck,trusted-entry}.ts`                                                                                | `gate.yml` `decide` (environment `promote`), `cq-accept`, and the `cq-verify` and `cq-policy` entries. `trusted-entry.ts` is the argv and I1 output contract those entries share                                                                                                                                                                                                                                                       |
+| `policy/promotion-reviewer.json`                                                                                                                                                                                                | the gate's reviewer pin. The signer test pins it as well (also covered by the built-in `policy/**`)                                                                                                                                                                                                                                                                                                                                    |
+| `scripts/ratchet-*.mjs`                                                                                                                                                                                                         | `pnpm run build` (which builds the trusted dist) and `check:static`, which produces the required `static` check                                                                                                                                                                                                                                                                                                                        |
+| `scripts/github-settings-drift.mjs`, `scripts/lib/github-settings.mjs`                                                                                                                                                          | `settings-drift` (environment `cq-verdict`, App token with admin read), whose output is the C3/T5 evidence                                                                                                                                                                                                                                                                                                                             |
+| `scripts/adversarial-suite.mjs`                                                                                                                                                                                                 | `adversarial-suite` (environment `adversarial-scratch`, scratch App secrets)                                                                                                                                                                                                                                                                                                                                                           |
+| `scripts/denylist-scan`                                                                                                                                                                                                         | the required `denylist` check. Also in the definition set                                                                                                                                                                                                                                                                                                                                                                              |
+| `apps/crq-python/signer/**`                                                                                                                                                                                                     | the queue-host signer: the reviewer App key, the identity pins, `spool-shell`, the root-owned unit, `DEPLOY.md`                                                                                                                                                                                                                                                                                                                        |
+| `apps/crq-python/ops/systemd/**`, `ops/prepare-*.py`                                                                                                                                                                            | crq's deploy contract: what runs, when, and from which root                                                                                                                                                                                                                                                                                                                                                                            |
+| `apps/crq-python/config.json`                                                                                                                                                                                                   | crq's live config, which carries its reviewer identity pin (`app_login`, `reviewer_bot_id`)                                                                                                                                                                                                                                                                                                                                            |
 
 ## Project list: dropped
 
@@ -75,59 +75,44 @@ go-ahead, from a SHA reachable from `main` with recorded hashes
 (crq-into-monorepo amendment §2). That is the owner's checkpoint for crq.
 Protecting it at merge time would add a second one for code that cannot judge.
 
-## Residuals (named, with their fixes)
+## Accepted residuals (named, with their fixes)
 
-R1 is closed. R2 is open and needs an owner decision. R2 is mostly not new,
-with one exception. Before #328, `src/ops/merge/classify*` and
-`src/selfhost/candidates.ts` were protected as admission logic, and #328
-dropped them because the gate re-judges every PR they admit. That is a
-deliberate narrowing, and **owner acceptance is needed**. It also widens R2
-by those three files: they run in the `self-merge-prs` and
-`self-review-loop` jobs. Those protections never covered those jobs'
-credentials, though. The other ~60 files in the same closures, including
-the drivers and harness, were already unprotected.
+These are open owner decisions. R1 is not new: none of its files was
+protected before this change. R2 is mostly not new, with one exception.
+Before this change, `src/ops/merge/classify*` and `src/selfhost/candidates.ts`
+were protected as admission logic, and this change drops them because the gate
+re-judges every PR they admit. That is a deliberate narrowing, and **owner
+acceptance is needed**. It also widens R2 by those three files: they run in
+the `self-merge-prs` and `self-review-loop` jobs. Those protections never
+covered those jobs' credentials, though. The other ~60 files in the same
+closures, including the drivers and harness, were already unprotected.
 
-**R1 (closed 2026-10-17): the CLI dispatch shell in the trusted verifier
-jobs.** Two trusted calls dispatched through `dist/cli.js`: `cq-policy`'s
-`gates.policyDiff`, and `cq-verify`'s compute job, which ran
-`ratchet.recomputeTypecheck` to produce the typecheck count. On every
-dispatch, `src/registry/index.ts` imports every `src/ops/*/registry.ts`, so
-the CLI shell (`src/cli/**`, `src/kernel/**`, `src/registry/**`) and the
-static imports of each op registry ran in those jobs: about 85 mostly
-unprotected files. A malicious change there, once accepted and promoted,
-could forge the PR-level `cq/policy` check, or the typecheck count that
-feeds `cq/ratchet`, so a **typecheck regression could promote**: nothing
-recomputes that count at the gate (review 5556004563 on #328, HOLD). The
-gate itself was never exposed: it recomputes `policyDiff` in-process
-(D-G.5), including the monotonic baseline guard.
+**R1: the CLI dispatch shell in the trusted verifier jobs.** Two trusted
+calls still dispatch through `dist/cli.js`: `cq-policy`'s `gates.policyDiff`,
+and `cq-verify`'s compute job, which runs `ratchet.recomputeTypecheck` to
+produce the typecheck count. On every dispatch, `src/registry/index.ts`
+imports every `src/ops/*/registry.ts`. So the CLI shell (`src/cli/**`,
+`src/kernel/**`, `src/registry/**`) and the static imports of each op
+registry run in those jobs. That is about 85 files, mostly in-development
+code, and they are not protected. A malicious change there needs I2
+acceptance, then promotion. Once deployed, it could forge the PR-level
+`cq/policy` check, or the typecheck count that feeds `cq/ratchet`, so a
+**typecheck regression could promote**. It cannot get a protected-path or
+definition change past the gate: the gate is authoritative (D-G.5) and
+recomputes `policyDiff` in-process, without the CLI, including the monotonic
+baseline guard.
 
-**The fix:** every trusted job now runs a `trust/dist/selfhost/` entry,
-and none runs the CLI:
+**Narrowed in this PR:** the `cq/ratchet` verdict itself (`judge`) now runs
+in-process (`dist/selfhost/verify-ratchet.js`, readiness T2), so coverage and
+baseline judgement no longer load the registry.
 
-| Job                 | Entry (source)                                                   | Replaces                                  |
-| ------------------- | ---------------------------------------------------------------- | ----------------------------------------- |
-| `cq-verify` judge   | `verify-ratchet.js` (`src/selfhost/verify-ratchet.ts`)           | `cli.js ratchet.verifyRatchet` (#328, T2) |
-| `cq-verify` compute | `recompute-typecheck.js` (`src/selfhost/recompute-typecheck.ts`) | `cli.js ratchet.recomputeTypecheck`       |
-| `cq-policy` judge   | `policy-diff.js` (`src/selfhost/policy-diff.ts`)                 | `cli.js gates.policyDiff`                 |
+**Fix (the next protected batch):** give `recomputeTypecheck` and the PR-level
+`policyDiff` their own `dist/selfhost/` entry points too. The alternative is
+to protect `src/cli/**`, `src/kernel/**` and `src/registry/**` now. That only
+narrows R1, because the registry closures still load, and it protects the
+kernel exactly while Phase 1 is revising it.
 
-The two new entries take the op's own input schema (`policyDiffInput.ts`,
-`recomputeTypecheckInput.ts`, shared with the registry, so the two carriers
-cannot drift), resolve the posture from the env exactly as the registry
-importer does, and print the CLI's OpResult (as one compact JSON line),
-which the workflows validate unchanged. They share `trusted-entry.ts` for strict
-`--name=value` argv and the I1 exit codes. Unlike the CLI, they do not
-JSON-parse flag values, so a SHA that happens to parse as a number stays a
-string. The CLI registry entries remain for library and plan use, and for
-`ratchet-propose-measure`, which builds the head (untrusted) and only
-proposes. The rejected alternative was to protect `src/cli/**`,
-`src/kernel/**` and `src/registry/**`. That only narrows R1, because the
-registry closures still load, and it protects the kernel exactly while
-Phase 1 is revising it.
-
-**R2 (open, follow-up): privileged jobs that run unprotected code.** Rated
-non-blocking by review 5556004563 on #328 and not fixed by the R1 change.
-These jobs post no verdict and cannot move `main`, so the R1 rule (a trusted
-job runs only protected code) does not reach them.
+**R2: privileged jobs that run unprotected code.**
 
 | Job                         | What it runs                                                                                        | Credentials                                                        | What bounds it                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
@@ -140,11 +125,10 @@ A merged change to this code can read the job's credentials. The worst case
 is a spent model key or a short-lived automation token. Neither can move
 `main` or post a trusted verdict. Protecting these closures would protect the
 drivers and harness, the core of the in-development code.
-**Follow-up (not started):** run model workers without the automation
-token. The sandbox launcher already strips runner credentials from run
-children (`test/adversarial/boundary-rows.test.ts` A11/A17); the remaining
-gap is the in-process code. Until then, R2 needs the owner acceptance named
-above.
+**Fix:** run model workers without the automation token. The sandbox
+launcher already strips runner credentials from run children
+(`test/adversarial/boundary-rows.test.ts` A11/A17); the remaining gap is the
+in-process code.
 
 `test/ops/gates/protectedPaths.test.ts` pins this table. Every script or
 selfhost entry that a privileged job runs must be protected or appear in its
@@ -153,37 +137,10 @@ privileged executor therefore fails CI until someone classifies it.
 
 ## How the scope stays honest
 
-`test/ops/gates/protectedPaths.test.ts` derives the trusted entry points
-from the rendered workflows: every job whose commands name the `trust`
-checkout as a path. In those jobs, every `node` token must be
-`node trust/dist/selfhost/<entry>.js`, a `node` named by path is refused,
-and `pnpm` may appear only as the frozen, script-free install and
-`pnpm run build`. A listed loader (`NODE_OPTIONS`, `NODE_PATH`, `--import`,
-`npx`, `tsx`, `node_modules/.bin`, a non-`bash` `shell:` and similar),
-in the job or in its workflow's top-level `env:` and `defaults:`, is
-refused, and so is a local action. Any `trust/dist/cli.js` in a workflow
-fails the test. The job-to-entry table is pinned, so the derived set cannot
-shrink to nothing unnoticed. The `build` script may run only protected
-scripts and the build `tsc`.
-
-The test then walks each entry's module-loading closure, plus the ratchet
-engine that `loadEngine` imports (parsed from the script), and fails when a
-file is unprotected. The scan fails closed (`test/helpers/import-closure.ts`).
-Node's own type stripper erases the type-only imports, and comments and
-string contents are lexed away. Every remaining `import` or `from` token
-must then be a recognised form with a literal specifier. The listed runtime
-loaders (`require`, `createRequire`, `register`, `registerHooks`, `Worker`,
-`dlopen`, `eval`, `Function`) are refused outright. Each specifier must be
-relative under `src/`, a `node:` builtin, or a declared dependency (the
-lockfile and `package.json` are protected by the built-in taxonomy). A
-computed `import()`, a package self-import or a `#` import fails the walk.
-
-These are guards against an honest mistake. They are not a sandbox: every
-workflow and every closure file is itself protected, so evading them takes
-a D11-authorized edit. The walk covers module loading. It does not cover
-the processes a closure file spawns: `git`, `gh`, and `tsc` from the trust
-checkout's locked install.
-
+`test/ops/gates/protectedPaths.test.ts` follows the value-import closure of
+the judging entry points and fails when a file is unprotected. The entry
+points include the ratchet engine that `loadEngine` imports, parsed from the
+script. It also pins which `trust/dist/...` calls the workflows contain.
 `test/ops/gates/policyDiff.test.ts` fails if a protected entry matches no
 tracked file. A pending entry, one whose tree has not landed yet, must be
 named in that test, and none is pending today.

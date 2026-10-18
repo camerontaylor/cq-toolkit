@@ -28,12 +28,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { match } from '../../helpers/matchers.js';
-import { makeCleanup, makeSubprocessCleanupEffects } from '../../../src/ops/sweep/cleanup.js';
+import { makeCleanup, makeSubprocessCleanupEffects } from '../../../src/adapters/git/cleanup.js';
 import type {
   CleanupEffects,
   CleanupInput,
   CleanupReport,
-} from '../../../src/ops/sweep/cleanup.js';
+} from '../../../src/adapters/git/cleanup.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures

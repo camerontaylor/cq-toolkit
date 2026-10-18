@@ -58,9 +58,9 @@
 import { describe, expect, test } from 'vitest';
 import { fetchMergeCandidates, summarizeForLog } from '../../src/selfhost/candidates.js';
 import { parseSelfhostArgs } from '../../src/selfhost/config.js';
-import { fetchReviewState } from '../../src/ops/review/fetchReviewState.js';
-import { GhError } from '../../src/ops/review/gh.js';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import { fetchReviewState } from '../../src/adapters/forge-github/fetchReviewState.js';
+import { GhError } from '../../src/adapters/forge-github/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------
 // Wire-shape fixture builders (gh payloads, camelCase/snake_case as gh

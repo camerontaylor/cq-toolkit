@@ -115,7 +115,10 @@ export const registry: OpRegistryEntry[] = [
     // boundary from the DISPATCHED input; nothing is wired at registry
     // module scope, and the effects construction is inert (closure-only).
     importer: () =>
-      Promise.all([import('./assemblePrs.js'), import('./ghEffects.js')]).then(
+      Promise.all([
+        import('./assemblePrs.js'),
+        import('../../adapters/forge-github/ghEffects.js'),
+      ]).then(
         ([m, effects]) =>
           (async (input: AssemblePrsInput) =>
             m.makeAssemblePrs(effects.makeSubprocessPrEffects(input.repoRoot))(input)) as Op<
@@ -131,7 +134,10 @@ export const registry: OpRegistryEntry[] = [
     // reads (and the optional tracker update) run through the real gh
     // subprocess effects bound to the dispatched input's repoRoot.
     importer: () =>
-      Promise.all([import('./runReport.js'), import('./ghEffects.js')]).then(
+      Promise.all([
+        import('./runReport.js'),
+        import('../../adapters/forge-github/ghEffects.js'),
+      ]).then(
         ([m, effects]) =>
           (async (input: RunReportInput) =>
             m.makeRunReport(effects.makeSubprocessPrEffects(input.repoRoot))(input)) as Op<

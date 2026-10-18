@@ -481,7 +481,7 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: ExecuteMergesInputSchema,
     importer: async () => {
       const { executeMerges } = await import('./executeMerges.js');
-      const { realMergeEffects } = await import('./effects.js');
+      const { realMergeEffects } = await import('../../adapters/forge-github/mergeEffects.js');
       const op: Op<ExecuteMergesInput, ExecutionReport> = async (input) => {
         // The effects seam binds PER DISPATCH from the input's plain-JSON
         // repo config — the entry carries no repo state.

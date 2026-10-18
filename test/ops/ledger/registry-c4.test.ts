@@ -29,7 +29,7 @@ import {
   LedgerRecordInputSchema,
 } from '../../../src/ops/ledger/registry.js';
 import { makeLedgerRecord } from '../../../src/ops/ledger/ledger.js';
-import { parseLedger, serializeLedger } from '../../../src/ops/ledger/store.js';
+import { parseLedger, serializeLedger } from '../../../src/adapters/store/ledgerStore.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 
 let scratchDir = '';
@@ -437,7 +437,7 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     await mkdir(root);
     const target = join(root, 'sub', 'ledger.json');
     // Stage A passes on the clean path; the escape appears before the save.
-    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const { pathLedgerStore } = await import('../../../src/adapters/store/ledgerStore.js');
     const store = pathLedgerStore(root, target);
     const outside = join(scratchDir, 'outside');
     await mkdir(outside);
@@ -508,7 +508,7 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     // dir where the ledger file itself does NOT exist — realpath of the
     // target ENOENTs through the escape, which must surface as a
     // containment fault, not an empty in-root ledger.
-    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const { pathLedgerStore } = await import('../../../src/adapters/store/ledgerStore.js');
     const store = pathLedgerStore(root, target);
     const outside = join(scratchDir, 'outside');
     await mkdir(outside);
@@ -539,7 +539,7 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     const root = join(scratchDir, 'ws');
     await mkdir(root);
     const target = join(root, 'escape', 'sub', 'ledger.json');
-    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const { pathLedgerStore } = await import('../../../src/adapters/store/ledgerStore.js');
     const store = pathLedgerStore(root, target);
     // The escape points at an EXISTING outside dir, but both 'sub' and the
     // ledger are absent THROUGH the link — the ancestor walk stops at the
@@ -722,7 +722,7 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
       // lstat), not swallow it and swap the 0640 ledger for a 0600
       // replacement (PR #93 review, CodeRabbit Minor).
       await chmod(stateDir, 0o000);
-      const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+      const { pathLedgerStore } = await import('../../../src/adapters/store/ledgerStore.js');
       const store = pathLedgerStore(root, storePath);
       try {
         expect(() =>

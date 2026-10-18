@@ -41,9 +41,9 @@ import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/typ
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type { OpResult } from '../../../src/kernel/types.js';
 import { REVIEW_ACCEPT_SETTLE_MS } from '../../../src/ops/merge/classify.config.js';
-import { headRefFor } from '../../../src/ops/merge/effects.js';
-import type { MergeEffects } from '../../../src/ops/merge/effects.js';
-import type { GhResult } from '../../../src/ops/review/gh.js';
+import { headRefFor } from '../../../src/adapters/forge-github/mergeEffects.js';
+import type { MergeEffects } from '../../../src/adapters/forge-github/mergeEffects.js';
+import type { GhResult } from '../../../src/adapters/forge-github/gh.js';
 import {
   makeRunMergePrsOp,
   MODEL_SPEC_REQUIRED_REASON,

@@ -32,9 +32,9 @@
 // repository's own branches (its worktrees, its pushes, its review
 // replies). Drafts are excluded for the same reason classifyPr rows them
 // `never`: nothing merges uninvited.
-import { fetchReviewState } from '../ops/review/fetchReviewState.js';
-import { GhError, ghJson, ghNameOk, slurpedComments } from '../ops/review/gh.js';
-import type { GhFn } from '../ops/review/gh.js';
+import { fetchReviewState } from '../adapters/forge-github/fetchReviewState.js';
+import { GhError, ghJson, ghNameOk, slurpedComments } from '../adapters/forge-github/gh.js';
+import type { GhFn } from '../adapters/forge-github/gh.js';
 import type { MergePrsCandidate } from '../ops/merge/runPrs.js';
 
 /** The listing's page size (`per_page` on the REST listing read). */

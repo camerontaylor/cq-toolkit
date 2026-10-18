@@ -20,13 +20,34 @@
 //     read or persist), never a fabricated ok and never a thrown error
 //     across the op seam.
 import type { Op } from '../../kernel/types.js';
-// TYPE-ONLY import of the store format: erased at compile time, so this
-// module has ZERO runtime imports — not ./store.js (whose optional node:fs
-// adapter must never load into pure decision-op consumers) and nothing else.
-// The canonical signature order below lives HERE (folded from order.ts):
-// lane i's registry-completeness heuristic (PR 64) would flag a sibling
-// module the family registry never references as an orphan op.
-import type { LedgerEntry, LedgerFile } from './store.js';
+// The port's data types are DEFINED HERE, owned by ops like the
+// {@link LedgerStore} port itself: the store adapter imports them to
+// implement the port (adapters → ops, ADR-0005:27) — never the reverse,
+// so the Phase 2 package split cannot form an ops→adapters type edge
+// (PR #335 review, Codex P1). This module still has ZERO runtime imports —
+// not ./store.js (whose optional node:fs adapter must never load into pure
+// decision-op consumers) and nothing else. The canonical signature order
+// below lives HERE (folded from order.ts): lane i's registry-completeness
+// heuristic (PR 64) would flag a sibling module the family registry never
+// references as an orphan op.
+
+/** One recurring error signature and its recurrence count (≥ 1). */
+export interface LedgerEntry {
+  /** The error signature — the stable identity of the recurring failure. */
+  signature: string;
+  /** How many times the signature was recorded; starts at 1, grows by 1. */
+  count: number;
+  /** Owning component (e.g. 'src/ops/ledger'); backfilled by the ledger op when first provided. */
+  component?: string;
+  /** Free-form human note; backfilled by the ledger op when first provided. */
+  note?: string;
+}
+
+/** The persisted ledger file. Version 1 — the only version parseLedger accepts. */
+export interface LedgerFile {
+  version: 1;
+  entries: LedgerEntry[];
+}
 
 /**
  * The canonical signature order: byte-wise ascending. Implemented as

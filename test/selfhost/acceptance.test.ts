@@ -16,7 +16,7 @@
 // unrecognised entry naming the key, structural identities never
 // re-admitted); and the strict CLI arg parser.
 import { describe, expect, test } from 'vitest';
-import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import {
   ACCEPTANCE_CHECK_NAME,
   ACCEPT_REVIEW_STATES_ENV,
