@@ -97,7 +97,7 @@ import type {
 } from '../../driver/types.js';
 import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
-import { defaultFixPrompt } from './prompts/fix.default.js';
+import { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
 import type { ThreadComment } from './threads.js';
 
 /**
