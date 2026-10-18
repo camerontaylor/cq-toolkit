@@ -789,6 +789,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     "I'm reading the anchored code first.",
     'I’m reading the anchored code first.',
     'Let’s read the anchored file first.',
+    'I will fix the guard.',
+    'Let me look at the file first.',
+    'I’ll start by reading the anchored code.',
     'I am now checking the diff.',
     'First, reading the anchored file.',
     'Currently inspecting the thread.',
@@ -823,6 +826,8 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // Outcome text that merely OPENS with a narration word (PR #343 review).
     ['Checking the anchored guard confirmed no change was needed.', false],
     ['Now guards the abort signal in the retry loop.', true],
+    ['I will not change this because the existing guard already handles the case.', false],
+    ["I'm not going to change it: line 3 already guards the case.", false],
     ['I am reading the anchored file, which already guards the abort, so nothing changed.', false],
     ['First, the retry loop was fixed to honor the abort signal.', true],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {
