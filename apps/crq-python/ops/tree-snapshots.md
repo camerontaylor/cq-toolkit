@@ -82,8 +82,10 @@ overlong symlink targets. Any remaining checkout failure at launch (for example
 a runner-configured required smudge filter that the snapshot's attributes
 activate) refuses that launch without a start or grant. The request stays
 waiting, so its lease deadline authorizes the agent fallback, as for any head
-the queue cannot review. At the 30-second deadline the endpoint unwinds rather
-than dying: runner scan and Git children are killed and `tick.lock` is released.
+the queue cannot review. The endpoint holds `tick.lock` itself and runs the
+request in a child that leads its own process group. On every exit, including
+the 30-second deadline, it SIGKILLs and reaps that whole group (runner scan, Git
+and any descendants) before it releases the lock.
 
 After validation, objects enter the clone and a versioned ref
 `refs/crq/author-snapshots/v1/<head>` pins the commit **before** enrollment. A crash

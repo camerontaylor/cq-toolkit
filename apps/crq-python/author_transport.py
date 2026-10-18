@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 import author_lease
 from author_quota import AuthorRefused, binding_of, enroll, normalize_binding
@@ -107,13 +108,107 @@ def handle(raw, runner, *, policy_path, reviewer, approved_target):
     return (json.dumps(result, separators=(",", ":"), sort_keys=True) + "\n").encode()
 
 
+class _LockHeld:
+    """The runner as the supervised child sees it: the parent already holds tick.lock."""
+
+    def __init__(self, runner):
+        self._runner = runner
+
+    def __getattr__(self, name):
+        return getattr(self._runner, name)
+
+    def with_lock(self, fn, *a, **kw):
+        return fn(*a, **kw)
+
+
+def _reap(pid, grace):
+    """Let the child exit within `grace` seconds, then SIGKILL whatever remains of its process
+    group, reap the child and wait for the group to empty."""
+    signal.alarm(0)
+    status, end = None, time.monotonic() + grace
+    while status is None and time.monotonic() < end:
+        done, waited = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = waited
+        else:
+            time.sleep(0.005)
+    # An exited child's ID stays reserved while any group member lives, so this cannot miss.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+    if status is None:
+        _, status = os.waitpid(pid, 0)
+    # Orphaned members are reaped by init; a zombie still counts, so the wait is bounded.
+    end = time.monotonic() + 2
+    while time.monotonic() < end:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    return os.waitstatus_to_exitcode(status)
+
+
+def supervised(work, runner):
+    """Run work(runner) in a child that leads its own process group, under tick.lock held here.
+
+    Every exit (response, error or the deadline raising in this parent) SIGKILLs and reaps the
+    whole group before the lock is released, so no scan or Git descendant outlives the lock.
+    None means the lock was busy.
+    """
+    def locked():
+        r, w = os.pipe()
+        # The deadline must not land between fork and supervision: hold SIGALRM until the
+        # parent is inside the try below (a pending alarm then fires there).
+        alarm = {signal.SIGALRM}
+        signal.pthread_sigmask(signal.SIG_BLOCK, alarm)
+        try:
+            pid = os.fork()
+        except BaseException:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, alarm)
+            raise
+        if pid == 0:
+            # Never unwind into the parent's frames: with_lock's finally would unlock the
+            # lock file description shared with the parent.
+            code = 2
+            try:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, alarm)
+                os.close(r)
+                os.setpgid(0, 0)
+                out = work(_LockHeld(runner))
+                with os.fdopen(w, "wb") as pipe:
+                    pipe.write(out)
+                code = 0
+            finally:
+                os._exit(code)
+        answered = False
+        try:
+            os.close(w)
+            with contextlib.suppress(OSError):
+                os.setpgid(pid, pid)  # also set here, so the group kill can never miss
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, alarm)
+            with os.fdopen(r, "rb") as pipe:
+                out = pipe.read(MAX_BYTES + 1)
+            answered = len(out) <= MAX_BYTES
+        finally:
+            # A complete response gets a moment to exit cleanly; a deadline or error kills now.
+            code = _reap(pid, 1 if answered else 0)
+        if code != 0 or len(out) > MAX_BYTES:
+            raise AuthorRefused("request refused; no permission")
+        return out
+
+    # crq.with_lock emits human diagnostics on stdout on contention; never mix them with wire JSON.
+    with contextlib.redirect_stdout(io.StringIO()):
+        return runner.with_lock(locked)
+
+
 def main():
     if len(sys.argv) != 1 or os.environ.get("SSH_ORIGINAL_COMMAND") != "author-v1":
         print("author-transport: operation refused", file=sys.stderr)
         return 2
+
     def expired(signum, frame):
-        # Unwind instead of dying on SIGALRM: subprocess.run and the snapshot Git helper
-        # kill their children on the way out, and with_lock releases tick.lock.
+        # Unwind instead of dying on SIGALRM, so supervised() kills the request's process
+        # group before with_lock releases tick.lock.
         raise AuthorRefused("author transport deadline")
 
     signal.signal(signal.SIGALRM, expired)
@@ -121,9 +216,12 @@ def main():
         signal.alarm(DEADLINE_S)
         raw = sys.stdin.buffer.read(MAX_SNAPSHOT_BYTES + 1)
         import crq  # Only after the forced-command guard; never imports signer.
-        result = handle(raw, crq, policy_path=os.environ.get("CRQ_AUTHOR_REVIEW_POLICY"),
-                        reviewer=os.environ.get("CRQ_AUTHOR_FALLBACK_REVIEWER"),
-                        approved_target=os.environ.get("CRQ_AUTHOR_TARGET"))
+        result = supervised(
+            lambda runner: handle(raw, runner, policy_path=os.environ.get("CRQ_AUTHOR_REVIEW_POLICY"),
+                                  reviewer=os.environ.get("CRQ_AUTHOR_FALLBACK_REVIEWER"),
+                                  approved_target=os.environ.get("CRQ_AUTHOR_TARGET")), crq)
+        if not isinstance(result, bytes):
+            raise AuthorRefused("queue lock busy; no permission")
         sys.stdout.buffer.write(result)
         return 0
     except (Exception, SystemExit):
