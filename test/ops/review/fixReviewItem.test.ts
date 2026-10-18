@@ -780,6 +780,11 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     'Now reviewing the reviewed comment.',
     'We are working on the fix.',
     'I am starting work on the reviewed item.',
+    // Progress-only sentences JOINED are still no outcome (PR #343 independent review, finding 1).
+    'Reading the anchored code first. Starting work on the reviewed item.',
+    'Starting work.\nReading the anchored file first.\nplaceholder',
+    'Let me look at the file first; I will fix the guard.',
+    'Looking into it…',
   ])('first-person or sequenced progress %j is a non-answer (PR #343 review)', (summary) => {
     expect(nonAnswerSummaryReason(summary, false)).toContain('preamble or placeholder');
     expect(nonAnswerSummaryReason(summary, true)).toContain('preamble or placeholder');
@@ -792,13 +797,16 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     expect((await op(baseInput())).status).toBe('failed');
   });
 
-  test.each(['n/a', 'No change needed.', 'Already addressed.'])(
-    'an unchanged summary with no reason (%j) → failed',
-    async (summary) => {
-      const { op } = scriptedOp([completeWorker({ changed: false, summary, commits: [] })]);
-      expect((await op(baseInput())).status).toBe('failed');
-    },
-  );
+  test.each([
+    'n/a',
+    'No change needed.',
+    'Already addressed.',
+    // The floor counts OUTCOME words: narration cannot pad a bare disposition past it.
+    'Reading the anchored code first. Already addressed.',
+  ])('an unchanged summary with no reason (%j) → failed', async (summary) => {
+    const { op } = scriptedOp([completeWorker({ changed: false, summary, commits: [] })]);
+    expect((await op(baseInput())).status).toBe('failed');
+  });
 
   test.each([
     [NO_CHANGE, false],
@@ -812,6 +820,11 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     ["I'm not going to change it: line 3 already guards the case.", false],
     ['I am reading the anchored file, which already guards the abort, so nothing changed.', false],
     ['First, the retry loop was fixed to honor the abort signal.', true],
+    // A future-tense lead that DECLINES a change is a disposition (independent review, finding 2).
+    ['I will make no changes because line 3 already rejects empty input.', false],
+    ['Let me explain why nothing changes: line 3 already rejects empty input.', false],
+    // Narration beside a real outcome: the outcome is what gets judged.
+    ['Reading the anchored code first. Line 3 already rejects empty input.', false],
   ] as const)('a real disposition %j (changed %s) is an outcome', (summary, changed) => {
     expect(nonAnswerSummaryReason(summary, changed)).toBeNull();
   });
