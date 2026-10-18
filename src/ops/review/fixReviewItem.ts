@@ -288,9 +288,13 @@ const DECLINING_LEAD = new RegExp(
   `^${SEQUENCE}(?:(?:(?:i|we) (?:will|shall|am going to|are going to)|i'll|we'll|i'm going to|we're going to) (?:not|never|make no|leave)\\b|(?:(?:i|we) (?:won't|am not going to|are not going to|do not need to|don't need to)|i'm not going to|we're not going to)\\b)`,
 );
 
-/** A sentence led by an activity gerund ("Investigating …"); -ing words that are no activity excepted. */
+/**
+ * A sentence led by an activity gerund ("Investigating …"). Excepted: -ing
+ * words that report no work in progress ("Nothing …", "Having checked …",
+ * "Using the guard …").
+ */
 const ACTIVITY_LEAD = new RegExp(
-  `^${SEQUENCE}(?!(?:nothing|something|anything|everything|during|according|string|strings|thing|things)\\b)\\w+ing\\b`,
+  `^${SEQUENCE}(?!(?:nothing|something|anything|everything|during|according|string|strings|thing|things|having|using|assuming|including|regarding|considering|given)\\b)\\w+ing\\b`,
 );
 
 /** An activity lead that reports its RESULT ("Checking the guard confirmed …"). */
@@ -349,6 +353,14 @@ const summarySentences = (summary: string): SummarySentence[] =>
     .map((sentence) => sentence.replace(/\s+/g, ' ').replace(/^[\s,*>#-]+|[\s.!?…:;,-]+$/gu, ''))
     .filter((raw) => /[\p{L}\p{N}]/u.test(raw))
     .map((raw) => ({ text: raw.toLowerCase(), raw }));
+
+/**
+ * The prefix of the `failed` error for a run that produced no outcome. Such a
+ * row parsed as a contract, so the loop knows what it claimed; it posts
+ * nothing for it, but need not withhold its siblings (review-loop's
+ * mixed-worktree guard).
+ */
+export const NO_OUTCOME_ERROR = 'fixReviewItem: complete run produced no outcome';
 
 /**
  * Why a summary is not an outcome, or null when it is one (module constants
@@ -820,7 +832,7 @@ export function makeFixReviewItem(deps: {
     if (nonAnswer !== null) {
       return {
         status: 'failed',
-        error: `fixReviewItem: complete run produced no outcome — ${nonAnswer}: ${JSON.stringify(parsed.summary.slice(0, 120))}${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
+        error: `${NO_OUTCOME_ERROR} — ${nonAnswer}: ${JSON.stringify(parsed.summary.slice(0, 120))}${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
       };
     }
     return {
