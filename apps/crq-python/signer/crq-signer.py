@@ -128,6 +128,7 @@ RUN_LEDGER = STATE / "run-ledger.jsonl"
 MY_STARTS = STATE / "starts.jsonl"
 COOLDOWN = STATE / "cooldown.json"
 LOCK = STATE / "daemon.lock"
+RUNTIME_CONFIG = Path("/etc/cq-reviewer/runtime.json")  # root-owned runtime data (record_base)
 SCAN_ALLOWLIST_PATHS = [r"(^|/)\.git/", r"(^|/)node_modules/", r"(^|/)dist/", r"(^|/)\.gjc/",
                         r"(^|/)\.DS_Store$", r"^policy/denylist/patterns\.yml$"]
 
@@ -395,7 +396,7 @@ def post_status(repo: str, sha: str, state: str, desc: str, bind_main: bool = Tr
     token = install_token(repo)
     body = {"context": STATUS_CONTEXT, "state": state, "description": desc}
     # URL config is root-owned runtime data, never part of the wire or trust policy.
-    config_path = Path('/etc/cq-reviewer/runtime.json')
+    config_path = RUNTIME_CONFIG
     if item is not None and config_path.exists():
         config = json.loads(config_path.read_text())
         base = config.get('record_base')
@@ -575,18 +576,28 @@ def secret_scan(base: str, batch: str, out: Path) -> bool:
     compiled = [(r["id"], re.compile(r["regex"]), re.compile(r["path"]) if "path" in r else None)
                 for r in rules]
     allow = [re.compile(p) for p in SCAN_ALLOWLIST_PATHS]
-    path = None
+    # Source and destination tracked apart: a rename's removed lines are
+    # judged by the OLD path's policy, its added lines by the NEW path's.
+    old_path: Optional[str] = None
+    new_path: Optional[str] = None
     for n, line in enumerate(diff.splitlines(), 1):
         if line.startswith("+++ ") or line.startswith("--- "):
             p = line[4:]
             if p != "/dev/null":
-                path = p[2:] if p[:2] in ("a/", "b/") else p
+                p = p[2:] if p[:2] in ("a/", "b/") else p
+                if line[0] == "-":
+                    old_path = p
+                else:
+                    new_path = p
             continue
         if line.startswith("diff --git"):
             m = re.match(r"diff --git a/(.*) b/(.*)$", line)
-            path = m.group(2) if m else None
+            old_path, new_path = (m.group(1), m.group(2)) if m else (None, None)
             continue
-        if not line or line[0] not in "+-" or path is None:
+        if not line or line[0] not in "+-":
+            continue
+        path = old_path if line[0] == "-" else new_path
+        if path is None:
             continue
         if any(a.search(path) for a in allow):
             continue
@@ -1232,16 +1243,23 @@ def close_out(iid: str, req: Optional[Dict[str, Any]], req_sha: Optional[str], *
 
 def post_final(iid: str, sha: str, state: str, desc: str) -> Optional[Dict[str, Any]]:
     # Same private publication lock as the owner override. Hold across GET/POST.
-    STATE.mkdir(parents=True, exist_ok=True)
-    with (STATE / 'publication.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        return _post_final_locked(iid, sha, state, desc)
+    # Never raises: every caller must still reach close_out, and orphan
+    # recovery at start must not crash-loop the daemon.
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with (STATE / 'publication.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return _post_final_locked(iid, sha, state, desc)
+    except OSError as e:
+        audit("post-failed", item=iid, sha=sha, state=state, why=type(e).__name__)
+        return None
 
 
 def _post_final_locked(iid: str, sha: str, state: str, desc: str) -> Optional[Dict[str, Any]]:
     """Post a final status (fresh token, per use). Best effort: a failed post
-    is audited and shows up as posted_state=none/pending, never fatal. Before
-    any FINAL post, skip when the newest trusted status on the sha is already
+    is audited and shows up as posted_state=none/pending, never fatal —
+    including a malformed or unreadable runtime config. Before any FINAL
+    post, skip when the newest trusted status on the sha is already
     success — a stale failure/error must never clobber an override."""
     try:
         if state in ("pending", "success", "failure", "error"):
@@ -1252,7 +1270,7 @@ def _post_final_locked(iid: str, sha: str, state: str, desc: str) -> Optional[Di
         posted = post_status(REPO, sha, state, desc, item=iid)
         audit("post", item=iid, sha=sha, state=state, status_id=posted.get("status_id"))
         return posted
-    except (Transient, RuntimeError, Fatal) as e:
+    except Exception as e:  # best effort by contract (runtime config errors included)
         audit("post-failed", item=iid, sha=sha, state=state, why=type(e).__name__)
         return None
 
@@ -1400,8 +1418,9 @@ def process_request(path: Path) -> None:
                 # clean record of the same range (load_runs: last wins) — the
                 # CLI is not deterministic, so a dirty rerun of a range
                 # invalidates the earlier clean verdict on it.
+                # counts stay classify()'s six-level tally; findings carry
+                # the blocking rows only and decide the clean verdict.
                 findings = blocking_findings(run_dir / "review.ndjson")
-                counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEVERITIES}
                 clean = not any(f["severity"] in BLOCKING_SEVERITIES for f in findings)
             record_run(base, run_base, batch, cls["outcome"], clean)
             if cls["outcome"] == "rate_limited":
