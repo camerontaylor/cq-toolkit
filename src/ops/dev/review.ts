@@ -380,7 +380,7 @@ function runCycleReview(
     // Every binary path a scanned component names is fetched per leg and
     // scanned as a FILE component (path context included): the committed
     // side from BOTH blobs (removed bytes are scanned too), the staged side
-    // from the index, the unstaged side from the worktree.
+    // from HEAD and the index, the unstaged side from index and worktree.
     for (const [leg, patchText] of [
       ['committed', committedText],
       ['staged', stagedText],
@@ -390,22 +390,30 @@ function runCycleReview(
       for (const path of binaryPathsOf(patchText)) {
         if (leg === 'unstaged') {
           const read = await effects.readWorktreeFile(path, UNTRACKED_SCAN_FILE_CAP_BYTES);
-          if (!read.ok) {
+          if (!read.ok && !read.reason.includes('ENOENT')) {
             return {
               status: 'needs-human',
               reason: `the binary file '${path}' was refused by the secret scan — ${read.reason}`,
             };
           }
-          components.push({
-            component: `binary:unstaged:${path}`,
-            text: read.text,
-            kind: 'file',
-            path,
-          });
-          continue;
+          if (read.ok) {
+            components.push({
+              component: `binary:unstaged:${path}`,
+              text: read.text,
+              kind: 'file',
+              path,
+            });
+          }
         }
-        const blobs = leg === 'committed' ? [`${base}:${path}`, `${head}:${path}`] : [`:${path}`];
-        let readAny = false;
+        const blobs =
+          leg === 'committed'
+            ? [`${base}:${path}`, `${head}:${path}`]
+            : leg === 'staged'
+              ? [`${head}:${path}`, `:${path}`]
+              : [`:${path}`];
+        let readAny = components.some(
+          (component) => component.component === `binary:unstaged:${path}`,
+        );
         for (const spec of blobs) {
           const blob = await effects.runCommand('git', ['cat-file', 'blob', spec], {
             timeoutMs: GIT_TIMEOUT_MS,
@@ -421,7 +429,7 @@ function runCycleReview(
             const side =
               leg === 'committed' ? (spec.startsWith(`${base}:`) ? 'base' : 'head') : leg;
             components.push({
-              component: `binary:${leg === 'committed' ? `committed(${side})` : leg}:${path}`,
+              component: `binary:${leg === 'committed' ? `committed(${side})` : leg === 'staged' && spec.startsWith(`${head}:`) ? 'staged(head)' : leg === 'unstaged' ? 'unstaged(index)' : leg}:${path}`,
               text: blob.stdout,
               kind: 'file',
               path,
