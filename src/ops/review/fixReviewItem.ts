@@ -240,13 +240,16 @@ export const MAX_SUMMARY_CHARS = 1_000;
  *     context (NARRATION_PROGRESS: "I am reading the anchored file first.",
  *     "Starting work on the reviewed item.", "Working on it.");
  *   - declared INTENT (NARRATION_INTENT: "Let me look at the file.", "I will
- *     fix the guard."), unless it declines a change ("I will make no changes
- *     because line 3 already rejects empty input.").
+ *     fix the guard.", "First, I will inspect the file."), unless it declines
+ *     a change (DECLINES_CHANGE: "I will make no changes because line 3
+ *     already rejects empty input.").
  * The OUTCOME is what remains once narration is dropped. No outcome is a
  * contract violation → `failed`, so nothing is posted; so is an UNCHANGED
- * outcome shorter than MIN_UNCHANGED_SUMMARY_WORDS. A progress sentence that
- * reports a finding ("Checking the guard confirmed no change was needed.") is
- * outcome, because only a context-only object counts as narration.
+ * outcome whose reason, the sentences beyond a bare disposition
+ * (BARE_DISPOSITION: "No change needed."), is shorter than
+ * MIN_UNCHANGED_SUMMARY_WORDS. A progress sentence that reports a finding
+ * ("Checking the guard confirmed no change was needed.") is outcome, because
+ * only a context-only object counts as narration.
  */
 const NARRATION_FILLER =
   /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|start(?:ed)?|on it|pending|in progress)$/;
@@ -265,10 +268,24 @@ const NARRATION_PROGRESS = new RegExp(
 );
 
 const NARRATION_INTENT =
-  /^(?:(?:i|we) (?:will|shall|am going to|are going to|need to|want to)|i'll|we'll|i'm going to|we're going to|going to|let me|let's)\b/;
+  /^(?:(?:first|now|next|then),? )?(?:(?:i|we) (?:will|shall|am going to|are going to|need to|want to)|i'll|we'll|i'm going to|we're going to|going to|let me|let's)\b/;
 
-/** A sentence that DECLINES a change is a disposition, whatever its tense. */
-const DECLINES_CHANGE = /\b(?:no|not|nothing|never|none)\b|n't\b/;
+/**
+ * A sentence that DECLINES a change is a disposition, whatever its tense: a
+ * negation governing a change verb within three words ("I will make no
+ * changes", "I'm not going to change it"). A negation elsewhere ("I will
+ * investigate why this is not working") declines nothing.
+ */
+const DECLINES_CHANGE =
+  /(?:\b(?:no|not|nothing|never)\b|n't)(?: \S+){0,3} (?:chang|modif|fix|edit|touch|apply|need|necessar|requir)/;
+
+/**
+ * A BARE disposition: a no-change verdict with no reason ("No changes are
+ * currently necessary.", "Already addressed."). It is outcome, but it does not
+ * count toward an unchanged summary's reason (MIN_UNCHANGED_SUMMARY_WORDS).
+ */
+const BARE_DISPOSITION =
+  /^(?:(?:no|zero) (?:further |code |additional )?(?:change|changes|fix|fixes|action)(?: is| are| was| were)?(?: currently| really| actually)?(?: needed| necessary| required| warranted)?|nothing (?:to (?:change|fix|do)|(?:needs|needed) (?:to change|changing|fixing))|(?:(?:this|it) (?:is|was) )?(?:already )?(?:addressed|handled|fixed|done|satisfied|resolved|covered|correct|fine)(?: already)?|not applicable|(?:looks|seems) (?:good|fine|correct)|(?:the )?(?:current )?(?:code|implementation|behaviou?r) is (?:already )?(?:fine|correct|ok|okay)(?: as is)?)$/;
 
 const isNarration = (sentence: string): boolean =>
   NARRATION_FILLER.test(sentence) ||
@@ -276,12 +293,12 @@ const isNarration = (sentence: string): boolean =>
   (NARRATION_INTENT.test(sentence) && !DECLINES_CHANGE.test(sentence));
 
 /**
- * The floor for an UNCHANGED outcome, in words. "changed:false" is the loop's
- * honest no-change answer, posted as the thread's reply. It must carry a
- * disposition AND its reason ("Already satisfied: line 691 rounds to one
- * decimal."), which no one-to-three-word summary does ("No change needed.").
- * A changed:true summary is backed by verified commits, so the floor applies
- * to the unchanged case only.
+ * The floor for an UNCHANGED outcome's REASON, in words: outcome sentences
+ * other than a bare disposition. "changed:false" is the loop's honest
+ * no-change answer, posted as the thread's reply. It must carry a disposition
+ * AND its reason ("Already satisfied: line 691 rounds to one decimal."). A
+ * changed:true summary is backed by verified commits, so the floor applies to
+ * the unchanged case only.
  */
 export const MIN_UNCHANGED_SUMMARY_WORDS = 4;
 
@@ -308,9 +325,11 @@ export const nonAnswerSummaryReason = (summary: string, changed: boolean): strin
   if (outcome.length === 0) {
     return 'summary is a preamble or placeholder, not an outcome';
   }
-  const words = outcome.reduce((total, sentence) => total + sentence.split(' ').length, 0);
-  if (!changed && words < MIN_UNCHANGED_SUMMARY_WORDS) {
-    return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words of outcome)`;
+  const reasonWords = outcome
+    .filter((sentence) => !BARE_DISPOSITION.test(sentence))
+    .reduce((total, sentence) => total + sentence.split(' ').length, 0);
+  if (!changed && reasonWords < MIN_UNCHANGED_SUMMARY_WORDS) {
+    return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words of reason)`;
   }
   return null;
 };
