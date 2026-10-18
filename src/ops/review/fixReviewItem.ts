@@ -285,6 +285,8 @@ export const MIN_UNCHANGED_SUMMARY_WORDS = 4;
 const normalizeSummary = (summary: string): string =>
   summary
     .trim()
+    // Typographic apostrophes (models often emit U+2019) match the ASCII patterns.
+    .replace(/[\u2018\u2019\u02BC]/gu, "'")
     .replace(/\s+/g, ' ')
     .toLowerCase()
     .replace(/[\s.!…:;,-]+$/u, '');
