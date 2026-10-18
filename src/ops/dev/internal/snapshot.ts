@@ -93,8 +93,19 @@ export async function captureSnapshot(repo: string, base: string, tree: string, 
   // Operator-owned executable, no shell. It must scan all outgoing object content,
   // including binary/untracked content, and exit nonzero on refusal or tool error.
   await new Promise<void>((resolve, reject) => {
-    execFile(scanner, [repo, base, head], { env, timeout: 30_000, maxBuffer: 8192 }, (error) =>
-      error ? reject(new Error('snapshot pre-upload scan refused')) : resolve(),
+    // SIGKILL: a scanner that traps SIGTERM must not outlive its budget and hang capture.
+    execFile(
+      scanner,
+      [repo, base, head],
+      { env, timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 8192 },
+      (error) => {
+        if (!error) resolve();
+        else if (
+          ['ENOENT', 'EACCES', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code))
+        )
+          reject(new SnapshotConfigError('snapshot scanner is missing or not executable'));
+        else reject(new Error('snapshot pre-upload scan refused'));
+      },
     );
   });
   const snapshot = { v: 1 as const, tree, objects, sha256: digest.digest('hex') };
