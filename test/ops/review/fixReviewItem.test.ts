@@ -785,6 +785,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     'Starting work.\nReading the anchored file first.\nplaceholder',
     'Let me look at the file first; I will fix the guard.',
     'Looking into it…',
+    // Intent after a sequencing lead; a negation that declines nothing (PR #343 Codex review).
+    'First, I will inspect the anchored file.',
+    'I will investigate why this is not working.',
   ])('first-person or sequenced progress %j is a non-answer (PR #343 review)', (summary) => {
     expect(nonAnswerSummaryReason(summary, false)).toContain('preamble or placeholder');
     expect(nonAnswerSummaryReason(summary, true)).toContain('preamble or placeholder');
@@ -803,6 +806,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     'Already addressed.',
     // The floor counts OUTCOME words: narration cannot pad a bare disposition past it.
     'Reading the anchored code first. Already addressed.',
+    // A bare disposition is no reason, however long (PR #343 Codex review).
+    'No changes are currently necessary.',
+    'The current implementation is already fine as is.',
   ])('an unchanged summary with no reason (%j) → failed', async (summary) => {
     const { op } = scriptedOp([completeWorker({ changed: false, summary, commits: [] })]);
     expect((await op(baseInput())).status).toBe('failed');
