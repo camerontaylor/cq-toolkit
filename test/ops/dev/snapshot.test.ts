@@ -86,10 +86,16 @@ describe('tree snapshot capture', () => {
     expect(await git(worker, 'rev-parse', 'HEAD')).toBe(base);
   });
 
-  it('kills scanner descendants at the scan deadline', async () => {
-    const marker = join(root, 'late-marker');
-    const slow = await scanner(`(sleep 2; touch "${marker}") &\nwait\n`);
-    await expect(captureSnapshot(worker, base, tree, slow, 300)).rejects.toThrow('scan refused');
+  it.each([
+    ['at the scan deadline', 'wait\n', 'scan refused'],
+    ['after the scanner exits successfully', 'exit 0\n', null],
+  ])('kills scanner descendants %s', async (_, tail, refusal) => {
+    const marker = join(root, `late-marker-${++scanners}`);
+    const forks = await scanner(`(sleep 2; touch "${marker}") &\n${tail}`);
+    const capture = captureSnapshot(worker, base, tree, forks, 300);
+    await (refusal
+      ? expect(capture).rejects.toThrow(refusal)
+      : expect(capture).resolves.toBeDefined());
     await new Promise((resolve) => setTimeout(resolve, 2500));
     await expect(readFile(marker)).rejects.toThrow();
   });
