@@ -36,8 +36,9 @@ export { defaultPlanBatchConfig, planReviewBatch } from './planReviewBatch.js';
 // REST-counted anti-hallucination verify with its explicit NO PROGRESS
 // contract (verifyReviewOutcome), and per-PR worktree resolution with the
 // registry (prWorktree — origin branch is truth, never the sweep worktree).
-export type { DispatchLog, DispatchRecord } from '../../adapters/store/dispatchLog.js';
 export type {
+  DispatchLog,
+  DispatchRecord,
   IssueCommentAction,
   ReplyAndResolveOpts,
   ReplyAndResolveResult,

@@ -46,8 +46,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileDispatchLog } from '../../../src/adapters/store/dispatchLog.js';
 import { replyAndResolve } from '../../../src/ops/review/replyAndResolve.js';
-import type { DispatchLog, DispatchRecord } from '../../../src/adapters/store/dispatchLog.js';
-import type { ReplyAndResolveOpts, ReviewAction } from '../../../src/ops/review/replyAndResolve.js';
+import type {
+  DispatchLog,
+  DispatchRecord,
+  ReplyAndResolveOpts,
+  ReviewAction,
+} from '../../../src/ops/review/replyAndResolve.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 
 // ---------------------------------------------------------------------------

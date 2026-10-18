@@ -75,10 +75,24 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { GIT_HARDEN } from '../../adapters/git/ratchetGit.js';
-import type { NonceLedger } from '../../adapters/store/nonceLedger.js';
 import { realpathOrSelf } from '../../adapters/store/nonceLedger.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
 import { markdownFileName, sidecarFileName } from './renderAnalysisReport.js';
+
+/**
+ * The single-use nonce store (ADR-0003 §5's operator ledger) — DEFINED HERE,
+ * owned by ops like the approval authority that consumes it: the file-backed
+ * adapter imports this type to implement it (adapters → ops, ADR-0005:27) —
+ * never the reverse, so the Phase 2 package split cannot form an
+ * ops→adapters declaration edge through {@link ApprovalAuthorityConfig}
+ * (PR #335 review, Codex P1). `consume` is a CHECK-AND-APPEND in one
+ * critical section: `'spent'` means an earlier consume — this process, or a
+ * previous run against the durable ledger — already spent the nonce.
+ * Implementations MUST be linearizable across concurrent callers.
+ */
+export interface NonceLedger {
+  consume(nonce: string): Promise<'consumed' | 'spent'>;
+}
 
 /** The workspace state an approval binds to (ADR-0003 §2 `state`, §4c step 1). */
 export interface ApprovalState {

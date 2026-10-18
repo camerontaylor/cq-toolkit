@@ -1,7 +1,9 @@
 // nonceLedger — the ADR-0003 §5 operator ledger (the store adapter's nonce
 // ledger; extracted from ops/analyze/approval.ts by Phase 1.4 — the approval
-// authority keeps admission/exercise policy, this module is the single-use
-// nonce persistence and its durability contract).
+// authority keeps admission/exercise policy and OWNS the {@link NonceLedger}
+// port type, imported from there adapters → ops (ADR-0005:27, PR #335
+// review, Codex P1); this module is the single-use nonce persistence and its
+// durability contract).
 import {
   existsSync,
   openSync,
@@ -14,17 +16,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { makeGitMutex } from '../../ops/sweep/gitMutex.js';
-
-/**
- * The single-use nonce store (ADR-0003 §5's operator ledger). `consume` is a
- * CHECK-AND-APPEND in one critical section: `'spent'` means an earlier
- * consume — this process, or a previous run against the durable ledger —
- * already spent the nonce. Implementations MUST be linearizable across
- * concurrent callers.
- */
-export interface NonceLedger {
-  consume(nonce: string): Promise<'consumed' | 'spent'>;
-}
+import type { NonceLedger } from '../../ops/analyze/approval.js';
 
 /** A ledger that can also answer the "left UNSPENT" question the tests assert. */
 export interface InspectableNonceLedger extends NonceLedger {

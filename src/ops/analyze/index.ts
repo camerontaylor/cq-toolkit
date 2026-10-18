@@ -60,8 +60,8 @@ export { makeApplyRemediation } from './applyRemediation.js';
 export type {
   FileNonceLedgerConfig,
   InspectableNonceLedger,
-  NonceLedger,
 } from '../../adapters/store/nonceLedger.js';
+export type { NonceLedger } from './approval.js';
 export type {
   ApprovalAdmission,
   ApprovalAuthority,

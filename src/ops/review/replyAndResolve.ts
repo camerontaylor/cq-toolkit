@@ -57,8 +57,12 @@
 // everything goes through opts.run, opts.push.run, and the DispatchLog.
 // Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
 // charset + the dot-segment rule); this module keeps only its own
-// module-prefixed fail-loud error message.
-import type { DispatchLog, DispatchRecord } from '../../adapters/store/dispatchLog.js';
+// module-prefixed fail-loud error message. The dispatch CONTRACT types
+// (DispatchRecord, DispatchLog) are DEFINED HERE beside the action
+// vocabulary they record — ops owns the port, the store adapter imports and
+// implements it (adapters → ops, ADR-0005:27), never the reverse, so the
+// Phase 2 package split cannot form an ops↔adapters declaration cycle
+// (PR #335 review, Codex P1).
 import { GH_NAME_OK, GhError, ghNameOk } from '../../adapters/forge-github/gh.js';
 import type { GhFn, GhResult } from '../../adapters/forge-github/gh.js';
 
@@ -93,6 +97,40 @@ export interface ResolveThreadAction {
 
 /** One dispatchable responder action. */
 export type ReviewAction = ReviewReplyAction | IssueCommentAction | ResolveThreadAction;
+
+/** One recorded successful dispatch — the dedupe memory's unit. */
+export interface DispatchRecord {
+  /** The action's stable id (the dedupe key). */
+  actionId: string;
+  /** Which action kind produced the record. */
+  kind: ReviewAction['kind'];
+  /** The created comment's REST id, or the resolved thread id. */
+  resultRef: string;
+  /** When the dispatch happened: the run's injected nowMs. */
+  at: number;
+}
+
+/**
+ * The crash-safe dispatch memory. `load` returns every prior record (an
+ * absent log = empty history); `record` persists one entry before the
+ * caller proceeds. Injectable: tests use an in-memory log, the CLI uses
+ * fileDispatchLog.
+ */
+export interface DispatchLog {
+  load(): Promise<DispatchRecord[]>;
+  record(entry: DispatchRecord): Promise<void>;
+  /**
+   * OPTIONAL cross-process serialization for ONE action's load →
+   * check → post → record sequence. The file-backed log provides it (a
+   * `<logPath>.lock` lockfile, proper-lockfile, bounded retries — failure
+   * to acquire within the bound throws loud naming the path); the
+   * in-memory log does not: in-process callers are single-threaded, and
+   * cross-process dedupe needs the file-backed log. Callers must hold the
+   * lock around exactly ONE action's sequence, never the whole batch (a
+   * whole-batch critical section is an avoidably long lock).
+   */
+  withLogLock?: <T>(fn: () => Promise<T>) => Promise<T>;
+}
 
 /** What to dispatch against, and everything the dispatch needs injected. */
 export interface ReplyAndResolveOpts {
