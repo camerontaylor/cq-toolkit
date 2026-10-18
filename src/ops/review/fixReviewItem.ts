@@ -61,7 +61,9 @@
 //     contract keys and value shapes, or a string holding one JSON line)
 //     → ok; a complete run whose structured output is missing, unparseable,
 //     or wrong-shaped is a DEFINITIVE contract violation → failed (never a
-//     guessed ok).
+//     guessed ok); so is a schema-valid contract whose summary is a
+//     preamble/placeholder, or an unchanged summary with no reason
+//     (nonAnswerSummaryReason — the run produced no outcome to post).
 //   'budget' → budget-exhausted; 'error' → failed with the structured
 //     errorClass named in the text for humans only (ADR-0002 §2.9 — the
 //     class itself is forwarded nowhere); 'aborted' → indeterminate (no
@@ -222,6 +224,61 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
  * feeds the existing `truncated` flag.
  */
 export const MAX_SUMMARY_CHARS = 1_000;
+
+/**
+ * NON-ANSWER SUMMARIES (PR #336 incident, 2026-10-17/18): a worker that
+ * answers the contract on its FIRST turn — before reading anything — hands
+ * back a schema-valid `{changed:false}` whose summary is a preamble
+ * ("Reading the anchored code first.", "Starting work on the reviewed
+ * item.") or filler ("placeholder", "start"). That is no outcome at all,
+ * and the loop composed it into a posted reply on every scheduled run. A
+ * summary whose NORMALIZED form (trimmed, whitespace-collapsed, lowercased,
+ * trailing punctuation dropped) matches any pattern below is a contract
+ * violation → `failed`, so nothing is posted. Two shapes, both anchored at
+ * the start: whole-summary filler, and progress narration that only
+ * announces work ("reading …", "let me …"). A real disposition reports what
+ * was done or found, never what is about to happen.
+ */
+export const NON_ANSWER_SUMMARY_PATTERNS: readonly RegExp[] = Object.freeze([
+  /^(?:placeholder|todo|tbd|wip|n\/?a|none|null|nothing|ok(?:ay)?|done|start(?:ed)?|on it|pending|in progress|\.{3}|…)$/,
+  /^(?:starting|reading|looking|checking|investigating|examining|inspecting|reviewing|analy[sz]ing|working|beginning|opening|let me|let's|i will|i'll|i am going to|i'm going to|going to|first|now|next)\b/,
+]);
+
+/**
+ * The floor for an UNCHANGED summary, in words. "changed:false" is the loop's
+ * honest no-change answer, posted as the thread's reply — it must carry a
+ * disposition AND its reason ("Already satisfied: line 691 rounds to one
+ * decimal."), which no one-to-three-word summary does ("n/a", "No change
+ * needed."). A changed:true summary is backed by verified commits, so the
+ * floor applies to the unchanged case only.
+ */
+export const MIN_UNCHANGED_SUMMARY_WORDS = 4;
+
+/** The normalized form the non-answer patterns judge (module doc above). */
+const normalizeSummary = (summary: string): string =>
+  summary
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/[\s.!…:;,-]+$/u, '');
+
+/**
+ * Why a summary is not an outcome, or null when it is one. Exported so the
+ * gate is pinned directly against the live incident bodies.
+ */
+export const nonAnswerSummaryReason = (summary: string, changed: boolean): string | null => {
+  const normalized = normalizeSummary(summary);
+  if (normalized === '') {
+    return 'empty summary';
+  }
+  if (NON_ANSWER_SUMMARY_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return 'summary is a preamble or placeholder, not an outcome';
+  }
+  if (!changed && normalized.split(' ').length < MIN_UNCHANGED_SUMMARY_WORDS) {
+    return `an unchanged summary must state the disposition and its reason (at least ${String(MIN_UNCHANGED_SUMMARY_WORDS)} words)`;
+  }
+  return null;
+};
 
 /**
  * The commits array's dispatch-boundary bounds (round-3 item 2): at most
@@ -397,6 +454,11 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   lines.push('{"changed":boolean,"summary":string,"commits":string[]}');
   lines.push(
     '"changed" is true only when you committed a fix in the worktree above; "commits" lists the full shas of the commits you created (empty array when none).',
+  );
+  // NON-overridable like the attribution line below: the op rejects a
+  // preamble/placeholder summary, so the worker is told what it must hold.
+  lines.push(
+    '"summary" reports the finished outcome — what you fixed, or (when changed is false) why no change is needed, citing what you read. Answer only after doing the work; a preamble such as "Reading the file first." or a placeholder is rejected.',
   );
   // NON-overridable attribution requirement (round-3 item 1): the loop
   // verifies per-item attribution by the commit subject, so this line rides
@@ -647,6 +709,16 @@ export function makeFixReviewItem(deps: {
       return {
         status: 'failed',
         error: `fixReviewItem: complete run carried no parseable fix contract — structured output must be an object with exactly the keys changed/summary/commits (non-empty summary; changed true ⇔ commits non-empty) or a single JSON line with them${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
+      };
+    }
+    // FAIL CLOSED ON A NON-ANSWER (module constants above): a schema-valid
+    // contract whose summary is a preamble or filler is no outcome — never
+    // an ok the loop would compose into a posted reply.
+    const nonAnswer = nonAnswerSummaryReason(parsed.summary, parsed.changed);
+    if (nonAnswer !== null) {
+      return {
+        status: 'failed',
+        error: `fixReviewItem: complete run produced no outcome — ${nonAnswer}: ${JSON.stringify(parsed.summary.slice(0, 120))}${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
       };
     }
     return {
