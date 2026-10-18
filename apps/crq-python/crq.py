@@ -130,7 +130,11 @@ def make_worktree(name: str, commit: str) -> Tuple[Path, str]:
     path = WT_ROOT / f"{WT_PREFIX}{name}"
     branch = f"crq/{name}"
     remove_worktree(path, branch)
-    git("worktree", "add", "--quiet", "-B", branch, str(path), commit)
+    try:
+        git("worktree", "add", "--quiet", "-B", branch, str(path), commit)
+    except RuntimeError:
+        remove_worktree(path, branch)
+        raise
     return path, branch
 
 
@@ -708,7 +712,15 @@ def launch(q: Dict[str, Any], item: Dict[str, Any], plan: Dict[str, Any]) -> str
             save_queue(q)
         event("blocked", item=item["id"], reason=item["last_error"])
         return run_id
-    wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
+    try:
+        wt, wbranch = make_worktree(f"wt-{run_id}", plan["head"])
+    except RuntimeError as exc:
+        if item["kind"] != author_quota.AUTHOR_KIND:
+            raise
+        # An admitted author head the clone cannot check out (e.g. a runner-configured
+        # required smudge filter) stays ungranted and waits for its lease deadline, which
+        # authorizes the agent fallback, instead of failing every tick.
+        raise author_quota.AuthorRefused("author head cannot be checked out") from exc
     cli_cmd = ["coderabbit", "review", "--agent"]
     if item["kind"] == author_quota.AUTHOR_KIND:
         # Author cycles review the COMMITTED base..head (the original manual cycle 1

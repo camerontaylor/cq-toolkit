@@ -1,11 +1,13 @@
 """Offline wire/lock tests. Never touches live state or starts any reviewer."""
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -173,6 +175,24 @@ class TransportTest(unittest.TestCase):
                 self.assertEqual(q["starts"], [])
 
 
+    def test_deadline_kills_the_runner_scan_and_releases_the_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            marker = root / "late-marker"
+            scanner = root / "scan"
+            scanner.write_text(f'#!/bin/sh\nsleep 2\ntouch "{marker}"\n')
+            scanner.chmod(0o700)
+            result = subprocess.run(
+                [sys.executable, "-B", "-c",
+                 "from test_author_transport import deadline_fixture_main; deadline_fixture_main()",
+                 str(root), str(scanner)],
+                cwd=Path(__file__).resolve().parent, input=request(), capture_output=True, timeout=20)
+            self.assertEqual((result.returncode, result.stdout), (2, b""))
+            time.sleep(2.5)
+            self.assertFalse(marker.exists())
+            with (root / "tick.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
 def fixture_main():
     """Production forced-command entry point; only the queue backend is fake."""
     sys.modules["crq"] = Backend()
@@ -182,3 +202,19 @@ def fixture_main():
                       CRQ_AUTHOR_TARGET=BINDING["target"])
     sys.argv = [transport.__file__]
     raise SystemExit(transport.main())
+
+
+def deadline_fixture_main():
+    """Production entry point whose locked work runs a scan that outlives the deadline."""
+    state, scanner = Path(sys.argv[1]), sys.argv[2]
+    backend = Backend()
+    backend.with_lock = lambda fn: crq.with_lock(lambda: crq.run([scanner], check=False) and fn())
+    sys.modules["crq"] = backend
+    transport.DEADLINE_S = 1
+    os.environ.update(SSH_ORIGINAL_COMMAND="author-v1",
+                      CRQ_AUTHOR_REVIEW_POLICY="operator-policy.json",
+                      CRQ_AUTHOR_FALLBACK_REVIEWER="agent:configured",
+                      CRQ_AUTHOR_TARGET=BINDING["target"])
+    sys.argv = [transport.__file__]
+    with mock.patch.multiple(crq, STATE=state, LOCK=state / "tick.lock"):
+        raise SystemExit(transport.main())

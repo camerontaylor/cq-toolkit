@@ -4,6 +4,7 @@ Offline Git objects only: no reviewer, network, signer or real state access.
 A tree OID passes legacy shape admission but cannot yet produce a review plan.
 """
 import copy
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -31,8 +32,9 @@ class SnapshotBaseline(unittest.TestCase):
     def git(self, *args, data=None):
         return subprocess.run(
             ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *args],
-            cwd=self.repo, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            check=True).stdout.decode().strip()
+            cwd=self.repo, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            # Never follow a caller's GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE.
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")}).stdout.decode().strip()
 
     def tree(self, contents):
         blob = self.git("hash-object", "-w", "--stdin", data=contents)
@@ -456,3 +458,27 @@ class SnapshotTransport(SnapshotBaseline):
         run(exact)  # the real joined input fits exactly at its own length
         with self.assertRaisesRegex(author_quota.AuthorRefused, "scan exceeds"):
             run(exact - 1)
+
+    def test_admitted_head_the_clone_cannot_check_out_waits_without_a_start(self):
+        # A runner-configured required smudge filter that fails: admission accepts the
+        # snapshot, but launch must leave it ungranted (deadline fallback), not crash the tick.
+        attrs = self.git("hash-object", "-w", "--stdin", data=b"* filter=strict\n")
+        blob = self.git("hash-object", "-w", "--stdin", data=b"filtered\n")
+        tree = self.git("mktree", data=f"100644 blob {attrs}\t.gitattributes\n100644 blob {blob}\tfile.txt\n".encode())
+        self.request = envelope(self.repo, self.base, tree)
+        self.call()
+        for key, value in (("filter.strict.smudge", "false"), ("filter.strict.required", "true")):
+            snapshot.git(self.destination, "config", key, value)
+        q = json.loads((self.state / "queue.json").read_text())
+        item = q["items"][0]
+        worktrees = self.repo / "worktrees"
+        with mock.patch.multiple(crq, CLONE=self.destination, WT_ROOT=worktrees, RUNS=self.state / "runs"), \
+             mock.patch.object(crq, "secret_scan", return_value=(True, {})), \
+             mock.patch.object(crq, "save_queue") as save:
+            with self.assertRaisesRegex(author_quota.AuthorRefused, "cannot be checked out"):
+                crq.launch(q, item, crq.plan_author(item, False))
+        self.assertEqual((item["state"], item["author_lease"]["state"], q["starts"]), ("pending", "waiting", []))
+        self.assertIsNone(item.get("run"))
+        save.assert_not_called()
+        self.assertEqual(snapshot.git(self.destination, "for-each-ref", "refs/heads/crq/"), b"")
+        self.assertEqual(list(worktrees.glob("*")), [])
