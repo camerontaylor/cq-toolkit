@@ -31,7 +31,7 @@
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from '../dev/effects.js';
-import { branchFromRevParse, gitOut, requireGitOut } from '../dev/effects.js';
+import { branchFromRevParse, gitOut, requireGitOut, requireGitOutRaw } from '../dev/effects.js';
 import type { DevCheckRecord, DevLedgerFile, DevReadinessRecord } from '../dev/record.js';
 import {
   AUTHOR_EVIDENCE_CAVEAT,
@@ -213,7 +213,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
       const dirtyDiff = await dev.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
         timeoutMs: GIT_TIMEOUT_MS,
       });
-      const diffText = requireGitOut(dirtyDiff, 'diff --binary --full-index HEAD');
+      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
       dirtySha256 =
         diffText === '' ? 'clean-tree' : createHash('sha256').update(diffText).digest('hex');
       const untrackedOut = requireGitOut(
@@ -363,7 +363,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         await dev.runCommand('git', ['rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS }),
         'rev-parse HEAD (recheck)',
       );
-      const recheckDiff = requireGitOut(
+      const recheckDiff = requireGitOutRaw(
         await dev.runCommand('git', ['diff', '--binary', '--full-index', 'HEAD'], {
           timeoutMs: GIT_TIMEOUT_MS,
         }),
