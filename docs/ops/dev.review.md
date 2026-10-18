@@ -44,13 +44,16 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "target": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$",
       "type": "string"
+    },
+    "tree": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
     }
   },
   "required": [
     "action",
     "requestId",
     "base",
-    "head",
     "target",
     "cycle"
   ],

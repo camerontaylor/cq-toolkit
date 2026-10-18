@@ -47,7 +47,8 @@ Wire v1 is one UTF-8 JSON object (maximum 8 KiB) followed by EOF:
 `{v:1,op:enroll|status|fallback,binding:{request_id,base,head,target,cycle}}`.
 Unknown fields/versions/operations and duplicate keys are refused. Both base
 and head are immutable commits already available to the queue's review clone;
-no worker path or shell fragment crosses the wire. P5 adds tree snapshots.
+no worker path or shell fragment crosses the wire. For the versioned P5 tree
+snapshot extension, see [tree-snapshots.md](tree-snapshots.md).
 The response is exactly P3's version-1 lease decision with its immutable binding.
 Every operation runs under the same `state/tick.lock`; enrollment only creates a
 pending item, and P3 persists fallback before returning its permission. Existing
