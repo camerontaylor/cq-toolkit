@@ -84,10 +84,11 @@
 // precision that produced it.
 //
 // Two precision rules ride on top (PR #336 review): coverage's metric-defined
-// ONE decimal is a floor on its proposal precision (an integer-written
-// coverage file still tightens 94 → 94.3), and the rendered value token is
-// re-padded to the file's lexical precision (94.30 stays 94.30, never the
-// 94.3 JSON.stringify would emit, which would coarsen the next run's basis).
+// ONE decimal IS its proposal precision (an integer-written coverage file
+// still tightens 94 → 94.3; a finer one never earns a 94.24 the one-decimal
+// live reading cannot reproduce), and the rendered value token is re-padded
+// to that precision (94.30 stays 94.30 in a two-decimal file, never the 94.3
+// JSON.stringify would emit, which would coarsen the next run's basis).
 //
 // Failure direction at the op-seam level: input validation failures (null
 // input, non-string ws/base/headPrefix, malformed improvements) are `failed`
@@ -428,10 +429,13 @@ function rawValueToken(text: string): string | null {
         if (text.charAt(i) !== ':') continue;
         i += 1;
         while (i < n && /\s/.test(text.charAt(i))) i += 1;
-        // parseBaseline has already proven "value" holds a number, so an
-        // end-of-text or string value here is unreachable; refusing it
-        // beats misreading it.
-        if (i >= n || text.charAt(i) === '"') return null;
+        // parseBaseline has already proven the LAST "value" holds a number,
+        // but a SUPERSEDED duplicate may hold anything ({"value":"old",
+        // "value":94.20}): a non-number is skipped, not an abort, so the
+        // scan still reaches the effective last token. End-of-text is
+        // unreachable; refusing it beats misreading it.
+        if (i >= n) return null;
+        if (/[-0-9]/.test(text.charAt(i)) === false) continue;
         let end = i;
         while (end < n && /[0-9.eE+-]/.test(text.charAt(end))) end += 1;
         last = text.slice(i, end);
@@ -508,13 +512,15 @@ function directionalRound(measurement: number, precision: number, direction: Dir
 
 /**
  * The coverage metric id and its metric-defined granularity (format.ts's
- * roundCoveragePct law: ONE decimal place). The granularity is a FLOOR on a
- * coverage proposal's precision: an integer-written coverage file ("value":
- * 94) must not turn a 94.3 reading into a skipped 94 — the evidence, the
- * ratchet check and the diff guard all speak one decimal for coverage.
+ * roundCoveragePct law: ONE decimal place). A coverage proposal is rounded
+ * and written at EXACTLY this precision, whatever the baseline file's
+ * lexical digits: an integer-written file ("value": 94) still tightens
+ * 94 → 94.3, and a finer file (94.20) never earns a 94.24 proposal — the
+ * live coverage reading is always one decimal, so a finer baseline is a
+ * value no re-measurement can reproduce (it would read as a regression).
  */
 const COVERAGE_METRIC = 'coverage';
-const COVERAGE_MIN_PRECISION = 1;
+const COVERAGE_PRECISION = 1;
 
 /**
  * Re-pad the rendered value token to the FILE's lexical precision. A number
@@ -750,14 +756,11 @@ export function createProposeBaselineUpdate(
         // canonical fallback) — a proposal is never stricter than the
         // evidence that produced it. Exact decimal work; an exact boundary
         // passes through unchanged.
-        const filePrecision = fileValuePrecision(text, baseline.value);
-        const proposalValue = directionalRound(
-          imp.value,
+        const precision =
           imp.metric === COVERAGE_METRIC
-            ? Math.max(filePrecision, COVERAGE_MIN_PRECISION)
-            : filePrecision,
-          baseline.direction,
-        );
+            ? COVERAGE_PRECISION
+            : fileValuePrecision(text, baseline.value);
+        const proposalValue = directionalRound(imp.value, precision, baseline.direction);
         // The ONLY path into a proposal: a genuine tighten AT THE PROPOSAL'S
         // OWN PRECISION, with the direction ALWAYS from the committed
         // baseline (this op has no readings — the improvement IS the
@@ -795,7 +798,7 @@ export function createProposeBaselineUpdate(
             capturedAt: imp.capturedAt ?? new Date().toISOString(),
           }),
           proposalValue,
-          filePrecision,
+          precision,
         );
         applied.push({
           path: relPath,

@@ -1712,4 +1712,74 @@ describe('proposeBaselineUpdate', () => {
     ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
     expect(effects.upsertCalls()).toBe(0);
   });
+
+  test('a superseded NON-NUMERIC value key does not abort the last-wins scan (PR review #4305894806)', async () => {
+    const rel = await seedRawBaseline(
+      TARGET,
+      METRIC,
+      [
+        '{',
+        '  "schemaVersion": 1,',
+        `  "target": "${TARGET}",`,
+        `  "metric": "${METRIC}",`,
+        '  "direction": "higher-is-better",',
+        '  "value": "obsolete",',
+        '  "value": 94.20,',
+        `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+        '}',
+        '',
+      ].join('\n'),
+    );
+    expect(parseBaseline(await readFile(join(ws, rel), 'utf8')).value).toBe(94.2);
+    const effects = makeFakeEffects();
+    // The effective token is 94.20 (two decimals), so 94.29 is a genuine
+    // tighten — not absorbed at the canonical one-decimal fallback.
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 94.29 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.29 }] },
+    });
+  });
+
+  test('coverage proposals use exactly one decimal even on a finer file: 94.20 + 94.24 absorbs, 94.20 + 94.35 writes 94.3 (PR review #4305894808)', async () => {
+    const rawCoverage = [
+      '{',
+      '  "schemaVersion": 1,',
+      '  "target": "cov",',
+      '  "metric": "coverage",',
+      '  "direction": "higher-is-better",',
+      '  "value": 94.20,',
+      `  "capturedAt": "${BASELINE_CAPTURED_AT}"`,
+      '}',
+      '',
+    ].join('\n');
+    await seedRawBaseline('cov', 'coverage', rawCoverage);
+    // 94.24 floors to the one-decimal 94.2 the live reading would show — not
+    // a tightening of 94.20, and never the 94.24 a re-measurement reads as
+    // 94.2 (a regression against it).
+    const absorbed = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(absorbed)(
+        proposeInput({ improvements: [{ target: 'cov', metric: 'coverage', value: 94.24 }] }),
+      ),
+    ).resolves.toMatchObject({ status: 'ok', value: { proposal: 'none', applied: [] } });
+    expect(absorbed.upsertCalls()).toBe(0);
+    const tightened = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(tightened)(
+        proposeInput({
+          improvements: [
+            { target: 'cov', metric: 'coverage', value: 94.35, capturedAt: CAPTURED_AT },
+          ],
+        }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 94.2, newValue: 94.3 }] },
+    });
+    expect(tightened.prs.values().next().value?.files[0]?.content).toContain('  "value": 94.3,\n');
+  });
 });
