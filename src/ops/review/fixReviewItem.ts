@@ -242,7 +242,9 @@ export const MAX_SUMMARY_CHARS = 1_000;
  *   - declared INTENT (NARRATION_INTENT: "Let me look at the file.", "I will
  *     fix the guard.", "First, I will inspect the file."), unless it declines
  *     a change (DECLINES_CHANGE: "I will make no changes because line 3
- *     already rejects empty input.").
+ *     already rejects empty input.");
+ *   - an ongoing first-person PROGRESSIVE (NARRATION_ONGOING: "I am
+ *     investigating why the test fails."), with the same exception.
  * The OUTCOME is what remains once narration is dropped. No outcome is a
  * contract violation → `failed`, so nothing is posted; so is an UNCHANGED
  * outcome whose reason, the sentences beyond a bare disposition
@@ -263,8 +265,21 @@ const CONTEXT_NOUN =
   '(?:(?:the|this|that|its|my) )?(?:(?:anchored|reviewed|review|relevant|target|referenced|current|flagged) )*(?:code|codebase|file|files|line|lines|item|thread|comment|comments|context|diff|change|changes|fix|issue|feedback|finding|suggestion|request|review|repo|repository|test|tests|it|this|that)';
 const CONTEXT_OBJECT = `${CONTEXT_NOUN}(?:,? and ${CONTEXT_NOUN})*`;
 
+/** The activity a progress report names ("reading", "looking into", "working on"). */
+const ACTIVITY_GERUND =
+  '(?:reading|re-reading|looking (?:at|into|over)|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating|exploring|scanning|tracing|studying|verifying|going (?:over|through)|digging into|working on|trying to)';
+
 const NARRATION_PROGRESS = new RegExp(
-  `^${PROGRESS_LEAD}(?:(?:reading|re-reading|looking (?:at|into|over)|checking|inspecting|examining|reviewing|opening|analy[sz]ing|investigating|exploring|scanning|tracing|studying|verifying|going (?:over|through)|digging into|working on)(?: ${CONTEXT_OBJECT})?|(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of|with) ${CONTEXT_OBJECT})?)(?: (?:first|now|next|again|closely|carefully|in detail))*$`,
+  `^${PROGRESS_LEAD}(?:${ACTIVITY_GERUND}(?: ${CONTEXT_OBJECT})?|(?:starting|beginning)(?: (?:the )?(?:work|investigation|review|fix|analysis))?(?: (?:on|of|with) ${CONTEXT_OBJECT})?)(?: (?:first|now|next|again|closely|carefully|in detail))*$`,
+);
+
+/**
+ * An explicit first-person PROGRESSIVE ("I am investigating why the test
+ * fails.") reports ongoing work whatever follows, unlike a bare gerund lead,
+ * which can open a finding ("Checking the guard confirmed …").
+ */
+const NARRATION_ONGOING = new RegExp(
+  `^(?:(?:first|now|next|then|currently),? )?(?:i am|i'm|we are|we're)(?: now| currently| just| still)? (?:${ACTIVITY_GERUND}|starting|beginning)\\b`,
 );
 
 const NARRATION_INTENT =
@@ -290,7 +305,8 @@ const BARE_DISPOSITION =
 const isNarration = (sentence: string): boolean =>
   NARRATION_FILLER.test(sentence) ||
   NARRATION_PROGRESS.test(sentence) ||
-  (NARRATION_INTENT.test(sentence) && !DECLINES_CHANGE.test(sentence));
+  ((NARRATION_INTENT.test(sentence) || NARRATION_ONGOING.test(sentence)) &&
+    !DECLINES_CHANGE.test(sentence));
 
 /**
  * The floor for an UNCHANGED outcome's REASON, in words: outcome sentences
