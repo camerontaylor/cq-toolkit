@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const MAX_CONTENT = 4 * 1024 * 1024;
@@ -9,7 +9,13 @@ const MAX_WIRE = 6 * 1024 * 1024;
 export class SnapshotConfigError extends Error {}
 
 /** Private object-only capture: never changes HEAD, the index or working files. */
-export async function captureSnapshot(repo: string, base: string, tree: string, scanner?: string) {
+export async function captureSnapshot(
+  repo: string,
+  base: string,
+  tree: string,
+  scanner?: string,
+  scanTimeoutMs = 30_000,
+) {
   if (![base, tree].every((oid) => /^[0-9a-f]{40}$/.test(oid)))
     throw new Error('invalid snapshot identity');
   if (!scanner?.startsWith('/'))
@@ -95,20 +101,28 @@ export async function captureSnapshot(repo: string, base: string, tree: string, 
   // Operator-owned executable, no shell. It must scan all outgoing object content,
   // including binary/untracked content, and exit nonzero on refusal or tool error.
   await new Promise<void>((resolve, reject) => {
-    // SIGKILL: a scanner that traps SIGTERM must not outlive its budget and hang capture.
-    execFile(
-      scanner,
-      [repo, base, head],
-      { env, timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 8192 },
-      (error) => {
-        if (!error) resolve();
-        else if (
-          ['ENOENT', 'EACCES', 'ENOTDIR'].includes(String((error as NodeJS.ErrnoException).code))
-        )
-          reject(new SnapshotConfigError('snapshot scanner is missing or not executable'));
-        else reject(new Error('snapshot pre-upload scan refused'));
-      },
-    );
+    // Own process group + SIGKILL of the whole group at the deadline: a scanner that traps
+    // SIGTERM or backgrounds children must not outlive its budget or keep reading the repo.
+    // Its output is never reflected, so stdio is discarded.
+    const child = spawn(scanner, [repo, base, head], { env, detached: true, stdio: 'ignore' });
+    const timer = setTimeout(() => {
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }, scanTimeoutMs);
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      if (['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(error.code)))
+        reject(new SnapshotConfigError('snapshot scanner is missing or not executable'));
+      else reject(new Error('snapshot pre-upload scan refused'));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error('snapshot pre-upload scan refused'));
+    });
   });
   const snapshot = { v: 1 as const, tree, objects, sha256: digest.digest('hex') };
   if (Buffer.byteLength(JSON.stringify(snapshot)) > MAX_WIRE - 8192)

@@ -142,6 +142,16 @@ describe('tree snapshot worker and real Python admission', () => {
         ).status,
       ).toBe('failed');
       expect(sentAfterRefusal).toBe(false);
+      // A scanner that backgrounds a child must not leave it running after the deadline.
+      const marker = join(root, 'late-marker');
+      await writeFile(scanner, `#!/bin/sh\n(sleep 2; touch "${marker}") &\nwait\n`, {
+        mode: 0o700,
+      });
+      await expect(captureSnapshot(worker, base, tree, scanner, 300)).rejects.toThrow(
+        'scan refused',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await expect(readFile(marker)).rejects.toThrow();
       // An absolute but missing scanner is operator configuration, not an unknown admission.
       const missing = await makeDevReview(
         async () => {
