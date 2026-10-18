@@ -811,6 +811,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // A bare disposition is no reason, however long (PR #343 Codex review).
     'No changes are currently necessary.',
     'The current implementation is already fine as is.',
+    // A scoped bare disposition: the path names where, not why (PR #343 Codex review).
+    'No changes are needed in `src/foo.ts`.',
+    'Nothing to change in src/a.ts.',
   ])('an unchanged summary with no reason (%j) → failed', async (summary) => {
     const { op } = scriptedOp([completeWorker({ changed: false, summary, commits: [] })]);
     expect((await op(baseInput())).status).toBe('failed');
@@ -836,6 +839,7 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     'Checking the anchored guard confirmed no change was needed.',
     'I will not change this because the existing guard already handles the case.',
     'The existing null check already covers the empty input case.',
+    'This is n/a here, and/or already settled upstream by the team.',
   ])('an unchanged reason %j that cites nothing it checked → no outcome', (summary) => {
     expect(nonAnswerSummaryReason(summary, false)).toContain('must cite what it checked');
   });
@@ -862,6 +866,9 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // A cited reason in any form: a symbol, a code span, a path.
     ['Already handled: `parseConfig()` rejects an empty path before the read.', false],
     ['The guard in MAX_SUMMARY_CHARS already caps the reply length.', false],
+    // An extensionless two-segment path is a citation (PR #343 Codex review).
+    ['No change is needed because src/Makefile already defines the target.', false],
+    ['Nothing to change for B because line 8 already guards it.', false],
     // -ing leads that report no work in progress (PR #343 CodeRabbit cycle).
     ['Having checked `src/a.ts:3`, the guard already rejects empty input.', false],
     ['Using the existing guard at line 3 already handles the empty case.', false],
