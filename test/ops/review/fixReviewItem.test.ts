@@ -788,6 +788,8 @@ describe('non-answer summaries fail closed (PR #336 incident)', () => {
     // Intent after a sequencing lead; a negation that declines nothing (PR #343 Codex review).
     'First, I will inspect the anchored file.',
     'I will investigate why this is not working.',
+    'I am investigating why the test fails.',
+    "We're still trying to reproduce the failure.",
   ])('first-person or sequenced progress %j is a non-answer (PR #343 review)', (summary) => {
     expect(nonAnswerSummaryReason(summary, false)).toContain('preamble or placeholder');
     expect(nonAnswerSummaryReason(summary, true)).toContain('preamble or placeholder');
