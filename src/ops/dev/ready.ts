@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import type { Op } from '../../kernel/types.js';
 import type { DevEffects } from './effects.js';
-import { branchFromRevParse, gitOut, requireGitOut } from './effects.js';
+import { branchFromRevParse, gitOut, requireGitOut, requireGitOutRaw } from './effects.js';
 import type { DevReadinessRecord } from './record.js';
 import {
   DEFAULT_DEV_TARGET,
@@ -97,7 +97,7 @@ export function makeDevReady(effects: DevEffects): Op<DevReadyInput, DevReadines
           timeoutMs: GIT_TIMEOUT_MS,
         },
       );
-      const diffText = requireGitOut(dirtyDiff, 'diff --binary --full-index HEAD');
+      const diffText = requireGitOutRaw(dirtyDiff, 'diff --binary --full-index HEAD');
       dirtySha256 =
         diffText === '' ? 'clean-tree' : createHash('sha256').update(diffText).digest('hex');
       const untrackedOut = requireGitOut(

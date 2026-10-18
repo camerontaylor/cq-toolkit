@@ -1,6 +1,7 @@
 // dev.ready op tests — the assembled record on ready, the named gaps on
 // not-ready (exit-3 class), and the identity recomputation (a readiness
 // claim is only ever about the state on disk right now).
+import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 import { makeDevReady } from '../../../src/ops/dev/ready.js';
 import { DEV_LEDGER_VERSION } from '../../../src/ops/dev/record.js';
@@ -41,6 +42,21 @@ describe('dev.ready', () => {
       checkId: 'k001-aaaaaaaa',
     });
     expect(result.value.caveat).toContain('Author readiness evidence');
+  });
+
+  test('ready: dirty evidence hashes the complete newline-terminated patch', async () => {
+    const patch =
+      'diff --git a/file.ts b/file.ts\n--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-before\n+after\n';
+    const dirtySha256 = createHash('sha256').update(patch).digest('hex');
+    const effects = readyEffects(patch);
+    effects.store.save({
+      version: DEV_LEDGER_VERSION,
+      branch: BRANCH,
+      records: [cycleRecord({ dirtySha256 }), checkRecord({ dirtySha256 })],
+    });
+    const result = await makeDevReady(effects)({ repoRoot: '/repo' });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') expect(result.value.dirtySha256).toBe(dirtySha256);
   });
 
   test('not ready: every gap in one needs-human reason', async () => {
