@@ -2206,7 +2206,9 @@ describe('carried-resolve authorization under the single identity (PR #343 revie
   test('a marked reply stamped for an older head does not resolve', async () => {
     const body = await answerOnce(completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])));
     const world = defaultWorld();
-    world.sha = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
+    // The PR moved on: the worktree resolvePrWorktree checked out is at a
+    // head the stamp (the pushed SHA) does not name.
+    world.worktreeHead = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
     world.pullsComments = [root(), selfReply(body)];
     const ghLog: string[][] = [];
     await runLoop(world, { driverResults: [], ghLog, responderLogin: 'prauthor' });
@@ -2588,6 +2590,104 @@ describe('thread settle gate (PR #336 incident)', () => {
     });
     expect(second.plan.jobs).toHaveLength(1);
     expect(second.actionsPosted).toBe(1);
+  });
+
+  test('a stamp naming the GraphQL head does not settle when the checked-out worktree is newer (PR #343 review)', async () => {
+    const body = await answerOnce();
+    // GitHub still serves BEFORE_SHA as headRefOid, but resolvePrWorktree
+    // already checked out the newly pushed OLD_HEAD tree: compare against it.
+    const world = { ...settleWorld(), worktreeHead: OLD_HEAD };
+    world.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+    });
+    expect(outcome.skipped).not.toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    expect(outcome.plan.jobs).toHaveLength(1);
+  });
+
+  describe('an edit the dispatch round cannot see re-opens the thread (PR #343 review)', () => {
+    // Two prior replies: the dispatch round reads only the LATEST one, so an
+    // edit to the root or to the first reply changes no timestamp or body it
+    // keys on. The settle round covers the whole thread.
+    const reply1 = (text: string) =>
+      restComment(9100, 'reviewer', text, iso(REPLY_AGE + 10_000), 101);
+    const reply2 = restComment(9101, 'reviewer', 'Still open.', iso(REPLY_AGE + 5000), 101);
+    const answerBody = async (): Promise<string> => {
+      const world = settleWorld();
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2];
+      const ghLog: string[][] = [];
+      await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+        ghLog,
+      });
+      return postedBodies(ghLog)[0] ?? '';
+    };
+
+    test('unedited: the reply still settles the thread (control)', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2, loopReply(body)];
+      const { outcome } = await runLoop(world, { driverResults: [] });
+      expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    });
+
+    test('the root comment was edited', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.threads = [actionableThread('T1', 'src/a.ts', 4, 101)];
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2, loopReply(body)];
+      const { outcome } = await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      });
+      expect(outcome.plan.jobs).toHaveLength(1);
+      expect(outcome.actionsPosted).toBe(1);
+    });
+
+    test('the first reply was edited (same id and timestamp)', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.pullsComments = [
+        root(),
+        reply1('Please guard line 3 AND line 4.'),
+        reply2,
+        loopReply(body),
+      ];
+      const { outcome } = await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      });
+      expect(outcome.plan.jobs).toHaveLength(1);
+    });
+  });
+
+  test('a thread reopened after its recorded resolve is looked at again (PR #343 review)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-reopen-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = publishedWorld();
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply', 'resolve_thread']);
+    // The reviewer pressed "unresolve": the thread is fetched unresolved again
+    // with no new comment and the same head, its resolve already recorded.
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.skipped).not.toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
   });
 
   test('a published fix stamps the worktree head it pushed', async () => {

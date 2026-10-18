@@ -619,6 +619,26 @@ const roundFingerprint = (itemId: string, item: FixableReviewItem): string => {
 };
 
 /**
+ * The SETTLE round (PR #343 review): what a loop reply's stamp binds. Unlike
+ * the dispatch round above (the LATEST comment only — a dispatch-idempotence
+ * key that deployed dispatch logs already hold), it covers the whole thread
+ * as the worker saw it: the root body and every prior reply (author, time,
+ * body), so an EDIT to the root or to any earlier reply — which changes no
+ * timestamp the dispatch round reads — invalidates the settlement proof.
+ */
+const settleRound = (
+  thread: { id: string; body: string },
+  prior: readonly ThreadComment[],
+): string =>
+  fnv1a32Hex(
+    JSON.stringify([
+      thread.id,
+      thread.body,
+      prior.map((reply) => [reply.authorLogin, reply.createdAt, reply.body]),
+    ]),
+  );
+
+/**
  * Build the fix plan: one job per fix input, op 'review.fixItem', ids
  * `fix-<n>` (1-based, input order). The builder is the parameterized plan
  * (module doc, WHY A BUILDER); runReviewLoop calls it with the enriched
@@ -884,6 +904,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const dispatched = new Set(
     (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
   );
+  // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
+  // are checked against the OBSERVED worktree movement, not trusted. Read
+  // BEFORE the settle gate: resolvePrWorktree has already fetched and checked
+  // out the head the workers will inspect, so the gate compares a reply's
+  // stamp against THAT head — GraphQL's headRefOid can lag a fresh push.
+  const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+  const settleHead =
+    headBefore.code === 0 && COMMIT_SHA_RE.test(headBefore.stdout.trim())
+      ? headBefore.stdout.trim()
+      : state.headRefOid;
   const signature = replySignature(opts.owner, opts.repo, opts.pr);
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
@@ -902,16 +932,25 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     if (entry.source.kind === 'thread') {
       const thread = state.threads.find((candidate) => candidate.id === entry.source.itemId);
       if (thread !== undefined) {
-        const roundOf = (prior: readonly ThreadComment[]): string =>
-          roundFingerprint(entry.source.itemId, { ...entry.item, comments: [...prior] });
+        const settleRoundOf = (prior: readonly ThreadComment[]): string =>
+          settleRound(thread, prior);
         const settlement = loopReplySettlement(thread.replies, {
           signature,
-          headSha: state.headRefOid,
+          headSha: settleHead,
           ownLogin: opts.responderLogin ?? null,
-          roundOf,
+          roundOf: settleRoundOf,
         });
-        if (settlement.settled) {
-          const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${roundOf(thread.replies.slice(0, -1))}`;
+        // The posting run's DISPATCH round: the thread without the trailing
+        // loop reply, so a recorded resolve dedupes.
+        const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${roundFingerprint(
+          entry.source.itemId,
+          { ...entry.item, comments: thread.replies.slice(0, -1) },
+        )}`;
+        // REOPENED: a marked reply whose resolve already RECORDED belongs to
+        // a thread that was resolved — yet it is fetched unresolved, so a
+        // reviewer reopened it. That is a signal to look again, not to settle.
+        const reopened = settlement.carryResolve && dispatched.has(resolveActionId);
+        if (settlement.settled && !reopened) {
           if (settlement.carryResolve && !dispatched.has(resolveActionId)) {
             carriedResolves.push({
               kind: 'resolve_thread',
@@ -987,26 +1026,27 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // stamped round and head still match, and its header carries the resolve
     // marker. A bare changed:false reply, a foreign signature-led reply or a
     // reply posted over unseen reviewer input queues nothing.
-    const roundOf = (prior: readonly ThreadComment[]): string =>
-      roundFingerprint(item.id, {
-        id: thread.id,
-        path: thread.path,
-        line: thread.line,
-        body: thread.body,
-        comments: [...prior],
-      });
     const settlement = loopReplySettlement(thread.replies, {
       signature,
-      headSha: state.headRefOid,
+      headSha: settleHead,
       ownLogin: opts.responderLogin ?? null,
-      roundOf,
+      roundOf: (prior) => settleRound(thread, prior),
     });
     if (!settlement.settled || !settlement.carryResolve) {
       continue;
     }
     // The posting run's round: the thread as it saw it, without the trailing
     // loop reply — the same actionId the planned carry above computes.
-    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundOf(thread.replies.slice(0, -1))}`;
+    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
+      item.id,
+      {
+        id: thread.id,
+        path: thread.path,
+        line: thread.line,
+        body: thread.body,
+        comments: thread.replies.slice(0, -1),
+      },
+    )}`;
     if (dispatched.has(resolveActionId)) {
       continue; // already resolved-and-recorded — a full no-op for this item
     }
@@ -1039,9 +1079,6 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // arms through the governor config: runPlan's governed dispatch reads
   // governor.ladderSpec.
   const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
-  // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
-  // are checked against the OBSERVED worktree movement, not trusted.
-  const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const fixReport = await (async (): Promise<RunReport> => {
     // Propagated accounted spend (review-debt #186): report the governor's
     // observed USD rollup OUT of the loop even when the fix run throws, so a
@@ -1351,9 +1388,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     const inspectedHead = headBefore.code === 0 ? headBefore.stdout.trim() : state.headRefOid;
     const answeredHead =
       value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : inspectedHead;
+    const stampThread =
+      source.kind === 'thread'
+        ? state.threads.find((candidate) => candidate.id === source.itemId)
+        : undefined;
+    const stampRound =
+      stampThread !== undefined
+        ? settleRound(stampThread, stampThread.replies)
+        : source.roundFingerprint;
     const stamp =
       answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
-        ? `\n${replyHeadStamp(answeredHead, source.roundFingerprint)}`
+        ? `\n${replyHeadStamp(answeredHead, stampRound)}`
         : '';
     // RESOLVE INTENT (REPLY_RESOLVE_MARKER): exactly the rows the resolve
     // branch below queues a resolve for — a thread's verified, untruncated
