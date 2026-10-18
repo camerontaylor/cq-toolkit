@@ -25,8 +25,8 @@ The runner additionally applies its existing path-aware denylist/gitleaks scan
 to every incoming blob in quarantine, including binary and attribute-suppressed
 content, as well as the ordinary diff. It matches actual paths and raw content
 lines as structured values, so blob text cannot forge patch headers or an
-allowlisted path
-and retains the usual pre-review-upload scan. Scanner approval never starts a run.
+allowlisted path. The runner also retains the usual pre-review-upload scan.
+Scanner approval never starts a run.
 
 ## Identity and wire
 
