@@ -166,7 +166,7 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([
         import('./open.js'),
-        import('./ghEffects.js'),
+        import('../../adapters/forge-github/ghEffects.js'),
         import('../dev/effects.js'),
       ]).then(
         ([m, ghEffects, devEffects]) =>
