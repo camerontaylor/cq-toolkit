@@ -98,17 +98,18 @@ export async function captureSnapshot(
   // Operator-owned executable, no shell. It must scan all outgoing object content,
   // including binary/untracked content, and exit nonzero on refusal or tool error.
   await new Promise<void>((resolve, reject) => {
-    // Own process group + SIGKILL of the whole group at the deadline: a scanner that traps
+    // Own process group, SIGKILLed at the deadline and on every exit: a scanner that traps
     // SIGTERM or backgrounds children must not outlive its budget or keep reading the repo.
     // Its output is never reflected, so stdio is discarded.
     const child = spawn(scanner, [repo, base, head], { env, detached: true, stdio: 'ignore' });
-    const timer = setTimeout(() => {
+    const killGroup = () => {
       try {
         if (child.pid) process.kill(-child.pid, 'SIGKILL');
       } catch {
-        child.kill('SIGKILL');
+        /* the group has already exited */
       }
-    }, scanTimeoutMs);
+    };
+    const timer = setTimeout(killGroup, scanTimeoutMs);
     child.on('error', (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
       if (['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(error.code)))
@@ -117,6 +118,7 @@ export async function captureSnapshot(
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      killGroup();
       if (code === 0) resolve();
       else reject(new Error('snapshot pre-upload scan refused'));
     });
