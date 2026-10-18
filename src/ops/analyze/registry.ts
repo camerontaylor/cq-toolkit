@@ -45,11 +45,10 @@ import type { CheckFailure, FailureSet } from '../gates/checkRunner.js';
 // what a record could produce. Safe at module scope: the pure ledger
 // decision module has zero runtime imports of its own.
 import { COMPONENT_MAX_CHARS, NOTE_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../ledger/ledger.js';
-// TYPE-ONLY import of the store format: erased at compile time, so this
-// module never loads the store's node:fs adapter (the ledger module's own
-// discipline).
-import type { LedgerEntry } from '../../adapters/store/ledgerStore.js';
-import type { LedgerView } from '../ledger/ledger.js';
+// TYPE-ONLY import of the ledger's port data types: erased at compile time,
+// so this module never loads the store adapter (the ledger module's own
+// discipline; the types are ops-owned — adapters → ops, never the reverse).
+import type { LedgerEntry, LedgerView } from '../ledger/ledger.js';
 import type { Cluster, ClusterErrorsInput, ClusterErrorsReport } from './clusterErrors.js';
 import type { ApprovalAuthority } from './approval.js';
 import { DENY_ALL_APPROVALS } from './approval.js';

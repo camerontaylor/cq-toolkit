@@ -4,7 +4,7 @@
 // violation of the committed format is a LedgerFormatError — a hand-edited
 // unsorted or duplicate-laden file is never silently normalized).
 import { describe, expect, test } from 'vitest';
-import type { LedgerEntry, LedgerFile } from '../../../src/adapters/store/ledgerStore.js';
+import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/ledger.js';
 import {
   LedgerFormatError,
   parseLedger,

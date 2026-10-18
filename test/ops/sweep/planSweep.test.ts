@@ -34,8 +34,13 @@ import { join } from 'node:path';
 import type { Op } from '../../../src/kernel/types.js';
 import type { CheckFailure } from '../../../src/ops/gates/checkRunner.js';
 import { fingerprintFailure, fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
-import type { LedgerEntry, LedgerFile } from '../../../src/adapters/store/ledgerStore.js';
-import type { LedgerQueryInput, LedgerStore, LedgerView } from '../../../src/ops/ledger/ledger.js';
+import type {
+  LedgerEntry,
+  LedgerFile,
+  LedgerQueryInput,
+  LedgerStore,
+  LedgerView,
+} from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
 import { SWEEP_DIFF_FLAGS } from '../../../src/ops/sweep/internal/gitDiffFlags.js';
 import {
