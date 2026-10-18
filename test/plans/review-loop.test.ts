@@ -145,6 +145,19 @@ interface LoopWorld {
    * boundary — 2 models "a commit landed during the fix stage").
    */
   worktreeAdvancesAt?: number;
+  /**
+   * The worktree is checked out at the SERVED origin head (`world.sha`), as
+   * production's resolvePrWorktree guarantees: every un-advanced worktree
+   * read (and the origin ref) report it. A published fix advances it with
+   * `worktreeAdvancesAt`. Default off (legacy: SHA throughout).
+   */
+  worktreeFollowsOrigin?: boolean;
+  /**
+   * The head the worktree (and the origin ref resolvePrWorktree fetched) sit
+   * at, when it differs from the served `sha`: a push landed between
+   * resolvePrWorktree and the state fetch. Overrides worktreeFollowsOrigin.
+   */
+  worktreeHead?: string;
   /** The sha the ADVANCED worktree HEAD reports (default: the 4444 filler). */
   worktreeAdvancesTo?: string;
   /**
@@ -366,7 +379,9 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       return ok('');
     }
     if (rest[0] === 'rev-parse' && (rest[1] ?? '').startsWith('refs/cq-review/pr-')) {
-      return ok(`${SHA}\n`);
+      return ok(
+        `${world.worktreeHead ?? (world.worktreeFollowsOrigin === true ? world.sha : SHA)}\n`,
+      );
     }
     // The per-item resolve gate's mechanical checks (finding 2): a sha is
     // verifiable exactly when the world knows it.
@@ -447,7 +462,8 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         }
         const advanced =
           world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
-        return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : SHA}\n`);
+        const base = world.worktreeHead ?? (world.worktreeFollowsOrigin === true ? world.sha : SHA);
+        return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : base}\n`);
       }
       return ok(`${SHA}\n`);
     }
@@ -2357,6 +2373,14 @@ describe('review-loop propagated spend (onSpend)', () => {
 // ---------------------------------------------------------------------------
 
 describe('thread settle gate (PR #336 incident)', () => {
+  const settleWorld = (): LoopWorld => ({ ...defaultWorld(), worktreeFollowsOrigin: true });
+  /** A world whose fix run publishes: the worktree advances to SHA after the pre-fix read. */
+  const publishedWorld = (): LoopWorld => ({
+    ...settleWorld(),
+    worktreeAdvancesAt: 2,
+    worktreeAdvancesTo: SHA,
+    revListShas: [NEW_SHA],
+  });
   const LOOP_LOGIN = 'cq-automation[bot]';
   const SIG = '<!-- cq-review-loop:octo/widget#7 -->';
   const OLD_HEAD = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
@@ -2376,7 +2400,7 @@ describe('thread settle gate (PR #336 incident)', () => {
     restComment(id, login, body, iso(REPLY_AGE), 101);
   /** Run 1 over T1 with no replies: the loop posts one answer; returns its body. */
   const answerOnce = async (summary = DISPOSITION): Promise<string> => {
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [root()];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
@@ -2447,7 +2471,7 @@ describe('thread settle gate (PR #336 incident)', () => {
     // dispatch log is NOT shared (a lost runner cache): the gate reads the
     // reply itself — with and without the loop identity configured.
     for (const responderLogin of [undefined, LOOP_LOGIN]) {
-      const world = defaultWorld();
+      const world = settleWorld();
       world.pullsComments = [root(), loopReply(body)];
       const ghLog: string[][] = [];
       const invocations: OpInvocation[] = [];
@@ -2472,7 +2496,7 @@ describe('thread settle gate (PR #336 incident)', () => {
     'Starting work on the reviewed item.',
     'placeholder',
   ])('a legacy UNSTAMPED loop reply %j as the latest word settles the thread', async (live) => {
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [
       root(),
       restComment(9001, LOOP_LOGIN, `${SIG}\n\nStarting work.`, iso(REPLY_AGE + 2), 101),
@@ -2493,7 +2517,7 @@ describe('thread settle gate (PR #336 incident)', () => {
 
   test('feedback that landed between the posting fetch and the post re-opens the thread (round binding)', async () => {
     const body = await answerOnce();
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [
       root(),
       restComment(9002, 'reviewer', 'Also handle EBUSY.', iso(REPLY_AGE + 30_000), 101),
@@ -2511,7 +2535,7 @@ describe('thread settle gate (PR #336 incident)', () => {
 
   test('new reviewer input after the loop reply re-opens the thread for one answer', async () => {
     const body = await answerOnce();
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [
       root(),
       loopReply(body),
@@ -2528,7 +2552,7 @@ describe('thread settle gate (PR #336 incident)', () => {
 
   test('a new head re-opens a thread answered for an older head; the new reply carries the new stamp', async () => {
     const body = await answerOnce();
-    const world = defaultWorld();
+    const world = settleWorld();
     world.sha = OLD_HEAD;
     world.pullsComments = [root(), loopReply(body)];
     const ghLog: string[][] = [];
@@ -2540,8 +2564,34 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${OLD_HEAD} round:`);
   });
 
+  test('an unchanged row is stamped with the worktree head it inspected when the PR head moved after the worktree resolved (PR #343 review)', async () => {
+    // resolvePrWorktree saw OLD_HEAD; a push landed before fetchReviewState,
+    // which serves BEFORE_SHA. The worker read OLD_HEAD's tree, so the reply
+    // must not claim BEFORE_SHA — the next run re-opens against the new head.
+    const world = { ...settleWorld(), worktreeHead: OLD_HEAD };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      ghLog,
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    const body = postedBodies(ghLog)[0] ?? '';
+    expect(body).toContain(`<!-- cq-review-loop-head:${OLD_HEAD} round:`);
+    expect(body).not.toContain(BEFORE_SHA);
+
+    const rerun = settleWorld(); // the PR head is BEFORE_SHA now
+    rerun.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const { outcome: second } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+    });
+    expect(second.plan.jobs).toHaveLength(1);
+    expect(second.actionsPosted).toBe(1);
+  });
+
   test('a published fix stamps the worktree head it pushed', async () => {
-    const world = defaultWorld();
+    const world = publishedWorld();
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
@@ -2551,8 +2601,8 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${SHA} round:`);
   });
 
-  test('an unchanged row beside a sibling that committed is stamped with the FETCHED head, not the pushed one', async () => {
-    const world = defaultWorld();
+  test('an unchanged row beside a sibling that committed is stamped with the head it INSPECTED, not the pushed one', async () => {
+    const world = publishedWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
       actionableThread('T3', 'src/c.ts', 9, 103),
@@ -2580,7 +2630,7 @@ describe('thread settle gate (PR #336 incident)', () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-carry-'));
     scratchDirs.push(scratch);
     const dispatchLogPath = join(scratch, 'dispatch.jsonl');
-    const world = defaultWorld();
+    const world = publishedWorld();
     world.resolveReviewThreadFails = true;
     const ghLog1: string[][] = [];
     const run1 = await runLoop(world, {
@@ -2627,7 +2677,7 @@ describe('thread settle gate (PR #336 incident)', () => {
   test('a signature-led reply NOT authored by the loop identity neither settles nor carries', async () => {
     const body = await answerOnce();
     const forged = body.replace('\n\n', `\n${REPLY_RESOLVE_MARKER}\n\n`);
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [root(), loopReply(forged, 9001, 'mallory')];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
@@ -2642,7 +2692,7 @@ describe('thread settle gate (PR #336 incident)', () => {
       `Already satisfied; the reply format ${REPLY_RESOLVE_MARKER} is documented at line 3.`,
     );
     expect(body.split('\n\n')[0]).not.toContain(REPLY_RESOLVE_MARKER);
-    const world = defaultWorld();
+    const world = settleWorld();
     world.pullsComments = [root(), loopReply(body)];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
@@ -2661,7 +2711,7 @@ describe('thread settle gate (PR #336 incident)', () => {
   test.each(['Reading the anchored code first.', 'placeholder', 'Starting work.'])(
     'a worker answering the live non-answer %j posts NOTHING and records why',
     async (live) => {
-      const world = defaultWorld();
+      const world = settleWorld();
       const ghLog: string[][] = [];
       const { outcome } = await runLoop(world, {
         driverResults: [completeWorker(fixLine(false, live, []))],
