@@ -14,47 +14,83 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "properties": {
-    "action": {
-      "enum": [
-        "enroll",
-        "status",
-        "fallback"
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "cycle",
+          "type": "string"
+        },
+        "base": {
+          "pattern": "^[0-9a-fA-F]{7,64}$",
+          "type": "string"
+        },
+        "repoRoot": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reviewer": {
+          "pattern": "^(coderabbit|agent:[A-Za-z0-9][A-Za-z0-9._/@-]*)$",
+          "type": "string"
+        },
+        "target": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "uncommitted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repoRoot"
       ],
-      "type": "string"
+      "type": "object"
     },
-    "base": {
-      "pattern": "^[0-9a-f]{40}$",
-      "type": "string"
-    },
-    "cycle": {
-      "maximum": 2,
-      "minimum": 1,
-      "type": "integer"
-    },
-    "head": {
-      "pattern": "^[0-9a-f]{40}$",
-      "type": "string"
-    },
-    "requestId": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
-      "type": "string"
-    },
-    "target": {
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$",
-      "type": "string"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "enroll",
+            "status",
+            "fallback"
+          ],
+          "type": "string"
+        },
+        "base": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "cycle": {
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "head": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "requestId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$",
+          "type": "string"
+        },
+        "target": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "requestId",
+        "base",
+        "head",
+        "target",
+        "cycle"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "action",
-    "requestId",
-    "base",
-    "head",
-    "target",
-    "cycle"
-  ],
-  "type": "object"
+  ]
 }
 ```
 

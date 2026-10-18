@@ -41,8 +41,8 @@ THE I1 CLI CONTRACT (landed):
   `cq run-plan --plan=p --json=yes` are usage errors, never a silently
   ignored flag or a silent human-mode downgrade). Bare `--json`/`--help`/`-h`
   keep their mode/help behavior and never reach op input.
-- `--help` renders the subcommand's input schema; an unknown subcommand
-  exits 2.
+- `--help` renders the subcommand's input schema, listing each object
+  alternative separately for union schemas; an unknown subcommand exits 2.
 - Unknown-flag enforcement is two-tier: unknown flag SYNTAX (positional
   tokens, duplicate flags) and unknown KEYS for run-plan are rejected by
   the CLI (exit 2); for op subcommands, unknown KEYS are rejected by the

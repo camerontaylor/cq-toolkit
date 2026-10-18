@@ -247,6 +247,7 @@ interface ZodDefLike {
   innerType?: unknown;
   element?: unknown;
   value?: unknown;
+  options?: unknown;
 }
 
 function defOf(schema: unknown): ZodDefLike | undefined {
@@ -314,8 +315,8 @@ function camelToKebab(key: string): string {
  * One line per schema field (`  --<key>=<described type>`), then the extra
  * reserved flags, then the notes. `renderKey` maps a schema key to the flag
  * spelling shown (identity everywhere except run-plan — camelToKebab). When
- * the schema exposes no `.shape`, render a generic line instead of field
- * lines.
+ * a union exposes object alternatives, list each branch separately; when
+ * the schema exposes no field shape, render a generic line.
  */
 function renderSubHelp(
   name: string,
@@ -325,12 +326,21 @@ function renderSubHelp(
   renderKey: (key: string) => string = (key) => key,
 ): string {
   const lines: string[] = [`usage: cq ${name} [--key=value ...]`, '', 'flags:'];
-  const shape = (schema as unknown as { shape?: Record<string, unknown> }).shape;
-  if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
+  const renderFields = (branch: unknown): boolean => {
+    const shape = (branch as { shape?: Record<string, unknown> } | null)?.shape;
+    if (typeof shape !== 'object' || shape === null || Array.isArray(shape)) return false;
     for (const [key, value] of Object.entries(shape)) {
       lines.push(`  --${renderKey(key)}=${describeType(value)}`);
     }
-  } else {
+    return true;
+  };
+  const def = defOf(schema);
+  if (def?.type === 'union' && Array.isArray(def.options)) {
+    for (const [index, branch] of def.options.entries()) {
+      lines.push(`  input alternative ${String(index + 1)}:`);
+      if (!renderFields(branch)) lines.push('  (this alternative does not expose a field list)');
+    }
+  } else if (!renderFields(schema)) {
     lines.push('  (the input schema does not expose a field list)');
   }
   for (const flag of extraFlags) lines.push(`  ${flag}`);

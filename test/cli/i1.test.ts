@@ -219,6 +219,25 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     expect(out).toContain('--help');
   });
 
+  test('dev.review union help lists both cycle and admission fields', async () => {
+    const { code, out } = await capture(['dev.review', '--help'], {
+      opsRoot: fileURLToPath(new URL('../../src/ops/', import.meta.url)),
+    });
+    expect(code).toBe(0);
+    for (const flag of [
+      '--repoRoot=',
+      '--reviewer=',
+      '--uncommitted=',
+      '--requestId=',
+      '--head=',
+      '--cycle=',
+    ])
+      expect(out).toContain(flag);
+    expect(out).toContain('input alternative 1');
+    expect(out).toContain('input alternative 2');
+    expect(out).not.toContain('does not expose a field list');
+  });
+
   test('--ops-root on an OP subcommand: reserved run-plan flag → exit 2, stdout empty', async () => {
     // Op inputs own their schema keys — no hidden flag collision: the flag is
     // rejected as a usage error BEFORE input validation, whatever the schema.

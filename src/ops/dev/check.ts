@@ -1,0 +1,360 @@
+// Dev lane — `dev.check`: the deterministic gate set composed over the diff
+// (strategy §3, dev.check row). A WRAPPER over existing code: it runs the
+// focused-checks contract's local duty as commands and records the verdicts
+// as data; it adds no gate logic of its own.
+//
+//   - check:static (lint/typecheck are its aliases — never run separately),
+//     format:check;
+//   - `pnpm test:narrow` AS-IS (nice re-exec, heavy lock and refusals are
+//     the script's, D-G), given the RESOLVED base sha (or the resolved
+//     `--range`), so its selection is the diff this record pins;
+//   - `knip` when its condition can hold (focused-checks contract §1),
+//     decided from PATH CLASSES, biased toward running: any added, deleted
+//     or untracked file, or any touched JS/TS source, package manifest,
+//     lockfile, knip or tsconfig file runs it; a diff of only modified
+//     non-code files (docs, workflows, data) skips it, recorded as skipped
+//     with the reason. No import line is parsed: an unnecessary knip run is
+//     cheap, a skipped required run is a hole;
+//   - `scripts/denylist-scan` over the tracked content being checked — the
+//     HEAD archive with the staged/unstaged patch applied, so a green row
+//     means the CURRENT identity was scanned (the protected script's
+//     diff-scoped mode stays its future);
+//   - `git diff --check` ×3 — committed (against the pinned base or the
+//     range), staged, unstaged.
+//
+// EVERY gate's verdict is recorded (pass/fail/skipped) with its exit code,
+// duration and an evidence tail; the record lands in the branch dev-record
+// whether the run passed or failed. A red run maps to `failed` (CLI exit 1);
+// green returns the report. The gates run in the live worktree; the record
+// is bound to the identity read before them (author tier, strategy §2.4).
+import { join } from 'node:path';
+import type { Op } from '../../kernel/types.js';
+import type { CommandResult, DevEffects } from './effects.js';
+import { faultText, guardDevOp } from './effects.js';
+import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
+import { DEFAULT_DEV_TARGET, DEV_LEDGER_VERSION } from './record.js';
+import { DevCheckInputSchema } from './registry.js';
+import { git, gitStdout, IDENTITY_DIFF_FLAGS, readWorkState, zList } from './internal/workState.js';
+
+/** Wall-clock caps, generous outer bounds (each inner tool enforces its own). */
+export const STATIC_GATE_TIMEOUT_MS = 10 * 60 * 1000;
+export const TEST_NARROW_TIMEOUT_MS = 30 * 60 * 1000;
+export const KNIP_TIMEOUT_MS = 10 * 60 * 1000;
+export const DENYLIST_TIMEOUT_MS = 10 * 60 * 1000;
+const GIT_GATE_TIMEOUT_MS = 60 * 1000;
+
+/** Input of the `dev.check` op (plain JSON; the registry schema mirrors it). */
+export interface DevCheckInput {
+  /** Repository the gates run in (the subprocess effects bind to it). */
+  repoRoot: string;
+  /** The intended PR target branch (default: the documented queue target). */
+  target?: string;
+  /** Explicit `a..b` commit range replacing the default merge-base pin; `b` must be HEAD. */
+  range?: string;
+}
+
+/** The dev.check report — the ok value and the persisted check record's evidence. */
+export type DevCheckReport = Omit<DevCheckRecord, 'kind'>;
+
+/** The `a..b` range shape: two non-empty refs joined by '..', neither spelled as an option. */
+export function rangeFault(range: string): string | null {
+  const parts = range.split('..');
+  if (parts.length !== 2 || parts.some((part) => part === '' || part.startsWith('-'))) {
+    return `range '${range}' must be '<ref>..<ref>'`;
+  }
+  if (parts[0] === parts[1]) return `range '${range}' is empty (identical endpoints)`;
+  return null;
+}
+
+/**
+ * Paths whose change can move knip's verdict when merely MODIFIED: JS/TS
+ * sources (imports, exports, entrypoints) and the dependency/config files
+ * knip reads.
+ */
+const KNIP_RELEVANT_PATH =
+  /\.[cm]?[jt]sx?$|(^|\/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|knip\.jsonc?|tsconfig[^/]*\.json)$/;
+
+/**
+ * Whether knip must run for a `--name-status -z` listing plus the untracked
+ * paths: the reason it runs, or null when the diff only modifies non-code
+ * files.
+ */
+export function knipTrigger(nameStatusZ: string, untracked: readonly string[]): string | null {
+  if (untracked.length > 0) return `untracked file ${untracked[0] ?? ''}`;
+  const entries = zList(nameStatusZ);
+  for (let index = 0; index + 1 < entries.length; index += 2) {
+    const status = entries[index] ?? '';
+    const path = entries[index + 1] ?? '';
+    if (status.startsWith('A') || status.startsWith('D')) return `${status} ${path}`;
+    if (KNIP_RELEVANT_PATH.test(path)) return `modified ${path}`;
+  }
+  return null;
+}
+
+/** Extract a bounded evidence tail from a gate's captured streams. */
+function evidenceTail(result: CommandResult): string {
+  const text = `${result.stderr}\n${result.stdout}`.trim();
+  if (text === '') return '(no output)';
+  const tail = text.split('\n').slice(-20).join('\n');
+  return tail.length > 2000 ? `…${tail.slice(-2000)}` : tail;
+}
+
+/**
+ * Classify one gate result: exit 0 → pass; anything else (non-zero exit,
+ * SIGKILL timeout) → fail with the evidence tail.
+ */
+function classifyGate(name: string, result: CommandResult, startedAtMs: number): DevCheckGate {
+  const durationMs = Date.now() - startedAtMs;
+  if (result.exitCode === 0 && !result.timedOut) {
+    return { name, status: 'pass', exitCode: 0, durationMs, evidence: evidenceTail(result) };
+  }
+  const why = result.timedOut
+    ? 'timed out and was SIGKILLed'
+    : `exit ${result.exitCode === null ? 'none (killed)' : String(result.exitCode)}`;
+  return {
+    name,
+    status: 'fail',
+    ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+    durationMs,
+    evidence: `${why} — ${evidenceTail(result)}`,
+  };
+}
+
+/**
+ * Run one gate; a runner that REJECTS (spawn fault, output overflow) is a
+ * failed row, never an op crash — earlier verdicts survive and the record
+ * still lands.
+ */
+async function runGate(
+  effects: DevEffects,
+  name: string,
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<DevCheckGate> {
+  const startedAt = Date.now();
+  try {
+    return classifyGate(name, await effects.runCommand(command, args, { timeoutMs }), startedAt);
+  } catch (err) {
+    return {
+      name,
+      status: 'fail',
+      durationMs: Date.now() - startedAt,
+      evidence: `could not run — ${faultText(err)}`,
+    };
+  }
+}
+
+/**
+ * The tracked-content denylist scan: the (protected, invoked read-only)
+ * script scans the tree it lives in, so run it over an extraction of
+ * `git archive HEAD` in a scratch dir OUTSIDE the worktree with the exact
+ * staged+unstaged patch applied — gitignored scratch is excluded by
+ * construction, and a newly staged file is included. Any step failing
+ * faults the gate (never a silently green scan).
+ */
+async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
+  const startedAt = Date.now();
+  let scratch: string | undefined;
+  try {
+    scratch = await effects.makeScratchDir('denylist-tree');
+    const archive = join(scratch, 'tree.tar');
+    const tree = join(scratch, 'tree');
+    const workPatch = join(scratch, 'work.patch');
+    gitStdout(
+      await git(effects, ['archive', '--format=tar', '--output', archive, 'HEAD']),
+      'archive HEAD',
+    );
+    await effects.ensureDir(tree);
+    const extract = await effects.runCommand('tar', ['-x', '-f', archive, '-C', tree], {
+      timeoutMs: GIT_GATE_TIMEOUT_MS,
+    });
+    if (extract.exitCode !== 0) {
+      throw new Error(`archive extraction failed — ${extract.stderr.trim().slice(0, 200)}`);
+    }
+    gitStdout(
+      await git(effects, ['diff', ...IDENTITY_DIFF_FLAGS, `--output=${workPatch}`, 'HEAD']),
+      'diff HEAD (staged+unstaged patch)',
+    );
+    gitStdout(
+      await git(effects, ['-C', tree, 'apply', '--whitespace=nowarn', '--allow-empty', workPatch]),
+      'apply the staged+unstaged patch over the archived tree',
+    );
+    const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
+      timeoutMs: DENYLIST_TIMEOUT_MS,
+    });
+    return classifyGate('denylist-scan', result, startedAt);
+  } catch (err) {
+    return {
+      name: 'denylist-scan',
+      status: 'fail',
+      durationMs: Date.now() - startedAt,
+      evidence: `${faultText(err)} — the tracked-tree scan could not run`,
+    };
+  } finally {
+    if (scratch !== undefined) await effects.removeScratchDir(scratch).catch(() => undefined);
+  }
+}
+
+/**
+ * Build the `dev.check` op over injected effects. Per call: read the
+ * identity (pin the immutable base), run the gates in sequence, persist the
+ * record, and return ok/failed per the verdict.
+ */
+export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckReport> {
+  return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
+    const fault = input.range === undefined ? null : rangeFault(input.range);
+    if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
+    const target = input.target ?? DEFAULT_DEV_TARGET;
+
+    // A range is resolved to commit shas; its end must BE HEAD, because the
+    // record's identity describes HEAD.
+    let rangeBase: string | undefined;
+    if (input.range !== undefined) {
+      const [start, end] = input.range.split('..') as [string, string];
+      const resolveRef = async (ref: string): Promise<string | null> => {
+        const result = await git(effects, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+        return result.exitCode === 0 ? result.stdout.trim() : null;
+      };
+      const [startSha, endSha, headSha] = [
+        await resolveRef(start),
+        await resolveRef(end),
+        await resolveRef('HEAD'),
+      ];
+      if (startSha === null || endSha === null) {
+        return {
+          status: 'needs-human',
+          reason: `dev.check: the range '${input.range}' did not resolve to two commits`,
+        };
+      }
+      if (endSha !== headSha) {
+        return {
+          status: 'needs-human',
+          reason: `dev.check: the range end ${endSha} is not HEAD ${String(headSha)} — a dev.check record describes HEAD, so the range must end there`,
+        };
+      }
+      rangeBase = startSha;
+    }
+    const read = await readWorkState(effects, {
+      target,
+      ...(rangeBase !== undefined ? { base: rangeBase } : {}),
+    });
+    if (!read.ok) return { status: 'needs-human', reason: `dev.check: ${read.reason}` };
+    const state = read.state;
+
+    const loadStamp: DevLoadStamp = effects.loadStamp();
+    const at = effects.nowIso();
+    const gates: DevCheckGate[] = [];
+    gates.push(
+      await runGate(
+        effects,
+        'check:static',
+        'pnpm',
+        ['run', 'check:static'],
+        STATIC_GATE_TIMEOUT_MS,
+      ),
+    );
+    gates.push(
+      await runGate(
+        effects,
+        'format:check',
+        'pnpm',
+        ['run', 'format:check'],
+        STATIC_GATE_TIMEOUT_MS,
+      ),
+    );
+    gates.push(
+      await runGate(
+        effects,
+        'test:narrow',
+        'pnpm',
+        input.range !== undefined
+          ? ['test:narrow', '--range', `${state.base}..${state.head}`]
+          : ['test:narrow', '--base', state.base],
+        TEST_NARROW_TIMEOUT_MS,
+      ),
+    );
+
+    // The knip condition reads base → WORKING TREE (committed, staged and
+    // unstaged together) plus the untracked list. An unreadable listing
+    // runs knip (fail-safe toward running).
+    const nameStatus = await git(effects, [
+      'diff',
+      '--name-status',
+      '-z',
+      '--no-renames',
+      state.base,
+    ]);
+    const trigger =
+      nameStatus.exitCode === 0
+        ? knipTrigger(nameStatus.stdout, state.untracked)
+        : 'the diff listing could not be read';
+    gates.push(
+      trigger !== null
+        ? await runGate(effects, 'knip', 'pnpm', ['run', 'knip'], KNIP_TIMEOUT_MS)
+        : {
+            name: 'knip',
+            status: 'skipped',
+            durationMs: 0,
+            evidence:
+              'knip condition not met: the diff only modifies non-code files (no added, deleted or untracked file; no JS/TS, manifest, lockfile, knip or tsconfig change)',
+          },
+    );
+
+    gates.push(await denylistGate(effects));
+
+    const committedLeg = [state.base, state.head];
+    for (const [name, args] of [
+      ['diff-check:committed', ['diff', '--check', ...committedLeg]],
+      ['diff-check:staged', ['diff', '--check', '--cached']],
+      ['diff-check:unstaged', ['diff', '--check']],
+    ] as const) {
+      gates.push(await runGate(effects, name, 'git', args, GIT_GATE_TIMEOUT_MS));
+    }
+
+    const red = gates.filter((gate) => gate.status === 'fail').map((gate) => gate.name);
+    const passed = red.length === 0;
+    // The record lands whether the run passed or failed; the check id is
+    // minted INSIDE the store mutex, and a store fault still reports the
+    // verdict.
+    let record: DevCheckRecord;
+    try {
+      record = await effects.openLedger(state.branch).mutate((ledger) => {
+        const checkCount = ledger.records.filter((entry) => entry.kind === 'check').length;
+        const entry: DevCheckRecord = {
+          kind: 'check',
+          checkId: `k${String(checkCount + 1).padStart(3, '0')}-${state.head.slice(0, 8)}`,
+          target,
+          base: state.base,
+          head: state.head,
+          dirtySha256: state.dirtySha256,
+          ...(input.range !== undefined ? { range: input.range } : {}),
+          passed,
+          gates,
+          loadStamp,
+          at,
+        };
+        return {
+          ledger: {
+            version: DEV_LEDGER_VERSION,
+            branch: ledger.branch,
+            records: [...ledger.records, entry],
+          },
+          value: entry,
+        };
+      });
+    } catch (err) {
+      const verdict = passed ? 'all gates green' : `red gates: ${red.join(', ')}`;
+      return {
+        status: 'failed',
+        error: `dev.check: ${verdict}, but the record could not be persisted — ${faultText(err)}`,
+      };
+    }
+    const { kind: _kind, ...report } = record;
+    if (passed) return { status: 'ok', value: report };
+    return {
+      status: 'failed',
+      error: `dev.check: ${String(red.length)} gate(s) red (${red.join(', ')}) — record ${record.checkId} is in the branch dev-record`,
+    };
+  });
+}
