@@ -270,7 +270,13 @@ export const loopReplySettlement = (
   if (header.head !== opts.headSha.toLowerCase()) {
     return unsettled;
   }
-  return { settled: true, carryResolve: header.resolve && ownLogin !== null };
+  // A MARKED reply queued a resolve; without a known identity it cannot be
+  // carried, so the thread stays actionable (a re-check answers it and
+  // settles) rather than settling with the resolve stranded.
+  if (header.resolve && ownLogin === null) {
+    return unsettled;
+  }
+  return { settled: true, carryResolve: header.resolve };
 };
 
 /**
@@ -1326,9 +1332,12 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // START-anchored, so the marker must be the body's FIRST line for a
     // re-run to recognize its own words as skip-class content. The HEAD
     // STAMP follows it (replyHeadStamp): the head this reply answers for —
-    // the pushed worktree head when this run published commits, else the
-    // fetched head the worker read.
-    const answeredHead = commits.length > 0 ? headAfter.stdout.trim() : state.headRefOid;
+    // the pushed worktree head for a row that published its own commits,
+    // else the FETCHED head. An unchanged row never claims a head a sibling's
+    // later commit produced: that head moved under it, so the next run
+    // re-opens the thread once against the new code.
+    const answeredHead =
+      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : state.headRefOid;
     const stamp =
       answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
         ? `\n${replyHeadStamp(answeredHead, source.roundFingerprint)}`

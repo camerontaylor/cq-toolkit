@@ -2343,7 +2343,8 @@ describe('thread settle gate (PR #336 incident)', () => {
       settled: true,
       carryResolve: true,
     });
-    expect(settle([reply(marked)])).toEqual(settledOnly);
+    // Without the identity a marked reply stays actionable (no stranded resolve).
+    expect(settle([reply(marked)])).toEqual(unsettled);
     // The marker counts only in the header, never quoted in the summary.
     expect(
       settle([reply(`${header}\n\nQuoted ${REPLY_RESOLVE_MARKER}\n${REPLY_RESOLVE_MARKER}`)], {
@@ -2463,6 +2464,31 @@ describe('thread settle gate (PR #336 incident)', () => {
     });
     expect(outcome.status).toBe('ok');
     expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${SHA} round:`);
+  });
+
+  test('an unchanged row beside a sibling that committed is stamped with the FETCHED head, not the pushed one', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, DISPOSITION, [])),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+    });
+    expect(outcome.status).toBe('ok');
+    const bodies = postedBodies(ghLog);
+    expect(bodies.find((body) => body.includes(DISPOSITION))).toContain(
+      `<!-- cq-review-loop-head:${BEFORE_SHA} round:`,
+    );
+    expect(bodies.find((body) => body.includes('Guarded the abort.'))).toContain(
+      `<!-- cq-review-loop-head:${SHA} round:`,
+    );
   });
 
   test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {
