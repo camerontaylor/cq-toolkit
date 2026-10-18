@@ -375,6 +375,73 @@ describe('dev.check', () => {
     expect(effects.commands.find((entry) => entry.command === 'tar')).toBeDefined();
   });
 
+  test('the denylist scan applies the staged/unstaged patch over the archive before scanning', async () => {
+    const effects = greenEffects();
+    const result = await makeDevCheck(effects)({ repoRoot: '/repo' });
+    expect(result.status).toBe('ok');
+    const commands = effects.commands;
+    const diffAt = commands.findIndex(
+      (entry) =>
+        entry.command === 'git' &&
+        entry.args[0] === 'diff' &&
+        entry.args.includes('--output') &&
+        entry.args[entry.args.length - 1] === 'HEAD',
+    );
+    const applyAt = commands.findIndex(
+      (entry) =>
+        entry.command === 'git' &&
+        entry.args[0] === '-C' &&
+        entry.args[2] === 'apply' &&
+        entry.args.includes('--allow-empty'),
+    );
+    const scanAt = commands.findIndex(
+      (entry) => entry.command === 'node' && entry.args[0]?.endsWith('denylist-scan'),
+    );
+    // The staged/unstaged leg exists, is single-read (`--output` into the
+    // scratch dir), and runs AFTER the extraction and BEFORE the scan.
+    expect(diffAt).toBeGreaterThanOrEqual(0);
+    expect(applyAt).toBeGreaterThan(diffAt);
+    expect(scanAt).toBeGreaterThan(applyAt);
+    expect(commands[diffAt]?.args).toContain('--binary');
+    expect(commands[diffAt]?.args).toContain('--full-index');
+  });
+
+  test('an unreadable staged/unstaged diff faults the denylist gate (fail-closed, still recorded)', async () => {
+    const effects = greenEffects((command, args) => {
+      if (command === 'git' && args[0] === 'diff' && args.includes('--output')) {
+        return failResult(128, '', 'fatal: bad object HEAD');
+      }
+      return undefined;
+    });
+    const result = await makeDevCheck(effects)({ repoRoot: '/repo' });
+    expect(result.status).toBe('failed');
+    const ledger = effects.openLedger(BRANCH).load();
+    const record = ledger.records[0];
+    if (record?.kind === 'check') {
+      const row = record.gates.find((entry) => entry.name === 'denylist-scan');
+      expect(row?.status).toBe('fail');
+      expect(row?.evidence).toContain('staged/unstaged patch could not be read');
+    }
+  });
+
+  test('a failed patch apply faults the denylist gate (fail-closed, never silently green)', async () => {
+    const effects = greenEffects((command, args) => {
+      if (command === 'git' && args[0] === '-C' && args[2] === 'apply') {
+        return failResult(1, '', 'error: patch failed: src/a.ts:1');
+      }
+      return undefined;
+    });
+    const result = await makeDevCheck(effects)({ repoRoot: '/repo' });
+    expect(result.status).toBe('failed');
+    const ledger = effects.openLedger(BRANCH).load();
+    const record = ledger.records[0];
+    if (record?.kind === 'check') {
+      const row = record.gates.find((entry) => entry.name === 'denylist-scan');
+      expect(row?.status).toBe('fail');
+      expect(row?.evidence).toContain('could not be applied over the archived tree');
+    }
+  });
+
   test('a FAILED ls-files read fails safe toward RUNNING knip (never skipped)', async () => {
     const effects = makeFakeEffects((command, args) => {
       if (command === 'git' && args[0] === 'ls-files') {

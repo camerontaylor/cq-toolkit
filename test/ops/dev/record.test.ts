@@ -71,9 +71,14 @@ describe('the dev-record format', () => {
 
   test('parse fails closed: bad JSON, wrong version, unknown kind', () => {
     expect(() => parseDevLedger('not json')).toThrow(/not valid JSON/);
-    expect(() => parseDevLedger(JSON.stringify({ version: 2, branch: 'b', records: [] }))).toThrow(
-      /schema violation/,
-    );
+    // Anything but the ONE accepted version refuses — including a FUTURE
+    // version, whatever the constant is at this HEAD.
+    expect(() =>
+      parseDevLedger(JSON.stringify({ version: DEV_LEDGER_VERSION + 1, branch: 'b', records: [] })),
+    ).toThrow(/schema violation/);
+    expect(() =>
+      parseDevLedger(JSON.stringify({ version: DEV_LEDGER_VERSION - 1, branch: 'b', records: [] })),
+    ).toThrow(/schema violation/);
     expect(() =>
       parseDevLedger(
         JSON.stringify({

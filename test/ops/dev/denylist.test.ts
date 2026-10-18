@@ -122,6 +122,56 @@ describe('parseDenylistPatterns', () => {
     expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:env');
   });
 
+  test('UNQUOTED headers with a filename-internal " b/" parse by self-consistency', () => {
+    // A binary file literally named `.claude/memory.db b/notes.txt`: git
+    // spells the SAME plain path on both sides, and that self-consistency
+    // pins the split by parity — the interior ` b/` cannot hijack it (a
+    // last-` b/` search read both sides as `notes.txt`, the agent-scratch
+    // rule never fired, and the patch uploaded).
+    const path = '.claude/memory.db b/notes.txt';
+    const header = `diff --git a/${path} b/${path}`;
+    expect(diffHeaderPaths(header)).toEqual([path, path]);
+    // A binary segment has no ---/+++ fallback — the header is the ONLY
+    // path source, and the path-scoped scratch rule must fire on it.
+    const patch = [header, 'GIT binary patch', 'literal 10', 'cmZ~1#x==', ''].join('\n');
+    const rules = [{ id: 'class:scratch', description: 'd', regex: '.+', path: '(^|/)\\.claude/' }];
+    const scans = scanComponents([{ component: 'staged', text: patch, kind: 'patch' }], rules);
+    expect(scans[0]?.hits.map((hit) => hit.ruleId)).toContain('class:scratch');
+  });
+
+  test('a plain-sided rename yields no header split; rename/copy lines carry the segment paths', () => {
+    // Two DIFFERENT plain paths are not self-consistent, so the header
+    // yields no split — the segment's unambiguous per-side `rename from`/
+    // `rename to` (or `copy`) lines are the path source, binary patches
+    // included.
+    expect(diffHeaderPaths('diff --git a/old dir/asset.bin b/new dir/asset.bin')).toBeNull();
+    const renamePatch = [
+      'diff --git a/old dir/asset.bin b/new dir/asset.bin',
+      'similarity index 100%',
+      'rename from old dir/asset.bin',
+      'rename to new dir/asset.bin',
+      'GIT binary patch',
+      'literal 10',
+      'cmZ~1#x==',
+      '',
+    ].join('\n');
+    expect(patchSegments(renamePatch)[0]?.paths).toEqual([
+      'old dir/asset.bin',
+      'new dir/asset.bin',
+    ]);
+    const copyPatch = [
+      'diff --git a/old.bin b/new.bin',
+      'similarity index 100%',
+      'copy from old.bin',
+      'copy to new.bin',
+      'GIT binary patch',
+      'literal 10',
+      'cmZ~1#x==',
+      '',
+    ].join('\n');
+    expect(patchSegments(copyPatch)[0]?.paths).toEqual(['old.bin', 'new.bin']);
+  });
+
   test('decodeGitPath is exact on escapes and multibyte sequences', () => {
     expect(decodeGitPath('plain.env')).toBe('plain.env');
     expect(decodeGitPath('caf\\303\\251.env')).toBe('café.env');

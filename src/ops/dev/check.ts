@@ -16,8 +16,10 @@
 //     CONSERVATIVE approximation biased toward running (an unnecessary run
 //     is cheap; a skipped required run is a hole) and can be forced with
 //     `knip: 'force'`; skipped runs are recorded as skipped with the reason.
-//   - `scripts/denylist-scan` (whole-tree today; the diff-scoped mode is the
-//     protected script's future, not this wrapper's),
+//   - `scripts/denylist-scan` over the tracked content being checked — the
+//     HEAD archive with the staged/unstaged patch applied over it, so a
+//     green row means the CURRENT identity was scanned, not the previous
+//     commit (the protected script's diff-scoped mode stays its future),
 //   - `git diff --check` ×3 — committed (against the pinned base or the
 //     explicit range), staged, unstaged.
 //
@@ -484,11 +486,13 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
       gates.push({ name: 'knip', status: 'skipped', durationMs: 0, evidence: knipSkippedReason });
     }
 
-    // THE TRACKED-TREE DENYLIST SCAN VIA ARCHIVE: the (protected, invoked
-    // read-only) scripts/denylist-scan scans the tree it lives in, so run
-    // it over an extraction of `git archive HEAD` in a scratch dir OUTSIDE
-    // the worktree — the scan sees exactly the tracked tree, and gitignored
-    // agent scratch is excluded by construction instead of by allowlist.
+    // THE TRACKED-CONTENT DENYLIST SCAN VIA ARCHIVE + WORKING PATCH: the
+    // (protected, invoked read-only) scripts/denylist-scan scans the tree
+    // it lives in, so run it over an extraction of `git archive HEAD` in a
+    // scratch dir OUTSIDE the worktree, with the staged and unstaged edits
+    // applied over it — the scan then sees exactly the tracked content the
+    // run is checking (a newly staged .env included), and gitignored agent
+    // scratch is excluded by construction instead of by allowlist.
     {
       const startedAt = Date.now();
       let gate: DevCheckGate;
@@ -517,6 +521,36 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
         });
         if (extract.exitCode !== 0) {
           throw new Error(`archive extraction failed — ${extract.stderr.trim().slice(0, 200)}`);
+        }
+        // THE STAGED/UNSTAGED LEG: archiving HEAD alone would scan the
+        // PREVIOUS committed tree and record a green row while the current
+        // identity holds forbidden content. The exact `git diff HEAD`
+        // patch (binaries included) is applied over the archive before the
+        // scan; the patch file is written by GIT itself into the scratch
+        // dir (one `--output` read — no patch text round-trips through this
+        // process), `--allow-empty` makes the clean-tree case an explicit
+        // no-op, and an unreadable diff or failed apply faults the gate
+        // (fail-closed, never a silently green scan).
+        const workPatch = join(scratch, 'work.patch');
+        const diffResult = await effects.runCommand(
+          'git',
+          ['diff', '--binary', '--full-index', '--output', workPatch, 'HEAD'],
+          { timeoutMs: GIT_TIMEOUT_MS },
+        );
+        if (diffResult.exitCode !== 0) {
+          throw new Error(
+            `the staged/unstaged patch could not be read — ${diffResult.stderr.trim().slice(0, 200)}`,
+          );
+        }
+        const apply = await effects.runCommand(
+          'git',
+          ['-C', tree, 'apply', '--whitespace=nowarn', '--allow-empty', workPatch],
+          { timeoutMs: GIT_TIMEOUT_MS },
+        );
+        if (apply.exitCode !== 0) {
+          throw new Error(
+            `the staged/unstaged patch could not be applied over the archived tree — ${apply.stderr.trim().slice(0, 200)}`,
+          );
         }
         const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
           timeoutMs: DENYLIST_TIMEOUT_MS,

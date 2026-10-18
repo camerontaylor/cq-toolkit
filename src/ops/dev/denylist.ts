@@ -300,11 +300,19 @@ function headerToken(token: string): string {
  * side INDEPENDENTLY (a rename between an ASCII and a non-ASCII path emits
  * a MIXED header: `diff --git a/foo.env "b/caf\303\251.env"`), so the two
  * tokens are parsed per-side after the `diff --git ` prefix — each either
- * double-quoted (greedy to its closing quote) or plain. For PLAIN paths
- * with spaces the split lands on the LAST ` b/` (git's own ambiguity
- * resolution); quoted tokens carry no such ambiguity. Every side decodes
- * through {@link decodeGitPath}; a malformed line yields null (the text
- * headers remain the fallback path source).
+ * double-quoted (greedy to its closing quote) or plain. For PLAIN sides
+ * there is exactly one shape git emits for every non-rename header
+ * (modification, add, delete, mode change): `a/<P> b/<P>` — the SAME path
+ * both sides — and that self-consistency pins the split uniquely: the
+ * remainder `<P> b/<P>` has odd length, so `<P>`'s length is forced by
+ * parity and a filename-internal ` b/` (a binary file literally named
+ * `.claude/memory.db b/notes.txt`) can never be mistaken for the
+ * separator. A plain header that is NOT self-consistent is a true
+ * rename/copy and yields null here — its paths arrive from the segment's
+ * own `rename from`/`rename to` (or `copy`) lines, which {@link
+ * patchSegments} parses. Every side decodes through {@link decodeGitPath};
+ * a malformed line yields null (the text headers remain the fallback path
+ * source for text files).
  */
 export function diffHeaderPaths(line: string): [string, string] | null {
   const prefix = 'diff --git ';
@@ -323,9 +331,19 @@ export function diffHeaderPaths(line: string): [string, string] | null {
   if (bothQuoted !== null) {
     return [decodeGitPath(bothQuoted[1] ?? ''), decodeGitPath(bothQuoted[2] ?? '')];
   }
-  const lastB = rest.lastIndexOf(' b/');
-  if (lastB === -1 || !rest.startsWith('a/')) return null;
-  return [headerToken(`a/${rest.slice(2, lastB)}`), headerToken(`b/${rest.slice(lastB + 3)}`)];
+  if (!rest.startsWith('a/')) return null;
+  const remainder = rest.slice(2);
+  const pathLength = (remainder.length - 3) / 2;
+  if (
+    Number.isInteger(pathLength) &&
+    pathLength > 0 &&
+    remainder.slice(pathLength, pathLength + 3) === ' b/' &&
+    remainder.slice(pathLength + 3) === remainder.slice(0, pathLength)
+  ) {
+    const path = remainder.slice(0, pathLength);
+    return [headerToken(`a/${path}`), headerToken(`b/${path}`)];
+  }
+  return null;
 }
 
 /**
@@ -375,6 +393,21 @@ export function patchSegments(patch: string): PatchSegment[] {
         raw.startsWith('"') && raw.endsWith('"') ? `"${raw.slice(1, -1)}"` : raw,
       );
       if (path !== '/dev/null' && path !== '' && !current.paths.includes(path)) {
+        current.paths.push(path);
+      }
+      continue;
+    }
+    // Rename/copy lines carry ONE path each, unambiguously — the per-side
+    // source a rename segment falls back to when its `diff --git` header is
+    // not self-consistent (a plain-sided rename, binary renames included,
+    // where no ---/+++ headers exist to fall back on).
+    const renameCopy = /^(rename|copy) (from|to) (.+?)\r?$/.exec(line);
+    if (renameCopy !== null) {
+      const raw = renameCopy[3] ?? '';
+      const path = decodeGitPath(
+        raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw,
+      );
+      if (path !== '' && !current.paths.includes(path)) {
         current.paths.push(path);
       }
     }

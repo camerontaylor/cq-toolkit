@@ -115,6 +115,8 @@ export interface DevReviewReport {
   cycleId: string;
   reviewer: string;
   scope: 'full' | 'uncommitted';
+  /** The intended PR target the cycle was recorded against. */
+  target: string;
   base: string;
   head: string;
   dirtySha256: string;
@@ -518,6 +520,7 @@ function runCycleReview(
           cycleId,
           reviewer,
           scope,
+          target,
           base: identity.base,
           head: identity.head,
           dirtySha256: identity.dirtySha256,
@@ -561,6 +564,7 @@ function runCycleReview(
           cycleId: cycleRecord.cycleId,
           reviewer,
           scope,
+          target,
           base,
           head,
           dirtySha256,

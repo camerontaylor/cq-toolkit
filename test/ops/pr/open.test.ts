@@ -64,6 +64,7 @@ function readyEffects(withDispositions: boolean, target: string = 'merge-queue')
   });
   const records: DevRecord[] = [
     cycleRecord({
+      target,
       dirtySha256: 'clean-tree',
       findings: withDispositions ? [{ id: 'c001-aaaaaaaa#f1', severity: 'minor' }] : [],
     }),
