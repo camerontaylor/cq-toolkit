@@ -6,10 +6,13 @@
 //
 //   1. resolvePrWorktree       — THE per-PR worktree (origin head is truth)
 //   2. snapshotPrState(before) — the anti-hallucination baseline
-//      fetchReviewState → classifyThreads → planReviewBatch
+//      fetchReviewState → classifyThreads → settle gate → planReviewBatch
 //      (a TRUNCATED classification refuses here → needs-human with the
 //      truncatedBecause reasons — an environment condition, never a crash;
-//      any OTHER pure-stage throw propagates — a bug must look like one)
+//      any OTHER pure-stage throw propagates — a bug must look like one).
+//      The settle gate (loopReplyVerdict) skips a thread this loop already
+//      answered for the current head and round, and re-opens one whose
+//      answer went stale.
 //   3. enrichment              — ClassifiedItem.id correlated against the
 //      fetched state into FixableReviewItems (thread body + prior comments);
 //      an id that no longer correlates (race) is recorded ('item-vanished')
@@ -97,7 +100,8 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../ops/review/fixReviewItem.js';
-import { reviewFixHarness } from '../ops/review/fixReviewItem.js';
+import { NO_OUTCOME_REASON, reviewFixHarness } from '../ops/review/fixReviewItem.js';
+import type { FixEvidence } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
 import type { WorktreeRegistry } from '../adapters/git/prWorktree.js';
@@ -108,6 +112,7 @@ import { replyAndResolve } from '../ops/review/replyAndResolve.js';
 import type { VerifyOutcome } from '../ops/review/verifyReviewOutcome.js';
 import { snapshotPrState } from '../adapters/forge-github/snapshotPrState.js';
 import { verifyPrOutcome } from '../ops/review/verifyReviewOutcome.js';
+import type { ThreadComment } from '../ops/review/threads.js';
 
 /** Cap for the composed push-failure reason — a push can spew pages of output. */
 const PUSH_REASON_MAX = 500;
@@ -142,6 +147,154 @@ export const replySignature = (owner: string, repo: string, pr: number): string 
 
 /** The content key recognizing the signature (the composed line's prefix). */
 const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
+
+/**
+ * The reply's HEAD STAMP: the line right after the signature on every loop
+ * reply. It names the head the reply answers for (the pushed head when the
+ * row's fix published commits, else the checked-out head the worker
+ * inspected) and the ROUND the worker answered ({@link settleRound} over the
+ * thread as fetched). Together they make the loop idempotent per thread AND
+ * head; see {@link loopReplyVerdict}.
+ */
+export const replyHeadStamp = (sha: string, round: string): string =>
+  `<!-- cq-review-loop-head:${sha.toLowerCase()} round:${round} -->`;
+
+/** Reads a stamp back out of a reply HEADER line (exact, whole line). */
+const REPLY_HEAD_STAMP_PATTERN =
+  /^<!-- cq-review-loop-head:([0-9a-f]{40}) round:([0-9a-f]{8}) -->$/;
+
+/**
+ * The RESOLVE-INTENT marker: rides (after the head stamp) a thread reply
+ * whose row queued a resolve, i.e. a verified, untruncated fix. A settled
+ * thread whose latest reply carries it still gets its pending resolve
+ * carried, so a resolve that failed in the posting run is retried instead of
+ * stranding the thread.
+ */
+export const REPLY_RESOLVE_MARKER = '<!-- cq-review-loop-resolve -->';
+
+/**
+ * The metadata HEADER of a loop reply: the lines after the signature line up
+ * to the first blank line (the composed body is header, blank line, then
+ * the worker summary). Read ONLY from that position: the summary is
+ * worker-controlled text, so a stamp or marker quoted in it never counts.
+ * Null when the body does not open with exactly this PR's signature line.
+ */
+const readReplyHeader = (
+  body: string,
+  signature: string,
+): { head: string | null; round: string | null; resolve: boolean } | null => {
+  const lines = body.split('\n');
+  if (lines[0] !== signature) {
+    return null;
+  }
+  let head: string | null = null;
+  let round: string | null = null;
+  let resolve = false;
+  for (const line of lines.slice(1)) {
+    if (line.trim() === '') {
+      break;
+    }
+    const stamp = REPLY_HEAD_STAMP_PATTERN.exec(line);
+    if (stamp !== null) {
+      head = stamp[1] ?? null;
+      round = stamp[2] ?? null;
+    } else if (line === REPLY_RESOLVE_MARKER) {
+      resolve = true;
+    }
+  }
+  return { head, round, resolve };
+};
+
+/**
+ * The SETTLE round: what a loop reply's stamp binds. Unlike the dispatch
+ * round ({@link roundFingerprint}: the LATEST comment only, the key deployed
+ * dispatch logs already hold) it covers the whole thread as the worker saw
+ * it, the root body and every prior reply (author, time, body), so new input
+ * that landed before the post, or an EDIT to the root or an earlier reply,
+ * invalidates the settlement proof.
+ */
+export const settleRound = (
+  thread: { id: string; body: string },
+  prior: readonly ThreadComment[],
+): string =>
+  fnv1a32Hex(
+    JSON.stringify([
+      thread.id,
+      thread.body,
+      prior.map((reply) => [reply.authorLogin, reply.createdAt, reply.body]),
+    ]),
+  );
+
+/**
+ * What the thread's LATEST reply proves about this loop's answer:
+ *   - `unproven`: it is not provably this loop's reply. It is missing or
+ *     undated (attachRestReplies sorts undated replies last, so it is not
+ *     provably the latest word), does not open with THIS PR's signature, is
+ *     authored by someone other than the known loop identity, or is an
+ *     unstamped (legacy) reply with no identity to authenticate it.
+ *     Classification decides the thread as usual.
+ *   - `settled`: the loop answered this thread at the current head and
+ *     round: no fix job, no reply. A legacy reply by the known identity
+ *     binds no head, so it settles until a reviewer speaks; so does any
+ *     stamped reply when the current head is unknown. `carryResolve` only
+ *     when the identity is known, the head is known to match and the header
+ *     carries REPLY_RESOLVE_MARKER.
+ *   - `stale`: the loop answered, but for another round (input landed
+ *     before or after its post, or an earlier comment was edited) or another
+ *     head, or it queued a resolve that cannot be carried without a known
+ *     identity. The thread is answered again, once.
+ * Without a known identity a reply proves silence only, never a mutation.
+ *
+ * Why a content gate and not the dispatch log alone: the dispatch round keys
+ * on the thread's LATEST comment, which after a post IS the loop's own reply,
+ * so every run computed a fresh reply actionId and the dispatch-log dedupe
+ * never matched. The posted reply is the durable record (the dispatch log is
+ * a runner cache), so the gate reads it.
+ */
+export type LoopReplyVerdict =
+  | { kind: 'unproven' }
+  | { kind: 'stale' }
+  | { kind: 'settled'; carryResolve: boolean };
+
+export const loopReplyVerdict = (
+  thread: { id: string; body: string; replies: readonly ThreadComment[] },
+  opts: { signature: string; headSha: string | null; ownLogin: string | null },
+): LoopReplyVerdict => {
+  const latest = thread.replies[thread.replies.length - 1];
+  if (
+    latest === undefined ||
+    latest.createdAt === null ||
+    Number.isNaN(Date.parse(latest.createdAt))
+  ) {
+    return { kind: 'unproven' };
+  }
+  const ownLogin = opts.ownLogin?.toLowerCase() ?? null;
+  if (ownLogin !== null && latest.authorLogin?.toLowerCase() !== ownLogin) {
+    return { kind: 'unproven' };
+  }
+  const header = readReplyHeader(latest.body, opts.signature);
+  if (header === null) {
+    return { kind: 'unproven' };
+  }
+  if (header.head === null || header.round === null) {
+    // Anyone can type the public signature: a LEGACY reply binds no round or
+    // head, so only the known identity's authorship proves it.
+    return ownLogin === null ? { kind: 'unproven' } : { kind: 'settled', carryResolve: false };
+  }
+  if (header.round !== settleRound(thread, thread.replies.slice(0, -1))) {
+    return { kind: 'stale' };
+  }
+  if (opts.headSha === null) {
+    return { kind: 'settled', carryResolve: false };
+  }
+  if (header.head !== opts.headSha.toLowerCase()) {
+    return { kind: 'stale' };
+  }
+  if (header.resolve && ownLogin === null) {
+    return { kind: 'stale' };
+  }
+  return { kind: 'settled', carryResolve: header.resolve };
+};
 
 /**
  * The loop's shipped classify DEFAULT: defaultClassifyConfig plus the
@@ -473,7 +626,10 @@ const fnv1a32Hex = (text: string): string => {
  * + body. Same feedback → same fingerprint (a retry is dispatch-idempotent);
  * new feedback → a new fingerprint (the item re-opens).
  */
-const roundFingerprint = (itemId: string, item: FixableReviewItem): string => {
+const roundFingerprint = (
+  itemId: string,
+  item: Pick<FixableReviewItem, 'body' | 'comments'>,
+): string => {
   const latest = item.comments[item.comments.length - 1];
   const source =
     latest === undefined
@@ -568,6 +724,56 @@ type CommitVerificationFailure =
   | 'attribution-missing';
 
 /**
+ * Why an unchanged answer's EVIDENCE does not verify, or null when it does:
+ * every cited `{path, line}` must name a FILE (a blob, never a directory) in
+ * the tree at `tip`, read through the git seam (`git cat-file -t` and `-s`,
+ * then `git show <tip>:<path>`), at most MAX_EVIDENCE_BLOB_BYTES long, with
+ * at least `line` lines.
+ */
+const MAX_EVIDENCE_BLOB_BYTES = 2_000_000;
+
+const evidenceFailure = async (
+  git: GhFn,
+  worktreePath: string,
+  tip: string,
+  evidence: readonly FixEvidence[],
+): Promise<string | null> => {
+  if (!COMMIT_SHA_RE.test(tip)) {
+    return 'the worktree tip is unreadable';
+  }
+  for (const { path, line } of evidence) {
+    // A FILE, not a tree: `git show <tip>:<dir>` succeeds on a directory too.
+    const kind = await git(['-C', worktreePath, 'cat-file', '-t', `${tip}:${path}`]);
+    if (kind.code !== 0 || kind.stdout.trim() !== 'blob') {
+      return `${path} is not a file at ${tip.slice(0, 12)}`;
+    }
+    // BOUNDED before it is read: the gh seam buffers the whole blob.
+    const size = Number(
+      (await git(['-C', worktreePath, 'cat-file', '-s', `${tip}:${path}`])).stdout.trim(),
+    );
+    if (!Number.isInteger(size) || size < 0 || size > MAX_EVIDENCE_BLOB_BYTES) {
+      return `${path} is too large to verify (over ${String(MAX_EVIDENCE_BLOB_BYTES)} bytes)`;
+    }
+    const shown =
+      size === 0
+        ? { code: 0, stdout: '' }
+        : await git(['-C', worktreePath, 'show', `${tip}:${path}`]);
+    if (shown.code !== 0) {
+      return `${path} is unreadable at ${tip.slice(0, 12)}`;
+    }
+    // An empty blob has no line to cite.
+    const lines =
+      shown.stdout === ''
+        ? []
+        : (shown.stdout.endsWith('\n') ? shown.stdout.slice(0, -1) : shown.stdout).split('\n');
+    if (line > lines.length) {
+      return `${path}:${String(line)} is past the end of the file (${String(lines.length)} lines)`;
+    }
+  }
+  return null;
+};
+
+/**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
  * strictly mechanically (exit codes only), hardened against spoofing
  * (round-2 finding 2). Returns null when the commit verifies, else the
@@ -659,13 +865,13 @@ const attributionMatches = (message: string, itemId: string): boolean => {
  * a thread that was not verifiably addressed. Unexpected throws propagate —
  * a bug must look like one (I5).
  *
- * DEPLOYMENT REQUIREMENT (round-3 adjudication): configure `responderLogin`
- * as the loop's own identity. The two self-reply suppressions split by
- * surface: THREAD-kind feedback rides RESPONDER AUTHORSHIP (classify row
- * 5, the thread last-word rule — with responderLogin configured, the loop
- * never re-answers a thread it already replied to); COMMENT-kind feedback
- * (top-level issue comments, which cannot thread) rides the reply
- * SIGNATURE — a different surface needing a different mechanism, see
+ * SELF-REPLY SUPPRESSION splits by surface. THREAD-kind feedback rides the
+ * settle gate ({@link loopReplyVerdict}: the thread's latest word is this
+ * loop's signature-led reply stamped with the current head and round).
+ * `responderLogin` names the loop's own identity: it authenticates that
+ * reply and feeds verify's attribution. It never reaches classify, whose row
+ * 5 reads the PR AUTHOR. COMMENT-kind feedback (top-level issue comments,
+ * which cannot thread) rides the reply SIGNATURE skip pattern, see
  * {@link replySignature}.
  */
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
@@ -728,7 +934,83 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       reasons.push(`blocked: ${item.id} requires human decision`);
     }
   }
-  const batches = planReviewBatch(classification, opts.planBatchConfig ?? defaultPlanBatchConfig);
+  const dispatched = new Set(
+    (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
+  );
+  // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
+  // are checked against the OBSERVED worktree movement, not trusted. It is
+  // also the head the workers inspect, so the settle gate below compares a
+  // reply's stamp against it (GraphQL's headRefOid can lag a fresh push). An
+  // unreadable head is UNKNOWN, never the API's: the gate then settles in
+  // silence and carries no resolve, and the run fails closed further down.
+  const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+  const checkedOutHead =
+    headBefore.code === 0 && COMMIT_SHA_RE.test(headBefore.stdout.trim())
+      ? headBefore.stdout.trim()
+      : null;
+  const signature = replySignature(opts.owner, opts.repo, opts.pr);
+  const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
+
+  // (2b) THE SETTLE GATE (PR #336 incident; loopReplyVerdict), BEFORE
+  // batching so it sees every thread whose latest word is a loop reply,
+  // whatever classify made of it: 'actionable' when the loop identity is not
+  // the PR author (the deployed App), 'responded' when it is (classify row 5,
+  // the shared-identity drill). A SETTLED thread gets no fix job and no reply
+  // (at most one answer per thread, head and round); its one carried action
+  // is a resolve its posting run queued but did not record, under the
+  // posting run's actionId (the dispatch round without the trailing loop
+  // reply) so a recorded resolve dedupes. A STALE thread, or a settled
+  // marked one whose resolve is not provably pending (recorded already, so
+  // a reviewer reopened it, or no record at all), is answered again. An
+  // UNPROVEN reply leaves classify's verdict standing.
+  const settledItems = classification.items.map((item): ClassifiedItem => {
+    if (item.kind !== 'thread' || (item.verdict !== 'actionable' && item.verdict !== 'responded')) {
+      return item;
+    }
+    const thread = state.threads.find((candidate) => candidate.id === item.id);
+    if (thread === undefined) {
+      return item;
+    }
+    const verdict = loopReplyVerdict(thread, {
+      signature,
+      headSha: checkedOutHead,
+      ownLogin: opts.responderLogin ?? null,
+    });
+    if (verdict.kind === 'unproven') {
+      return item;
+    }
+    if (verdict.kind === 'settled') {
+      const postingRound = `${item.id}-${roundFingerprint(item.id, {
+        body: thread.body,
+        comments: thread.replies.slice(0, -1),
+      })}`;
+      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${postingRound}`;
+      // A carry needs POSITIVE proof the resolve is pending: the posting
+      // run's reply recorded and its resolve not. A recorded resolve on a
+      // thread fetched unresolved means a reviewer reopened it; with no
+      // record at all (a lost runner cache) the two cannot be told apart.
+      // Either way the thread is looked at again, never silently re-closed.
+      const pendingResolve =
+        dispatched.has(`review-loop:${String(opts.pr)}:reply:${postingRound}`) &&
+        !dispatched.has(resolveActionId);
+      if (!verdict.carryResolve || pendingResolve) {
+        if (verdict.carryResolve) {
+          carriedResolves.push({
+            kind: 'resolve_thread',
+            actionId: resolveActionId,
+            threadId: item.id,
+          });
+        }
+        skipped.push({ id: item.id, reason: 'loop-replied-this-head' });
+        return { ...item, verdict: 'responded', reason: 'loop_reply_settled' };
+      }
+    }
+    return { ...item, verdict: 'actionable', reason: 'loop_reply_stale' };
+  });
+  const batches = planReviewBatch(
+    { ...classification, items: settledItems },
+    opts.planBatchConfig ?? defaultPlanBatchConfig,
+  );
 
   // (3) Enrich every planned item into the fixer payload. One job per ITEM
   // (the fix op is single-item by contract); vanished races are RECORDED,
@@ -746,12 +1028,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // action (same actionId → posts once, dedupe-safe by the dispatch log);
   // comment-kind items have no resolve and skip fully. New feedback
   // fingerprints a new round and re-opens the item.
-  const dispatched = new Set(
-    (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
-  );
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
-  const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
     const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
     if (dispatched.has(replyActionId)) {
@@ -780,64 +1058,6 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
     });
   }
-  // CARRIED RESOLVES OVER RESPONDED THREADS (codex P2 jNUCa): a thread
-  // whose loop reply posted classifies 'responded' next run (the reply is
-  // the thread's latest word) and planReviewBatch excludes it — the 3b
-  // carry over PLANNED items above would never see it, and a resolve that
-  // failed or was withheld behind that reply would strand the thread
-  // unresolved permanently (in the single-identity drill AND the documented
-  // bot-identity deployment). Walk the classification's responded THREAD
-  // items and carry the round-versioned resolve when it has not dispatched
-  // (no fix job, no reply — the reply already posted; the resolve pushes
-  // nothing). Deduped against the planned carry by thread id; the
-  // fingerprint is computed over the thread's fetched data exactly the way
-  // stage 6 computes it. AUTHORIZATION (jNfip): the carry fires only when
-  // the thread's LATEST reply opens with the loop's own signature — the
-  // signature-led reply is the evidence that a resolve was queued by THIS
-  // loop; any other latest reply is not carried, and the feedback stays
-  // outstanding instead of being closed without a verified fix.
-  const carriedIds = new Set(carriedResolves.map((resolve) => resolve.threadId));
-  for (const item of classification.items) {
-    if (item.kind !== 'thread' || item.verdict !== 'responded') {
-      continue;
-    }
-    if (carriedIds.has(item.id)) {
-      continue;
-    }
-    const thread = state.threads.find((candidate) => candidate.id === item.id);
-    if (thread === undefined) {
-      continue; // vanished between fetch and classify — nothing to resolve
-    }
-    // AUTHORIZATION (jNfip): the thread's LATEST reply must open with the
-    // loop's own signature — the signature-led reply is the evidence that a
-    // resolve was queued by this loop. Any other latest reply (a PR-author
-    // or third-party reply) is not carried; the feedback stays outstanding.
-    const latestReply = thread.replies[thread.replies.length - 1];
-    if (latestReply === undefined || !REPLY_SIGNATURE_PATTERN.test(latestReply.body)) {
-      continue;
-    }
-    // Same shape enrichItem builds (body + replies) — identical fingerprint
-    // to the stage-6 resolve of the posting run.
-    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
-      item.id,
-      {
-        id: thread.id,
-        path: thread.path,
-        line: thread.line,
-        body: thread.body,
-        comments: thread.replies,
-      },
-    )}`;
-    if (dispatched.has(resolveActionId)) {
-      continue; // already resolved-and-recorded — a full no-op for this item
-    }
-    carriedIds.add(item.id);
-    carriedResolves.push({
-      kind: 'resolve_thread',
-      actionId: resolveActionId,
-      threadId: item.id,
-    });
-  }
 
   // (4) The governed fix run. concurrency is FORCED to 1 (the shared
   // per-PR-worktree sequencing contract) and stopOnError is false (one bad
@@ -860,9 +1080,6 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // arms through the governor config: runPlan's governed dispatch reads
   // governor.ladderSpec.
   const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
-  // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
-  // are checked against the OBSERVED worktree movement, not trusted.
-  const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const fixReport = await (async (): Promise<RunReport> => {
     // Propagated accounted spend (review-debt #186): report the governor's
     // observed USD rollup OUT of the loop even when the fix run throws, so a
@@ -1068,8 +1285,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // pushing HEAD when a sibling row failed would publish that sibling's
   // unreported commit. Publication requires EVERY fix row to be ok; a
   // failed/indeterminate/needs-human sibling withholds the push, and every
-  // changed item is recorded (its commit stays local-unpublished).
-  const allRowsOk = fixReport.jobs.every((row) => row.result.status === 'ok');
+  // changed item is recorded (its commit stays local-unpublished). One
+  // non-ok row is ACCOUNTABLE: a NO-OUTCOME row (NO_OUTCOME_REASON) parsed as
+  // a contract that claims no commits, so nothing about it is unknown. It
+  // posts nothing and is a needs-human reason, but it does not stall its
+  // siblings' verified fixes on every run; any commit it made anyway is
+  // unclaimed, so range accountability above still blocks publication.
+  const allRowsOk = fixReport.jobs.every(
+    (row) =>
+      row.result.status === 'ok' ||
+      (row.result.status === 'needs-human' && row.result.reason.startsWith(NO_OUTCOME_REASON)),
+  );
   const publishWithheld = commits.length > 0 && !allRowsOk;
   if (publishWithheld) {
     for (const row of fixReport.jobs) {
@@ -1159,12 +1385,59 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // The SELF-REPLY SIGNATURE LEADS every reply body (drill 8, cycle-1
     // major — see replySignature): REPLY_SIGNATURE_PATTERN is
     // START-anchored, so the marker must be the body's FIRST line for a
-    // re-run to recognize its own words as skip-class content.
-    const signature = replySignature(opts.owner, opts.repo, opts.pr);
-    const body = `${signature}\n\n${
-      value.changed && value.commits.length > 0
+    // re-run to recognize its own words as skip-class content. The HEAD
+    // STAMP follows it (replyHeadStamp): the pushed head for a row that
+    // published its own commits, else the head the worker INSPECTED (the
+    // checked-out pre-run head; publishable implies it was readable). An
+    // unchanged row never claims a head a sibling's later commit produced:
+    // the next run then sees another head and re-opens the thread once.
+    const answeredHead =
+      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : checkedOutHead;
+    const stampThread =
+      source.kind === 'thread'
+        ? state.threads.find((candidate) => candidate.id === source.itemId)
+        : undefined;
+    const stampRound =
+      stampThread !== undefined
+        ? settleRound(stampThread, stampThread.replies)
+        : source.roundFingerprint;
+    const stamp =
+      answeredHead !== null && COMMIT_SHA_RE.test(answeredHead)
+        ? `\n${replyHeadStamp(answeredHead, stampRound)}`
+        : '';
+    // RESOLVE INTENT (REPLY_RESOLVE_MARKER): exactly the rows the resolve
+    // branch below queues a resolve for — a thread's verified, untruncated
+    // fix — so a later settled run can carry a resolve that did not record.
+    const resolveIntended =
+      source.kind === 'thread' &&
+      value.changed &&
+      value.commits.length > 0 &&
+      value.truncated !== true &&
+      rowVerified.get(row.jobId) === true;
+    // EVIDENCE (THE FIX OUTCOME CONTRACT): an unchanged answer posts only
+    // when every code location it cites exists in the tree its stamp names
+    // (answeredHead: the checked-out head it inspected), so a later
+    // sibling's commit can neither supply nor remove a citation. Otherwise
+    // nothing posts and the thread stays unsettled: an unverified reason is
+    // no outcome.
+    if (value.disposition === 'unchanged_with_reason') {
+      const failure = await evidenceFailure(
+        opts.git,
+        worktree.path,
+        answeredHead ?? '',
+        value.evidence,
+      );
+      if (failure !== null) {
+        reasons.push(
+          `${NO_OUTCOME_REASON} — ${source.itemId}: the unchanged answer's evidence does not verify (${failure}); reply withheld`,
+        );
+        continue;
+      }
+    }
+    const body = `${signature}${stamp}${resolveIntended ? `\n${REPLY_RESOLVE_MARKER}` : ''}\n\n${
+      value.disposition === 'fixed'
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
-        : value.summary
+        : `${value.summary}\n\nEvidence: ${value.evidence.map(({ path, line }) => `\`${path}:${String(line)}\``).join(' ')}`
     }`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
@@ -1223,8 +1496,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       });
     }
   }
-  // CARRIED RESOLVES (stage 3b): a thread whose round reply already
-  // dispatched but whose resolve did not rides THIS run's dispatch — no fix
+  // CARRIED RESOLVES (stages 2b and 3b): a thread whose reply already
+  // posted but whose resolve did not record rides THIS run's dispatch — no fix
   // ran for it, no reply is re-posted; the resolve's own actionId dedupes.
   // These bypass the publish-gate withholding deliberately: their round was
   // already published when the reply recorded, and the resolve mutation

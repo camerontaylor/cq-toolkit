@@ -58,7 +58,12 @@ import { listPlans } from '../../src/plans/registry.js';
 import {
   commitVerificationFailure,
   enrichBatches,
+  loopReplyVerdict,
+  REPLY_RESOLVE_MARKER,
+  replyHeadStamp,
+  replySignature,
   runReviewLoop,
+  settleRound,
 } from '../../src/plans/review-loop.js';
 import { MAX_ITEM_BODY_CHARS } from '../../src/ops/review/fixReviewItem.js';
 import { reviewFixHarness } from '../../src/ops/review/fixReviewItem.js';
@@ -141,6 +146,19 @@ interface LoopWorld {
    * boundary — 2 models "a commit landed during the fix stage").
    */
   worktreeAdvancesAt?: number;
+  /**
+   * The worktree is checked out at the SERVED origin head (`world.sha`), as
+   * production's resolvePrWorktree guarantees: every un-advanced worktree
+   * read (and the origin ref) report it. A published fix advances it with
+   * `worktreeAdvancesAt`. Default off (legacy: SHA throughout).
+   */
+  worktreeFollowsOrigin?: boolean;
+  /**
+   * The head the worktree (and the origin ref resolvePrWorktree fetched) sit
+   * at, when it differs from the served `sha`: a push landed between
+   * resolvePrWorktree and the state fetch. Overrides worktreeFollowsOrigin.
+   */
+  worktreeHead?: string;
   /** The sha the ADVANCED worktree HEAD reports (default: the 4444 filler). */
   worktreeAdvancesTo?: string;
   /**
@@ -176,6 +194,14 @@ interface LoopWorld {
   headReadFailsAt?: number;
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
+  /**
+   * Files in the worktree tree, path → line count, served to `git show
+   * <sha>:<path>` (an unchanged answer's evidence check). Default:
+   * DEFAULT_WORLD_FILES.
+   */
+  files?: Record<string, number>;
+  /** Per-commit trees overriding `files` for `git cat-file`/`git show` at that sha. */
+  filesAt?: Record<string, Record<string, number>>;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -207,6 +233,13 @@ const actionableThread = (id: string, path: string, line: number, databaseId: nu
   line,
   comments: { nodes: [rootComment(databaseId, 'reviewer', `Fix ${path} at ${String(line)}.`)] },
 });
+
+/** GitHub's view once a resolve recorded: the thread `id` is served resolved. */
+const markResolved = (world: LoopWorld, id: string): void => {
+  world.threads = world.threads.map((thread) =>
+    (thread as { id: string }).id === id ? { ...(thread as object), isResolved: true } : thread,
+  );
+};
 
 /** The default world: T1 actionable (external), T2 the responder's own (skip). */
 const defaultWorld = (): LoopWorld => ({
@@ -347,7 +380,23 @@ const fakeGh =
   };
 
 /** The routed git fake: prWorktree's model (a reusable on-label tree) + pushes. */
+/**
+ * The worktree tree the fake git serves by default (path → line count): the
+ * three anchored files, an empty file, and a huge one (-1: over the
+ * evidence size bound, never meant to be read).
+ */
+const DEFAULT_WORLD_FILES: Record<string, number> = {
+  'src/a.ts': 20,
+  'src/b.ts': 20,
+  'src/c.ts': 20,
+  'src/empty.ts': 0,
+  'src/huge.ts': -1,
+};
+
 const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
+  /** The tree at `<sha>:<path>`'s sha: a per-commit override, else the world's files. */
+  const treeAt = (object: string): Record<string, number> =>
+    world.filesAt?.[object.slice(0, 40)] ?? world.files ?? DEFAULT_WORLD_FILES;
   let pushCount = 0;
   let worktreeHeadReads = 0;
   return async (args) => {
@@ -362,7 +411,9 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       return ok('');
     }
     if (rest[0] === 'rev-parse' && (rest[1] ?? '').startsWith('refs/cq-review/pr-')) {
-      return ok(`${SHA}\n`);
+      return ok(
+        `${world.worktreeHead ?? (world.worktreeFollowsOrigin === true ? world.sha : SHA)}\n`,
+      );
     }
     // The per-item resolve gate's mechanical checks (finding 2): a sha is
     // verifiable exactly when the world knows it.
@@ -443,12 +494,46 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         }
         const advanced =
           world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
-        return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : SHA}\n`);
+        const base = world.worktreeHead ?? (world.worktreeFollowsOrigin === true ? world.sha : SHA);
+        return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : base}\n`);
       }
       return ok(`${SHA}\n`);
     }
     if (rest[0] === 'status' && rest[1] === '--porcelain') {
       return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
+    }
+    if (rest[0] === 'cat-file' && rest[1] === '-s' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
+      const lines = treeAt(rest[2] ?? '')[(rest[2] ?? '').slice(41)];
+      // Each served line is 'line N\n': about 8 bytes; -1 marks a huge blob.
+      return lines === undefined
+        ? { code: 128, stdout: '', stderr: 'fatal: not a valid object\n' }
+        : ok(`${String(lines < 0 ? 10_000_000 : lines * 8)}\n`);
+    }
+    if (rest[0] === 'cat-file' && rest[1] === '-t' && /^[0-9a-f]{40}:/.test(rest[2] ?? '')) {
+      const path = (rest[2] ?? '').slice(41);
+      const files = Object.keys(treeAt(rest[2] ?? ''));
+      return files.includes(path)
+        ? ok('blob\n')
+        : files.some((file) => file.startsWith(`${path}/`))
+          ? ok('tree\n')
+          : { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` };
+    }
+    if (rest[0] === 'show' && /^[0-9a-f]{40}:/.test(rest[1] ?? '')) {
+      const path = (rest[1] ?? '').slice(41);
+      const files = treeAt(rest[1] ?? '');
+      const lines = files[path];
+      const entries = Object.keys(files).filter((file) => file.startsWith(`${path}/`));
+      // Like git: showing a TREE succeeds and lists its entries.
+      if (lines === undefined && entries.length > 0) {
+        return ok(
+          `tree ${rest[1] ?? ''}\n\n${entries.map((file) => file.slice(path.length + 1)).join('\n')}\n`,
+        );
+      }
+      return lines === undefined
+        ? { code: 128, stdout: '', stderr: `fatal: path '${path}' does not exist\n` }
+        : lines <= 0
+          ? ok('')
+          : ok(Array.from({ length: lines }, (_, i) => `line ${String(i + 1)}`).join('\n') + '\n');
     }
     if (rest[0] === 'push') {
       pushCount += 1;
@@ -499,7 +584,30 @@ const completeWorker = (line: string, extra?: Partial<WorkerResult>): WorkerResu
 });
 
 /** The single-line JSON contract a compliant worker answers with. */
-const fixLine = (changed: boolean, summary: string, commits: string[]): string =>
+/**
+ * One v2 fix contract line (THE FIX OUTCOME CONTRACT): a change is `fixed`;
+ * no change is `unchanged_with_reason` citing `src/a.ts:3` unless `evidence`
+ * says otherwise.
+ */
+const fixLine = (
+  changed: boolean,
+  summary: string,
+  commits: string[],
+  evidence: Array<{ path: string; line: number }> = changed ? [] : [{ path: 'src/a.ts', line: 3 }],
+): string =>
+  JSON.stringify({
+    disposition: changed ? 'fixed' : 'unchanged_with_reason',
+    summary,
+    commits,
+    evidence,
+  });
+
+/** A v2 contract line with an explicit disposition (no commits). */
+const dispositionLine = (disposition: string, summary: string): string =>
+  JSON.stringify({ disposition, summary, commits: [], evidence: [] });
+
+/** The LEGACY v1 shape `{changed, summary, commits}`: free text, no disposition. */
+const legacyFixLine = (changed: boolean, summary: string, commits: string[]): string =>
   JSON.stringify({ changed, summary, commits });
 
 // ---------------------------------------------------------------------------
@@ -537,6 +645,8 @@ const runLoop = async (
     driverRun?: Driver['run'];
     /** Propagated-spend observer (review-debt #186). */
     onSpend?: (usd: number) => void;
+    /** The loop's own identity (the settle gate's resolve-carry authorization). */
+    responderLogin?: string;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -604,6 +714,7 @@ const runLoop = async (
     ...(o.runOptions !== undefined ? { runOptions: o.runOptions } : {}),
     ...(o.governanceOptIn !== undefined ? { governanceOptIn: o.governanceOptIn } : {}),
     ...(o.onSpend !== undefined ? { onSpend: o.onSpend } : {}),
+    ...(o.responderLogin !== undefined ? { responderLogin: o.responderLogin } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
@@ -1406,7 +1517,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.worktreeAdvancesAt = 2; // a commit lands during the fix stage
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, 'Nothing to change.', []))],
+      driverResults: [
+        completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
+      ],
       ghLog,
     });
     expect(outcome.status).toBe('needs-human');
@@ -1437,7 +1550,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker(fixLine(true, 'Fixed A.', [NEW_SHA])),
-        completeWorker(fixLine(false, 'Nothing to change for B.', [])),
+        completeWorker(
+          fixLine(false, 'Nothing to change for B: src/b.ts line 8 already guards it.', []),
+        ),
       ],
       gitLog,
     });
@@ -1527,7 +1642,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.headReadFailsAfter = 2;
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, 'Nothing to change.', []))],
+      driverResults: [
+        completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
+      ],
       ghLog,
     });
     expect(outcome.status).toBe('needs-human');
@@ -1586,7 +1703,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
-        completeWorker(fixLine(false, 'A: nothing to change.', [])),
+        completeWorker(
+          fixLine(false, 'A: nothing to change, src/a.ts line 3 already guards it.', []),
+        ),
         completeWorker(fixLine(true, 'Fixed B.', [NEW_SHA])),
       ],
       ghLog,
@@ -1648,7 +1767,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.revListShas = []; // `rev-list <before>..HEAD` is empty behind the base
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, 'Nothing to change.', []))],
+      driverResults: [
+        completeWorker(fixLine(false, 'Nothing to change: already handled at line 3.', [])),
+      ],
       ghLog,
     });
     expect(outcome.status).toBe('needs-human');
@@ -1777,8 +1898,12 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8, cy
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
-        completeWorker(fixLine(false, 'The checks comment: noted.', [])),
-        completeWorker(fixLine(false, 'Noted; nothing to change in code.', [])),
+        completeWorker(
+          fixLine(false, 'The checks comment: noted, the `static` job already covers it.', []),
+        ),
+        completeWorker(
+          fixLine(false, 'Noted; nothing to change, src/a.ts line 3 already guards it.', []),
+        ),
       ],
       ghLog,
     });
@@ -2014,9 +2139,11 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     const world = defaultWorld();
     world.resolveReviewThreadFails = true; // run 1: the reply posts; the resolve fails
     const invocations1: OpInvocation[] = [];
+    const ghLog1: string[][] = [];
     const run1 = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
       invocations: invocations1,
+      ghLog: ghLog1,
       dispatchLogPath,
     });
     expect(run1.outcome.status).toBe('needs-human');
@@ -2031,14 +2158,18 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     // classifies 'responded' → the carried resolve posts from the
     // classification walk.
     world.resolveReviewThreadFails = false;
+    world.sha = SHA; // the fix pushed: the PR head is the stamped head now
     world.pullsComments = [
       restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
-      // The loop's OWN reply, exactly as it composed it: the signature
-      // LEADS the body — that is the carry's authorization (jNfip).
+      // The loop's OWN reply, exactly as run 1 composed it (signature, head
+      // stamp, resolve marker), re-fetched under the single-identity
+      // deployment (authored by the PR author, who is also the responder) —
+      // that is the carry's authorization (jNfip).
       restComment(
         201,
         'prauthor',
-        '<!-- cq-review-loop:octo/widget#7 -->\n\nFixed with a pushed commit.',
+        ghLog1.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'))[0] ??
+          '',
         iso(REPLY_AGE),
         101,
       ),
@@ -2048,6 +2179,7 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
       driverResults: [],
       invocations: invocations2,
       dispatchLogPath,
+      responderLogin: 'prauthor',
     });
     expect(run2.outcome.status).toBe('ok');
     expect(run2.outcome.reasons).toEqual([]);
@@ -2056,12 +2188,15 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     expect(run2.outcome.actionsPosted).toBe(1);
     expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
 
-    // Run 3: the resolve actionId is dispatched → a full no-op.
+    // Run 3: the resolve recorded and GitHub serves the thread resolved → a
+    // full no-op.
+    markResolved(world, 'T1');
     const invocations3: OpInvocation[] = [];
     const run3 = await runLoop(world, {
       driverResults: [],
       invocations: invocations3,
       dispatchLogPath,
+      responderLogin: 'prauthor',
     });
     expect(run3.outcome.status).toBe('ok');
     expect(run3.outcome.plan.jobs).toEqual([]);
@@ -2097,6 +2232,120 @@ describe('carried-resolve authorization (jNfip)', () => {
     expect(invocations).toHaveLength(0);
     expect(run.outcome.actionsPosted).toBe(0);
     expect(run.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('carried-resolve authorization under the single identity (PR #343 review)', () => {
+  const SIG = '<!-- cq-review-loop:octo/widget#7 -->';
+  const postedBodies = (ghLog: string[][]): string[] =>
+    ghLog.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'));
+  const root = () => restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+  /** Run 1 over T1: returns the exact reply body the loop posted. */
+  const answerOnce = async (result: WorkerResult): Promise<string> => {
+    const world = defaultWorld();
+    world.pullsComments = [root()];
+    const ghLog: string[][] = [];
+    await runLoop(world, { driverResults: [result], ghLog });
+    return postedBodies(ghLog)[0] ?? '';
+  };
+  /** Run 2: the single-identity world (replies authored by the PR author). */
+  const rerun = async (comments: ReturnType<typeof restComment>[], responderLogin?: string) => {
+    const world = defaultWorld();
+    world.pullsComments = comments;
+    const ghLog: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      invocations,
+      ...(responderLogin !== undefined ? { responderLogin } : {}),
+    });
+    return { outcome, mutations: ghLog.filter((args) => isGhMutation(args)), invocations };
+  };
+  const selfReply = (body: string, id = 9001) =>
+    restComment(id, 'prauthor', body, iso(REPLY_AGE), 101);
+
+  test('a changed:false reply (no resolve marker) never resolves the thread', async () => {
+    const body = await answerOnce(
+      completeWorker(fixLine(false, 'Already satisfied: line 3 already guards the case.', [])),
+    );
+    expect(body).not.toContain('cq-review-loop-resolve');
+    for (const responderLogin of [undefined, 'prauthor']) {
+      const { mutations, invocations } = await rerun([root(), selfReply(body)], responderLogin);
+      expect(mutations).toEqual([]);
+      expect(invocations).toHaveLength(0);
+    }
+  });
+
+  test('a legacy signature-led reply (no stamp, no marker) never resolves the thread', async () => {
+    for (const responderLogin of [undefined, 'prauthor']) {
+      const { mutations } = await rerun(
+        [root(), selfReply(`${SIG}\n\nFixed with a pushed commit.`)],
+        responderLogin,
+      );
+      expect(mutations).toEqual([]);
+    }
+  });
+
+  // A STALE proof re-plans the thread even though classify calls it
+  // 'responded' (the loop shares the PR author's login): the loop answers it
+  // again, once, and never resolves it (PR #343 independent review, finding 3).
+  const reanswer = async (comments: ReturnType<typeof restComment>[], worktreeHead?: string) => {
+    const world = defaultWorld();
+    if (worktreeHead !== undefined) world.worktreeHead = worktreeHead;
+    world.pullsComments = comments;
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'Already satisfied: line 3 already guards the case.', [])),
+      ],
+      ghLog,
+      responderLogin: 'prauthor',
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
+    return postedBodies(ghLog)[0] ?? '';
+  };
+
+  test('a marked reply posted over unseen reviewer input is answered again, not resolved (round binding)', async () => {
+    const body = await answerOnce(completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])));
+    expect(body).toContain('cq-review-loop-resolve');
+    await reanswer([
+      root(),
+      restComment(9002, 'reviewer', 'Also handle EBUSY.', iso(REPLY_AGE + 30_000), 101),
+      selfReply(body),
+    ]);
+  });
+
+  test('a marked reply stamped for an older head is answered again, not resolved', async () => {
+    const body = await answerOnce(completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])));
+    // The PR moved on: the worktree resolvePrWorktree checked out is at a
+    // head the stamp (the pushed SHA) does not name.
+    await reanswer([root(), selfReply(body)], 'f40e01550df09310707247bd2cb97b0ac79a5d1b');
+  });
+
+  test('an unchanged reply re-opens at a new checked-out head, and the new answer settles it', async () => {
+    const NEW_HEAD = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
+    const body = await answerOnce(
+      completeWorker(fixLine(false, 'Already satisfied: line 3 already guards the case.', [])),
+    );
+    const second = await reanswer([root(), selfReply(body)], NEW_HEAD);
+    expect(second).toContain(`<!-- cq-review-loop-head:${NEW_HEAD} round:`);
+    const world = defaultWorld();
+    world.worktreeHead = NEW_HEAD;
+    world.pullsComments = [
+      root(),
+      selfReply(body),
+      restComment(9002, 'prauthor', second, iso(REPLY_AGE - 60_000), 101),
+    ];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      invocations,
+      responderLogin: 'prauthor',
+    });
+    expect(invocations).toHaveLength(0);
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
   });
 });
 
@@ -2249,5 +2498,788 @@ describe('review-loop propagated spend (onSpend)', () => {
     // outcome (and any original throw) propagates untouched.
     expect(outcome.status).toBe('ok');
     expect(outcome.fixReport?.counts.done).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #336 incident (2026-10-17/18): the loop re-answered every unresolved
+// thread on each scheduled run with a non-answer. The settle gate makes it
+// idempotent per thread and head; the fix contract refuses non-answers.
+// ---------------------------------------------------------------------------
+
+describe('thread settle gate (PR #336 incident)', () => {
+  const settleWorld = (): LoopWorld => ({ ...defaultWorld(), worktreeFollowsOrigin: true });
+  /** A world whose fix run publishes: the worktree advances to SHA after the pre-fix read. */
+  const publishedWorld = (): LoopWorld => ({
+    ...settleWorld(),
+    worktreeAdvancesAt: 2,
+    worktreeAdvancesTo: SHA,
+    revListShas: [NEW_SHA],
+  });
+  const LOOP_LOGIN = 'cq-automation[bot]';
+  const SIG = '<!-- cq-review-loop:octo/widget#7 -->';
+  const OLD_HEAD = 'f40e01550df09310707247bd2cb97b0ac79a5d1b';
+  const DISPOSITION = 'Already satisfied: src/a.ts line 3 already guards the case.';
+  const reply = (
+    body: string,
+    createdAt: string | null = iso(REPLY_AGE),
+    authorLogin: string = LOOP_LOGIN,
+  ) => ({ authorLogin, body, createdAt });
+  const postedBodies = (ghLog: string[][]): string[] =>
+    ghLog.filter((args) => args.includes('-X')).map((args) => flagValue(args, 'body'));
+  const postedKinds = (outcome: ReviewLoopOutcome): string[] =>
+    outcome.reply?.posted.map((record) => record.kind) ?? [];
+  const root = () => restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+  const loopReply = (body: string, id = 9001, login = LOOP_LOGIN) =>
+    restComment(id, login, body, iso(REPLY_AGE), 101);
+  /** Run 1 over T1 with no replies: the loop posts one answer; returns its body. */
+  const answerOnce = async (summary = DISPOSITION): Promise<string> => {
+    const world = settleWorld();
+    world.pullsComments = [root()];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, summary, []))],
+      ghLog,
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    return postedBodies(ghLog)[0] ?? '';
+  };
+
+  test('loopReplyVerdict: latest word, timestamp, author, round, head and header decide', () => {
+    const ROOT = 'Fix src/a.ts at 3.';
+    const thread = (replies: ReturnType<typeof reply>[]) => ({ id: 'T1', body: ROOT, replies });
+    // The round the posting run answered: the thread with no replies yet.
+    const header = `${SIG}\n${replyHeadStamp(BEFORE_SHA, settleRound({ id: 'T1', body: ROOT }, []))}`;
+    const stamped = `${header}\n\n${DISPOSITION}`;
+    const marked = `${header}\n${REPLY_RESOLVE_MARKER}\n\nGuarded the abort.`;
+    const base = { signature: SIG, headSha: BEFORE_SHA, ownLogin: null };
+    const verdict = (
+      replies: ReturnType<typeof reply>[],
+      over: Partial<Parameters<typeof loopReplyVerdict>[1]> = {},
+    ) => loopReplyVerdict(thread(replies), { ...base, ...over });
+    const settled = { kind: 'settled', carryResolve: false };
+    const stale = { kind: 'stale' };
+    const unproven = { kind: 'unproven' };
+
+    expect(verdict([])).toEqual(unproven);
+    expect(verdict([reply(stamped)])).toEqual(settled);
+    expect(verdict([reply(stamped)], { headSha: BEFORE_SHA.toUpperCase() })).toEqual(settled);
+    // Another head: the loop answers again, once.
+    expect(verdict([reply(stamped)], { headSha: OLD_HEAD })).toEqual(stale);
+    // Unknown current head: silence, never a mutation.
+    expect(verdict([reply(marked)], { headSha: null, ownLogin: LOOP_LOGIN })).toEqual(settled);
+    // A legacy reply binds nothing: only the KNOWN identity's authorship proves it.
+    expect(verdict([reply(`${SIG}\n\nplaceholder`)], { ownLogin: LOOP_LOGIN })).toEqual(settled);
+    expect(verdict([reply(`${SIG}\n\nplaceholder`)])).toEqual(unproven);
+    expect(
+      verdict([reply(`${SIG}\n\nplaceholder`, iso(REPLY_AGE), 'mallory')], {
+        ownLogin: LOOP_LOGIN,
+      }),
+    ).toEqual(unproven);
+    // Reviewer input after the loop's reply: the reply is no longer the latest word.
+    expect(verdict([reply(stamped), reply('Still wrong.', iso(1), 'reviewer')])).toEqual(unproven);
+    // Feedback that landed before the reply but after the posting run's fetch.
+    expect(verdict([reply('Also EBUSY.', iso(REPLY_AGE + 1), 'reviewer'), reply(stamped)])).toEqual(
+      stale,
+    );
+    // An undated latest reply is not provably the latest word.
+    expect(verdict([reply(stamped, null)])).toEqual(unproven);
+    // Another PR's signature is not this loop's word.
+    expect(verdict([reply(replySignature('octo', 'widget', 8))])).toEqual(unproven);
+    // With the identity known, only the loop's own reply settles or carries.
+    expect(verdict([reply(stamped)], { ownLogin: LOOP_LOGIN.toUpperCase() })).toEqual(settled);
+    expect(verdict([reply(marked, iso(REPLY_AGE), 'mallory')], { ownLogin: LOOP_LOGIN })).toEqual(
+      unproven,
+    );
+    expect(verdict([reply(marked)], { ownLogin: LOOP_LOGIN })).toEqual({
+      kind: 'settled',
+      carryResolve: true,
+    });
+    // Without the identity a marked reply is answered again (no stranded resolve).
+    expect(verdict([reply(marked)])).toEqual(stale);
+    // The marker counts only in the header, never quoted in the summary.
+    expect(
+      verdict([reply(`${header}\n\nQuoted ${REPLY_RESOLVE_MARKER}\n${REPLY_RESOLVE_MARKER}`)], {
+        ownLogin: LOOP_LOGIN,
+      }),
+    ).toEqual(settled);
+  });
+
+  test('the incident: run 1 answers once; with its reply re-fetched, run 2 dispatches nothing (fresh dispatch log)', async () => {
+    const body = await answerOnce();
+    expect(body).toMatch(
+      new RegExp(`^${SIG}\\n<!-- cq-review-loop-head:${BEFORE_SHA} round:[0-9a-f]{8} -->\\n\\n`),
+    );
+    // GitHub now serves the posted reply as the thread's latest word. The
+    // dispatch log is NOT shared (a lost runner cache): the gate reads the
+    // reply itself — with and without the loop identity configured.
+    for (const responderLogin of [undefined, LOOP_LOGIN]) {
+      const world = settleWorld();
+      world.pullsComments = [root(), loopReply(body)];
+      const ghLog: string[][] = [];
+      const invocations: OpInvocation[] = [];
+      const { outcome } = await runLoop(world, {
+        driverResults: [],
+        ghLog,
+        invocations,
+        ...(responderLogin !== undefined ? { responderLogin } : {}),
+      });
+      expect(invocations).toHaveLength(0);
+      expect(outcome.plan.jobs).toEqual([]);
+      expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+      expect(outcome.actionsPosted).toBe(0);
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+      expect(outcome.status).toBe('ok');
+    }
+  });
+
+  test.each([
+    'Reading the anchored code first.',
+    'Reading the anchored file first.',
+    'Starting work on the reviewed item.',
+    'placeholder',
+  ])('a legacy UNSTAMPED loop reply %j as the latest word settles the thread', async (live) => {
+    const world = settleWorld();
+    world.pullsComments = [
+      root(),
+      restComment(9001, LOOP_LOGIN, `${SIG}\n\nStarting work.`, iso(REPLY_AGE + 2), 101),
+      restComment(9002, LOOP_LOGIN, `${SIG}\n\n${live}`, iso(REPLY_AGE), 101),
+    ];
+    const ghLog: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      invocations,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations).toHaveLength(0);
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test('feedback that landed between the posting fetch and the post re-opens the thread (round binding)', async () => {
+    const body = await answerOnce();
+    const world = settleWorld();
+    world.pullsComments = [
+      root(),
+      restComment(9002, 'reviewer', 'Also handle EBUSY.', iso(REPLY_AGE + 30_000), 101),
+      loopReply(body),
+    ];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'Already satisfied: EBUSY is retried at line 3.', [])),
+      ],
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.actionsPosted).toBe(1);
+  });
+
+  test('new reviewer input after the loop reply re-opens the thread for one answer', async () => {
+    const body = await answerOnce();
+    const world = settleWorld();
+    world.pullsComments = [
+      root(),
+      loopReply(body),
+      restComment(9002, 'reviewer', 'It still fails on EBUSY.', iso(REPLY_AGE - 60_000), 101),
+    ];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'Already satisfied: EBUSY is retried at line 3.', [])),
+      ],
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.actionsPosted).toBe(1);
+  });
+
+  test('a new head re-opens a thread answered for an older head; the new reply carries the new stamp', async () => {
+    const body = await answerOnce();
+    const world = settleWorld();
+    world.sha = OLD_HEAD;
+    world.pullsComments = [root(), loopReply(body)];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      ghLog,
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${OLD_HEAD} round:`);
+  });
+
+  test('an unchanged row is stamped with the worktree head it inspected when the PR head moved after the worktree resolved (PR #343 review)', async () => {
+    // resolvePrWorktree saw OLD_HEAD; a push landed before fetchReviewState,
+    // which serves BEFORE_SHA. The worker read OLD_HEAD's tree, so the reply
+    // must not claim BEFORE_SHA — the next run re-opens against the new head.
+    const world = { ...settleWorld(), worktreeHead: OLD_HEAD };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      ghLog,
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    const body = postedBodies(ghLog)[0] ?? '';
+    expect(body).toContain(`<!-- cq-review-loop-head:${OLD_HEAD} round:`);
+    expect(body).not.toContain(BEFORE_SHA);
+
+    const rerun = settleWorld(); // the PR head is BEFORE_SHA now
+    rerun.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const { outcome: second } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+    });
+    expect(second.plan.jobs).toHaveLength(1);
+    expect(second.actionsPosted).toBe(1);
+  });
+
+  test('a stamp naming the GraphQL head does not settle when the checked-out worktree is newer (PR #343 review)', async () => {
+    const body = await answerOnce();
+    // GitHub still serves BEFORE_SHA as headRefOid, but resolvePrWorktree
+    // already checked out the newly pushed OLD_HEAD tree: compare against it.
+    const world = { ...settleWorld(), worktreeHead: OLD_HEAD };
+    world.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+    });
+    expect(outcome.skipped).not.toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    expect(outcome.plan.jobs).toHaveLength(1);
+  });
+
+  describe('an edit the dispatch round cannot see re-opens the thread (PR #343 review)', () => {
+    // Two prior replies: the dispatch round reads only the LATEST one, so an
+    // edit to the root or to the first reply changes no timestamp or body it
+    // keys on. The settle round covers the whole thread.
+    const reply1 = (text: string) =>
+      restComment(9100, 'reviewer', text, iso(REPLY_AGE + 10_000), 101);
+    const reply2 = restComment(9101, 'reviewer', 'Still open.', iso(REPLY_AGE + 5000), 101);
+    const answerBody = async (): Promise<string> => {
+      const world = settleWorld();
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2];
+      const ghLog: string[][] = [];
+      await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+        ghLog,
+      });
+      return postedBodies(ghLog)[0] ?? '';
+    };
+
+    test('unedited: the reply still settles the thread (control)', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2, loopReply(body)];
+      const { outcome } = await runLoop(world, { driverResults: [] });
+      expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    });
+
+    test('the root comment was edited', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.threads = [actionableThread('T1', 'src/a.ts', 4, 101)];
+      world.pullsComments = [root(), reply1('Please guard line 3.'), reply2, loopReply(body)];
+      const { outcome } = await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      });
+      expect(outcome.plan.jobs).toHaveLength(1);
+      expect(outcome.actionsPosted).toBe(1);
+    });
+
+    test('the first reply was edited (same id and timestamp)', async () => {
+      const body = await answerBody();
+      const world = settleWorld();
+      world.pullsComments = [
+        root(),
+        reply1('Please guard line 3 AND line 4.'),
+        reply2,
+        loopReply(body),
+      ];
+      const { outcome } = await runLoop(world, {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      });
+      expect(outcome.plan.jobs).toHaveLength(1);
+    });
+  });
+
+  test('a marked reply with no dispatch record (lost cache) is looked at again, never silently re-resolved (PR #343 Codex review)', async () => {
+    const world = publishedWorld();
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply', 'resolve_thread']);
+    // A reviewer reopened the thread; the runner cache holding run 1's
+    // records is gone (a fresh dispatch log per runLoop).
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(postedKinds(outcome)).toEqual(['review_reply']);
+  });
+
+  test('a thread reopened after its recorded resolve is looked at again (PR #343 review)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-reopen-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = publishedWorld();
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply', 'resolve_thread']);
+    // The reviewer pressed "unresolve": the thread is fetched unresolved again
+    // with no new comment and the same head, its resolve already recorded.
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      invocations,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(outcome.skipped).not.toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+  });
+
+  test('a published fix stamps the worktree head it pushed', async () => {
+    const world = publishedWorld();
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('ok');
+    expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${SHA} round:`);
+  });
+
+  test('an unchanged row beside a sibling that committed is stamped with the head it INSPECTED, not the pushed one', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, DISPOSITION, [])),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+    });
+    expect(outcome.status).toBe('ok');
+    const bodies = postedBodies(ghLog);
+    expect(bodies.find((body) => body.includes(DISPOSITION))).toContain(
+      `<!-- cq-review-loop-head:${BEFORE_SHA} round:`,
+    );
+    expect(bodies.find((body) => body.includes('Guarded the abort.'))).toContain(
+      `<!-- cq-review-loop-head:${SHA} round:`,
+    );
+  });
+
+  test('a no-outcome sibling does not withhold a verified fix: the fix publishes, replies and resolves; the run is needs-human (PR #343 CodeRabbit cycle)', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    const ghLog: string[][] = [];
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(dispositionLine('no_outcome', 'Investigating why the test fails.')),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+      gitLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(true);
+    expect(
+      outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
+    ).toBe(false);
+    expect(gitLog.some((args) => args.includes('push'))).toBe(true);
+    expect(postedKinds(outcome)).toEqual(['review_reply', 'resolve_thread']);
+    expect(postedBodies(ghLog)).toHaveLength(1);
+    expect(postedBodies(ghLog)[0]).toContain('Guarded the abort.');
+  });
+
+  test('unchanged evidence is verified at the head the reply is stamped with, not a sibling commit (PR #343 Codex review)', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T3 in src/c.ts' };
+    // Only the sibling's pushed tree has src/new.ts; the inspected head does not.
+    world.filesAt = { [SHA]: { ...DEFAULT_WORLD_FILES, 'src/new.ts': 5 } };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, DISPOSITION, [], [{ path: 'src/new.ts', line: 1 }])),
+        completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA])),
+      ],
+      ghLog,
+    });
+    expect(outcome.reasons.some((reason) => reason.includes('evidence does not verify'))).toBe(
+      true,
+    );
+    const bodies = postedBodies(ghLog);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain('Guarded the abort.');
+  });
+
+  test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-carry-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = publishedWorld();
+    world.resolveReviewThreadFails = true;
+    const ghLog1: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(postedKinds(run1.outcome)).toEqual(['review_reply']);
+    const [body] = postedBodies(ghLog1);
+    expect(body?.split('\n\n')[0]).toContain(REPLY_RESOLVE_MARKER);
+
+    // Run 2: the reply is the thread's latest word for the current head
+    // (the stamp names the pushed worktree head) → settled; the marked,
+    // own-authored reply carries the failed resolve.
+    world.resolveReviewThreadFails = false;
+    world.sha = SHA;
+    world.pullsComments = [root(), loopReply(body ?? '')];
+    const invocations2: OpInvocation[] = [];
+    const run2 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations2,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations2).toHaveLength(0);
+    expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(postedKinds(run2.outcome)).toEqual(['resolve_thread']);
+    // The carried id IS the posting run's resolve id (its round).
+    expect(run2.outcome.reply?.posted[0]?.actionId).toBe(
+      run1.outcome.reply?.posted[0]?.actionId.replace(':reply:', ':resolve:'),
+    );
+
+    // Run 3: the resolve recorded and GitHub serves the thread resolved →
+    // nothing dispatches.
+    markResolved(world, 'T1');
+    const invocations3: OpInvocation[] = [];
+    const run3 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations3,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(run3.outcome.status).toBe('ok');
+    expect(invocations3).toHaveLength(0);
+    expect(run3.outcome.actionsPosted).toBe(0);
+    expect(run3.outcome.reply).toBeUndefined();
+  });
+
+  test('an unreadable checked-out head is unknown: the thread settles in silence and no resolve is carried (PR #343 Codex review)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-settle-nohead-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = publishedWorld();
+    world.resolveReviewThreadFails = true;
+    const ghLog1: string[][] = [];
+    await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort.', [NEW_SHA]))],
+      ghLog: ghLog1,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    // Run 2: GraphQL serves the stamped head, but the pre-fix worktree read
+    // fails, so the gate cannot prove the head and must not carry the resolve.
+    const rerun = settleWorld();
+    rerun.sha = SHA;
+    rerun.headReadFailsAt = 2;
+    rerun.pullsComments = [root(), loopReply(postedBodies(ghLog1)[0] ?? '')];
+    const ghLog2: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(rerun, {
+      driverResults: [],
+      ghLog: ghLog2,
+      invocations,
+      dispatchLogPath,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations).toHaveLength(0);
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(ghLog2.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test('a signature-led reply NOT authored by the loop identity neither settles nor carries', async () => {
+    const body = await answerOnce();
+    const forged = body.replace('\n\n', `\n${REPLY_RESOLVE_MARKER}\n\n`);
+    const world = settleWorld();
+    world.pullsComments = [root(), loopReply(forged, 9001, 'mallory')];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect(postedKinds(outcome)).toEqual(['review_reply']);
+  });
+
+  test('a summary quoting the resolve marker never manufactures resolve intent', async () => {
+    const body = await answerOnce(
+      `Already satisfied; the reply format ${REPLY_RESOLVE_MARKER} is documented at line 3.`,
+    );
+    expect(body.split('\n\n')[0]).not.toContain(REPLY_RESOLVE_MARKER);
+    const world = settleWorld();
+    world.pullsComments = [root(), loopReply(body)];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test('an UNCHANGED reply carries no resolve marker', async () => {
+    expect(await answerOnce()).not.toContain(REPLY_RESOLVE_MARKER);
+  });
+
+  // THE FIX OUTCOME CONTRACT: free text is never judged. A legacy contract
+  // without a disposition is no outcome, whatever its summary says: every
+  // non-answer from the incident and both independent reviews posts nothing
+  // and leaves the thread unsettled.
+  test.each([
+    'Reading the anchored code first.',
+    'placeholder',
+    'Starting work.',
+    'Reading the anchored code first. Starting work on the reviewed item.',
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+    'The investigation of `src/a.ts` is still in progress.',
+    'Checking whether `src/a.ts` shows the reported issue.',
+    'The next step is to inspect `src/a.ts` before making any changes.',
+    'No changes are needed in the guard at `src/a.ts:3`.',
+  ])(
+    'a legacy free-text answer %j posts NOTHING, records why, and stays unsettled',
+    async (live) => {
+      const ghLog: string[][] = [];
+      const run1 = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(legacyFixLine(false, live, []))],
+        ghLog,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(run1.outcome.status).toBe('needs-human');
+      expect(run1.outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(
+        true,
+      );
+      expect(run1.outcome.actionsPosted).toBe(0);
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+      // Nothing was posted, so nothing settles: run 2 dispatches the worker again.
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+        invocations,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(invocations).toHaveLength(1);
+      expect(run2.outcome.actionsPosted).toBe(1);
+    },
+  );
+
+  test.each([
+    ['needs_human', 'A maintainer must choose between the two retry policies.'],
+    ['no_outcome', 'Reading the anchored code first.'],
+  ])('disposition %s posts NOTHING and leaves the thread unsettled', async (disposition, text) => {
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(settleWorld(), {
+      driverResults: [completeWorker(dispositionLine(disposition, text))],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(
+      outcome.reasons.some((reason) => reason.includes(`worker disposition ${disposition}`)),
+    ).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+  });
+
+  test.each([
+    ['no evidence at all', []],
+    ['a file that does not exist', [{ path: 'src/zzz.ts', line: 1 }]],
+    ['a line past the end of the file', [{ path: 'src/a.ts', line: 99 }]],
+    // A directory is no file (PR #343 CodeRabbit cycle on fa64d9b8).
+    ['a directory', [{ path: 'src', line: 1 }]],
+    // An empty file has no line 1; an oversized file is never buffered (PR #343 Codex review).
+    ['line 1 of an empty file', [{ path: 'src/empty.ts', line: 1 }]],
+    ['a file too large to verify', [{ path: 'src/huge.ts', line: 1 }]],
+  ] as const)(
+    'an unchanged answer citing %s posts NOTHING and stays unsettled',
+    async (_name, evidence) => {
+      const ghLog: string[][] = [];
+      const { outcome } = await runLoop(settleWorld(), {
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, [], [...evidence]))],
+        ghLog,
+        responderLogin: LOOP_LOGIN,
+      });
+      expect(outcome.status).toBe('needs-human');
+      expect(outcome.reasons.some((reason) => reason.includes('no outcome to post'))).toBe(true);
+      expect(outcome.actionsPosted).toBe(0);
+      expect(ghLog.filter((args) => isGhMutation(args))).toEqual([]);
+    },
+  );
+
+  test('an unchanged answer with verified evidence posts once, shows the evidence, and settles', async () => {
+    // The independent review's P2 at c05577e2: a completed "leaving unchanged" disposition.
+    const summary =
+      'I am leaving `src/a.ts:3` unchanged because its guard already rejects empty input.';
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(settleWorld(), {
+      driverResults: [completeWorker(fixLine(false, summary, []))],
+      ghLog,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(1);
+    const body = postedBodies(ghLog)[0] ?? '';
+    expect(body).toContain(summary);
+    expect(body).toContain('Evidence: `src/a.ts:3`');
+    const rerun = settleWorld();
+    rerun.pullsComments = [root(), loopReply(body)];
+    const invocations: OpInvocation[] = [];
+    const second = await runLoop(rerun, {
+      driverResults: [],
+      invocations,
+      responderLogin: LOOP_LOGIN,
+    });
+    expect(invocations).toHaveLength(0);
+    expect(second.outcome.skipped).toEqual([{ id: 'T1', reason: 'loop-replied-this-head' }]);
+  });
+
+  test('a future-tense disposition that declines a change posts once (PR #343 independent review, finding 2)', async () => {
+    const summary = 'I will make no changes because line 3 already rejects empty input.';
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(settleWorld(), {
+      driverResults: [completeWorker(fixLine(false, summary, []))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(1);
+    expect(postedBodies(ghLog)[0]).toContain(summary);
+  });
+});
+
+// The independent reviewers' exact probes (PR #343 at c95807ca and c05577e2),
+// folded in from their probe file. The free-text probes send the legacy
+// shape, exactly as the reviewers did; the leave-unchanged one sends v2.
+describe('independent PR343 exact-head regressions', () => {
+  test.each([
+    'Investigating why the test fails.',
+    'I am investigating why no changes are applied.',
+  ])('progress-only output %j must post nothing and stay retriable', async (summary) => {
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    const root = restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+    world.pullsComments = [root];
+    const ghLog: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(legacyFixLine(false, summary, []))],
+      ghLog,
+      responderLogin: 'cq-automation[bot]',
+    });
+    const body = ghLog
+      .filter((args) => args.includes('-X'))
+      .map((args) => flagValue(args, 'body'))[0];
+    // Observe the suppression consequence without relying on a dispatch log.
+    if (body !== undefined) {
+      const rerun = { ...defaultWorld(), worktreeFollowsOrigin: true };
+      rerun.pullsComments = [
+        root,
+        restComment(9001, 'cq-automation[bot]', body, iso(REPLY_AGE), 101),
+      ];
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(rerun, {
+        driverResults: [],
+        invocations,
+        responderLogin: 'cq-automation[bot]',
+      });
+      expect(run2.outcome.status).toBe('ok');
+      expect(invocations).toHaveLength(0);
+      expect(run2.outcome.skipped).toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    }
+    expect(run1.outcome.actionsPosted).toBe(0);
+    expect(run1.outcome.status).toBe('needs-human');
+  });
+});
+
+describe('independent PR343 c05577 outcome regressions', () => {
+  test.each([
+    'The investigation of `src/a.ts` is still in progress.',
+    'Checking whether `src/a.ts` shows the reported issue.',
+    'The next step is to inspect `src/a.ts` before making any changes.',
+    'No changes are needed in the guard at `src/a.ts:3`.',
+  ])('a non-answer %j must not post or settle', async (summary) => {
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    const root = restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null);
+    world.pullsComments = [root];
+    const ghLog: string[][] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(legacyFixLine(false, summary, []))],
+      ghLog,
+      responderLogin: 'cq-automation[bot]',
+    });
+    const body = ghLog
+      .filter((args) => args.includes('-X'))
+      .map((args) => flagValue(args, 'body'))[0];
+    if (body !== undefined) {
+      expect(body).toContain(summary);
+      const rerun = { ...defaultWorld(), worktreeFollowsOrigin: true };
+      rerun.pullsComments = [
+        root,
+        restComment(9001, 'cq-automation[bot]', body, iso(REPLY_AGE), 101),
+      ];
+      const invocations: OpInvocation[] = [];
+      const run2 = await runLoop(rerun, {
+        driverResults: [],
+        invocations,
+        responderLogin: 'cq-automation[bot]',
+      });
+      expect(run2.outcome.status).toBe('ok');
+      expect(invocations).toHaveLength(0);
+      expect(run2.outcome.skipped).toContainEqual({ id: 'T1', reason: 'loop-replied-this-head' });
+    }
+    expect(run1.outcome.actionsPosted).toBe(0);
+    expect(run1.outcome.status).toBe('needs-human');
+  });
+
+  test('a completed no-change disposition using leave unchanged should post', async () => {
+    const summary =
+      'I am leaving `src/a.ts:3` unchanged because its guard already rejects empty input.';
+    const world = { ...defaultWorld(), worktreeFollowsOrigin: true };
+    // v2 contract: the disposition and its evidence, not the wording, make it an outcome.
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, summary, [], [{ path: 'src/a.ts', line: 3 }]))],
+      responderLogin: 'cq-automation[bot]',
+    });
+    expect(outcome.actionsPosted).toBe(1);
+    expect(outcome.status).toBe('ok');
   });
 });

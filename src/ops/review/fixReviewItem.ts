@@ -36,8 +36,9 @@
 // path+line, item body, prior comments — each head-capped to
 // MAX_COMMENT_CHARS — and the worktree path/branch) plus the OUTPUT
 // CONTRACT: the worker must make the fix in the worktree, COMMIT it, and
-// answer with a single line of JSON {"changed":boolean,"summary":string,
-// "commits":string[]} where commits are the full shas it created. The
+// answer with a single line of JSON {"disposition", "summary", "commits",
+// "evidence"} (THE FIX OUTCOME CONTRACT below): commits are the full shas
+// it created, evidence the code an unchanged answer cites. The
 // single prompt string is system + blank line + user (OpInvocation carries
 // one prompt). `truncated: true` rides the ok result when ANY truncation
 // fired — the system prompt cap or any comment cap — so a caller never
@@ -61,7 +62,9 @@
 //     contract keys and value shapes, or a string holding one JSON line)
 //     → ok; a complete run whose structured output is missing, unparseable,
 //     or wrong-shaped is a DEFINITIVE contract violation → failed (never a
-//     guessed ok).
+//     guessed ok); a well-formed contract whose disposition is no outcome
+//     (needs_human, no_outcome, or missing its evidence) → needs-human with
+//     a NO_OUTCOME_REASON reason (THE FIX OUTCOME CONTRACT — nothing to post).
 //   'budget' → budget-exhausted; 'error' → failed with the structured
 //     errorClass named in the text for humans only (ADR-0002 §2.9 — the
 //     class itself is forwarded nowhere); 'aborted' → indeterminate (no
@@ -173,12 +176,16 @@ export interface FixReviewItemInput {
  * undefined).
  */
 export interface FixReviewItemResult {
-  /** True only when the worker committed a fix. */
+  /** The worker's outcome: only these two dispositions are ok (THE FIX OUTCOME CONTRACT). */
+  disposition: 'fixed' | 'unchanged_with_reason';
+  /** True exactly when the disposition is `fixed` (kept for v1 consumers such as crq). */
   changed: boolean;
-  /** The worker's one-sentence account of what it did (or why nothing was needed). */
+  /** The worker's one-sentence account of what it fixed, or the reason nothing changed. */
   summary: string;
   /** Full shas of the commits the worker created, in worker-reported order. */
   commits: string[];
+  /** The code the worker cites; at least one entry for `unchanged_with_reason`. */
+  evidence: FixEvidence[];
   /** Present (true) only when the CONTEXT (system prompt / body / comments) was clipped. */
   truncated?: boolean;
   /** Present (true) only when the worker SUMMARY hit its own head-cap. */
@@ -224,6 +231,60 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
 export const MAX_SUMMARY_CHARS = 1_000;
 
 /**
+ * THE FIX OUTCOME CONTRACT (PR #336 incident, 2026-10-17/18; PR #343). A
+ * worker that answered on its FIRST turn, before reading anything, handed
+ * back a schema-valid `{changed:false}` whose summary was a preamble
+ * ("Reading the anchored code first."), and the loop posted it on every run.
+ * Free-text classification of the summary failed in both directions, so the
+ * worker now states its OUTCOME as an explicit disposition, plus the
+ * evidence that disposition requires:
+ *   - `fixed`: at least one commit (the loop verifies each against git);
+ *   - `unchanged_with_reason`: no commits, a summary giving the reason, and
+ *     at least one `evidence` entry `{path, line}` citing the code that
+ *     shows it (the loop verifies each against the worktree before posting);
+ *   - `needs_human`: no commits; the summary says what a human must decide;
+ *   - `no_outcome`: no commits; the worker could not finish.
+ * Only `fixed` and `unchanged_with_reason` are an outcome (ok). The rest,
+ * and a well-formed contract whose disposition lacks its evidence, are
+ * NO-OUTCOME rows: `needs-human` with a reason opening NO_OUTCOME_REASON.
+ * They post nothing, so the thread stays unsettled. Their commits are known
+ * to be none, so they do not withhold siblings. A malformed contract, or
+ * commits on any disposition but `fixed`, stays `failed`: what the worker
+ * committed is then unknown.
+ */
+export const FIX_DISPOSITIONS = [
+  'fixed',
+  'unchanged_with_reason',
+  'needs_human',
+  'no_outcome',
+] as const;
+
+/** The reason prefix of a NO-OUTCOME row (module doc above). */
+export const NO_OUTCOME_REASON = 'fixReviewItem: no outcome to post';
+
+/** At most this many evidence entries; each path at most MAX_EVIDENCE_PATH_CHARS. */
+export const MAX_EVIDENCE = 10;
+export const MAX_EVIDENCE_PATH_CHARS = 300;
+
+/** One evidence citation: a worktree-relative file path and a 1-based line in it. */
+export interface FixEvidence {
+  path: string;
+  line: number;
+}
+
+/**
+ * A worktree-relative path the loop can resolve through git: no absolute
+ * path, no `..` or `.` segment, no backslash, no control character.
+ */
+const isRelativeRepoPath = (path: string): boolean =>
+  path.length > 0 &&
+  path.length <= MAX_EVIDENCE_PATH_CHARS &&
+  !path.startsWith('/') &&
+  !path.includes('\\') &&
+  [...path].every((char) => char.charCodeAt(0) >= 0x20) &&
+  path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+
+/**
  * The commits array's dispatch-boundary bounds (round-3 item 2): at most
  * ten shas per fix, each a string of at most 64 chars — the loop verifies
  * them against git anyway, so these bounds only cap the worker's claim
@@ -239,19 +300,20 @@ export const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
  * rendered once as plain data via {@link toOutputSchema}; the lane must
  * settle a schema-valid contract object or an 'output-invalid' error,
  * Codex 2j). parseFixOutput stays as defense in depth (exact keys,
- * changed↔commits tie, bounds) — the schema is the vendor-boundary
- * contract, the parse is the loop's own gate.
+ * disposition↔evidence requirements, bounds) — the schema is the
+ * vendor-boundary contract, the parse is the loop's own gate.
  */
 export const FixReviewItemOutputSchema = z
   .object({
-    changed: z.boolean(),
+    disposition: z.enum(FIX_DISPOSITIONS),
     summary: z.string(),
     commits: z.array(z.string()),
+    evidence: z.array(z.object({ path: z.string(), line: z.number().int() }).strict()),
   })
   .strict();
 
 /** The invocation's structured-output contract, rendered once (module doc). */
-const FIX_CONTRACT_OUTPUT_SCHEMA = toOutputSchema('review.fixItem/v1', FixReviewItemOutputSchema);
+const FIX_CONTRACT_OUTPUT_SCHEMA = toOutputSchema('review.fixItem/v2', FixReviewItemOutputSchema);
 
 /** Head-truncate text to maxChars; reports whether the cap fired. */
 const headCapped = (text: string, maxChars: number): { text: string; truncated: boolean } =>
@@ -394,9 +456,13 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   lines.push(
     'Output contract — after working, reply with exactly ONE line of JSON and nothing else:',
   );
-  lines.push('{"changed":boolean,"summary":string,"commits":string[]}');
   lines.push(
-    '"changed" is true only when you committed a fix in the worktree above; "commits" lists the full shas of the commits you created (empty array when none).',
+    '{"disposition":"fixed"|"unchanged_with_reason"|"needs_human"|"no_outcome","summary":string,"commits":string[],"evidence":[{"path":string,"line":number}]}',
+  );
+  // NON-overridable like the attribution line below: the op reads the
+  // disposition and its evidence, never the summary's wording.
+  lines.push(
+    '"disposition" is "fixed" only when you committed a fix in the worktree above ("commits" lists the full shas you created); "unchanged_with_reason" when no change is needed, with the reason in "summary" and at least one "evidence" entry citing the file (worktree-relative path) and line that show it; "needs_human" when a person must decide, saying what in "summary"; "no_outcome" when you could not finish. "commits" is empty for every disposition but "fixed". Answer only after doing the work: only "fixed" and "unchanged_with_reason" with valid evidence are posted.',
   );
   // NON-overridable attribution requirement (round-3 item 1): the loop
   // verifies per-item attribution by the commit subject, so this line rides
@@ -408,86 +474,152 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
 };
 
 /**
- * The exact fix-contract shape: an object with EXACTLY the keys changed /
- * summary / commits and the right value shapes (changed boolean, summary a
- * plain string, commits an array of non-empty strings), with the changed↔
- * commits TIE enforced both ways (a documented contract violation):
- * `changed: true` with an empty commits array and `changed: false` with
- * commits are both rejected — the loop's resolve gate trusts this tie, so
- * a worker claiming a fix without shas (or no-fix with shas) is a lying
- * worker, never a guessable ok. Any extra or missing key, wrong type, or
- * non-string commit entry is likewise a violation → null. A string input
- * is parsed first (a worker that cannot bind structured output may answer
- * one JSON line).
+ * The fix-contract parse (module doc on THE FIX OUTCOME CONTRACT). A string
+ * input is parsed first (a worker that cannot bind structured output may
+ * answer one JSON line). Three verdicts:
+ *   - `invalid`: not exactly the contract keys and value shapes, a
+ *     malformed commit or evidence entry, an empty summary, commits on any
+ *     disposition but `fixed`, or a `fixed` naming no commit — what the
+ *     worker committed is unknown;
+ *   - `no-outcome`: well-formed, no commits, but not an outcome:
+ *     `needs_human`, `no_outcome`, or `unchanged_with_reason` without
+ *     evidence;
+ *   - `outcome`: `fixed` with its commits, or `unchanged_with_reason` with
+ *     its evidence.
+ * LEGACY v1 (`{changed, summary, commits}`), minimal and fail-closed:
+ * `changed:true` with commits reads as `fixed`, because its commits are
+ * still verified; `changed:false` carries no disposition or evidence, so it
+ * is `no-outcome`. The same tie and summary rules apply.
  */
-const parseFixOutput = (
-  raw: unknown,
-): { changed: boolean; summary: string; commits: string[]; summaryTruncated: boolean } | null => {
-  let value: unknown = raw;
-  if (typeof raw === 'string') {
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+type ParsedFix =
+  | { kind: 'invalid' }
+  | { kind: 'no-outcome'; why: string }
+  | {
+      kind: 'outcome';
+      disposition: 'fixed' | 'unchanged_with_reason';
+      summary: string;
+      summaryTruncated: boolean;
+      commits: string[];
+      evidence: FixEvidence[];
+    };
+
+const sameKeys = (record: Record<string, unknown>, keys: readonly string[]): boolean => {
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, i) => key === expected[i]);
+};
+
+/** Element-wise sha validation (round-3 items 2 and 15): full 40-hex, bounded. */
+const parseCommits = (commits: unknown): string[] | null => {
+  if (!Array.isArray(commits) || commits.length > MAX_FIX_COMMITS) {
     return null;
   }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (
-    keys.length !== 3 ||
-    keys[0] !== 'changed' ||
-    keys[1] !== 'commits' ||
-    keys[2] !== 'summary'
-  ) {
-    return null;
-  }
-  if (typeof record['changed'] !== 'boolean' || typeof record['summary'] !== 'string') {
-    return null;
-  }
-  // An EMPTY summary is a definitive contract violation — the reply body is
-  // composed from it, and "changed nothing, saying nothing" is not honest
-  // evidence. An oversized summary is head-capped (the reply must not blow
-  // the gh argv) and feeds the `truncated` flag.
-  if (record['summary'].trim().length < 1) {
-    return null;
-  }
-  const summary = headCapped(record['summary'], MAX_SUMMARY_CHARS);
-  const commits = record['commits'];
-  if (!Array.isArray(commits)) {
-    return null;
-  }
-  // Element-wise validation over `unknown` (an Array.isArray narrow alone
-  // leaves `any[]` — the exact hole a lying worker could slip a non-string
-  // sha through): every entry must be a FULL 40-hex sha (round-3 item 15 —
-  // an abbreviated sha can resolve in git and must not pass the parse),
-  // the array bounded at MAX_FIX_COMMITS entries and each sha at 64 chars
-  // (round-3 item 2 — bounds the worker claim surface and the composed
-  // reply). Violations are contract violations, consistent with the
-  // changed↔commits tie.
   const shas: string[] = [];
   for (const entry of commits as unknown[]) {
     if (typeof entry !== 'string' || !COMMIT_SHA_RE.test(entry)) {
       return null;
     }
-    if (entry.length > 64 || shas.length >= MAX_FIX_COMMITS) {
-      return null;
-    }
     shas.push(entry);
   }
-  const changed = record['changed'];
-  // The changed↔commits tie, both directions (item 10): a claimed fix has
-  // shas; a no-change has none.
-  if ((changed === true && shas.length === 0) || (changed === false && shas.length > 0)) {
+  return shas;
+};
+
+const parseEvidence = (evidence: unknown): FixEvidence[] | null => {
+  if (!Array.isArray(evidence) || evidence.length > MAX_EVIDENCE) {
     return null;
   }
+  const entries: FixEvidence[] = [];
+  for (const entry of evidence as unknown[]) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    if (!sameKeys(record, ['path', 'line'])) {
+      return null;
+    }
+    const { path, line } = record;
+    if (typeof path !== 'string' || !isRelativeRepoPath(path)) {
+      return null;
+    }
+    if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) {
+      return null;
+    }
+    entries.push({ path, line });
+  }
+  return entries;
+};
+
+const parseFixOutput = (raw: unknown): ParsedFix => {
+  let value: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return { kind: 'invalid' };
+    }
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { kind: 'invalid' };
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record['summary'] !== 'string') {
+    return { kind: 'invalid' };
+  }
+  const commits = parseCommits(record['commits']);
+  if (commits === null) {
+    return { kind: 'invalid' };
+  }
+  let disposition: (typeof FIX_DISPOSITIONS)[number];
+  let evidence: FixEvidence[] = [];
+  const legacy = sameKeys(record, ['changed', 'summary', 'commits']);
+  if (sameKeys(record, ['disposition', 'summary', 'commits', 'evidence'])) {
+    const claimed = record['disposition'];
+    const parsedEvidence = parseEvidence(record['evidence']);
+    if (
+      typeof claimed !== 'string' ||
+      !(FIX_DISPOSITIONS as readonly string[]).includes(claimed) ||
+      parsedEvidence === null
+    ) {
+      return { kind: 'invalid' };
+    }
+    disposition = claimed as (typeof FIX_DISPOSITIONS)[number];
+    evidence = parsedEvidence;
+  } else if (legacy) {
+    if (typeof record['changed'] !== 'boolean') {
+      return { kind: 'invalid' };
+    }
+    disposition = record['changed'] ? 'fixed' : 'no_outcome';
+  } else {
+    return { kind: 'invalid' };
+  }
+  // The disposition↔commits tie, both ways: commits on anything but `fixed`,
+  // or a `fixed` that names none, is a lying worker whose commits are
+  // unknown. An empty summary is a definitive violation too.
+  if ((disposition === 'fixed') !== commits.length > 0) {
+    return { kind: 'invalid' };
+  }
+  const summary = headCapped(record['summary'], MAX_SUMMARY_CHARS);
+  if (summary.text.trim() === '') {
+    return { kind: 'invalid' };
+  }
+  if (disposition === 'needs_human' || disposition === 'no_outcome') {
+    return {
+      kind: 'no-outcome',
+      why: legacy
+        ? 'a legacy no-change contract carries no disposition or evidence'
+        : `worker disposition ${disposition}: ${summary.text}`,
+    };
+  }
+  if (disposition === 'unchanged_with_reason' && evidence.length === 0) {
+    return { kind: 'no-outcome', why: 'disposition unchanged_with_reason cites no evidence' };
+  }
   return {
-    changed,
+    kind: 'outcome',
+    disposition,
     summary: summary.text,
-    commits: shas,
     summaryTruncated: summary.truncated,
+    commits,
+    evidence,
   };
 };
 
@@ -643,18 +775,30 @@ export function makeFixReviewItem(deps: {
       };
     }
     const parsed = parseFixOutput(worker.structuredOutput);
-    if (parsed === null) {
+    const session = worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`;
+    if (parsed.kind === 'invalid') {
       return {
         status: 'failed',
-        error: `fixReviewItem: complete run carried no parseable fix contract — structured output must be an object with exactly the keys changed/summary/commits (non-empty summary; changed true ⇔ commits non-empty) or a single JSON line with them${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
+        error: `fixReviewItem: complete run carried no parseable fix contract — structured output must be an object with exactly the keys disposition/summary/commits/evidence (disposition one of ${FIX_DISPOSITIONS.join('|')}; commits only for fixed) or a single JSON line with them${session}`,
+      };
+    }
+    // NO OUTCOME (module doc on THE FIX OUTCOME CONTRACT): nothing to post,
+    // and no commits, so the loop leaves the thread unsettled without
+    // withholding its siblings.
+    if (parsed.kind === 'no-outcome') {
+      return {
+        status: 'needs-human',
+        reason: `${NO_OUTCOME_REASON} — ${parsed.why.slice(0, 200)}${session}`,
       };
     }
     return {
       status: 'ok',
       value: {
-        changed: parsed.changed,
+        disposition: parsed.disposition,
+        changed: parsed.disposition === 'fixed',
         summary: parsed.summary,
         commits: parsed.commits,
+        evidence: parsed.evidence,
         ...(truncated ? { truncated: true } : {}),
         ...(parsed.summaryTruncated ? { summaryTruncated: true } : {}),
         denials: worker.denials,

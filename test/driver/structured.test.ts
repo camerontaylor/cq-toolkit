@@ -66,17 +66,28 @@ const CASES: DifferentialCase[] = [
     invalid: [{}, { decision: 'nope' }, { decision: 'acted', summary: 5 }, 'acted', null],
   },
   {
-    name: 'review.fixItem/v1',
+    name: 'review.fixItem/v2',
     schema: FixReviewItemOutputSchema,
     valid: [
-      { changed: true, summary: 'extracted helper', commits: [] },
-      { changed: false, summary: 'no change needed', commits: ['a'.repeat(40)] },
+      { disposition: 'fixed', summary: 'extracted helper', commits: [], evidence: [] },
+      {
+        disposition: 'unchanged_with_reason',
+        summary: 'no change needed',
+        commits: ['a'.repeat(40)],
+        evidence: [{ path: 'src/a.ts', line: 3 }],
+      },
     ],
     invalid: [
-      { changed: true, summary: 'missing commits' },
-      { changed: true, summary: 'extra key', commits: [], zz: 1 },
-      { changed: 'yes', summary: 'wrong type', commits: [] },
-      { changed: true, summary: 'commits not an array', commits: 'abc' },
+      { disposition: 'fixed', summary: 'missing evidence', commits: [] },
+      { disposition: 'fixed', summary: 'extra key', commits: [], evidence: [], zz: 1 },
+      { disposition: 'done', summary: 'unknown disposition', commits: [], evidence: [] },
+      { disposition: 'fixed', summary: 'commits not an array', commits: 'abc', evidence: [] },
+      {
+        disposition: 'fixed',
+        summary: 'evidence line not an integer',
+        commits: [],
+        evidence: [{ path: 'a', line: 1.5 }],
+      },
     ],
   },
   {
@@ -159,8 +170,13 @@ describe('toOutputSchema + validateStructured — zod round-trip differential (W
 
   test('normalization: strict contract returns the parsed plain JSON; tolerant contract keeps tolerance', () => {
     // Strict: the ok value is the schema-normalised object.
-    const fix = toOutputSchema('review.fixItem/v1', FixReviewItemOutputSchema);
-    const sample = { changed: true, summary: 'extracted helper', commits: ['a'.repeat(40)] };
+    const fix = toOutputSchema('review.fixItem/v2', FixReviewItemOutputSchema);
+    const sample = {
+      disposition: 'fixed',
+      summary: 'extracted helper',
+      commits: ['a'.repeat(40)],
+      evidence: [],
+    };
     const result = validateStructured(fix, sample);
     assert(result.ok);
     expect(result.value).toEqual(sample);
@@ -233,11 +249,12 @@ describe('toOutputSchema — seam guards', () => {
 
 describe('validateStructured — seam guards', () => {
   test('never mutates its input, including a deeply frozen value', () => {
-    const os = toOutputSchema('review.fixItem/v1', FixReviewItemOutputSchema);
+    const os = toOutputSchema('review.fixItem/v2', FixReviewItemOutputSchema);
     const snapshot = Object.freeze({
-      changed: true,
+      disposition: 'unchanged_with_reason',
       summary: 'extracted helper',
-      commits: Object.freeze(['a'.repeat(40)]),
+      commits: Object.freeze([]),
+      evidence: Object.freeze([Object.freeze({ path: 'src/a.ts', line: 3 })]),
     });
     const before = structuredClone(snapshot);
     const result = validateStructured(os, snapshot);

@@ -27,8 +27,13 @@ const FAKE_CLI = fileURLToPath(new URL('../../fixtures/fake-agent-cli.mjs', impo
 const temporary: string[] = [];
 
 // The strict op-side parse accepts exactly this no-change fix contract
-// (changed false ⇔ empty commits, non-empty summary).
-const FIX_CONTRACT = { changed: false, summary: 'Already addressed.', commits: [] };
+// (unchanged_with_reason: no commits, a reason, cited evidence).
+const FIX_CONTRACT = {
+  disposition: 'unchanged_with_reason',
+  summary: 'Already satisfied: the guard at src/a.ts:3 exists.',
+  commits: [],
+  evidence: [{ path: 'src/a.ts', line: 3 }],
+};
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'review-served-construction-'));
@@ -105,7 +110,7 @@ describe('S4b review.fixItem served-model construction', () => {
         if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
         expect(result.value).toMatchObject({
           changed: false,
-          summary: 'Already addressed.',
+          summary: 'Already satisfied: the guard at src/a.ts:3 exists.',
           commits: [],
         });
       } else {
@@ -116,7 +121,9 @@ describe('S4b review.fixItem served-model construction', () => {
         // The mismatch verdict outranks the valid payload: the ok value
         // (the parsed fix contract) never surfaces.
         expect(result).not.toHaveProperty('value');
-        expect(JSON.stringify(result)).not.toContain('Already addressed.');
+        expect(JSON.stringify(result)).not.toContain(
+          'Already satisfied: the guard at src/a.ts:3 exists.',
+        );
       }
     },
   );
