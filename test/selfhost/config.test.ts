@@ -155,6 +155,13 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     // handshake must name their key, not an empty string.
     expect(driverKeyEnv({ provider: 'openai', model: 'gpt-5' })).toBe('OPENAI_API_KEY');
     expect(driverKeyEnv({ provider: 'anthropic', model: 'claude-x' })).toBe('ANTHROPIC_API_KEY');
+    // The OpenCode Go handle (dev-strategy §8 item 7): the credential env
+    // the ai-sdk lane's factory reads at dispatch time (its route env,
+    // OPENCODE_GO_BASE_URL, is required by the factory too — configuration,
+    // never a constant).
+    expect(driverKeyEnv({ provider: 'opencode-go', model: 'served-flash' })).toBe(
+      'OPENCODE_GO_API_KEY',
+    );
     // An unknown provider cannot be credential-checked: the caller must read
     // undefined as "cannot vouch", never as "no key needed".
     expect(driverKeyEnv({ provider: 'mystery', model: 'x' })).toBeUndefined();

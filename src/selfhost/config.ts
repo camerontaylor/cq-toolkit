@@ -339,6 +339,14 @@ export function driverKeyEnv(driver: ModelSpec): string | undefined {
       return 'OPENAI_API_KEY';
     case 'anthropic':
       return 'ANTHROPIC_API_KEY';
+    // The OpenCode Go handle (dev-strategy §8 item 7): the key is read at
+    // dispatch time by the ai-sdk lane's 'opencode-go' factory, which ALSO
+    // requires OPENCODE_GO_BASE_URL — the route is configuration, never a
+    // constant. Peak-window exhaustion on this wire is HTTP 402 → 'quota'
+    // (the ai-sdk classifier; the profile's endpoint-scoped rule
+    // discriminates the Go wire from the Zen pay-per-use one).
+    case 'opencode-go':
+      return 'OPENCODE_GO_API_KEY';
     default:
       // A handle this map does not know (a host-CLI lane, a typo): the caller
       // must read undefined as "cannot vouch" and refuse, never as "no key
