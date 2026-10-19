@@ -1466,6 +1466,7 @@ describe('policyDiff: the override record', SLOW, () => {
   const OWNER_ID = 1001;
   const EPOCH = '2026-09-20T10:00:00.000Z';
   let subject: string;
+  let cqState: string;
 
   const labelEvent = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     event: 'labeled',
@@ -1508,9 +1509,9 @@ describe('policyDiff: the override record', SLOW, () => {
         },
       },
     };
-    importCommits(repo, {
+    cqState = importCommits(repo, {
       'cq-state': { files: { '.cq/settle-state.json': JSON.stringify(ledger) } },
-    });
+    })['cq-state']!;
   }, HOOK_MS);
 
   test('attested trust + a valid owner label after the epoch is honoured: pass', async () => {
@@ -1580,6 +1581,57 @@ describe('policyDiff: the override record', SLOW, () => {
     const out = await run(subject, 'human', noLedger);
     expect(out.override.status).toBe('invalid');
     expect(out.report).toContain('settle ledger: no settle ref (cq-state absent)');
+  });
+
+  test('the composition-bound settleStatePath relocates the ledger read; a path with no ledger fails closed', async () => {
+    // The ledger's location is bound at composition (selfhost config,
+    // migration 1.2): a ledger at the bound path is read and honoured, and
+    // the default wire path is unchanged for compositions that omit the
+    // option. The path is never op input — dispatch data cannot choose
+    // which bytes supply the override epoch.
+    importCommits(repo, {
+      'cq-state': {
+        from: cqState,
+        files: {
+          'custom/ledger.json': JSON.stringify({
+            version: 1,
+            repo: 'o/r',
+            prs: {
+              [String(PR)]: {
+                tuple: { head: subject, base: trust, forcePushEpoch: 0 },
+                observations: [{ observedAt: EPOCH, by: 'test' }],
+              },
+            },
+          }),
+        },
+      },
+    });
+    const runBound = async (path: string): Promise<PolicyDiffOutcome> => {
+      const result = await createPolicyDiff(
+        { posture: 'human', layer: 'env' },
+        { settleStatePath: path },
+      )({
+        repo,
+        trustRef: attestedTrust,
+        subject,
+        subjectKind: 'pr',
+        base: 'merge-queue',
+        pr: PR,
+        repository: 'o/r',
+        ownerId: OWNER_ID,
+        labelEventsPath: events('relocated.json', [labelEvent()]),
+        settleRef: 'cq-state',
+      });
+      if (result.status !== 'ok') throw new Error(JSON.stringify(result));
+      return result.value;
+    };
+    const out = await runBound('custom/ledger.json');
+    expect(out.override.status).toBe('honoured');
+    expect(out.verdict).toBe('pass');
+
+    const outAbsent = await runBound('custom/missing.json');
+    expect(outAbsent.override.status).toBe('invalid');
+    expect(outAbsent.report).toContain('settle ledger: custom/missing.json absent at cq-state');
   });
 
   test('an unreadable events file is an invalid record, never `failed`', async () => {
@@ -1956,6 +2008,9 @@ describe('gates.policyDiff registry entry: the posture comes from config only', 
       false,
     );
     expect(entry!.inputSchema.safeParse({ ...input(), pr: 0 }).success).toBe(false);
+    expect(
+      entry!.inputSchema.safeParse({ ...input(), settleStatePath: 'other.json' }).success,
+    ).toBe(false);
   });
 
   async function dispatch(env: string | undefined, subject: string) {

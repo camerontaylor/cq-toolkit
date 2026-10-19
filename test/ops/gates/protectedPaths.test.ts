@@ -190,6 +190,35 @@ describe('worker gate pattern liveness (reverse direction)', () => {
   });
 });
 
+describe('settle-schema relocation protection', () => {
+  const patterns = (
+    JSON.parse(readFileSync(join(REPO_ROOT, 'policy/protected-paths.json'), 'utf8')) as {
+      protectedPaths: string[];
+    }
+  ).protectedPaths;
+  test.each([
+    'src/selfhost/settle-state.ts',
+    'src/policy/queue/settle-state.ts',
+    'src/selfhost/config.ts',
+    'src/shared/deepFreeze.ts',
+    'src/ops/gates/policyDiff.ts',
+    'src/ops/gates/overrideRecord.ts',
+  ])('%s remains protected', (path) => {
+    expect(patterns.some((pattern) => new RegExp(pattern).test(path))).toBe(true);
+  });
+  test('the moved schema protection is exact', () => {
+    const pattern = patterns.find((source) => source.startsWith('^src/policy/queue/settle-state'))!;
+    expect(pattern).toBeDefined();
+    for (const path of [
+      'src/policy/queue/settle-state.tsx',
+      'src/policy/queue/other.ts',
+      'nested/src/policy/queue/settle-state.ts',
+    ]) {
+      expect(new RegExp(pattern).test(path)).toBe(false);
+    }
+  });
+});
+
 describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
   test.each([
     'policy/DOCTRINE.md',

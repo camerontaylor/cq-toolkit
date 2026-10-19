@@ -35,8 +35,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
-import { parseSettleState } from '../../selfhost/settle-state.js';
-import { SETTLE_STATE_PATH } from '../../selfhost/state-branch.js';
+import { parseSettleState } from '../../policy/queue/settle-state.js';
 import {
   assertRepoRelPath,
   gitChangedPaths,
@@ -86,6 +85,19 @@ import {
 
 /** The project's policy list, read at the trust ref (and at both range ends for removals). */
 export const POLICY_LIST_PATH = 'policy/protected-paths.json';
+
+/**
+ * The settle ledger's path on the settle ref, as the deployed automation
+ * writes it (selfhost config's `SETTLE_STATE_PATH` — the same wire path the
+ * self-host templates document). The path is COMPOSITION-OWNED, never op
+ * input: the head observation epoch read here decides whether an override
+ * record is honoured, so the bytes that supply that epoch must not be
+ * selectable through dispatch data — a crafted ledger at a caller-chosen
+ * path could fabricate the anchor. Callers bind the location once at
+ * composition (`createPolicyDiff`'s options); the default keeps the
+ * deployed wire semantics for the registry-composed workflow path.
+ */
+const DEFAULT_SETTLE_STATE_PATH = '.cq/settle-state.json';
 
 /** The only directory GitHub reads workflows from. */
 const WORKFLOWS_DIR = '.github/workflows';
@@ -430,6 +442,7 @@ async function evaluateOverride(
   input: PolicyDiffInput,
   trust: string,
   subject: string,
+  settlePath: string,
   notes: string[],
 ): Promise<OverrideEvaluation> {
   const skip = (why: string): OverrideEvaluation => ({
@@ -466,9 +479,9 @@ async function evaluateOverride(
     notes.push('settle ledger: no settle ref (cq-state absent)');
   } else {
     try {
-      const text = await gitReadBlob(input.repo, input.settleRef, SETTLE_STATE_PATH);
+      const text = await gitReadBlob(input.repo, input.settleRef, settlePath);
       if (text === null) {
-        notes.push(`settle ledger: ${SETTLE_STATE_PATH} absent at ${input.settleRef}`);
+        notes.push(`settle ledger: ${settlePath} absent at ${input.settleRef}`);
       } else {
         const { state, discarded } = parseSettleState(JSON.parse(text), input.repository ?? '');
         for (const why of discarded) notes.push(`settle ledger: discarded — ${why}`);
@@ -527,13 +540,17 @@ function judge(
 /**
  * The policy-diff op, bound to a resolved posture. See the module header for
  * what is trusted and why. `now` is the clock the trust ref's revision
- * window is judged by (injected for tests).
+ * window is judged by (injected for tests). `options.settleStatePath` binds
+ * where the settle ledger is read from on the settle ref — composition-owned
+ * configuration (selfhost passes its configured path; never op input, see
+ * {@link DEFAULT_SETTLE_STATE_PATH}), defaulting to the deployed wire path.
  */
 export function createPolicyDiff(
   config: ProtectedPathsConfig,
-  options: { now?: () => number } = {},
+  options: { now?: () => number; settleStatePath?: string } = {},
 ): Op<PolicyDiffInput, PolicyDiffOutcome> {
   const now = options.now ?? Date.now;
+  const settlePath = options.settleStatePath ?? DEFAULT_SETTLE_STATE_PATH;
   return async (input) => {
     // Same base rule as verifyRatchet: a push subject is judged against main,
     // so a mislabeled push cannot silently use a PR range.
@@ -929,7 +946,7 @@ export function createPolicyDiff(
         `policy list: ${POLICY_LIST_PATH} absent at the trust ref — project protectedPaths and requiredChecks are inactive`,
       );
     }
-    const override = await evaluateOverride(input, trust, subject, notes);
+    const override = await evaluateOverride(input, trust, subject, settlePath, notes);
 
     // The window comes from the TRUST REF's list only (never the subject's).
     const effective = applyRevisionWindow(config, policy.revisionWindow, now());
