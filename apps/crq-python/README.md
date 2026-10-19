@@ -133,6 +133,9 @@ normal owner workflow. `promotion-ack` acknowledges the alert; it does not retry
 the gate, authorize promotion, or clear the stalled item. An eventual authorized
 promotion closes the item normally. This timeout is an observation of stalled
 progress, not proof of a particular gate verdict.
+If main advances strictly inside an escalated range, crq retires the old item and
+requests a fresh full review of the remaining range from current main. The old
+review success and stall latch are not reused for that replacement.
 Do not execute dry ticks, model jobs or test-bearing gates during the suspension.
 
 Runtime activation also requires verified hard-budget launchers for Codex and

@@ -81,6 +81,8 @@ class PromotionRetryTest(unittest.TestCase):
                 return False  # batch not yet promoted
             if a == BASE and b == MAIN:
                 return True  # review base still on main
+            if a == MAIN and b == BATCH:
+                return False  # the default main is not inside the reviewed range
             raise AssertionError(f"unexpected is_ancestor({a[:8]}, {b[:8]})")
 
         self.anc = mock.patch.object(crq, "is_ancestor", side_effect=ancestor)
@@ -340,6 +342,56 @@ class PromotionRetryTest(unittest.TestCase):
         self.assertEqual(q["items"][0]["state"], "done")
         self.assertEqual(q["promotion"]["last_promoted_sha"], BATCH)
         self.mock_notify.assert_called_once()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_signer_re_cuts_stalled_range_after_partial_main_advance(self):
+        q = make_queue(success_at=success_at(60), signer=True)
+        current_main = {"sha": BASE}
+
+        def ancestor(a, b):
+            return (a, b) in ((BASE, BASE), (BASE, MAIN), (MAIN, BATCH))
+
+        with mock.patch.object(crq, "promotion_mode", return_value="signer"), \
+             mock.patch.object(crq, "main_sha", side_effect=lambda: current_main["sha"]), \
+             mock.patch.object(crq, "is_ancestor", side_effect=ancestor), \
+             mock.patch.object(crq.SPOOL, "results_exist", return_value=set()), \
+             mock.patch.object(crq, "first_parents", return_value=[BATCH]) as parents:
+            crq.promotion_tick(q, False)
+            self.assertIn("gate_stalled_at", q["items"][0])
+            q = json.loads(json.dumps(q))
+            current_main["sha"] = MAIN  # authorized partial/break-glass fast-forward
+            log = crq.promotion_tick(q, False)
+            self.assertTrue(any("re-cut remaining range" in line for line in log))
+            old, new = q["items"]
+            self.assertEqual(old["state"], "skipped")
+            self.assertEqual(old["base_sha"], BASE)
+            self.assertNotEqual(new["id"], old["id"])
+            self.assertEqual(new["state"], "pending")
+            self.assertEqual((new["base_sha"], new["batch_sha"]), (MAIN, BATCH))
+            self.assertTrue(new["signer"])
+            self.assertNotIn("gate_stalled_at", new)
+            self.assertNotIn("success_at", new)
+            self.assertEqual(new["cycles"], [])
+            self.assertEqual(sum(i["state"] in crq.OPEN_PROMO_STATES for i in q["items"]), 1)
+            parents.assert_called_once_with(MAIN, BATCH)
+            q = json.loads(json.dumps(q))
+            crq.promotion_tick(q, False)
+            self.assertEqual(len(q["items"]), 2)  # no re-cut/retry loop after restart
+            self.assertEqual(crq.open_promotion(q)["id"], new["id"])
+        self.mock_notify.assert_called_once()  # only the original stall notification
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_partial_main_advance_dry_run_does_not_re_cut_or_mutate(self):
+        q = make_queue(success_at=success_at(60), signer=True, gate_stalled_at=success_at(1))
+        before = json.dumps(q, sort_keys=True)
+        with mock.patch.object(crq, "promotion_mode", return_value="signer"), \
+             mock.patch.object(crq, "is_ancestor", side_effect=lambda a, b: (a, b) in ((BASE, MAIN), (MAIN, BATCH))), \
+             mock.patch.object(crq, "recut_promotion") as recut:
+            log = crq.promotion_tick(q, True)
+        self.assertTrue(any("would re-cut remaining range" in line for line in log))
+        self.assertEqual(json.dumps(q, sort_keys=True), before)
+        recut.assert_not_called()
+        self.mock_notify.assert_not_called()
         self.assertEqual(self.gh_calls(), [])
 
     def test_stall_persists_in_status_until_acknowledged(self):

@@ -1334,6 +1334,15 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
                 item.update(state="skipped", last_error=f"main moved to {main[:10]}, which lacks the review base")
             log.append(f"promotion: {item['id']} superseded (main {main[:10]} lacks base) → re-cut")
             item = None
+        elif item.get("gate_stalled_at") and main != item["base_sha"] and is_ancestor(main, item["batch_sha"]):
+            # Main advanced inside the stalled range: the old exact-base review
+            # cannot authorize the remainder. Re-cut for a fresh full review.
+            why = f"main advanced within stalled range to {main[:10]} → re-cut remaining range"
+            if dry:
+                log.append(f"promotion: {item['id']} would re-cut remaining range from {main[:10]}")
+            else:
+                recut_promotion(q, item, log, dry, "skipped", why)
+            return log
         else:
             since = (now() - parse_iso(item["success_at"])).total_seconds() / 60
             if item.get("gate_stalled_at") or since >= PROMOTION_GATE_STALL_MIN:
