@@ -17,6 +17,27 @@ loader.exec_module(adapter)
 
 
 class SummaryTest(unittest.TestCase):
+    def test_gate_stall_visible_after_ack_until_promotion_completes(self):
+        at = "2026-10-19T00:00:00Z"
+        item = {"id": "promo-stalled", "kind": "promotion", "state": "promoting", "gate_stalled_at": at}
+        alert = {"at": at, "item": item["id"], "sha": "a" * 40, "base": "b" * 40,
+                 "text": "private diagnostic", "acked": None}
+        queue = {"items": [item], "promotion": {"gate_alerts": [alert]}}
+
+        def summary():
+            return adapter.summarize({"generated_at": at}, queue, {},
+                {"promotion": {"enabled": True}, "max_starts_per_hour": 5}, [], adapter.timestamp(at))
+
+        data = summary()["promotion"]
+        self.assertEqual(data["state"], "needs-human")
+        self.assertEqual(data["gate_alerts"], [{k: alert[k] for k in ("at", "item", "sha", "base")}])
+        self.assertNotIn("private diagnostic", json.dumps(data))
+        alert["acked"] = "owner investigating"
+        self.assertEqual(summary()["promotion"]["gate_alerts"], [])
+        self.assertEqual(summary()["promotion"]["state"], "needs-human")
+        item["state"] = "done"
+        self.assertEqual(summary()["promotion"]["state"], "idle")
+
     def test_publish_is_atomic_private_and_omits_queue_details(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

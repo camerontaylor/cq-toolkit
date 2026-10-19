@@ -67,10 +67,13 @@ def summarize(status, queue, heartbeat, config, events, now):
                           ("requested", "signer_running")) for i in items),
         "outcomes_24h": outcomes, "other_outcomes_24h": other, "backlog": backlog,
         "promotion": {
-            "state": "disabled" if not enabled else "blocked" if blockers else
+            "state": "disabled" if not enabled else
+                     "needs-human" if any(i.get("gate_stalled_at") for i in promotions) else "blocked" if blockers else
                      ", ".join(sorted({i["state"] for i in promotions})) or "idle",
             "last_promoted_sha": promotion.get("last_promoted_sha"),
             "last_promoted_at": promotion.get("last_promoted_at"), "blockers": blockers,
+            "gate_alerts": [{key: alert.get(key) for key in ("at", "item", "sha", "base")}
+                            for alert in promotion.get("gate_alerts", []) if not alert.get("acked")],
         },
     }
 

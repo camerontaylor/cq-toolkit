@@ -1072,6 +1072,9 @@ PROMO = CONFIG.get("promotion", {})
 OPEN_PROMO_STATES = ("pending", "reviewing", "findings", "promoting", "split_needed", "chain_next", "blocked",
                      "requested", "signer_running")
 MAIN_TOKEN = re.compile(r"(^|\s)main=[0-9a-f]{40}(\s|$)")
+# A refused gate is not a retryable review failure. Bound silent ownership of
+# the promotion slot even when no usable gate result is available.
+PROMOTION_GATE_STALL_MIN = 60
 
 
 def policy_at(rev: str) -> bool:
@@ -1333,6 +1336,20 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
             item = None
         else:
             since = (now() - parse_iso(item["success_at"])).total_seconds() / 60
+            if item.get("gate_stalled_at") or since >= PROMOTION_GATE_STALL_MIN:
+                text = (f"{item['id']}: main has not reached batch {item['batch_sha'][:10]} "
+                        f"(base {item['base_sha'][:10]}) within {PROMOTION_GATE_STALL_MIN}m of review success; "
+                        "inspect cq-gate for refused/needs-human verdicts. Owner intervention required; "
+                        "no further gate dispatch or automatic retry.")
+                if not dry and not item.get("gate_stalled_at"):
+                    item.update(gate_stalled_at=iso(), last_error=text)
+                    st.setdefault("gate_alerts", []).append({"at": iso(), "item": item["id"],
+                        "sha": item["batch_sha"], "base": item["base_sha"], "text": text, "acked": None})
+                    event("promotion_gate_stalled", item=item["id"], sha=item["batch_sha"],
+                          base=item["base_sha"])
+                    notify_owner(f"crq PROMOTION GATE NEEDS HUMAN: {text} — see {STATE / 'status.md'}; "
+                                 f"ack with `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
+                return log + [f"promotion: {'would escalate' if dry else 'GATE NEEDS HUMAN'} — {text}"]
             if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched"):
                 # C2 cutover: the old gate is dispatched while it still exists on
                 # fetched main; once deleted, gate.yml (no sha input) takes over.
@@ -2553,6 +2570,8 @@ def write_status(q: Dict[str, Any]) -> None:
             extra = f"survival {m['survival']} ({m['surviving']}/{m['added']}), focus {m['focus']}"
         last = (i.get("attempts") or [{}])[-1]
         why = i.get("wait_reason") if i["state"] == "pending" else (i.get("last_error") or "")
+        if i["state"] == "promoting" and i.get("gate_stalled_at"):
+            why = f"Owner intervention required — gate stalled since {i['gate_stalled_at']}; {why}"
         kind = (f"{i['kind']}{' t' + str(i['tier']) if i.get('tier') else ''}"
                 f"{' new' if i.get('source') == 'followup' else ''}{' post-merge' if i.get('followup') == 'merged' else ''}")
         rows.append(f"| {i['id']} | {kind} | {i['state']} | {cyc} "
@@ -2580,6 +2599,10 @@ def write_status(q: Dict[str, Any]) -> None:
     for x in st_p.get("signer_alerts", []):
         if not x.get("acked"):
             banner.append(f"> **ALERT — PROMOTION SIGNER** ({x['at']}): {x['text']}. Ack: "
+                          f"`crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
+    for x in st_p.get("gate_alerts", []):
+        if not x.get("acked"):
+            banner.append(f"> **ALERT — PROMOTION GATE NEEDS HUMAN** ({x['at']}): {x['text']}. Ack: "
                           f"`crq.py promotion-ack {x['sha'][:10]} \"<reason>\"`")
     for i in items:
         if i["kind"] == "promotion":
@@ -2622,9 +2645,11 @@ def write_status(q: Dict[str, Any]) -> None:
     (STATE / "status.md").write_text("\n".join(md))
     (STATE / "status.json").write_text(json.dumps({"generated_at": iso(), "paused": q.get("paused"),
                                                    "cooldown_until": q.get("cooldown_until"),
+                                                   "promotion_gate_alerts": [x for x in st_p.get("gate_alerts", [])
+                                                                             if not x.get("acked")],
                                                    "items": [{k: i.get(k) for k in ("id", "kind", "state",
                                                               "prior_cycles", "cycles", "pinned_base", "last_error",
-                                                              "wait_reason")} for i in items]}, indent=2) + "\n")
+                                                              "wait_reason", "gate_stalled_at")} for i in items]}, indent=2) + "\n")
     try:
         status_summary.publish(ROOT, q, CONFIG, schedule, promotion_mode=mode)
     except Exception as exc:
@@ -2769,6 +2794,7 @@ def admin(action: str, item_id: Optional[str], reason: Optional[str]) -> None:
         sha, _, why = (reason or "").partition(" ")
         hit = [x for x in (q.get("promotion_audit") or {}).get("alerts", []) + (q.get("promotion") or {}).get("escalations", [])
                + (q.get("promotion") or {}).get("signer_alerts", [])
+               + (q.get("promotion") or {}).get("gate_alerts", [])
                if not x.get("acked") and (sha == "all" or x.get("to", x.get("sha", "")).startswith(sha))]
         if not hit or not why.strip():
             sys.exit('usage: crq.py promotion-ack <main-sha-prefix|all> "<reason>" (no matching open alert?)')
