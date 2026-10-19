@@ -44,7 +44,7 @@ const { createDriverFactory, bindingsFromDispatch, makeSweepUnitOp } = await imp
 const factory = createDriverFactory({
   bindings: { fixer: { 'cq-t43-smoke': 'claude-code' } },
   lanes: {
-    'claude-code': {
+    claudeCode: {
       binary: [process.execPath, SWEEP_AGENT],
       sessionsDir,
       routingTable: {
