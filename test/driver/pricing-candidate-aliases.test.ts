@@ -24,10 +24,9 @@ describe('candidate served aliases — shape and contents', () => {
   test('the anthropic group is lane-scoped and records the dated id for the dateless alias', () => {
     expect(Object.keys(CANDIDATE_ANTHROPIC_DATED_ALIASES).sort()).toEqual([
       'ai-sdk',
-      'claude-agent',
-      'subprocess',
+      'claude-code',
     ]);
-    for (const lane of ['ai-sdk', 'claude-agent', 'subprocess'] as const) {
+    for (const lane of ['ai-sdk', 'claude-code'] as const) {
       expect(
         servedAliasIds(CANDIDATE_ANTHROPIC_DATED_ALIASES, lane, 'anthropic', 'claude-haiku-4-5'),
       ).toEqual(['claude-haiku-4-5-20251001']);
@@ -78,7 +77,7 @@ describe('candidate served aliases — shape and contents', () => {
     ]);
     // And the lane-scoped groups that no other group carries survive too.
     expect(
-      servedAliasIds(CANDIDATE_SERVED_ALIASES, 'claude-agent', 'anthropic', 'claude-haiku-4-5'),
+      servedAliasIds(CANDIDATE_SERVED_ALIASES, 'claude-code', 'anthropic', 'claude-haiku-4-5'),
     ).toEqual(['claude-haiku-4-5-20251001']);
   });
 
@@ -180,7 +179,7 @@ describe('candidate served aliases — what they would do to pricing if enabled'
     const worst = worstCaseRates(
       { provider: 'anthropic', model: 'claude-haiku-4-5' },
       CANDIDATE_ANTHROPIC_DATED_ALIASES,
-      'subprocess',
+      'claude-code',
     );
     expect(worst.complete).toBe(false);
     expect(worst.unpricedCandidates).toEqual(['claude-haiku-4-5-20251001']);
@@ -201,7 +200,7 @@ describe('candidate served aliases — what they would do to pricing if enabled'
   test('with no candidates injected the normalizer behaves exactly as before', () => {
     const none: ServedAliasTable = {};
     const resolved = resolvePricedModel({
-      lane: 'subprocess',
+      lane: 'claude-code',
       modelSpec: { provider: 'anthropic', model: 'claude-haiku-4-5' },
       servedModel: 'claude-opus-4-1',
       aliases: none,
