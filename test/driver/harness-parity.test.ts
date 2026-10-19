@@ -47,11 +47,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { ClaudeCodeDriver } from '../../src/driver/claude-code/index.js';
 import { RoutingTableSchema as EndpointTableSchema } from '../../src/driver/claude-code/routing.js';
-import type {
-  ManagedChild,
-  ProcessClose,
-  SpawnOptions,
-} from '../../src/shared/proc.js';
+import type { ManagedChild, ProcessClose, SpawnOptions } from '../../src/shared/proc.js';
 import { RoutingTableSchema } from '../../src/driver/claude-code/routing.js';
 import type { SandboxLevel, ToolDenial, WorkerResult } from '../../src/driver/types.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';

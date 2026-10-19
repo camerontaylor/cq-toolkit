@@ -29,7 +29,7 @@ import {
 } from '../../../src/driver/claude-code/usage.js';
 import { fakeManagedSpawn } from '../../helpers/transport-fakes.js';
 import type { JsonLineFrame, JsonLinePeer } from '../../helpers/transport-fakes.js';
-import type { SpawnOptions } from '../../../src/driver/claude-code/process.js';
+import type { SpawnOptions } from '../../../src/shared/proc.js';
 import { RoutingTableSchema } from '../../../src/driver/claude-code/routing.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import { SessionStore, tempWorkspace } from '../../../src/harness/session.js';

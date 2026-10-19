@@ -24,7 +24,7 @@ import { toOutputSchema } from '../../../src/driver/common/structured.js';
 import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
 import { fakeManagedSpawn } from '../../helpers/transport-fakes.js';
 import type { JsonLineFrame, JsonLinePeer } from '../../helpers/transport-fakes.js';
-import type { SpawnOptions } from '../../../src/driver/claude-code/process.js';
+import type { SpawnOptions } from '../../../src/shared/proc.js';
 import { RoutingTableSchema } from '../../../src/driver/claude-code/routing.js';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import { SessionStore } from '../../../src/harness/session.js';

@@ -40,7 +40,7 @@
 // Anything unresolved is 'unknown' via the caller, NEVER a guessed
 // 'transient'.
 import { basename } from 'node:path';
-import type { ProcessClose } from './process.js';
+import type { ProcessClose } from '../../shared/proc.js';
 import type { ProviderSignals, WorkerErrorClass } from '../types.js';
 
 /** Inputs to the lane failure classifier — structured signals only. */

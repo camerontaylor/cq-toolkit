@@ -292,8 +292,8 @@ export { PRICE_TABLE } from './driver/pricing/data.js';
 // never src literals), the ONE shared worker-accounting fold (per-model
 // aggregates, provenance, resumed-session semantics) and failure classifier,
 // and the process-lifecycle helpers — the documented extension surface for
-// future CLI drivers (I8: the grace ladder lives in
-// driver/<name>/process.ts, the hygiene scan's one exempt path).
+// future CLI drivers (I8: shared/proc.ts executes decided process kills;
+// driver/<name>/process.ts owns the SDK cancellation-root wiring).
 export type { ClaudeCodeDriverOptions, ClaudeCodeTransport } from './driver/claude-code/index.js';
 export { ClaudeCodeDriver } from './driver/claude-code/index.js';
 export type {

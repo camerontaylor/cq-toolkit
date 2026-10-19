@@ -218,14 +218,11 @@ Files (what the merge SHARES — one implementation each):
   check: the lane surfaces the id the substrate reports as served into
   `WorkerResult.model` and the shared served-model assertion fails a
   remap post-hoc. Routes carry env var NAMES only, never key values.
-- `process.ts` — the ONE I8-exempt file for the lane
-  (`driver/<name>/process.ts`): the CLI transport's `spawnManaged`
-  (shell-less spawn, line-streamed stdout, prompt via stdin, spawn
-  failures surfaced as data) + `terminateGracefully` (the
-  SIGTERM→SIGKILL grace ladder that EXECUTES an already-decided kill;
-  rungs observable, grace delays injectable) AND the SDK transport's
-  cancellation-root wiring (`abortRootFollowing`). The governor decides
-  WHEN (the governed `RunOptions.signal`); this file only obeys.
+- `process.ts` — the I8-exempt SDK cancellation-root wiring
+  (`abortRootFollowing`). The CLI process ladder (`spawnManaged` and
+  `terminateGracefully`) and single env scrub remain in `shared/proc.ts`
+  after migration 1.1. The governor decides WHEN to abort; both helpers
+  only execute that decision.
 - `usage.ts` — THE ONE worker-accounting fold: the result frame's
   `modelUsage` per-model token aggregates when well-shaped (the SDK's
   camelCase aggregate vocabulary; subagent spend INCLUDED; tokens only —
@@ -273,8 +270,7 @@ Files (what the merge SHARES — one implementation each):
 
 Child environment is DEFAULT-DENY (issue #183) for the CLI, the SDK child,
 the ACP vendor process, and every harness `run` child. All use the shared
-`buildChildEnv` policy (this lane's `process.ts`; ACP imports it from
-here). The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST`
+`buildChildEnv` policy in `shared/proc.ts`. The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST`
 (PATH/HOME/SHELL/USER/temp dirs, terminal + locale basics, XDG dirs,
 network-egress/TLS config (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy
 vars), Windows equivalents) from the entry process env. By default it

@@ -12,8 +12,8 @@
 // I8 SEAM — the driver owns NO wall clock. The run's ONLY cancellation
 // SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) — the caller
 // passes the governed rung-1 signal explicitly. The signal is forwarded
-// EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder in ./process.ts (the
-// hygiene scan's single exempt file, where the ladder executes an
+// EXACTLY ONE place: the SIGTERM→SIGKILL grace ladder in shared/proc.ts
+// (migration 1.1), where the ladder executes an
 // already-decided kill). An already-aborted signal never dispatches and
 // creates NO session state. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
@@ -229,7 +229,12 @@ import { classifyFailure, isCodexBinary } from './failures.js';
 import { RoutingTableSchema, defaultRoutingTable, resolveRoute, authEnvPlan } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
 import { spawnManaged, terminateGracefully } from '../../shared/proc.js';
-import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from '../../shared/proc.js';
+import type {
+  ManagedChild,
+  ProcessClose,
+  SpawnOptions,
+  TerminationRungMarker,
+} from '../../shared/proc.js';
 import { readCliSessionId, writeCliSessionId, CLI_NARRATION_TOOL } from './sessions.js';
 import {
   frameCarriesRefusal,

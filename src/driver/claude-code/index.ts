@@ -5,11 +5,11 @@
 // never a src literal — and the SDK remains an optional peer dependency
 // loaded lazily only when the 'sdk' transport is selected.
 //
-// WHAT THE MERGE SHARES (one implementation each, in this directory):
+// WHAT THE MERGE SHARES (one implementation each):
 //   - routing.ts — the ONE endpoint/routing table (plain serializable
 //     CONFIG; model/provider choices are never src literals);
-//   - process.ts — the I8-exempt process-lifecycle file: the CLI spawn +
-//     SIGTERM→SIGKILL grace ladder and the SDK cancellation-root wiring;
+//   - shared/proc.ts — the canonical CLI process ladder and env scrub;
+//     process.ts retains the I8-exempt SDK cancellation-root wiring;
 //   - usage.ts — the ONE worker-accounting fold: per-model token
 //     aggregates (modelUsage — subagent spend included) preferred over the
 //     flat main-loop usage over the assistant fallback, fold PROVENANCE
@@ -40,7 +40,7 @@
 //   - settings isolation (no ambient settings, no ambient MCP);
 //   - the EXACT production-harness init inventory assertion;
 //   - the CQ_* env scrub (default-deny child env, no CQ_* policy knob ever
-//     reaches a worker — sandbox/index.ts + process.ts);
+//     reaches a worker — sandbox/index.ts + shared/proc.ts);
 //   - harness session records, the frozen seam types, the strict-budget
 //     refusal, the served-model observation + assertion;
 //   - the kernel's classifyDispatch/lane table/hard-advisory posture

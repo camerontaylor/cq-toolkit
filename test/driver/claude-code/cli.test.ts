@@ -1547,8 +1547,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
 
   test('importing driver and runCli does not install signal handlers', async () => {
     await withScratch(async (scratchDir) => {
-      const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url)
-        .href;
+      const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url).href;
       const cliUrl = new URL('../../../src/cli/main.ts', import.meta.url).href;
       const loader = fileURLToPath(new URL('../../helpers/ts-source-loader.mjs', import.meta.url));
       const child = spawnManaged({
@@ -1584,8 +1583,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
           new URL('../../helpers/ts-source-loader.mjs', import.meta.url),
         );
         const bin = fileURLToPath(new URL('../../../src/cli.ts', import.meta.url));
-        const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url)
-          .href;
+        const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url).href;
         const runUrl = new URL('../../../src/harness/run.ts', import.meta.url).href;
         const preload = join(scratchDir, 'owned-child.mjs');
         const runWorker = join(scratchDir, 'run-worker.cjs');
