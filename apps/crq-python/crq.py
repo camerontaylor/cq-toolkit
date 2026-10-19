@@ -1347,8 +1347,18 @@ def promotion_tick(q: Dict[str, Any], dry: bool) -> List[str]:
                         "sha": item["batch_sha"], "base": item["base_sha"], "text": text, "acked": None})
                     event("promotion_gate_stalled", item=item["id"], sha=item["batch_sha"],
                           base=item["base_sha"])
-                    notify_owner(f"crq PROMOTION GATE NEEDS HUMAN: {text} — see {STATE / 'status.md'}; "
-                                 f"ack with `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
+                if not dry:
+                    alert = next((a for a in st.get("gate_alerts", [])
+                                  if a["item"] == item["id"] and a["sha"] == item["batch_sha"]), None)
+                    if alert and not alert.get("acked") and not alert.get("notified_at") and \
+                            (not alert.get("notify_after") or now() >= parse_iso(alert["notify_after"])):
+                        alert["notification"] = notify_owner(
+                            f"crq PROMOTION GATE NEEDS HUMAN: {text} — see {STATE / 'status.md'}; "
+                            f"ack with `crq.py promotion-ack {item['batch_sha'][:10]} \"<reason>\"`.")
+                        if alert["notification"].get("paseo_send") == 0:
+                            alert["notified_at"] = iso()
+                        else:
+                            alert["notify_after"] = iso(now() + dt.timedelta(minutes=15))
                 return log + [f"promotion: {'would escalate' if dry else 'GATE NEEDS HUMAN'} — {text}"]
             if since >= PROMO.get("dispatch_after_min", 20) and not item.get("dispatched"):
                 # C2 cutover: the old gate is dispatched while it still exists on

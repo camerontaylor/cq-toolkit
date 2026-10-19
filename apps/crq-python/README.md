@@ -124,6 +124,8 @@ for the sole installed runner. `pause`/`resume` control queue starts;
 `promotion-resolve` and `promotion-ack` retain the owner override/audit workflow.
 If main has not reached a reviewed promotion within 60 minutes, crq raises one
 persisted gate escalation through status and the configured owner notification.
+Failed notification deliveries retry at most once per 15 minutes until delivered
+or acknowledged; these retries never dispatch the promotion gate.
 The promotion stays in its slot, visible as `needs-human` in the fleet summary;
 crq stops dispatching its gate and continues observing main. Inspect cq-gate for
 `refused`/`needs-human` verdicts and resolve the underlying refusal through the

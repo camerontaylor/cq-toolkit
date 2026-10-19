@@ -100,7 +100,7 @@ class PromotionRetryTest(unittest.TestCase):
         self.addCleanup(self.notify.stop)
 
         self.clock = mock.patch.object(crq, "now", return_value=dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc))
-        self.clock.start()
+        self.mock_now = self.clock.start()
         self.addCleanup(self.clock.stop)
 
     def gh_calls(self):
@@ -270,6 +270,43 @@ class PromotionRetryTest(unittest.TestCase):
         self.assertEqual(len(q["promotion"]["gate_alerts"]), 1)
         self.mock_notify.assert_called_once()
         self.mock_wf.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_failed_or_unconfigured_notification_retries_with_backoff_without_gate_retry(self):
+        for result in ({"paseo_send": "1: daemon unavailable"}, {}):
+            with self.subTest(result=result):
+                self.mock_notify.reset_mock()
+                self.mock_notify.return_value = result
+                q = make_queue(success_at=success_at(60))
+                crq.promotion_tick(q, False)
+                alert = q["promotion"]["gate_alerts"][0]
+                self.assertNotIn("notified_at", alert)
+                self.assertEqual(alert["notification"], result)
+                self.assertEqual(alert["notify_after"], crq.iso(crq.now() + dt.timedelta(minutes=15)))
+                q = json.loads(json.dumps(q))
+                crq.promotion_tick(q, False)
+                self.mock_notify.assert_called_once()
+                self.mock_now.return_value += dt.timedelta(minutes=15)
+                self.mock_notify.return_value = {"paseo_send": 0}
+                crq.promotion_tick(q, False)
+                alert = q["promotion"]["gate_alerts"][0]
+                self.assertEqual(alert["notified_at"], crq.iso())
+                self.assertEqual(self.mock_notify.call_count, 2)
+                self.mock_now.return_value += dt.timedelta(minutes=30)
+                crq.promotion_tick(q, False)
+                self.assertEqual(self.mock_notify.call_count, 2)
+                self.assertEqual(len(q["promotion"]["gate_alerts"]), 1)
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_ack_cancels_failed_notification_retry_but_not_stall(self):
+        self.mock_notify.return_value = {"paseo_send": "error: timeout"}
+        q = make_queue(success_at=success_at(60))
+        crq.promotion_tick(q, False)
+        q["promotion"]["gate_alerts"][0]["acked"] = crq.iso()
+        self.mock_now.return_value += dt.timedelta(minutes=15)
+        crq.promotion_tick(q, False)
+        self.mock_notify.assert_called_once()
+        self.assertIn("gate_stalled_at", q["items"][0])
         self.assertEqual(self.gh_calls(), [])
 
     def test_stall_dry_run_only_describes_escalation(self):
