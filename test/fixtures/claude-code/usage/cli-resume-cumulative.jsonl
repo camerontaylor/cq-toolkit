@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"rec-cli-usage-cumulative-1","model":"claude-sonnet-4-5","tools":[],"mcp_servers":[]}
+{"type":"assistant","session_id":"rec-cli-usage-cumulative-1","message":{"id":"msg_rec_cum_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":410,"output_tokens":105,"cache_read_input_tokens":22,"cache_creation_input_tokens":0}}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":80,"session_id":"rec-cli-usage-cumulative-1","model":"claude-sonnet-4-5","stop_reason":"end_turn","usage":{"input_tokens":410,"output_tokens":105,"cache_read_input_tokens":22,"cache_creation_input_tokens":0}}

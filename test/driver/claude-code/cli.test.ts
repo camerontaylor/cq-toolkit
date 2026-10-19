@@ -1,8 +1,8 @@
-// The subprocess driver instantiation — T1.5 slice 2.
+// The claude-code lane's CLI transport — Phase 1.9 (from T1.5 slice 2).
 //
 // Two layers, mirroring test/driver/ai-sdk.test.ts:
 //   1. THE CONFORMANCE SUITE (test/driver/conformance.ts, verbatim) run
-//      against the real SubprocessDriver spawning a FAKE agent CLI
+//      against the real ClaudeCodeDriver spawning a FAKE agent CLI
 //      (test/fixtures/fake-agent-cli.mjs) through the driver's `spawn`
 //      override — no real `claude` binary, no network, no vendor SDK. The
 //      suite's ModelDirective maps onto FAKE_AGENT_* env vars for the
@@ -41,48 +41,52 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, onTestFinished, test, vi } from 'vitest';
 import { z } from 'zod';
 import {
-  HARNESS_ERROR_PREFIX,
   HARNESS_MCP_CONFIG_FILE,
-  SubprocessDriver,
   buildArgs,
   handleStdoutLine,
-  stopReasonOf,
-  usageFromCli,
-} from '../../src/driver/subprocess/index.js';
-import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
-import type { ManagedChild, SpawnOptions } from '../../src/shared/proc.js';
-import { fakeManagedSpawn } from '../helpers/transport-fakes.js';
-import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
-import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
+} from '../../../src/driver/claude-code/cli.js';
+import { ClaudeCodeDriver } from '../../../src/driver/claude-code/index.js';
+import { HARNESS_ERROR_PREFIX, stopReasonOf } from '../../../src/driver/claude-code/verdict.js';
+import { usageFromWire } from '../../../src/driver/claude-code/usage.js';
+import type { SpawnFn, CliTransportOptions } from '../../../src/driver/claude-code/cli.js';
+import type { ManagedChild, SpawnOptions } from '../../../src/shared/proc.js';
+import { fakeManagedSpawn } from '../../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../../helpers/transport-fakes.js';
+import { CLI_SESSION_FILE } from '../../../src/driver/claude-code/sessions.js';
 import {
   RoutingTableSchema,
   defaultRoutingTable,
-  routeFor,
-} from '../../src/driver/subprocess/routing.js';
-import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
+  resolveRoute,
+} from '../../../src/driver/claude-code/routing.js';
+import type { RoutingTable } from '../../../src/driver/claude-code/routing.js';
 import {
   DEFAULT_CHILD_ENV_ALLOWLIST,
   DEFAULT_MAX_RETAINED_BYTES,
   buildChildEnv,
   spawnManaged,
   terminateActiveChildrenOnExit,
-} from '../../src/shared/proc.js';
-import type { ProcessClose } from '../../src/shared/proc.js';
-import { runDriverConformance } from '../../src/driver/conformance.js';
-import type { ConformanceSpec, ModelDirective } from '../../src/driver/conformance.js';
+} from '../../../src/shared/proc.js';
+import type { ProcessClose } from '../../../src/shared/proc.js';
+import { runDriverConformance } from '../../../src/driver/conformance.js';
+import type { ConformanceSpec, ModelDirective } from '../../../src/driver/conformance.js';
 import {
   SESSIONS_DIR,
   CONFORMANCE_PROVIDER,
   CONFORMANCE_MODEL,
-} from '../../src/driver/conformance.js';
-import { runGovernedAbortLeg } from './conformance-kernel.js';
-import { defaultHarnessConfig } from '../../src/harness/config.js';
-import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
-import { SessionStore } from '../../src/harness/session.js';
-import { realClock, runLadder } from '../../src/kernel/governor.js';
-import { toOutputSchema } from '../../src/driver/common/structured.js';
-import { WorkerResultSchema } from '../../src/kernel/schema.js';
-import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src/driver/types.js';
+} from '../../../src/driver/conformance.js';
+import { runGovernedAbortLeg } from '../conformance-kernel.js';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
+import { DispatchError, errorClassOf } from '../../../src/driver/errors.js';
+import { SessionStore } from '../../../src/harness/session.js';
+import { realClock, runLadder } from '../../../src/kernel/governor.js';
+import { toOutputSchema } from '../../../src/driver/common/structured.js';
+import { WorkerResultSchema } from '../../../src/kernel/schema.js';
+import type {
+  Driver,
+  OpInvocation,
+  OutputSchema,
+  WorkerResult,
+} from '../../../src/driver/types.js';
 
 // The harness MCP server runs from TypeScript SOURCE in these process-level
 // runs (no build): the launch spec is mocked onto `node --import <the test
@@ -90,7 +94,7 @@ import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src
 // `launchControl.extraArgs` lets one test append a stray argument so the
 // REAL server refuses its argv at startup (exit 78 → status 'failed').
 const launchControl = vi.hoisted(() => ({ extraArgs: [] as string[] }));
-vi.mock('../../src/harness/mcp/launch.js', () => {
+vi.mock('../../../src/harness/mcp/launch.js', () => {
   const fromHere = (rel: string): string =>
     decodeURIComponent(new URL(rel, import.meta.url).pathname);
   return {
@@ -98,8 +102,8 @@ vi.mock('../../src/harness/mcp/launch.js', () => {
       command: process.execPath,
       args: [
         '--import',
-        fromHere('../helpers/ts-source-loader.mjs'),
-        fromHere('../../src/harness/mcp/bin.ts'),
+        fromHere('../../../test/helpers/ts-source-loader.mjs'),
+        fromHere('../../../src/harness/mcp/bin.ts'),
         ...launchControl.extraArgs,
       ],
     }),
@@ -112,7 +116,7 @@ vi.setConfig({ testTimeout: 30_000 });
 
 // The fake CLI: node + the fixture script, spawned through the driver's
 // argv template `binary` option (shell:false — argv is element-built).
-const FAKE_CLI = fileURLToPath(new URL('../fixtures/fake-agent-cli.mjs', import.meta.url));
+const FAKE_CLI = fileURLToPath(new URL('../../fixtures/fake-agent-cli.mjs', import.meta.url));
 
 // The driver reads key VALUES from the environment at run() time (the route
 // carries names only); the conformance endpoint's fake key is set once here.
@@ -194,7 +198,7 @@ function baseOptions(
   scratchDir: string,
   extraEnv: Record<string, string>,
   calls: SpawnCall[],
-): SubprocessDriverOptions {
+): CliTransportOptions {
   return {
     binary: ['node', FAKE_CLI],
     routingTable: conformanceRoutingTable(),
@@ -208,12 +212,12 @@ function baseOptions(
  * The harness config every fake-CLI run uses: workspaces inside scratchDir,
  * and the conformance isolation write (`echo … > note.txt`) permitted via an
  * anchored re: pattern (token patterns deny redirects by design) — the same
- * config the ai-sdk and claude-agent instantiations use, because in harness
+ * config the ai-sdk and claude-code sdk-transport instantiations use, because in harness
  * mode the REAL harness (served over MCP) executes the tool.
  */
 function conformanceHarnessConfig(
   scratchDir: string,
-): NonNullable<SubprocessDriverOptions['harnessConfig']> {
+): NonNullable<CliTransportOptions['harnessConfig']> {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
@@ -354,11 +358,11 @@ function fakeManagedScript(
   };
 }
 
-/** Fresh SubprocessDriver honoring the ConformanceSpec contract. */
+/** Fresh ClaudeCodeDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
   const directive = spec.directive;
   const toolLeg = directive?.kind === 'tool-then-reply';
-  return new SubprocessDriver({
+  return new ClaudeCodeDriver({
     ...baseOptions(spec.scratchDir, toolLeg ? toolLegEnv(directive) : {}, []),
     ...(toolLeg ? {} : { spawn: fakeManagedSpawn((opts) => fakeManagedScript(opts, directive)) }),
     // The priced handle flows through the price lookup so the conformance
@@ -381,7 +385,7 @@ function makeDriver(spec: ConformanceSpec): Driver {
 runDriverConformance(
   makeDriver,
   { describe, test, expect },
-  { label: 'subprocess driver (fake agent CLI)' },
+  { label: 'claude-code driver, CLI transport (fake agent CLI)' },
 );
 runGovernedAbortLeg(makeDriver, { describe, test, expect });
 
@@ -432,20 +436,17 @@ function probeEnvOf(narration: readonly string[]): Record<string, string> {
 const TEST_ROUTE = {
   endpoint: 'conformance',
   baseUrl: 'http://127.0.0.1:1/anthropic',
-  env: {
-    ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
-    ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
-  },
+  keyEnv: 'CONFORMANCE_API_KEY',
   model: 'conformance-1',
 };
 
-describe('subprocess driver specifics (fake agent CLI)', () => {
-  test('routeFor rejects prototype keys — constructor/toString are not providers (mirror of the claude-agent guard)', () => {
+describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
+  test('routeFor rejects prototype keys — constructor/toString are not providers (the own-property guard both consolidated lanes carried)', () => {
     expect(() =>
-      routeFor({ provider: 'constructor', model: 'deepseek-chat' }, defaultRoutingTable()),
+      resolveRoute({ provider: 'constructor', model: 'deepseek-chat' }, defaultRoutingTable()),
     ).toThrow(/unknown provider 'constructor'/);
     expect(() =>
-      routeFor({ provider: 'toString', model: 'deepseek-chat' }, defaultRoutingTable()),
+      resolveRoute({ provider: 'toString', model: 'deepseek-chat' }, defaultRoutingTable()),
     ).toThrow(/unknown provider 'toString'/);
   });
 
@@ -587,7 +588,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       onTestFinished(() => {
         vi.unstubAllEnvs();
       });
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'deepseek-default-served' },
@@ -630,7 +631,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       let deadline: (() => void) | undefined;
       const deadlineHandle = Symbol('readiness-gated deadline');
       const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, calls),
         spawn: (options) => {
           const child = spawn(options);
@@ -686,7 +687,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('graceful abort: a default-disposition child dies on SIGTERM — one rung, no SIGKILL', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'slow-exit-ms', FAKE_AGENT_SLOW_EXIT_MS: '10000' },
@@ -719,7 +720,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('junk lines are narration, never a crash: the result event still parses', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'emit-junk' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'junky run' }));
@@ -739,7 +740,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('resume: the second run passes --resume; the sidecar lives in the STORE, not the workspace (#19-12/#26)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const first = new SubprocessDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
+      const first = new ClaudeCodeDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
       const run1 = await first.run(invocation({ prompt: 'resume run one' }));
       expect(calls[0]?.args).not.toContain('--resume'); // fresh run: no resume flag
       // The sidecar is RELOCATED (issue #26, design (b)): beside the session
@@ -764,7 +765,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The resumed run forwards the recorded CLI session id as --resume
       // (proven by the fixture echoing it) and reuses the SAME workspace.
       const calls2: SpawnCall[] = [];
-      const second = new SubprocessDriver(
+      const second = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'resume-echo' }, calls2),
       );
       if (run1.sessionId === undefined) throw new Error('first run must create a session');
@@ -800,7 +801,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('deny-tool: the CLI permission denial maps to the frozen {tool, reason} shape under the HARNESS name', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'denial run' }));
@@ -823,7 +824,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('result-event error path: the error verdict names the result cause and stays bounded (#208)', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'result error run' }));
@@ -842,7 +843,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('result-event cause precedence: result string wins over errors over subtype (#208)', async () => {
     await withScratch(async (scratchDir) => {
-      const resultString = await new SubprocessDriver(
+      const resultString = await new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-result' }, []),
       ).run(invocation({ prompt: 'result-string run' }));
       // The `result` string outranks the `errors` entries and the subtype.
@@ -850,7 +851,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(resultString.error).not.toContain('errors-entry-cause');
       expect(resultString.errorClass).toBe('provider-error');
 
-      const errorsOnly = await new SubprocessDriver(
+      const errorsOnly = await new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-errors' }, []),
       ).run(invocation({ prompt: 'errors run' }));
       // No `result` string → the joined `errors` entries are the cause.
@@ -864,7 +865,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
       const schema = z.object({ answer: z.string() }).strict();
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
       );
       const result = await driver.run(
@@ -888,7 +889,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The fixture emits the raw payload verbatim (a lying CLI — no fixture
       // schema checking), so the driver's own settle-time validation is what
       // stands between the vendor field and the seam.
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
@@ -919,7 +920,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('usage mapping: the fixed fixture numbers become the frozen Usage shape', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const driver = new ClaudeCodeDriver(baseOptions(scratchDir, {}, []));
       const result = await driver.run(invocation({ prompt: 'usage run' }));
       expect(result.stopReason).toBe('complete');
       // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
@@ -933,7 +934,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('costUSD via the pricing override: derived from real usage; unpriced → absent', async () => {
     await withScratch(async (scratchDir) => {
-      const priced = new SubprocessDriver({
+      const priced = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         pricing: (modelSpec) =>
           modelSpec.provider === CONFORMANCE_PROVIDER
@@ -945,7 +946,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.costUSD).toBeDefined();
       expect(result.costUSD).toBeCloseTo(0.00003, 12);
 
-      const unpriced = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const unpriced = new ClaudeCodeDriver(baseOptions(scratchDir, {}, []));
       const unknown = await unpriced.run(invocation({ prompt: 'unpriced run' }));
       expect(unknown.costUSD).toBeUndefined(); // derived-only: never fabricated
     });
@@ -953,7 +954,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('budget: maxTokens trips on the folded result usage (pre-verdict check only)', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'budget-usage' }, []),
       );
       const result = await driver.run(
@@ -968,7 +969,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('unknown-model mode: a nonzero CLI exit with no result event is an honest error verdict', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'unknown-model' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'doomed run' }));
@@ -1001,7 +1002,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const throwingSpawn: SpawnFn = () => {
         throw new Error(`spawn blew up with ${secret}: ${'x'.repeat(600)}`);
       };
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         spawn: throwingSpawn,
       });
@@ -1017,7 +1018,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('a signal death with no result event names the signal in error (#208)', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'self-kill' }, []),
       );
       // NOT a governed run: no governor signal fires, so this cannot settle
@@ -1036,12 +1037,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('echo-workspace: the fixture executes a real read in the resumed workspace', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const first = new SubprocessDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
+      const first = new ClaudeCodeDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
       const run1 = await first.run(invocation({ prompt: 'seed run' }));
       const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
       await writeFile(join(workspace, 'note.txt'), 'hello note', 'utf8');
 
-      const second = new SubprocessDriver(
+      const second = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'echo-workspace', FAKE_AGENT_PATH: 'note.txt' },
@@ -1071,7 +1072,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('served-model pricing + mismatch marker: the price lookup gets the SERVED id (#19-1/#24, #19-2)', async () => {
     await withScratch(async (scratchDir, store) => {
       const pricedKeys: Array<{ provider: string; model: string }> = [];
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' },
@@ -1105,7 +1106,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('CLI token fields must be finite non-negative integers: lying fields fold to 0 (#19-3)', () => {
     expect(
-      usageFromCli({
+      usageFromWire({
         input_tokens: -200_000,
         output_tokens: 150_000,
         cache_read_input_tokens: -3,
@@ -1115,7 +1116,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     // The bypass is closed: the OLD fold read -50,000 total (negative
     // input masking real spend), which could never trip `>= maxTokens`;
     // the tightened fold counts the real magnitude.
-    const lying = usageFromCli({ input_tokens: -200_000, output_tokens: 150_000 });
+    const lying = usageFromWire({ input_tokens: -200_000, output_tokens: 150_000 });
     expect(lying).toBeDefined();
     if (lying === undefined) return;
     expect(
@@ -1124,16 +1125,16 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   });
 
   test('binary validation: an empty template throws at construction, never at spawn (#19-4)', () => {
-    expect(() => new SubprocessDriver({ binary: [] })).toThrow(
+    expect(() => new ClaudeCodeDriver({ binary: [] })).toThrow(
       /non-empty string or a non-empty array of non-empty strings/,
     );
-    expect(() => new SubprocessDriver({ binary: ['node', ''] })).toThrow(
+    expect(() => new ClaudeCodeDriver({ binary: ['node', ''] })).toThrow(
       /non-empty string or a non-empty array of non-empty strings/,
     );
-    expect(() => new SubprocessDriver({ binary: '' })).toThrow(/non-empty string/);
+    expect(() => new ClaudeCodeDriver({ binary: '' })).toThrow(/non-empty string/);
     // The valid forms still construct.
-    expect(() => new SubprocessDriver({ binary: 'claude' })).not.toThrow();
-    expect(() => new SubprocessDriver({ binary: ['node', FAKE_CLI] })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ binary: 'claude' })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ binary: ['node', FAKE_CLI] })).not.toThrow();
   });
 
   test.each([
@@ -1167,7 +1168,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           structured_output: { answer: 'must be voided on harness failure' },
         });
         let childClose: Promise<ProcessClose> | undefined;
-        const driver = new SubprocessDriver({
+        const driver = new ClaudeCodeDriver({
           ...baseOptions(scratchDir, {}, []),
           toolSurface,
           spawn: (options) => {
@@ -1192,7 +1193,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         expect(result.stopReason).toBe('error');
         expect(result.usage.input).toBe(10);
         if (toolSurface === 'harness') {
-          expect(result.error).toMatch(/^subprocess driver: harness failure/);
+          expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
           expect(result.error).toContain('never reported its init surface');
           expect(result.error).not.toContain('oversized');
           expect(result.errorClass).toBe('harness');
@@ -1213,7 +1214,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const throwingSpawn: SpawnFn = () => {
         throw new TypeError('spawn args must be strings');
       };
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         spawn: throwingSpawn,
       });
@@ -1236,29 +1237,29 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   });
 
   test('grace validation: negative/NaN/Infinity/fractional graces throw at construction (#19-6)', () => {
-    expect(() => new SubprocessDriver({ termGraceMs: -1 })).toThrow(
+    expect(() => new ClaudeCodeDriver({ termGraceMs: -1 })).toThrow(
       /termGraceMs must be an integer >= 0/,
     );
-    expect(() => new SubprocessDriver({ termGraceMs: Number.NaN })).toThrow(
+    expect(() => new ClaudeCodeDriver({ termGraceMs: Number.NaN })).toThrow(
       /termGraceMs must be an integer >= 0/,
     );
-    expect(() => new SubprocessDriver({ termGraceMs: Number.POSITIVE_INFINITY })).toThrow(
+    expect(() => new ClaudeCodeDriver({ termGraceMs: Number.POSITIVE_INFINITY })).toThrow(
       /termGraceMs must be an integer >= 0/,
     );
-    expect(() => new SubprocessDriver({ termGraceMs: 0.5 })).toThrow(
+    expect(() => new ClaudeCodeDriver({ termGraceMs: 0.5 })).toThrow(
       /termGraceMs must be an integer >= 0/,
     );
-    expect(() => new SubprocessDriver({ killGraceMs: -5 })).toThrow(
+    expect(() => new ClaudeCodeDriver({ killGraceMs: -5 })).toThrow(
       /killGraceMs must be an integer >= 0/,
     );
     // Zero and positive integers are legitimate.
-    expect(() => new SubprocessDriver({ killGraceMs: 0 })).not.toThrow();
-    expect(() => new SubprocessDriver({ termGraceMs: 100, killGraceMs: 200 })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ killGraceMs: 0 })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ termGraceMs: 100, killGraceMs: 200 })).not.toThrow();
   });
 
   test('sandbox-level-unenforced marker: a requested level is recorded as unenforced (#19-7)', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const driver = new ClaudeCodeDriver(baseOptions(scratchDir, {}, []));
       // The default invocation requests workspace-write — the marker must
       // record that THIS driver does not enforce it (trust statement, header).
       const result = await driver.run(invocation({ prompt: 'sandbox marker run' }));
@@ -1275,7 +1276,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
       // Stock mode (null-hypothesis evals): nothing the harness enforces
       // applies — the LEGACY marker, no layer.
-      const stockDriver = new SubprocessDriver({
+      const stockDriver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         toolSurface: 'stock',
       });
@@ -1290,7 +1291,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       });
 
       // level 'none' asks for nothing extra → no marker…
-      const noneDriver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const noneDriver = new ClaudeCodeDriver(baseOptions(scratchDir, {}, []));
       const noneResult = await noneDriver.run(
         invocation({ prompt: 'no sandbox run', sandboxPolicy: { level: 'none' } }),
       );
@@ -1300,7 +1301,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // pre-approved, headless-denied) has nothing unenforced to observe —
       // no marker (the conformance contract also pins such records to zero
       // tool-role messages).
-      const emptySurface = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const emptySurface = new ClaudeCodeDriver(baseOptions(scratchDir, {}, []));
       const emptyResult = await emptySurface.run(
         invocation({ prompt: 'empty surface run', toolPolicy: { allow: [], mode: 'none' } }),
       );
@@ -1335,7 +1336,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         }
       };
       const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, calls),
         binary: ['node', FAKE_CLI, '--spawn-grandchild', pidFile],
         spawn: (options) => {
@@ -1546,9 +1547,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('importing driver and runCli does not install signal handlers', async () => {
     await withScratch(async (scratchDir) => {
-      const processUrl = new URL('../../src/shared/proc.ts', import.meta.url).href;
-      const cliUrl = new URL('../../src/cli/main.ts', import.meta.url).href;
-      const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+      const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url).href;
+      const cliUrl = new URL('../../../src/cli/main.ts', import.meta.url).href;
+      const loader = fileURLToPath(new URL('../../helpers/ts-source-loader.mjs', import.meta.url));
       const child = spawnManaged({
         command: process.execPath,
         args: [
@@ -1578,10 +1579,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     'CLI parent %s cleans detached workers and descendants from driver and in-process run',
     async (signal) => {
       await withScratch(async (scratchDir) => {
-        const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
-        const bin = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
-        const processUrl = new URL('../../src/shared/proc.ts', import.meta.url).href;
-        const runUrl = new URL('../../src/harness/run.ts', import.meta.url).href;
+        const loader = fileURLToPath(
+          new URL('../../helpers/ts-source-loader.mjs', import.meta.url),
+        );
+        const bin = fileURLToPath(new URL('../../../src/cli.ts', import.meta.url));
+        const processUrl = new URL('../../../src/shared/proc.ts', import.meta.url).href;
+        const runUrl = new URL('../../../src/harness/run.ts', import.meta.url).href;
         const preload = join(scratchDir, 'owned-child.mjs');
         const runWorker = join(scratchDir, 'run-worker.cjs');
         const runPidFile = join(scratchDir, 'run-pids.json');
@@ -1923,7 +1926,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // vitest .concurrent), so no concurrent test observes the markers.
       process.env.CQ_ENV_LEAK_MARKER = marker;
       process.env.GH_TOKEN = 'ghp_marker_secret';
-      const probeOptions: SubprocessDriverOptions = {
+      const probeOptions: CliTransportOptions = {
         binary: ['node', probePath],
         routingTable: conformanceRoutingTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
@@ -1934,7 +1937,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       };
       try {
         // NO spawn override: this is the production spawnManaged path.
-        const denied = await new SubprocessDriver(probeOptions).run(
+        const denied = await new ClaudeCodeDriver(probeOptions).run(
           invocation({ prompt: 'env probe run', toolPolicy: EMPTY_SURFACE }),
         );
         expect(denied.stopReason).toBe('complete');
@@ -1956,7 +1959,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
         // The documented escape hatch is real end-to-end (r1): naming the
         // marker in envAllowlist copies ONLY that parent name back in.
-        const allowed = await new SubprocessDriver({
+        const allowed = await new ClaudeCodeDriver({
           ...probeOptions,
           envAllowlist: ['CQ_ENV_LEAK_MARKER'],
         }).run(invocation({ prompt: 'allowlist probe run', toolPolicy: EMPTY_SURFACE }));
@@ -1968,7 +1971,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         // The per-instance list is a FROZEN COPY (r2): mutating the caller's
         // array after construction cannot weaken later spawns.
         const mutableAllowlist = ['CQ_ENV_LEAK_MARKER'];
-        const frozenDriver = new SubprocessDriver({
+        const frozenDriver = new ClaudeCodeDriver({
           ...probeOptions,
           envAllowlist: mutableAllowlist,
         });
@@ -1989,16 +1992,16 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   }, 20_000);
 
   test('envAllowlist validation: malformed names throw at construction (#183)', () => {
-    expect(() => new SubprocessDriver({ envAllowlist: [''] })).toThrow(
+    expect(() => new ClaudeCodeDriver({ envAllowlist: [''] })).toThrow(
       /envAllowlist entries must be env var names matching/,
     );
-    expect(() => new SubprocessDriver({ envAllowlist: ['A=B'] })).toThrow(
+    expect(() => new ClaudeCodeDriver({ envAllowlist: ['A=B'] })).toThrow(
       /envAllowlist entries must be env var names matching/,
     );
-    expect(() => new SubprocessDriver({ envAllowlist: ['BAD NAME'] })).toThrow(
+    expect(() => new ClaudeCodeDriver({ envAllowlist: ['BAD NAME'] })).toThrow(
       /envAllowlist entries must be env var names matching/,
     );
-    expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
   });
 });
 
@@ -2071,6 +2074,7 @@ function harnessObservation(tools: string[]): Observation {
     harnessConnected: false,
     permissionDeniedIds: new Set(),
     harnessFailure: undefined,
+    refusalSeen: false,
   };
 }
 
@@ -2095,20 +2099,20 @@ const toolResultLine = (id: string, content: unknown): string =>
     message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content }] },
   });
 
-describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
+describe('claude-code CLI transport: the closed harness tool surface (W1.4)', () => {
   test('toolSurface validation: anything but harness/stock throws at construction', () => {
-    expect(() => new SubprocessDriver({ toolSurface: 'builtin' as unknown as 'harness' })).toThrow(
+    expect(() => new ClaudeCodeDriver({ toolSurface: 'builtin' as unknown as 'harness' })).toThrow(
       /toolSurface must be 'harness' or 'stock'/,
     );
-    expect(() => new SubprocessDriver({ toolSurface: 'harness' })).not.toThrow();
-    expect(() => new SubprocessDriver({ toolSurface: 'stock' })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ toolSurface: 'harness' })).not.toThrow();
+    expect(() => new ClaudeCodeDriver({ toolSurface: 'stock' })).not.toThrow();
   });
 
   test('a real run: byte-exact closed argv; the 0600 config lives in sessionsDir, is deleted once init reports connected, and is gone after settle', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
       const probe = join(scratchDir, 'config-probe.json');
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probe }, calls),
       );
       const result = await driver.run(invocation({ prompt: 'closed surface run' }));
@@ -2166,7 +2170,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
   test('empty selection (mode none): no --mcp-config, --allowedTools "" as ONE element, no config file, init [] passes', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
       );
       const result = await driver.run(
@@ -2199,7 +2203,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test("per-run config names: concurrent runs on ONE session never share, replace or delete each other's binding; files at other names are never touched", async () => {
     await withScratch(async (scratchDir) => {
-      const seed = await new SubprocessDriver(
+      const seed = await new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, []),
       ).run(invocation({ prompt: 'seed run' }));
       const sessionId = seed.sessionId as string;
@@ -2218,7 +2222,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
       const probeA = join(scratchDir, 'probe-a.json');
       const probeB = join(scratchDir, 'probe-b.json');
       const [a, b] = await Promise.all([
-        new SubprocessDriver(
+        new ClaudeCodeDriver(
           baseOptions(
             scratchDir,
             { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeA },
@@ -2231,7 +2235,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
             sandboxPolicy: { level: 'read-only' },
           }),
         ),
-        new SubprocessDriver(
+        new ClaudeCodeDriver(
           baseOptions(
             scratchDir,
             { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeB },
@@ -2270,7 +2274,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('init mismatch: an unstripped builtin in init.tools → error, harness prefix, surface-mismatch marker', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_TOOL: 'Bash' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'leaky builtin run' }));
@@ -2291,7 +2295,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('init mismatch: an extra connected MCP server → error with the harness prefix', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_SERVER: 'ambient-connector' },
@@ -2318,7 +2322,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
       launchControl.extraArgs = [];
     });
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'tool-then-reply', FAKE_AGENT_TOOL: 'read' },
@@ -2345,7 +2349,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('no init event at all in harness mode → harness-surface-unverified error, never a model outcome', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_NO_INIT: '1' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'silent init run' }));
@@ -2360,7 +2364,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('a harness failure voids structured output: an unverified run never exposes the payload (review r1)', async () => {
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_NO_INIT: '1' }, []),
       );
       const result = await driver.run(
@@ -2381,7 +2385,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
   test('a RELATIVE sessionsDir still yields an absolute --mcp-config the CLI (cwd = workspace) can open (review r1)', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
         sessionsDir: relative(process.cwd(), join(scratchDir, SESSIONS_DIR)),
       });
@@ -2394,7 +2398,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('the server dying mid-run → transport failure: error/harness, NOT a denial', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           {
@@ -2427,7 +2431,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('a REAL harness denial (path escape) is a denial under the harness name; the run completes', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           {
@@ -2458,7 +2462,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
 
   test('a harness-served tool that SUCCEEDS lands as a role-tool message with the server text', async () => {
     await withScratch(async (scratchDir, store) => {
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           {
@@ -2553,7 +2557,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
         FAKE_AGENT_MODE: 'block-until-abort',
         FAKE_AGENT_SERVER_PID_FILE: pidFile,
       });
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         spawn: (options) => {
           const child = spawn(options);
@@ -2613,7 +2617,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
   test('STOCK surface run: the legacy argv and the legacy in-process tool path (raw names, no MCP)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(
           scratchDir,
           {
@@ -2650,7 +2654,7 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
       ).toBe(false);
 
       // The legacy deny-tool shape still maps on the stock surface.
-      const denied = await new SubprocessDriver({
+      const denied = await new ClaudeCodeDriver({
         ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
         toolSurface: 'stock',
       }).run(invocation({ prompt: 'stock denial run' }));
@@ -2676,12 +2680,12 @@ async function thrownBy(run: Promise<unknown>): Promise<unknown> {
   }
 }
 
-describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () => {
+describe('claude-code CLI transport seam v2: RunOptions.signal + workspace binding', () => {
   test('a PRE-ABORTED options.signal never dispatches: aborted, zero usage, no session state', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'subdrv-s2-'));
     try {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: 'must never run' },
@@ -2715,7 +2719,7 @@ describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () 
       // delay lands AFTER the abort listener attaches (synchronously after
       // the spawn) and while the block-until-abort fixture is still alive.
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'block-until-abort' }, calls),
       );
       const controller = new AbortController();
@@ -2745,7 +2749,7 @@ describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () 
         FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo conformance-marker > note.txt' }),
         FAKE_AGENT_REPLY: 'wrote note.txt',
       };
-      const driver = new SubprocessDriver({
+      const driver = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, extraEnv, []),
         // Record the spawn cwd (the base recordingSpawn records argv/env
         // only); the directive env merge is repeated here because THIS
@@ -2793,8 +2797,8 @@ describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () 
       await mkdir(workspaceDir);
       await mkdir(otherDir);
       const calls: SpawnCall[] = [];
-      const freshDriver = (): SubprocessDriver =>
-        new SubprocessDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
+      const freshDriver = (): ClaudeCodeDriver =>
+        new ClaudeCodeDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
       const run1 = await freshDriver().run(invocation({ workspace: { path: workspaceDir } }));
       expect(run1.stopReason).toBe('complete');
       expect(calls).toHaveLength(1);
@@ -2828,7 +2832,7 @@ describe('subprocess driver seam v2: RunOptions.signal + workspace binding', () 
       const aFile = join(scratchDir, 'plain-file.txt');
       await writeFile(aFile, 'not a directory', 'utf8');
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
       );
       for (const badPath of ['relative/workspace', join(scratchDir, 'absent'), aFile]) {
@@ -2908,22 +2912,22 @@ function s3Driver(
   scratchDir: string,
   lines: readonly string[],
   opts: {
-    binary?: SubprocessDriverOptions['binary'];
+    binary?: CliTransportOptions['binary'];
     exitCode?: number;
   } = {},
-): SubprocessDriver {
-  return new SubprocessDriver({
+): ClaudeCodeDriver {
+  return new ClaudeCodeDriver({
     ...baseOptions(scratchDir, {}, []),
     ...(opts.binary === undefined ? {} : { binary: opts.binary }),
     spawn: s3Child(lines, opts.exitCode ?? 0),
   });
 }
 
-describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
+describe('claude-code CLI transport seam v2 §2.3 (S3): invocation outputSchema + output-invalid + classifier', () => {
   test('round-trip: an invocation outputSchema rides --json-schema and the validated payload completes', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
       );
       const result = await driver.run(
@@ -2945,7 +2949,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
   test('no schema requested: structuredOutput is ABSENT and no --json-schema is sent', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(
+      const driver = new ClaudeCodeDriver(
         baseOptions(
           scratchDir,
           { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: '{"answer":"ok"}' },
@@ -3046,7 +3050,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
   test('an uncompilable outputSchema is the LOCAL output-invalid verdict before any spawn (PR #238 review round 2)', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, calls));
+      const driver = new ClaudeCodeDriver(baseOptions(scratchDir, {}, calls));
       const result = await driver.run(
         invocation({
           outputSchema: { name: 'test.broken/v1', schema: { type: 'not-a-json-schema-type' } },
@@ -3071,7 +3075,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
   test('I8 precedence: an already-aborted signal outranks an uncompilable outputSchema (PR #241)', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, calls));
+      const driver = new ClaudeCodeDriver(baseOptions(scratchDir, {}, calls));
       const controller = new AbortController();
       controller.abort();
       const result = await driver.run(
@@ -3159,7 +3163,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
 
       // "Request rejected (429)" arrives on STDERR with a non-zero exit —
       // the throttle row still outranks the close-cause branch.
-      const rejectedViaStderr = new SubprocessDriver({
+      const rejectedViaStderr = new ClaudeCodeDriver({
         ...baseOptions(fresh(), {}, []),
         spawn: (opts) =>
           spawnManaged({
@@ -3194,7 +3198,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
           ],
         });
       // A codex CLI: the provider's failure surfaced through the CLI.
-      const codex = new SubprocessDriver({
+      const codex = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         binary: ['/opt/vendor/codex'],
         spawn: usageThenExit,
@@ -3208,7 +3212,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
 
       // CONTROL: the same stream from a non-codex binary stays 'harness'
       // (the exit is the CLI's own crash, not a provider classification).
-      const plain = new SubprocessDriver({
+      const plain = new ClaudeCodeDriver({
         ...baseOptions(scratchDir, {}, []),
         spawn: usageThenExit,
       });
@@ -3226,7 +3230,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
       const saved = process.env[keyName];
       delete process.env[keyName];
       try {
-        const driver = new SubprocessDriver({
+        const driver = new ClaudeCodeDriver({
           ...baseOptions(scratchDir, {}, []),
           routingTable: RoutingTableSchema.parse({
             endpoints: {
@@ -3266,7 +3270,7 @@ describe('subprocess driver seam v2 §2.3 (S3): invocation outputSchema + output
       });
 
       // 2. a structured-output miss → error/'output-invalid'.
-      const miss = new SubprocessDriver(
+      const miss = new ClaudeCodeDriver(
         baseOptions(
           fresh(),
           { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },

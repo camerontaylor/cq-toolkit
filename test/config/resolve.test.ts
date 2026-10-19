@@ -523,7 +523,7 @@ describe('pure configuration resolution', () => {
     it('judges per-call map values by their merged result', () => {
       const config = resolve({ values: { 'driver.bindings': { '*/zai': 'ai-sdk' } } });
       expect(config.entries['driver.bindings']?.layer).toBe('call');
-      expect(() => resolve({ values: { 'driver.bindings': { '*/zai': 'claude-agent' } } })).toThrow(
+      expect(() => resolve({ values: { 'driver.bindings': { '*/zai': 'claude-code' } } })).toThrow(
         /explicit opt-in/,
       );
     });
@@ -548,7 +548,7 @@ describe('pure configuration resolution', () => {
       expect(() =>
         resolve({
           values: { 'driver.bindings': { 'custom/vendor': 'ai-sdk' } },
-          optIn: ['driver.bindings=custom/vendor:subprocess'],
+          optIn: ['driver.bindings=custom/vendor:claude-code'],
         }),
       ).toThrow(/disagrees/);
     });

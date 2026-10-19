@@ -84,9 +84,9 @@ describe('S4b review.fixItem served-model construction', () => {
       vi.stubEnv('CQ_CONSTRUCTION_KEY', 'offline-fixture-key');
       const op = makeFixReviewItem({
         drivers: createDriverFactory({
-          bindings: { fixer: { construction: 'subprocess' } },
+          bindings: { fixer: { construction: 'claude-code' } },
           lanes: {
-            subprocess: {
+            claudeCode: {
               binary,
               sessionsDir: join(root, 'sessions'),
               routingTable: {

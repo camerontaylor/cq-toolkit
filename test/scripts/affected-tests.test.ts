@@ -69,7 +69,7 @@ describe('selectAffected', () => {
       'test/cli/i1.test.ts',
       'test/driver/harness-parity.test.ts',
       'test/driver/served-model-sites.test.ts',
-      'test/driver/subprocess.test.ts',
+      'test/driver/claude-code/cli.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/policyDiff.test.ts',
@@ -97,7 +97,7 @@ describe('selectAffected', () => {
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/kernel/runner.ts')).toEqual([
-      'test/driver/subprocess.test.ts',
+      'test/driver/claude-code/cli.test.ts',
       'test/kernel/driver-hygiene.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
@@ -112,13 +112,13 @@ describe('selectAffected', () => {
     ]);
     expect(pick('src/harness/mcp/server.ts')).toEqual([
       'test/cli/i1.test.ts',
+      'test/driver/claude-code/cli.test.ts',
       'test/driver/harness-parity.test.ts',
-      'test/driver/subprocess.test.ts',
       'test/harness/mcp-bin.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     expect(pick('src/cli/main.ts')).toEqual([
-      'test/driver/subprocess.test.ts',
+      'test/driver/claude-code/cli.test.ts',
       'test/ops/gates/protectedPaths.test.ts',
     ]);
     // The generic scripts/ row adds every test/workflows suite as well.

@@ -42,9 +42,9 @@ if (typeof sessionsDir !== 'string' || sessionsDir === '') {
 const { createDriverFactory, bindingsFromDispatch, makeSweepUnitOp } = await import(DIST); // top-level await — fine in ESM
 
 const factory = createDriverFactory({
-  bindings: { fixer: { 'cq-t43-smoke': 'subprocess' } },
+  bindings: { fixer: { 'cq-t43-smoke': 'claude-code' } },
   lanes: {
-    subprocess: {
+    claudeCode: {
       binary: [process.execPath, SWEEP_AGENT],
       sessionsDir,
       routingTable: {

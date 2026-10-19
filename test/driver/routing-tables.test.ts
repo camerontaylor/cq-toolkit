@@ -1,40 +1,41 @@
-// Routing-table agreement pin — VB1C batch gate.
+// Shipped-routing pin — VB1C batch gate, post-Phase-1.9.
 //
-// The two agent lanes ship DUPLICATED endpoint data: the subprocess lane's
-// `defaultRoutingTable()` and the claude-agent lane's
-// `defaultEndpointTable()` both carry the zai / deepseek / anthropic
-// endpoints as plain serializable config (the subprocess table keeps the
-// historical per-endpoint `models` rows as accepted-but-unenforced data —
-// the model allowlist check is retired, ADR-0002 §2.6, and the claude-agent
-// table is provider-only by the no-allowlist owner override). The tables
-// share no code, so nothing stopped a future rename — a new base URL, a
-// moved key env — from drifting ONE lane silently. This pin asserts the
-// shipped defaults agree per provider on the three fields both tables
-// carry (`baseUrlEnv` / `baseUrlDefault` / `keyEnv`) and on the provider
-// set itself: drift is now a loud test failure, not a silent lane split.
+// The two agent lanes the original pin guarded shipped DUPLICATED endpoint
+// data; Phase 1.9 merged them into the ONE claude-code lane with ONE
+// `defaultRoutingTable()`, so the drift this file existed to catch is now
+// impossible by construction (no second table exists to drift). What stays
+// load-bearing is the shipped default itself: these endpoints are
+// provider-documented CONFIG (as-of 2026-09), and a rename of a base URL,
+// a key env, or a provider handle would silently re-route every deployment
+// that relies on the defaults. This pin asserts the documented shape loudly.
 import { describe, expect, test } from 'vitest';
-import { defaultEndpointTable } from '../../src/driver/claude-agent/routing.js';
-import { defaultRoutingTable } from '../../src/driver/subprocess/routing.js';
+import { defaultRoutingTable } from '../../src/driver/claude-code/routing.js';
 
-const claudeEndpoints = defaultEndpointTable().endpoints;
-const subprocessEndpoints = defaultRoutingTable().endpoints;
+const endpoints = defaultRoutingTable().endpoints;
 
-describe('routing tables — the two lanes ship ONE endpoint truth', () => {
-  test('the provider sets agree across lanes', () => {
-    expect(Object.keys(claudeEndpoints).sort()).toEqual(Object.keys(subprocessEndpoints).sort());
+describe('routing table — the shipped default keeps the documented anthropic-compat endpoints', () => {
+  test('the provider set is exactly the documented three', () => {
+    expect(Object.keys(endpoints).sort()).toEqual(['anthropic', 'deepseek', 'zai']);
   });
 
-  test.each(Object.keys(subprocessEndpoints).sort())(
-    '%s: baseUrlEnv/baseUrlDefault/keyEnv agree across lanes',
-    (provider) => {
-      const subprocess = subprocessEndpoints[provider];
-      const claude = claudeEndpoints[provider];
-      if (claude === undefined || subprocess === undefined)
-        throw new Error(`missing endpoint: ${provider}`);
-      expect(claude).toBeDefined(); // implied by the set pin above; kept for a clear failure message
-      expect(claude.baseUrlEnv).toBe(subprocess.baseUrlEnv);
-      expect(claude.baseUrlDefault).toBe(subprocess.baseUrlDefault);
-      expect(claude.keyEnv).toBe(subprocess.keyEnv);
-    },
-  );
+  test.each(['zai', 'deepseek', 'anthropic'])('%s: the documented env wiring holds', (provider) => {
+    const entry = endpoints[provider];
+    if (entry === undefined) throw new Error(`missing endpoint: ${provider}`);
+    // The key env is the provider's documented credential variable, and the
+    // base URL default matches the provider's anthropic-compat endpoint.
+    const documented: Record<string, { baseUrlDefault: string; keyEnv: string }> = {
+      zai: { baseUrlDefault: 'https://api.z.ai/api/anthropic', keyEnv: 'ZAI_API_KEY' },
+      deepseek: {
+        baseUrlDefault: 'https://api.deepseek.com/anthropic',
+        keyEnv: 'DEEPSEEK_API_KEY',
+      },
+      anthropic: { baseUrlDefault: 'https://api.anthropic.com', keyEnv: 'ANTHROPIC_API_KEY' },
+    };
+    expect(entry.baseUrlDefault).toBe(documented[provider]?.baseUrlDefault);
+    expect(entry.keyEnv).toBe(documented[provider]?.keyEnv);
+    // The base URL override env var is per-provider and never a credential.
+    expect(entry.baseUrlEnv).toMatch(/_ANTHROPIC_BASE_URL$|^ANTHROPIC_BASE_URL$/);
+    // The model allowlist is retired: the shipped default carries no rows.
+    expect(entry.models).toBeUndefined();
+  });
 });

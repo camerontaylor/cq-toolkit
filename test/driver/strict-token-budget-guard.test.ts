@@ -20,10 +20,9 @@ import { assertStrictTokenBudgetSupported } from '../../src/driver/common/strict
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
 import { AcpDriver } from '../../src/driver/acp/index.js';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
-import { ClaudeAgentDriver } from '../../src/driver/claude-agent/index.js';
+import { ClaudeCodeDriver } from '../../src/driver/claude-code/index.js';
 import { createDriverFactory } from '../../src/driver/factory.js';
 import type { DriverFactoryConfig } from '../../src/driver/factory.js';
-import { SubprocessDriver } from '../../src/driver/subprocess/index.js';
 import type { Driver, ModelSpec, OpInvocation } from '../../src/driver/types.js';
 
 const STRICT = { strictTokenBudget: { maxInputTokens: 1000, reserveOutputTokens: 64 } };
@@ -65,7 +64,7 @@ describe('assertStrictTokenBudgetSupported', () => {
       try {
         assertStrictTokenBudgetSupported(
           { strictTokenBudget: { maxInputTokens: 1, reserveOutputTokens: 1 } },
-          'subprocess',
+          'claude-code',
         );
       } catch (caught) {
         return caught;
@@ -75,7 +74,7 @@ describe('assertStrictTokenBudgetSupported', () => {
     expect(err).toBeInstanceOf(DispatchError);
     expect(errorClassOf(err)).toBe('config');
     expect((err as Error).message).toContain('strictTokenBudget');
-    expect((err as Error).message).toContain('subprocess');
+    expect((err as Error).message).toContain('claude-code');
   });
 
   test('is a no-op for the ai-sdk lane and for a budget without a strict ceiling', () => {
@@ -85,8 +84,8 @@ describe('assertStrictTokenBudgetSupported', () => {
         'ai-sdk',
       ),
     ).not.toThrow();
-    expect(() => assertStrictTokenBudgetSupported({ maxUsd: 5 }, 'subprocess')).not.toThrow();
-    expect(() => assertStrictTokenBudgetSupported({}, 'claude-agent')).not.toThrow();
+    expect(() => assertStrictTokenBudgetSupported({ maxUsd: 5 }, 'claude-code')).not.toThrow();
+    expect(() => assertStrictTokenBudgetSupported({}, 'claude-code')).not.toThrow();
   });
 });
 
@@ -99,7 +98,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
     const { root, sessionsDir } = await scratch();
     try {
       const spy = seamSpy();
-      const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
+      const driver = new ClaudeCodeDriver({ spawn: spy.fn, sessionsDir });
       const err = await driver
         .run(invocation({ provider: 'anthropic', model: 'claude-test' }))
         .catch((e: unknown) => e);
@@ -109,7 +108,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
       // (missing route key) can no longer masquerade as this refusal.
       expect((err as Error).message).toContain('strictTokenBudget');
       expect((err as Error).message).toContain('does not enforce a pre-request token ceiling');
-      expect((err as Error).message).toContain('subprocess');
+      expect((err as Error).message).toContain('claude-code');
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
@@ -121,7 +120,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
     const { root, sessionsDir } = await scratch();
     try {
       const spy = seamSpy();
-      const driver = new ClaudeAgentDriver({ sdkLoader: spy.fn, sessionsDir });
+      const driver = new ClaudeCodeDriver({ transport: 'sdk', sdkLoader: spy.fn, sessionsDir });
       const err = await driver
         .run(invocation({ provider: 'anthropic', model: 'claude-test' }))
         .catch((e: unknown) => e);
@@ -129,7 +128,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
       expect(errorClassOf(err)).toBe('config');
       expect((err as Error).message).toContain('strictTokenBudget');
       expect((err as Error).message).toContain('does not enforce a pre-request token ceiling');
-      expect((err as Error).message).toContain('claude-agent');
+      expect((err as Error).message).toContain('claude-code');
       expect(spy.calls).toBe(0);
       expect(existsSync(sessionsDir)).toBe(false);
     } finally {
@@ -161,7 +160,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
     const { root, sessionsDir } = await scratch();
     try {
       const spy = seamSpy();
-      const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
+      const driver = new ClaudeCodeDriver({ spawn: spy.fn, sessionsDir });
       const err = await driver
         .run(invocation({ provider: 'anthropic', model: 'claude-test' }, { maxUsd: 1 }))
         .catch((e: unknown) => e);
@@ -182,7 +181,7 @@ describe('direct lane entry refuses a strict budget before dispatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('factory guard refuses a strict budget on unsupported lanes', () => {
-  const lanes = ['subprocess', 'claude-agent', 'acp'] as const;
+  const lanes = ['claude-code', 'claude-code', 'acp'] as const;
 
   for (const lane of lanes) {
     for (const binding of ['exact', 'wildcard'] as const) {
@@ -217,7 +216,7 @@ describe('factory guard refuses a strict budget on unsupported lanes', () => {
     try {
       const factory = createDriverFactory({
         sessionsDir,
-        bindings: { fixer: { probe: 'subprocess' } },
+        bindings: { fixer: { probe: 'claude-code' } },
       });
       const resolved = factory.resolve({
         role: 'fixer',
@@ -329,7 +328,7 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
     const { root, sessionsDir } = await scratch();
     try {
       const spy = seamSpy();
-      const driver = new SubprocessDriver({ spawn: spy.fn, sessionsDir });
+      const driver = new ClaudeCodeDriver({ spawn: spy.fn, sessionsDir });
       const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
         signal: preAborted().signal,
       });
@@ -346,7 +345,7 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
     const { root, sessionsDir } = await scratch();
     try {
       const spy = seamSpy();
-      const driver = new ClaudeAgentDriver({ sdkLoader: spy.fn, sessionsDir });
+      const driver = new ClaudeCodeDriver({ transport: 'sdk', sdkLoader: spy.fn, sessionsDir });
       const result = await driver.run(invocation({ provider: 'anthropic', model: 'claude-test' }), {
         signal: preAborted().signal,
       });
@@ -411,7 +410,8 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const driver = new ClaudeAgentDriver({
+      const driver = new ClaudeCodeDriver({
+        transport: 'sdk',
         sdkLoader: async () => {
           await gate;
           return {
@@ -445,7 +445,7 @@ describe('a pre-aborted signal settles aborted before the strict-budget gate', (
     try {
       const factory = createDriverFactory({
         sessionsDir,
-        bindings: { fixer: { probe: 'subprocess' } },
+        bindings: { fixer: { probe: 'claude-code' } },
       });
       const resolved = factory.resolve({
         role: 'fixer',
@@ -541,15 +541,20 @@ describe('entry guards precede every lane setup side effect (systematic suite)',
     readonly spyInnerRun: () => RunSpy;
     /** The setup fault a NON-strict run of this lane must still hit. */
     readonly nonstrictMessage: string;
+    /**
+     * Per-lane factory knobs applied at the factory legs' construction, so a
+     * row can pin its transport (the claude-code sdk row).
+     */
+    readonly lanes?: DriverFactoryConfig['lanes'];
   }
 
   const rows: readonly SweepRow[] = [
     {
-      name: 'subprocess',
+      name: 'claude-code',
       refusalPhrase: GUARD_PHRASE,
-      refusalLane: 'subprocess',
+      refusalLane: 'claude-code',
       direct: (reached, sessionsDir) =>
-        new SubprocessDriver({
+        new ClaudeCodeDriver({
           spawn: () => {
             reached();
             throw new Error('subprocess-setup-reached');
@@ -558,26 +563,30 @@ describe('entry guards precede every lane setup side effect (systematic suite)',
         }),
       directModelSpec: { provider: 'anthropic', model: 'claude-test' },
       factoryModelSpec: { provider: 'probe', model: 'claude-test' },
-      bindings: { fixer: { probe: 'subprocess' } },
-      spyInnerRun: () => vi.spyOn(SubprocessDriver.prototype, 'run'),
+      bindings: { fixer: { probe: 'claude-code' } },
+      spyInnerRun: () => vi.spyOn(ClaudeCodeDriver.prototype, 'run'),
       nonstrictMessage: 'ANTHROPIC_API_KEY',
     },
     {
-      name: 'claude-agent',
+      name: 'claude-code',
       refusalPhrase: GUARD_PHRASE,
-      refusalLane: 'claude-agent',
+      refusalLane: 'claude-code',
       direct: (reached, sessionsDir) =>
-        new ClaudeAgentDriver({
+        new ClaudeCodeDriver({
+          transport: 'sdk',
           sdkLoader: () => {
             reached();
-            throw new Error('claude-agent-setup-reached');
+            throw new Error('claude-code-sdk-setup-reached');
           },
           sessionsDir,
         }),
       directModelSpec: { provider: 'anthropic', model: 'claude-test' },
       factoryModelSpec: { provider: 'probe', model: 'claude-test' },
-      bindings: { fixer: { probe: 'claude-agent' } },
-      spyInnerRun: () => vi.spyOn(ClaudeAgentDriver.prototype, 'run'),
+      bindings: { fixer: { probe: 'claude-code' } },
+      // The factory legs resolve the SDK transport too, so the row proves
+      // the guard on the lane's OPTIONAL substrate path, not just the CLI one.
+      lanes: { claudeCode: { transport: 'sdk' } },
+      spyInnerRun: () => vi.spyOn(ClaudeCodeDriver.prototype, 'run'),
       nonstrictMessage: 'ANTHROPIC_API_KEY',
     },
     {
@@ -663,7 +672,11 @@ describe('entry guards precede every lane setup side effect (systematic suite)',
       const innerRun = row.spyInnerRun();
       vi.stubEnv('ANTHROPIC_API_KEY', '');
       try {
-        const factory = createDriverFactory({ sessionsDir, bindings: row.bindings });
+        const factory = createDriverFactory({
+          sessionsDir,
+          bindings: row.bindings,
+          ...(row.lanes !== undefined ? { lanes: row.lanes } : {}),
+        });
         const resolved = factory.resolve({ role: 'fixer', modelSpec: row.factoryModelSpec });
         expect(resolved.lane).toBe(row.refusalLane);
         const err = await resolved.driver
@@ -686,7 +699,11 @@ describe('entry guards precede every lane setup side effect (systematic suite)',
       const { root, sessionsDir } = await scratch();
       const innerRun = row.spyInnerRun();
       try {
-        const factory = createDriverFactory({ sessionsDir, bindings: row.bindings });
+        const factory = createDriverFactory({
+          sessionsDir,
+          bindings: row.bindings,
+          ...(row.lanes !== undefined ? { lanes: row.lanes } : {}),
+        });
         const resolved = factory.resolve({ role: 'fixer', modelSpec: row.factoryModelSpec });
         const result = await resolved.driver.run(invocation(row.factoryModelSpec, STRICT_BUDGET), {
           signal: preAbortedSignal(),

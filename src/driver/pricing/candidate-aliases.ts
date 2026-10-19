@@ -40,12 +40,9 @@ import type { ServedAliasTable } from './normalize.js';
  * the dated row (or the alias group is excluded).
  */
 export const CANDIDATE_ANTHROPIC_DATED_ALIASES: ServedAliasTable = {
-  subprocess: {
-    anthropic: {
-      'claude-haiku-4-5': ['claude-haiku-4-5-20251001'],
-    },
-  },
-  'claude-agent': {
+  // Phase 1.9 merged the former 'subprocess' and 'claude-agent' lanes into
+  // the one 'claude-code' lane; the two identical rows merged with it.
+  'claude-code': {
     anthropic: {
       'claude-haiku-4-5': ['claude-haiku-4-5-20251001'],
     },
