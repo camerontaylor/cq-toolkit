@@ -70,6 +70,7 @@
 // ratchet lane's hardened argv and a scrubbed child env, because a state
 // read a repo-local config redirect could answer wrongly is not a state
 // read. Every seam is injectable, so the direct tests never spawn anything.
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -1078,9 +1079,4 @@ function canonicalJson(value: unknown): string {
   return `{${entries
     .map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`)
     .join(',')}}`;
-}
-
-/** Error message of an unknown throwable, for refusal reasons. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

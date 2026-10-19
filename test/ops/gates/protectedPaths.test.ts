@@ -495,6 +495,11 @@ describe('every trusted job runs a protected entry point with a protected closur
   ) as { protectedPaths: string[] };
   const REGEXES = POLICY.protectedPaths.map((source) => new RegExp(source));
 
+  test('the shared error helper has exact protected coverage', () => {
+    expect(REGEXES.some((regex) => regex.test('src/shared/messageOf.ts'))).toBe(true);
+    expect(REGEXES.some((regex) => regex.test('src/shared/messageOfOther.ts'))).toBe(false);
+  });
+
   test('the closure walk refuses what it cannot classify', () => {
     const scan = (text: string): ModuleScan => scanModuleLoads(text);
     expect(

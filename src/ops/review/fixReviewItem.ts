@@ -83,6 +83,7 @@
 //   evidence has no result to ride (the frozen OpResult carries none) —
 //   but its USAGE/COST is still reported to the governor through the job
 //   context, so a bounded run's spend is observed (review-debt #185).
+import { messageOf } from '../../shared/messageOf.js';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import { boundedErrorText } from '../../driver/error-text.js';
@@ -622,9 +623,6 @@ const parseFixOutput = (raw: unknown): ParsedFix => {
     evidence,
   };
 };
-
-/** Error message of an unknown throwable, for indeterminate/failed details. */
-const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Build the `review.fixItem` op over the injected DriverFactory (ADR-0002

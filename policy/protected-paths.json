@@ -13,6 +13,7 @@
     "^src/shared/deepFreeze\\.ts$",
     "^src/shared/independent-review\\.ts$",
     "^src/shared/gitHarden\\.ts$",
+    "^src/shared/messageOf\\.ts$",
     "^policy/promotion-reviewer\\.json$",
     "^scripts/ratchet-[^/]+\\.mjs$",
     "^scripts/github-settings-drift\\.mjs$",

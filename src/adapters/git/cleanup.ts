@@ -32,6 +32,7 @@
 //   - Canonicalized path comparisons throughout (the worktreeFor realpath
 //     idiom), so porcelain-reported realpaths and caller-supplied dirs meet
 //     on equal terms.
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -695,11 +696,6 @@ async function realpathOf(p: string): Promise<string> {
   } catch {
     return p;
   }
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

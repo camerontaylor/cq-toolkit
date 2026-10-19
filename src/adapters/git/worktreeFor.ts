@@ -28,6 +28,7 @@
 //   - Derived paths cannot escape worktreesDir: kind/slug/runPrefix must be
 //     safe path segments (no separators, no '..', no leading dash — which
 //     also keeps them out of git's flag namespace in the args array).
+import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { lstat, realpath, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -731,11 +732,6 @@ function mutexConfigOf(mutex: WorktreeMutexConfig): GitMutexConfig {
   if (mutex.retries !== undefined) config.retries = mutex.retries;
   if (mutex.retryBaseMs !== undefined) config.retryBaseMs = mutex.retryBaseMs;
   return config;
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

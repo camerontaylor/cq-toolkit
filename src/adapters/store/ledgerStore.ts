@@ -22,6 +22,7 @@
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
+import { messageOf } from '../../shared/messageOf.js';
 import {
   chmodSync,
   lstatSync,
@@ -446,11 +447,6 @@ function strictDescendantFault(rootReal: string, candidate: string): string | nu
     return `'${candidate}' does not resolve to a strict descendant of root '${rootReal}'`;
   }
   return null;
-}
-
-/** Error message of an unknown throwable, for fault messages. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** Temp-name salt: uniqueness within a process; EEXIST collisions advance the counter, bounded. */

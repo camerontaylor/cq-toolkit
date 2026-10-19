@@ -27,6 +27,7 @@
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
 //     style).
+import { messageOf } from '../../shared/messageOf.js';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
@@ -716,11 +717,6 @@ function withUrl(
   url: string | undefined,
 ): { name: string; number: number; created: boolean; url?: string } {
   return url === undefined ? row : { ...row, url };
-}
-
-/** Error message of an unknown throwable, for `failed` results. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 // ---------------------------------------------------------------------------
