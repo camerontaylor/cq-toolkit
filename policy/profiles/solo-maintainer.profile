@@ -7,4 +7,4 @@ CQ_MERGE_TRUSTED_BOTS=coderabbitai[bot]
 CQ_MERGE_PROTECTED_PATHS=diff-check
 CQ_SANDBOX=off
 CQ_SANDBOX_NETWORK=allow
-CQ_DRIVER_BINDINGS=*/anthropic:claude-agent
+CQ_DRIVER_BINDINGS=*/anthropic:claude-code

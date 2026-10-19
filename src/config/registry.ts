@@ -202,7 +202,7 @@ const rows: readonly (readonly [
     'driver.bindings',
     'bindings',
     '*/zai:ai-sdk,*/anthropic:ai-sdk,*/openai:ai-sdk,*/deepseek:ai-sdk,*/opencode-go:ai-sdk',
-    '*/anthropic:claude-agent',
+    '*/anthropic:claude-code',
     'unordered',
     true,
   ],
