@@ -7,7 +7,9 @@ mocked out: no real CLONE, spool, or state is touched.
 import datetime as dt
 import importlib.machinery
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +81,8 @@ class PromotionRetryTest(unittest.TestCase):
                 return False  # batch not yet promoted
             if a == BASE and b == MAIN:
                 return True  # review base still on main
+            if a == MAIN and b == BATCH:
+                return False  # the default main is not inside the reviewed range
             raise AssertionError(f"unexpected is_ancestor({a[:8]}, {b[:8]})")
 
         self.anc = mock.patch.object(crq, "is_ancestor", side_effect=ancestor)
@@ -92,6 +96,14 @@ class PromotionRetryTest(unittest.TestCase):
         self.alert = mock.patch.object(crq, "signer_alert")
         self.mock_alert = self.alert.start()
         self.addCleanup(self.alert.stop)
+
+        self.notify = mock.patch.object(crq, "notify_owner", return_value={"paseo_send": 0})
+        self.mock_notify = self.notify.start()
+        self.addCleanup(self.notify.stop)
+
+        self.clock = mock.patch.object(crq, "now", return_value=dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc))
+        self.mock_now = self.clock.start()
+        self.addCleanup(self.clock.stop)
 
     def gh_calls(self):
         return [c for c in self.mock_run.call_args_list if c.args[0][0] == "gh"]
@@ -224,6 +236,187 @@ class PromotionRetryTest(unittest.TestCase):
         self.assertTrue(any("post_status off" in line for line in log), f"log: {log}")
         self.assertTrue(all("dispatched" not in line for line in log),
                         f"must not claim a dispatch happened: {log}")
+
+    def test_stall_boundary_escalates_once_across_restart_without_dispatch(self):
+        # Gate refusals/needs-human may never yield a usable result. The clock
+        # still bounds silence, independently of dispatch time or gate attempts.
+        q = make_queue(success_at=success_at(59), dispatched=success_at(1))
+        crq.promotion_tick(q, False)
+        self.mock_notify.assert_not_called()
+        q["items"][0]["success_at"] = success_at(60)
+        log = crq.promotion_tick(q, False)
+        self.assertTrue(any("GATE NEEDS HUMAN" in line for line in log))
+        item = q["items"][0]
+        self.assertEqual(item["state"], "promoting")
+        self.assertEqual(item["gate_stalled_at"], crq.iso())
+        self.assertIn("refused/needs-human", item["last_error"])
+        alert = q["promotion"]["gate_alerts"][0]
+        self.assertEqual((alert["item"], alert["sha"], alert["base"]), (item["id"], BATCH, BASE))
+        self.assertIsNone(alert["acked"])
+        self.mock_notify.assert_called_once()
+        self.assertIn("PROMOTION GATE NEEDS HUMAN", self.mock_notify.call_args.args[0])
+        self.assertEqual(self.gh_calls(), [])
+        q = json.loads(json.dumps(q))  # durable state survives a process restart
+        del q["items"][0]["dispatched"]
+        crq.promotion_tick(q, False)
+        self.assertEqual(len(q["promotion"]["gate_alerts"]), 1)
+        self.mock_notify.assert_called_once()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_long_stall_escalates_without_gate_or_status_configuration(self):
+        crq.PROMO["post_status"] = False
+        self.mock_wf.return_value = False
+        q = make_queue(success_at=success_at(23 * 60))
+        crq.promotion_tick(q, False)
+        self.assertIn("gate_stalled_at", q["items"][0])
+        self.assertEqual(len(q["promotion"]["gate_alerts"]), 1)
+        self.mock_notify.assert_called_once()
+        self.mock_wf.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_failed_or_unconfigured_notification_retries_with_backoff_without_gate_retry(self):
+        for result in ({"paseo_send": "1: daemon unavailable"}, {}):
+            with self.subTest(result=result):
+                self.mock_notify.reset_mock()
+                self.mock_notify.return_value = result
+                q = make_queue(success_at=success_at(60))
+                crq.promotion_tick(q, False)
+                alert = q["promotion"]["gate_alerts"][0]
+                self.assertNotIn("notified_at", alert)
+                self.assertEqual(alert["notification"], result)
+                self.assertEqual(alert["notify_after"], crq.iso(crq.now() + dt.timedelta(minutes=15)))
+                q = json.loads(json.dumps(q))
+                crq.promotion_tick(q, False)
+                self.mock_notify.assert_called_once()
+                self.mock_now.return_value += dt.timedelta(minutes=15)
+                self.mock_notify.return_value = {"paseo_send": 0}
+                crq.promotion_tick(q, False)
+                alert = q["promotion"]["gate_alerts"][0]
+                self.assertEqual(alert["notified_at"], crq.iso())
+                self.assertEqual(self.mock_notify.call_count, 2)
+                self.mock_now.return_value += dt.timedelta(minutes=30)
+                crq.promotion_tick(q, False)
+                self.assertEqual(self.mock_notify.call_count, 2)
+                self.assertEqual(len(q["promotion"]["gate_alerts"]), 1)
+                self.assertEqual(self.gh_calls(), [])
+
+    def test_ack_cancels_failed_notification_retry_but_not_stall(self):
+        self.mock_notify.return_value = {"paseo_send": "error: timeout"}
+        q = make_queue(success_at=success_at(60))
+        crq.promotion_tick(q, False)
+        q["promotion"]["gate_alerts"][0]["acked"] = crq.iso()
+        self.mock_now.return_value += dt.timedelta(minutes=15)
+        crq.promotion_tick(q, False)
+        self.mock_notify.assert_called_once()
+        self.assertIn("gate_stalled_at", q["items"][0])
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_stall_dry_run_only_describes_escalation(self):
+        q = make_queue(success_at=success_at(61))
+        before = json.dumps(q, sort_keys=True)
+        log = crq.promotion_tick(q, True)
+        self.assertTrue(any("would escalate" in line for line in log))
+        self.assertEqual(json.dumps(q, sort_keys=True), before)
+        self.mock_notify.assert_not_called()
+        self.mock_event.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_ack_keeps_stall_visible_and_does_not_retry(self):
+        q = make_queue(success_at=success_at(60))
+        crq.promotion_tick(q, False)
+        with mock.patch.object(crq, "load_queue", return_value=q), \
+             mock.patch.object(crq, "save_queue"), mock.patch.object(crq, "write_status"):
+            crq.admin("promotion-ack", None, f"{BATCH[:10]} investigating gate refusal")
+        self.assertIn("investigating gate refusal", q["promotion"]["gate_alerts"][0]["acked"])
+        crq.promotion_tick(q, False)
+        self.assertIn("gate_stalled_at", q["items"][0])
+        self.mock_notify.assert_called_once()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_authorized_progress_closes_stalled_promotion(self):
+        q = make_queue(success_at=success_at(60))
+        crq.promotion_tick(q, False)
+        with mock.patch.object(crq, "is_ancestor", return_value=True), \
+             mock.patch.object(crq, "git", return_value="0"):
+            crq.promotion_tick(q, False)
+        self.assertEqual(q["items"][0]["state"], "done")
+        self.assertEqual(q["promotion"]["last_promoted_sha"], BATCH)
+        self.mock_notify.assert_called_once()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_signer_re_cuts_stalled_range_after_partial_main_advance(self):
+        q = make_queue(success_at=success_at(60), signer=True)
+        current_main = {"sha": BASE}
+
+        def ancestor(a, b):
+            return (a, b) in ((BASE, BASE), (BASE, MAIN), (MAIN, BATCH))
+
+        with mock.patch.object(crq, "promotion_mode", return_value="signer"), \
+             mock.patch.object(crq, "main_sha", side_effect=lambda: current_main["sha"]), \
+             mock.patch.object(crq, "is_ancestor", side_effect=ancestor), \
+             mock.patch.object(crq.SPOOL, "results_exist", return_value=set()), \
+             mock.patch.object(crq, "first_parents", return_value=[BATCH]) as parents:
+            crq.promotion_tick(q, False)
+            self.assertIn("gate_stalled_at", q["items"][0])
+            q = json.loads(json.dumps(q))
+            current_main["sha"] = MAIN  # authorized partial/break-glass fast-forward
+            log = crq.promotion_tick(q, False)
+            self.assertTrue(any("re-cut remaining range" in line for line in log))
+            old, new = q["items"]
+            self.assertEqual(old["state"], "skipped")
+            self.assertEqual(old["base_sha"], BASE)
+            self.assertNotEqual(new["id"], old["id"])
+            self.assertEqual(new["state"], "pending")
+            self.assertEqual((new["base_sha"], new["batch_sha"]), (MAIN, BATCH))
+            self.assertTrue(new["signer"])
+            self.assertNotIn("gate_stalled_at", new)
+            self.assertNotIn("success_at", new)
+            self.assertEqual(new["cycles"], [])
+            self.assertEqual(sum(i["state"] in crq.OPEN_PROMO_STATES for i in q["items"]), 1)
+            parents.assert_called_once_with(MAIN, BATCH)
+            q = json.loads(json.dumps(q))
+            crq.promotion_tick(q, False)
+            self.assertEqual(len(q["items"]), 2)  # no re-cut/retry loop after restart
+            self.assertEqual(crq.open_promotion(q)["id"], new["id"])
+        self.mock_notify.assert_called_once()  # only the original stall notification
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_partial_main_advance_dry_run_does_not_re_cut_or_mutate(self):
+        q = make_queue(success_at=success_at(60), signer=True, gate_stalled_at=success_at(1))
+        before = json.dumps(q, sort_keys=True)
+        with mock.patch.object(crq, "promotion_mode", return_value="signer"), \
+             mock.patch.object(crq, "is_ancestor", side_effect=lambda a, b: (a, b) in ((BASE, MAIN), (MAIN, BATCH))), \
+             mock.patch.object(crq, "recut_promotion") as recut:
+            log = crq.promotion_tick(q, True)
+        self.assertTrue(any("would re-cut remaining range" in line for line in log))
+        self.assertEqual(json.dumps(q, sort_keys=True), before)
+        recut.assert_not_called()
+        self.mock_notify.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_stall_persists_in_status_until_acknowledged(self):
+        q = make_queue(success_at=success_at(60))
+        crq.promotion_tick(q, False)
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(crq, "STATE", Path(tmp)), \
+             mock.patch.object(crq, "EVENTS", Path(tmp) / "events.jsonl"), \
+             mock.patch.dict(crq.CONFIG, {"schedule_id": None}), \
+             mock.patch.object(crq, "promotion_record", return_value=None), \
+             mock.patch.object(crq.repair_tick, "digest", return_value={}), \
+             mock.patch.object(crq.coverage, "utilization_digest", return_value={}), \
+             mock.patch.object(crq.status_summary, "publish"):
+            crq.write_status(q)
+            self.assertIn("ALERT — PROMOTION GATE NEEDS HUMAN", (Path(tmp) / "status.md").read_text())
+            data = json.loads((Path(tmp) / "status.json").read_text())
+            self.assertEqual(data["promotion_gate_alerts"], q["promotion"]["gate_alerts"])
+            self.assertEqual(data["items"][0]["gate_stalled_at"], crq.iso())
+            q["promotion"]["gate_alerts"][0]["acked"] = crq.iso()
+            crq.write_status(q)
+            self.assertNotIn("ALERT — PROMOTION GATE NEEDS HUMAN", (Path(tmp) / "status.md").read_text())
+            self.assertIn("Owner intervention required", (Path(tmp) / "status.md").read_text())
+            data = json.loads((Path(tmp) / "status.json").read_text())
+            self.assertEqual(data["promotion_gate_alerts"], [])
+            self.assertEqual(data["items"][0]["gate_stalled_at"], crq.iso())
 
 
 if __name__ == "__main__":
