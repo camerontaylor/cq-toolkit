@@ -626,10 +626,6 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
     ) as {
       environments: Record<string, { branch_policies: { name: string; type: string }[] }>;
     };
-    // Retired at C2 (ADR-0004 D-H.3.1): the rendered workflow is deleted; the
-    // adopter-only template still reads a repository-level secret and is guarded
-    // by a job-level default-ref check.
-    const RETIRING_C1_CARRIERS = new Set(['policy/templates/merge-queue-gate.yml:gate']);
     const unprotected: string[] = [];
     let checked = 0;
     for (const path of files) {
@@ -637,7 +633,6 @@ describe('§7 A14 static token isolation over the toolkit’s real workflows', (
       if (!scan.ok || !scan.triggers.includes('workflow_dispatch')) continue;
       for (const [id, job] of scan.jobs) {
         if (!/\bsecrets\.[A-Za-z_]/.test(job.text)) continue;
-        if (RETIRING_C1_CARRIERS.has(`${path}:${id}`)) continue;
         checked += 1;
         const name = /\benvironment:\s*([A-Za-z0-9_-]+)/.exec(job.text)?.[1];
         const policies =

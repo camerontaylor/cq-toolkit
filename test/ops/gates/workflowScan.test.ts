@@ -1501,19 +1501,6 @@ describe('the repository workflows', () => {
     expect(producersOf(ok(read(f)), check)).toEqual(producers);
   });
 
-  // Retired at C2 (adopter-only template): the rendered workflow is gone, so the
-  // privilege shape is pinned over the retained template instead.
-  test('merge-queue-gate template gate job is privileged by the promote secret', () => {
-    const text = readFileSync(join(REPO_ROOT, 'policy/templates/merge-queue-gate.yml'), 'utf8');
-    const gate = ok(text).jobs.get('gate')!;
-    expect(gate.privileged).toBe(true);
-    // In the template the secret NAME is still the {{PROMOTE_SECRET}} token, so the
-    // scanner can only see the secrets context, never a literal name — pin the
-    // reference shape textually (the rendered instance substituted PROMOTE_TOKEN).
-    expect(gate.privilegeReasons).toContain('secrets context');
-    expect(text).toContain('${{ secrets.{{PROMOTE_SECRET}} }}');
-  });
-
   test('cq-measure.yml jobs are not privileged under permissions: {}', () => {
     const scan = ok(read('cq-measure.yml'));
     expect(scan.jobs.size).toBeGreaterThan(0);

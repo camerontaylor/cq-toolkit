@@ -77,8 +77,8 @@ commit carrying a trusted success; every check (closure, policy, verdict, verifi
 judges `main..<subject>`, and its verdicts are `promoted`/`noop`/`awaiting` (no reviewed
 commit yet), green, with `refused` red. A tip ahead of the reviewed sha simply waits for
 its own review. The old `merge-queue-gate.yml` is retired at the C2 cutover (2026-10-11):
-its instance entry is deleted, its rendered workflow is gone, and its template is kept
-as an adopter-only template — it is no longer a promoter anywhere. (`merge-queue-gate`'s
+its instance entry, its rendered workflow and (Phase 0.2) its template are deleted —
+it is no longer a promoter anywhere; git history is the archive. (`merge-queue-gate`'s
 ancestor rule promoted any reviewed batch behind `main`; `cq-gate`'s equality rule
 promotes exactly the batch cut from the current `main`.)
 

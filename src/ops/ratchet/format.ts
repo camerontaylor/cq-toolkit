@@ -278,8 +278,8 @@ function diffHeaderPath(line: string): string | null {
  * never touched.
  *
  * This is the ONE implementation shared by the `ratchet.monotonicGuard` op
- * (the required workflow's path) and the local `scripts/ratchet-check.mjs`
- * driver (through `loadEngine`).
+ * (the required workflow's path) and the local ratchet scripts (through
+ * `loadEngine`).
  *
  * The second argument selects the coverage sections: a STRING matches one
  * exact baseline path, a REGEXP matches a family of paths (the op keys it on

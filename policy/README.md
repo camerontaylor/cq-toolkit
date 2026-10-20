@@ -56,8 +56,7 @@ files themselves.
    branch-protection wait:
    - `REQUIRED_WORKFLOW_CHECKS` in `scripts/denylist-scan` (the I4 policy
      data: workflow file ↔ producing job name),
-   - the gate's wait list (the retired `merge-queue-gate.yml` template's `{{GATE_CHECKS}}`, adopter-only;
-     `gate.yml` reads the `cq/*` verdicts by app and its `{{GATE_WORKFLOWS}}` runs by workflow path),
+   - the gate's wait list (`gate.yml` reads the `cq/*` verdicts by app and its `{{GATE_WORKFLOWS}}` runs by workflow path),
    - branch protection required status contexts on **both** branches
      (`merge-queue` and `main`).
 5. **Never edit an instantiated workflow directly.** Edit the template and
@@ -69,8 +68,7 @@ files themselves.
 
 The template files, in dependency order: `init-merge-queue.yml` (bootstrap the
 queue branch), `gate.yml` (`cq-gate`, armed — the only component that advances
-`main`), `merge-queue-gate.yml` (retired at C2, adopter-only template),
-`sync-merge-queue.yml` (keep the branches level, never write `main`),
+`main`), `sync-merge-queue.yml` (keep the branches level, never write `main`),
 `required-check.md` (the I4 pattern), `affected-tests.md` (reduced-test
 selection and its blind spot), `ratchet.yml` + `ratchet-propose.yml` (the
 baseline ratchet), `live-merge.yml` (the live drill), and `self-host/` (the
@@ -98,9 +96,8 @@ never a pass.
   automation token (`CQ_AUTOMATION_TOKEN` here): without it the job is a
   logged green no-op, because a `GITHUB_TOKEN`-authored PR would suppress the
   required check's own run.
-- **Local drivers**: `scripts/ratchet-typecheck.mjs` (also the
-  `check:static` gate) and `scripts/ratchet-check.mjs` drive the same engine
-  the CLI subcommands expose.
+- **Local driver**: `scripts/ratchet-typecheck.mjs` (also the
+  `check:static` gate) drives the same engine the CLI subcommands expose.
 
 To adopt: commit your own `baselines/` files (capture a first reading with
 `ratchet.captureBaseline`), instantiate `ratchet.yml` and, if you want
