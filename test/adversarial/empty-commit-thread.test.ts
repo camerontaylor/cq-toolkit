@@ -78,9 +78,11 @@ describe('§7 A4 empty-commit thread-ID forgery', () => {
       { gh, owner: 'octo', repo: 'widget', policy: CONSERVATIVE_TRUST_POLICY },
       { pr: 7, subject: HEAD, base: 'merge-queue', state: 'open' },
     );
-    expect(verdict.verdict).toBe('fail');
-    expect(verdict.report.some((line) => line.includes('unresolved external threads: 1'))).toBe(
-      true,
+    // The API's real thread state is what the check reports: the commit
+    // subject resolves nothing. Since the advisory development posture
+    // (2026-10-20) the open thread is reported, never a refusal on its own.
+    expect(verdict.report).toContain(
+      'threads: unresolved external threads: 1 (reported, not judged)',
     );
     expect(calls).toHaveLength(3);
   });

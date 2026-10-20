@@ -9,7 +9,8 @@
 // graphql snapshot and the two REST lag reads is ever made.
 //
 // Pinned here: pass at head; an approval of an older commit fails; an
-// outstanding objection fails; unresolved external threads fail; draft,
+// outstanding objection fails; unresolved external threads are reported,
+// never a refusal (advisory development posture, 2026-10-20); draft,
 // head moved, wrong base, truncated and REST lag fail; open vs merged
 // state; never throwing; resolveAcceptanceTrust's P7 layering (blank and
 // whitespace = conservative default, env values, loud failure on an
@@ -301,12 +302,14 @@ describe('judgeAcceptance', () => {
     );
   });
 
-  test('an unresolved external thread fails; the author-rooted one does not', async () => {
+  test('an unresolved external thread is reported, never a refusal; author-rooted ones do not count', async () => {
     const external = makeForge(
       prSpec({ reviews: [review()], threads: [{ isResolved: false, root: 'carol' }] }),
     );
-    expect(failLine((await judge(external)).report)).toBe(
-      'fail (threads): unresolved external threads: 1',
+    const result = await judge(external);
+    expect(result.verdict).toBe('pass');
+    expect(result.report).toContain(
+      'threads: unresolved external threads: 1 (reported, not judged)',
     );
     const own = makeForge(
       prSpec({
@@ -317,7 +320,23 @@ describe('judgeAcceptance', () => {
         ],
       }),
     );
-    expect((await judge(own)).verdict).toBe('pass');
+    const ownResult = await judge(own);
+    expect(ownResult.verdict).toBe('pass');
+    expect(ownResult.report).toContain(
+      'threads: unresolved external threads: 0 (reported, not judged)',
+    );
+  });
+
+  test('an unresolved external thread does not rescue a missing head-bound acceptance', async () => {
+    const forge = makeForge(
+      prSpec({
+        reviews: [review({ oid: SHA_A })],
+        threads: [{ isResolved: false, root: 'carol' }],
+      }),
+    );
+    const result = await judge(forge);
+    expect(result.verdict).toBe('fail');
+    expect(failLine(result.report)).toMatch(/^fail \(acceptance\): no_head_bound_acceptance: /);
   });
 
   test.each<[string, Partial<PrSpec>, Partial<AcceptanceInput>, RegExp]>([
