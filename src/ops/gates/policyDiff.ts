@@ -19,6 +19,11 @@
 //     dispatch) and bound into the op; op input never carries it. A D-P
 //     revision window in the trust ref's list may relax a default-layer
 //     posture to `diff-check` until its explicit expiry (policyConfig.ts).
+//     Under `advisory` (development posture, 2026-10-20) only a
+//     `privileged-path` (a path the trust ref's project `protectedPaths`
+//     list names), `baseline-loosened`, `target-removed` or `entry-removed`
+//     finding needs a human; every other finding is a report annotation
+//     prefixed `advisory:`.
 //   - THE OVERRIDE LABEL is evaluated from API timeline events and the
 //     settle-ledger head epoch, logged in full, and honoured only once the
 //     C3 attestation is on the trust ref and only when applied after its
@@ -146,6 +151,7 @@ export interface PolicyDiffInput {
 
 export type PolicyFindingKind =
   | 'protected-path'
+  | 'privileged-path'
   | 'baseline-loosened'
   | 'target-removed'
   | 'definition-changed'
@@ -516,12 +522,34 @@ async function evaluateOverride(
   });
 }
 
-/** The findings that make a posture's verdict needs-human. */
+/** The finding kinds that still need a human under `advisory`. */
+const ADVISORY_HUMAN_KINDS: ReadonlySet<PolicyFindingKind> = new Set<PolicyFindingKind>([
+  'privileged-path',
+  'baseline-loosened',
+  'target-removed',
+  'entry-removed',
+]);
+
+/**
+ * The findings that make a posture's verdict needs-human: every finding
+ * under `human`; all but plain protected-path edits under `diff-check` (a
+ * `privileged-path` finding is the same edit seen through the project list,
+ * so it relaxes with its `protected-path` twin and diff-check verdicts are
+ * unchanged); only {@link ADVISORY_HUMAN_KINDS} under `advisory`. `lint` is
+ * judged before this (always `fail`).
+ */
 function humanFindings(
   posture: ProtectedPathsPosture,
   findings: readonly PolicyFinding[],
 ): PolicyFinding[] {
-  return posture === 'human' ? [...findings] : findings.filter((f) => f.kind !== 'protected-path');
+  switch (posture) {
+    case 'human':
+      return [...findings];
+    case 'diff-check':
+      return findings.filter((f) => f.kind !== 'protected-path' && f.kind !== 'privileged-path');
+    case 'advisory':
+      return findings.filter((f) => ADVISORY_HUMAN_KINDS.has(f.kind));
+  }
 }
 
 /** The verdict a posture assigns to a finding list (before any override). */
@@ -639,16 +667,18 @@ export function createPolicyDiff(
     }
     const safeSet = new Set(safe);
 
-    // protected-path / definition-changed.
+    // protected-path / privileged-path / definition-changed. A path the
+    // trust ref's project list names is BOTH: protected (every posture's
+    // taxonomy) and privileged (what still needs a human under `advisory`).
     const projectPatterns = policy.protectedPaths.map((source) => new RegExp(source));
     for (const path of safe) {
       const definition = isDefinitionPath(manifest, path) || graph.has(path);
-      if (
-        definition ||
-        isProtectedPolicyPath(path) ||
-        projectPatterns.some((pattern) => pattern.test(path))
-      ) {
+      const privileged = projectPatterns.some((pattern) => pattern.test(path));
+      if (definition || isProtectedPolicyPath(path) || privileged) {
         add('protected-path', path, 'changes a protected path');
+      }
+      if (privileged) {
+        add('privileged-path', path, `changes a privileged path (${POLICY_LIST_PATH})`);
       }
       if (definition && !CANONICAL_BASELINE_PATH.test(path)) {
         add(
@@ -967,7 +997,16 @@ export function createPolicyDiff(
       `range: ${rangeBase}..${subject} (trust ${trust})`,
     ];
     if (findings.length === 0) report.push('findings: none');
-    for (const f of findings) report.push(`${f.kind}: ${f.path} — ${f.reason}`);
+    // Under `advisory` a finding that needs no human is an annotation: still
+    // listed, prefixed so the run report says it did not decide the verdict.
+    const needsHuman = new Set(humanFindings(effective.posture, findings));
+    for (const f of findings) {
+      const note =
+        effective.posture === 'advisory' && f.kind !== 'lint' && !needsHuman.has(f)
+          ? 'advisory: '
+          : '';
+      report.push(`${note}${f.kind}: ${f.path} — ${f.reason}`);
+    }
     report.push(...formatOverride(override));
     for (const reason of override.status === 'absent' ? override.reasons : []) {
       report.push(`  ${reason}`);

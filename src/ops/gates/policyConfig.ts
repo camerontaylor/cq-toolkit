@@ -4,8 +4,14 @@
 // The resolver is deliberately pure, following W1.11's sandbox resolver
 // (`src/sandbox/config.ts`): the caller injects the environment and the
 // explicit per-call opt-in. Unset or blank is the conservative `human`
-// posture (P8); any value other than `human`/`diff-check` is a configuration
-// error, never a silent fallback.
+// posture (P8); any value other than `human`/`diff-check`/`advisory` is a
+// configuration error, never a silent fallback.
+//
+// THE ADVISORY POSTURE (development posture, 2026-10-20; docs/protected-scope.md
+// "Advisory posture"): only privileged paths (the trust ref's project
+// `protectedPaths` list), loosened baselines and removed ratchet targets or
+// definition/policy-list entries still need a human; every other finding is
+// an annotation in the run report. `lint` stays `fail` in every posture.
 //
 // WHERE THE POSTURE MAY COME FROM (Annex B §B.1): only the project env
 // (`CQ_MERGE_PROTECTED_PATHS`) and an explicit per-call opt-in. Plan JSON, op
@@ -18,8 +24,22 @@
 
 import { z } from 'zod';
 
-/** `human`: every finding needs a human. `diff-check`: plain protected-path edits pass. */
-export type ProtectedPathsPosture = 'human' | 'diff-check';
+/**
+ * `human`: every finding needs a human. `diff-check`: plain protected-path
+ * edits pass. `advisory`: only privileged-path, baseline-loosened,
+ * target-removed and entry-removed findings need a human; the rest are
+ * annotations.
+ */
+export type ProtectedPathsPosture = 'human' | 'diff-check' | 'advisory';
+
+/** Every accepted posture value, in the error-message order. */
+export const PROTECTED_PATHS_POSTURES: readonly ProtectedPathsPosture[] = Object.freeze([
+  'human',
+  'diff-check',
+  'advisory',
+]);
+
+const POSTURE_LIST = "'human', 'diff-check' or 'advisory'";
 
 /** The project env key selecting the posture. */
 export const PROTECTED_PATHS_ENV = 'CQ_MERGE_PROTECTED_PATHS';
@@ -39,15 +59,16 @@ export interface ProtectedPathsConfig {
 }
 
 const isPosture = (raw: string): raw is ProtectedPathsPosture =>
-  raw === 'human' || raw === 'diff-check';
+  (PROTECTED_PATHS_POSTURES as readonly string[]).includes(raw);
 
 /**
  * Resolve the D11 posture: explicit per-call opt-in, then project env, over
  * the conservative `human` default.
  *
  * The opt-in wins whichever way it points. Moving to `human` is a
- * tightening; moving to `diff-check` is a relaxation, authorised only because
- * the key is named explicitly — there is no wildcard opt-in. Unlike the env,
+ * tightening; moving to `diff-check` or `advisory` is a relaxation,
+ * authorised only because the key is named explicitly — there is no
+ * wildcard opt-in. Unlike the env,
  * a present-but-blank opt-in is an error: naming the key is a deliberate act,
  * so an empty value is a mistake rather than "unset".
  */
@@ -63,9 +84,7 @@ export function resolveProtectedPathsConfig(
   const call = optIn[PROTECTED_PATHS_OPT_IN];
   if (call !== undefined) {
     if (!isPosture(call)) {
-      throw new Error(
-        `policy: ${PROTECTED_PATHS_OPT_IN} must be 'human' or 'diff-check', got '${call}'`,
-      );
+      throw new Error(`policy: ${PROTECTED_PATHS_OPT_IN} must be ${POSTURE_LIST}, got '${call}'`);
     }
     return Object.freeze({ posture: call, layer: 'call' });
   }
@@ -75,7 +94,7 @@ export function resolveProtectedPathsConfig(
     return Object.freeze({ posture: 'human', layer: 'default' });
   }
   if (!isPosture(raw)) {
-    throw new Error(`policy: ${PROTECTED_PATHS_ENV} must be 'human' or 'diff-check', got '${raw}'`);
+    throw new Error(`policy: ${PROTECTED_PATHS_ENV} must be ${POSTURE_LIST}, got '${raw}'`);
   }
   return Object.freeze({ posture: raw, layer: 'env' });
 }

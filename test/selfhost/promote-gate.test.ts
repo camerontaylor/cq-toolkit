@@ -1312,6 +1312,32 @@ describe('runGate', () => {
     expect((await runGate(present.deps, cfg())).verdict).toBe('would-promote');
   });
 
+  test('an advisory pass (env layer) promotes with no extra branch and no recheck', async () => {
+    const calls: PolicyDiffInput[] = [];
+    const advisory = policyOutcome('pass', {}, 'env');
+    if (advisory.status === 'ok') {
+      advisory.value.posture = 'advisory';
+      advisory.value.report = [
+        'posture: advisory (layer env)',
+        'advisory: protected-path: src/ops/gates/policyDiff.ts — changes a protected path',
+        'verdict: pass',
+      ];
+    }
+    const h = harness(world(), {
+      policyDiff: (input) => {
+        calls.push(input);
+        return Promise.resolve(advisory);
+      },
+    });
+    const r = await runGate(h.deps, cfg());
+    expect(r.verdict).toBe('would-promote');
+    expect(calls).toHaveLength(1);
+    expect(r.report).toContain('policy pass 1: pass');
+    expect(r.report).toContain(
+      '  advisory: protected-path: src/ops/gates/policyDiff.ts — changes a protected path',
+    );
+  });
+
   test('a pass that relied on the revision window is re-judged at push time', async () => {
     // First judgement inside the window; the second (after the waits) finds it expired.
     const answers = [policyOutcome('pass', {}, 'window'), policyOutcome('needs-human')];

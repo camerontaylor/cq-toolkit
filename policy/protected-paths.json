@@ -1,36 +1,19 @@
 {
   "schemaVersion": 1,
   "protectedPaths": [
-    "^src/ops/gates/(?:checkRunner|d11Authorization|overrideRecord|policyConfig|policyDiff|policyDiffInput|protectedPaths|registry|workflowScan)\\.ts$",
-    "^src/ops/gates/adapters/(?:eslint|tsc|vitest)\\.ts$",
-    "^src/ops/ratchet/",
-    "^src/adapters/git/ratchetGit\\.ts$",
-    "^src/adapters/forge-github/(?:gh|ratchetEffects)\\.ts$",
-    "^src/ops/review/threads\\.ts$",
-    "^src/selfhost/(?:acceptance|merge-recheck|policy-diff|promote-gate|recompute-typecheck|settle-state|state-branch|trusted-entry|verify-ratchet)\\.ts$",
-    "^src/policy/queue/settle-state\\.ts$",
-    "^src/selfhost/config\\.ts$",
-    "^src/shared/deepFreeze\\.ts$",
-    "^src/shared/independent-review\\.ts$",
-    "^src/shared/gitHarden\\.ts$",
-    "^src/shared/messageOf\\.ts$",
     "^policy/promotion-reviewer\\.json$",
-    "^scripts/ratchet-[^/]+\\.mjs$",
+    "^policy/denylist/",
+    "^scripts/denylist-scan$",
+    "^src/selfhost/promote-gate\\.ts$",
     "^scripts/github-settings-drift\\.mjs$",
     "^scripts/lib/github-settings\\.mjs$",
-    "^scripts/adversarial-suite\\.mjs$",
-    "^scripts/denylist-scan$",
-    "^apps/crq-python/(?:signer/|ops/systemd/|ops/prepare-[^/]+\\.py$|config\\.json$)"
+    "^policy/templates/github-settings\\.json$",
+    "^policy/attestations/",
+    "^apps/crq-python/(?:signer/|ops/systemd/|config\\.json$)"
   ],
   "requiredChecks": ["static", "denylist", "ratchet"],
   "requiredJobs": {
     "ci.yml": ["static", "crq-python", "from-source"],
     "denylist.yml": ["denylist"]
-  },
-  "revisionWindow": {
-    "posture": "diff-check",
-    "opens": "2026-10-17T00:00:00Z",
-    "expires": "2026-10-31T00:00:00Z",
-    "ruling": "D-P (owner, 2026-10-16): migration-plan Phases 0-2 revision window"
   }
 }
