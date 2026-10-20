@@ -110,8 +110,40 @@ export {
 // precedent): `registry` would collide with the ledger family's export on
 // the root barrel (star-export ambiguity is a compile error, TS2308) — the
 // central op-registry scanner and tests import ./registry.js directly.
+export type { AnalyzeInitInput, AnalyzeInitReport } from './init.js';
+export { detectChecks, makeAnalyzeInit } from './init.js';
+export type { CqConfig } from './cqConfig.js';
+export {
+  CQ_CONFIG_FILE,
+  CQ_CONFIG_SCHEMA_VERSION,
+  CqConfigSchema,
+  parseCqConfig,
+} from './cqConfig.js';
+export type {
+  AnalysisSnapshot,
+  AnalyzeRunCheckSummary,
+  AnalyzeRunCluster,
+  AnalyzeRunInput,
+  AnalyzeRunReport,
+} from './run.js';
+export { ANALYZE_DEFAULT_OUT, makeAnalyzeRun, probeAndCluster, resolveChecks } from './run.js';
+export type { AttendedApprovalConfig } from './attended.js';
+export { ATTENDED_DEFAULT_EXEMPT, makeAttendedApprovalAuthority } from './attended.js';
+export type { GitApprovalStateReaderOptions } from './approval.js';
+export type {
+  AnalyzeFixApplied,
+  AnalyzeFixDeps,
+  AnalyzeFixInput,
+  AnalyzeFixPreview,
+  AnalyzeFixRecheck,
+  AnalyzeFixReport,
+} from './fix.js';
+export { makeAnalyzeFix, patchTargets } from './fix.js';
 export {
   AgenticRemediationInputSchema,
+  AnalyzeFixInputSchema,
+  AnalyzeInitInputSchema,
+  AnalyzeRunInputSchema,
   AnalyzeReportSchema,
   ApplyRemediationInputSchema,
   AstGrepCodemodInputSchema,
