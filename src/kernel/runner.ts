@@ -4,7 +4,7 @@
 //
 // What this is NOT: no daemon, no workflow engine, and no rescue/escalation
 // policy — recovery is not an op here. Resume is the SAME loop re-entered with
-// `resume: true`, and rescue decisions belong to T1.3's governor. The runner
+// `resume: true`, and re-dispatch admission belongs to T1.3's governor. The runner
 // never calls drivers; it invokes ops only through the frozen Op contract.
 //
 // Flow (every step evented, in order — run-started, per job job-started +

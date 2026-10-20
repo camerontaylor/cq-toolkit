@@ -30,12 +30,20 @@ import { getOp, listOps } from '@camerontaylor/cq-toolkit';
 
 const names = (await listOps()).map((entry) => entry.name); // every registered op
 
-const entry = await getOp('analyze.collectFailures');
+const entry = await getOp('analyze.run');
 if (entry === undefined) throw new Error('op not registered');
 
 const op = await entry.importer(); // lazy: no op module loads before this
-const result = await op({ sets: [] }); // OpResult — a status-tagged union
+const result = await op({ dir: '.' }); // OpResult — a status-tagged union
+if (result.status === 'ok') {
+  // probe → collect → cluster → report: reads ./cq.json (`cq analyze.init` writes one)
+  console.log(result.value.failureCount, result.value.clusters, result.value.markdownPath);
+}
 ```
+
+The same op is composable directly — `makeAnalyzeRun(subprocessRunCheck)` — with your
+own check runner injected; `analyze.fix` previews a remediation for one cluster and applies
+it only through an attended approval (`makeAttendedApprovalAuthority`, ADR-0003).
 
 The runner is exported too: `runPlan(plan, opts, registry, gov?)` returns a
 serializable `RunReport` (per-job outcomes, usage rollup, honest-stop counts);
@@ -52,13 +60,32 @@ governed run.
 One subcommand per registry entry, plus one per shipped plan, plus the built-in `run-plan`. Flags map onto the op's schema keys; output honors invariant I1 (`stdout` = one JSON artifact, `stderr` = `cq:` narration, machine mode with `--json`):
 
 ```sh
-cq analyze.collectFailures --sets='[]' --json   # one op (schema-key flags; bare --json = machine mode)
+cq analyze.init --dir=.                   # writes cq.json
+cq analyze.run --dir=. --json             # probe → collect → cluster → report
+cq analyze.fix --dir=. --clusterId=<id>   # preview
+cq analyze.fix --dir=. --clusterId=<id> --apply   # attended apply + recheck
+```
+
+`analyze.init` detects `tsc` (a `tsconfig.json`) and ESLint (a config file) checks. `analyze.run`
+writes a Markdown report and its JSON sidecar under `.cq/analysis/` and returns the clusters.
+`analyze.fix` needs the remediation: an ast-grep rule (`--rule='{"id":…,"language":"TypeScript","rule":{…},"fix":"…"}'`),
+or `--model='{"provider":…,"model":…}'` to ask an agent for a patch; `--rule` with `--files='["src/a.ts"]'`
+works without a cluster. Without `--apply` no project file is written (the report directory
+`.cq/analysis/` may be created, and a `--model` preview stores its proposal there). An agent patch
+is applied only in a second call that names its digest (`--previewDigest=<digest> --apply`). With `--apply` the work tree must be a
+committed, clean git tree (only `.cq/` may differ — commit or stash anything else); the edit is
+applied exactly as previewed (pass `--previewDigest=<digest>` from the preview to pin it), and the
+configured checks are re-run to report the failure count before and after. The commands in
+`cq.json` run with your privileges, like package.json scripts (as argv, never through a shell),
+so review the file like code.
+
+```sh
 cq --help                                        # global help
-cq analyze.collectFailures --help                # per-op input schema
+cq analyze.run --help                            # per-op input schema
 cq run-plan --plan=plan.json --json              # a governed plan
 ```
 
-Exit codes: `0` clean, `1` thrown/definitive failure, `2` usage error, `3` needs-human or budget-exhausted. See [`src/cli/README.md`](src/cli/README.md) for the full CLI contract.
+Exit codes: `0` clean, `1` thrown/definitive failure, `2` usage error, `3` needs-human or budget-exhausted. An `ok` result can still carry a failing verdict in its value (`{ "status": "ok", "value": { "verdict": "fail", … } }`), which exits `0` by default; pass `--fail-on-verdict` to turn that into exit `1` (stdout is unchanged; only the exact string `"fail"` counts — a `needs-human` or `failing` verdict vocabulary is not mapped). In `--json` mode an error writes one `{ "error": { "kind", "subcommand", "message", "exitCode" } }` object to stdout (stderr stays empty). CI gate: `cq ratchet.checkRatchet … --json --fail-on-verdict`. See [`src/cli/README.md`](src/cli/README.md) for the full CLI contract.
 
 ## Drivers
 

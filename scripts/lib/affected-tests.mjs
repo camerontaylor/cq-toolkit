@@ -64,12 +64,6 @@ export const NON_IMPORT_MAP = [
   ],
   [/^src\/(driver|harness|sandbox)\//, [/^test\/cli\/i1\.test\.ts$/]],
   [/^scripts\/api-report\.mjs$/, [/^test\/api-report\.test\.mjs$/]],
-  // Deliberately NOT mapped: policy/profiles/ — consumed from disk (no
-  // import edge) by test/config/resolve.test.ts today, but a row here names
-  // only the consumers we know; one missed filesystem consumer would let a
-  // profile edit narrow past its real impact. Unmapped, the edit falls back
-  // and is refused locally instead; CI's full suite stays the authority
-  // for profiles (#283).
   [
     /^policy\/templates\//,
     [

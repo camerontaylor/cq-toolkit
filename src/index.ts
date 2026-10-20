@@ -2,7 +2,7 @@
 // driver-seam and kernel types, the kernel's zod schema mirrors (schema
 // values, generic op-result factory included), the T1.2 kernel runtime
 // surface (runner, journal, manifest, output helpers), and the T1.3 budget
-// governor + rescue lane.
+// governor.
 export type {
   Budget,
   // Aliased (seam v2, lane decision O-1 treatment): the kernel governor's
@@ -119,10 +119,9 @@ export { canonicalJson, hashInputs, makeManifest, topoOrder } from './kernel/man
 export { deriveJobStatuses, openRunLog } from './kernel/journal.js';
 export { runPlan } from './kernel/runner.js';
 export { emitReport, narrate, renderHuman } from './kernel/output.js';
-// Budget governor + rescue lane (T1.3) — re-export only, no logic: the
-// per-run enforcer behind `runPlan`'s Governance handle, the escalation
-// ladder, and the rescue policy table + decision engine. Pure types ride
-// along as `export type`.
+// Budget governor (T1.3) — re-export only, no logic: the per-run enforcer
+// behind `runPlan`'s Governance handle and the escalation ladder. Pure types
+// ride along as `export type`.
 export type {
   AdmissionDecision,
   BudgetReservation,
@@ -154,22 +153,6 @@ export {
 // Per-lane budget classification (W2.3, ADR-0003 §2.4) — re-export only.
 export { classifyDispatch, LANE_CLASSIFICATION } from './kernel/lanes.js';
 export type { BudgetClass, LaneClassificationRow } from './kernel/lanes.js';
-export type {
-  RescueAction,
-  RescueDecision,
-  RescueEscalation,
-  RescueGuard,
-  RescueInput,
-  RescueOutcome,
-  RescuePolicy,
-  RescuePolicyRow,
-} from './kernel/rescue.js';
-export {
-  attemptsFromJournal,
-  CONSERVATIVE_RESCUE_POLICY,
-  decideRescue,
-  rescueInputFromJournal,
-} from './kernel/rescue.js';
 // Composition harness (T1.4) — re-export only, no logic: the R4 per-op
 // config schema + conservative defaults, the toolkit's minimal read/edit/run
 // tool surface with its per-op allowlists, and the JSONL session store

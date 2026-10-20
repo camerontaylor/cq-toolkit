@@ -74,7 +74,7 @@ import { messageOf } from '../../shared/messageOf.js';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import { realpathOrSelf } from '../../adapters/store/nonceLedger.js';
 import { makeGitMutex } from '../../shared/gitMutex.js';
@@ -103,6 +103,13 @@ export interface ApprovalState {
   readonly headSha: string;
   /** Strict Git cleanliness, with only the verified applyRemediation report pair exempted. */
   readonly treeClean: boolean;
+  /**
+   * INFORMATIONAL ONLY: the workspace-relative paths that made `treeClean`
+   * false (at most a handful), so a refusal can name what to commit or stash.
+   * Never compared by the drift check and never a basis for a grant; absent
+   * when the tree is clean or the reader does not report them.
+   */
+  readonly dirtyPaths?: readonly string[];
 }
 
 /** The subject an approval must bind to: this op, these inputs, this workspace. */
@@ -364,7 +371,10 @@ export interface ApprovalStateReader {
  * unreadable state is never treated as "unchanged" — that inversion is
  * exactly how a TOCTOU becomes a bypass.
  */
-export function makeGitApprovalStateReader(): ApprovalStateReader {
+export function makeGitApprovalStateReader(
+  options: GitApprovalStateReaderOptions = {},
+): ApprovalStateReader {
+  const exempt = normalizeExemptPrefixes(options.exempt ?? []);
   return {
     read: async (workspace, subject) => {
       const root = realpathSync(workspace);
@@ -372,13 +382,11 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
       // `--ignore-submodules=none` overrides a committed `ignore = all` in
       // .gitmodules, which would otherwise hide changed bytes inside a
       // submodule from the clean predicate.
-      const status = await git(root, [
-        'status',
-        '--porcelain=v1',
-        '-z',
-        '--untracked-files=all',
-        '--ignore-submodules=none',
-      ]);
+      const status = await git(
+        root,
+        ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+        true,
+      );
       // INDEX FLAGS CAN HIDE BYTES FROM `git status`. An entry marked
       // `assume-unchanged` (also what `core.ignoreStat` sets on add) or
       // `skip-worktree` (sparse checkout, or set by hand) is never compared
@@ -395,8 +403,9 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
         );
       }
       const reports = verifiedAnalysisReportPaths(root, subject);
-      const repoRoot =
-        reports.size === 0 ? root : await git(root, ['rev-parse', '--show-toplevel']);
+      // Porcelain paths are relative to the REPOSITORY top level, not to the
+      // workspace (which may be a subdirectory of it).
+      const repoRoot = await git(root, ['rev-parse', '--show-toplevel']);
       // EXACT REPORT EXCEPTION (promotion F3), with four guards:
       // (1) only this run's two fingerprint-derived paths, never patterns;
       // (2) exact SHA-256 bytes, bound into the approved input digest;
@@ -407,13 +416,78 @@ export function makeGitApprovalStateReader(): ApprovalStateReader {
       // admission AND the exercise re-check. Markdown cannot affect the
       // explicit-target, inline-rule codemod; the sidecar's planning inputs
       // are digest-bound and cannot change between planning and the write.
-      const dirty = status.split('\0').some((record) => {
-        if (record === '') return false;
-        return !record.startsWith('?? ') || !reports.has(resolve(repoRoot, record.slice(3)));
-      });
-      return { workspace: root, headSha, treeClean: !dirty };
+      //
+      // CALLER-NAMED EXEMPT PREFIXES (the attended authority's `.cq/` report
+      // area, ops/analyze/attended.ts): a record whose path — and, for a
+      // rename/copy, whose ORIGINAL path too — lies inside one of the
+      // workspace-relative prefixes is ignored, tracked or untracked. An empty
+      // list (every other caller) leaves the strict predicate unchanged.
+      const records = status.split('\0');
+      const dirtyPaths: string[] = [];
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index] as string;
+        if (record === '') continue;
+        const code = record.slice(0, 2);
+        const path = record.slice(3);
+        // `-z` porcelain carries a rename/copy's ORIGINAL path as the NEXT
+        // record; it belongs to this entry and is judged with it.
+        const original = code.includes('R') || code.includes('C') ? records[++index] : undefined;
+        if (code === '??' && reports.has(resolve(repoRoot, path))) continue;
+        const paths = original === undefined ? [path] : [path, original];
+        if (exempt.length > 0 && paths.every((p) => isExemptPath(root, repoRoot, p, exempt))) {
+          continue;
+        }
+        dirtyPaths.push(relative(root, resolve(repoRoot, path)) || path);
+      }
+      return dirtyPaths.length === 0
+        ? { workspace: root, headSha, treeClean: true }
+        : { workspace: root, headSha, treeClean: false, dirtyPaths: dirtyPaths.slice(0, 20) };
     },
   };
+}
+
+/** Options for {@link makeGitApprovalStateReader}. */
+export interface GitApprovalStateReaderOptions {
+  /**
+   * Workspace-relative directory prefixes (e.g. `.cq/`) whose untracked or
+   * modified entries do NOT make the tree dirty. Meant for a tool's own
+   * report area that no approved write reads from or writes to; every other
+   * path keeps the strict predicate. Absolute prefixes and prefixes that
+   * escape the workspace are refused (a throw at construction).
+   */
+  readonly exempt?: readonly string[];
+}
+
+/** Validate and normalize exempt prefixes to workspace-relative POSIX directory forms. */
+function normalizeExemptPrefixes(prefixes: readonly string[]): string[] {
+  return prefixes.map((prefix) => {
+    const trimmed = prefix.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (
+      trimmed === '' ||
+      trimmed === '.' ||
+      isAbsolute(trimmed) ||
+      trimmed.split('/').some((part) => part === '..')
+    ) {
+      throw new Error(
+        `approval state: exempt prefix '${prefix}' must be a non-empty workspace-relative directory that does not escape the workspace`,
+      );
+    }
+    return trimmed;
+  });
+}
+
+/** True when the repo-relative porcelain `path` lies inside one of the workspace-relative exempt prefixes. */
+function isExemptPath(
+  root: string,
+  repoRoot: string,
+  path: string,
+  exempt: readonly string[],
+): boolean {
+  const absolute = resolve(repoRoot, path);
+  return exempt.some((prefix) => {
+    const base = resolve(root, prefix);
+    return absolute === base || absolute.startsWith(base + sep);
+  });
 }
 
 /** Verify the exact rendered pair before granting its narrow untracked exception. */
@@ -485,8 +559,13 @@ const SCRUBBED_ENV = [
   'GIT_CONFIG_COUNT',
 ];
 
-/** One read-only git command over the hardened argv and a scrubbed env; trimmed stdout. */
-async function git(cwd: string, args: string[]): Promise<string> {
+/**
+ * One read-only git command over the hardened argv and a scrubbed env;
+ * trimmed stdout by default. `raw` keeps the exact bytes — the `-z` porcelain
+ * parse needs them, because the first record's leading status space is
+ * significant (` M path`).
+ */
+async function git(cwd: string, args: string[], raw = false): Promise<string> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_ENV) delete env[key];
   env['GIT_CONFIG_NOSYSTEM'] = '1';
@@ -505,7 +584,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
           );
           return;
         }
-        resolvePromise(stdout.trim());
+        resolvePromise(raw ? stdout : stdout.trim());
       },
     );
   });
@@ -597,7 +676,8 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
         return {
           granted: false,
           reason:
-            'approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state',
+            'approval refused: `workspace dirty` — the workspace is not clean (an untracked file counts as dirty, per ADR-0003 §4c step 1) — this module acts only on a strictly clean tree, and a dirty state is one the approval cannot be shown to describe; commit, stash or clean the workspace, then approve against that state' +
+            dirtyPathsNote(state),
         };
       }
       let verified: VerifiedApproval | undefined;
@@ -698,6 +778,13 @@ export function makeApprovalAuthority(config: ApprovalAuthorityConfig): Approval
     },
   };
   return authority;
+}
+
+/** The refusal suffix naming the dirty paths, when the reader reported them. */
+function dirtyPathsNote(state: ApprovalState): string {
+  const paths = state.dirtyPaths;
+  if (paths === undefined || paths.length === 0) return '';
+  return ` (dirty: ${paths.map((path) => `'${path}'`).join(', ')})`;
 }
 
 /** The op-facing result: the write happened under a spent approval, or it did not happen. */

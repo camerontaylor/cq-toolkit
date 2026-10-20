@@ -15,7 +15,7 @@
 //
 // Invariants honored here:
 //   - I8: the governor decides WHEN to abort (this module) and the kernel
-//     owns WHETHER to retry/escalate (rescue.ts); drivers never decide.
+//     owns WHETHER to retry/escalate (the plan layer); drivers never decide.
 //     Enforcement is abort-only — this module never re-dispatches.
 //   - I9: honest stop — at a cap the remaining work is marked
 //     budget-exhausted, never fabricated; the runner claims

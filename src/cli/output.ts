@@ -15,6 +15,9 @@
 //   - 'human' (the default) — failures-only narration on stderr; ok rows are
 //     silent (the nx/turbo pattern).
 //   - 'json' — machine mode: stderr stays EMPTY, stdout carries the artifact.
+//     When no result artifact exists (an error before/instead of a result),
+//     stdout carries ONE error artifact instead (writeErrorJson / reportError):
+//     the error artifact REPLACES the empty stream, it never joins a result.
 import { renderHuman } from '../kernel/output.js';
 import type { OpResult, RunReport } from '../kernel/types.js';
 
@@ -151,6 +154,48 @@ export function assertJsonLossless(value: unknown): void {
     default:
       throw new Error(`non-JSON value of type '${typeof value}'`);
   }
+}
+
+/** The error classes of the machine-mode error artifact (`--json`). */
+export type CliErrorKind = 'usage' | 'invalid-input' | 'invalid-result' | 'thrown';
+
+/**
+ * The machine-mode ERROR artifact: `{ "error": { kind, subcommand, message,
+ * exitCode } }`. `subcommand` is the name the invocation dispatched on, or
+ * null when none was known (a missing subcommand).
+ */
+export interface CliErrorArtifact {
+  error: {
+    kind: CliErrorKind;
+    subcommand: string | null;
+    message: string;
+    exitCode: number;
+  };
+}
+
+/**
+ * Report one CLI error and return its exit code. Mode 'human' → the one
+ * `cq:` stderr narration line (unchanged behavior). Mode 'json' → ONE
+ * CliErrorArtifact on stdout and NOTHING on stderr: no result artifact ever
+ * existed on these paths (the stream was empty), so the error artifact is the
+ * invocation's single stdout artifact (I1). Callers must only use this where
+ * no result artifact has been (or will be) written.
+ */
+export function reportError(
+  io: CliIo,
+  mode: NarrationMode,
+  kind: CliErrorKind,
+  subcommand: string | null,
+  message: string,
+  exitCode: number,
+): number {
+  if (mode === 'json') {
+    const artifact: CliErrorArtifact = { error: { kind, subcommand, message, exitCode } };
+    writeResultJson(io, artifact);
+  } else {
+    narrate(io, message);
+  }
+  return exitCode;
 }
 
 /**

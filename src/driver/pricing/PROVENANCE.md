@@ -1,5 +1,10 @@
 # Provider-fact provenance for the pricing lane (W3.5 / RS-14 inputs)
 
+> Phase 0.2 (ADR-0005-D-C): the normalizer, `candidate-aliases.ts`, `provider-profiles.ts`
+> and `admission.ts` named below were deleted as unreachable; this file is kept
+> as the provenance record for the retained price map (`data.ts`). Git history
+> holds the deleted modules.
+
 Every provider fact this lane relies on, with its primary source, the fetch
 date, how it was obtained, and its verification status. Facts are either
 **documented** (a vendor's own documentation, fetched here) or **observed** (a

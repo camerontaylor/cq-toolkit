@@ -235,7 +235,7 @@ export const registry: OpRegistryEntry[] = [
     // path (keeping a large diff out of argv). An unreadable file is an
     // honest `failed`, never a fabricated pass. The diff is rewritten to the
     // coverage one-decimal comparison basis BEFORE the pure guard judges
-    // it (the same normalization the local ratchet-check driver applies), so
+    // it (the same normalization the ratchet engine applies), so
     // a fractional `93.46 → 93.5` re-basis cannot read as a loosening while
     // the live coverage reading is rounded to 93.5 (review finding 1). The
     // comparison basis is keyed on the coverage METRIC id, so any
