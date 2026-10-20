@@ -91,6 +91,8 @@ function dispatchEvidence(text: string): {
 describe('analyze registry: the lane entries', () => {
   test('the registry names the lane ops in order', () => {
     expect(registry.map((entry) => entry.name)).toEqual([
+      'analyze.init',
+      'analyze.run',
       'analyze.collectFailures',
       'analyze.clusterErrors',
       'analyze.renderAnalysisReport',

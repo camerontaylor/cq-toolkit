@@ -1,46 +1,36 @@
 // analyze — the shipped analyze plan (goal G3; ws-g scope item 6): the
-// failure-analysis pipeline as DATA — probe → collect → cluster → report.
+// failure-analysis pipeline probe → collect → cluster → report.
+//
+// THE FLOOR RUNS `analyze.run` (Lane C, S2). The discovered entry below is
+// ONE job: the `analyze.run` op over the current directory, which reads the
+// project's `cq.json` (write one with `cq analyze.init --dir=.`) and does the
+// whole pipeline with REAL dataflow in-process. So `cq analyze` is a working
+// command on a configured project, and on an unconfigured one it fails
+// honestly, naming `analyze.init` — writing nothing.
 //
 // REMEDIATION IS NOT IN THE PLAN (UC §1 row 9): every remediation surface
-// the analyze family ships — `analyze.applyRemediation` (cluster-scoped,
-// refuses without { clusterId, approved: true }), `analyze.astGrepCodemod`
-// (rule-scoped, refuses without `approved: true`),
-// `analyze.agenticRemediation` (a proposal producer, never an applier), and
-// `analyze.playbookDispatch` (quarantine-consulted, verifier-gated) — stays
+// the analyze family ships — `analyze.fix` (preview, or an ATTENDED apply
+// when the human passes `apply: true`), `analyze.applyRemediation`,
+// `analyze.astGrepCodemod`, `analyze.agenticRemediation` (a proposal
+// producer, never an applier), and `analyze.playbookDispatch` — stays
 // OUTSIDE the plan runner's autonomous path. The approval gate is a human
 // decision, and a plan job is dispatched without one; so this plan ends at
-// the REPORT, which writes two files and decides nothing. Consumers invoke
-// remediation per cluster, explicitly, after reading the report.
+// the REPORT. Consumers invoke remediation per cluster, explicitly, after
+// reading the report (`cq analyze.fix --dir=. --clusterId=<id>`).
 //
-// THE DATAFLOW CONTRACT (why the inputs look the way they do): the frozen
-// Job carries `input` as STATIC JSON data — the kernel runner wires ORDER
-// (`dependsOn`), never dataflow (src/kernel/runner.ts dispatches each job's
-// own input verbatim). So the four jobs below are independent data with
-// fixed inputs, and the DATAFLOW — the probe's FailureSet becoming
-// `collect.sets`, the aggregate becoming `cluster.set`, the clustering
-// report becoming `render.report` — is implemented by the CALLER that
-// authors the plan (the lane-i CLI run-plan consumers author a plan JSON
-// from a prior stage's observed output; SDK callers use
-// {@link makeAnalyzePlan} with the values their earlier stages produced).
-// The shipped entry below is the discoverable FLOOR: schema-valid inputs
-// that make the plan's SHAPE executable-but-unwired. Run verbatim, it is
-// honest about exactly that — the collect job's empty `sets` is the
-// boundary's valid "nothing wired" shape and the collect op fails with the
-// no-input reason ('aggregating zero runs would fabricate a clean
-// FailureSet'), which (with the runner's stop-on-error) keeps the floor
-// from pretending an analysis happened. Nothing in the floor writes files
-// unless a consumer edits the inputs to values a real upstream produced.
-//
-// THE PLACEHOLDER PROBE: the shipped `gates.checkRunner` job carries an
-// explicit, consumer-editable CheckCommand — the shipped 'tsc-lines' tsc
-// invocation is a PLACEHOLDER the consumer points at their own tool
-// (their own compiler/linter/test runner binary, cwd, and args); the plan
-// hardcodes no tool and no repository layout.
+// THE FOUR-JOB BUILDER ({@link makeAnalyzePlan}) is kept for SDK callers who
+// want each stage as a separate journaled job. Its DATAFLOW CONTRACT is the
+// kernel's: the frozen Job carries `input` as STATIC JSON data — the runner
+// wires ORDER (`dependsOn`), never dataflow (src/kernel/runner.ts dispatches
+// each job's own input verbatim) — so its caller supplies each stage's input
+// from values an earlier stage produced. `analyze.run` exists precisely
+// because that wiring is the part adopters should not have to write.
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type { CheckRunnerInput } from '../ops/gates/checkRunner.js';
 import type { CollectFailuresInput } from '../ops/analyze/collectFailures.js';
 import type { ClusterErrorsInput } from '../ops/analyze/clusterErrors.js';
 import type { RenderAnalysisReportInput } from '../ops/analyze/renderAnalysisReport.js';
+import type { AnalyzeRunInput } from '../ops/analyze/run.js';
 
 /** The shipped plan's stable id (the discovery name and the Plan.id). */
 export const ANALYZE_PLAN_ID = 'analyze';
@@ -107,34 +97,28 @@ export function makeAnalyzePlan(inputs: AnalyzePlanInputs): Plan {
   };
 }
 
+/** The floor's single job id (the `analyze.run` composition). */
+export const ANALYZE_RUN_JOB_ID = 'analyze-run';
+
 /**
- * The shipped floor's inputs, built FRESH per call (never shared mutable
- * module-level objects): the placeholder tsc probe over the current
- * directory, and the schema-valid empty shapes downstream of it
- * (`sets: []` for collect; the empty tsc set for cluster; the empty report
- * rendered into the current directory for render). Run VERBATIM, the floor
- * terminates at the collect job with the honest no-input failure — see the
- * module header. These are template values for discovery, not a configured
- * analysis.
+ * Author the one-job plan that runs `analyze.run` with `input` (a deep copy —
+ * the same snapshot discipline as {@link makeAnalyzePlan}).
  */
-function floorInputs(): AnalyzePlanInputs {
+export function makeAnalyzeRunPlan(input: AnalyzeRunInput): Plan {
   return {
-    probe: {
-      adapter: 'tsc-lines',
-      command: { command: 'tsc', args: ['--noEmit', '--pretty', 'false'], cwd: '.' },
-    },
-    collect: { sets: [] },
-    cluster: { set: { tool: 'tsc', failures: [], exitCode: 0 } },
-    render: { report: { clusters: [], noise: [] }, dir: '.' },
+    id: ANALYZE_PLAN_ID,
+    label:
+      'analyze: analyze.run — probe → collect → cluster → report (remediation is NEVER in the plan)',
+    jobs: [{ id: ANALYZE_RUN_JOB_ID, op: 'analyze.run', input: structuredClone(input) }],
   };
 }
 
 /**
- * The discovered plan entry: its importer resolves the floor above — the
- * discoverable, schema-valid SHAPE of the pipeline (the src/plans/registry.ts
- * convention), not a configured workflow.
+ * The discovered plan entry: `analyze.run` over the current directory (built
+ * FRESH per resolution). Reads `./cq.json`; without one it fails naming
+ * `analyze.init` and writes nothing.
  */
 export const plan: PlanRegistryEntry = {
   name: ANALYZE_PLAN_ID,
-  importer: async () => makeAnalyzePlan(floorInputs()),
+  importer: async () => makeAnalyzeRunPlan({ dir: '.' }),
 };

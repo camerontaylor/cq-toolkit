@@ -1,4 +1,5 @@
-// Analyze lane G1+G2+G3 — registry slice: the `analyze.collectFailures`,
+// Analyze lane G1+G2+G3 + Lane C — registry slice: the standalone path
+// (`analyze.init`, `analyze.run`), the `analyze.collectFailures`,
 // `analyze.clusterErrors`, `analyze.renderAnalysisReport`,
 // `analyze.astGrepCodemod`, `analyze.agenticRemediation`,
 // `analyze.applyRemediation`, and the G3 playbook entries
@@ -12,7 +13,9 @@
 // agenticRemediation entry's one construction seam; see its entry comment),
 // the ledger's bound constants, the kernel's PURE zod mirrors of the frozen
 // driver-seam types (kernel/schema.js — zod + types only, the same
-// eager-import class as the ledger constants), and types (the type-only
+// eager-import class as the ledger constants), the gates registry's pure
+// check-runner input mirror (zod + types only — the `analyze.run`
+// `checks` field), and types (the type-only
 // imports are erased at compile time) — the gates registry's lazy-import
 // pattern. The zod schemas are registry-time mirrors of the lane's inputs
 // and live HERE because `inputSchema` must exist eagerly while the ops may
@@ -57,6 +60,14 @@ import type { AgenticRemediationInput } from './agenticRemediation.js';
 import type { ApplyRemediationInput } from './applyRemediation.js';
 import type { AstGrepCodemodInput } from './codemod/astGrep.js';
 import type { RenderAnalysisReportInput } from './renderAnalysisReport.js';
+import type { AnalyzeInitInput } from './init.js';
+import type { AnalyzeRunInput } from './run.js';
+import type { CqConfig } from './cqConfig.js';
+// The Lane C standalone ops' eager imports: the gates family's pure
+// check-runner input mirror (zod + types only) — one definition of a check,
+// shared by `cq.json` (./cqConfig.ts, also zod + types only) and the
+// `checks` override below.
+import { CheckRunnerInputSchema } from '../gates/registry.js';
 // The G3 playbook format's schema is EAGERLY imported (the registry's
 // documented eager class: zod + types only — format.ts imports nothing but
 // zod at runtime), because `inputSchema` must exist while the ops may not.
@@ -355,6 +366,35 @@ export const PlaybookQuarantineListInputSchema: z.ZodType<PlaybookQuarantineList
   .object({})
   .strict();
 
+/**
+ * Registry-time mirror of {@link AnalyzeInitInput}: the project directory and
+ * the overwrite opt-in. Strict.
+ */
+export const AnalyzeInitInputSchema: z.ZodType<AnalyzeInitInput> = z
+  .object({
+    dir: z.string().min(1),
+    force: z.boolean().exactOptional(),
+  })
+  .strict();
+
+/** A non-empty check list: exactly `cq.json`'s `checks` (./cqConfig.ts). */
+const ChecksSchema: z.ZodType<CqConfig['checks']> = z.array(CheckRunnerInputSchema).min(1);
+
+/**
+ * Registry-time mirror of {@link AnalyzeRunInput}. `checks` (when given)
+ * reuses the gates family's check-runner mirror, so a `cq.json` check and an
+ * inline check are the same shape; an empty list is rejected here (a run of
+ * zero checks would be vacuous).
+ */
+export const AnalyzeRunInputSchema: z.ZodType<AnalyzeRunInput> = z
+  .object({
+    dir: z.string().min(1),
+    checks: ChecksSchema.exactOptional(),
+    configPath: z.string().min(1).exactOptional(),
+    out: z.string().min(1).exactOptional(),
+  })
+  .strict();
+
 // Process-scoped v1 state for the playbook lane (the documented cut — see
 // playbooks/quarantine.ts and the family NOTES.md): the playbook registry
 // and the quarantine ledger are IN-MEMORY, so every playbook op composed
@@ -422,6 +462,19 @@ export function setAnalyzeApprovalAuthority(authority: ApprovalAuthority | undef
 
 /** Analyze-lane op registry (G1: failure-set aggregation; signature clustering). */
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'analyze.init',
+    inputSchema: AnalyzeInitInputSchema,
+    // File-system backed, no injected seams: the module's default export.
+    importer: () => import('./init.js').then((m) => m.default as Op<unknown, unknown>),
+  },
+  {
+    name: 'analyze.run',
+    inputSchema: AnalyzeRunInputSchema,
+    // probe → collect → cluster → report with REAL dataflow, over the gates'
+    // subprocess runner (the module's default export binds it).
+    importer: () => import('./run.js').then((m) => m.default as Op<unknown, unknown>),
+  },
   {
     name: 'analyze.collectFailures',
     inputSchema: CollectFailuresInputSchema,

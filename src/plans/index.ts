@@ -27,7 +27,13 @@ export { sweepUnitSegments } from '../ops/sweep/unit.js';
 // exports, never star: merge-prs.ts and analyze.ts each export a `plan`
 // PlanRegistryEntry, and colliding star exports are a TS2308 build error.
 export { MERGE_PRS_PLAN_ID, makeMergePrsPlan } from './merge-prs.js';
-export { ANALYZE_PLAN_ID, ANALYZE_JOB_IDS, makeAnalyzePlan } from './analyze.js';
+export {
+  ANALYZE_PLAN_ID,
+  ANALYZE_JOB_IDS,
+  ANALYZE_RUN_JOB_ID,
+  makeAnalyzePlan,
+  makeAnalyzeRunPlan,
+} from './analyze.js';
 export type { AnalyzePlanInputs } from './analyze.js';
 // The factory's input type rides the barrel so the plans surface is
 // self-contained; it is the SAME declaration ops/merge exports (one

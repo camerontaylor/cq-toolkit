@@ -219,8 +219,8 @@ function ensureBuiltCli(): void {
  * URL, the forge credentials, and the Node startup hooks (NODE_OPTIONS can
  * inject a --require/--import preload into the CLI and every driver-spawned
  * agent child; NODE_PATH can change module resolution). The repo's
- * node_modules/.bin leads PATH so the analyze floor's placeholder probe
- * resolves `tsc` deterministically.
+ * node_modules/.bin leads PATH so any tool a floor resolves by name (e.g.
+ * `tsc`) is deterministic.
  */
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -388,19 +388,13 @@ describe('every shipped plan runs through the built CLI (ws-i item 2)', () => {
           expect(report.stoppedEarly).toBe(false);
         }
         if (plan.name === 'analyze') {
-          // The floor's honest pin: the run fails for an honest reason. When
-          // the probe reaches a reading, collect fails on its OWN empty-sets
-          // policy; when the probe itself cannot read the target (a
-          // host-toolchain fact, e.g. no parsable tsc diagnostics), collect is
-          // honestly BLOCKED by it. Either way a failed row carries a
-          // non-empty reason — never a fabricated pass. Pin both shapes
-          // rather than assuming the probe's outcome on this host.
-          const probe = report.jobs.find((row) => row.jobId === 'analyze-probe');
-          const collect = report.jobs.find((row) => row.jobId === 'analyze-collect');
-          expect(collect?.result.status, context(res)).toBe('failed');
-          if (collect?.result.status === 'failed') {
-            const expected = probe?.result.status === 'ok' ? 'no input sets' : 'blocked:';
-            expect(collect.result.error, context(res)).toContain(expected);
+          // The floor's honest pin: the floor is `analyze.run` over the
+          // scratch repo, which carries no cq.json — the job fails for that
+          // honest reason, naming the op that writes one. Never a pass.
+          const row = report.jobs.find((job) => job.jobId === 'analyze-run');
+          expect(row?.result.status, context(res)).toBe('failed');
+          if (row?.result.status === 'failed') {
+            expect(row.result.error, context(res)).toContain('analyze.init');
           }
         }
       },
