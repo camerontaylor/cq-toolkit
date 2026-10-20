@@ -50,7 +50,9 @@ policyDiff performs no new `gh` call. After the findings are computed:
 - `lint` findings stay `fail`; a record never turns a fail into a pass.
 - If the verdict is `needs-human` and an authorization is bound, the paths
   of the findings that made it needs-human (all findings under `human`;
-  non-`protected-path` findings under `diff-check`) go to `authorizePaths`.
+  findings other than `protected-path`/`privileged-path` under `diff-check`;
+  only `privileged-path`, `baseline-loosened`, `target-removed` and
+  `entry-removed` under `advisory`) go to `authorizePaths`.
   All authorized → `pass`; otherwise `needs-human` and the report lists
   every unauthorized path with its reason. The outcome carries the decision
   (`d11`) so the gate can revalidate it.
@@ -62,6 +64,18 @@ policyDiff performs no new `gh` call. After the findings are computed:
 A finding whose `path` is not a changed path (`unsafe-path`, an
 unresolvable `./action`, a multi-workflow required-check removal) is never
 in any contribution, so it stays needs-human: fail closed.
+
+### Advisory posture (development, 2026-10-20)
+
+Under `CQ_MERGE_PROTECTED_PATHS=advisory` (docs/protected-scope.md,
+"Advisory posture") a push subject needs a D11 record only for what still
+needs a human: a privileged path (the trust ref's project list), a loosened
+baseline, or a removed ratchet target or entry. A range with none of those
+passes without any authorization, and the other findings appear in the run
+report as `advisory:` annotations. The authorization is computed from the
+same `humanFindings` list, so a record is never asked to cover an
+annotation. An `unsafe-path` finding is an annotation under `advisory`
+(it is never read either way).
 
 ## promote-gate becomes decisive
 

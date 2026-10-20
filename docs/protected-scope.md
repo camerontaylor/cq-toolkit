@@ -7,6 +7,40 @@ The owner approved four measures: C3 soon, so the gate honours `cq-override`;
 the D-P revision window; protection narrowed to the deployed system; and
 batching the remaining protected changes.
 
+## Advisory posture (development, 2026-10-20)
+
+Owner posture, 2026-10-19/20: greenfield, low vigilance. The self-hosting
+gates were blocking development (`cq/policy` needs-human on 51 heads, 518
+`cq/acceptance` refusals on unresolved P2 threads), so the D11 check runs in
+the `advisory` posture (`vars.CQ_MERGE_PROTECTED_PATHS=advisory`, set at the
+env layer; `human` stays the code default). What still needs a human:
+
+- a **privileged path** — one the trust ref's `policy/protected-paths.json`
+  `protectedPaths` names (a `privileged-path` finding). The list is now the
+  privileged list only: `policy/promotion-reviewer.json`, `policy/denylist/**`,
+  `scripts/denylist-scan`, `src/selfhost/promote-gate.ts`,
+  `scripts/github-settings-drift.mjs`, `scripts/lib/github-settings.mjs`,
+  `policy/templates/github-settings.json`, `policy/attestations/**`,
+  `apps/crq-python/signer/**`, `apps/crq-python/ops/systemd/**` and
+  `apps/crq-python/config.json`;
+- a **loosened baseline** (`baseline-loosened`);
+- a **removed ratchet target** (`target-removed`) or a **removed
+  definition-set or policy-list entry** (`entry-removed`).
+
+A `lint` finding still fails the check. Every other finding — a plain
+protected or definition-set path, a workflow trigger or privileged-job
+change, a required-check producer change, an unsafe path — is listed in the
+run report prefixed `advisory:` and does not decide the verdict. The
+promotion gate's D11 authorization covers only the paths that still need a
+human. `cq/policy` still posts but is not required at merge (R2), and
+`cq/acceptance` reports unresolved threads instead of refusing. The D-P
+revision window below is retired: the env layer carries the posture.
+
+The sections below record the 2026-10-16 scope (the `human`/`diff-check`
+postures). Under `advisory` the "kept" table is superseded by the privileged
+list above; the built-in taxonomy and the definition set are unchanged and
+still report `protected-path` findings, as annotations.
+
 ## The rule
 
 A path is protected (D11, [ADR-0004](adr/0004-policy-check-trust-boundaries.md)
@@ -151,7 +185,10 @@ named in that test, and none is pending today.
 
 ## The D-P revision window
 
-`revisionWindow` in `policy/protected-paths.json`:
+Retired 2026-10-20: `policy/protected-paths.json` no longer declares a
+window (the advisory posture above is set at the env layer, which a window
+never overrides). The mechanism stays in `policyConfig.ts` for adopters. As
+declared until then, `revisionWindow` in `policy/protected-paths.json`:
 
 | Field     | Value                                |
 | --------- | ------------------------------------ |
@@ -226,6 +263,10 @@ enforce the same thing later.
 | ------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `merge-queue` | `static`, `denylist`, `from-source`, `pack-audit`, `ratchet` | `cq/policy`, `cq/ratchet`, `cq/acceptance`, `static`, `crq-python`, `denylist`, `from-source`, `pack-audit` | `cq/policy`, `cq/acceptance`, `denylist` |
 | `main`        | `static`, `denylist`, `ratchet`                              | none (R1: promoter-only updates)                                                                            | none                                     |
+
+Since 2026-10-20 (advisory posture) the live R2 and the settings template
+require only `cq/acceptance` and `denylist`: `cq/policy` still posts but is
+not required, and review-thread resolution is off.
 
 Bot merges usually wait for green CI, but only as best-effort screening.
 The merger considers only `CLEAN`, `BEHIND` and `HAS_HOOKS` PRs

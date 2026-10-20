@@ -1,6 +1,6 @@
 @camerontaylor/cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable merge-queue and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress. See the [documentation index](docs/README.md) for the canonical reading set.
 
-The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). Review protocol (two CodeRabbit CLI cycles before every PR): see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
+The SDK is the primary interface; the CLI is a secondary interface over the same ops and plans, and no logic lives only in the CLI. Doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md). Review protocol (one CodeRabbit CLI cycle before every PR, then one independent head-bound review): see [docs/coderabbit-review.md](docs/coderabbit-review.md). Generated per-op reference: see [docs/ops/](docs/ops/) (regenerate with `pnpm run gen:op-docs`).
 
 ## Install
 
