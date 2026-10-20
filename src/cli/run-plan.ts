@@ -256,7 +256,12 @@ export function parseRunPlanInput<T>(
   const normalizedFlags: Record<string, unknown> = { __proto__: null };
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
-    if (key === 'json' || key === 'help' || key === 'h' || key === 'failOnVerdict') continue;
+    // Reserved keys are stripped only in their reserved spelling; the camelCase
+    // alias `--failOnVerdict` is NOT reserved and falls through to the strict
+    // schema like any unknown key (exit 2), the same as on op subcommands.
+    if (rawKey === 'json' || rawKey === 'help' || rawKey === 'h' || rawKey === 'fail-on-verdict') {
+      continue;
+    }
     if (Object.hasOwn(normalizedFlags, key)) {
       return {
         ok: false,

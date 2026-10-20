@@ -47,6 +47,7 @@ export function hasFailVerdict(value: unknown): boolean {
   return (
     typeof value === 'object' &&
     value !== null &&
+    Object.hasOwn(value, 'verdict') &&
     (value as { verdict?: unknown }).verdict === 'fail'
   );
 }
