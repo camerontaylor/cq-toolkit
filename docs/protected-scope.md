@@ -17,7 +17,9 @@ env layer; `human` stays the code default). What still needs a human:
 
 - a **privileged path** — one the trust ref's `policy/protected-paths.json`
   `protectedPaths` names (a `privileged-path` finding). The list is now the
-  privileged list only: `policy/promotion-reviewer.json`, `policy/denylist/**`,
+  privileged list only: `policy/protected-paths.json` itself,
+  `.github/workflows/denylist.yml` (the producer of the required `denylist`
+  check), `policy/promotion-reviewer.json`, `policy/denylist/**`,
   `scripts/denylist-scan`, `src/selfhost/promote-gate.ts`,
   `scripts/github-settings-drift.mjs`, `scripts/lib/github-settings.mjs`,
   `policy/templates/github-settings.json`, `policy/attestations/**`,

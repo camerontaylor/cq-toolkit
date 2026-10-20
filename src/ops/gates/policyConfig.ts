@@ -104,8 +104,9 @@ export function resolveProtectedPathsConfig(
 // this one shape: a time-boxed `diff-check` declared in the TRUST REF's
 // `policy/protected-paths.json`. The subject never supplies it. The policy
 // check reads the list at the trust ref only, so a PR cannot open, widen or
-// extend a window for itself, and editing the list is itself a definition
-// change that needs a human in every posture.
+// extend a window for itself, and the list file is on its own privileged
+// list, so editing it is a `privileged-path` finding that needs a human in
+// every posture (advisory included).
 //
 // The window relaxes ONLY the default layer: an explicit env or per-call
 // posture is a deliberate statement and wins whichever way it points. A

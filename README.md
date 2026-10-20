@@ -81,19 +81,19 @@ The eleven behavioral invariants are canonical in
 [policy/DOCTRINE.md](policy/DOCTRINE.md), each with its Rule, Why, and
 Enforcement. In brief:
 
-| #   | Invariant                                                                                                                                                                              |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                         |
-| I2  | No-privileged-reviewer acceptance: a non-author review of the exact head, plus a ≥10-minute settle or a postdating all-clear; unresolved threads block and truncated data fails closed |
-| I3  | Merge commits only; `merge-queue`→`main` promotion is a pure fast-forward behind merge-base guards — never squash, rewrite, or force-push                                              |
-| I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                   |
-| I5  | Baselines only tighten; a missing metrics summary is non-passing evidence, never a pass                                                                                                |
-| I6  | Every per-file/per-job worker is a fresh isolated invocation; context never leaks                                                                                                      |
-| I7  | A reused clean worktree re-probes its baselines from scratch; baseline values are never cached                                                                                         |
-| I8  | Rescue and escalation policy live in the plan runner, never in a driver                                                                                                                |
-| I9  | Fleet runs collect everything and never bail mid-fleet; budget stops are honest (`budget-exhausted`, never fabricated)                                                                 |
-| I10 | The kernel stays vendor-neutral — no vendor SDK vocabulary in kernel types or persisted data                                                                                           |
-| I11 | GitHub-API facts are carried as named tests beside the ops that rely on them                                                                                                           |
+| #   | Invariant                                                                                                                                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                                               |
+| I2  | No-privileged-reviewer acceptance: a non-author review of the exact head, plus a ≥10-minute settle or a postdating all-clear; unresolved threads are reported (not blocking) and truncated data fails closed |
+| I3  | Merge commits only; `merge-queue`→`main` promotion is a pure fast-forward behind merge-base guards — never squash, rewrite, or force-push                                                                    |
+| I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                                         |
+| I5  | Baselines only tighten; a missing metrics summary is non-passing evidence, never a pass                                                                                                                      |
+| I6  | Every per-file/per-job worker is a fresh isolated invocation; context never leaks                                                                                                                            |
+| I7  | A reused clean worktree re-probes its baselines from scratch; baseline values are never cached                                                                                                               |
+| I8  | Rescue and escalation policy live in the plan runner, never in a driver                                                                                                                                      |
+| I9  | Fleet runs collect everything and never bail mid-fleet; budget stops are honest (`budget-exhausted`, never fabricated)                                                                                       |
+| I10 | The kernel stays vendor-neutral — no vendor SDK vocabulary in kernel types or persisted data                                                                                                                 |
+| I11 | GitHub-API facts are carried as named tests beside the ops that rely on them                                                                                                                                 |
 
 ## Adopting the policy
 

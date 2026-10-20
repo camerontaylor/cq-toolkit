@@ -207,6 +207,8 @@ describe('the privileged list (advisory development posture)', () => {
     patterns.some((pattern) => new RegExp(pattern).test(path));
 
   test.each([
+    'policy/protected-paths.json',
+    '.github/workflows/denylist.yml',
     'policy/promotion-reviewer.json',
     'policy/denylist/patterns.yml',
     'scripts/denylist-scan',
@@ -224,6 +226,7 @@ describe('the privileged list (advisory development posture)', () => {
 
   test.each([
     'src/selfhost/settle-state.ts',
+    '.github/workflows/ci.yml',
     'src/selfhost/acceptance.ts',
     'src/ops/gates/policyDiff.ts',
     'src/ops/gates/registry.ts',

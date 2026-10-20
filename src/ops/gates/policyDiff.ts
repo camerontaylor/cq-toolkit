@@ -943,8 +943,9 @@ export function createPolicyDiff(
     // required-check (required jobs): the gate requires the trust ref's
     // `requiredJobs` by display name in each verified workflow's run, so a
     // changed workflow that no longer statically names one would block every
-    // promotion. That is a definition change, needs-human in every posture —
-    // never a revision-window pass.
+    // promotion. That is a definition change: needs-human under `human` and
+    // `diff-check` (never a revision-window pass), an `advisory:` annotation
+    // under `advisory`.
     for (const [file, jobs] of Object.entries(policy.requiredJobs ?? {})) {
       const wf = `${WORKFLOWS_DIR}/${file}`;
       if (!safeSet.has(wf)) continue;

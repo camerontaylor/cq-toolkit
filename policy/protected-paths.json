@@ -1,7 +1,9 @@
 {
   "schemaVersion": 1,
   "protectedPaths": [
+    "^policy/protected-paths\\.json$",
     "^policy/promotion-reviewer\\.json$",
+    "^\\.github/workflows/denylist\\.yml$",
     "^policy/denylist/",
     "^scripts/denylist-scan$",
     "^src/selfhost/promote-gate\\.ts$",
