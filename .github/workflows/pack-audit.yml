@@ -31,6 +31,7 @@ on:
       - package.json
       - pnpm-lock.yaml
       - 'policy/**'
+      - 'src/**'
       - README.md
       - LICENSE
       - 'tsconfig*.json'

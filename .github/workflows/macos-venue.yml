@@ -30,6 +30,7 @@ on:
       - pnpm-workspace.yaml
       - 'src/driver/**'
       - 'src/sandbox/**'
+      - 'src/shared/**'
       - 'scripts/**'
       - '.github/actions/static-gate/**'
       - .github/workflows/macos-venue.yml
