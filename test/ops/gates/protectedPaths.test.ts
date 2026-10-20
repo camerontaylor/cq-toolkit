@@ -190,6 +190,15 @@ describe('worker gate pattern liveness (reverse direction)', () => {
   });
 });
 
+describe('promotion-reviewer identity source stays protected', () => {
+  test('policy/protected-paths.json lists ^policy/promotion-reviewer\\.json$', () => {
+    const policy = JSON.parse(
+      readFileSync(join(REPO_ROOT, 'policy/protected-paths.json'), 'utf8'),
+    ) as { protectedPaths: string[] };
+    expect(policy.protectedPaths).toContain('^policy/promotion-reviewer\\.json$');
+  });
+});
+
 describe('settle-schema relocation protection', () => {
   const patterns = (
     JSON.parse(readFileSync(join(REPO_ROOT, 'policy/protected-paths.json'), 'utf8')) as {
