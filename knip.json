@@ -14,7 +14,8 @@
     "scripts/lib/test-narrow.d.mts",
     "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
-    "test/fixtures/cli-smoke-ops/smoke/*.js"
+    "test/fixtures/cli-smoke-ops/smoke/*.js",
+    "test/fixtures/cli-verdict-ops/verdict/*.js"
   ],
   "project": [
     "src/**/*.ts",

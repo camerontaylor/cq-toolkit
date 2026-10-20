@@ -21,10 +21,10 @@
 import { PlanSchema } from '../kernel/schema.js';
 import type { PlanRegistryEntry } from '../kernel/types.js';
 import { listPlans } from '../registry/plans.js';
-import { EXIT_CODES } from './exit.js';
-import { narrate, type CliIo, type NarrationMode } from './output.js';
+import type { CliIo, NarrationMode } from './output.js';
 import {
   RunPlanCommandSchema,
+  inputDefect,
   issueMessage,
   parseRunPlanInput,
   runPlanThroughKernel,
@@ -54,7 +54,7 @@ export async function runPlanEntryCommand(
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string; plansRoot?: string },
+  opts?: { opsRoot?: string; plansRoot?: string; failOnVerdict?: boolean },
 ): Promise<number> {
   const parsed = parseRunPlanInput(entry.name, flags, io, mode, RunPlanCommandSchema);
   if (!parsed.ok) return parsed.code;
@@ -65,13 +65,12 @@ export async function runPlanEntryCommand(
   const imported = await entry.importer();
   const checked = PlanSchema.safeParse(imported);
   if (!checked.success) {
-    if (mode !== 'json') {
-      narrate(
-        io,
-        `invalid input for '${entry.name}': the registry floor is not a valid plan: ${issueMessage(checked.error)}`,
-      );
-    }
-    return EXIT_CODES.usage;
+    return inputDefect(
+      io,
+      mode,
+      entry.name,
+      `invalid input for '${entry.name}': the registry floor is not a valid plan: ${issueMessage(checked.error)}`,
+    );
   }
   return runPlanThroughKernel(entry.name, checked.data, parsed.input, io, mode, opts);
 }

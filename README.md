@@ -58,7 +58,7 @@ cq analyze.collectFailures --help                # per-op input schema
 cq run-plan --plan=plan.json --json              # a governed plan
 ```
 
-Exit codes: `0` clean, `1` thrown/definitive failure, `2` usage error, `3` needs-human or budget-exhausted. See [`src/cli/README.md`](src/cli/README.md) for the full CLI contract.
+Exit codes: `0` clean, `1` thrown/definitive failure, `2` usage error, `3` needs-human or budget-exhausted. An `ok` result can still carry a failing verdict in its value (`{ "status": "ok", "value": { "verdict": "fail", … } }`), which exits `0` by default; pass `--fail-on-verdict` to turn that into exit `1` (stdout is unchanged; only the exact string `"fail"` counts — a `needs-human` or `failing` verdict vocabulary is not mapped). In `--json` mode an error writes one `{ "error": { "kind", "subcommand", "message", "exitCode" } }` object to stdout (stderr stays empty). CI gate: `cq ratchet.checkRatchet … --json --fail-on-verdict`. See [`src/cli/README.md`](src/cli/README.md) for the full CLI contract.
 
 ## Drivers
 

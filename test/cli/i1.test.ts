@@ -379,7 +379,9 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
     expect(human.err).not.toMatch(/threw:/); // never the last-resort crash narration
     const machine = await capture(['asyncthrow', '--json'], { opsRoot: tmp });
     expect(machine.code).toBe(2);
-    expect(machine.out).toBe('');
+    expect(JSON.parse(machine.out)).toMatchObject({
+      error: { kind: 'invalid-input', subcommand: 'asyncthrow', exitCode: 2 },
+    });
     expect(machine.err).toBe(''); // machine mode: stderr stays EMPTY, protocol intact
   });
 
@@ -503,8 +505,11 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
       '--json',
     ]);
     expect(json.code).toBe(2);
-    expect(json.out).toBe(''); // no artifact — the run never started
-    expect(json.err).toBe(''); // machine mode: the exit code IS the verdict
+    // no RESULT artifact — the run never started; the ONE stdout artifact is the error
+    expect(JSON.parse(json.out)).toMatchObject({
+      error: { kind: 'invalid-input', subcommand: 'run-plan', exitCode: 2 },
+    });
+    expect(json.err).toBe(''); // machine mode: stderr stays empty
     // The same defect in human mode keeps the failures-only narration.
     const human = await capture(['run-plan', `--plan=${missing}`, `--ops-root=${opsRoot}`]);
     expect(human.code).toBe(2);
@@ -516,22 +521,29 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
   test('machine mode: op input-validation failure + --json → exit 2, stderr empty', async () => {
     const { code, out, err } = await capture(['echo', '--json'], { opsRoot }); // missing required --msg
     expect(code).toBe(2);
-    expect(out).toBe('');
+    expect(JSON.parse(out)).toMatchObject({
+      error: { kind: 'invalid-input', subcommand: 'echo', exitCode: 2 },
+    });
     expect(err).toBe(''); // suppressed — the human-mode twin is the 'missing required field' pin above
   });
 
   test('machine mode: op invalid-result gate (garbage) + --json → exit 1, stderr empty', async () => {
     const { code, out, err } = await capture(['garbage', '--json'], { opsRoot });
     expect(code).toBe(1);
-    expect(out).toBe(''); // the invalid result never became an artifact
+    // the invalid result never became a RESULT artifact: the error artifact replaces it
+    expect(JSON.parse(out)).toMatchObject({
+      error: { kind: 'invalid-result', subcommand: 'garbage', exitCode: 1 },
+    });
     expect(err).toBe('');
   });
 
-  test('machine mode: usage-class errors still narrate — unknown subcommand + --json → exit 2 WITH the line', async () => {
+  test('machine mode: usage-class errors write the usage error artifact — unknown subcommand + --json → exit 2', async () => {
     const { code, out, err } = await capture(['no-such-op', '--json'], { opsRoot });
     expect(code).toBe(2);
-    expect(out).toBe('');
-    expect(err).toMatch(/unknown subcommand 'no-such-op'/);
+    expect(err).toBe('');
+    const parsed = JSON.parse(out) as { error: { kind: string; message: string } };
+    expect(parsed.error.kind).toBe('usage');
+    expect(parsed.error.message).toMatch(/unknown subcommand 'no-such-op'/);
   });
 
   test('parseFlags: null-prototype record — --__proto__ lands as an own key, not the inherited accessor', () => {
@@ -1296,7 +1308,11 @@ describe('run-plan through the governed kernel', () => {
     expect(human.err).not.toContain('invalid input');
 
     const machine = await capture([...argv, '--json']);
-    expect(machine).toEqual({ code: 1, out: '', err: '' });
+    expect(machine.code).toBe(1);
+    expect(machine.err).toBe('');
+    expect(JSON.parse(machine.out)).toMatchObject({
+      error: { kind: 'thrown', subcommand: 'run-plan', exitCode: 1 },
+    });
   });
 
   test('a held plan lock is TRANSIENT: the typed refusal exits 3, not usage 2 (ADR-0003 §2.9)', async () => {
@@ -1324,7 +1340,11 @@ describe('run-plan through the governed kernel', () => {
       expect(human.err).not.toMatch(/invalid input/);
 
       const machine = await capture([...argv, '--json']);
-      expect(machine).toEqual({ code: 3, out: '', err: '' });
+      expect(machine.code).toBe(3);
+      expect(machine.err).toBe('');
+      expect(JSON.parse(machine.out)).toMatchObject({
+        error: { kind: 'thrown', subcommand: 'run-plan', exitCode: 3 },
+      });
     } finally {
       await holder.release();
     }

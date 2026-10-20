@@ -39,8 +39,10 @@
 // never retry). RUNTIME throws are
 // exit 1 — anything else (a journal open/write failure, a file read that
 // raced the stat gate) propagates to main.ts's catch, which narrates and
-// returns 1 'thrown'. No result ever existed on a throw, so stdout stays
-// empty.
+// returns 1 'thrown'. No result ever existed on a throw, so stdout carries no
+// result artifact: human mode narrates on stderr, `--json` mode writes the one
+// error artifact (kind 'invalid-input' for the exit-2 input defects, 'thrown'
+// for the rest — see main.ts's error matrix) and nothing on stderr.
 //
 // GOVERNED COMPOSITION (ADR-0003 §2, kernel README "Budget governor"): the
 // CLI opts into governance exactly when the operator sets a cap
@@ -81,6 +83,7 @@ import { EXIT_CODES, exitCodeForRunReport } from './exit.js';
 import {
   narrate,
   narrateRunReport,
+  reportError,
   writeResultJson,
   type CliIo,
   type NarrationMode,
@@ -215,14 +218,19 @@ export function issueMessage(error: unknown): string {
 }
 
 /**
- * Mode-aware narration for run-plan's INPUT-defect exits (the suppression
- * matrix in main.ts's header): mode 'json' → nothing on stderr (machine
- * mode — the exit code carries the verdict); mode 'human' → the one `cq:`
- * stderr line. Runtime throws narrate in main.ts's catch, same matrix.
+ * Report one INPUT defect (exit 2) of run-plan / a plan subcommand (the error
+ * matrix in main.ts's header): mode 'human' → the one `cq:` stderr line;
+ * mode 'json' → the one `invalid-input` error artifact on stdout and nothing
+ * on stderr. Runtime throws report in main.ts's catch, same matrix. EXPORTED
+ * for the plan-subcommand floor gate in src/cli/plans.ts.
  */
-function narrateIfHuman(io: CliIo, mode: NarrationMode, message: string): void {
-  if (mode === 'json') return;
-  narrate(io, message);
+export function inputDefect(
+  io: CliIo,
+  mode: NarrationMode,
+  commandName: string,
+  message: string,
+): number {
+  return reportError(io, mode, 'invalid-input', commandName, message, EXIT_CODES.usage);
 }
 
 /**
@@ -248,21 +256,36 @@ export function parseRunPlanInput<T>(
   const normalizedFlags: Record<string, unknown> = { __proto__: null };
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
-    if (key === 'json' || key === 'help' || key === 'h') continue;
+    // Reserved keys are stripped only in their reserved spelling; the camelCase
+    // alias `--failOnVerdict` is NOT reserved and falls through to the strict
+    // schema like any unknown key (exit 2), the same as on op subcommands.
+    if (rawKey === 'json' || rawKey === 'help' || rawKey === 'h' || rawKey === 'fail-on-verdict') {
+      continue;
+    }
     if (Object.hasOwn(normalizedFlags, key)) {
-      narrateIfHuman(
-        io,
-        mode,
-        `invalid input for '${commandName}': duplicate flag '--${rawKey}' after kebab-case normalization`,
-      );
-      return { ok: false, code: EXIT_CODES.usage };
+      return {
+        ok: false,
+        code: inputDefect(
+          io,
+          mode,
+          commandName,
+          `invalid input for '${commandName}': duplicate flag '--${rawKey}' after kebab-case normalization`,
+        ),
+      };
     }
     normalizedFlags[key] = value;
   }
   const check = schema.safeParse(normalizedFlags);
   if (!check.success) {
-    narrateIfHuman(io, mode, `invalid input for '${commandName}': ${issueMessage(check.error)}`);
-    return { ok: false, code: EXIT_CODES.usage };
+    return {
+      ok: false,
+      code: inputDefect(
+        io,
+        mode,
+        commandName,
+        `invalid input for '${commandName}': ${issueMessage(check.error)}`,
+      ),
+    };
   }
   return { ok: true, input: check.data };
 }
@@ -290,7 +313,7 @@ export async function runPlanThroughKernel(
   input: RunPlanOptions,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string },
+  opts?: { opsRoot?: string; failOnVerdict?: boolean },
 ): Promise<number> {
   // Registry view over the resolved ops root: the explicit --ops-root flag
   // (input.opsRoot) wins over the runCli-level DI override (opts.opsRoot).
@@ -380,8 +403,7 @@ export async function runPlanThroughKernel(
     // failure instead of a contention wait. The message is the narration
     // contract; the class is the datum — never message matching.
     if (err instanceof PlanLockRefusedError) {
-      narrateIfHuman(io, mode, messageOf(err));
-      return EXIT_CODES.needsHuman;
+      return reportError(io, mode, 'thrown', commandName, messageOf(err), EXIT_CODES.needsHuman);
     }
     // Kernel-input-class throws are INPUT defects → exit 2, consistent with
     // the schema/content defects above. The LEDGER refusals (a run over
@@ -411,8 +433,7 @@ export async function runPlanThroughKernel(
       message.startsWith('journal: runId must match ') ||
       message.startsWith('topoOrder: ')
     ) {
-      narrateIfHuman(io, mode, `invalid input for '${commandName}': ${message}`);
-      return EXIT_CODES.usage;
+      return inputDefect(io, mode, commandName, `invalid input for '${commandName}': ${message}`);
     }
     throw err;
   }
@@ -427,11 +448,11 @@ export async function runPlanThroughKernel(
       event.kind === 'bound-excluded-ungoverned' ? event.runIds : [],
     );
     if (excludedRunIds.length > 0) {
-      narrateIfHuman(
-        io,
-        mode,
-        `bound excludes ungoverned runs ${[...new Set(excludedRunIds)].join(' ')}`,
-      );
+      // Informational, not an error: it rides stderr in human mode only, and
+      // never joins the json-mode stdout artifact.
+      if (mode !== 'json') {
+        narrate(io, `bound excludes ungoverned runs ${[...new Set(excludedRunIds)].join(' ')}`);
+      }
     }
   }
 
@@ -439,7 +460,7 @@ export async function runPlanThroughKernel(
   // (silent in 'json' mode), then the mechanical exit code.
   writeResultJson(io, report);
   narrateRunReport(io, report, mode);
-  return exitCodeForRunReport(report);
+  return exitCodeForRunReport(report, { failOnVerdict: opts?.failOnVerdict === true });
 }
 
 /**
@@ -451,7 +472,7 @@ export async function runPlanCommand(
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string },
+  opts?: { opsRoot?: string; failOnVerdict?: boolean },
 ): Promise<number> {
   const parsed = parseRunPlanInput('run-plan', flags, io, mode, RunPlanInputSchema);
   if (!parsed.ok) return parsed.code;
@@ -476,18 +497,18 @@ export async function runPlanCommand(
     planStat = undefined;
   }
   if (planStat === undefined || !planStat.isFile()) {
-    narrateIfHuman(
+    return inputDefect(
       io,
       mode,
+      'run-plan',
       `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`,
     );
-    return EXIT_CODES.usage;
   }
 
   // The file exists and is regular (per the stat gate); a read error here is
   // a post-gate race or permission failure — a RUNTIME throw, not an arg
   // error: it propagates to main.ts's catch → narrated + exit 1 'thrown'
-  // (stdout stays empty — no result ever existed). Arg-shaped errors are 2;
+  // (no result artifact — none ever existed). Arg-shaped errors are 2;
   // runtime throws are 1.
   const raw = await readFile(input.plan, 'utf8');
   let plan: Plan;
@@ -498,12 +519,12 @@ export async function runPlanCommand(
     // A zod error is flattened to the one-line issue form (narration stays
     // line-based); a JSON.parse error narrates its own message.
     const detail = hasIssues(err) ? issueMessage(err) : messageOf(err);
-    narrateIfHuman(
+    return inputDefect(
       io,
       mode,
+      'run-plan',
       `invalid input for 'run-plan': plan file '${input.plan}' is not a valid plan: ${detail}`,
     );
-    return EXIT_CODES.usage;
   }
 
   return runPlanThroughKernel('run-plan', plan, input, io, mode, opts);

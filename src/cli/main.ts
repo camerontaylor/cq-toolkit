@@ -31,44 +31,57 @@
 // kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
 // --stop-on-error) normalized inside runPlanCommand; see run-plan.ts.
 //
-// RESERVED MODE FLAGS: --json and --help/-h are recognized for EVERY
-// subcommand and never reach input validation. --help renders the
+// RESERVED MODE FLAGS: --json, --fail-on-verdict and --help/-h are recognized
+// for EVERY subcommand and never reach input validation. --help renders the
 // subcommand's input schema as plain text (the one sanctioned non-JSON
 // stdout surface, like the legacy --help) and exits 0. --json switches
 // narration to machine mode (NarrationMode 'json': stderr stays EMPTY,
-// stdout carries the artifact). A VALUED reserved spelling (`--json=x`,
-// `--help=x`, `--h=x`) is a usage error (exit 2) on EVERY subcommand — the
+// stdout carries ONE JSON artifact). --fail-on-verdict is an exit-code
+// opt-in: an `ok` op result whose value is an object with `verdict: 'fail'`
+// (or, for run-plan/plan subcommands, any ok row with such a value) exits 1
+// instead of 0; every other result maps unchanged and stdout is identical.
+// A VALUED reserved spelling (`--json=x`, `--help=x`, `--h=x`,
+// `--fail-on-verdict=x`) is a usage error (exit 2) on EVERY subcommand — the
 // raw-token gate runs before the help/mode branches — while the bare
 // spellings keep their mode/help behavior.
 //
-// MACHINE-MODE ERROR SUPPRESSION (the exact narration matrix): the bare
-// `--json` flag resolves the NarrationMode immediately after flag parsing;
-// from that point the exit code carries the verdict and error narration is
-// SUPPRESSED — stderr stays EMPTY, stdout stays the artifact-or-empty:
-//   suppressed when mode === 'json' (mode known):
+// MACHINE-MODE ERROR ARTIFACTS (the exact error matrix): when the bare
+// `--json` flag is present the exit code still carries the verdict, stderr
+// stays EMPTY, and every error site writes ONE JSON error artifact to stdout
+// in place of the (never-written) result:
+//   { "error": { "kind": "usage" | "invalid-input" | "invalid-result" |
+//                "thrown", "subcommand": "<name>" | null,
+//                "message": "<text>", "exitCode": <n> } }
+// An error artifact REPLACES the empty stream; it never joins a result
+// artifact, so "stdout is one JSON artifact" (I1) holds on every --json path.
+//   kind 'invalid-input' (the input was well-formed CLI syntax but defective):
 //     - op input-validation failure                      → exit 2
+//     - run-plan / plan-subcommand input defects (every  → exit 2
+//       exit-2 class in run-plan.ts and plans.ts)
+//   kind 'invalid-result':
 //     - op invalid-result gates (result-schema mirror +  → exit 1
 //       JSON-losslessness probes)
+//   kind 'thrown':
 //     - op throw                                         → exit 1
-//     - run-plan input defects (every exit-2 class in    → exit 2
-//       run-plan.ts)
-//     - run-plan thrown                                  → exit 1
-//   ALWAYS narrated (usage-class errors, all pre-parse or arg-shaped — a
-//   machine consumer relying on --json got a usage error, and the exit code
-//   is the contract there):
+//     - run-plan / plan-subcommand thrown                → exit 1
+//     - the plan-lock refusal (transient)                → exit 3
+//     - the runCli last-resort catch                     → exit 1
+//   kind 'usage' (arg-shaped; detected before the mode flag is parsed, so the
+//   raw argv is scanned for a bare `--json` token):
 //     - missing subcommand / unknown subcommand
 //     - flag-syntax errors (duplicate flags), positional tokens
-//     - valued-reserved rejections (--json=x / --help=x / --h=x)
-//     - --ops-root passed to an op subcommand
-//     - the runCli last-resort catch (mode not resolved at that scope)
-//   Human mode keeps narration on every path (the failures-only convention).
+//     - valued-reserved rejections (--json=x / --help=x / --h=x /
+//       --fail-on-verdict=x)
+//     - --ops-root passed to an op or plan subcommand
+//   Human mode keeps the one `cq:` stderr narration line on every path (the
+//   failures-only convention) and leaves stdout empty on these paths.
 //
 // EXIT CODES: 0 ok; 1 failed/thrown; 2 usage — arg-shaped errors the CLI
 // detects itself, never derived from the taxonomy; 3 needs-human/budget.
 // runCli NEVER throws: every path returns a number, and a runtime throw
-// (op crash, journal failure, registry defect) is caught per subcommand,
-// narrated, and returned as 1 with stdout left EMPTY — no result ever
-// existed.
+// (op crash, journal failure, registry defect) is caught per subcommand and
+// returned as 1 with no RESULT artifact on stdout — none ever existed (human
+// mode narrates on stderr; --json mode writes the error artifact above).
 export { installProcessSignalCleanup } from '../kernel/governor.js';
 import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
@@ -80,6 +93,7 @@ import {
   narrate,
   narrateOpResult,
   processIo,
+  reportError,
   writeResultJson,
   type CliIo,
   type NarrationMode,
@@ -100,18 +114,6 @@ export interface RunCliOptions {
 /** Message of an unknown throwable, for narration lines. */
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/**
- * Mode-aware narration for the POST-PARSE error sites (the suppression
- * matrix in the header): mode 'json' → nothing on stderr (machine mode —
- * stdout stays the artifact-or-empty and the exit code carries the verdict);
- * mode 'human' → the one `cq:` stderr line. Usage-class errors detected
- * before the mode is knowable narrate unconditionally via plain narrate().
- */
-function narrateIfHuman(io: CliIo, mode: NarrationMode, message: string): void {
-  if (mode === 'json') return;
-  narrate(io, message);
 }
 
 /**
@@ -211,11 +213,11 @@ export function subcommandNames(
 }
 
 /**
- * The reserved mode-flag keys: `--json` (narration mode) and `--help`/`-h`
- * (the help surface) are recognized for EVERY subcommand and never reach any
+ * The reserved mode-flag keys: `--json` (narration mode), `--fail-on-verdict`
+ * (the verdict exit-code opt-in) and `--help`/`-h` (the help surface) are recognized for EVERY subcommand and never reach any
  * op input as data.
  */
-const RESERVED_FLAG_KEYS: readonly string[] = ['json', 'help', 'h'];
+const RESERVED_FLAG_KEYS: readonly string[] = ['json', 'help', 'h', 'fail-on-verdict'];
 
 /**
  * The first reserved key that arrived WITH an explicit `=value`, or
@@ -290,7 +292,7 @@ const JSON_VALUES_NOTE =
 
 function renderGlobalHelp(names: string[]): string {
   return [
-    'usage: cq <subcommand> [--key=value ...] [--json]',
+    'usage: cq <subcommand> [--key=value ...] [--json] [--fail-on-verdict]',
     '',
     'subcommands:',
     ...names.map((name) => `  ${name}`),
@@ -354,9 +356,10 @@ function renderOpHelp(name: string, inputSchema: unknown): string {
   return renderSubHelp(
     name,
     inputSchema,
-    // --json is accepted for EVERY subcommand (it drives narration mode) and
-    // --help is the reserved help flag — list both, like renderRunPlanHelp.
-    ['--json', '--help'],
+    // --json (narration mode) and --fail-on-verdict (verdict exit code) are
+    // accepted for EVERY subcommand and --help is the reserved help flag —
+    // list all three, like renderRunPlanHelp.
+    ['--json', '--fail-on-verdict', '--help'],
     [JSON_VALUES_NOTE],
   );
 }
@@ -365,7 +368,7 @@ function renderRunPlanHelp(): string {
   return renderSubHelp(
     'run-plan',
     RunPlanInputSchema,
-    ['--json', '--help'],
+    ['--json', '--fail-on-verdict', '--help'],
     [
       JSON_VALUES_NOTE,
       'run-plan accepts kebab-case aliases for its camelCase keys (--ops-root, --journal-dir, --max-usd, --max-tokens, --stop-on-error); op subcommands take EXACT schema keys.',
@@ -385,7 +388,7 @@ function renderPlanHelp(name: string): string {
   return renderSubHelp(
     name,
     RunPlanCommandSchema,
-    ['--json', '--help'],
+    ['--json', '--fail-on-verdict', '--help'],
     [
       JSON_VALUES_NOTE,
       `'${name}' runs the shipped '${name}' plan from the plan registry (its discoverable floor instance) through the governed kernel; use run-plan to run a plan JSON file.`,
@@ -411,9 +414,19 @@ async function dispatchCli(
   // No subcommand at all: a usage error the CLI detects (exit 2, nothing on
   // stdout) — `--help` is the way to opt into the help surface.
   const sub = argv[0];
+  // Usage errors below are detected BEFORE (or while) the flags parse, so the
+  // machine-mode decision for THEM is a raw-token scan for a bare `--json`
+  // (the post-parse `mode` below is authoritative for everything after it).
+  const rawMode: NarrationMode = argv.includes('--json') ? 'json' : 'human';
   if (sub === undefined) {
-    narrate(io, 'missing subcommand (try --help)');
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      rawMode,
+      'usage',
+      null,
+      'missing subcommand (try --help)',
+      EXIT_CODES.usage,
+    );
   }
   // Global help: --help/-h as the leading argument (lenient about what
   // follows — help wins).
@@ -438,12 +451,24 @@ async function dispatchCli(
   try {
     parsed = parseFlags(argv.slice(1));
   } catch (err) {
-    narrate(io, `${messageOf(err)} (try --help)`);
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      rawMode,
+      'usage',
+      sub,
+      `${messageOf(err)} (try --help)`,
+      EXIT_CODES.usage,
+    );
   }
   if (parsed.unknown.length > 0) {
-    narrate(io, `unexpected positional argument '${parsed.unknown[0]}' (try --help)`);
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      rawMode,
+      'usage',
+      sub,
+      `unexpected positional argument '${parsed.unknown[0]}' (try --help)`,
+      EXIT_CODES.usage,
+    );
   }
   // A reserved key that arrived WITH an explicit `=value` never runs: the
   // strips below would otherwise silently drop it (exit 0, key gone) — for an
@@ -458,16 +483,23 @@ async function dispatchCli(
   // (`cq --help`, help as the leading argument) stays lenient above it.
   const reservedKey = reservedFlagWithValue(argv.slice(1));
   if (reservedKey !== undefined) {
-    narrate(
+    return reportError(
       io,
+      rawMode,
+      'usage',
+      sub,
       `--${reservedKey} is a reserved CLI flag ` +
-        '(op input schemas must not declare reserved keys: json, help, h)',
+        '(op input schemas must not declare reserved keys: json, help, h, fail-on-verdict)',
+      EXIT_CODES.usage,
     );
-    return EXIT_CODES.usage;
   }
   // Reserved mode flags — never part of any op input.
   const wantsHelp = parsed.flags['help'] === true || parsed.flags['h'] === true;
-  const mode: NarrationMode = parsed.flags['json'] === true ? 'json' : 'human';
+  // A bare `--json` as the LEADING token (`cq --json`) is not in parsed.flags
+  // (argv[0] is the subcommand slot); the raw scan covers it.
+  const mode: NarrationMode =
+    parsed.flags['json'] === true || rawMode === 'json' ? 'json' : 'human';
+  const failOnVerdict = parsed.flags['fail-on-verdict'] === true;
 
   // --- 'run-plan': the one non-op subcommand -------------------------------
   if (sub === 'run-plan') {
@@ -481,11 +513,17 @@ async function dispatchCli(
       // 'runPlan: ' input-validation class); runtime throws (journal
       // open/write failure, a post-stat read race) escape as throws →
       // narrated exit 1 below.
-      return await runPlanCommand(parsed.flags, io, mode, opts);
+      return await runPlanCommand(parsed.flags, io, mode, { ...opts, failOnVerdict });
     } catch (err) {
-      // Runtime throw → 1; machine mode suppresses the narration line.
-      narrateIfHuman(io, mode, `run-plan threw: ${messageOf(err)}`);
-      return EXIT_CODES.thrown;
+      // Runtime throw → 1; machine mode writes the error artifact instead.
+      return reportError(
+        io,
+        mode,
+        'thrown',
+        sub,
+        `run-plan threw: ${messageOf(err)}`,
+        EXIT_CODES.thrown,
+      );
     }
   }
 
@@ -510,23 +548,45 @@ async function dispatchCli(
       // runCli-level { opsRoot } DI is the embedding seam. The schema omits
       // the key too (defense in depth); this check names the rule.
       if (Object.hasOwn(parsed.flags, 'ops-root')) {
-        narrate(io, '--ops-root is a run-plan flag (plan subcommands run the registry floor)');
-        return EXIT_CODES.usage;
+        return reportError(
+          io,
+          mode,
+          'usage',
+          sub,
+          '--ops-root is a run-plan flag (plan subcommands run the registry floor)',
+          EXIT_CODES.usage,
+        );
       }
       try {
         // Input defects are narrated exits 2 INSIDE runPlanEntryCommand (flag
         // schema, duplicates); runtime throws (an importer that throws, a
         // journal failure) escape as throws → narrated exit 1 below.
-        return await runPlanEntryCommand(planEntry, parsed.flags, io, mode, opts);
+        return await runPlanEntryCommand(planEntry, parsed.flags, io, mode, {
+          ...opts,
+          failOnVerdict,
+        });
       } catch (err) {
-        // Runtime throw → 1; machine mode suppresses the narration line.
-        narrateIfHuman(io, mode, `${sub} threw: ${messageOf(err)}`);
-        return EXIT_CODES.thrown;
+        // Runtime throw → 1; machine mode writes the error artifact instead.
+        return reportError(
+          io,
+          mode,
+          'thrown',
+          sub,
+          `${sub} threw: ${messageOf(err)}`,
+          EXIT_CODES.thrown,
+        );
       }
     }
-    // Unknown subcommand: narrate to stderr, NOTHING on stdout, exit 2.
-    narrate(io, `unknown subcommand '${sub}' (try --help)`);
-    return EXIT_CODES.usage;
+    // Unknown subcommand: human mode narrates to stderr (stdout empty); json
+    // mode writes the usage error artifact. Exit 2.
+    return reportError(
+      io,
+      mode,
+      'usage',
+      sub,
+      `unknown subcommand '${sub}' (try --help)`,
+      EXIT_CODES.usage,
+    );
   }
   if (wantsHelp) {
     io.stdout(renderOpHelp(sub, entry.inputSchema));
@@ -538,8 +598,14 @@ async function dispatchCli(
   // needs it, so this check is op-branch only. The runCli-level {opsRoot} DI
   // (embedding/tests) is unaffected — only the FLAG is reserved.
   if (Object.hasOwn(parsed.flags, 'ops-root')) {
-    narrate(io, '--ops-root is a run-plan flag (op inputs own their schema keys)');
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      mode,
+      'usage',
+      sub,
+      '--ops-root is a run-plan flag (op inputs own their schema keys)',
+      EXIT_CODES.usage,
+    );
   }
   // Strip the reserved mode flags — the op's schema sees only its own keys
   // (ops map flags by EXACT schema key; see the header for the run-plan
@@ -548,6 +614,7 @@ async function dispatchCli(
   delete input['json'];
   delete input['help'];
   delete input['h'];
+  delete input['fail-on-verdict'];
   // Validate FIRST: schema-invalid input is a usage error (exit 2, nothing
   // on stdout — no op ever ran). safeParseAsync, not safeParse: registry
   // schemas may carry ASYNC refinements/transforms (the runner dispatches
@@ -568,12 +635,24 @@ async function dispatchCli(
   try {
     check = await entry.inputSchema.safeParseAsync(input);
   } catch (err) {
-    narrateIfHuman(io, mode, `invalid input for '${sub}': schema gate threw — ${messageOf(err)}`);
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      mode,
+      'invalid-input',
+      sub,
+      `invalid input for '${sub}': schema gate threw — ${messageOf(err)}`,
+      EXIT_CODES.usage,
+    );
   }
   if (!check.success) {
-    narrateIfHuman(io, mode, `invalid input for '${sub}': ${issueMessage(check.error)}`);
-    return EXIT_CODES.usage;
+    return reportError(
+      io,
+      mode,
+      'invalid-input',
+      sub,
+      `invalid input for '${sub}': ${issueMessage(check.error)}`,
+      EXIT_CODES.usage,
+    );
   }
   // Dispatch-time importer wiring (PR #238 review P2): the driver factory's
   // deprecated-alias notice is a `cq:` stderr line, so in machine mode it is
@@ -592,8 +671,14 @@ async function dispatchCli(
     const raw: unknown = await op(check.data);
     const checked = OpResultSchema.safeParse(raw);
     if (!checked.success) {
-      narrateIfHuman(io, mode, `${sub} returned an invalid result: ${issueMessage(checked.error)}`);
-      return EXIT_CODES.thrown;
+      return reportError(
+        io,
+        mode,
+        'invalid-result',
+        sub,
+        `${sub} returned an invalid result: ${issueMessage(checked.error)}`,
+        EXIT_CODES.thrown,
+      );
     }
     // JSON-losslessness probes — the runner's full pre-journal gate applied
     // to the direct path, BEFORE any stdout artifact: (1) stringify with a
@@ -617,18 +702,30 @@ async function dispatchCli(
       }
       assertJsonLossless(checked.data);
     } catch (probeErr) {
-      narrateIfHuman(io, mode, `${sub} returned an invalid result: ${messageOf(probeErr)}`);
-      return EXIT_CODES.thrown;
+      return reportError(
+        io,
+        mode,
+        'invalid-result',
+        sub,
+        `${sub} returned an invalid result: ${messageOf(probeErr)}`,
+        EXIT_CODES.thrown,
+      );
     }
     writeResultJson(io, checked.data); // the ONE stdout artifact
     narrateOpResult(io, sub, checked.data, mode); // failures-only; silent in json mode
-    return exitCodeForOpResult(checked.data);
+    return exitCodeForOpResult(checked.data, { failOnVerdict });
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the
-    // exit-code functions); stdout stays empty — no result ever existed.
-    // Machine mode suppresses the narration line (mode is known here).
-    narrateIfHuman(io, mode, `${sub} threw: ${messageOf(err)}`);
-    return EXIT_CODES.thrown;
+    // exit-code functions); no RESULT artifact ever existed. Human mode
+    // narrates; machine mode writes the error artifact (mode is known here).
+    return reportError(
+      io,
+      mode,
+      'thrown',
+      sub,
+      `${sub} threw: ${messageOf(err)}`,
+      EXIT_CODES.thrown,
+    );
   }
 }
 
@@ -643,7 +740,15 @@ export async function runCli(argv: string[], io?: CliIo, opts?: RunCliOptions): 
   } catch (err) {
     // Last-resort catch (registry scan defect, …): a runtime throw outside a
     // subcommand's own scope → narrated exit 1 'thrown'.
-    narrate(sink, `threw: ${messageOf(err)}`);
-    return EXIT_CODES.thrown;
+    // The mode flag is not resolved at this scope: a raw bare `--json` token
+    // selects the error artifact.
+    return reportError(
+      sink,
+      argv.includes('--json') ? 'json' : 'human',
+      'thrown',
+      argv[0] ?? null,
+      `threw: ${messageOf(err)}`,
+      EXIT_CODES.thrown,
+    );
   }
 }
