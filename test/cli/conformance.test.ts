@@ -354,7 +354,7 @@ describe('plan-registry defects degrade help, never break it (T4.3)', () => {
       join(dir, 'badfloor.js'),
       "export const plan = { name: 'badfloor', importer: async () => ({ id: 'badfloor' }) };\n",
     );
-    // Machine mode: exit 2, EMPTY stdout and stderr (narration suppressed).
+    // Machine mode: exit 2, one error artifact on stdout, EMPTY stderr.
     const jsonOut: string[] = [];
     const jsonErr: string[] = [];
     const jsonIo: CliIo = {
@@ -362,7 +362,9 @@ describe('plan-registry defects degrade help, never break it (T4.3)', () => {
       stderr: (chunk) => jsonErr.push(chunk),
     };
     expect(await runCli(['badfloor', '--json'], jsonIo, { plansRoot: dir })).toBe(2);
-    expect(jsonOut.join('')).toBe('');
+    expect(JSON.parse(jsonOut.join(''))).toMatchObject({
+      error: { kind: 'invalid-input', subcommand: 'badfloor', exitCode: 2 },
+    });
     expect(jsonErr.join('')).toBe('');
     // Human mode narrates the input-class reason.
     const humanOut: string[] = [];

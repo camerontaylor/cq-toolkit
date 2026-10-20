@@ -20,12 +20,30 @@ THE I1 CLI CONTRACT (landed):
   Op names win on a name collision (the op registry is consulted first).
 - stdout = exactly ONE JSON artifact per invocation (an OpResult, or a
   RunReport for run-plan); the plain-text `--help` surface is the one
-  sanctioned exception.
+  sanctioned exception. In human mode an invocation that fails before any
+  result exists (usage error, invalid input, thrown) leaves stdout empty.
 - stderr = `cq:`-prefixed narration, failures-only by default; `--json`
-  suppresses narration entirely (machine mode).
+  suppresses narration entirely (machine mode): stderr stays empty on every
+  path, and an error that has no result artifact writes ONE error artifact
+  to stdout instead:
+  `{ "error": { "kind": "usage" | "invalid-input" | "invalid-result" |
+"thrown", "subcommand": "<name>" | null, "message": "<text>",
+"exitCode": <n> } }`. It replaces the empty stream and never accompanies a
+  result artifact; the shapes are told apart by `status` (a result) vs an
+  object-valued `error` (this artifact; a `failed` result's `error` is a
+  string). Kinds: `usage` = arg-shaped (unknown/missing subcommand, flag
+  syntax, positional, valued reserved flag, `--ops-root` misuse);
+  `invalid-input` = schema/plan-file defects (exit 2); `invalid-result` = the
+  result gates (exit 1); `thrown` = an op/run-plan throw or the last-resort
+  catch (exit 1; the transient plan-lock refusal is `thrown` with exit 3).
 - Exit codes {0 clean, 1 thrown/definitive failure, 2 arg/usage error,
   3 needs-human/budget-exhausted} — derived in src/cli/exit.ts, mechanically
   from the frozen taxonomy; 2 is never derived from a taxonomy value.
+  `--fail-on-verdict` (opt-in, bare only) additionally maps an `ok` result
+  whose value is an object with `verdict: 'fail'` — for run-plan and plan
+  subcommands, any ok row with such a value — to 1; every other result maps
+  unchanged and stdout is identical with or without the flag (so
+  `cq ratchet.checkRatchet … --json --fail-on-verdict` is a one-line CI gate).
 - Flags are a thin JSON-flag mapping onto the op's input schema (values
   JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
@@ -33,9 +51,10 @@ THE I1 CLI CONTRACT (landed):
   from the kernel's GovernanceOptIn union; an opt-in alone constructs the
   governance handle, so `budget.ungovernedOverGoverned` marks an uncapped
   run ungoverned).
-- `json`, `help`, and `h` are CLI-reserved keys on every subcommand (narration
-  mode / help surface): op input schemas must not declare them. VALUED
-  reserved flags (`--json=x`, `--help=x`, `--h=x`) are rejected with exit 2
+- `json`, `help`, `h`, and `fail-on-verdict` are CLI-reserved keys on every
+  subcommand (narration mode / help surface / verdict exit code): op input
+  schemas must not declare them. VALUED
+  reserved flags (`--json=x`, `--help=x`, `--h=x`, `--fail-on-verdict=x`) are rejected with exit 2
   on EVERY subcommand — ops and run-plan alike — by a raw-token gate that
   runs before the help/mode branches (so `cq echo --help --json=yes` and
   `cq run-plan --plan=p --json=yes` are usage errors, never a silently

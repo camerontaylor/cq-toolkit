@@ -5,7 +5,12 @@
 // The four codes {0, 1, 2, 3}:
 //   0 — ok (or a run whose every job row reached `ok`).
 //   1 — definitive failure: a `failed`/`indeterminate` result or row, or an
-//       uncaught exception ("thrown").
+//       uncaught exception ("thrown"). With the opt-in `--fail-on-verdict`
+//       flag, ALSO an `ok` result (or an ok row) whose `value` is an object
+//       carrying `verdict: 'fail'` — a regression gate's "ok" status means
+//       the op ran, its verdict says whether the gate passed. Without the
+//       flag such a result stays 0 (the status taxonomy is the default
+//       contract); the stdout artifact is identical either way.
 //   2 — usage: arg-shaped errors the CLI ITSELF detects (unknown subcommand,
 //       bad flag syntax, duplicate flag, positional tokens, schema-invalid
 //       input). 2 is NEVER derived from a taxonomy value — no function here
@@ -27,15 +32,40 @@ import type { OpResult, RunReport } from '../kernel/types.js';
 /** The exit-code table. `usage` (2) is reserved for CLI-detected arg errors; see the header. */
 export const EXIT_CODES = { ok: 0, thrown: 1, usage: 2, needsHuman: 3 } as const;
 
+/** Options of the mechanical result → exit-code maps. */
+export interface ExitCodeOptions {
+  /** `--fail-on-verdict`: an ok result whose value carries `verdict: 'fail'` maps to 1. */
+  failOnVerdict?: boolean;
+}
+
+/**
+ * True when `value` is an object whose `verdict` property is exactly the
+ * string 'fail' (the regression-gate convention). Anything else — a missing
+ * verdict, 'pass', a non-string, a non-object value — is not a failing verdict.
+ */
+export function hasFailVerdict(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { verdict?: unknown }).verdict === 'fail'
+  );
+}
+
 /**
  * Map one op result's frozen status to the process exit code:
- * 'ok' → 0; 'failed' | 'indeterminate' → 1; 'needs-human' |
- * 'budget-exhausted' → 3. Mechanical — no interpretation.
+ * 'ok' → 0 (1 under `failOnVerdict` when its value has `verdict: 'fail'`);
+ * 'failed' | 'indeterminate' → 1; 'needs-human' | 'budget-exhausted' → 3.
+ * Mechanical — no interpretation.
  */
-export function exitCodeForOpResult(r: OpResult<unknown>): 0 | 1 | 3 {
+export function exitCodeForOpResult(
+  r: OpResult<unknown>,
+  options: ExitCodeOptions = {},
+): 0 | 1 | 3 {
   switch (r.status) {
     case 'ok':
-      return EXIT_CODES.ok;
+      return options.failOnVerdict === true && hasFailVerdict(r.value)
+        ? EXIT_CODES.thrown
+        : EXIT_CODES.ok;
     case 'failed':
     case 'indeterminate':
       return EXIT_CODES.thrown;
@@ -55,7 +85,9 @@ export function exitCodeForOpResult(r: OpResult<unknown>): 0 | 1 | 3 {
  * if any job row's result status is 'needs-human' or 'budget-exhausted',
  * OR (r.stoppedEarly && the earlyStopReason is a stop-class reason —
  * 'budget' or, since the v1.1 widening, the governed runner's cancel
- * 'signal') → 3; else if any row is 'failed' or 'indeterminate' → 1; else 0.
+ * 'signal') → 3; else if any row is 'failed' or 'indeterminate' → 1; else
+ * (under `failOnVerdict` only) if any ok row's value has `verdict: 'fail'` → 1;
+ * else 0.
  *
  * The row scan is the PRIMARY evidence: rows come from runPlan, and the
  * governed runner re-marks transitively budget-caused rows as
@@ -65,7 +97,7 @@ export function exitCodeForOpResult(r: OpResult<unknown>): 0 | 1 | 3 {
  * the runner claims), and 3 dominates 1 so a stop is never misreported as a
  * mere failure even if some row kept a real failed verdict.
  */
-export function exitCodeForRunReport(r: RunReport): 0 | 1 | 3 {
+export function exitCodeForRunReport(r: RunReport, options: ExitCodeOptions = {}): 0 | 1 | 3 {
   const needsHumanRow = r.jobs.some(
     (row) => row.result.status === 'needs-human' || row.result.status === 'budget-exhausted',
   );
@@ -87,5 +119,12 @@ export function exitCodeForRunReport(r: RunReport): 0 | 1 | 3 {
         row.result.status !== 'needs-human' &&
         row.result.status !== 'budget-exhausted'),
   );
-  return failedRow ? EXIT_CODES.thrown : EXIT_CODES.ok;
+  if (failedRow) return EXIT_CODES.thrown;
+  if (
+    options.failOnVerdict === true &&
+    r.jobs.some((row) => row.result.status === 'ok' && hasFailVerdict(row.result.value))
+  ) {
+    return EXIT_CODES.thrown;
+  }
+  return EXIT_CODES.ok;
 }
