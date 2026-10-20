@@ -23,19 +23,24 @@ describe('resolveProtectedPathsConfig', () => {
     expect(resolveProtectedPathsConfig({ env })).toEqual({ posture: 'human', layer: 'default' });
   });
 
-  test.each(['human', 'diff-check'] as const)('env %s resolves at the env layer', (posture) => {
-    expect(resolveProtectedPathsConfig({ env: { CQ_MERGE_PROTECTED_PATHS: posture } })).toEqual({
-      posture,
-      layer: 'env',
-    });
-  });
+  test.each(['human', 'diff-check', 'advisory'] as const)(
+    'env %s resolves at the env layer',
+    (posture) => {
+      expect(resolveProtectedPathsConfig({ env: { CQ_MERGE_PROTECTED_PATHS: posture } })).toEqual({
+        posture,
+        layer: 'env',
+      });
+    },
+  );
 
-  test.each(['Human', 'diff_check', ' human', 'diff-check ', 'off', '*'])(
+  test.each(['Human', 'diff_check', ' human', 'diff-check ', 'Advisory', 'advisory ', 'off', '*'])(
     'any other env value %j throws',
     (value) => {
       expect(() =>
         resolveProtectedPathsConfig({ env: { CQ_MERGE_PROTECTED_PATHS: value } }),
-      ).toThrow(`policy: CQ_MERGE_PROTECTED_PATHS must be 'human' or 'diff-check', got '${value}'`);
+      ).toThrow(
+        `policy: CQ_MERGE_PROTECTED_PATHS must be 'human', 'diff-check' or 'advisory', got '${value}'`,
+      );
     },
   );
 
@@ -46,6 +51,24 @@ describe('resolveProtectedPathsConfig', () => {
         optIn: { 'merge.protectedPaths': 'diff-check' },
       }),
     ).toEqual({ posture: 'diff-check', layer: 'call' });
+  });
+
+  test('a per-call opt-in to advisory wins over the env (explicitly named relaxation)', () => {
+    expect(
+      resolveProtectedPathsConfig({
+        env: { CQ_MERGE_PROTECTED_PATHS: 'human' },
+        optIn: { 'merge.protectedPaths': 'advisory' },
+      }),
+    ).toEqual({ posture: 'advisory', layer: 'call' });
+  });
+
+  test('a per-call opt-in to human tightens an env advisory', () => {
+    expect(
+      resolveProtectedPathsConfig({
+        env: { CQ_MERGE_PROTECTED_PATHS: 'advisory' },
+        optIn: { 'merge.protectedPaths': 'human' },
+      }),
+    ).toEqual({ posture: 'human', layer: 'call' });
   });
 
   test('a per-call opt-in to human tightens an env diff-check', () => {
@@ -69,7 +92,7 @@ describe('resolveProtectedPathsConfig', () => {
   test.each(['', '  ', 'Diff-Check', 'all'])('a blank or unknown opt-in %j throws', (value) => {
     expect(() =>
       resolveProtectedPathsConfig({ env: {}, optIn: { 'merge.protectedPaths': value } }),
-    ).toThrow(/merge\.protectedPaths must be 'human' or 'diff-check'/);
+    ).toThrow(/merge\.protectedPaths must be 'human', 'diff-check' or 'advisory'/);
   });
 
   test('an empty opt-in object falls through to the env', () => {
@@ -160,6 +183,7 @@ describe('applyRevisionWindow', () => {
     [{ posture: 'human', layer: 'env' }],
     [{ posture: 'human', layer: 'call' }],
     [{ posture: 'diff-check', layer: 'env' }],
+    [{ posture: 'advisory', layer: 'env' }],
   ] as const)('an explicit %o posture wins over the window', (config) => {
     const out = applyRevisionWindow(config, window, Date.parse('2026-10-20T00:00:00Z'));
     expect(out).toMatchObject(config);

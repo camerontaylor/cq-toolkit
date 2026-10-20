@@ -11,11 +11,14 @@
 // its merged head — the caller verifies merged-ness itself via REST), draft,
 // a truncated snapshot, the head (bound to the 40-hex subject the verdict
 // names), the base branch NAME, the I11 REST lag cross-check
-// (checkReviewDataLag), unresolved external review threads (root author ≠
-// the PR author, classify row 5's count), and head-bound trusted acceptance
-// with no outstanding trusted objection (judgeAtHead).
+// (checkReviewDataLag), and head-bound trusted acceptance with no
+// outstanding trusted objection (judgeAtHead).
 //
-// WHAT IS NOT. Settle stays in the merger's recheck: its durable
+// WHAT IS NOT. Unresolved external review threads (root author ≠ the PR
+// author, classify row 5's count) are REPORTED, never a refusal: under the
+// advisory development posture (2026-10-20) acceptance is an independent
+// PASS bound to the exact head, and leftover P2 threads go to follow-up
+// issues instead of blocking the check. Settle stays in the merger's recheck: its durable
 // observation is a ledger WRITE (contents: write), which this check never
 // holds. Mergeability / merge state is not judged either: a required
 // `cq/acceptance` keeps GitHub's merge state BLOCKED until it posts, so a
@@ -257,6 +260,7 @@ const judgeSnapshot = async (
   input: AcceptanceInput,
   subject: string,
   snapshot: PrSnapshot,
+  report: string[],
 ): Promise<RuleFailure | { by: string[] }> => {
   if (input.state === 'open' && !snapshot.open) return { rule: 'state', reason: 'pr is not open' };
   if (input.state === 'merged' && snapshot.open) {
@@ -288,9 +292,8 @@ const judgeSnapshot = async (
   const unresolved = countUnresolvedThreads(snapshot.threads.map(asReviewThread), {
     excludeAuthorLogin: snapshot.authorLogin,
   });
-  if (unresolved > 0) {
-    return { rule: 'threads', reason: `unresolved external threads: ${String(unresolved)}` };
-  }
+  // Reported, never a refusal (advisory development posture, 2026-10-20).
+  report.push(`threads: unresolved external threads: ${String(unresolved)} (reported, not judged)`);
   const judgment = judgeAtHead(snapshot, subject, deps.policy);
   if (!judgment.accepted) {
     return { rule: 'acceptance', reason: `${judgment.reason}: ${judgment.detail}` };
@@ -303,10 +306,11 @@ const judgeSnapshot = async (
  * validate the input (40-hex subject, positive safe-integer pr, a base name,
  * a known state), fetch the snapshot, then fail on — in order — the wrong
  * PR state, draft, truncated, head ≠ subject, base name ≠ `input.base`, the
- * I11 REST lag cross-check, unresolved external threads, and no head-bound
- * trusted acceptance or an outstanding trusted objection. Pass carries
- * `acceptedBy` (judgeAtHead's actor keys). The report opens with the PR,
- * the subject and the trust summary, then `fail (<rule>): <reason>` or
+ * I11 REST lag cross-check, and no head-bound trusted acceptance or an
+ * outstanding trusted objection. Pass carries `acceptedBy` (judgeAtHead's
+ * actor keys). The report opens with the PR, the subject and the trust
+ * summary, then (once the lag check passes) the unresolved external thread
+ * count — reported, never a refusal — then `fail (<rule>): <reason>` or
  * `pass: accepted by …`.
  * Never throws: any throw becomes verdict 'fail' with a one-line capped reason.
  */
@@ -344,7 +348,7 @@ export async function judgeAcceptance(
     report.push(
       `snapshot: reviews=${String(snapshot.reviews.length)} threads=${String(snapshot.threads.length)}`,
     );
-    const outcome = await judgeSnapshot(deps, input, subject, snapshot);
+    const outcome = await judgeSnapshot(deps, input, subject, snapshot, report);
     if ('rule' in outcome) return fail(outcome.rule, outcome.reason);
     report.push(`pass: accepted by ${outcome.by.join(', ')}`);
     return { verdict: 'pass', pr: input.pr, subject, acceptedBy: outcome.by, report };

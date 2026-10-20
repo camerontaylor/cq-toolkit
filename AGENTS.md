@@ -29,7 +29,8 @@ Your local duty, on a coherent change:
 
 **Zero local full gates per PR.** No protocol step requires of a worker a local full
 `pnpm run test` / `test:unit`, and a clean review adds no run beyond the review
-protocol's own three fixed checkpoints (which are the cheap deterministic
+protocol's own two fixed checkpoints — before and after the single CLI
+cycle — (which are the cheap deterministic
 gates plus the affected tests, never the suite).
 The full suite — plus the build, the from-source smoke plan, the coverage
 ratchet and the denylist scan + self-test — runs in CI on every push/PR, and
@@ -101,16 +102,17 @@ use a non-GLM provider or wait.
 
 ## Code review — mandatory before every PR
 
-Exactly TWO completed CodeRabbit CLI review-and-address cycles over the
-full intended PR diff before creating a PR. Full protocol:
-[docs/coderabbit-review.md](docs/coderabbit-review.md).
+ONE completed CodeRabbit CLI review-and-address cycle over the full
+intended PR diff before creating a PR, then one independent head-bound
+review of the PR (owner ruling D-J, development posture 2026-10-20). Full
+protocol: [docs/coderabbit-review.md](docs/coderabbit-review.md).
 
 - Pin ONE immutable base per task: the merge-base against the task's
   EXPLICIT intended PR target (`origin/merge-queue` per documented policy;
   `origin/main` when that is the task's actual target). Never a moving
   branch, never blindly task-start HEAD when the branch carries previous
-  work. Same base for both passes; record target, base, reviewed HEAD, and
-  the dirty-diff identity when uncommitted work is in scope.
+  work. Record target, base, reviewed HEAD, and the dirty-diff identity
+  when uncommitted work is in scope.
 - A cycle counts only when the CLI exits successfully, the output ends
   with a terminal non-skipped completion, and no error/action_required
   occurred — a `complete` event alone is insufficient. Failed, skipped,
@@ -118,24 +120,21 @@ full intended PR diff before creating a PR. Full protocol:
   blocker — a blocker prevents opening the PR. Never replace a required
   review with another reviewer, never waive the rule, never fabricate
   results.
-- Run the deterministic gates three times: before cycle 1, after cycle-1
-  addressing (before cycle 2), and after cycle-2 addressing. Both cycles
-  include their addressing. Those gates are the cheap deterministic ones plus
-  the affected tests — the full suite is CI's, and Knip runs per the contract's
-  condition (see
+- Run the deterministic gates before the cycle and after addressing it.
+  Those gates are the cheap deterministic ones plus the affected tests — the
+  full suite is CI's, and Knip runs per the contract's condition (see
   [docs/focused-checks-contract.md](docs/focused-checks-contract.md)).
   Whitespace/conflict-marker checks cover the pinned base through HEAD,
   staged changes, and unstaged tracked changes separately (commands in the
   protocol §5); stage your own new files first.
 - Adjudicate every critical/major finding: fix the technically valid ones,
   reject false positives with concrete reasons. Minor findings only when
-  materially beneficial. Record dispositions concisely.
-- STOP after two completed cycles — no third loop. Significant scope change
-  after reviews means a new task, not a bigger diff.
+  materially beneficial. Record dispositions concisely. P2 findings left
+  open after the cycle go to follow-up issues, not more review loops; give
+  the reviewers the owner rulings as context.
 - No valid unresolved critical/major finding may coexist with a
-  ready-to-merge claim. Fixes after cycle 2 require independent non-author
-  review on the final PR head before that claim; passing gates alone is
-  insufficient. This does not add a third CLI cycle.
+  ready-to-merge claim. The independent non-author review is on the final
+  PR head; passing gates alone is insufficient.
 
 The GitHub CodeRabbit App reviews the opened PR (already installed and
 active on this repo). CLI cycles are the author-side pre-PR pass and stay

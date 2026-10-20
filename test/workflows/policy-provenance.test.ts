@@ -126,10 +126,11 @@ describe('cq-signal is a wake-up only (ADR-0004 D-B)', () => {
       const body = code(text);
       const on = onBlock(body);
       expect(on).toMatch(
-        /^ {2}pull_request:\n {4}types:\n {6}- opened\n {6}- synchronize\n {6}- reopened\n {6}- labeled\n {6}- unlabeled\n {6}- ready_for_review\n {6}- edited$/m,
+        /^ {2}pull_request:\n {4}types:\n {6}- opened\n {6}- synchronize\n {6}- reopened\n {6}- ready_for_review\n {2}pull_request_review:$/m,
       );
-      expect(on).toMatch(/^ {2}pull_request_review:$/m);
-      expect(on).toMatch(/^ {2}pull_request_review_comment:$/m);
+      // Debounced (development posture, 2026-10-20): comments, edits and
+      // label events no longer wake the verifiers; cq-accept's sweep reconciles.
+      expect(on).not.toMatch(/pull_request_review_comment|- edited|labeled/);
       expect(on).toMatch(/^ {2}push:\n {4}branches:\n {6}- merge-queue$/m);
       expect(on).not.toMatch(/pull_request_target|workflow_run|workflow_dispatch/);
       expect(body).toMatch(/^permissions: \{\}$/m);
@@ -1462,9 +1463,10 @@ describe('self-review-loop peak-aware model selection (D11)', () => {
       '.github/workflows/self-review-loop.yml',
     ]) {
       const text = readFileSync(join(ROOT, file), 'utf8');
-      // All-hours cadence: the old start-exclusion guard (and its weekday
-      // clock read) is gone. The model switches per run instead.
-      expect(text, `${file}: all-hours cron`).toContain("cron: '*/15 * * * *'");
+      // Dispatch-only (development posture, 2026-10-20): no cron at all, and
+      // the old start-exclusion guard (and its weekday clock read) is gone.
+      // The model switches per run instead.
+      expect(text, `${file}: no cron`).not.toMatch(/^\s*- cron:/m);
       expect(text, `${file}: no start-exclusion guard`).not.toContain(
         'refusing to initiate operations',
       );

@@ -190,41 +190,53 @@ describe('worker gate pattern liveness (reverse direction)', () => {
   });
 });
 
-describe('promotion-reviewer identity source stays protected', () => {
-  test('policy/protected-paths.json lists ^policy/promotion-reviewer\\.json$', () => {
-    const policy = JSON.parse(
-      readFileSync(join(REPO_ROOT, 'policy/protected-paths.json'), 'utf8'),
-    ) as { protectedPaths: string[] };
-    expect(policy.protectedPaths).toContain('^policy/promotion-reviewer\\.json$');
-  });
-});
-
-describe('settle-schema relocation protection', () => {
+// The project list is the PRIVILEGED list (advisory development posture,
+// 2026-10-20; docs/protected-scope.md "Advisory posture"): under
+// `CQ_MERGE_PROTECTED_PATHS=advisory` a path it names is a `privileged-path`
+// finding and still needs a human; the trusted closure, the settle schema
+// and the D11 check code are no longer listed, so a change to them is an
+// `advisory:` annotation (the built-in taxonomy still reports them as
+// `protected-path`).
+describe('the privileged list (advisory development posture)', () => {
   const patterns = (
     JSON.parse(readFileSync(join(REPO_ROOT, 'policy/protected-paths.json'), 'utf8')) as {
       protectedPaths: string[];
     }
   ).protectedPaths;
+  const privileged = (path: string): boolean =>
+    patterns.some((pattern) => new RegExp(pattern).test(path));
+
+  test.each([
+    'policy/protected-paths.json',
+    '.github/workflows/denylist.yml',
+    'policy/promotion-reviewer.json',
+    'policy/denylist/patterns.yml',
+    'scripts/denylist-scan',
+    'src/selfhost/promote-gate.ts',
+    'scripts/github-settings-drift.mjs',
+    'scripts/lib/github-settings.mjs',
+    'policy/templates/github-settings.json',
+    'policy/attestations/c3.json',
+    'apps/crq-python/signer/signer.py',
+    'apps/crq-python/ops/systemd/crq.service',
+    'apps/crq-python/config.json',
+  ])('%s is privileged', (path) => {
+    expect(privileged(path)).toBe(true);
+  });
+
   test.each([
     'src/selfhost/settle-state.ts',
-    'src/policy/queue/settle-state.ts',
-    'src/selfhost/config.ts',
-    'src/shared/deepFreeze.ts',
+    '.github/workflows/ci.yml',
+    'src/selfhost/acceptance.ts',
     'src/ops/gates/policyDiff.ts',
-    'src/ops/gates/overrideRecord.ts',
-  ])('%s remains protected', (path) => {
-    expect(patterns.some((pattern) => new RegExp(pattern).test(path))).toBe(true);
-  });
-  test('the moved schema protection is exact', () => {
-    const pattern = patterns.find((source) => source.startsWith('^src/policy/queue/settle-state'))!;
-    expect(pattern).toBeDefined();
-    for (const path of [
-      'src/policy/queue/settle-state.tsx',
-      'src/policy/queue/other.ts',
-      'nested/src/policy/queue/settle-state.ts',
-    ]) {
-      expect(new RegExp(pattern).test(path)).toBe(false);
-    }
+    'src/ops/gates/registry.ts',
+    'src/shared/messageOf.ts',
+    'scripts/ratchet-check.mjs',
+    'apps/crq-python/ops/prepare-host.py',
+    'src/selfhost/promote-gate.tsx',
+    'apps/crq-python/config.json.bak',
+  ])('%s is not privileged', (path) => {
+    expect(privileged(path)).toBe(false);
   });
 });
 
@@ -274,11 +286,14 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
 // hand, and each must be a `trust/dist/selfhost/<entry>.js` invocation:
 // `trust/dist/cli.js` loads every op registry, so it may not run there at
 // all. The walk then follows each entry's module-loading closure FAIL
-// CLOSED (test/helpers/import-closure.ts) and requires every file to match
-// a `policy/protected-paths.json` regex. A form the scan cannot resolve, or
-// a specifier that is neither relative, a `node:` builtin nor a declared
+// CLOSED (test/helpers/import-closure.ts). A form the scan cannot resolve,
+// or a specifier that is neither relative, a `node:` builtin nor a declared
 // dependency (the lockfile and package.json are protected by the built-in
-// taxonomy), is a failure, never a skipped edge.
+// taxonomy), is a failure, never a skipped edge. Since the advisory
+// development posture (2026-10-20) the closure files and the scripts a
+// privileged job runs no longer have to match `policy/protected-paths.json`
+// (now the privileged list only, which keeps the promotion gate itself);
+// the walk and the invocation rules stay.
 /** `loadEngine`'s `imp('<rel>.js')` modules, as `src/ops/ratchet/<rel>.ts`. */
 function engineModules(): string[] {
   const text = readFileSync(join(REPO_ROOT, 'scripts', 'ratchet-lib.mjs'), 'utf8');
@@ -290,13 +305,12 @@ function engineModules(): string[] {
   return out;
 }
 
-describe('every trusted job runs a protected entry point with a protected closure', () => {
+describe('every trusted job runs a selfhost entry point with a classified closure', () => {
   const WORKFLOWS_DIR = join(REPO_ROOT, '.github', 'workflows');
   const workflows = readdirSync(WORKFLOWS_DIR)
     .filter((f) => /\.ya?ml$/.test(f))
     .sort()
     .map((file) => ({ file, text: readFileSync(join(WORKFLOWS_DIR, file), 'utf8') }));
-  const workflowTexts = workflows.map((w) => w.text);
 
   /** A job's lines without comments or step names (prose, not commands). */
   const commandLines = (text: string): string =>
@@ -444,23 +458,6 @@ describe('every trusted job runs a protected entry point with a protected closur
     ...engineModules(),
   ];
 
-  /**
-   * Protected but NOT walked: the registry entries that bind the verifier
-   * ops for the CLI and plans. No trusted job loads them now (R1); their
-   * lazy importers also reach ops no trusted job runs, so walking them
-   * would protect library code.
-   */
-  const BINDINGS = ['src/ops/gates/registry.ts', 'src/ops/ratchet/registry.ts'];
-
-  /**
-   * Closure files that need NOT be protected, each with its reason. Keep it
-   * minimal: a file carrying decision logic gets a regex in
-   * policy/protected-paths.json instead. Empty today — every value import
-   * in the closure is covered (src/kernel/types.ts is reached only through
-   * `import type`, so it is not in the closure).
-   */
-  const ALLOWLIST: Readonly<Record<string, string>> = {};
-
   const PACKAGE = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
     dependencies: Record<string, string>;
   };
@@ -503,11 +500,6 @@ describe('every trusted job runs a protected entry point with a protected closur
     readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
   ) as { protectedPaths: string[] };
   const REGEXES = POLICY.protectedPaths.map((source) => new RegExp(source));
-
-  test('the shared error helper has exact protected coverage', () => {
-    expect(REGEXES.some((regex) => regex.test('src/shared/messageOf.ts'))).toBe(true);
-    expect(REGEXES.some((regex) => regex.test('src/shared/messageOfOther.ts'))).toBe(false);
-  });
 
   test('the closure walk refuses what it cannot classify', () => {
     const scan = (text: string): ModuleScan => scanModuleLoads(text);
@@ -556,60 +548,7 @@ describe('every trusted job runs a protected entry point with a protected closur
     expect(DEPENDENCIES.has(packageOf('#internal'))).toBe(false);
   });
 
-  test('the verifier bindings are protected', () => {
-    for (const file of BINDINGS) {
-      expect(
-        REGEXES.some((re) => re.test(file)),
-        file,
-      ).toBe(true);
-    }
-  });
-
-  /**
-   * Unprotected code that a privileged job (an `environment:`, a secret, a
-   * write permission) runs by path: the named residual of
-   * docs/protected-scope.md, each with what bounds it. Anything else such a
-   * job runs must be protected.
-   */
-  const RESIDUAL: Readonly<Record<string, string>> = {
-    'dist/selfhost/self-merge-prs.js':
-      'merges into merge-queue only; promote-gate re-judges closure, I2 and policy',
-    'dist/selfhost/self-review-loop.js':
-      'pushes to PR heads only; cq/acceptance and promote-gate re-judge them',
-    'scripts/dd1-abort-spike.mjs':
-      'live-drivers drill: workflow_dispatch on main only, model keys only',
-    'scripts/demo-eval-axes.mjs':
-      'live-drivers drill: workflow_dispatch on main only, model keys only',
-  };
-
-  test('every script or selfhost entry a privileged job runs is protected or a named residual', () => {
-    const seen = new Set<string>();
-    const unclassified: string[] = [];
-    for (const text of workflowTexts) {
-      const scan = scanWorkflow(text);
-      expect(scan.ok).toBe(true);
-      if (!scan.ok) continue;
-      for (const job of scan.jobs.values()) {
-        if (!job.privileged) continue;
-        // `trust/dist/...` is excluded by the leading-boundary rule: the walk covers it.
-        const refs = job.text.matchAll(
-          /(?:^|[\s"'=])(?:\.\/)?(scripts\/[\w./-]+|dist\/selfhost\/[\w-]+\.js)/gm,
-        );
-        for (const m of refs) {
-          const ref = m[1]!;
-          if (Object.hasOwn(RESIDUAL, ref)) seen.add(ref);
-          else if (!isProtectedPolicyPath(ref) && !REGEXES.some((re) => re.test(ref))) {
-            unclassified.push(`${job.id}: ${ref}`);
-          }
-        }
-      }
-    }
-    expect(unclassified).toEqual([]);
-    // The residual never goes stale: each entry is still run by a privileged job.
-    expect([...seen].sort()).toEqual(Object.keys(RESIDUAL).sort());
-  });
-
-  test('every closure file is protected or allowlisted with a reason', () => {
+  test('the closure walk classifies every edge and reaches the judges', () => {
     const { files, problems } = closure(ENTRY_POINTS);
     expect(problems).toEqual([]);
     // The judges the trusted entries exist to run are reached.
@@ -627,18 +566,11 @@ describe('every trusted job runs a protected entry point with a protected closur
     expect(
       files.filter((f) => /^src\/(?:cli|kernel|registry)\//.test(f) || f === 'src/cli.ts'),
     ).toEqual([]);
-    const uncovered = files.filter(
-      (file) => !REGEXES.some((re) => re.test(file)) && !Object.hasOwn(ALLOWLIST, file),
-    );
-    expect(uncovered).toEqual([]);
-    // The allowlist never goes stale: each entry is in the closure and unprotected.
-    for (const file of Object.keys(ALLOWLIST)) {
-      expect(files, file).toContain(file);
-      expect(
-        REGEXES.some((re) => re.test(file)),
-        file,
-      ).toBe(false);
-    }
+    // Advisory development posture (2026-10-20): the closure is no longer
+    // required to match the project list — only the promotion gate itself is
+    // privileged. The fail-closed walk above still refuses any edge it
+    // cannot classify.
+    expect(REGEXES.some((re) => re.test('src/selfhost/promote-gate.ts'))).toBe(true);
   });
 });
 

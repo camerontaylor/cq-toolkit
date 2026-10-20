@@ -293,7 +293,7 @@ const kinds = (out: PolicyDiffOutcome): string[] =>
 
 async function bothPostures(
   input: PolicyDiffInput,
-): Promise<Record<ProtectedPathsPosture, string>> {
+): Promise<Record<Exclude<ProtectedPathsPosture, 'advisory'>, string>> {
   const human = await judge(input, 'human');
   const diffCheck = await judge(input, 'diff-check');
   return { human: human.verdict, 'diff-check': diffCheck.verdict };
@@ -507,10 +507,13 @@ describe('§7 A14 promotion needs the D11 authorization (both postures, both sid
     // explicitly (`CQ_MERGE_PROTECTED_PATHS` / the per-call opt-in), so both
     // sides and both postures are pinned here rather than one.
     const relaxed = await judge(prSubject(subject), 'diff-check');
-    expect(kinds(relaxed)).toEqual(['protected-path']);
+    expect(kinds(relaxed)).toEqual(['privileged-path', 'protected-path']);
     expect(relaxed.verdict).toBe('pass');
     expect(relaxed.posture).toBe('diff-check');
     expect((await judge(prSubject(subject), 'human')).verdict).toBe('needs-human');
+    // The fixture's project list names the classifier, so it is privileged:
+    // the `advisory` posture still needs a human for it.
+    expect((await judge(prSubject(subject), 'advisory')).verdict).toBe('needs-human');
 
     // The promotion gate recomputes the SAME range as a push subject, and a
     // push subject is never evaluated for a PR label record: it is authorized
@@ -519,7 +522,7 @@ describe('§7 A14 promotion needs the D11 authorization (both postures, both sid
     // a human whatever the PR side decided.
     const promoted = await judge(pushSubject(subject), 'human');
     expect(promoted.verdict).toBe('needs-human');
-    expect(kinds(promoted)).toEqual(['protected-path']);
+    expect(kinds(promoted)).toEqual(['privileged-path', 'protected-path']);
     expect(promoted.override).toEqual({
       status: 'absent',
       reasons: ['not evaluated: a push subject is authorized per admitted PR (D11 authorization)'],

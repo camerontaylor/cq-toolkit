@@ -16,21 +16,33 @@
 #      TARBALL'S OWN policy/denylist/patterns.yml (its absence or corruption
 #      fails the audit too) and gitleaks-scans the shipped bytes.
 #
-# Trigger note (I4 posture): this workflow is not a required check, but its
-# `on:` block is deliberately simple and UNFILTERED — pull_request +
-# workflow_dispatch, no path/branch filters — so the denylist sanity check
-# parses it and the audit runs on every PR regardless of touched files.
+# Trigger note (development posture, 2026-10-20): this workflow is not a
+# required check, so invariant I4 does not bind it; it is path-filtered to
+# the files that shape the tarball's path set or its scan — package.json and
+# the lockfile, the shipped policy/ tree, README.md and LICENSE, the build
+# configs, the scripts (denylist-scan, the build helpers), and this file —
+# plus workflow_dispatch, which the release runbooks use on the exact
+# release SHA. The repository-tree denylist (required) still scans every PR.
 name: pack-audit
 
 on:
   pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - 'policy/**'
+      - 'src/**'
+      - README.md
+      - LICENSE
+      - 'tsconfig*.json'
+      - 'scripts/**'
+      - .github/workflows/pack-audit.yml
   workflow_dispatch:
 
 # Superseded PR audits cancel: a newer commit on the same ref makes an
 # older run's verdict moot, and the audit is free to re-run. Per-ref group —
 # different PRs never cancel each other. Note this is run serialization, not
-# a trigger filter: the unfiltered `on:` block above (the I4 posture) is
-# untouched.
+# the trigger filter above.
 concurrency:
   group: pack-audit-${{ github.ref }}
   cancel-in-progress: true

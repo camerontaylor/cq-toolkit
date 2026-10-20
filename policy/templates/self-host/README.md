@@ -8,11 +8,19 @@ in its own `.github/workflows/`.
 
 ## Files
 
-| file                   | what it is                                                                                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `self-review-loop.yml` | scheduled review-loop automation: runs `runReviewLoop` from source over every open, same-repo, non-draft PR — fetch, classify, respond, resolve               |
-| `self-merge-prs.yml`   | scheduled merge-dispatch automation: classifies open PRs and executes eligible merges through the governed kernel (BudgetGovernor → runPlan → withBudgetStop) |
-| `README.md`            | this guide                                                                                                                                                    |
+| file                   | what it is                                                                                                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `self-review-loop.yml` | opt-in review-loop automation (dispatch only, dry run by default): runs `runReviewLoop` from source over every open, same-repo, non-draft PR — fetch, classify, respond, resolve |
+| `self-merge-prs.yml`   | scheduled merge-dispatch automation: classifies open PRs and executes eligible merges through the governed kernel (BudgetGovernor → runPlan → withBudgetStop)                    |
+| `README.md`            | this guide                                                                                                                                                                       |
+
+**Review loop is opt-in (development posture, 2026-10-20).** The
+`self-review-loop.yml` template carries no schedule: it runs only by
+`workflow_dispatch`, with `dry_run` defaulting to true. In the 2026-10-19
+sprint review it posted 1,019 replies and landed 0 fixes, so it stays opt-in
+until it shows a fixes-per-run rate above zero. The schedule, cadence and
+slot notes below describe the loop as it ran before; they apply again only if
+a cron is deliberately re-added.
 
 ## Wiring an adopting repo
 

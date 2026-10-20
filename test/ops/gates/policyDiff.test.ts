@@ -5,7 +5,10 @@
 //   1. Each finding kind, under BOTH postures where it matters: `human`
 //      routes every finding to needs-human; `diff-check` passes a plain
 //      protected-path edit and routes every other kind to needs-human; `lint`
-//      is `fail` in both (fail beats needs-human).
+//      is `fail` in both (fail beats needs-human). `advisory` routes only
+//      privileged-path (the trust-ref project list), baseline-loosened,
+//      target-removed and entry-removed findings to needs-human; every other
+//      finding passes as an `advisory:` report annotation; `lint` still fails.
 //   2. #224 composition: a changed path with a `.git` segment (built with
 //      plumbing, since the porcelain refuses it) or a backslash is an
 //      `unsafe-path` finding and is never read.
@@ -402,7 +405,9 @@ const kinds = (o: PolicyDiffOutcome): string[] =>
   [...new Set(o.findings.map((f) => f.kind))].sort();
 
 /** Both postures' verdicts for one subject. */
-async function verdicts(subject: string): Promise<Record<ProtectedPathsPosture, string>> {
+async function verdicts(
+  subject: string,
+): Promise<Record<Exclude<ProtectedPathsPosture, 'advisory'>, string>> {
   const human = await run(subject, 'human');
   const diffCheck = await run(subject, 'diff-check');
   return { human: human.verdict, 'diff-check': diffCheck.verdict };
@@ -495,8 +500,47 @@ describe('policyDiff: plain changes', SLOW, () => {
   });
 
   test('the trust-ref policy list protects project paths', async () => {
-    expect(kinds(await run(c['guarded']!))).toEqual(['protected-path']);
+    expect(kinds(await run(c['guarded']!))).toEqual(['privileged-path', 'protected-path']);
     expect(await verdicts(c['guarded']!)).toEqual({ human: 'needs-human', 'diff-check': 'pass' });
+  });
+
+  test('advisory: a privileged path (the trust-ref project list) still needs a human', async () => {
+    const out = await run(c['guarded']!, 'advisory');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: 'src/guarded/g.ts', reason: 'changes a protected path' },
+      {
+        kind: 'privileged-path',
+        path: 'src/guarded/g.ts',
+        reason: 'changes a privileged path (policy/protected-paths.json)',
+      },
+    ]);
+    expect(out.verdict).toBe('needs-human');
+    expect(out.report[0]).toBe('posture: advisory (layer env)');
+    expect(out.report).toContain(
+      'advisory: protected-path: src/guarded/g.ts — changes a protected path',
+    );
+    expect(out.report).toContain(
+      'privileged-path: src/guarded/g.ts — changes a privileged path (policy/protected-paths.json)',
+    );
+    expect(out.report.at(-1)).toBe('verdict: needs-human');
+  });
+
+  test('advisory: an ordinary protected path passes with an advisory annotation', async () => {
+    const out = await run(c['lint-edit']!, 'advisory');
+    expect(out.verdict).toBe('pass');
+    expect(out.posture).toBe('advisory');
+    expect(out.report).toContain('advisory: protected-path: lint/x.txt — changes a protected path');
+    expect(out.report.at(-1)).toBe('verdict: pass');
+  });
+
+  test('advisory: a definition-set change passes with advisory annotations', async () => {
+    const out = await run(c['pkg']!, 'advisory');
+    expect(kinds(out)).toEqual(['definition-changed', 'protected-path']);
+    expect(out.verdict).toBe('pass');
+    expect(out.report.filter((line) => line.startsWith('advisory: '))).toEqual([
+      'advisory: protected-path: package.json — changes a protected path',
+      'advisory: definition-changed: package.json — changes a ratchet definition (definition set or tsconfig graph)',
+    ]);
   });
 
   test('a definition-set file (package.json) is needs-human under diff-check', async () => {
@@ -545,6 +589,31 @@ describe('policyDiff: baselines and definitions', SLOW, () => {
       human: 'needs-human',
       'diff-check': 'needs-human',
     });
+  });
+
+  test('advisory: a loosened baseline still needs a human; a tightened one passes', async () => {
+    const loosen = await run(c['loosen']!, 'advisory');
+    expect(loosen.verdict).toBe('needs-human');
+    expect(loosen.report.some((line) => line.startsWith('baseline-loosened: '))).toBe(true);
+    expect(loosen.report.some((line) => line.startsWith('advisory: protected-path: '))).toBe(true);
+    expect((await run(c['tighten']!, 'advisory')).verdict).toBe('pass');
+  });
+
+  test('advisory: removed ratchet targets and removed list entries still need a human', async () => {
+    const manifest = await run(c['manifest']!, 'advisory');
+    expect(manifest.verdict).toBe('needs-human');
+    expect(manifest.report).toContain(
+      `target-removed: ${MANIFEST_PATH} — removes ratchet coverage/coverage`,
+    );
+    expect(manifest.report).toContain(
+      `entry-removed: ${MANIFEST_PATH} — removes definitionSet entry (?:^|/)package\\.json$`,
+    );
+    expect(manifest.report).toContain(
+      `advisory: definition-changed: ${MANIFEST_PATH} — changes a ratchet definition (definition set or tsconfig graph)`,
+    );
+    for (const name of ['policy-trim', 'policy-trim-jobs', 'policy-delete']) {
+      expect((await run(c[name]!, 'advisory')).verdict, name).toBe('needs-human');
+    }
   });
 
   test('a tightened baseline passes under diff-check', async () => {
@@ -791,6 +860,30 @@ describe('policyDiff: workflows', SLOW, () => {
     expect(kinds(out)).toContain('lint');
     expect(await verdicts(c['lint']!)).toEqual({ human: 'fail', 'diff-check': 'fail' });
     expect(out.report.at(-1)).toBe('verdict: fail');
+  });
+
+  test('advisory: a lint violation still fails, and its line is never an annotation', async () => {
+    const out = await run(c['lint']!, 'advisory');
+    expect(out.verdict).toBe('fail');
+    expect(out.report.some((line) => line.startsWith('lint: '))).toBe(true);
+    expect(out.report.some((line) => line.startsWith('advisory: lint'))).toBe(false);
+    expect(out.report.at(-1)).toBe('verdict: fail');
+  });
+
+  test('advisory: workflow, privileged-job and required-check findings are annotations', async () => {
+    const trigger = await run(c['trigger']!, 'advisory');
+    expect(trigger.verdict).toBe('pass');
+    expect(trigger.report.some((line) => line.startsWith('advisory: trigger-changed: '))).toBe(
+      true,
+    );
+    const priv = await run(c['priv-edit']!, 'advisory');
+    expect(priv.verdict).toBe('pass');
+    expect(priv.report.some((line) => line.startsWith('advisory: privileged-job: '))).toBe(true);
+    const renamed = await run(c['rename']!, 'advisory');
+    expect(renamed.verdict).toBe('pass');
+    expect(renamed.report).toContain(
+      `advisory: required-check: ${CI_PATH} — removed required check static`,
+    );
   });
 
   test('a D11 authorization covering every path never turns a lint fail into a pass', async () => {
@@ -1730,6 +1823,41 @@ describe('policyDiff: the override record', SLOW, () => {
     }
   });
 
+  test('push, advisory: D11 authorizes only the paths that still need a human', async () => {
+    const mixed = importCommits(repo, {
+      'override-mixed': {
+        files: { 'lint/x.txt': 'rule4\n', 'src/guarded/g.ts': 'export const g = 4;\n' },
+      },
+    })['override-mixed']!;
+    const auth = (paths: string[]): D11Authorization =>
+      bindD11Authorization({
+        ownerId: OWNER_ID,
+        attestation: { state: 'present', text: C3 },
+        prs: [
+          {
+            pr: PR,
+            merge: 'c'.repeat(40),
+            head: mixed,
+            paths,
+            events: [labelEvent()],
+            headObservedAt: EPOCH,
+          },
+        ],
+      });
+    // The privileged path alone is authorized: `advisory` passes, `human` does not.
+    const advisory = await run(mixed, 'advisory', push(auth(['src/guarded/g.ts'])));
+    expect(advisory.verdict).toBe('pass');
+    expect(advisory.d11).toMatchObject({ authorized: true, unauthorized: [] });
+    expect(advisory.report).toContain('d11: src/guarded/g.ts authorized by PR #7');
+    expect(advisory.report.some((line) => line.startsWith('d11: lint/x.txt'))).toBe(false);
+    const human = await run(mixed, 'human', push(auth(['src/guarded/g.ts'])));
+    expect(human.verdict).toBe('needs-human');
+    // Nothing privileged in the range: an advisory push passes with no D11 record at all.
+    const plain = await run(subject, 'advisory', { subjectKind: 'push', base: 'main' });
+    expect(plain.verdict).toBe('pass');
+    expect(plain.d11).toBeUndefined();
+  });
+
   test('push: a path no admitted PR contributed (outside the closure) → needs-human', async () => {
     const out = await run(subject, 'human', push(authorization({ paths: ['src/other.ts'] })));
     expect(out.verdict).toBe('needs-human');
@@ -2045,7 +2173,8 @@ describe('gates.policyDiff registry entry: the posture comes from config only', 
   test('a bogus env posture fails the dispatch', async () => {
     expect(await dispatch('bogus', trust)).toEqual({
       status: 'failed',
-      error: "policy: CQ_MERGE_PROTECTED_PATHS must be 'human' or 'diff-check', got 'bogus'",
+      error:
+        "policy: CQ_MERGE_PROTECTED_PATHS must be 'human', 'diff-check' or 'advisory', got 'bogus'",
     });
   });
 });

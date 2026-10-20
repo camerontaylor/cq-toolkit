@@ -204,13 +204,16 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     );
   });
 
-  it('the self-review-loop instantiation runs all day with peak-aware model selection (D11a)', () => {
-    // OWNER DIRECTIVE 2026-10-12: the loop runs EVERY 15 minutes, every day —
-    // the Z.ai GLM peak is no longer excluded. The MODEL switches instead of
-    // the schedule: the toolkit resolves the driver from the run's clock
-    // (src/selfhost/config.ts resolveSelfhostDriver).
+  it('the self-review-loop instantiation is dispatch-only, dry by default, with peak-aware model selection (D11a)', () => {
+    // DEVELOPMENT POSTURE 2026-10-20: no schedule — the loop is opt-in by
+    // workflow_dispatch, and a dispatch is a dry run unless cleared, until
+    // it shows a fixes-per-run rate above zero. The MODEL still switches
+    // from the run's clock (src/selfhost/config.ts resolveSelfhostDriver).
     const text = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
-    expect(text).toContain("cron: '*/15 * * * *'");
+    expect(text).not.toMatch(/^ {2}schedule:/m);
+    expect(text).not.toMatch(/^\s*- cron:/m);
+    expect(text).toMatch(/^ {2}workflow_dispatch:$/m);
+    expect(text).toMatch(/ {6}dry_run:\n(?: {8}.*\n)*? {8}default: true\n/);
     // The three exclusion crons and the headroom guard are gone.
     expect(text).not.toContain("cron: '*/15 0-4,10-23 * * 1-5'");
     expect(text).not.toContain("cron: '0,15,30 5 * * 1-5'");

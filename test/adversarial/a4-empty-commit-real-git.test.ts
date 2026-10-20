@@ -16,13 +16,17 @@
 // What is pinned:
 //   1. The attack really is an empty commit: a new 40-hex head, an identical
 //      tree, and an empty changed-path set (`git diff --name-only`).
-//   2. At that real head the acceptance check still fails on the still-open
-//      thread — the `threads` rule, not a head mismatch.
+//   2. At that real head the acceptance check still reports the still-open
+//      thread (the API's real count, never the commit subject) and refuses
+//      the head: the review bound to the pre-attack SHA does not accept it.
+//      Since the advisory development posture (2026-10-20) an unresolved
+//      thread is reported, never a refusal on its own, so the refusal that
+//      matters here is the head-bound acceptance rule.
 //   3. Retargeting the branch (a second empty commit, and the merge-queue
-//      ref moved with it) does not buy resolution at any real head.
+//      ref moved with it) does not buy resolution or acceptance at any real head.
 //   4. Positive control: when the API alone reports the thread resolved, the
-//      same real head passes — the gate keys on real thread state, so the
-//      refusals above are the guard working, not a stub that always fails.
+//      reported count drops to zero at the same real head — the check keys
+//      on real thread state, not a stub that always reports one.
 //   5. The retarget invalidates head-bound acceptance: a trusted APPROVED
 //      review bound to the pre-attack real SHA no longer accepts at the
 //      empty commit's real SHA.
@@ -94,7 +98,7 @@ const ok = (body: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(body)
  * from the commit subject — the A4 attack's message is deliberately visible
  * to nothing here.
  */
-function forge(head: string, resolved: boolean, log: string[]): GhFn {
+function forge(head: string, resolved: boolean, log: string[], reviewOid: string): GhFn {
   return (args) => {
     log.push(args.join(' '));
     if (args[0] !== 'api') throw new Error(`unexpected gh command: ${args.join(' ')}`);
@@ -131,7 +135,7 @@ function forge(head: string, resolved: boolean, log: string[]): GhFn {
                       authorAssociation: 'MEMBER',
                       state: 'APPROVED',
                       submittedAt: '2026-09-26T00:10:00Z',
-                      commit: { oid: head },
+                      commit: { oid: reviewOid },
                       body: 'LGTM',
                     },
                   ],
@@ -156,11 +160,12 @@ function forge(head: string, resolved: boolean, log: string[]): GhFn {
 async function judge(
   head: string,
   resolved: boolean,
+  reviewOid: string = head,
 ): Promise<AcceptanceResult & { gh: string[] }> {
   const calls: string[] = [];
   const verdict = await judgeAcceptance(
     {
-      gh: forge(head, resolved, calls),
+      gh: forge(head, resolved, calls, reviewOid),
       owner: 'octo',
       repo: 'widget',
       policy: CONSERVATIVE_TRUST_POLICY,
@@ -214,12 +219,13 @@ describe('§7 A4 the attack is a real empty commit', SLOW, () => {
 });
 
 describe('§7 A4 an empty commit does not resolve a thread', SLOW, () => {
-  test('acceptance fails on the still-open thread at the attacker’s real head', async () => {
-    const verdict = await judge(attackHead, false);
+  test('acceptance still reports the open thread and refuses the attacker’s real head', async () => {
+    const verdict = await judge(attackHead, false, reviewedHead);
     expect(verdict.verdict).toBe('fail');
-    expect(
-      verdict.report.some((line) => line === 'fail (threads): unresolved external threads: 1'),
-    ).toBe(true);
+    expect(verdict.report).toContain(
+      'threads: unresolved external threads: 1 (reported, not judged)',
+    );
+    expect(verdict.report.at(-1)).toMatch(/^fail \(acceptance\): no_head_bound_acceptance: /);
     expect(verdict.acceptedBy).toEqual([]);
     // The judged head is the real attack head, not a stand-in.
     expect(verdict.subject).toBe(attackHead);
@@ -227,9 +233,12 @@ describe('§7 A4 an empty commit does not resolve a thread', SLOW, () => {
   });
 
   test('retargeting the branch and the merge-queue ref buys no resolution', async () => {
-    const verdict = await judge(retargetHead, false);
+    const verdict = await judge(retargetHead, false, reviewedHead);
     expect(verdict.verdict).toBe('fail');
-    expect(verdict.report).toContain('fail (threads): unresolved external threads: 1');
+    expect(verdict.report).toContain(
+      'threads: unresolved external threads: 1 (reported, not judged)',
+    );
+    expect(verdict.report.at(-1)).toMatch(/^fail \(acceptance\): no_head_bound_acceptance: /);
     expect(verdict.subject).toBe(retargetHead);
   });
 
@@ -237,6 +246,9 @@ describe('§7 A4 an empty commit does not resolve a thread', SLOW, () => {
     const resolved = await judge(attackHead, true);
     expect(resolved.verdict).toBe('pass');
     expect(resolved.acceptedBy).toEqual(['user:reviewer']);
+    expect(resolved.report).toContain(
+      'threads: unresolved external threads: 0 (reported, not judged)',
+    );
   });
 });
 

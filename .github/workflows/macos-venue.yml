@@ -13,11 +13,28 @@
 # 10-candidate pilot measured from the merge of the suite's
 # spawn-reduction work: p90 <= 15 min, max < 20 min, zero infra-only
 # failures. Runs before that merge are BASELINE data, not pilot candidates.
+#
+# Trigger note (development posture, 2026-10-20): path-filtered. Being
+# non-required, the venue is outside invariant I4, so it runs on a pull
+# request only when what it can catch changed — the dependency set, the
+# process-spawning driver and sandbox code, the static-gate action, the
+# scripts, or this file — and by workflow_dispatch otherwise. If it is
+# ever promoted to required, the filter goes in the same edit (I4).
 name: macos-venue
 
 on:
-  push:
   pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - 'src/driver/**'
+      - 'src/sandbox/**'
+      - 'src/shared/**'
+      - 'scripts/**'
+      - '.github/actions/static-gate/**'
+      - .github/workflows/macos-venue.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

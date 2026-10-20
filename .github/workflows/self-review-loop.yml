@@ -1,9 +1,16 @@
 # instantiated from policy/templates/self-host/self-review-loop.yml — edit the template, not this file
-# Template: self-review-loop — the adoptable scheduled review-loop
-# automation: the toolkit, built from source, runs its OWN review loop
-# (runReviewLoop over the frozen SelfhostDefaults, driver peak-aware from
-# the run's clock) against the ADOPTING repository's open PRs — fetch →
-# classify → respond → resolve, one ≤20-minute scheduled run per slot.
+# Template: self-review-loop — the adoptable review-loop automation: the
+# toolkit, built from source, runs its OWN review loop (runReviewLoop over
+# the frozen SelfhostDefaults, driver peak-aware from the run's clock)
+# against the ADOPTING repository's open PRs — fetch → classify → respond →
+# resolve, one ≤20-minute run per dispatch.
+#
+# OPT-IN (development posture, 2026-10-20): there is NO schedule. The loop
+# posted 1,019 replies and landed 0 fixes in the 2026-10-19 sprint review,
+# so it runs only by `workflow_dispatch`, and a dispatch is a dry run
+# (`dry_run` defaults to true) unless the dispatcher clears it. It stays
+# opt-in until it shows a fixes-per-run rate above zero; re-adding a cron is
+# a deliberate change backed by that metric.
 # Wiring, secrets, the peak-window rule, the budget caps, and the I2
 # single-identity caveat: README.md in this directory
 # (policy/templates/self-host/). The trusted build and the
@@ -23,7 +30,7 @@
 # only. This is the per-run-mint pattern of PR #307
 # (policy/templates/adversarial-suite.yml); it supersedes the PR #303
 # identity note, which deferred per-run minting as a separately scoped
-# behavior change. FAIL-CLOSED: the schedule has no fallback identity, so an
+# behavior change. FAIL-CLOSED: the loop has no fallback identity, so an
 # empty client-id variable or a failed mint refuses the run. The mint step
 # is variable-gated, and the loop step asserts the minted token before any
 # effect (exit 1) — never a PAT, never the runner's GITHUB_TOKEN. The minted
@@ -41,14 +48,14 @@
 #                              step exports BOTH keys unconditionally and
 #                              each provider factory reads its own; WHICH one
 #                              a run needs is a runtime decision (below).
-#   (peak window)           -> CODE, not cron: the schedule runs ALL DAY and
-#                              the peak switch lives in the toolkit
+#   (peak window)           -> CODE, not cron: a run may start at any hour
+#                              and the peak switch lives in the toolkit
 #                              (src/selfhost/config.ts: SelfhostPeak +
 #                              resolveSelfhostDriver — 06:00–10:00 UTC
 #                              Mon–Fri, plus its reserved 05:40–06:00
 #                              pre-peak dispatch headroom). An adopter edits
 #                              THAT window (and the headroom and the two
-#                              driver specs) rather than the crons;
+#                              driver specs) rather than any cron;
 #                              the run step derives the required key name
 #                              from the same function, so no YAML window
 #                              arithmetic has to move with it. No
@@ -63,23 +70,10 @@
 name: self-review-loop
 
 on:
-  schedule:
-    # ALL-HOURS CADENCE (owner directive 2026-10-12): the loop no longer
-    # stands down during the Z.ai GLM peak (06:00–10:00 UTC Mon–Fri,
-    # 14:00–18:00 Asia/Singapore). One every-15-minutes cron, every day; the
-    # MODEL switches per run instead of the schedule: the toolkit resolves
-    # the driver from the run's UTC start instant
-    # (src/selfhost/config.ts resolveSelfhostDriver) — the frozen
-    # zai/glm-5.3-flash off-peak, deepseek/deepseek-flash inside the
-    # documented peak window OR its reserved pre-peak headroom (05:40–06:00,
-    # the documented ≤20-minute run: a sweep starting there could still be
-    # executing inside the peak, so it must not dispatch Z.ai GLM into it —
-    # a dispatch reservation, never a start exclusion). Delayed fires and
-    # manual dispatches resolve at their OWN start, never at the slot's
-    # nominal time. HAND-REPLACED for adopters: the window, headroom and the
-    # two driver specs live in the toolkit, not here — only the cadence is
-    # cron.
-    - cron: '*/15 * * * *'
+  # Dispatch only (OPT-IN, above). The driver is still resolved from the
+  # run's UTC start instant (src/selfhost/config.ts resolveSelfhostDriver):
+  # the frozen zai/glm-5.3-flash off-peak, deepseek/deepseek-flash inside the
+  # documented peak window OR its reserved pre-peak headroom (05:40–06:00).
   workflow_dispatch:
     inputs:
       max_usd:
@@ -88,9 +82,9 @@ on:
         default: ''
         type: string
       dry_run:
-        description: Fetch + summarize only — post nothing, dispatch nothing
+        description: Fetch + summarize only — post nothing, dispatch nothing (default; clear it to act)
         required: false
-        default: false
+        default: true
         type: boolean
 
 # ONE shared serialization group across BOTH self-host workflows
@@ -225,7 +219,7 @@ jobs:
           key: self-review-loop-state-${{ github.run_id }}
           restore-keys: |
             self-review-loop-state-
-      # Per-run mint, FAIL-CLOSED (no PAT fallback): the schedule has no
+      # Per-run mint, FAIL-CLOSED (no PAT fallback): the loop has no
       # fallback identity, so an empty client-id variable skips this step and
       # the loop step's assert below refuses the run. `owner` is the
       # repository owner; `repositories` is THIS repository only (never the
@@ -282,7 +276,7 @@ jobs:
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
           # Env-indirection doctrine: inputs reach the script as env vars,
-          # never as interpolated text. Both are '' on schedule events.
+          # never as interpolated text.
           # The mint action reports the App's slug — the responder identity
           # derives from it (`<slug>[bot]`): installation tokens are NOT
           # supported by `GET /user`, so the login must never be looked up

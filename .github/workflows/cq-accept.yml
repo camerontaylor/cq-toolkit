@@ -2,10 +2,10 @@
 # cq-accept — the DEFAULT-BRANCH I2 acceptance verifier (W1.10 Decision 10;
 # ADR-0004 D-B, D-F). Posts `cq/acceptance` on merge-queue PR heads.
 #
-# Carrier (P1): `workflow_run` on `cq-signal` (PR, label, review and
-# merge-queue push events), a `schedule` sweep (every 15 minutes: a review
-# dismissal, a thread resolution or a settle change can arrive without an
-# event this workflow sees) and `workflow_dispatch` with a PR number
+# Carrier (P1): `workflow_run` on `cq-signal` (PR head, review and
+# merge-queue push events; debounced 2026-10-20), a `schedule` sweep (every
+# 15 minutes: a review dismissal, a comment, an edit or a settle change can
+# arrive without an event this workflow sees — the sweep is the reconciler) and `workflow_dispatch` with a PR number
 # (honoured only on the default ref — ADR-0004 D-A.1). GitHub runs the
 # DEFAULT BRANCH's copy of this file for all three, so a pull request cannot
 # edit what judges it (RS-4 T-2/T-8).
@@ -13,9 +13,10 @@
 # What is judged (Decision 10, the RS-3 rules in merge-recheck.ts composed
 # read-only by src/selfhost/acceptance.ts): the PR is open, not a draft and
 # into merge-queue; its head is the subject; the snapshot is complete and
-# passes the I11 REST lag cross-check; no unresolved external review thread
-# and no outstanding trusted objection; a trusted acceptance is bound to the
-# head. Settle and mergeability are not judged here.
+# passes the I11 REST lag cross-check; no outstanding trusted objection; a
+# trusted acceptance is bound to the head. Unresolved external review
+# threads are reported, never a refusal (advisory development posture,
+# 2026-10-20). Settle and mergeability are not judged here.
 #
 # DATA-ONLY: the verifier reads PR, review and thread API data with this
 # job's GITHUB_TOKEN. Nothing is checked out but the trust ref, and no head
