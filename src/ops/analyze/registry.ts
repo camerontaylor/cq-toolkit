@@ -1,5 +1,5 @@
 // Analyze lane G1+G2+G3 + Lane C — registry slice: the standalone path
-// (`analyze.init`, `analyze.run`), the `analyze.collectFailures`,
+// (`analyze.init`, `analyze.run`, `analyze.fix`), the `analyze.collectFailures`,
 // `analyze.clusterErrors`, `analyze.renderAnalysisReport`,
 // `analyze.astGrepCodemod`, `analyze.agenticRemediation`,
 // `analyze.applyRemediation`, and the G3 playbook entries
@@ -14,8 +14,8 @@
 // the ledger's bound constants, the kernel's PURE zod mirrors of the frozen
 // driver-seam types (kernel/schema.js — zod + types only, the same
 // eager-import class as the ledger constants), the gates registry's pure
-// check-runner input mirror (zod + types only — the `analyze.run`
-// `checks` field), and types (the type-only
+// check-runner input mirror (zod + types only — the `analyze.run` /
+// `analyze.fix` `checks` field), and types (the type-only
 // imports are erased at compile time) — the gates registry's lazy-import
 // pattern. The zod schemas are registry-time mirrors of the lane's inputs
 // and live HERE because `inputSchema` must exist eagerly while the ops may
@@ -60,6 +60,7 @@ import type { AgenticRemediationInput } from './agenticRemediation.js';
 import type { ApplyRemediationInput } from './applyRemediation.js';
 import type { AstGrepCodemodInput } from './codemod/astGrep.js';
 import type { RenderAnalysisReportInput } from './renderAnalysisReport.js';
+import type { AnalyzeFixInput } from './fix.js';
 import type { AnalyzeInitInput } from './init.js';
 import type { AnalyzeRunInput } from './run.js';
 import type { CqConfig } from './cqConfig.js';
@@ -395,6 +396,58 @@ export const AnalyzeRunInputSchema: z.ZodType<AnalyzeRunInput> = z
   })
   .strict();
 
+/**
+ * The CLI parses flag values as JSON when they parse, so an all-digit
+ * cluster id (`--clusterId=12345678`) arrives as a NUMBER. Ids never start
+ * with a zero that JSON would drop (JSON rejects leading zeros, so such ids
+ * stay strings), which makes the integer form recoverable exactly.
+ */
+const ClusterIdInput = z.preprocess(
+  (value) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 99_999_999
+      ? String(value).padStart(8, '0')
+      : value,
+  z.string().regex(/^[0-9a-f]{8}$/, 'expected the 8-hex-digit cluster id from analyze.run'),
+);
+
+/**
+ * An ast-grep rule: YAML/JSON TEXT. A JSON object (what the CLI produces for
+ * `--rule='{"id":…}'`) is accepted and re-serialized, since JSON is YAML.
+ */
+const RuleInput = z.preprocess(
+  (value) =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? JSON.stringify(value)
+      : value,
+  z.string().min(1),
+);
+
+/**
+ * Registry-time mirror of {@link AnalyzeFixInput}. The selection rule
+ * (exactly one of `clusterId` or `rule` + `files`) is the OP's refusal, not a
+ * shape fault, so it can name the alternative. Strict.
+ */
+export const AnalyzeFixInputSchema: z.ZodType<AnalyzeFixInput> = z
+  .object({
+    dir: z.string().min(1),
+    sidecarPath: z.string().min(1).exactOptional(),
+    clusterId: ClusterIdInput.exactOptional(),
+    signature: z.string().min(1).exactOptional(),
+    rule: RuleInput.exactOptional(),
+    files: z.array(z.string().min(1)).exactOptional(),
+    apply: z.boolean().exactOptional(),
+    model: ModelSpecSchema.exactOptional(),
+    out: z.string().min(1).exactOptional(),
+    checks: ChecksSchema.exactOptional(),
+    configPath: z.string().min(1).exactOptional(),
+    previewDigest: z
+      .string()
+      .regex(/^sha256:[0-9a-f]{64}$/, 'expected the preview digest analyze.fix printed')
+      .exactOptional(),
+    timeoutMs: z.number().int().positive().exactOptional(),
+  })
+  .strict() as unknown as z.ZodType<AnalyzeFixInput>;
+
 // Process-scoped v1 state for the playbook lane (the documented cut — see
 // playbooks/quarantine.ts and the family NOTES.md): the playbook registry
 // and the quarantine ledger are IN-MEMORY, so every playbook op composed
@@ -474,6 +527,33 @@ export const registry: OpRegistryEntry[] = [
     // probe → collect → cluster → report with REAL dataflow, over the gates'
     // subprocess runner (the module's default export binds it).
     importer: () => import('./run.js').then((m) => m.default as Op<unknown, unknown>),
+  },
+  {
+    name: 'analyze.fix',
+    inputSchema: AnalyzeFixInputSchema,
+    // preview → attended apply → recheck. The ATTENDED authority is composed
+    // INSIDE the op, per call, and only when the input carries
+    // `apply: true` (the human's confirmation of that exact preview) — the
+    // process-wide `sharedApproval` binding above stays deny-all for the
+    // plain engine ops. The driver factory is bound exactly as the
+    // agenticRemediation entry binds it (read-only proposal defaults).
+    importer: (wiring) =>
+      Promise.all([
+        import('./fix.js'),
+        import('./attended.js'),
+        import('../gates/checkRunner.js'),
+      ]).then(
+        ([m, a, runner]) =>
+          m.makeAnalyzeFix({
+            run: runner.subprocessRunCheck,
+            attended: a.makeAttendedApprovalAuthority,
+            drivers: createDriverFactory(
+              wiring?.onDeprecatedAlias !== undefined
+                ? { onDeprecatedAlias: wiring.onDeprecatedAlias }
+                : {},
+            ),
+          }) as Op<unknown, unknown>,
+      ),
   },
   {
     name: 'analyze.collectFailures',

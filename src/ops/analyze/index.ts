@@ -127,8 +127,21 @@ export type {
   AnalyzeRunReport,
 } from './run.js';
 export { ANALYZE_DEFAULT_OUT, makeAnalyzeRun, probeAndCluster, resolveChecks } from './run.js';
+export type { AttendedApprovalConfig } from './attended.js';
+export { ATTENDED_DEFAULT_EXEMPT, makeAttendedApprovalAuthority } from './attended.js';
+export type { GitApprovalStateReaderOptions } from './approval.js';
+export type {
+  AnalyzeFixApplied,
+  AnalyzeFixDeps,
+  AnalyzeFixInput,
+  AnalyzeFixPreview,
+  AnalyzeFixRecheck,
+  AnalyzeFixReport,
+} from './fix.js';
+export { makeAnalyzeFix, patchTargets } from './fix.js';
 export {
   AgenticRemediationInputSchema,
+  AnalyzeFixInputSchema,
   AnalyzeInitInputSchema,
   AnalyzeRunInputSchema,
   AnalyzeReportSchema,

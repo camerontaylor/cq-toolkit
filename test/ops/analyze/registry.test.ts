@@ -93,6 +93,7 @@ describe('analyze registry: the lane entries', () => {
     expect(registry.map((entry) => entry.name)).toEqual([
       'analyze.init',
       'analyze.run',
+      'analyze.fix',
       'analyze.collectFailures',
       'analyze.clusterErrors',
       'analyze.renderAnalysisReport',
