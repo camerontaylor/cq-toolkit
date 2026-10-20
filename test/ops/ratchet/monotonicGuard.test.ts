@@ -1758,7 +1758,7 @@ describe('formatViolations', () => {
 
 // ---------------------------------------------------------------------------
 // Coverage diff re-basis (review finding 1): the ONE normalizer shared by
-// the ratchet.monotonicGuard CLI op and the local ratchet-check driver.
+// the ratchet.monotonicGuard CLI op and the local ratchet scripts.
 // ---------------------------------------------------------------------------
 
 const REL_CX = baselineRelPath('complexity', 'complexity');

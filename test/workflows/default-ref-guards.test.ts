@@ -5,12 +5,11 @@
 // Pinned here:
 //   1. Every privileged workflow that carries `workflow_dispatch` gates its
 //      job(s) to the default ref (D-A.1): a dispatch on any other ref would
-//      run that ref's copy of the file. The seven files below either hold a
+//      run that ref's copy of the file. The six files below either hold a
 //      promotion-adjacent credential or dispatch one; the carriers that are
-//      not dispatch (`push`, `schedule`, `workflow_run`, `status`) carry no
+//      not dispatch (`push`, `schedule`, `workflow_run`) carry no
 //      dispatcher-chosen ref, so their disjuncts admit them without the ref
-//      clause (the retired merge-queue-gate template's `status` disjunct also
-//      filters the context and state; its dispatch disjunct is `!= 'status'` + ref).
+//      clause.
 //   2. `gate.yml`'s `wake` job consumes exactly ONE field of the
 //      `workflow_run` payload — the run id — and re-reads everything else
 //      from the API by that id (path, event, branch, head repository id,
@@ -31,10 +30,6 @@ const bothCopies = (template: string, instance = template): Array<[string, strin
     `.github/workflows/${instance}`,
     readFileSync(join(ROOT, '.github/workflows', instance), 'utf8'),
   ],
-];
-
-const templateOnly = (template: string): Array<[string, string]> => [
-  [`policy/templates/${template}`, readFileSync(join(ROOT, 'policy/templates', template), 'utf8')],
 ];
 
 const instanceOnly = (name: string): Array<[string, string]> => [
@@ -64,7 +59,6 @@ const DEFAULT_REF = "format('refs/heads/{0}', github.event.repository.default_br
  * dispatcher-chosen ref).
  */
 const carriers: Readonly<Record<string, readonly string[]>> = {
-  'merge-queue-gate.yml': ['status'],
   'sync-merge-queue.yml': ['push'],
   'init-merge-queue.yml': [],
   'self-merge-prs.yml': ['schedule'],
@@ -73,9 +67,8 @@ const carriers: Readonly<Record<string, readonly string[]>> = {
   'live-drivers.yml': [],
 };
 
-/** Where each file's guarded job lives (all seven are single-job workflows). */
+/** Where each file's guarded job lives (all six are single-job workflows). */
 const jobId: Readonly<Record<string, string>> = {
-  'merge-queue-gate.yml': 'gate',
   'sync-merge-queue.yml': 'sync',
   'init-merge-queue.yml': 'init',
   'self-merge-prs.yml': 'self-merge-prs',
@@ -85,7 +78,6 @@ const jobId: Readonly<Record<string, string>> = {
 };
 
 const sources: Record<string, Array<[string, string]>> = {
-  'merge-queue-gate.yml': templateOnly('merge-queue-gate.yml'),
   'sync-merge-queue.yml': bothCopies('sync-merge-queue.yml'),
   'init-merge-queue.yml': bothCopies('init-merge-queue.yml'),
   'self-merge-prs.yml': bothCopies('self-host/self-merge-prs.yml', 'self-merge-prs.yml'),

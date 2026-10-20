@@ -120,10 +120,5 @@
       "reason": "Repo-owned CI with no template today: audits this package's npm tarball (files allowlist + denylist scan) — specific to this package, not an adoptable pattern."
     }
   ],
-  "adopterOnly": [
-    {
-      "template": "merge-queue-gate.yml",
-      "reason": "Retired at the C2 cutover (2026-10-11): gate.yml (cq-gate, armed) is the sole promoter; kept as an adopter-only template, see docs/promotion-policy.md."
-    }
-  ]
+  "adopterOnly": []
 }

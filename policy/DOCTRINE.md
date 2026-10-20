@@ -65,8 +65,7 @@ reality.
 `main`, behind merge-base guards in order: an already-promoted sha is a
 logged no-op; divergence refuses and a human merges `main` into `merge-queue`;
 only then `<sha>:refs/heads/main`. The old `merge-queue-gate.yml` is retired at the C2 cutover
-(2026-10-11): its instance entry is deleted, its rendered workflow is gone, and its template
-is kept adopter-only. The repo's merge settings allow merge commits
+(2026-10-11): its instance entry and rendered workflow are deleted, and (Phase 0.2) so is its template. The repo's merge settings allow merge commits
 only. Adopting repos: disable squash and rebase merges in repo settings —
 nothing in the templates configures it for you.
 
@@ -120,8 +119,8 @@ parsable diagnostics is refused before the engine ever sees a reading. The same
 rule now covers every wired summary: the required ratchet workflow
 (`policy/templates/ratchet.yml`) drives the shipped CLI ops —
 `ratchet.checkRatchet` over the typecheck and coverage summaries and
-`ratchet.monotonicGuard` over a PR's baseline diff — while
-`scripts/ratchet-check.mjs` remains a local driver over the same engine.
+`ratchet.monotonicGuard` over a PR's baseline diff
+(the former local driver `scripts/ratchet-check.mjs` was deleted in Phase 0.2).
 
 ## I6 — every worker is a fresh isolated invocation
 

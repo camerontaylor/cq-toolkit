@@ -52,17 +52,16 @@ by the eslint rule `cq/no-vendor-sdk-in-kernel`, scoped to `src/kernel/**`
 
 ## What lands next
 
-Phase 1 (this phase) has landed: the plan runner, the NDJSON journal, the
-budget governor, and the rescue policy lane — all consuming these frozen
-types as-is. Later phases: op families under `src/ops/`, the plan library
+Phase 1 (this phase) has landed: the plan runner, the NDJSON journal, and the
+budget governor — all consuming these frozen types as-is. Later phases: op families under `src/ops/`, the plan library
 under `src/plans/`, and the CLI layer (which owns the {0,1,2,3} exit-code
 mapping) under `src/cli/`.
 
 ## Runner, manifest, journal (T1.2)
 
 `runPlan(plan, opts, registry)` interprets a plan to a `RunReport` (R2 §5:
-a deterministic interpreter — no daemon, no workflow engine; rescue is
-T1.3's governor, never the runner).
+a deterministic interpreter — no daemon, no workflow engine; re-dispatch
+is governed by T1.3's governor, never decided by the runner).
 
 - **Registry is dependency-injected** (`OpRegistryView.get`): the frozen
   `RunOptions` cannot carry it, and the runner stays DI-clean — phase-2
@@ -110,8 +109,7 @@ reason" clause):
 
 The governor owns WHEN to abort (invariant I8): the per-job wall-clock
 escalation ladder, per-job and per-run attempt caps, the USD rollup cap, and
-the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts` (enforcer)
-and `src/kernel/rescue.ts` (policy table + decision engine).
+the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts`.
 
 - **Seam — the governed runner (W2.2, ADR-0003 §2).**
   `runPlan(plan, opts, registry, gov?)` takes the `Governance` handle
@@ -128,7 +126,7 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   still recorded: the governor NEVER retries — an in-wrapper retry would
   hide attempts from the journal (one job-started, two real dispatches),
   which is journal-dishonest and rejected. Re-dispatch happens at the
-  runPlan level via the rescue lane.
+  runPlan level (a resumed run).
 - **Escalation ladder (per job).** Rungs fire in order, each after its grace,
   each appending a marker (kind `ladder-rung`: `rung`, `delayMs` since the
   previous rung, `sinceStartMs`, `delivered`) to `BudgetGovernor.events`:
@@ -583,70 +581,13 @@ deterministically and assert the ladder purely from
 `BudgetGovernor.events` (admissions, refusals, rungs with delays and
 `delivered` flags, completions, the trip, the seed).
 
-## Rescue lane (T1.3)
+## Rescue lane (removed)
 
-`src/kernel/rescue.ts` holds the policy TABLE — plain serializable data
-(JSON round-trips losslessly; no functions) — and the pure decision engine
-that consumes it. Invariant I8 in kernel terms: the KERNEL decides WHETHER
-to retry/escalate and WHAT a re-dispatch carries; drivers execute and never
-decide. The kernel never constructs driver objects — escalation is data a
-driver-owning layer maps onto real drivers.
-
-Shape (first matching row wins; `on` matches the LATEST attempt's outcome;
-`op` scopes the row when present):
-
-```ts
-interface RescuePolicyRow {
-  id: string;                 // stable — audit references name the deciding row
-  on: RescueOutcome | 'any';  // 'ok'|'failed'|'needs-human'|'budget-exhausted'|'indeterminate'|'killed'
-  op?: string;                // absent = every op
-  action:
-    | { kind: 'retry';
-        maxAttempts: number;  // MAX TOTAL attempts under this row (1 = never re-dispatch)
-        escalate?: { model?: string; provider?: string; driver?: string };
-        carrySessionRef?: boolean }  // echo the latest attempt's session resume token
-    | { kind: 'skip' };       // explicit conservative termination
-}
-interface RescuePolicy { rows: RescuePolicyRow[] }
-```
-
-`CONSERVATIVE_RESCUE_POLICY = { rows: [] }` rescues nothing.
-
-Decision rules, in order — first termination wins (conservative by
-construction):
-
-1. Guards first. `baseline-failed` (the job's pre-rescue baseline attempt
-   ended in a definitive failure — a real verdict; re-dispatch cannot help)
-   and `human-intervened` (a human owns the next move) terminate with the
-   guard named; NO row overrides a guard — when a guard trips, rescue NEVER
-   retries. A `needs-human` latest outcome auto-trips the human-intervened
-   guard.
-2. No attempts → terminate (`no-attempts`); latest outcome `ok` → terminate
-   (`already-ok`).
-3. No matching row → terminate (`no-policy-row`); a `skip` row → terminate
-   (`policy-skip`).
-4. A `retry` row is bounded by the EFFECTIVE per-job attempt cap =
-   min(`row.maxAttempts`, `Limits.maxAttemptsPerJob`) — at cap, terminate
-   (`attempt-cap`, naming which bound refused). Otherwise re-dispatch as
-   attempt `n+1` carrying the row's escalation (stronger model/driver, as
-   data) and — only when the row says `carrySessionRef` and the latest
-   attempt observed a token — the session resume token (`OpInvocation.sessionRef`
-   on the frozen seam; observed from `WorkerResult.sessionId`).
-
-`attemptsFromJournal(events, jobId)` is the evidence fold: each
-`job-started` opens a dispatch with ordinal max(frozen `attempt` field,
-dispatch occurrence) — the occurrence count carries the truth while the
-runner still writes `attempt: 1`, and the frozen field dominates once real
-attempt numbers land; the matching `job-finished` closes it with the frozen
-result; a start with no finish (crash/torn tail) stays `killed`; an orphan
-finish is a replay re-attestation refreshing the last attempt. From journal
-evidence alone a ladder kill and any other budget-exhausted result fold to
-the same frozen status — refine to `killed` from the governor's event
-stream when available.
-
-Executing a `retry` decision = a resumed `runPlan` whose dispatches honor
-the decision — never an in-wrapper retry (see the governor section). The
-composition harness for that arrives with the op families (T1.4+).
+The standalone rescue policy table and decision engine (`src/kernel/rescue.ts`)
+were unreachable and were deleted in Phase 0.2 (ADR-0005-D-C); git history is
+the archive. Re-dispatch is a resumed `runPlan` whose dispatches the governor
+admits — never an in-wrapper retry (see the governor section). The sweep plan
+carries its own bounded re-dispatch loop.
 
 ## Recorded design decisions (T1.3)
 

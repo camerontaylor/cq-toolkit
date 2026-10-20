@@ -76,7 +76,7 @@ describe('template render-diff: coverage', () => {
 
   it('finds the workflows and the templates, including the self-host subdirectory', () => {
     expect(workflows).toContain('ci.yml');
-    expect(templates).toContain('merge-queue-gate.yml');
+    expect(templates).toContain('gate.yml');
     expect(templates).toContain('self-host/self-review-loop.yml');
   });
 
