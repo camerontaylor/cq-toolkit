@@ -11,11 +11,13 @@
 # produces nothing:
 #   - `permissions: {}` at the top and on the job, no `secrets.*`, no
 #     `environment:`, no checkout, one no-op step;
-#   - the trigger set is every event that can change a D11 verdict: new or
+#   - the trigger set is debounced (development posture, 2026-10-20): new or
 #     rewritten heads (opened, synchronize, reopened, ready_for_review),
-#     base/body edits (edited), `cq-override` label records (labeled,
-#     unlabeled — the record is re-evaluated on every label event), reviews
-#     and review comments (W1.10's acceptance), and merge-queue pushes.
+#     submitted reviews (W1.10's acceptance), and merge-queue pushes. Review
+#     comments, body/base edits and label events no longer wake the
+#     verifiers — they re-fired them on every comment (79.5% of all Actions
+#     runs in the 2026-10-19 sprint review). `cq-accept`'s 15-minute sweep
+#     is the reconciler for anything a dropped event would have changed.
 #
 # Not a required check: its runs carry no verdict. `cq/policy`, posted by the
 # verifier, is the check.
@@ -27,12 +29,8 @@ on:
       - opened
       - synchronize
       - reopened
-      - labeled
-      - unlabeled
       - ready_for_review
-      - edited
   pull_request_review:
-  pull_request_review_comment:
   push:
     branches:
       - merge-queue

@@ -16,14 +16,22 @@
 #     (every test injects a mock module through the driver's `sdkLoader`
 #     seam).
 #
-# Trigger note (I4 posture): this workflow is not a required check, but its
-# `on:` block is deliberately simple and UNFILTERED — pull_request +
-# workflow_dispatch, no path/branch filters — so the denylist sanity check
-# parses it and the matrix runs on every PR regardless of touched files.
+# Trigger note (development posture, 2026-10-20): this workflow is not a
+# required check, so invariant I4 does not bind it; it is path-filtered to
+# the files that can change the peer-optional claim — the dependency set,
+# the driver lanes, the scripts, and this file — plus workflow_dispatch.
+# If it is ever made required, the filter goes in the same edit (I4).
 name: install-matrix
 
 on:
   pull_request:
+    paths:
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - 'src/driver/**'
+      - 'scripts/**'
+      - .github/workflows/install-matrix.yml
   workflow_dispatch:
 
 permissions:
