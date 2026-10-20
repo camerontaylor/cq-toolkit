@@ -150,10 +150,10 @@ describe('github-settings.json: the committed D13 target', () => {
       context: string;
       integration_id: number;
     }[];
-    // The minimal merge-time set: the I2/D11 verdicts plus denylist; the
-    // promotion gate enforces the rest on the queue tip.
+    // The minimal merge-time set: the I2 verdict plus denylist; the
+    // promotion gate enforces the rest on the queue tip. cq/policy still
+    // posts but is not required (advisory development posture, 2026-10-20).
     expect(checks).toEqual([
-      { context: 'cq/policy', integration_id: VERDICT },
       { context: 'cq/acceptance', integration_id: VERDICT },
       { context: 'denylist', integration_id: 15368 },
     ]);
@@ -303,15 +303,17 @@ describe('compareSettings', () => {
     const live = liveFrom(target());
     const p = params(ruleset(live, 'cq-r2-merge-queue'), 'required_status_checks');
     // The minimal merge-time set (docs/protected-scope.md): a re-pinned
-    // cq/policy, a missing cq/acceptance, and a dropped CI check still live.
+    // cq/acceptance, a missing denylist, a dropped CI check still live, and
+    // a re-required cq/policy (not required since 2026-10-20).
     p['required_status_checks'] = [
-      { context: 'cq/policy', integration_id: 15368 },
-      { context: 'denylist', integration_id: 15368 },
+      { context: 'cq/acceptance', integration_id: 15368 },
       { context: 'static', integration_id: 15368 },
+      { context: 'cq/policy', integration_id: VERDICT },
     ];
     expect(driftOf(live)).toEqual([
-      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/acceptance (integration_id ${VERDICT}) missing`,
-      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/policy: integration_id differs: expected ${VERDICT} actual 15368`,
+      `ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/acceptance: integration_id differs: expected ${VERDICT} actual 15368`,
+      'ruleset cq-r2-merge-queue: rule required_status_checks: required check denylist (integration_id 15368) missing',
+      'ruleset cq-r2-merge-queue: rule required_status_checks: required check cq/policy present live but not in the settings file',
       'ruleset cq-r2-merge-queue: rule required_status_checks: required check static present live but not in the settings file',
     ]);
   });
@@ -320,10 +322,10 @@ describe('compareSettings', () => {
     const live = liveFrom(target());
     const p = params(ruleset(live, 'cq-r2-merge-queue'), 'pull_request');
     p['allowed_merge_methods'] = ['squash', 'merge'];
-    p['required_review_thread_resolution'] = false;
+    p['required_review_thread_resolution'] = true;
     expect(driftOf(live)).toEqual([
       'ruleset cq-r2-merge-queue: rule pull_request: parameter allowed_merge_methods differs: missing [] extra ["squash"]',
-      'ruleset cq-r2-merge-queue: rule pull_request: parameter required_review_thread_resolution differs: expected true actual false',
+      'ruleset cq-r2-merge-queue: rule pull_request: parameter required_review_thread_resolution differs: expected false actual true',
     ]);
   });
 
