@@ -39,6 +39,15 @@
 //     file — still refuses (`workspace dirty`, naming the paths): commit or
 //     stash first. Ignored files stay out of scope (ADR-0003 §4c residual).
 //
+// WHO CAN CONFIRM. In `analyze.fix`, `apply: true` IS the confirmation: it
+// is operator-declared and reachable from ANY registry dispatch (the CLI's
+// `--apply`, an SDK call, or a plan job's JSON) — ADR-0003 §1's "attended,
+// unsigned" row, where the human's presence is the mitigation. It binds to
+// the preview THIS process computes (and, when `previewDigest` is given, to
+// exactly the preview the caller reviewed; an agent patch always requires
+// it). It is not a signed token and must not be treated as one by
+// unattended automation.
+//
 // The registry's process-wide binding stays DENY-ALL for the plain ops
 // (`analyze.applyRemediation`, `analyze.astGrepCodemod`,
 // `analyze.playbookDispatch`); this authority is composed per call by the op

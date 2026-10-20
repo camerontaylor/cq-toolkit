@@ -18,7 +18,9 @@
 //      `--previewDigest=<digest> --apply` applies exactly that patch without
 //      asking the model again);
 //   2. `apply !== true` → `ok` with `mode: 'preview'` and the preview's
-//      `digest`;
+//      `digest`. An AGENT patch is never applied in the call that produced
+//      it: `apply: true` on an agent patch requires `previewDigest` naming
+//      the stored proposal (else `needs-human` with the digest to pass);
 //   3. `apply === true` → run the configured checks (the BEFORE count), then
 //      compose the SAME engine op with an ATTENDED authority
 //      (./attended.ts) whose `confirm` accepts exactly the subject this
@@ -40,15 +42,19 @@
 // edit into a failure: the edit happened, so the value reports it with the
 // recheck's evidence (or the recheck's own failure as `recheck.detail`).
 //
-// `previewDigest` (optional, every path): the digest the caller reviewed.
+// `apply: true` is the operator-declared attended confirmation, reachable
+// from any registry dispatch (ADR-0003 §1 "attended, unsigned"); see
+// ./attended.ts for what that does and does not guarantee.
+//
+// `previewDigest` (optional on the codemod paths): the digest the caller reviewed.
 // When given, a recomputed preview with a different digest is refused
 // `needs-human` — the strongest form of "apply what I saw".
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import type { DriverFactory } from '../../driver/factory.js';
-import type { ModelSpec } from '../../driver/types.js';
+import type { Budget, ModelSpec } from '../../driver/types.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { GIT_HARDEN } from '../../shared/gitHarden.js';
 import { messageOf } from '../../shared/messageOf.js';
@@ -63,7 +69,7 @@ import type { Cluster } from './clusterErrors.js';
 import type { CodemodFileDiff } from './codemod/astGrep.js';
 import { makeAstGrepCodemod } from './codemod/astGrep.js';
 import type { AnalysisSidecar } from './renderAnalysisReport.js';
-import { parseAnalysisSidecar, sidecarFileName } from './renderAnalysisReport.js';
+import { contentDigest, parseAnalysisSidecar, sidecarFileName } from './renderAnalysisReport.js';
 import type { AnalysisSnapshot, AnalyzeRunReport } from './run.js';
 import {
   canonicalProjectDir,
@@ -101,6 +107,8 @@ export interface AnalyzeFixInput {
   previewDigest?: string;
   /** Wall-clock cap for the ast-grep scan. */
   timeoutMs?: number;
+  /** Budget caps for the agent proposal (`model`); forwarded to `analyze.agenticRemediation`. */
+  budget?: Budget;
 }
 
 /** What `analyze.fix` previewed. */
@@ -250,10 +258,27 @@ function selectCluster(
       error: `analyze.fix: the sidecar '${sidecarPath}' must lie inside the project directory '${dir}'`,
     };
   }
+  // Lexical containment is not enough: a leaf (or intermediate) symlink
+  // could point the read outside the project. Resolve, then re-check.
+  let realSidecar: string;
+  try {
+    realSidecar = realpathSync(sidecarPath);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `analyze.fix: the analysis sidecar '${sidecarPath}' does not resolve — ${messageOf(err)}; run \`cq analyze.run --dir=${dir}\` again`,
+    };
+  }
+  if (!inside(dir, realSidecar)) {
+    return {
+      ok: false,
+      error: `analyze.fix: the sidecar '${sidecarPath}' resolves outside the project directory ('${realSidecar}') — refusing to read it`,
+    };
+  }
   let text: string;
   let sidecar: AnalysisSidecar;
   try {
-    text = readFileSync(sidecarPath, 'utf8');
+    text = readFileSync(realSidecar, 'utf8');
     sidecar = parseAnalysisSidecar(text);
   } catch (err) {
     return {
@@ -376,7 +401,27 @@ export function patchTargets(
   exempt: readonly string[] = ATTENDED_DEFAULT_EXEMPT,
 ): { ok: true; targets: string[] } | { ok: false; reason: string } {
   const paths = new Set<string>();
+  // Hunk BODY lines are content, never headers: a removed `-- comment` line
+  // reads `--- comment`. Track the `@@ -a,b +c,d @@` counts and skip the body.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of patch.split('\n')) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith('\\')) continue; // "\ No newline at end of file"
+      if (line.startsWith('-')) oldLeft -= 1;
+      else if (line.startsWith('+')) newLeft -= 1;
+      else {
+        oldLeft -= 1;
+        newLeft -= 1;
+      }
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (hunk !== null) {
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      continue;
+    }
     let candidate: string | null | undefined;
     if (line.startsWith('diff --git ')) {
       const match = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
@@ -450,6 +495,7 @@ async function checkPatch(
     return { ok: false, reason: `git apply would skip part of the patch: ${output.trim()}` };
   }
   const allowed = new Set(targets.map((target) => `${prefix}${target}`));
+  const touched = new Set<string>();
   for (const match of output.matchAll(/^Checking patch (.+)\.\.\.$/gm)) {
     const named = match[1] as string;
     // A rename is reported as `old => new`.
@@ -460,7 +506,17 @@ async function checkPatch(
           reason: `git would touch '${part}', which the patch header parse did not name`,
         };
       }
+      touched.add(part);
     }
+  }
+  // The cross-check must PROVE coverage, not merely find no contradiction:
+  // git has to report every parsed target (and so at least one).
+  const unreported = [...allowed].filter((path) => !touched.has(path));
+  if (touched.size === 0 || unreported.length > 0) {
+    return {
+      ok: false,
+      reason: `git apply --check did not report the files the patch names (unreported: ${unreported.join(', ') || '(all)'}) — refusing a patch whose write set cannot be confirmed`,
+    };
   }
   return { ok: true };
 }
@@ -506,7 +562,7 @@ function withRunHint(error: string, dir: string): string {
 
 /** Build the `analyze.fix` op over its seams. */
 export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, AnalyzeFixReport> {
-  const exempt = deps.exempt ?? ATTENDED_DEFAULT_EXEMPT;
+  const baseExempt = deps.exempt ?? ATTENDED_DEFAULT_EXEMPT;
   return async (input) => {
     const project = canonicalProjectDir(input.dir, 'analyze.fix');
     if (!project.ok) return { status: 'failed', error: project.error };
@@ -533,6 +589,7 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
     if (!outDir.ok)
       return { status: 'failed', error: outDir.error.replace('analyze.run', 'analyze.fix') };
     const out = outDir.out;
+    const exempt = withReportArea(baseExempt, dir, out);
     const store = pathAnalysisFileStore(dir);
     const timeout = input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs };
 
@@ -588,7 +645,7 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
           }),
         };
       } else if (input.model !== undefined || input.previewDigest !== undefined) {
-        const proposal = await agentPreview(deps, dir, out, selected, input);
+        const proposal = await agentPreview(deps, dir, out, exempt, selected, input);
         if (proposal.status !== 'ok') return proposal;
         preview = proposal.value;
       } else {
@@ -627,6 +684,19 @@ export function makeAnalyzeFix(deps: AnalyzeFixDeps): Op<AnalyzeFixInput, Analyz
       return {
         status: 'needs-human',
         reason: `analyze.fix: the preview changed since it was reviewed (reviewed ${input.previewDigest}, now ${preview.digest}) — nothing was written; review the new preview and re-run with --previewDigest=${preview.digest} --apply`,
+      };
+    }
+
+    // An AGENT patch is never applied unseen: the model is not deterministic,
+    // so the apply must name the stored proposal the human reviewed.
+    if (
+      input.apply === true &&
+      preview.kind === 'agent-patch' &&
+      input.previewDigest === undefined
+    ) {
+      return {
+        status: 'needs-human',
+        reason: `analyze.fix: an agent proposal is applied only after review — nothing was written; the proposal is stored at '${preview.proposalPath}'; review it, then re-run with --previewDigest=${preview.digest} --apply`,
       };
     }
 
@@ -869,12 +939,22 @@ async function agentPreview(
   deps: AnalyzeFixDeps,
   dir: string,
   out: string,
+  exempt: readonly string[],
   selected: SelectedCluster,
   input: AnalyzeFixInput,
 ): Promise<OpResult<AnalyzeFixPreview>> {
   const { cluster, sidecarPath } = selected;
   const outStore = pathAnalysisFileStore(out);
-  const exempt = deps.exempt ?? ATTENDED_DEFAULT_EXEMPT;
+  // The mechanical path's staleness rule, applied here too: a proposal for a
+  // snapshot whose evidenced files moved is a proposal for a diagnostic that
+  // may no longer exist.
+  const stale = await staleEvidence(pathAnalysisFileStore(dir), selected.sidecar);
+  if (stale !== null) {
+    return {
+      status: 'failed',
+      error: `analyze.fix: ${stale} (run \`cq analyze.run --dir=${dir}\` to refresh the analysis)`,
+    };
+  }
   const digestHex = /^sha256:([0-9a-f]{64})$/.exec(input.previewDigest ?? '')?.[1];
   // A STORED proposal, addressed by the digest the caller reviewed.
   if (digestHex !== undefined) {
@@ -904,7 +984,7 @@ async function agentPreview(
           patch,
           targets: parsed.targets,
           proposalPath: join(out, name),
-          digest: approvalInputDigest({ kind: 'agent-patch', targets: parsed.targets, patch }),
+          digest: proposalDigest(selected, parsed.targets, patch),
         },
       };
     }
@@ -919,6 +999,7 @@ async function agentPreview(
     clusterId: cluster.id,
     cluster,
     modelSpec: input.model,
+    ...(input.budget === undefined ? {} : { budget: input.budget }),
   });
   if (agent.status !== 'ok') return relay(agent, 'analyze.fix: the agent proposal');
   const proposal = AGENTIC_PROPOSAL_SCHEMA.safeParse(agent.value.structuredOutput);
@@ -939,7 +1020,12 @@ async function agentPreview(
         sidecarPath,
         summary,
         note: 'the proposal carries no patch — nothing mechanical to apply; read the summary',
-        digest: approvalInputDigest({ kind: 'agent-summary', summary }),
+        digest: approvalInputDigest({
+          kind: 'agent-summary',
+          clusterId: cluster.id,
+          signature: cluster.signature,
+          summary,
+        }),
       },
     };
   }
@@ -950,7 +1036,7 @@ async function agentPreview(
       error: `analyze.fix: the agent's patch is not applicable — ${parsed.reason}`,
     };
   }
-  const digest = approvalInputDigest({ kind: 'agent-patch', targets: parsed.targets, patch });
+  const digest = proposalDigest(selected, parsed.targets, patch);
   const name = `${PROPOSAL_PREFIX}${digest.slice('sha256:'.length)}.patch`;
   try {
     await outStore.writeBytes(name, Buffer.from(patch, 'utf8'));
@@ -982,4 +1068,61 @@ async function agentPreview(
       digest,
     },
   };
+}
+
+/**
+ * The stored-proposal binding: the patch, its targets, AND the work it was
+ * proposed for (cluster id, signature, sidecar bytes) — so a digest reviewed
+ * for one cluster cannot be replayed against another, or against a newer
+ * analysis.
+ */
+function proposalDigest(
+  selected: SelectedCluster,
+  targets: readonly string[],
+  patch: string,
+): string {
+  return approvalInputDigest({
+    kind: 'agent-patch',
+    clusterId: selected.cluster.id,
+    signature: selected.cluster.signature,
+    sidecarSha256: selected.sidecarSha256,
+    targets,
+    patch,
+  });
+}
+
+/** The first evidenced target whose current bytes differ from the analysis digest, as a reason; or null. */
+async function staleEvidence(
+  store: ReturnType<typeof pathAnalysisFileStore>,
+  sidecar: AnalysisSidecar,
+): Promise<string | null> {
+  for (const evidence of sidecar.evidence) {
+    for (const target of evidence.targets) {
+      let digest: string;
+      try {
+        digest = contentDigest(Buffer.from(await store.readBytes(target.file)).toString('utf8'));
+      } catch (err) {
+        return `stale sidecar: target '${target.file}' is no longer readable — ${messageOf(err)}`;
+      }
+      if (digest !== target.digest) {
+        return `stale sidecar: '${target.file}' changed since analysis (analysis digest ${target.digest}, current ${digest})`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The exempt prefixes for one call: the configured ones plus the report
+ * directory `out` (strictly inside `dir`), so a custom report area holding
+ * this run's untracked sidecar and proposals is not workspace dirt. Targets
+ * under any exempt prefix stay refused.
+ */
+function withReportArea(exempt: readonly string[], dir: string, out: string): readonly string[] {
+  const rel = relative(dir, out).split(sep).join('/');
+  const covered = exempt.some((prefix) => {
+    const base = prefix.replace(/\/+$/, '');
+    return rel === base || rel.startsWith(`${base}/`);
+  });
+  return covered ? exempt : [...exempt, `${rel}/`];
 }

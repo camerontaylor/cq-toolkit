@@ -266,6 +266,24 @@ describe('analyze.fix — cluster + rule', () => {
   });
 });
 
+describe('analyze.fix — a custom report directory', () => {
+  test('the custom out is exempt like .cq/: the apply proceeds over its untracked reports', async () => {
+    const { dir } = await fixture();
+    const run = scriptedRunner();
+    const analysis = await makeAnalyzeRun(run)({ dir, checks: CHECKS, out: 'reports/cq' });
+    if (analysis.status !== 'ok') throw new Error('analysis failed');
+    const result = await makeAnalyzeFix({ run })({
+      dir,
+      out: 'reports/cq',
+      clusterId: analysis.value.clusters[0]?.id ?? '',
+      rule: RULE,
+      apply: true,
+    });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    expect(source(dir)).toBe(GOOD);
+  });
+});
+
 describe('analyze.fix — rule over files', () => {
   test('preview then apply; recheck counts go down', async () => {
     const { dir } = await fixture();
@@ -332,21 +350,38 @@ const PATCH = [
 const MODEL = { provider: 'zai', model: 'glm-test' };
 
 describe('analyze.fix — agent proposal', () => {
-  test('preview stores the patch; apply (same call) writes it and rechecks', async () => {
+  test('two steps: preview stores the patch; a one-step apply is refused; apply with the digest writes it', async () => {
     const { dir, clusterId } = await fixture();
     const { factory, invocations } = fakeFactory({ summary: 'use a number', patch: PATCH });
     const fix = makeAnalyzeFix({ run: scriptedRunner(), drivers: factory });
-    const preview = await fix({ dir, clusterId, model: MODEL });
+    const budget = { maxTokens: 1000 };
+    const preview = await fix({ dir, clusterId, model: MODEL, budget });
     expect(preview.status).toBe('ok');
     if (preview.status !== 'ok' || preview.value.preview.kind !== 'agent-patch') {
       throw new Error(`expected an agent-patch preview: ${JSON.stringify(preview)}`);
     }
     expect(invocations[0]?.toolPolicy.mode).toBe('none');
     expect(invocations[0]?.sandboxPolicy.level).toBe('read-only');
+    expect(invocations[0]?.budget).toEqual(budget);
     expect(preview.value.preview.targets).toEqual(['src/index.ts']);
     expect(readFileSync(preview.value.preview.proposalPath, 'utf8')).toBe(PATCH);
     expect(source(dir)).toBe(BAD);
-    const applied = await fix({ dir, clusterId, model: MODEL, apply: true });
+    // ONE step (model + apply, no digest): a fresh, unseen proposal — refused.
+    const oneStep = await fix({ dir, clusterId, model: MODEL, apply: true });
+    expect(oneStep.status).toBe('needs-human');
+    if (oneStep.status === 'needs-human')
+      expect(oneStep.reason).toContain('--previewDigest=sha256:');
+    expect(source(dir)).toBe(BAD);
+    // TWO steps: the reviewed digest applies exactly the stored proposal.
+    const calls = invocations.length;
+    const applied = await fix({
+      dir,
+      clusterId,
+      model: MODEL,
+      apply: true,
+      previewDigest: preview.value.preview.digest,
+    });
+    expect(invocations.length).toBe(calls);
     expect(applied.status).toBe('ok');
     if (applied.status !== 'ok') return;
     expect(applied.value.applied?.patch).toBe(PATCH);
@@ -378,6 +413,38 @@ describe('analyze.fix — agent proposal', () => {
     ).toBe('stored-proposal');
     expect(second.invocations).toEqual([]);
     expect(source(dir)).toBe(GOOD);
+  });
+
+  test('a stored proposal is bound to its analysis: a changed sidecar refuses the digest', async () => {
+    const { dir, clusterId, sidecarPath } = await fixture();
+    const { factory } = fakeFactory({ summary: 'use a number', patch: PATCH });
+    const fix = makeAnalyzeFix({ run: scriptedRunner(), drivers: factory });
+    const preview = await fix({ dir, clusterId, model: MODEL });
+    if (preview.status !== 'ok') throw new Error('preview failed');
+    writeFileSync(sidecarPath, `${readFileSync(sidecarPath, 'utf8')}\n`);
+    const result = await fix({
+      dir,
+      clusterId,
+      apply: true,
+      previewDigest: preview.value.preview.digest,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('preview changed');
+    expect(source(dir)).toBe(BAD);
+  });
+
+  test('a stale sidecar is refused before the model is asked', async () => {
+    const { dir, clusterId } = await fixture();
+    writeFileSync(join(dir, 'src', 'index.ts'), `${BAD}// moved on\n`);
+    const { factory, invocations } = fakeFactory({ summary: 'x', patch: PATCH });
+    const result = await makeAnalyzeFix({ run: scriptedRunner(), drivers: factory })({
+      dir,
+      clusterId,
+      model: MODEL,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toContain('stale sidecar');
+    expect(invocations).toEqual([]);
   });
 
   test('a summary-only proposal is a preview with nothing to apply', async () => {
@@ -445,6 +512,23 @@ describe('patchTargets', () => {
       ok: true,
       targets: ['new.ts'],
     });
+  });
+
+  test('hunk body lines that look like headers are content, not paths', () => {
+    const patch = [
+      '--- a/q.sql',
+      '+++ b/q.sql',
+      '@@ -1,2 +1,2 @@',
+      '-- comment',
+      '+++ x',
+      ' select 1;',
+      '',
+    ]
+      .join('\n')
+      .replace('-- comment', '--- comment');
+    expect(patchTargets(patch)).toEqual({ ok: true, targets: ['q.sql'] });
+    const escaping = patch.replace('--- comment', '--- ../notes');
+    expect(patchTargets(escaping)).toEqual({ ok: true, targets: ['q.sql'] });
   });
 
   test.each([

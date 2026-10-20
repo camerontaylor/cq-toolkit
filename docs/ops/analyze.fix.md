@@ -17,7 +17,47 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "additionalProperties": false,
   "properties": {
     "apply": {
+      "description": "The operator-declared ATTENDED confirmation (ADR-0003 §1 'attended, unsigned'): true applies the edit this process previews (or exactly the one previewDigest names) under an attended approval — reachable from any registry dispatch, plan JSON included, so it is a declared intent bound to that preview, not a signed token. An agent (model) patch additionally requires previewDigest.",
       "type": "boolean"
+    },
+    "budget": {
+      "additionalProperties": false,
+      "properties": {
+        "maxAttempts": {
+          "type": "number"
+        },
+        "maxTokens": {
+          "type": "number"
+        },
+        "maxUsd": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "strictTokenBudget": {
+          "additionalProperties": false,
+          "properties": {
+            "maxInputTokens": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
+            "reserveOutputTokens": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "maxInputTokens",
+            "reserveOutputTokens"
+          ],
+          "type": "object"
+        },
+        "wallClockMs": {
+          "type": "number"
+        }
+      },
+      "type": "object"
     },
     "checks": {
       "items": {

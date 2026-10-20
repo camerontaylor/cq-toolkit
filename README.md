@@ -70,10 +70,14 @@ cq analyze.fix --dir=. --clusterId=<id> --apply   # attended apply + recheck
 writes a Markdown report and its JSON sidecar under `.cq/analysis/` and returns the clusters.
 `analyze.fix` needs the remediation: an ast-grep rule (`--rule='{"id":…,"language":"TypeScript","rule":{…},"fix":"…"}'`),
 or `--model='{"provider":…,"model":…}'` to ask an agent for a patch; `--rule` with `--files='["src/a.ts"]'`
-works without a cluster. Without `--apply` nothing is written. With `--apply` the work tree must be a
+works without a cluster. Without `--apply` no project file is written (the report directory
+`.cq/analysis/` may be created, and a `--model` preview stores its proposal there). An agent patch
+is applied only in a second call that names its digest (`--previewDigest=<digest> --apply`). With `--apply` the work tree must be a
 committed, clean git tree (only `.cq/` may differ — commit or stash anything else); the edit is
 applied exactly as previewed (pass `--previewDigest=<digest>` from the preview to pin it), and the
-configured checks are re-run to report the failure count before and after.
+configured checks are re-run to report the failure count before and after. The commands in
+`cq.json` run with your privileges, like package.json scripts (as argv, never through a shell),
+so review the file like code.
 
 ```sh
 cq --help                                        # global help

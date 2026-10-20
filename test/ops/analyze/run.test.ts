@@ -3,7 +3,16 @@
 // cq.json or the input, dir-relative failure paths, multi-tool merge, the
 // report pair under .cq/analysis (a sidecar the remediation path can parse),
 // the honest empty result, and every refusal's taxonomy.
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -123,6 +132,19 @@ describe('analyze.run — the dataflow', () => {
     expect(result.status === 'ok' && result.value.clusters[0]?.files).toEqual(['pkg/src/index.ts']);
   });
 
+  test('a failure outside dir is counted per check but not clustered; reported as skippedOutsideDir', async () => {
+    const dir = project({ 'cq.json': CONFIG, 'src/index.ts': 'x\n' });
+    const outside = "../elsewhere/lib.ts(3,1): error TS2304: Cannot find name 'q'.\n" + TS2322;
+    const result = await makeAnalyzeRun(scripted([{ stdout: outside, exitCode: 1 }]))({ dir });
+    expect(result.status, JSON.stringify(result)).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.checks[0]?.failures).toBe(2);
+    expect(result.value.failureCount).toBe(1);
+    expect(result.value.skippedOutsideDir).toBe(1);
+    expect(result.value.outsideDirFiles).toEqual([join(dir, '..', 'elsewhere', 'lib.ts')]);
+    expect(result.value.clusters.map((cluster) => cluster.ruleId)).toEqual(['TS2322']);
+  });
+
   test('no failures behind exit 0 → honest ok, failureCount 0, an empty report pair', async () => {
     const dir = project({ 'cq.json': CONFIG });
     const result = await makeAnalyzeRun(scripted([{ stdout: '', exitCode: 0 }]))({ dir });
@@ -156,7 +178,7 @@ describe('analyze.run — refusals keep the taxonomy', () => {
     expect(result.status).toBe('failed');
     if (result.status === 'failed') expect(result.error).toContain('analyze.init');
     expect(run.calls).toEqual([]);
-    expect(() => readFileSync(join(dir, '.cq'))).toThrow();
+    expect(existsSync(join(dir, '.cq'))).toBe(false);
   });
 
   test('invalid cq.json → failed naming the defect and analyze.init --force', async () => {
@@ -209,6 +231,19 @@ describe('analyze.run — refusals keep the taxonomy', () => {
       });
       expect(result.status, out).toBe('failed');
     }
+  });
+
+  test('an out through a symlinked component is refused BEFORE anything is created outside', async () => {
+    const dir = project({ 'cq.json': CONFIG });
+    const external = realpathSync(mkdtempSync(join(tmpdir(), 'cq-run-external-')));
+    dirs.push(external);
+    symlinkSync(external, join(dir, 'reports'));
+    const result = await makeAnalyzeRun(scripted([{ stdout: TS2322, exitCode: 1 }]))({
+      dir,
+      out: 'reports/analysis',
+    });
+    expect(result.status).toBe('failed');
+    expect(existsSync(join(external, 'analysis'))).toBe(false);
   });
 
   test('a missing dir → failed', async () => {

@@ -435,8 +435,14 @@ export const AnalyzeFixInputSchema: z.ZodType<AnalyzeFixInput> = z
     signature: z.string().min(1).exactOptional(),
     rule: RuleInput.exactOptional(),
     files: z.array(z.string().min(1)).exactOptional(),
-    apply: z.boolean().exactOptional(),
+    apply: z
+      .boolean()
+      .describe(
+        "The operator-declared ATTENDED confirmation (ADR-0003 §1 'attended, unsigned'): true applies the edit this process previews (or exactly the one previewDigest names) under an attended approval — reachable from any registry dispatch, plan JSON included, so it is a declared intent bound to that preview, not a signed token. An agent (model) patch additionally requires previewDigest.",
+      )
+      .exactOptional(),
     model: ModelSpecSchema.exactOptional(),
+    budget: BudgetSchema.exactOptional(),
     out: z.string().min(1).exactOptional(),
     checks: ChecksSchema.exactOptional(),
     configPath: z.string().min(1).exactOptional(),

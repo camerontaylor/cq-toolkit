@@ -26,10 +26,15 @@
 //      `out` must be a strict descendant of `dir`: `analyze.applyRemediation`
 //      reads the sidecar through a store rooted at `dir`, and the attended
 //      approval exempts `.cq/` from the clean-tree predicate.
+// A failure whose file lies OUTSIDE `dir` (a monorepo `paths` mapping, a
+// sibling package) stays counted in its check's `failures` but is excluded
+// from the clustered and rendered set — the report's evidence store is rooted
+// at `dir` — and is surfaced as `skippedOutsideDir` with the paths, so
+// nothing is silently hidden.
 // An empty failure set is an honest `ok` with `failureCount: 0` (and an empty
 // report pair), because every check parsed behind exit code 0.
-import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { CheckFailure, CheckRunnerInput, FailureSet, RunCheck } from '../gates/checkRunner.js';
@@ -81,8 +86,12 @@ export interface AnalyzeRunCluster {
 export interface AnalyzeRunReport {
   /** Per-check outcomes, in check order. */
   checks: AnalyzeRunCheckSummary[];
-  /** Distinct failures across every tool. */
+  /** Distinct failures inside `dir` across every tool (the clustered set). */
   failureCount: number;
+  /** Failures whose file lies outside `dir`: counted per check, not clustered. */
+  skippedOutsideDir: number;
+  /** The distinct outside-`dir` files behind {@link skippedOutsideDir}, sorted. */
+  outsideDirFiles: string[];
   clusters: AnalyzeRunCluster[];
   markdownPath: string;
   sidecarPath: string;
@@ -98,6 +107,8 @@ export interface AnalysisSnapshot {
   sets: FailureSet[];
   report: ClusterErrorsReport;
   failureCount: number;
+  skippedOutsideDir: number;
+  outsideDirFiles: string[];
 }
 
 /**
@@ -174,6 +185,8 @@ export async function probeAndCluster(
   checks: readonly CheckRunnerInput[],
 ): Promise<OpResult<AnalysisSnapshot>> {
   const summaries: AnalyzeRunCheckSummary[] = [];
+  let skippedOutsideDir = 0;
+  const outsideDirFiles = new Set<string>();
   const byTool = new Map<string, FailureSet[]>();
   for (const [index, check] of checks.entries()) {
     const command = resolvedCommand(dir, check);
@@ -199,16 +212,24 @@ export async function probeAndCluster(
       };
     }
     const cwd = command.cwd ?? dir;
-    const failures: CheckFailure[] = parsed.set.failures.map((failure) => ({
+    const normalized: CheckFailure[] = parsed.set.failures.map((failure) => ({
       ...failure,
       file: normalizeFile(dir, cwd, failure.file),
     }));
+    // Inside-`dir` failures are dir-relative (or file-less); an absolute
+    // path is one normalizeFile left outside `dir`.
+    const failures = normalized.filter((failure) => {
+      if (failure.file === null || !isAbsolute(failure.file)) return true;
+      skippedOutsideDir += 1;
+      outsideDirFiles.add(failure.file);
+      return false;
+    });
     const set: FailureSet = { tool: parsed.set.tool, failures, exitCode: parsed.set.exitCode };
     summaries.push({
       adapter: check.adapter,
       tool: set.tool,
       exitCode: set.exitCode,
-      failures: failures.length,
+      failures: normalized.length,
     });
     byTool.set(set.tool, [...(byTool.get(set.tool) ?? []), set]);
   }
@@ -238,7 +259,14 @@ export async function probeAndCluster(
   const failureCount = sets.reduce((total, set) => total + set.failures.length, 0);
   return {
     status: 'ok',
-    value: { checks: summaries, sets, report: { clusters, noise }, failureCount },
+    value: {
+      checks: summaries,
+      sets,
+      report: { clusters, noise },
+      failureCount,
+      skippedOutsideDir,
+      outsideDirFiles: [...outsideDirFiles].sort(),
+    },
   };
 }
 
@@ -273,6 +301,28 @@ export function resolveOutDir(
       error: `analyze.run: report directory '${target}' must lie strictly inside the project directory '${dir}' (the remediation store and the attended approval both assume it); the default is '${ANALYZE_DEFAULT_OUT}'`,
     };
   }
+  // Containment BEFORE creation: realpath the deepest EXISTING ancestor and
+  // require it inside `dir`, so a symlinked component cannot make mkdir -p
+  // create directories outside the project before the check refuses.
+  // lstat, not exists: a dangling symlink component counts as existing, and
+  // its realpath then fails — a refusal, never a mkdir through it.
+  let ancestor = target;
+  while (!entryExists(ancestor)) ancestor = dirname(ancestor);
+  try {
+    const realAncestor = realpathSync(ancestor);
+    const ancestorRel = relative(dir, realAncestor);
+    if (ancestorRel.startsWith('..') || isAbsolute(ancestorRel)) {
+      return {
+        ok: false,
+        error: `analyze.run: report directory '${target}' resolves outside the project directory through '${ancestor}' (a symlink?) — refusing to create or write reports there`,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `analyze.run: could not resolve the report directory '${target}' — ${messageOf(err)}`,
+    };
+  }
   try {
     mkdirSync(target, { recursive: true });
     const real = realpathSync(target);
@@ -289,6 +339,16 @@ export function resolveOutDir(
       ok: false,
       error: `analyze.run: could not create the report directory '${target}' — ${messageOf(err)}`,
     };
+  }
+}
+
+/** True when a directory entry (of any type, a dangling symlink included) exists at `path`. */
+function entryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -345,6 +405,8 @@ export function makeAnalyzeRun(run: RunCheck): Op<AnalyzeRunInput, AnalyzeRunRep
       value: {
         checks: snapshot.value.checks,
         failureCount: snapshot.value.failureCount,
+        skippedOutsideDir: snapshot.value.skippedOutsideDir,
+        outsideDirFiles: snapshot.value.outsideDirFiles,
         clusters: snapshot.value.report.clusters.map(summarizeCluster),
         markdownPath: rendered.value.markdownPath,
         sidecarPath: rendered.value.sidecarPath,

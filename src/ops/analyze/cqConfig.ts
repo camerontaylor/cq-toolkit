@@ -9,6 +9,8 @@
 //                   "command": { "command": "node_modules/.bin/tsc",
 //                                "args": ["--noEmit", "--pretty", "false"],
 //                                "cwd": "." } } ] }
+// Commands in `cq.json` run with YOUR privileges, like package.json scripts:
+// treat the file as code. They are executed as argv (no shell, no globbing).
 // Each check is exactly a `gates.checkRunner` input. Relative `cwd` values
 // resolve against the config's project directory; a relative `command` that
 // contains a path separator resolves against the check's cwd.
