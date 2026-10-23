@@ -25,12 +25,20 @@ import type { OpInvocation, WorkerResult } from '../../src/driver/types.js';
 
 const handle = vi.hoisted(() => ({
   controller: new AbortController(),
-  factoryCalls: [] as Array<{ apiKey: string; baseURL: string }>,
+  factoryCalls: [] as Array<{
+    apiKey: string;
+    baseURL: string;
+    headers: { 'x-opencode-session': string };
+  }>,
   chatModelIds: [] as string[],
 }));
 
 vi.mock('@ai-sdk/openai', () => ({
-  createOpenAI: (settings: { apiKey: string; baseURL: string }) => {
+  createOpenAI: (settings: {
+    apiKey: string;
+    baseURL: string;
+    headers: { 'x-opencode-session': string };
+  }) => {
     handle.factoryCalls.push(settings);
     // Abort DURING provider resolution: the driver's late governed-
     // cancellation recheck then returns before any session store, so this
@@ -125,9 +133,14 @@ describe('the opencode-go provider handle (default registry)', () => {
       // UNCHANGED (no default route, no rewriting), and the requested id is
       // exactly ModelSpec.model — the chat-completions handle aliases
       // nothing.
-      expect(handle.factoryCalls).toEqual([
-        { apiKey: 'offline-handle-key', baseURL: 'https://go-wire.invalid/v1' },
-      ]);
+      expect(handle.factoryCalls).toHaveLength(1);
+      expect(handle.factoryCalls[0]).toMatchObject({
+        apiKey: 'offline-handle-key',
+        baseURL: 'https://go-wire.invalid/v1',
+      });
+      expect(handle.factoryCalls[0]?.headers['x-opencode-session']).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
       expect(handle.chatModelIds).toEqual(['config-owned-model-id']);
       // The abort fired inside the mock, so the LATE governed-cancellation
       // recheck settled the run before any session state: zero usage, no

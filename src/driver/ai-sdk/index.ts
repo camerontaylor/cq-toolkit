@@ -208,6 +208,7 @@ import type {
   ToolSet,
 } from 'ai';
 import type { JSONSchema7 } from '@ai-sdk/provider';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -1389,6 +1390,8 @@ function defaultSessionsDir(): string {
  * a deployment points the handle at its wire explicitly (the captured Go
  * origin lives in the pricing profile's endpoint-scoped 402 rule,
  * provider-profiles.ts, and is deliberately not duplicated here). The
+ * provider supplies a stable `x-opencode-session` UUID for this run, as Go
+ * uses conversation ids for efficient routing and prompt caching.
  * model id rides ModelSpec.model verbatim — `.chat(modelId)`, no aliasing.
  * The Go wire ECHOES the requested id in the response `model` field (RS-14
  * capture: the upstream serving provider surfaces only in routing
@@ -1453,6 +1456,7 @@ function defaultProviders(): Record<string, ProviderFactory> {
       createOpenAI({
         apiKey: requireEnv('opencode-go', 'OPENCODE_GO_API_KEY'),
         baseURL: requireEnv('opencode-go', 'OPENCODE_GO_BASE_URL'),
+        headers: { 'x-opencode-session': randomUUID() },
       }).chat(modelId),
   };
 }
