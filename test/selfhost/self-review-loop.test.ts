@@ -1095,10 +1095,8 @@ describe('main — peak-aware driver credential (fail closed)', () => {
   });
 
   const at = (iso: string): number => Date.parse(iso);
-  // Owner ruling 2026-10-16: the peak window uses the SAME driver as off-peak,
-  // so both windows select the Z.AI key. The tests below still exercise the
-  // window-selection and single-clock-read mechanics, keyed on the resolved
-  // env names rather than on a provider difference.
+  // The peak window uses OpenCode Go while off-peak uses Z.AI; these tests
+  // pin the window selection and the key/base-URL preflight for each route.
   const PEAK_KEY = `${String(driverKeyEnv(SelfhostPeak.driver))}\n`;
   const OFF_PEAK_KEY = `${String(driverKeyEnv(SelfhostDefaults.driver))}\n`;
 
@@ -1154,8 +1152,8 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
     // Another provider's key is present but NOT the selected one: the
     // preflight must require the key belonging to the window's driver.
-    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
-    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('OPENCODE_GO_API_KEY', '');
     await expect(
       main({
         ...baseDeps(
@@ -1164,13 +1162,13 @@ describe('main — peak-aware driver credential (fail closed)', () => {
         ),
         nowMs: () => at('2026-10-12T07:00:00Z'),
       }),
-    ).rejects.toThrow('requires ZAI_API_KEY');
+    ).rejects.toThrow('requires OPENCODE_GO_API_KEY');
   });
 
   test('an OFF-PEAK run likewise refuses when ZAI_API_KEY is absent', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
     vi.stubEnv('ZAI_API_KEY', '');
-    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('OPENCODE_GO_API_KEY', 'present-but-not-selected');
     await expect(
       main({
         ...baseDeps(
@@ -1199,8 +1197,8 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     write.mockRestore();
     // … and a REAL run starting there refuses when the selected key is absent.
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH];
-    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
-    vi.stubEnv('ZAI_API_KEY', '');
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('OPENCODE_GO_API_KEY', '');
     await expect(
       main({
         ...baseDeps(
@@ -1209,7 +1207,7 @@ describe('main — peak-aware driver credential (fail closed)', () => {
         ),
         nowMs: () => at('2026-10-12T05:45:00Z'),
       }),
-    ).rejects.toThrow('requires ZAI_API_KEY');
+    ).rejects.toThrow('requires OPENCODE_GO_API_KEY');
   });
 
   test('a pinned CQ_SELFHOST_NOW_MS drives the handshake AND the run', async () => {
@@ -1241,8 +1239,9 @@ describe('main — peak-aware driver credential (fail closed)', () => {
       '--journal-root',
       journalRoot,
     ];
-    vi.stubEnv('ZAI_API_KEY', 'peak-key');
-    vi.stubEnv('DEEPSEEK_API_KEY', 'present-but-not-selected');
+    vi.stubEnv('OPENCODE_GO_API_KEY', 'peak-key');
+    vi.stubEnv('OPENCODE_GO_BASE_URL', 'https://go-wire.invalid/v1');
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
     await main({
       ...baseDeps(
         fakeGh([pullRow(7)]),
@@ -1270,7 +1269,8 @@ describe('main — peak-aware driver credential (fail closed)', () => {
   test('a dry run dispatches nothing and needs no provider key', async () => {
     process.argv = ['node', 'self-review-loop.js', '--repo', REPO_PATH, '--dry-run'];
     vi.stubEnv('ZAI_API_KEY', '');
-    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    vi.stubEnv('OPENCODE_GO_API_KEY', '');
+    vi.stubEnv('OPENCODE_GO_BASE_URL', '');
     // stdout is spied to keep the payload out of the report; the mock MUST
     // invoke the write callback, which main() awaits (a no-op mock would
     // hang the run).
@@ -1312,8 +1312,9 @@ describe('main — peak-aware driver credential (fail closed)', () => {
     // The selected key is present; a sweep that read its OWN clock after the
     // preflight would stamp the journal with the later instant (and, for an
     // adopter with a distinct peak driver, pick the other provider).
-    vi.stubEnv('ZAI_API_KEY', 'peak-key');
-    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    vi.stubEnv('OPENCODE_GO_API_KEY', 'peak-key');
+    vi.stubEnv('OPENCODE_GO_BASE_URL', 'https://go-wire.invalid/v1');
+    vi.stubEnv('ZAI_API_KEY', 'present-but-not-selected');
     const peak = Date.parse('2026-10-12T06:00:00Z');
     const offPeakLater = Date.parse('2026-10-12T11:00:00Z');
     let reads = 0;

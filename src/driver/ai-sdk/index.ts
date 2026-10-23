@@ -413,7 +413,13 @@ export class AiSdkDriver implements Driver {
     // --- Pre-dispatch validation: everything here throws BEFORE the model
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
     // partial state).
-    const resolvedModel = this.resolveModel(modelSpec, sessionRef);
+    // OpenCode Go routes requests by session header. Allocate the fresh
+    // invocation's session id before provider construction so the wire and
+    // persisted session record share one stable identity; resumed runs reuse
+    // their existing record id.
+    const sessionId =
+      sessionRef ?? (modelSpec.provider === 'opencode-go' ? randomUUID() : undefined);
+    const resolvedModel = this.resolveModel(modelSpec, sessionId);
     let model: LanguageModel = resolvedModel;
     const system = this.composeSystemPrompt(prompt);
     // Resolve policy before creating session/workspace state: malformed
@@ -487,6 +493,7 @@ export class AiSdkDriver implements Driver {
       sessionRef === undefined
         ? await store.create(
             boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
+            sessionId,
           )
         : await resumedRecordOrThrow(store, sessionRef, boundWorkspace, 'ai-sdk driver');
     // A FAILED prior attempt persists its prompt with no verdict after it:

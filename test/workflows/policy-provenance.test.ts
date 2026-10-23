@@ -1473,7 +1473,10 @@ describe('self-review-loop peak-aware model selection (D11)', () => {
       expect(text, `${file}: no weekday guard read`).not.toContain('date -u +%u');
       // Both provider keys are exported unconditionally …
       expect(text, `${file}: off-peak key declaration`).toContain('ZAI_API_KEY: ${{ secrets.');
-      expect(text, `${file}: peak key declaration`).toContain('DEEPSEEK_API_KEY: ${{ secrets.');
+      expect(text, `${file}: peak key declaration`).toContain('OPENCODE_GO_API_KEY: ${{ secrets.');
+      expect(text, `${file}: peak base URL declaration`).toContain(
+        'OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}',
+      );
       // … and the required one is derived from the toolkit's ONE decision
       // point, so no window arithmetic lives in the YAML. The step also PINS
       // one run instant so the handshake process and the run cannot straddle
