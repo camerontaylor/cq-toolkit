@@ -256,8 +256,8 @@ import type { OutputSchema, ProviderSignals, WorkerErrorClass } from '../types.j
 // Public surface
 // ---------------------------------------------------------------------------
 
-/** A provider factory: frozen ModelSpec.model id → a live language-model instance. */
-export type ProviderFactory = (modelId: string) => LanguageModel;
+/** A provider factory: model id and optional persisted session id → a live language-model instance. */
+export type ProviderFactory = (modelId: string, sessionId?: string) => LanguageModel;
 
 /**
  * The multi-step default for the SDK tool loop (ai@7.0.99). TOOL-CALL LOOPS
@@ -413,7 +413,7 @@ export class AiSdkDriver implements Driver {
     // --- Pre-dispatch validation: everything here throws BEFORE the model
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
     // partial state).
-    const resolvedModel = this.resolveModel(modelSpec);
+    const resolvedModel = this.resolveModel(modelSpec, sessionRef);
     let model: LanguageModel = resolvedModel;
     const system = this.composeSystemPrompt(prompt);
     // Resolve policy before creating session/workspace state: malformed
@@ -1293,7 +1293,7 @@ export class AiSdkDriver implements Driver {
   }
 
   /** Resolve the frozen ModelSpec onto a live provider instance. Throws before dispatch. */
-  private resolveModel(modelSpec: ModelSpec): LanguageModel {
+  private resolveModel(modelSpec: ModelSpec, sessionId?: string): LanguageModel {
     const factory = this.providers[modelSpec.provider];
     if (factory === undefined) {
       // Pre-dispatch misconfiguration carries its class as structured data
@@ -1303,7 +1303,7 @@ export class AiSdkDriver implements Driver {
         `ai-sdk driver: unknown provider '${modelSpec.provider}' (known: ${Object.keys(this.providers).join(', ')})`,
       );
     }
-    return factory(modelSpec.model);
+    return factory(modelSpec.model, sessionId);
   }
 
   /**
@@ -1390,8 +1390,8 @@ function defaultSessionsDir(): string {
  * a deployment points the handle at its wire explicitly (the captured Go
  * origin lives in the pricing profile's endpoint-scoped 402 rule,
  * provider-profiles.ts, and is deliberately not duplicated here). The
- * provider supplies a stable `x-opencode-session` UUID for this run, as Go
- * uses conversation ids for efficient routing and prompt caching.
+ * provider supplies the persisted session id when resuming, or a fresh UUID
+ * for a new run, as Go uses conversation ids for routing and prompt caching.
  * model id rides ModelSpec.model verbatim — `.chat(modelId)`, no aliasing.
  * The Go wire ECHOES the requested id in the response `model` field (RS-14
  * capture: the upstream serving provider surfaces only in routing
@@ -1452,11 +1452,11 @@ function defaultProviders(): Record<string, ProviderFactory> {
     // Chat-completions-only OpenCode Go handle (see the doc comment above):
     // both the credential and the route are required env reads — there is
     // deliberately NO default base-URL literal here.
-    'opencode-go': (modelId) =>
+    'opencode-go': (modelId, sessionId) =>
       createOpenAI({
         apiKey: requireEnv('opencode-go', 'OPENCODE_GO_API_KEY'),
         baseURL: requireEnv('opencode-go', 'OPENCODE_GO_BASE_URL'),
-        headers: { 'x-opencode-session': randomUUID() },
+        headers: { 'x-opencode-session': sessionId ?? randomUUID() },
       }).chat(modelId),
   };
 }

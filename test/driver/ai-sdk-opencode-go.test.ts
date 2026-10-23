@@ -152,6 +152,23 @@ describe('the opencode-go provider handle (default registry)', () => {
       restoreEnv(saved);
     }
   });
+
+  test('a resumed driver session reuses its session id for OpenCode Go routing', async () => {
+    const saved = takeEnv();
+    handle.factoryCalls.length = 0;
+    handle.controller = new AbortController();
+    try {
+      process.env.OPENCODE_GO_API_KEY = 'offline-handle-key';
+      process.env.OPENCODE_GO_BASE_URL = 'https://go-wire.invalid/v1';
+      await new AiSdkDriver().run(
+        { ...invocation('config-owned-model-id'), sessionRef: 'ses-existing-session' },
+        { signal: handle.controller.signal },
+      );
+      expect(handle.factoryCalls[0]?.headers['x-opencode-session']).toBe('ses-existing-session');
+    } finally {
+      restoreEnv(saved);
+    }
+  });
 });
 
 describe('the opencode-go served-model alias row (config-owned)', () => {

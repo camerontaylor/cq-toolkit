@@ -72,8 +72,7 @@ name: self-review-loop
 on:
   # Dispatch only (OPT-IN, above). The driver is still resolved from the
   # run's UTC start instant (src/selfhost/config.ts resolveSelfhostDriver):
-  # the frozen zai/glm-5.3-flash off-peak,
-  # opencode-go/deepseek-v4.1-flash inside the
+  # the frozen zai/glm-5.3-flash off-peak, opencode-go/deepseek-v4.1-flash inside the
   # documented peak window OR its reserved pre-peak headroom (05:40–06:00).
   workflow_dispatch:
     inputs:
@@ -323,8 +322,7 @@ jobs:
           # ZAI_API_KEY off-peak, OPENCODE_GO_API_KEY inside the 06:00–10:00 UTC
           # Mon–Fri peak or its 05:40–06:00 reserved headroom) and require
           # exactly that key. Both provider credentials and the Go route are
-          # exported above; the key for the OTHER window may be absent. A
-          # missing key
+          # exported above; the key for the OTHER window may be absent. A missing key
           # refuses the run instead of dispatching with no credential, and no
           # window arithmetic lives in this YAML (the same resolveSelfhostDriver
           # also drives the run's own preflight). SKIPPED for a dry run, which
@@ -333,6 +331,9 @@ jobs:
           if [ "$DRY_RUN" != "true" ]; then
             REQUIRED_KEY=$(node dist/selfhost/self-review-loop.js --print-driver-key-env)
             test -n "$(printenv "$REQUIRED_KEY")" || { echo "$REQUIRED_KEY not set — the fix workers' selected provider cannot dispatch; refusing to start" >&2; exit 1; }
+            if [ "$REQUIRED_KEY" = "OPENCODE_GO_API_KEY" ]; then
+              test -n "$OPENCODE_GO_BASE_URL" || { echo 'OPENCODE_GO_BASE_URL not set — the selected OpenCode Go provider cannot dispatch; refusing to start' >&2; exit 1; }
+            fi
           fi
           # Review-fix pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git

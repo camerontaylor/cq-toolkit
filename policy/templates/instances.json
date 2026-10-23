@@ -76,7 +76,7 @@
       "template": "self-host/self-review-loop.yml",
       "tokens": {
         "SELFHOST_DRIVER_KEY": "Z_AI_API_KEY",
-        "SELFHOST_PEAK_DRIVER_KEY": "DEEPSEEK_API_KEY"
+        "SELFHOST_PEAK_DRIVER_KEY": "OPENCODE_GO_API_KEY"
       }
     },
     {

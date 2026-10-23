@@ -37,9 +37,10 @@ template, not this file` provenance header.
    `SelfhostDefaults.driver` is the OFF-PEAK binding and `SelfhostPeak.driver`
    the peak one, selected by `SelfhostPeak.window` (all three are frozen
    data). This repo's instantiation uses the ai-sdk route against the Z.AI
-   GLM coding endpoint (served id `glm-5.3-flash`) off-peak and DeepSeek's
-   flash model (served id `deepseek-flash`) inside the peak window.
-4. Provision BOTH provider keys (below) — one per window — and edit
+   GLM coding endpoint (served id `glm-5.3-flash`) off-peak and OpenCode Go
+   (`deepseek-v4.1-flash`) inside the peak window.
+4. Provision both provider keys and the OpenCode Go route variable (below),
+   and edit
    `SelfhostPeak` in the toolkit if your provider's peak window differs. The
    schedule itself is all-hours; no cron or YAML window needs to move with it.
    If you re-point `SelfhostDefaults.driver` or `SelfhostPeak.driver` at
@@ -93,12 +94,13 @@ Decision 8): the jobs that read them declare `environment: automation`, so a
 dispatch from any other ref fails at job admission, before a secret is
 exposed.
 
-| credential                     | where it lives      | what it holds                                                                                                                                                                                                                                                                                                                                  |
-| ------------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CQ_AUTOMATION_APP_KEY`        | `automation` SECRET | the `cq-automation` App's private key. BOTH privileged jobs mint an installation token from it per run, scoped to this repository only. LITERAL name (each mint step names it).                                                                                                                                                                |
-| `CQ_AUTOMATION_APP_CLIENT_ID`  | repository VARIABLE | the `cq-automation` App's client id, paired with the key. Each mint step is variable-gated: with the variable unset the step is skipped and the workflow handles the missing credential honestly (the loop refuses, the merge dispatch skips). LITERAL name.                                                                                   |
-| `{{SELFHOST_DRIVER_KEY}}`      | `automation` SECRET | the OFF-PEAK model provider API key driving review-loop fix workers through the ai-sdk route (read as `ZAI_API_KEY`). Used when the run's UTC start is outside the peak window. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                 |
-| `{{SELFHOST_PEAK_DRIVER_KEY}}` | `automation` SECRET | the PEAK model provider API key (read as `DEEPSEEK_API_KEY` for this repo's DeepSeek binding). Used when the run's UTC start is inside the peak window. BOTH keys are exported to the run step unconditionally — each provider reads its own — and the run step requires ONLY the selected one, so the key for the other window may be absent. |
+| credential                     | where it lives      | what it holds                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CQ_AUTOMATION_APP_KEY`        | `automation` SECRET | the `cq-automation` App's private key. BOTH privileged jobs mint an installation token from it per run, scoped to this repository only. LITERAL name (each mint step names it).                                                                                                                              |
+| `CQ_AUTOMATION_APP_CLIENT_ID`  | repository VARIABLE | the `cq-automation` App's client id, paired with the key. Each mint step is variable-gated: with the variable unset the step is skipped and the workflow handles the missing credential honestly (the loop refuses, the merge dispatch skips). LITERAL name.                                                 |
+| `{{SELFHOST_DRIVER_KEY}}`      | `automation` SECRET | the OFF-PEAK model provider API key driving review-loop fix workers through the ai-sdk route (read as `ZAI_API_KEY`). Used when the run's UTC start is outside the peak window. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                               |
+| `{{SELFHOST_PEAK_DRIVER_KEY}}` | `automation` SECRET | the PEAK model provider API key (read as `OPENCODE_GO_API_KEY` for this repo's OpenCode Go binding). Used when the run's UTC start is inside the peak window. Both provider credentials and the Go route are exported; the run step requires only the selected key, so the other window's key may be absent. |
+| `OPENCODE_GO_BASE_URL`         | repository VARIABLE | the configured OpenCode Go route, passed to the ai-sdk provider. Required by a non-dry peak run when OpenCode Go is selected.                                                                                                                                                                                |
 
 Every credential is step-scoped and never reaches `pnpm install`'s
 lifecycle scripts: the App private key is provided only to the mint step
@@ -179,15 +181,16 @@ adopter owns it by hand.
   06:00–10:00 UTC Monday–Friday Z.ai GLM peak (14:00–18:00 Asia/Singapore,
   ~3x quota consumption). It runs every 15 minutes, every day
   (`*/15 * * * *`), and switches provider for the peak: off-peak
-  `zai/glm-5.3-flash` (with `ZAI_API_KEY`), peak `deepseek/deepseek-flash`
-  (with `DEEPSEEK_API_KEY`). The peak selection also covers the reserved
+  `zai/glm-5.3-flash` (with `ZAI_API_KEY`), peak
+  `opencode-go/deepseek-v4.1-flash` (with `OPENCODE_GO_API_KEY` and
+  `OPENCODE_GO_BASE_URL`). The peak selection also covers the reserved
   **pre-peak headroom** (`SelfhostPeak.headroomMinutes`, 20 minutes — the
   documented ≤20-minute scheduled run): a run's driver is fixed when it
   starts, so a sweep starting at 05:41 could otherwise still be dispatching
   Z.ai GLM work after 06:00; starting in that band is dispatched through the
   peak provider instead. This reserves dispatch, never a start exclusion:
-  the loop still runs all day. Peak and headroom runs therefore spend the
-  paid DeepSeek key; the sweep token cap still bounds a run. The
+  the loop still runs all day. Peak and headroom runs therefore use the
+  configured OpenCode Go route; the sweep token cap still bounds a run. The
   merge-dispatch sibling keeps the older, narrower 15:00–01:00 UTC window
   and is out of scope.
 - Enforcement: the frozen `SelfhostPeak` window + headroom and
