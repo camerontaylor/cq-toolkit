@@ -7,6 +7,17 @@ claim on review slots. crq cuts a promotion as soon as a `merge-queue` tip beyon
 `main` has all gate checks green; merges that land during an in-flight review
 join the next promotion.
 
+**Amended 2026-10-24 (owner, cq-toolkit#376): the signer review is advisory except for privileged
+ranges.** The gate requires a `crq/promotion-review` success only when the promoted range
+`main..<subject>` touches a path on the privileged list (`protectedPaths` in
+`policy/protected-paths.json` at the trust ref — signer and reviewer config, the denylist, the
+settings-drift scripts and template, attestations, `promote-gate.ts`, and crq's
+signer/config/systemd). Every other range promotes on core CI green at the exact SHA, the `cq/ratchet`
+verdict, and `cq/acceptance` evidence for every admitted PR; crq and the signer still review it
+and still file findings, but a missing, pending or failed review never refuses. See
+[Advisory signer review](#advisory-signer-review-except-privileged-ranges). Where the sections
+below say a review is required, read "for a privileged range".
+
 ## When a promotion is cut
 
 crq cuts a promotion whenever a `merge-queue` tip beyond `main` has all gate
@@ -39,11 +50,35 @@ the owner's registration record, `app-registration-session-20261004.md` @ `d8f13
   covering the whole range, never a judgment that findings were "addressed". Rejecting a false
   positive is a human decision and goes through an owner override.
 
+## Advisory signer review except privileged ranges
+
+The gate walks `merge-queue`'s first-parent line newest-first and classifies each candidate's range
+`main..<sha>` with the ONE privileged-path predicate `gates.policyDiff` uses for its
+`privileged-path` finding (`privilegedPathPredicate` in `src/ops/gates/policyDiff.ts`, fed the
+trust ref's list — there is no second list):
+
+- **Ordinary range** (no privileged path): selected as the subject outright. The signer status is
+  recorded in the decision output's `signer` field — `present` (a trusted success bound to the
+  current `main`), `advisory-missing` (none, pending, or bound to another base) or
+  `advisory-failed` (a trusted failure or a malformed success) — and is not re-read before the
+  push.
+- **Privileged range**: exactly the rules below — a trusted success bound to the current `main`,
+  re-read immediately before the push (`signer: required`). Without one the walk moves on, so an
+  older ordinary prefix of the queue can still promote while the privileged tip waits for its
+  own review.
+- **Fail closed**: if the list is absent at the trust ref every range is privileged; an invalid
+  list refuses.
+
+Unchanged for every range: core CI and the verdict at the exact SHA, closure, clean merges, per-PR
+`cq/acceptance` evidence, the policy recompute, the `cq/promoted` replay marker, the leased
+exact-SHA `--atomic` fast-forward (never a force push), and the denylist. A foreign
+promotion-review status on the tip still refuses when no subject is selected.
+
 ## What promotes
 
 `cq-gate` (`gate.yml`, armed) fast-forwards `main` to the **reviewed SHA**, not to whatever the queue tip is
 now. Merges that land during an in-flight review join the next promotion.
-The gate promotes the SHA only when:
+The gate promotes the SHA only when (item 1 for privileged ranges only — see above):
 
 1. The newest `crq/promotion-review` status on it from the pinned reviewer is `success`, and it
    binds `main=<base>`. The pinned reviewer is the `cq-promotion-reviewer` App's bot user, matched
@@ -188,7 +223,7 @@ I4 still applies: an override skips the review, never the required checks.
 ## When the signer is offline
 
 If the signer host — or the ssh path from crq to the spool — is down, nothing posts a review,
-so nothing promotes. crq treats ssh failure as **unknown**: no new request, no withdrawal, no
+so no privileged range promotes (ordinary ranges are unaffected: their review is advisory). crq treats ssh failure as **unknown**: no new request, no withdrawal, no
 false "signer down"; after 30 minutes it alerts "signer host unreachable" (distinct from the
 signer-down alert) and keeps triage. **Promotion waits; nothing fails red.** Gate runs woken
 meanwhile end green with "awaiting promotion review". When the signer host returns, crq re-issues the
