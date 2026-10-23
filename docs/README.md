@@ -14,6 +14,7 @@ Evidence and records document dated outcomes; they do not override current contr
 5. [Policy adoption guide](../policy/README.md) — token setup and required-check registration.
 6. [Focused checks contract](focused-checks-contract.md) — local and CI gate responsibilities.
 7. [Agent instructions](../AGENTS.md) and [CodeRabbit review protocol](coderabbit-review.md) — repository workflow and review evidence.
+8. [Current contract and backlog](current-contract-and-backlog.md) — the normative contract and its backlog (supersedes the 2026-09-12 spec).
 
 ## Historical and evidence records
 
