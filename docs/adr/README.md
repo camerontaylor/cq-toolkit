@@ -12,17 +12,17 @@ narrows it. Known changes of that kind are recorded below as
 each ADR points to its note. The list is not exhaustive: where a note and the
 code disagree with an ADR, the code and the notes are current.
 
-| ADR                                                                               | Decides                                                                                                    |
-| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| [ADR-0001 — Worker/driver seam](0001-worker-driver-seam.md)                       | The four driver lanes, the `Driver.run` seam contract and the served-model rule                            |
-| [ADR-0002 — Worker/driver seam v2](0002-worker-driver-seam-v2.md)                 | Output schema, cancellation, workspace binding and error classes on the seam; `DriverFactory`              |
-| [ADR-0002 Annex A — MCP harness server](0002-annex-a-mcp-harness.md)              | The shared harness tool surface and the stdio MCP server for the subprocess and claude-agent lanes         |
-| [ADR-0002 Annex B — Configuration keys](0002-annex-b-config.md)                   | The `CQ_*` key namespace, precedence, secrets and CI mapping (it also defines ADR-0003's keys)             |
-| [ADR-0003 — Governed runner](0003-governed-runner.md)                             | `runPlan` governance: budget reservations, admission, lane classification, crash and resume, exit contract |
-| [ADR-0003 annex — Approval token](0003-approval-token.md)                         | The signed, single-use human approval for `approved: true` jobs                                            |
-| [ADR-0003 annex — Journal v2](0003-journal-migration.md)                          | The journal v2 schema and replay rules                                                                     |
-| [ADR-0004 — Policy-check trust boundaries](0004-policy-check-trust-boundaries.md) | Where policy checks get their code and definitions, credentials and identities, and promotion              |
-| [ADR-0005 — Architecture revision](0005-architecture-revision.md)                 | The layered monorepo, policy foundation, driver lanes and TypeScript queue rewrite                         |
+| ADR                                                                                                 | Decides                                                                                                    |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [ADR-0001 — Worker/driver seam](0001-worker-driver-seam.md)                                         | The four driver lanes, the `Driver.run` seam contract and the served-model rule                            |
+| [ADR-0002 — Worker/driver seam v2](0002-worker-driver-seam-v2.md)                                   | Output schema, cancellation, workspace binding and error classes on the seam; `DriverFactory`              |
+| [ADR-0002 Annex A — MCP harness server](0002-annex-a-mcp-harness.md)                                | The shared harness tool surface and the stdio MCP server for the subprocess and claude-agent lanes         |
+| [ADR-0002 Annex B — Configuration keys](0002-annex-b-config.md)                                     | The `CQ_*` key namespace, precedence, secrets and CI mapping (it also defines ADR-0003's keys)             |
+| [ADR-0003 — Governed runner](0003-governed-runner.md)                                               | `runPlan` governance: budget reservations, admission, lane classification, crash and resume, exit contract |
+| [ADR-0003 annex — Approval token](0003-approval-token.md)                                           | The signed, single-use human approval for `approved: true` jobs                                            |
+| [ADR-0003 annex — Journal v2](0003-journal-migration.md)                                            | The journal v2 schema and replay rules                                                                     |
+| [ADR-0004 — Policy-check trust boundaries](0004-policy-check-trust-boundaries.md)                   | Where policy checks get their code and definitions, credentials and identities, and promotion              |
+| [ADR-0005 — Architecture revision](0005-architecture-revision.md)                                   | The layered monorepo, policy foundation, driver lanes and TypeScript queue rewrite                         |
 | [ADR-0006 — Fix engine and address-review as CLI compositions](0006-fix-engine-cli-compositions.md) | The developer-loop commands as registered ops owning their dataflow, with `cq.json` as the policy file     |
 
 ## Terms and identifiers

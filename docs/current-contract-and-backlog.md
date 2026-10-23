@@ -7,15 +7,15 @@
 
 ## Current contract
 
-1. **SDK first; every op runnable standalone from TS and the CLI.** Spec, 2026-09-12. *Amended:* ADR-0005 (2026-10-16) found it "met in letter, missed in default wiring". The 2026-10-20 posture makes CLI usability the goal and fresh-repo transcripts the acceptance bar.
-2. **I1 output contract.** JSON on stdout, narration on stderr, exits 0/1/2/3. *Extended* on 2026-10-20 by `--fail-on-verdict` and a `--json` error artifact. Flags only, no positionals.
+1. **SDK first; every op runnable standalone from TS and the CLI.** Spec, 2026-09-12. _Amended:_ ADR-0005 (2026-10-16) found it "met in letter, missed in default wiring". The 2026-10-20 posture makes CLI usability the goal and fresh-repo transcripts the acceptance bar.
+2. **I1 output contract.** JSON on stdout, narration on stderr, exits 0/1/2/3. _Extended_ on 2026-10-20 by `--fail-on-verdict` and a `--json` error artifact. Flags only, no positionals.
 3. **Generic mechanism only, zero webfront-isms, webfront untouched** (2026-09-12). Unchanged.
 4. **Public MIT; first npm release `0.2.0`, never 1.x.** Publication is gated on the packed-artifact smoke test (#394); G2/G3 as written are retired (see [Retirements](#retirements-2026-10-24)).
 5. **Topology.** A six-package monorepo absorbing crq and `packages/eval` (ADR-0005). Phase 2 is narrowed to `@cq/policy` + `@cq/ops` and comes after the acceptance exercise.
-6. **Pluggable driver seam, vendor-neutral kernel.** *Amended* from 4 lanes to 3 (ADR-0005).
+6. **Pluggable driver seam, vendor-neutral kernel.** _Amended_ from 4 lanes to 3 (ADR-0005).
 7. **Model choice is configuration, never a literal** (owner, 2026-10-16).
 8. **Tokens are the source of truth; USD is modeled only; the governor enforces a token budget.** Spend must be reported on every exit path of the new agentic commands (#393).
-9. **Remediation is approval-gated; nothing is auto-applied.** *Realised* 2026-10-20 as an attended authority bound to the preview digest and a clean tree.
+9. **Remediation is approval-gated; nothing is auto-applied.** _Realised_ 2026-10-20 as an attended authority bound to the preview digest and a clean tree.
 10. **Workers may not commit tests, runner config or snapshots** (W1.8). Enforced in sweep, not in `analyze.fix`.
 11. **Baselines only tighten; a missing summary is non-passing; the monotonic guard is mandatory.**
 12. **Review = one CodeRabbit CLI cycle plus one independent head-bound review; P2s go to issues** (2026-10-16). Supersedes the 0.2 plan's two cycles.
@@ -25,7 +25,7 @@
 16. **Gates are advisory; only the privileged list needs a human** (2026-10-20). `cq/policy` is not required; the `cq-override` label is parked.
 17. **Must stay blocking:** fail-closed denylist before upload; core CI at the exact SHA; independent head-bound PASS with no P0/P1; FF-only promotion with no force-push of `main`/`cq/promoted`/replay markers; owner sign-off on credentials, signer custody and deploy trust. Unchanged.
 18. **Merge commits only in the engine; promotion is FF-only.** Practice: `automerge.sh` merges; promotion needs break-glass FF until #376.
-19. **Self-hosting proves the toolkit** (spec DoD 2). *Scaled back* 2026-10-20: review loop off, self-merge off, re-enable only with a fixes-per-run metric.
+19. **Self-hosting proves the toolkit** (spec DoD 2). _Scaled back_ 2026-10-20: review loop off, self-merge off, re-enable only with a fixes-per-run metric.
 20. **Freeze new self-host machinery until S1–S6 ship** (2026-10-20). S1–S6 shipped 2026-10-20; whether the freeze lifted is a GAP.
 21. **Local tests are narrow, on triton, one run at a time; CI is the full-suite authority** (owner, 2026-10-11/10-14). Per-package suites come after the ops cut.
 22. **Protect the deployed system, not in-development code** (2026-10-18).
@@ -39,57 +39,57 @@ Class key from consolidation.md §3: **C** = carry into the next step, **P** = p
 
 ### Carried (C)
 
-| Item | Notes |
-|---|---|
-| Ops standalone in default wiring | The gap behind every "No" in the capability register; the developer-loop slices address it |
-| W2.1 spend on every exit path | #393 |
-| Packed-artifact smoke test (release gate) | #394 |
-| #376 follow-up: crq deploy controller | #395, parallel, owner deploy-trust sign-off |
-| oxlint-json check adapter | #396; cq.json omits lint until Oxlint ships an eslint-format output |
-| #378 configurable checks + Ruff/Knip adapters | Blocks `review` portability |
-| Phase 0.4 version alignment | Cheap; package.json 1.0.1 contradicts README |
-| #377 App merger (after), DS `pr.verify`/`pr.merge`/`pr.run` | Chancellor practice covers them; revisit with #377 |
-| `policy/dev-protocol.json`, `docs/dev-protocol.md` | Not privileged any more; fold into this page over time |
-| #381/#382/#385 P2 batches | Unchanged |
-| #351/#362/#363 review-loop defects | Correctness of address-review |
-| #352 agent fallback reviewer, #353 `--uncommitted` | `review` usability |
-| Per-file fan-out | In scope for S2 (not a not-planned issue) |
-| Re-request review inside address-review | Small forge action; decision 1 |
+| Item                                                        | Notes                                                                                      |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Ops standalone in default wiring                            | The gap behind every "No" in the capability register; the developer-loop slices address it |
+| W2.1 spend on every exit path                               | #393                                                                                       |
+| Packed-artifact smoke test (release gate)                   | #394                                                                                       |
+| #376 follow-up: crq deploy controller                       | #395, parallel, owner deploy-trust sign-off                                                |
+| oxlint-json check adapter                                   | #396; cq.json omits lint until Oxlint ships an eslint-format output                        |
+| #378 configurable checks + Ruff/Knip adapters               | Blocks `review` portability                                                                |
+| Phase 0.4 version alignment                                 | Cheap; package.json 1.0.1 contradicts README                                               |
+| #377 App merger (after), DS `pr.verify`/`pr.merge`/`pr.run` | Chancellor practice covers them; revisit with #377                                         |
+| `policy/dev-protocol.json`, `docs/dev-protocol.md`          | Not privileged any more; fold into this page over time                                     |
+| #381/#382/#385 P2 batches                                   | Unchanged                                                                                  |
+| #351/#362/#363 review-loop defects                          | Correctness of address-review                                                              |
+| #352 agent fallback reviewer, #353 `--uncommitted`          | `review` usability                                                                         |
+| Per-file fan-out                                            | In scope for S2 (not a not-planned issue)                                                  |
+| Re-request review inside address-review                     | Small forge action; decision 1                                                             |
 
 ### Parked (P) — issue filed
 
-| Item | Issue | Rationale |
-|---|---|---|
-| Prep-only entry point | #397 | Sweep slice |
-| `recover` entry point | #398 | Shipped composition/config-only answer ratified |
-| Run listing | #399 | Sweep slice |
-| merge-prs `--admin` | #400 | Conflicts with "no admin over red checks" |
-| Three-tier command resolution | #401 | Shipped fail-closed answer ratified |
-| Complexity ceilings | #402 | Not needed for the developer-loop step |
-| `trace` | #403 | Not needed for the developer-loop step |
-| Sweep/orchestration/substrate benchmark | #404 | Never performed; not needed locally |
-| fleet-devenv | #405 | Out of toolkit scope since Round 0 |
-| Watchlist R3–R5 | #406 | Owner may rescue later |
-| npm publication 0.2.0 | #394 | After the packed-artifact smoke test |
-| Fixtures/eval valid evidence (W6.5/W6.7, fixtures flip) | — | Owner-blocked on keys and spend |
-| W4.1 governed sweep composition | — | Becomes the sweep slice |
-| Slice F fixtures governance | — | Goes with eval absorption |
-| W1.2b F1 REST cross-check | — | Revisit inside address-review if needed |
-| Review debt #216/#241/#242, #225/#226 | — | Triage as ordinary issues |
-| Adversarial suite and certified backends | — | Not needed for local commands |
-| External-contribution safeguards | — | Only matters before outside contributors |
-| Phase 1.1/1.3 helpers, 1.5–1.7, 1.9b ACP, 1.9c cost estimator | — | They do not make a command work |
-| Phase 2 package cut; Phase 3/4 | — | After the slice |
-| DS verification tier `pr.address` siblings | — | See `pr.*` row above |
-| Single crq review issuer | — | Depends on D-H |
-| #354 diff-scoped denylist | — | Privileged; needs a human |
-| #341 stale ratchet proposal | — | Unrelated to the five commands |
-| Runaway-remediation residuals | — | Fleet issue, belongs outside cq-toolkit |
-| D9 spend envelope | — | Revive with eval |
-| v1 §6 publication checklist | — | Goes with publication |
-| WB1 model-fidelity retraction | — | Cheap honesty item; file later |
-| Conflict-agent wall-clock #137 | — | merge-prs slice |
-| Per-fix diff verification tier | — | `verifyReviewOutcome` covers PR level |
+| Item                                                          | Issue | Rationale                                       |
+| ------------------------------------------------------------- | ----- | ----------------------------------------------- |
+| Prep-only entry point                                         | #397  | Sweep slice                                     |
+| `recover` entry point                                         | #398  | Shipped composition/config-only answer ratified |
+| Run listing                                                   | #399  | Sweep slice                                     |
+| merge-prs `--admin`                                           | #400  | Conflicts with "no admin over red checks"       |
+| Three-tier command resolution                                 | #401  | Shipped fail-closed answer ratified             |
+| Complexity ceilings                                           | #402  | Not needed for the developer-loop step          |
+| `trace`                                                       | #403  | Not needed for the developer-loop step          |
+| Sweep/orchestration/substrate benchmark                       | #404  | Never performed; not needed locally             |
+| fleet-devenv                                                  | #405  | Out of toolkit scope since Round 0              |
+| Watchlist R3–R5                                               | #406  | Owner may rescue later                          |
+| npm publication 0.2.0                                         | #394  | After the packed-artifact smoke test            |
+| Fixtures/eval valid evidence (W6.5/W6.7, fixtures flip)       | —     | Owner-blocked on keys and spend                 |
+| W4.1 governed sweep composition                               | —     | Becomes the sweep slice                         |
+| Slice F fixtures governance                                   | —     | Goes with eval absorption                       |
+| W1.2b F1 REST cross-check                                     | —     | Revisit inside address-review if needed         |
+| Review debt #216/#241/#242, #225/#226                         | —     | Triage as ordinary issues                       |
+| Adversarial suite and certified backends                      | —     | Not needed for local commands                   |
+| External-contribution safeguards                              | —     | Only matters before outside contributors        |
+| Phase 1.1/1.3 helpers, 1.5–1.7, 1.9b ACP, 1.9c cost estimator | —     | They do not make a command work                 |
+| Phase 2 package cut; Phase 3/4                                | —     | After the slice                                 |
+| DS verification tier `pr.address` siblings                    | —     | See `pr.*` row above                            |
+| Single crq review issuer                                      | —     | Depends on D-H                                  |
+| #354 diff-scoped denylist                                     | —     | Privileged; needs a human                       |
+| #341 stale ratchet proposal                                   | —     | Unrelated to the five commands                  |
+| Runaway-remediation residuals                                 | —     | Fleet issue, belongs outside cq-toolkit         |
+| D9 spend envelope                                             | —     | Revive with eval                                |
+| v1 §6 publication checklist                                   | —     | Goes with publication                           |
+| WB1 model-fidelity retraction                                 | —     | Cheap honesty item; file later                  |
+| Conflict-agent wall-clock #137                                | —     | merge-prs slice                                 |
+| Per-fix diff verification tier                                | —     | `verifyReviewOutcome` covers PR level           |
 
 ### Retired (R)
 
