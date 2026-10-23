@@ -46,7 +46,7 @@ Class key from consolidation.md §3: **C** = carry into the next step, **P** = p
 | Packed-artifact smoke test (release gate)                   | #394                                                                                       |
 | #376 follow-up: crq deploy controller                       | #395, parallel, owner deploy-trust sign-off                                                |
 | oxlint-json check adapter                                   | #396; cq.json omits lint until Oxlint ships an eslint-format output                        |
-| #378 configurable checks + Ruff/Knip adapters               | Blocks `review` portability                                                                |
+| #378 configurable checks + Ruff/Knip adapters               | #378; blocks `review` portability                                                          |
 | Phase 0.4 version alignment                                 | Cheap; package.json 1.0.1 contradicts README                                               |
 | #377 App merger (after), DS `pr.verify`/`pr.merge`/`pr.run` | Chancellor practice covers them; revisit with #377                                         |
 | `policy/dev-protocol.json`, `docs/dev-protocol.md`          | Not privileged any more; fold into this page over time                                     |
