@@ -16,7 +16,16 @@
 // Refusals are `failed`, never silent: an existing `cq.json` is not
 // overwritten unless `force: true`; a directory where nothing is detected
 // gets no file (an empty check list would make `analyze.run` vacuous).
-import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
@@ -156,14 +165,30 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
             status: 'failed',
             error: `analyze.init: cannot migrate '${configPath}': ${migrated.reason}`,
           };
-        writeFileSync(configPath, `${JSON.stringify(migrated.config, null, 2)}\n`, 'utf8');
+        if (migrated.changed) {
+          const scratch = mkdtempSync(join(input.dir, '.cq-config-migrate-'));
+          try {
+            const temporary = join(scratch, CQ_CONFIG_FILE);
+            writeFileSync(temporary, `${JSON.stringify(migrated.config, null, 2)}\n`, {
+              encoding: 'utf8',
+              mode: existing?.mode ?? 0o600,
+            });
+            renameSync(temporary, configPath);
+          } finally {
+            rmSync(scratch, { recursive: true, force: true });
+          }
+        }
         return {
           status: 'ok',
           value: {
             configPath,
             config: migrated.config,
-            detected: ['migrated schemaVersion 1 to 2; checks preserved'],
-            overwritten: true,
+            detected: [
+              migrated.changed
+                ? 'migrated schemaVersion 1 to 2; checks preserved'
+                : 'already schemaVersion 2; no changes',
+            ],
+            overwritten: migrated.changed,
           },
         };
       } catch (err) {

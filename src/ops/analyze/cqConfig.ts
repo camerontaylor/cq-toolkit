@@ -105,7 +105,8 @@ function schemaReason(error: z.ZodError): string {
 /** Parse without migration or filesystem effects; unknown keys fail at every level. */
 export function parseCqConfig(
   text: string,
-): { ok: true; config: CqConfig } | { ok: false; reason: string } {
+  dir = '.',
+): { ok: true; config: CqConfig } | { ok: false; reason: string; migrationRequired?: true } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -126,8 +127,8 @@ export function parseCqConfig(
   ) {
     return {
       ok: false,
-      reason:
-        'cq.json schemaVersion 1 is unsupported; run `cq analyze.init --migrate` to upgrade to schemaVersion 2',
+      migrationRequired: true,
+      reason: `cq.json schemaVersion 1 is unsupported; run \`cq analyze.init --migrate --dir='${dir.replace(/'/g, "'\\''")}'\` to upgrade to schemaVersion 2`,
     };
   }
   const parsed = CqConfigSchema.safeParse(raw);
@@ -135,15 +136,18 @@ export function parseCqConfig(
   return { ok: true, config: parsed.data };
 }
 
-/** Validate the original v1 shape, then preserve its JSON data without injecting defaults. */
+/** Validate and preserve raw JSON without injecting defaults; v2 is already migrated. */
 export function migrateCqConfig(
   text: string,
-): { ok: true; config: CqConfig } | { ok: false; reason: string } {
+): { ok: true; config: CqConfig; changed: boolean } | { ok: false; reason: string } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
     return { ok: false, reason: 'not valid JSON' };
+  }
+  if (CqConfigSchema.safeParse(raw).success) {
+    return { ok: true, config: raw as CqConfig, changed: false };
   }
   const legacy = z
     .object({ schemaVersion: z.literal(1), checks: z.array(CheckRunnerInputObject).min(1) })
@@ -152,5 +156,8 @@ export function migrateCqConfig(
   if (!legacy.success) return { ok: false, reason: schemaReason(legacy.error) };
   // Use the raw checks: parsing adds timeoutMs, which migration must not invent.
   const original = raw as { schemaVersion: 1; checks: CqCheck[] };
-  return { ok: true, config: { ...original, schemaVersion: CQ_CONFIG_SCHEMA_VERSION } };
+  const config: CqConfig = { ...original, schemaVersion: CQ_CONFIG_SCHEMA_VERSION };
+  const validated = CqConfigSchema.safeParse(config);
+  if (!validated.success) return { ok: false, reason: schemaReason(validated.error) };
+  return { ok: true, config, changed: true };
 }

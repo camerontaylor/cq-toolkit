@@ -172,6 +172,21 @@ describe('analyze.run — the dataflow', () => {
 });
 
 describe('analyze.run — refusals keep the taxonomy', () => {
+  test('v1 names the lossless migration with the project directory and never --force', async () => {
+    const text = JSON.stringify({ schemaVersion: 1, checks: [TSC_CHECK] });
+    const dir = project({ 'cq.json': text });
+    const run = scripted([]);
+    const result = await makeAnalyzeRun(run)({ dir });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain(`cq analyze.init --migrate --dir='${dir}'`);
+      expect(result.error).not.toContain('--force');
+    }
+    expect(run.calls).toEqual([]);
+    expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe(text);
+    expect(existsSync(join(dir, '.cq'))).toBe(false);
+  });
+
   test('missing cq.json → failed naming analyze.init; nothing written', async () => {
     const dir = project({ 'src/index.ts': 'x\n' });
     const run = scripted([]);

@@ -51,8 +51,19 @@ describe('cq.json v2', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain('cq analyze.init --migrate');
+      expect(result.reason).toContain("--dir='.'");
+      expect(result.migrationRequired).toBe(true);
       expect(result.reason).not.toMatch(/[\r\n]/);
     }
+  });
+
+  test('migration hint uses the requested project directory as one shell argument', () => {
+    const result = parseCqConfig(
+      JSON.stringify({ ...minimal, schemaVersion: 1 }),
+      "project's folder",
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("--dir='project'\\''s folder'");
   });
 
   test.each([
@@ -103,13 +114,26 @@ describe('cq.json v2', () => {
       },
     ];
     const result = migrateCqConfig(JSON.stringify({ schemaVersion: 1, checks }));
-    expect(result).toEqual({ ok: true, config: { schemaVersion: 2, checks } });
+    expect(result).toEqual({ ok: true, config: { schemaVersion: 2, checks }, changed: true });
   });
 
-  test('migration refuses invalid JSON, unknown fields and non-v1 inputs', () => {
+  test('migration is idempotent for valid v2 and preserves omitted defaults', () => {
+    expect(migrateCqConfig(JSON.stringify(full))).toEqual({
+      ok: true,
+      config: full,
+      changed: false,
+    });
+    expect(migrateCqConfig(JSON.stringify(minimal))).toEqual({
+      ok: true,
+      config: minimal,
+      changed: false,
+    });
+  });
+
+  test('migration refuses invalid JSON, unknown fields and unsupported versions', () => {
     for (const text of [
       '{',
-      JSON.stringify(minimal),
+      JSON.stringify({ ...minimal, schemaVersion: 99 }),
       JSON.stringify({ schemaVersion: 1, checks: [], typo: true }),
       JSON.stringify({ schemaVersion: 1, checks: [{ ...check, extra: true }] }),
     ]) {

@@ -2,7 +2,16 @@
 // `cq.json` round-trips through the config parser, and every refusal
 // (existing file without force, nothing detected, missing dir) is `failed`
 // with nothing written.
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -155,6 +164,27 @@ describe('analyze.init migration', () => {
     expect(JSON.parse(readFileSync(join(dir, 'cq.json'), 'utf8'))).toEqual(expected);
     expect(result.value.overwritten).toBe(true);
     expect(parseCqConfig(readFileSync(join(dir, 'cq.json'), 'utf8')).ok).toBe(true);
+    expect(readdirSync(dir)).toEqual(['cq.json']);
+  });
+
+  test('--migrate on v2 is a no-op preserving bytes, timestamps and optional policy', async () => {
+    const config = {
+      schemaVersion: 2,
+      checks: [{ adapter: 'tsc-lines', command: { command: 'custom-tsc', args: [] } }],
+      budgets: { run: { maxTokens: 1234 } },
+    };
+    const text = `  ${JSON.stringify(config)}\n\n`;
+    const dir = project({ 'cq.json': text });
+    const before = statSync(join(dir, 'cq.json'));
+    const result = await init({ dir, migrate: true });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.config).toEqual(config);
+    expect(result.value.overwritten).toBe(false);
+    expect(result.value.detected).toEqual(['already schemaVersion 2; no changes']);
+    expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe(text);
+    expect(statSync(join(dir, 'cq.json')).mtimeMs).toBe(before.mtimeMs);
+    expect(readdirSync(dir)).toEqual(['cq.json']);
   });
 
   test.each(['{', '{"schemaVersion":1,"checks":[]}', '{"schemaVersion":2,"checks":[]}'])(

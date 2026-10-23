@@ -81,7 +81,8 @@ so review the file like code.
 
 `cq.json` uses `schemaVersion: 2`. Upgrade a v1 file with
 `cq analyze.init --dir=. --migrate`; this preserves its checks and argv and changes only
-the version. Reading v1 otherwise fails with the migration hint. `--force` regenerates
+the version. Migration validates the result and replaces the file atomically; running
+`--migrate` on a valid v2 file is a no-op. Reading v1 otherwise fails with the migration hint. `--force` regenerates
 checks from detection; `--migrate` upgrades the existing file.
 
 The v2 config also accepts `packages` (`name`, `path`), check `kind` (`tests` or `static`),

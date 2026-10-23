@@ -135,11 +135,11 @@ export function resolveChecks(
       error: `analyze.run: no checks configured — could not read '${configPath}' (${messageOf(err)}); run \`cq analyze.init --dir=${dir}\` to write one, or pass checks explicitly`,
     };
   }
-  const parsed = parseCqConfig(text);
+  const parsed = parseCqConfig(text, dir);
   if (!parsed.ok) {
     return {
       ok: false,
-      error: `analyze.run: '${configPath}' ${parsed.reason}; fix it, or regenerate it with \`cq analyze.init --dir=${dir} --force\``,
+      error: `analyze.run: '${configPath}' ${parsed.reason}${parsed.migrationRequired === true ? '' : `; fix it, or regenerate it with \`cq analyze.init --dir=${dir} --force\``}`,
     };
   }
   return {
