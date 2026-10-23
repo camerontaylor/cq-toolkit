@@ -32,6 +32,14 @@
 //      trust ref (a run queued behind an earlier promotion trails main and
 //      refuses: its code and definitions are not main's); main ⋢ tip →
 //      diverged.
+//   2b. subject (the walk): the newest queue commit that may promote. The
+//      SIGNER REVIEW (`crq/promotion-review`) is mandatory only when
+//      main..sha touches a privileged path — the trust ref's
+//      `policy/protected-paths.json` list, matched by policyDiff's shared
+//      `privilegedPathPredicate` (#376). For an ordinary range it is
+//      advisory: recorded in the result's `signer` field
+//      (present|advisory-missing|advisory-failed), never a refusal. Core CI,
+//      the verdict and per-PR acceptance (steps 3–9) bind every range alike.
 //   3. closure over main..tip (checkClosure): every first-parent commit is
 //      the recorded merge of exactly one merged same-repo PR into
 //      `merge-queue` whose final head is the merge's second parent; every
@@ -70,8 +78,9 @@
 //      not catch it; any change refuses), steps 6–7 re-run when the policy
 //      pass relied on D11 records (an unlabel moves no ref either), then
 //      one no-wait re-read of steps 8–9 (pass 2 can itself take minutes),
-//      the promotion-review re-read, then step 6 once more when its pass
-//      relied on the D-P revision window (the last read), then
+//      the promotion-review re-read (privileged ranges only), then step 6
+//      once more when its pass relied on the D-P revision window (the last
+//      read), then
 //      `push --atomic` of tip
 //      onto main — leased on the (main, tip) read at step 1, never a plain
 //      force. One `ls-remote` right before the push re-reads the queue on
@@ -91,6 +100,9 @@ import { C3_ATTESTATION_PATH, headObservationEpochInHistory } from '../ops/gates
 import { resolveProtectedPathsConfig } from '../ops/gates/policyConfig.js';
 import {
   createPolicyDiff,
+  parsePolicyList,
+  POLICY_LIST_PATH,
+  privilegedPathPredicate,
   type PolicyDiffInput,
   type PolicyDiffOutcome,
 } from '../ops/gates/policyDiff.js';
@@ -838,7 +850,47 @@ export interface GateResult {
   /** The reviewed sha the gate judged and would promote (PR-C). */
   subject: string | null;
   main: string | null;
+  /**
+   * The signer review's role for the selected subject (#376): `required`
+   * when `main..subject` touches a privileged path (a trusted success bound
+   * to main was found and is re-read before the push); for an ordinary
+   * range it is advisory and only recorded — `present` (a trusted success
+   * bound to main), `advisory-missing` (none, pending, or bound to another
+   * base) or `advisory-failed` (a trusted failure or malformed success).
+   * Null when no subject was selected.
+   */
+  signer: SignerDisposition | null;
   report: string[];
+}
+
+/** How the signer review figured in a subject's selection (see GateResult.signer). */
+export type SignerDisposition = 'required' | 'present' | 'advisory-missing' | 'advisory-failed';
+
+/**
+ * The advisory disposition of a promotion review on an ORDINARY range:
+ * recorded, never a refusal. Only a trusted success bound to `main` counts as
+ * present. Pure.
+ */
+export function advisorySigner(
+  review: PromotionReviewSelection,
+  main: string,
+): Exclude<SignerDisposition, 'required'> {
+  if (review.state === 'success' && review.base === main) return 'present';
+  return review.state === 'failure' ? 'advisory-failed' : 'advisory-missing';
+}
+
+/**
+ * The privileged paths `changed` touches, by the trust ref's policy list
+ * (`policyText`, read at the trust ref) and the ONE shared predicate
+ * (policyDiff's {@link privilegedPathPredicate}). An absent list fails
+ * closed: every range is privileged (one placeholder entry, even for an
+ * empty diff), so the signer review stays mandatory. An invalid list
+ * throws (the gate cannot know what is privileged). Pure.
+ */
+export function privilegedPathsIn(changed: readonly string[], policyText: string | null): string[] {
+  if (policyText === null) return [`<${POLICY_LIST_PATH} absent: every range>`];
+  const isPrivileged = privilegedPathPredicate(parsePolicyList(policyText));
+  return changed.filter(isPrivileged);
 }
 
 /** A refusal thrown inside runGate's body; caught into a `refused` result. */
@@ -865,6 +917,7 @@ export async function runGate(deps: GateDeps, cfg: GateConfig): Promise<GateResu
   let tip: string | null = null;
   let subject: string | null = null;
   let main: string | null = null;
+  let signer: SignerDisposition | null = null;
   const refuse = (why: string): never => {
     throw new Refusal(why);
   };
@@ -873,18 +926,19 @@ export async function runGate(deps: GateDeps, cfg: GateConfig): Promise<GateResu
       deps,
       cfg,
       report,
-      (t, m, s) => {
+      (t, m, s, d) => {
         tip = t;
         main = m;
         subject = s;
+        signer = d;
       },
       refuse,
     );
-    return { ...result, tip, subject, main, report };
+    return { ...result, tip, subject, main, signer, report };
   } catch (error) {
     const why = error instanceof Refusal ? error.message : `gate error: ${describeError(error)}`;
     report.push(`refused: ${why}`);
-    return { verdict: 'refused', tip, subject, main, report };
+    return { verdict: 'refused', tip, subject, main, signer, report };
   }
 }
 
@@ -892,7 +946,12 @@ async function gateBody(
   deps: GateDeps,
   cfg: GateConfig,
   report: string[],
-  setSubject: (tip: string, main: string, subject: string | null) => void,
+  setSubject: (
+    tip: string,
+    main: string,
+    subject: string | null,
+    signer: SignerDisposition | null,
+  ) => void,
   refuse: (why: string) => never,
 ): Promise<{ verdict: GateResult['verdict'] }> {
   const { gh, git } = deps;
@@ -913,7 +972,7 @@ async function gateBody(
   };
   const tip = await refSha(QUEUE_BRANCH);
   const main = await refSha(MAIN_BRANCH);
-  setSubject(tip, main, null);
+  setSubject(tip, main, null, null);
   report.push(`subject: tip ${tip} (${QUEUE_BRANCH}), main ${main} (API)`);
   for (const [sha, what] of [
     [tip, 'tip'],
@@ -951,11 +1010,17 @@ async function gateBody(
   }
   report.push('ancestry: main is an ancestor of the tip (fast-forward)');
 
-  // 2b. Subject: the newest queue commit whose newest trusted promotion
-  //     review is a success bound to EXACTLY this main (PR-C). Walk the
-  //     first-parent line main..tip newest-first; everything below judges
-  //     and promotes the SUBJECT, not the tip — a tip ahead of the
-  //     reviewed sha simply waits for its own review. Untrusted
+  // 2b. Subject: the newest queue commit that may promote (PR-C, #376).
+  //     Walk the first-parent line main..tip newest-first; everything below
+  //     judges and promotes the SUBJECT, not the tip. A commit whose range
+  //     main..sha touches NO privileged path (the trust ref's policy list,
+  //     policyDiff's shared predicate) is selected outright: its signer
+  //     review is ADVISORY — recorded as `signer: present|advisory-missing|
+  //     advisory-failed`, never a refusal. A commit whose range touches a
+  //     privileged path needs its newest trusted promotion review to be a
+  //     success bound to EXACTLY this main, as before; without one the walk
+  //     moves on (an older, ordinary prefix may still promote) and a
+  //     privileged tip simply waits for its own review. Untrusted
   //     promotion-review statuses on the TIP with no selected review
   //     refuse (a foreign or forged signal); on older commits they are
   //     history and inert, because the subject — never the tip — is what
@@ -996,7 +1061,16 @@ async function gateBody(
   let subject: string | null = null;
   let subjectBase: string | null = null;
   let subjectReviewId: number | null = null;
+  let subjectSigner: SignerDisposition | null = null;
   let othersOnTip = 0;
+  // The trust ref's privileged list (read once; absent fails closed — every
+  // range then needs the signer review; invalid refuses).
+  const policyText = await git.readBlob(cfg.repo, cfg.trustRef, POLICY_LIST_PATH);
+  if (policyText === null) {
+    report.push(
+      `signer: ${POLICY_LIST_PATH} absent at the trust ref — every range treated as privileged (signer review required)`,
+    );
+  }
   for (const sha of walk) {
     const statusesPath = `${repoPath}/commits/${sha}/statuses?per_page=100`;
     const review = selectPromotionReview(
@@ -1004,6 +1078,31 @@ async function gateBody(
       cfg.reviewer,
     );
     if (sha === tip) othersOnTip = review.others;
+    const privileged = privilegedPathsIn(await git.changedPaths(cfg.repo, main, sha), policyText);
+    if (privileged.length === 0) {
+      if (
+        promotedMarked !== null &&
+        (sha === promotedMarked || (await git.isAncestor(cfg.repo, sha, promotedMarked)))
+      ) {
+        report.push(
+          `  review walk ${sha}: already promoted (cq/promoted at ${promotedMarked}) — skipping`,
+        );
+        continue;
+      }
+      subject = sha;
+      subjectSigner = advisorySigner(review, main);
+      report.push(
+        `  review walk ${sha}: SELECTED — ordinary range (no privileged path), signer review advisory: ${subjectSigner}`,
+        ...review.lines.map((l) => `  ${l}`),
+      );
+      break;
+    }
+    const shown = privileged.slice(0, 5).map(clean).join(', ');
+    report.push(
+      `  review walk ${sha}: privileged range (${shown}${
+        privileged.length > 5 ? `, +${String(privileged.length - 5)} more` : ''
+      }) — signer review required`,
+    );
     if (review.state !== 'success' || review.base === null) {
       report.push(`  review walk ${sha}: ${review.state}`, ...review.lines.map((l) => `  ${l}`));
       continue;
@@ -1027,6 +1126,7 @@ async function gateBody(
     subject = sha;
     subjectBase = review.base;
     subjectReviewId = review.winner;
+    subjectSigner = 'required';
     report.push(`  review walk ${sha}: SELECTED`, ...review.lines.map((l) => `  ${l}`));
     break;
   }
@@ -1039,11 +1139,19 @@ async function gateBody(
     report.push('awaiting promotion review: no reviewed commit on the queue');
     return { verdict: 'awaiting' };
   }
-  setSubject(tip, main, subject);
+  setSubject(tip, main, subject, subjectSigner);
+  const required = subjectSigner === 'required';
   report.push(
-    `subject: reviewed sha ${subject} (base ${subjectBase} in main)${
-      subject === tip ? ' — the queue tip itself' : ` — queue tip ${tip} waits for its own review`
+    `${
+      required
+        ? `subject: reviewed sha ${subject} (base ${subjectBase} in main)`
+        : `subject: ${subject} (ordinary range, base ${main})`
+    }${
+      subject === tip
+        ? ' — the queue tip itself'
+        : ` — queue tip ${tip} waits (its range needs the signer review or is not yet judged)`
     }`,
+    `signer: ${subjectSigner ?? 'none'}${required ? ' (privileged range)' : ' (advisory — never refuses)'}`,
   );
 
   // 3–4. Closure over main..subject, and clean first-parent merges.
@@ -1120,29 +1228,37 @@ async function gateBody(
   }
   const pushToken = cfg.pushToken;
   if (pushToken === null) refuse('push: no push credential');
-  // 10-pre. The selected promotion review must still be the subject's
-  // newest trusted status and still success at PUSH time (the waits above
+  // 10-pre. (Privileged ranges only.) The selected promotion review must
+  // still be the subject's newest trusted status and still success at PUSH
+  // time (the waits above
   // re-check verdicts and verified runs, but a newer trusted failure or
   // pending, or a malformed success, posted on the subject during that
   // interval must stop the promotion here). The review is also bound to
   // the main this run read: a review of an older range can only exist
   // below a rewound main, and replaying it would defeat the rewind.
-  const recheckPath = `${repoPath}/commits/${subject}/statuses?per_page=100`;
-  const fresh = selectPromotionReview(
-    slurpedComments(await getSlurp(recheckPath), recheckPath).flat(),
-    cfg.reviewer,
-  );
-  if (fresh.state !== 'success' || fresh.winner !== subjectReviewId || fresh.base !== subjectBase) {
-    refuse(
-      `push: the promotion review on ${subject} changed since selection (newest trusted: ${fresh.state}${
-        fresh.winner === null ? '' : ` status ${fresh.winner}`
-      }); next sweep retries`,
+  // An ORDINARY range's review is advisory (#376): nothing to re-read.
+  if (required) {
+    const recheckPath = `${repoPath}/commits/${subject}/statuses?per_page=100`;
+    const fresh = selectPromotionReview(
+      slurpedComments(await getSlurp(recheckPath), recheckPath).flat(),
+      cfg.reviewer,
     );
-  }
-  if (fresh.base !== main) {
-    refuse(
-      `push: the review's recorded base ${fresh.base} is not the current main ${main} — refusing to replay a review of an older range`,
-    );
+    if (
+      fresh.state !== 'success' ||
+      fresh.winner !== subjectReviewId ||
+      fresh.base !== subjectBase
+    ) {
+      refuse(
+        `push: the promotion review on ${subject} changed since selection (newest trusted: ${fresh.state}${
+          fresh.winner === null ? '' : ` status ${fresh.winner}`
+        }); next sweep retries`,
+      );
+    }
+    if (fresh.base !== main) {
+      refuse(
+        `push: the review's recorded base ${fresh.base} is not the current main ${main} — refusing to replay a review of an older range`,
+      );
+    }
   }
   // Three leased updates in one --atomic push (luna round 4): (a) main to
   // the subject, leased at the step-1 read; (b) the replay marker to the
@@ -1170,7 +1286,11 @@ async function gateBody(
       'push: the atomic leased push was rejected (main or the queue moved since the read); next sweep retries',
     );
   }
-  report.push(`push: main at ${subject} (reviewed sha, base ${subjectBase})`);
+  report.push(
+    required
+      ? `push: main at ${subject} (reviewed sha, base ${subjectBase})`
+      : `push: main at ${subject} (ordinary range, signer ${subjectSigner ?? 'none'})`,
+  );
   return { verdict: 'promoted' };
 }
 

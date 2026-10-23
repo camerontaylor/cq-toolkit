@@ -17,13 +17,18 @@
 // selectPromotionReview pins the reviewer by type+login+id, and the push
 // sends ONLY main.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
 import { authorizePaths } from '../../src/ops/gates/d11Authorization.js';
-import type { PolicyDiffInput, PolicyDiffOutcome } from '../../src/ops/gates/policyDiff.js';
+import {
+  parsePolicyList,
+  privilegedPathPredicate,
+  type PolicyDiffInput,
+  type PolicyDiffOutcome,
+} from '../../src/ops/gates/policyDiff.js';
 import type { RangeCommit } from '../../src/adapters/git/ratchetGit.js';
 import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import type { AcceptanceInput, AcceptanceResult } from '../../src/selfhost/acceptance.js';
@@ -36,6 +41,7 @@ import {
   checkVerifiedRun,
   mainWith,
   parseGateArgs,
+  privilegedPathsIn,
   realGateGit,
   remoteUrlFor,
   runGate,
@@ -1800,6 +1806,196 @@ describe('runGate', () => {
   });
 });
 
+// -- runGate: signer review advisory except privileged ranges (#376) ------------
+
+/** The repository's real privileged list (the trust ref's policy file). */
+const REAL_POLICY = readFileSync(
+  join(import.meta.dirname, '..', '..', 'policy', 'protected-paths.json'),
+  'utf8',
+);
+
+/** Fake git whose trust ref carries `policy` and whose range changes `changed`. */
+const rangeGit = (changed: string[], policy: string | null = REAL_POLICY): GateGit =>
+  fakeGit({
+    readBlob: (_r, rev, path) =>
+      Promise.resolve(rev === TRUST && path === 'policy/protected-paths.json' ? policy : null),
+    changedPaths: () => Promise.resolve(changed),
+  });
+
+describe('runGate — signer review advisory except privileged ranges (#376)', () => {
+  const ORDINARY = ['src/ops/analyze/run.ts', 'docs/promotion-policy.md'];
+  const PRIVILEGED = ['src/ops/analyze/run.ts', 'src/selfhost/promote-gate.ts'];
+
+  const pushing = (w: World, changed: string[]) => {
+    const h = harness(w);
+    const pushes: unknown[] = [];
+    const inner = rangeGit(changed);
+    h.deps.git = {
+      ...inner,
+      pushAtomic: (repo, url, updates, token) => {
+        pushes.push(updates);
+        return inner.pushAtomic(repo, url, updates, token);
+      },
+    };
+    return { h, pushes };
+  };
+
+  test('ordinary range with no signer status → promoted, signer advisory-missing', async () => {
+    const { h, pushes } = pushing(world(M1, MAIN, { statuses: new Map() }), ORDINARY);
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(r.subject).toBe(M1);
+    expect(r.signer).toBe('advisory-missing');
+    // The replay marker and leased exact-SHA FF are unchanged.
+    expect(pushes).toEqual([
+      [
+        { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+        { refspec: `${M1}:refs/heads/cq/promoted`, expected: MAIN },
+        { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
+      ],
+    ]);
+    // Core CI / verdict / acceptance still bind the range.
+    expect(h.acceptanceInputs).toHaveLength(2);
+    expect(h.policyInputs).toHaveLength(1);
+    const text = r.report.join('\n');
+    expect(text).toMatch(/ordinary range \(no privileged path\), signer review advisory/);
+    expect(text).toMatch(/signer: advisory-missing \(advisory — never refuses\)/);
+  });
+
+  test('ordinary range: pending → advisory-missing, failed → advisory-failed, success → present', async () => {
+    const cases: [unknown[], string][] = [
+      [[promoReview(MAIN, { state: 'pending', description: 'reviewing' })], 'advisory-missing'],
+      [[promoReview(MAIN, { state: 'failure', description: 'major finding' })], 'advisory-failed'],
+      [[promoReview(X)], 'advisory-missing'],
+      [[promoReview(MAIN)], 'present'],
+    ];
+    for (const [rows, want] of cases) {
+      const { h } = pushing(world(M1, MAIN, { statuses: new Map([[M1, rows]]) }), ORDINARY);
+      const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+      expect(r.verdict, want).toBe('promoted');
+      expect(r.signer, want).toBe(want);
+    }
+  });
+
+  test('ordinary range still refuses on a red verdict (core CI binds every range)', async () => {
+    const { h } = pushing(
+      world(M1, MAIN, {
+        statuses: new Map(),
+        checkRuns: [[verdictRow(M1, MAIN, { conclusion: 'failure' })]],
+      }),
+      ORDINARY,
+    );
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('refused');
+  });
+
+  test('privileged range with no signer success → not promoted, exactly as before', async () => {
+    const { h, pushes } = pushing(world(M1, MAIN, { statuses: new Map() }), PRIVILEGED);
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('awaiting');
+    expect(r.subject).toBeNull();
+    expect(r.signer).toBeNull();
+    expect(pushes).toEqual([]);
+    expect(h.policyInputs).toEqual([]);
+    expect(r.report.join('\n')).toMatch(
+      /privileged range \(src\/selfhost\/promote-gate\.ts\) — signer review required/,
+    );
+    // A failed review on a privileged range does not promote either, and a
+    // foreign status on the tip is still a red refusal.
+    const failed = pushing(
+      world(M1, MAIN, { statuses: new Map([[M1, [promoReview(MAIN, { state: 'failure' })]]]) }),
+      PRIVILEGED,
+    );
+    expect((await runGate(failed.h.deps, cfg({ push: true, pushToken: 't' }))).verdict).toBe(
+      'awaiting',
+    );
+    const foreign = pushing(
+      world(M1, MAIN, {
+        statuses: new Map([
+          [M1, [promoReview(MAIN, { creator: { login: 'owner', id: 1, type: 'User' } })]],
+        ]),
+      }),
+      PRIVILEGED,
+    );
+    expect((await runGate(foreign.h.deps, cfg({ push: true, pushToken: 't' }))).verdict).toBe(
+      'refused',
+    );
+  });
+
+  test('privileged range with a signer success bound to main → promoted, signer required', async () => {
+    const { h, pushes } = pushing(world(), PRIVILEGED);
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(r.signer).toBe('required');
+    expect(pushes).toHaveLength(1);
+    expect(r.report.join('\n')).toMatch(/subject: reviewed sha c{40} \(base a{40} in main\)/);
+  });
+
+  test('privileged range: a review that turns failure before the push still refuses', async () => {
+    const w = world();
+    w.onStatuses = (n) => {
+      // Read 0 is the walk; read 1 is the pre-push re-read.
+      if (n === 1)
+        w.statuses = new Map([
+          [
+            M1,
+            [
+              promoReview(MAIN, { id: 901, state: 'failure', created_at: '2026-09-02T00:00:00Z' }),
+              promoReview(MAIN),
+            ],
+          ],
+        ]);
+    };
+    const { h, pushes } = pushing(w, PRIVILEGED);
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/promotion review on c{40} changed since selection/);
+    expect(pushes).toEqual([]);
+  });
+
+  test('an absent policy list at the trust ref fails closed: the signer review is required', async () => {
+    const h = harness(world(M1, MAIN, { statuses: new Map() }));
+    h.deps.git = rangeGit(ORDINARY, null);
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('awaiting');
+    expect(r.report.join('\n')).toMatch(
+      /absent at the trust ref — every range treated as privileged/,
+    );
+  });
+
+  test('the privileged predicate is policyDiff’s shared one over the trust ref’s list', () => {
+    const isPrivileged = privilegedPathPredicate(parsePolicyList(REAL_POLICY));
+    const paths = [
+      'src/selfhost/promote-gate.ts',
+      'policy/promotion-reviewer.json',
+      'policy/denylist/rules.json',
+      'scripts/denylist-scan',
+      'apps/crq-python/signer/sign.py',
+      'apps/crq-python/config.json',
+      'apps/crq-python/ops/systemd/crq.service',
+      'policy/protected-paths.json',
+      'src/ops/analyze/run.ts',
+      'docs/promotion-policy.md',
+      'apps/crq-python/crq/tick.py',
+      '.github/workflows/ci.yml',
+    ];
+    expect(privilegedPathsIn(paths, REAL_POLICY)).toEqual(paths.filter(isPrivileged));
+    expect(privilegedPathsIn(paths, REAL_POLICY)).toEqual(paths.slice(0, 8));
+    // It reads the list it is given (the trust ref's), not a second copy.
+    const custom = JSON.stringify({
+      schemaVersion: 1,
+      protectedPaths: ['^docs/'],
+      requiredChecks: [],
+    });
+    expect(privilegedPathsIn(paths, custom)).toEqual(['docs/promotion-policy.md']);
+    // An absent list fails closed: every range is privileged, even an empty one.
+    expect(privilegedPathsIn([], null)).toEqual([
+      '<policy/protected-paths.json absent: every range>',
+    ]);
+    expect(() => privilegedPathsIn(paths, '{}')).toThrow(/schema violation/);
+  });
+});
+
 // -- runGate: decisive D11 authorization (ADR-0004 D-C.3, D-G.4) ----------------
 
 const C3_OK = JSON.stringify({
@@ -1921,7 +2117,14 @@ describe('runGate — decisive D11 authorization', () => {
 
   test('an unreadable attestation is dormant', async () => {
     const { h } = d11Harness({ timeline: () => [ownerLabel()] });
-    h.deps.git = { ...h.deps.git, readBlob: () => Promise.reject(new Error('git fault')) };
+    // The privileged-list read (#376) is absent; only the attestation read faults.
+    h.deps.git = {
+      ...h.deps.git,
+      readBlob: (_r, _rev, path) =>
+        path === 'policy/protected-paths.json'
+          ? Promise.resolve(null)
+          : Promise.reject(new Error('git fault')),
+    };
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
     expect(r.report.join('\n')).toMatch(/unreadable at the trust ref \(git fault\)/);

@@ -226,10 +226,10 @@ const PolicyListSchema = z
   })
   .strict();
 
-type PolicyList = z.infer<typeof PolicyListSchema>;
+export type PolicyList = z.infer<typeof PolicyListSchema>;
 
 /** Parse policy-list text; throws a plain Error on any violation. */
-function parsePolicyList(text: string): PolicyList {
+export function parsePolicyList(text: string): PolicyList {
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -244,6 +244,18 @@ function parsePolicyList(text: string): PolicyList {
     throw new Error(`${POLICY_LIST_PATH}: schema violation — ${issues}`);
   }
   return parsed.data;
+}
+
+/**
+ * THE privileged-path predicate: true when a repo-relative path matches one
+ * of the trust ref's project `protectedPaths` sources (the privileged list).
+ * The single definition both consumers use — this check's `privileged-path`
+ * finding and the promotion gate's "does this range need the signer review"
+ * test (#376) — so the two can never disagree about what is privileged.
+ */
+export function privilegedPathPredicate(policy: PolicyList): (path: string) => boolean {
+  const patterns = policy.protectedPaths.map((source) => new RegExp(source));
+  return (path) => patterns.some((pattern) => pattern.test(path));
 }
 
 /** A side of the range that may be absent or unreadable, never a throw. */
@@ -670,10 +682,10 @@ export function createPolicyDiff(
     // protected-path / privileged-path / definition-changed. A path the
     // trust ref's project list names is BOTH: protected (every posture's
     // taxonomy) and privileged (what still needs a human under `advisory`).
-    const projectPatterns = policy.protectedPaths.map((source) => new RegExp(source));
+    const isPrivileged = privilegedPathPredicate(policy);
     for (const path of safe) {
       const definition = isDefinitionPath(manifest, path) || graph.has(path);
-      const privileged = projectPatterns.some((pattern) => pattern.test(path));
+      const privileged = isPrivileged(path);
       if (definition || isProtectedPolicyPath(path) || privileged) {
         add('protected-path', path, 'changes a protected path');
       }
