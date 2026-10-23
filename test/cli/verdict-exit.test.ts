@@ -1,7 +1,7 @@
 // Lane E — `--fail-on-verdict`: the opt-in exit-code mapping for an `ok`
-// result whose value carries `verdict: 'fail'` (a regression gate's "the op
-// ran" vs "the gate passed"). Hermetic: the fixture family under
-// test/fixtures/cli-verdict-ops plus tmp plan registries.
+// result whose value carries a failing `verdict` string ('fail', and since
+// S0/'#371' the regression gate's 'regression'). Hermetic: the fixture
+// family under test/fixtures/cli-verdict-ops plus tmp plan registries.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,9 +51,15 @@ async function tmpDir(prefix: string): Promise<string> {
 }
 
 describe('exit.ts mapping (mechanical)', () => {
-  test('hasFailVerdict: only an object whose verdict is exactly the string "fail"', () => {
+  test('hasFailVerdict: only an object whose verdict is exactly a failing string', () => {
     expect(hasFailVerdict({ verdict: 'fail' })).toBe(true);
+    // The regression gate's failing decision maps like 'fail' (S0).
+    expect(hasFailVerdict({ verdict: 'regression' })).toBe(true);
+    // Passing verdicts — the regression gate's twin included — stay false.
     expect(hasFailVerdict({ verdict: 'pass' })).toBe(false);
+    expect(hasFailVerdict({ verdict: 'no-regression' })).toBe(false);
+    expect(hasFailVerdict({ verdict: 'needs-human' })).toBe(false);
+    expect(hasFailVerdict({ verdict: 'REGRESSION' })).toBe(false);
     expect(hasFailVerdict({ verdict: 'FAIL' })).toBe(false);
     expect(hasFailVerdict({ verdict: false })).toBe(false);
     expect(hasFailVerdict({})).toBe(false);
@@ -64,12 +70,22 @@ describe('exit.ts mapping (mechanical)', () => {
 
   test('exitCodeForOpResult: the flag only upgrades ok+fail-verdict to 1', () => {
     const failing = { status: 'ok', value: { verdict: 'fail' } } as const;
+    const regressing = { status: 'ok', value: { verdict: 'regression' } } as const;
     expect(exitCodeForOpResult(failing)).toBe(0);
     expect(exitCodeForOpResult(failing, {})).toBe(0);
     expect(exitCodeForOpResult(failing, { failOnVerdict: false })).toBe(0);
     expect(exitCodeForOpResult(failing, { failOnVerdict: true })).toBe(1);
+    // 'regression' maps identically to 'fail' (S0).
+    expect(exitCodeForOpResult(regressing)).toBe(0);
+    expect(exitCodeForOpResult(regressing, { failOnVerdict: true })).toBe(1);
     expect(
       exitCodeForOpResult({ status: 'ok', value: { verdict: 'pass' } }, { failOnVerdict: true }),
+    ).toBe(0);
+    expect(
+      exitCodeForOpResult(
+        { status: 'ok', value: { verdict: 'no-regression' } },
+        { failOnVerdict: true },
+      ),
     ).toBe(0);
     // Non-ok statuses are untouched by the flag.
     expect(exitCodeForOpResult({ status: 'failed', error: 'x' }, { failOnVerdict: true })).toBe(1);
@@ -112,6 +128,22 @@ describe('op subcommands: --fail-on-verdict', () => {
     expect(gated.err).toBe('');
   });
 
+  test('verdict regression (the regression gate): exit 0 without the flag, 1 with; artifact identical', async () => {
+    // The regression gate returns status:'ok' with value.verdict 'regression'
+    // on a novel failure — the exact input shape the fixture family mirrors.
+    const plain = await capture(['verdictregression', '--json']);
+    const gated = await capture(['verdictregression', '--json', '--fail-on-verdict']);
+    expect(plain.code).toBe(0);
+    expect(gated.code).toBe(1);
+    expect(gated.out).toBe(plain.out);
+    expect(JSON.parse(gated.out)).toEqual({
+      status: 'ok',
+      value: { verdict: 'regression', novel: 1 },
+    });
+    expect(plain.err).toBe('');
+    expect(gated.err).toBe('');
+  });
+
   test('flag order does not matter and human mode stays failures-only silent for an ok status', async () => {
     const { code, out, err } = await capture(['verdictfail', '--fail-on-verdict']);
     expect(code).toBe(1);
@@ -119,14 +151,18 @@ describe('op subcommands: --fail-on-verdict', () => {
     expect(err).toBe('');
   });
 
-  test.each(['verdictpass', 'verdictnone', 'verdictcase', 'verdictscalar', 'verdictnested'])(
-    '%s: not a failing verdict → exit 0 even with the flag',
-    async (op) => {
-      const { code, out } = await capture([op, '--fail-on-verdict', '--json']);
-      expect(code).toBe(0);
-      expect(JSON.parse(out)).toMatchObject({ status: 'ok' });
-    },
-  );
+  test.each([
+    'verdictpass',
+    'verdictnone',
+    'verdictcase',
+    'verdictscalar',
+    'verdictnested',
+    'verdictnoregression',
+  ])('%s: not a failing verdict → exit 0 even with the flag', async (op) => {
+    const { code, out } = await capture([op, '--fail-on-verdict', '--json']);
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toMatchObject({ status: 'ok' });
+  });
 
   test('a non-ok status keeps its mapping with the flag (failed → 1)', async () => {
     const { code } = await capture(['failedverdict', '--fail-on-verdict', '--json']);
@@ -186,6 +222,14 @@ describe('run-plan and plan subcommands: --fail-on-verdict', () => {
     expect(jobResults(gated.out)).toEqual(jobResults(plain.out)); // same artifact modulo runId
     expect(jobResults(gated.out)).toHaveLength(2);
     expect(gated.err).toBe('');
+  });
+
+  test('run-plan: an ok regression-verdict row → exit 1 with the flag (S0)', async () => {
+    const plan = await planFile(['verdictpass', 'verdictregression']);
+    const plain = await capture(['run-plan', `--plan=${plan}`, '--json']);
+    const gated = await capture(['run-plan', `--plan=${plan}`, '--json', '--fail-on-verdict']);
+    expect(plain.code).toBe(0);
+    expect(gated.code).toBe(1);
   });
 
   test('run-plan: all rows pass/absent → exit 0 with the flag', async () => {

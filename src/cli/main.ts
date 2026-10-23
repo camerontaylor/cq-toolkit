@@ -13,8 +13,11 @@
 // --help/-h); every further token must be a flag. `--key=value`, or a bare
 // `--key` (= boolean true). Values are JSON.parse'd when they parse, else
 // kept as raw strings (--packages=helpers → "helpers", --max-usd=2 → 2,
-// --tags=["a"] → an array). A positional (non-flag) token is a usage error;
-// a duplicate flag is a usage error (both exit 2).
+// --tags=["a"] → an array) — EXCEPT a numeric-LOOKING token whose text is
+// not the canonical decimal form of its Number ('1e000005', '01', '1.50'):
+// it stays the raw string so hex cluster ids round-trip (#386). A
+// positional (non-flag) token is a usage error; a duplicate flag is a
+// usage error (both exit 2).
 //
 // PLAN SUBCOMMANDS (T4.3): every name the plan registry discovers is ALSO a
 // subcommand, generated at dispatch time (src/cli/plans.ts) — never a
@@ -134,9 +137,34 @@ function issueMessage(error: unknown): string {
 }
 
 /**
+ * The canonical-decimal check for numeric-LOOKING raw flag values (#386).
+ *
+ * A raw token whose JSON.parse yields a number is still kept as a raw
+ * STRING unless its text is the canonical decimal form of that number —
+ * `String(Number(raw)) === raw` — i.e. exactly what JS's own number →
+ * string conversion would print back. '2' → 2 ('2' === '2'); '1e000005',
+ * '0e123456', '123e4567', '01', '1.50', '+1', '.5', '1.' → raw strings
+ * (Number() accepts them; String() round-trips them differently, or to
+ * Infinity/NaN-class text). This is what keeps 8-hex cluster ids that are
+ * all digits plus one 'e' (`1e000005`) — and leading-zero ids (`01234567`)
+ * — verbatim strings through `analyze.fix --clusterId=…`, while ordinary
+ * numeric flags (`--maxUsd=2`, `--concurrency=3`) still parse as numbers.
+ */
+function isCanonicalDecimal(raw: string): boolean {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return false; // '1e999999...' → Infinity: never canonical
+  return String(n) === raw;
+}
+
+/**
  * Parse flag tokens into a plain flags record. `--key=value` / bare
  * `--key` (true) / `-h` (single-dash short flags, boolean true). Values are
- * JSON.parse'd when they parse, else raw strings. Keys stay VERBATIM: ops
+ * JSON.parse'd when they parse AND the result is faithful: a value that
+ * parses to a number whose raw text is not its canonical decimal form
+ * (`String(Number(raw)) !== raw`, e.g. '1e000005', '01', '1.50') is kept as
+ * the raw string instead (#386 — hex-shaped cluster ids must round-trip),
+ * as is anything that fails to parse. Other JSON values (objects, arrays,
+ * strings, booleans, null) parse as themselves. Keys stay VERBATIM: ops
  * match them against schema keys exactly; run-plan normalizes its
  * kebab-case aliases itself. Positional tokens land in `unknown` — the
  * caller turns a non-empty array into a usage error. Duplicate flags throw
@@ -168,7 +196,11 @@ export function parseFlags(tokens: string[]): {
       return;
     }
     try {
-      flags[key] = JSON.parse(rawValue);
+      const parsed: unknown = JSON.parse(rawValue);
+      // #386: a number that the raw text does not denote canonically is kept
+      // as the raw string — the token the user typed IS the id; Number()
+      // would silently rewrite exponent/leading-zero forms.
+      flags[key] = typeof parsed === 'number' && !isCanonicalDecimal(rawValue) ? rawValue : parsed;
     } catch {
       flags[key] = rawValue;
     }
