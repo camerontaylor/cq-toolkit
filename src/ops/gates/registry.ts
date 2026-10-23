@@ -37,7 +37,7 @@ import type { RegressionGateInput } from './regressionGate.js';
  * concrete object is kept so the baseline-probe schema can COMPOSE its
  * adapter/command shapes from this single source.
  */
-const CheckRunnerInputObject = z
+export const CheckRunnerInputObject = z
   .object({
     adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
     // Strict: an unknown key inside command (a typo'd timeoutMS) must fail

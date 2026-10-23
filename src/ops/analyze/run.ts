@@ -142,7 +142,11 @@ export function resolveChecks(
       error: `analyze.run: '${configPath}' ${parsed.reason}; fix it, or regenerate it with \`cq analyze.init --dir=${dir} --force\``,
     };
   }
-  return { ok: true, checks: parsed.config.checks, configPath };
+  return {
+    ok: true,
+    checks: parsed.config.checks.map(({ adapter, command }) => ({ adapter, command })),
+    configPath,
+  };
 }
 
 /** The check's command with cwd and relative command paths resolved against `dir`. */

@@ -112,12 +112,14 @@ export {
 // central op-registry scanner and tests import ./registry.js directly.
 export type { AnalyzeInitInput, AnalyzeInitReport } from './init.js';
 export { detectChecks, makeAnalyzeInit } from './init.js';
-export type { CqConfig } from './cqConfig.js';
+export type { CqConfig, CqCheck, CqSeverity } from './cqConfig.js';
 export {
   CQ_CONFIG_FILE,
   CQ_CONFIG_SCHEMA_VERSION,
   CqConfigSchema,
   parseCqConfig,
+  migrateCqConfig,
+  CqCheckSchema,
 } from './cqConfig.js';
 export type {
   AnalysisSnapshot,
@@ -160,3 +162,6 @@ export { AnalysisStoreError, pathAnalysisFileStore } from './analysisStore.js';
 // re-exported wholesale from the playbooks barrel (its exports are
 // explicit and collision-checked there).
 export * from './playbooks/index.js';
+
+export type { CqConfigFlags, EffectiveCqPolicy } from './cqConfigDefaults.js';
+export { resolveCqConfigDefaults, requireAgenticTokenBudget } from './cqConfigDefaults.js';

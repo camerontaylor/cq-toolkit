@@ -22,14 +22,21 @@ import type { Op } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { CheckRunnerInput } from '../gates/checkRunner.js';
 import type { CqConfig } from './cqConfig.js';
-import { CQ_CONFIG_FILE, CQ_CONFIG_SCHEMA_VERSION } from './cqConfig.js';
+import {
+  CqConfigSchema,
+  CQ_CONFIG_FILE,
+  CQ_CONFIG_SCHEMA_VERSION,
+  migrateCqConfig,
+} from './cqConfig.js';
 
 /** JSON-serializable input of the `analyze.init` op. */
-export interface AnalyzeInitInput {
+export interface AnalyzeInitInput extends Partial<Omit<CqConfig, 'schemaVersion' | 'checks'>> {
   /** The project directory to write `cq.json` into (must exist). */
   dir: string;
   /** Overwrite an existing `cq.json`. Default false (refuse). */
   force?: boolean;
+  /** Rewrite an existing v1 file to v2, preserving all checks. */
+  migrate?: boolean;
 }
 
 /** The op's value: what was written, and why each check was chosen. */
@@ -126,7 +133,10 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
     } catch {
       existing = undefined;
     }
-    if (existing !== undefined && input.force !== true) {
+    if (input.migrate === true && input.force === true) {
+      return { status: 'failed', error: 'analyze.init: --migrate and --force cannot be combined' };
+    }
+    if (existing !== undefined && input.force !== true && input.migrate !== true) {
       return {
         status: 'failed',
         error: `analyze.init: '${configPath}' already exists — refusing to overwrite it; edit it by hand, or pass force: true (--force) to replace it`,
@@ -138,14 +148,46 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
         error: `analyze.init: '${configPath}' is a symlink — refusing to write through it`,
       };
     }
+    if (input.migrate === true) {
+      try {
+        const migrated = migrateCqConfig(readFileSync(configPath, 'utf8'));
+        if (!migrated.ok)
+          return {
+            status: 'failed',
+            error: `analyze.init: cannot migrate '${configPath}': ${migrated.reason}`,
+          };
+        writeFileSync(configPath, `${JSON.stringify(migrated.config, null, 2)}\n`, 'utf8');
+        return {
+          status: 'ok',
+          value: {
+            configPath,
+            config: migrated.config,
+            detected: ['migrated schemaVersion 1 to 2; checks preserved'],
+            overwritten: true,
+          },
+        };
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `analyze.init: cannot migrate '${configPath}' — ${messageOf(err)}`,
+        };
+      }
+    }
     const { checks, detected } = detectChecks(input.dir);
     if (checks.length === 0) {
       return {
         status: 'failed',
-        error: `analyze.init: no supported check detected in '${input.dir}' (looked for tsconfig.json and an ESLint config) — write ${CQ_CONFIG_FILE} by hand: { "schemaVersion": 1, "checks": [ { "adapter": "tsc-lines" | "eslint-json" | "vitest-json", "command": { "command": "...", "args": [...], "cwd": "." } } ] }`,
+        error: `analyze.init: no supported check detected in '${input.dir}' (looked for tsconfig.json and an ESLint config) — write ${CQ_CONFIG_FILE} by hand: { "schemaVersion": 2, "checks": [ { "adapter": "tsc-lines" | "eslint-json" | "vitest-json", "command": { "command": "...", "args": [...], "cwd": "." } } ] }`,
       };
     }
-    const config: CqConfig = { schemaVersion: CQ_CONFIG_SCHEMA_VERSION, checks };
+    const { dir: _dir, force: _force, migrate: _migrate, ...options } = input;
+    const config: CqConfig = { ...options, schemaVersion: CQ_CONFIG_SCHEMA_VERSION, checks };
+    const valid = CqConfigSchema.safeParse(config);
+    if (!valid.success)
+      return {
+        status: 'failed',
+        error: `analyze.init: invalid config options: ${valid.error.message}`,
+      };
     try {
       writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
         encoding: 'utf8',
