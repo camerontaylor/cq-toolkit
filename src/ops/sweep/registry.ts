@@ -59,7 +59,7 @@ const PlanSweepPackageSchema = z
  * check. Segment/traversal safety of the package names (explicit) is the
  * op's library-level contract — the schema enforces the plain-JSON shape.
  */
-const PlanSweepSelectorSchema = z.discriminatedUnion('mode', [
+export const PlanSweepSelectorSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('workspace-all') }).strict(),
   z.object({ mode: z.literal('changed-vs-base'), base: z.string().min(1) }).strict(),
   z.object({ mode: z.literal('explicit'), packages: z.array(z.string().min(1)).min(1) }).strict(),
@@ -251,6 +251,21 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     kind: z.string().min(1).exactOptional(),
     slug: z.string().min(1).exactOptional(),
     mode: z.enum(['fix', 'prep']).exactOptional(),
+    taskLoop: z
+      .object({
+        denylistPatternsFile: z.string().min(1).exactOptional(),
+        relatedArgs: z
+          .array(z.string())
+          .refine(
+            (args) => args.includes('{files}'),
+            'relatedArgs must include a standalone {files} token',
+          )
+          .exactOptional(),
+        protectTests: z.boolean().exactOptional(),
+        wallMs: z.number().int().positive().exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
     proposeOnly: z.boolean().exactOptional(),
     mutex: GitMutexBindingSchema.exactOptional(),
     sandboxPolicy: SandboxPolicySchema.exactOptional(),
@@ -288,6 +303,14 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     check: z
       .object({
         adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
+        cwd: z
+          .string()
+          .refine(
+            (path) =>
+              !path.startsWith('/') && !path.includes('\\') && !path.split('/').includes('..'),
+            'cwd must be repository-relative',
+          )
+          .exactOptional(),
         command: z.string().min(1),
         args: z.array(z.string()),
         timeoutMs: z.number().int().min(1).exactOptional(),
@@ -439,3 +462,5 @@ export const registry: OpRegistryEntry[] = [
       ),
   },
 ];
+
+// Shared task and stage-path helpers: './tasks.js', './stagePaths.js', './taskLoop.js'.

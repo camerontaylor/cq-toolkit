@@ -197,6 +197,7 @@ import {
   NoObjectGeneratedError,
   Output,
   stepCountIs,
+  wrapLanguageModel,
   tool,
 } from 'ai';
 import type {
@@ -210,7 +211,8 @@ import type {
 import type { JSONSchema7 } from '@ai-sdk/provider';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -282,6 +284,11 @@ export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
+  /** Runs before every provider send, including retries, repairs and tool-loop steps. */
+  beforeRequest?: (
+    text: string,
+    contents?: readonly { text: string; path?: string }[],
+  ) => void | Promise<void>;
   /**
    * Provider registry override (name → factory). Unknown provider names
    * still throw before dispatch. Tests inject mocks here; the production
@@ -340,6 +347,7 @@ export interface AiSdkDriverOptions {
  * isolated invocations.
  */
 export class AiSdkDriver implements Driver {
+  private readonly beforeRequest: AiSdkDriverOptions['beforeRequest'];
   private readonly providers: Readonly<Record<string, ProviderFactory>>;
   private readonly harnessConfig: HarnessConfig;
   private readonly sandboxConfig: SandboxConfig | undefined;
@@ -365,6 +373,7 @@ export class AiSdkDriver implements Driver {
         ? undefined
         : deepFreeze(structuredClone(options.sandboxConfig));
     this.sessionsDir = options.sessionsDir;
+    this.beforeRequest = options.beforeRequest;
     this.pricing = options.pricing ?? priceOf;
     this.strictTokenCapability = options.strictTokenCapability;
     this.strictTokenReservationHook = options.strictTokenReservationHook;
@@ -470,6 +479,40 @@ export class AiSdkDriver implements Driver {
       model = wrapWithPreRequestCeiling(resolvedModel, ceiling);
     }
 
+    let uploadRefused = false;
+    const guard: AiSdkDriverOptions['beforeRequest'] =
+      this.beforeRequest === undefined
+        ? undefined
+        : async (text, contents) => {
+            if (uploadRefused) throw new Error('worker upload already refused');
+            try {
+              await this.beforeRequest?.(text, contents);
+            } catch {
+              uploadRefused = true;
+              throw new Error('worker upload refused by scan');
+            }
+          };
+    if (guard !== undefined) {
+      if (typeof model === 'string') throw new Error('upload gate requires a resolved model');
+      model = wrapLanguageModel({
+        model,
+        middleware: {
+          transformParams: async ({ params }) => {
+            const text = serializeRequestForScan(params);
+            const contents: { text: string }[] = [];
+            const collect = (value: unknown): void => {
+              if (typeof value === 'string') contents.push({ text: value });
+              else if (value !== null && typeof value === 'object')
+                for (const child of Object.values(value)) collect(child);
+            };
+            collect(JSON.parse(text));
+            await guard(text, contents);
+            return params;
+          },
+        },
+      });
+    }
+
     // --- Structured-output preflight (PR #238 review round 2): the schema
     // document is caller-authored plain data — compile it BEFORE any
     // provider dispatch (the same slot as the other lanes: after the
@@ -540,7 +583,7 @@ export class AiSdkDriver implements Driver {
         description: harnessTool.description,
         inputSchema: harnessTool.inputSchema,
         execute: async (input: unknown): Promise<string> =>
-          runTool(harnessTool, input, store, record, denials),
+          runTool(harnessTool, input, store, record, denials, guard),
       });
     }
 
@@ -1492,8 +1535,25 @@ async function runTool(
   store: SessionStore,
   record: SessionRecord,
   denials: ToolDenial[],
+  guard?: AiSdkDriverOptions['beforeRequest'],
 ): Promise<string> {
   const result = await harnessTool.execute(input);
+  if (guard !== undefined && result.ok) {
+    const contents: { text: string; path?: string }[] = [{ text: result.output }];
+    if (harnessTool.name === 'read') {
+      const path = (input as { path?: unknown } | null)?.path;
+      if (typeof path !== 'string' || record.workspace === undefined)
+        throw new Error('read upload lacks source provenance');
+      const requested = resolve(record.workspace, path);
+      const actual = await realpath(requested);
+      for (const source of new Set([requested, actual]))
+        contents.push({
+          text: result.output,
+          path: relative(record.workspace, source).replaceAll('\\', '/'),
+        });
+    }
+    await guard(result.output, contents);
+  }
   await store.appendMessage(record.sessionId, {
     role: 'tool',
     toolName: harnessTool.name,
@@ -1945,4 +2005,37 @@ export function providerSignalsFromError(err: unknown): ProviderSignals | undefi
     if (signals !== undefined) return signals;
   }
   return undefined;
+}
+
+/** Preserve undefined slots explicitly; refuse values JSON would silently erase or coerce. */
+export function serializeRequestForScan(params: unknown): string {
+  if (params === null || typeof params !== 'object')
+    throw new Error('upload scan requires a request object');
+  const active = new Set<object>();
+  const inspect = (value: unknown): void => {
+    if (typeof value !== 'object' || value === null || value instanceof AbortSignal) return;
+    if (active.has(value)) throw new Error('upload scan request is cyclic');
+    if (
+      'toJSON' in value ||
+      (!Array.isArray(value) &&
+        Object.getPrototypeOf(value) !== Object.prototype &&
+        Object.getPrototypeOf(value) !== null)
+    )
+      throw new Error('upload scan request contains a non-JSON object');
+    active.add(value);
+    for (const entry of Object.values(value)) inspect(entry);
+    active.delete(value);
+  };
+  inspect(params);
+  return JSON.stringify(params, (_key, value: unknown) => {
+    if (value === undefined) return '[undefined]';
+    if (
+      typeof value === 'function' ||
+      typeof value === 'symbol' ||
+      typeof value === 'bigint' ||
+      (typeof value === 'number' && !Number.isFinite(value))
+    )
+      throw new Error('upload scan request contains a non-JSON value');
+    return value;
+  });
 }

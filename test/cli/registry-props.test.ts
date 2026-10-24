@@ -191,7 +191,15 @@ describe('pure sample: op results are JSON-serializable (OpResultSchema + the CL
     '%s: result passes OpResultSchema and round-trips JSON',
     async (_name, run) => {
       const result = await run();
-      expect(OpResultSchema.safeParse(result).success).toBe(true);
+      const { report, ...base } = result as Record<string, unknown>;
+      expect(OpResultSchema.safeParse(base).success).toBe(true);
+      if ('report' in (result as object)) {
+        JSON.stringify(report, (_key, value: unknown) => {
+          if (value === undefined) throw new Error('report must be JSON-lossless');
+          return value;
+        });
+        assertJsonLossless(report);
+      }
       assertJsonLossless(result);
       expect(JSON.parse(JSON.stringify(result))).toEqual(result);
     },
@@ -285,7 +293,15 @@ describe('every registry entry: the op result JSON-serializes (hermetic fail-fas
         return;
       }
       outcomes.push({ name, kind: 'result' });
-      expect(OpResultSchema.safeParse(result).success).toBe(true);
+      const { report, ...base } = result as Record<string, unknown>;
+      expect(OpResultSchema.safeParse(base).success).toBe(true);
+      if ('report' in (result as object)) {
+        JSON.stringify(report, (_key, value: unknown) => {
+          if (value === undefined) throw new Error('report must be JSON-lossless');
+          return value;
+        });
+        assertJsonLossless(report);
+      }
       assertJsonLossless(result);
       expect(JSON.parse(JSON.stringify(result))).toEqual(result);
     },

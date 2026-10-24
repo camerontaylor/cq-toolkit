@@ -5,6 +5,8 @@ is canonical for I1–I11. Accepted ADRs record historical design and yield to l
 post-acceptance notes or implementation changes, subject to those canonical authorities.
 Evidence and records document dated outcomes; they do not override current contracts.
 
+I1 stdout = one JSON artifact: the OpResult, optionally with a `report` field carrying the op's run report on any status. The report must survive JSON serialization without loss; the status controls the exit code. See the [CLI contract](../src/cli/README.md).
+
 ## Canonical reading set
 
 1. [README](../README.md) — product scope, installation, SDK and CLI interfaces.

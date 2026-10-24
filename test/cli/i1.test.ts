@@ -148,6 +148,46 @@ function singleJobPlan(op: string): unknown {
 }
 
 describe('op subcommands (I1 stream + exit-code contract)', () => {
+  test('optional report envelopes preserve all statuses, reject unknown keys and lossy evidence', async () => {
+    const tmp = await makeTmpOpsRoot('cq-i1-report-');
+    await mkdir(join(tmp, 'reports'));
+    const expressions = [
+      ['reportok', "{status:'ok',value:1,report:{tasks:[]}}", 0],
+      ['reportfail', "{status:'failed',error:'failed',report:{tasks:[]}}", 1],
+      ['reporthuman', "{status:'needs-human',reason:'review',report:{tasks:[]}}", 3],
+      ['reportextra', "{status:'failed',error:'failed',report:{},unexpected:1}", 1],
+      ['reportundefined', "{status:'failed',error:'failed',report:undefined}", 1],
+      ['reportnan', "{status:'failed',error:'failed',report:{tokens:NaN}}", 1],
+      ['reportfunction', "{status:'failed',error:'failed',report:{run:()=>1}}", 1],
+    ] as const;
+    await writeFile(
+      join(tmp, 'reports', 'registry.js'),
+      "import {z} from 'zod';\nexport const registry=[" +
+        expressions
+          .map(
+            ([name, expression]) =>
+              `{name:'${name}',inputSchema:z.object({}).strict(),importer:async()=>async()=>(${expression})}`,
+          )
+          .join(',') +
+        '];\n',
+    );
+    for (const [name, , code] of expressions) {
+      const result = await capture([name, '--json'], { opsRoot: tmp });
+      expect(result.code, result.out).toBe(code);
+      const artifact = JSON.parse(result.out) as {
+        report?: unknown;
+        error: { kind: string; message: string };
+      };
+      if (['reportok', 'reportfail', 'reporthuman'].includes(name))
+        expect(artifact.report).toEqual({ tasks: [] });
+      else {
+        expect(artifact.error.kind, name).toBe('invalid-result');
+        expect(artifact.error.message).toMatch(
+          /unrecognized|unexpected|undefined|non-finite|function/i,
+        );
+      }
+    }
+  });
   test('pure op, ok: one JSON artifact on stdout, silent stderr, exit 0', async () => {
     const { code, out, err } = await capture(['echo', '--msg=hello'], { opsRoot });
     expect(code).toBe(0);

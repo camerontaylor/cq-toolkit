@@ -74,6 +74,8 @@ export interface DriverRequest {
   modelSpec: ModelSpec;
   /** The harness the lane binds its tool surface to (where the lane accepts one). Default: defaultHarnessConfig. */
   harness?: HarnessConfig;
+  /** Fail-closed gate for each complete ai-sdk request, including tool results. */
+  beforeRequest?: AiSdkDriverOptions['beforeRequest'];
   /**
    * Session-record retention for this run (§2.5): 'keep' (the default) keeps
    * the record; 'reap-on-settle' deletes the FRESH record this run created
@@ -259,6 +261,8 @@ function sessionsDirFor(lane: LaneId, config: DriverFactoryConfig): string {
  * accepts them.
  */
 function constructLane(lane: LaneId, request: DriverRequest, config: DriverFactoryConfig): Driver {
+  if (request.beforeRequest !== undefined && lane !== 'ai-sdk')
+    throw new Error('upload scanning requires the ai-sdk request gate');
   const sessionsDir = sessionsDirFor(lane, config);
   const harness = request.harness !== undefined ? { harnessConfig: request.harness } : {};
   const pricing = config.pricing !== undefined ? { pricing: config.pricing } : {};
@@ -280,6 +284,7 @@ function constructLane(lane: LaneId, request: DriverRequest, config: DriverFacto
     case 'ai-sdk': {
       const cfg = config.lanes?.aiSdk;
       return new AiSdkDriver({
+        ...(request.beforeRequest === undefined ? {} : { beforeRequest: request.beforeRequest }),
         ...(cfg?.providers !== undefined ? { providers: cfg.providers } : {}),
         ...(cfg?.sandboxConfig !== undefined ? { sandboxConfig: cfg.sandboxConfig } : {}),
         ...(cfg?.strictTokenCapability !== undefined

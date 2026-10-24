@@ -59,6 +59,8 @@ governed run.
 
 One subcommand per registry entry, plus one per shipped plan, plus the built-in `run-plan`. Flags map onto the op's schema keys; output honors invariant I1 (`stdout` = one JSON artifact, `stderr` = `cq:` narration, machine mode with `--json`):
 
+For direct ops, stdout = one JSON artifact: the OpResult, optionally with a `report` field carrying the op's run report on any status. Reports must be JSON-lossless; exit codes follow the result's status.
+
 ```sh
 cq analyze.init --dir=.                   # writes cq.json
 cq analyze.run --dir=. --json             # probe → collect → cluster → report

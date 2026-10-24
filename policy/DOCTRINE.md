@@ -7,6 +7,8 @@ Enforcement. This repo enforces I4, I3, both halves of I5, and the I10 lint rule
 
 ## I1 — stdout is JSON, stderr is narration; exit codes 0/1/2/3
 
+stdout = one JSON artifact: the OpResult, optionally with a `report` field carrying the op's run report on any status. Reports must be JSON-lossless; other extension keys remain invalid. The result's status controls the exit code.
+
 **Rule.** Every operation invocation writes machine-readable JSON to stdout and human
 narration to stderr, never mixed. Exit codes: 0 clean, 1 thrown error, 2 arg error,
 3 needs-human. In machine mode (`--json`) stderr stays empty and an error that has no

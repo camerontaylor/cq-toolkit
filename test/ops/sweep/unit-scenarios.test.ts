@@ -4,11 +4,11 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { Driver, WorkerResult } from '../../../src/driver/types.js';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
-import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
+import { bindingsFromDispatch, makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitBindings } from '../../../src/ops/sweep/unit.js';
 import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import type { WorktreeEffects } from '../../../src/adapters/git/worktreeFor.js';
@@ -72,7 +72,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     [`${worktreePath}:main`, 'base-sha'],
   ]);
   const dirty = { value: false };
-  const staged = { nameStatus: '' };
+  const staged = { nameStatus: 'M\0src/a.js\0' };
 
   const effectsFactory = (): WorktreeEffects => ({
     listWorktrees: async () => worktreeState.map((entry) => ({ ...entry })),
@@ -124,6 +124,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     // The worker always leaves a staged change: `diff --cached --quiet` exits 1.
     if (args.includes('--quiet')) return { code: 1, stdout: '', stderr: '' };
     if (args.includes('--name-status')) return ok(staged.nameStatus);
+    if (args.includes('--name-only')) return ok('src/a.js\0');
     if (args.includes('diff')) return ok('diff --git a/src/a.js b/src/a.js\n');
     return ok();
   };
@@ -186,6 +187,7 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
     modelSpec: { model: 'fake', provider: 'test' },
     budget: { wallClockMs: 600_000, maxTokens: 1_000_000 },
     prompt: () => 'fix it',
+    scanPrompt: async () => {},
     git: world.gitFactory(),
     pushBranch: async (repoRoot, branch) => {
       world.pushCalls.push({ repoRoot, branch });
@@ -491,3 +493,491 @@ describe('sweep unit fixer budget enforcement', () => {
     }
   });
 });
+
+describe('optional per-task loop', () => {
+  test('cleanup and publish failures retain task evidence as indeterminate unit reports', async () => {
+    for (const fault of ['cleanup', 'publish']) {
+      const world = await makeWorld([{ failing: true }, { failing: false }]);
+      const underlying = world.gitFactory();
+      try {
+        const result = await runUnit(world, {
+          taskLoop: {},
+          git: async (args) =>
+            args.includes('status') && fault === 'cleanup'
+              ? { code: 0, stdout: ' M src/a.js\n', stderr: '' }
+              : underlying(args),
+          driver:
+            fault === 'cleanup'
+              ? world.driverFactory()
+              : {
+                  run: async (invocation) => {
+                    expect(invocation.toolPolicy.allow).not.toContain('run');
+                    return {
+                      stopReason: 'complete',
+                      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+                      denials: [],
+                      structuredOutput: {
+                        outcome: 'code-bug',
+                        summary: 'repair source',
+                        confidence: 0.9,
+                      },
+                    };
+                  },
+                },
+          pushBranch: async () => {
+            throw new Error('offline push fault');
+          },
+        });
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+          expect(result.value.tasks).toHaveLength(1);
+          expect(result.value.indeterminate).toContain(
+            fault === 'cleanup' ? 'cleanup failed' : 'publish failed',
+          );
+          expect(result.value.committed).toBe(fault === 'publish');
+        }
+      } finally {
+        await rm(world.root, { recursive: true, force: true });
+      }
+    }
+  });
+  test('absolute runner paths become checkout-relative task files', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const runCheck = world.runCheckFactory();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        runCheck: async (command) => {
+          const output = await runCheck(command);
+          return {
+            ...output,
+            stdout: output.stdout.replaceAll('suite.test.js', `${command.cwd}/suite.test.js`),
+          };
+        },
+        deriveTasks: (baseline) => {
+          expect(baseline.failures[0]?.file).toBe('suite.test.js');
+          return [];
+        },
+      });
+      expect(result.status).toBe('ok');
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+  test('stateless related feedback precedes detached broader gate and a verified task commit', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const prompts: string[] = [];
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        driver: {
+          run: async (invocation) => {
+            prompts.push(invocation.prompt);
+            expect(invocation.sessionRef).toBeUndefined();
+            return {
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.tasks?.[0]?.outcome).toBe('fixed');
+        expect(result.value.tasks?.[0]?.attempts).toHaveLength(2);
+        expect(result.value.tasks?.[0]?.commits).toHaveLength(1);
+      }
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain('Related check:');
+      expect(world.checks.some((path) => path.includes('.cq-sweep-final-'))).toBe(true);
+      expect(world.gitCalls.find((args) => args.includes('commit'))?.at(-1)).toContain(
+        'Outcome: code-bug',
+      );
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+  test('protectTests sends test edits to human and commits nothing', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { protectTests: true },
+        git: async (args) =>
+          args.includes('--name-status')
+            ? { code: 0, stdout: 'M\0suite.test.js\0', stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+});
+
+test('failed task does not block a passing sibling task', async () => {
+  const world = await makeWorld([
+    { failing: true },
+    { failing: true },
+    { failing: true },
+    { failing: false },
+  ]);
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: (baseline) =>
+        [0, 1].map((id) => ({
+          id: String(id),
+          files: ['suite.test.js'],
+          failures: baseline.failures,
+        })),
+      driver: {
+        run: async () => ({
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          denials: [],
+          stopReason: 'complete',
+          structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+        }),
+      },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.tasks?.map((task) => task.outcome)).toEqual(['unfixed', 'fixed']);
+      expect(result.value.tasks?.[1]?.commits).toHaveLength(1);
+    }
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+
+test.each(['budget', 'stopped', 'invalid-output', 'dirty', 'moved-head', 'unattributed'] as const)(
+  'task-loop refusal retains evidence for %s',
+  async (mode) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    let invoked = false;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        deriveTasks: (baseline) =>
+          [0, 1].map((id) => ({
+            id: String(id),
+            files: mode === 'unattributed' ? [] : ['suite.test.js'],
+            failures: baseline.failures,
+          })),
+        git: async (args) => {
+          if (
+            mode === 'moved-head' &&
+            invoked &&
+            args.includes('rev-parse') &&
+            args.includes('HEAD')
+          )
+            return { code: 0, stdout: 'd'.repeat(40), stderr: '' };
+          if (mode === 'dirty' && args.includes('status'))
+            return { code: 0, stdout: ' M src/a.js', stderr: '' };
+          if (args.includes('stash')) return { code: 0, stdout: 'e'.repeat(40), stderr: '' };
+          return underlying(args);
+        },
+        driver: {
+          run: async () => {
+            invoked = true;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: mode === 'budget' ? 'budget' : mode === 'stopped' ? 'error' : 'complete',
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.committed).toBe(false);
+      expect(result.value.tasks).toHaveLength(2);
+      if (mode === 'budget') {
+        expect(result.value.budgetStopped).toBe(true);
+        expect(result.value.tasks?.[1]?.attempts).toHaveLength(0);
+      } else if (mode === 'moved-head') {
+        expect(result.value.tasks?.[0]?.reason).toContain('HEAD changed');
+        expect(result.value.tasks?.[1]?.reason).toContain('human review');
+      } else if (mode === 'dirty') {
+        expect(result.value.tasks?.[0]?.preservedEdits?.sha).toBe('e'.repeat(40));
+        expect(world.gitCalls.some((args) => args.includes('restore'))).toBe(true);
+      } else if (mode === 'unattributed') {
+        expect(invoked).toBe(false);
+        expect(result.value.tasks?.every((task) => task.outcome === 'escalated-to-human')).toBe(
+          true,
+        );
+      } else expect(result.value.tasks?.[0]?.outcome).toBe('unfixed');
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(['edit', 'feedback'] as const)(
+  'protected config edits from %s are refused before another check executes',
+  async (phase) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    let invocations = 0;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        git: async (args) =>
+          args.includes('--name-status') && invocations >= (phase === 'edit' ? 1 : 2)
+            ? { code: 0, stdout: 'M\0vitest.config.ts\0', stderr: '' }
+            : underlying(args),
+        driver: {
+          run: async () => {
+            invocations++;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(world.checks).toHaveLength(phase === 'edit' ? 1 : 2);
+      expect(invocations).toBe(phase === 'edit' ? 1 : 2);
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test.each(['none', 'edit-only'] as const)(
+  'task-specific harness never widens explicit %s policy',
+  async (mode) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const seen: unknown[] = [];
+    try {
+      const driver: Driver = {
+        run: async (invocation) => {
+          seen.push(invocation.toolPolicy);
+          return {
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+          };
+        },
+      };
+      await runUnit(world, {
+        taskLoop: {},
+        driver,
+        taskWorker: () => ({ driver, modelSpec: { provider: 'test', model: 'fake' } }),
+        toolPolicy:
+          mode === 'none'
+            ? { mode: 'none', allow: ['read', 'edit', 'run'] }
+            : { mode: 'allowlist', allow: ['edit'] },
+      });
+      expect(seen).toHaveLength(2);
+      expect(
+        seen.every(
+          (policy) =>
+            JSON.stringify(policy) ===
+            JSON.stringify(
+              mode === 'none'
+                ? { allow: [], mode: 'none' }
+                : { allow: ['edit'], mode: 'allowlist' },
+            ),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test.each([false, true])(
+  'broader timeout uses remaining unit wall and bounds retries (bail=%s)',
+  async (bail) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const original = world.runCheckFactory();
+    let broaderCalls = 0;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { wallMs: 1000 },
+        runCheck: async (command) => {
+          if (command.cwd?.includes('.cq-sweep-final-')) {
+            broaderCalls++;
+            expect(command.timeoutMs).toBeGreaterThan(0);
+            expect(command.timeoutMs).toBeLessThanOrEqual(200);
+            if (bail) {
+              now += 201;
+              return { stdout: '', stderr: 'test run aborted', exitCode: null };
+            }
+          }
+          return original(command);
+        },
+        driver: {
+          run: async () => {
+            now += 400;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+            };
+          },
+        },
+      });
+      expect(broaderCalls).toBe(1);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.outcome).toBe(bail ? 'unfixed' : 'fixed');
+    } finally {
+      clock.mockRestore();
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test('a sibling-resolved task consumes no worker invocation or duplicate commit', async () => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  let invocations = 0;
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: (baseline) =>
+        [0, 1].map((id) => ({
+          id: String(id),
+          files: ['suite.test.js'],
+          failures: baseline.failures,
+        })),
+      driver: {
+        run: async () => {
+          invocations++;
+          return {
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair', confidence: 0.9 },
+          };
+        },
+      },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.tasks?.map((task) => task.outcome)).toEqual(['fixed', 'fixed']);
+      expect(result.value.tasks?.[1]?.attempts).toEqual([]);
+      expect(result.value.tasks?.[1]?.commits).toEqual([]);
+    }
+    expect(invocations).toBe(2);
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+test('task derivation throws become a failed OpResult', async () => {
+  const world = await makeWorld([{ failing: true }]);
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: () => {
+        throw new Error('bad task derivation');
+      },
+    });
+    expect(result).toEqual({
+      status: 'failed',
+      error: '[INFRA] task loop failed: Error: bad task derivation',
+    });
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+
+test('an unrecorded ahead commit cannot be republished on a no-task rerun', async () => {
+  const world = await makeWorld([{ failing: false }]);
+  const original = world.gitFactory();
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      deriveTasks: () => [],
+      runStateDir: join(world.root, 'state'),
+      git: async (args) =>
+        args.includes('rev-list') ? { code: 0, stdout: '1', stderr: '' } : original(args),
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.pushed).toBe(false);
+      expect(result.value.indeterminate).toContain('no verified scanned commit');
+    }
+    expect(world.pushCalls).toEqual([]);
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
+
+test.each(['missing', 'fault', 'initial-hit', 'prior-output', 'related-output'] as const)(
+  'task upload gate refuses %s without sending tainted prompts',
+  async (mode) => {
+    const world = await makeWorld([
+      { failing: true, message: mode === 'initial-hit' ? 'DO_NOT_UPLOAD' : 'failure' },
+      { failing: true, message: mode === 'related-output' ? 'DO_NOT_UPLOAD' : 'failure' },
+    ]);
+    let calls = 0;
+    try {
+      const base = world.driverFactory();
+      const bindings = bindingsOf(world, {
+        taskLoop: {},
+        scanPrompt: async (text) => {
+          if (mode === 'fault' || text.includes('DO_NOT_UPLOAD')) throw new Error('scan refused');
+        },
+        driver: {
+          run: async (...args) => {
+            calls++;
+            expect(args[0].prompt).not.toContain('DO_NOT_UPLOAD');
+            const result = await base.run(...args);
+            return mode === 'prior-output'
+              ? { ...result, structuredOutput: { summary: 'DO_NOT_UPLOAD' } }
+              : result;
+          },
+        },
+      });
+      if (mode === 'missing') delete bindings.scanPrompt;
+      const result = await makeSweepUnitOp(bindings)(UNIT);
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(calls).toBe(['prior-output', 'related-output'].includes(mode) ? 1 : 0);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+
+// Direct SDK callers bypass the registry schema: refuse escaping check roots before resolving a driver.
+test.each(['/tmp/outside', '../outside', 'nested/../../outside', 'C:\\outside'])(
+  'direct dispatch refuses escaping check.cwd %s',
+  (cwd) => {
+    const resolve = vi.fn(() => {
+      throw new Error('driver must not resolve');
+    });
+    expect(() =>
+      bindingsFromDispatch(
+        {
+          repoRoot: '/repo',
+          runPrefix: 'fix',
+          base: 'HEAD',
+          package: 'alpha',
+          fixer: 'fix',
+          files: [],
+          driver: { provider: 'test', model: 'test', budget: { wallClockMs: 1000 } },
+          check: { adapter: 'vitest-json', command: 'node', args: [], cwd },
+        },
+        { resolve },
+      ),
+    ).toThrow('check.cwd must remain inside');
+    expect(resolve).not.toHaveBeenCalled();
+  },
+);

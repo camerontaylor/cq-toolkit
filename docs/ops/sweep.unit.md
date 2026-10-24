@@ -41,6 +41,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "minLength": 1,
           "type": "string"
         },
+        "cwd": {
+          "type": "string"
+        },
         "timeoutMs": {
           "maximum": 9007199254740991,
           "minimum": 1,
@@ -276,6 +279,30 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "required": [
         "patterns"
       ],
+      "type": "object"
+    },
+    "taskLoop": {
+      "additionalProperties": false,
+      "properties": {
+        "denylistPatternsFile": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "protectTests": {
+          "type": "boolean"
+        },
+        "relatedArgs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "wallMs": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "worktreesDir": {

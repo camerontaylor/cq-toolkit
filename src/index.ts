@@ -406,3 +406,5 @@ export * from './ops/dev/index.js';
 export * from './ops/analyze/index.js';
 export * from './plans/index.js';
 export * from './driver/index.js';
+
+export * from './ops/fix/index.js';

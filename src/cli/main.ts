@@ -701,7 +701,14 @@ async function dispatchCli(
     // exit-code derivation (the plan path gets the same two probes via
     // runPlan's executeOp; this is their direct-path counterpart).
     const raw: unknown = await op(check.data);
-    const checked = OpResultSchema.safeParse(raw);
+    // I1 permits an optional run-report envelope on every status. Keep the
+    // frozen result mirror strict: no other extension key is accepted.
+    let base = raw;
+    if (typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report')) {
+      const { report: _report, ...rest } = raw as Record<string, unknown>;
+      base = rest;
+    }
+    const checked = OpResultSchema.safeParse(base);
     if (!checked.success) {
       return reportError(
         io,
@@ -723,7 +730,13 @@ async function dispatchCli(
     // silently-lossy values the schema probe passes — Maps, Dates, class
     // instances, function members, symbol-keyed or non-enumerable (hidden) members, undefined array elements.
     try {
-      JSON.stringify(checked.data, (_key, value: unknown) => {
+      if (typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'report')) {
+        JSON.stringify((raw as Record<string, unknown>).report, (_key, value: unknown) => {
+          if (value === undefined) throw new Error('undefined member in report');
+          return value;
+        });
+      }
+      JSON.stringify(raw, (_key, value: unknown) => {
         if (typeof value === 'number' && !Number.isFinite(value)) {
           throw new Error(`non-finite number ${String(value)}`);
         }
@@ -732,7 +745,7 @@ async function dispatchCli(
       if (checked.data.status === 'ok' && checked.data.value === undefined) {
         throw new Error("ok result without a 'value'");
       }
-      assertJsonLossless(checked.data);
+      assertJsonLossless(raw);
     } catch (probeErr) {
       return reportError(
         io,
@@ -743,7 +756,7 @@ async function dispatchCli(
         EXIT_CODES.thrown,
       );
     }
-    writeResultJson(io, checked.data); // the ONE stdout artifact
+    writeResultJson(io, raw); // the ONE stdout artifact, including optional report
     narrateOpResult(io, sub, checked.data, mode); // failures-only; silent in json mode
     return exitCodeForOpResult(checked.data, { failOnVerdict });
   } catch (err) {

@@ -1,3 +1,10 @@
+import { normalizeFailurePaths } from './tasks.js';
+import {
+  composeScanners,
+  makeGitleaksDefaultsScanner,
+  makeRepoDiffScanner,
+} from '../dev/denylist.js';
+import { makeSubprocessDevEffects } from '../dev/effects.js';
 // Sweep lane (WS-D, goal D4) — the 'sweep.unit' op: the per-package pipeline
 // as ONE composition. A unit's stages are a DATAFLOW (worktreeFor's workspace
 // feeds the probe's cwd, the baseline FailureSet feeds the gate, the staged
@@ -30,10 +37,18 @@
 //     custom Driver OBJECT cannot cross the JSON boundary (a deployment
 //     binds its lane through DriverFactoryConfig — bindings + per-lane
 //     construction knobs — and hands the factory to this seam).
+export { classifyStagePaths, compileStagePathPatterns } from './stagePaths.js';
+export type { StagePathGateResult } from './stagePaths.js';
+import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
+import type { StagePathGateResult } from './stagePaths.js';
+import { runTaskLoop } from './taskLoop.js';
+import type { TaskLoopConfig, TaskWorker, FixTaskReport } from './taskLoop.js';
+import type { FixTask } from './tasks.js';
+import { defaultHarnessConfig } from '../../harness/config.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve, win32 } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -44,7 +59,7 @@ import { makeBaselineProbe } from '../gates/baselineProbe.js';
 import type { BaselineProbeInput } from '../gates/baselineProbe.js';
 import { hackDetector } from '../gates/hackDetector.js';
 import type { TamperFinding } from '../gates/hackDetector.js';
-import { isProtectedStagePath, PROTECTED_STAGE_PATTERNS } from '../gates/protectedPaths.js';
+import { PROTECTED_STAGE_PATTERNS } from '../gates/protectedPaths.js';
 import { regressionGate } from '../gates/regressionGate.js';
 import type { RegressionReport } from '../gates/regressionGate.js';
 import { makeGhRunner } from '../../adapters/forge-github/gh.js';
@@ -201,6 +216,9 @@ export const DEFAULT_PROTECTED_STAGE_PATTERNS = PROTECTED_STAGE_PATTERNS;
 
 /** Everything one unit's pipeline needs, bound per run by the caller. */
 export interface SweepUnitBindings {
+  taskLoop?: TaskLoopConfig;
+  taskWorker?: TaskWorker;
+  deriveTasks?: (baseline: FailureSet) => FixTask[];
   /** Repository the worktrees check out from. */
   repoRoot: string;
   /** Parent dir for worktree checkouts (the worktreeFor seam). */
@@ -260,6 +278,13 @@ export interface SweepUnitBindings {
   worktreeEffects?: WorktreeEffects;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
   runCheck: RunCheck;
+  /** Required by taskLoop; refuses before any provider upload. */
+  scanPrompt?: (
+    text: string,
+    contents?: readonly { text: string; path?: string }[],
+  ) => Promise<void>;
+  /** Explicit enclosing-job cancellation; verified commits are retained but not published. */
+  cancelled?: () => boolean;
   /** The per-package check command, resolved against the unit's worktree. */
   checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
   /**
@@ -342,6 +367,9 @@ export interface UnitProbe {
  * would claim evidence no scan collected).
  */
 export interface SweepUnitReport {
+  tasks?: FixTaskReport[];
+  budgetStopped?: boolean;
+  indeterminate?: string;
   package: string;
   fixer: string;
   /** The worktree the unit ran in (create or I7 reuse). */
@@ -552,6 +580,86 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         prBranch: segments.branch,
       };
       return { status: 'ok', value: prepReport };
+    }
+
+    if (bindings.taskLoop !== undefined) {
+      return runTaskLoop(bindings, unit, worktree, baseline, segments.branch, {
+        broader: async (parent, remainingWallMs) => {
+          const expiresAt = Date.now() + remainingWallMs;
+          const boundedProbe = makeBaselineProbe(async (command) => {
+            const remaining = expiresAt - Date.now();
+            if (remaining <= 0) throw new Error('unit wall budget exhausted before broader check');
+            return bindings.runCheck({
+              ...command,
+              timeoutMs: Math.min(command.timeoutMs ?? 600_000, remaining),
+            });
+          });
+          const result = await withBaseOwnedFinalTree(bindings, unit, worktree, parent, (clean) =>
+            probeLeg(boundedProbe, bindings, unit, worktreeFor, 'final', clean),
+          );
+          if (result.fault !== null || result.probe === undefined || result.treeSha === undefined) {
+            throw new Error(result.fault ?? 'final probe returned no evidence');
+          }
+          return { final: result.probe, treeSha: result.treeSha };
+        },
+        commit: async (message, treeSha) => {
+          const committed = await commitStaged(bindings, unit, worktree, treeSha, message);
+          if (committed.fault !== null || !committed.committed)
+            throw new Error(committed.fault ?? 'no staged change');
+          const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+          if (head.code !== 0) throw new Error(head.stderr);
+          return head.stdout.trim();
+        },
+        verify: async (sha, parent) => {
+          const fault = await verifyScannedTip(bindings, unit, worktree.path, sha, parent);
+          if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+        },
+        pendingPublish: async () => {
+          const counted = await bindings.git([
+            '-C',
+            worktree.path,
+            'rev-list',
+            '--count',
+            `${bindings.base}..HEAD`,
+          ]);
+          if (counted.code !== 0 || !/^\d+$/.test(counted.stdout.trim()))
+            throw new Error('cannot read pending commit count');
+          const ahead = Number(counted.stdout.trim()) > 0;
+          if (bindings.runStateDir === undefined) {
+            if (ahead) throw new Error('pending publish requires explicit runStateDir');
+            return undefined;
+          }
+          const sha = await readScannedCommitSha(bindings, segments);
+          // A relative base such as HEAD follows the reused branch tip. The
+          // trusted scanned record still identifies a previous failed publish.
+          if (sha === null) {
+            if (ahead) throw new Error('pending publish has no verified scanned commit');
+            return undefined;
+          }
+          const parent = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD^']);
+          if (parent.code !== 0) throw new Error('cannot read pending commit parent');
+          const fault = await verifyScannedTip(
+            bindings,
+            unit,
+            worktree.path,
+            sha,
+            parent.stdout.trim(),
+          );
+          if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+          return sha;
+        },
+        publish: async (sha) => {
+          const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+          if (head.code !== 0 || head.stdout.trim() !== sha)
+            throw new Error('tip moved before push');
+          const fault = await recordScannedCommitSha(bindings, segments, sha);
+          if (fault !== null) throw new Error(fault);
+          if (bindings.cancelled?.()) throw new Error('enclosing job cancelled before push');
+          await bindings.pushBranch?.(bindings.repoRoot, segments.branch);
+          const marker = await writeCommittedMarker(bindings, segments, unit);
+          if (marker !== null) throw new Error(marker);
+        },
+      });
     }
 
     // 5. The fixer: one Driver run whose workspace IS the worktree (the
@@ -1213,7 +1321,14 @@ async function probeLeg(
   const narrowed: UnitProbe = {
     verdict: probed.value.verdict,
     attempts: probed.value.attempts,
-    failureSet: probed.value.failureSet,
+    failureSet:
+      bindings.taskLoop === undefined
+        ? probed.value.failureSet
+        : normalizeFailurePaths(
+            probed.value.failureSet,
+            worktree.path,
+            bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
+          ),
   };
   return { worktree, probe: narrowed };
 }
@@ -1264,74 +1379,6 @@ async function stageUnitFiles(
 }
 
 /**
- * Compile the staged-path allowlist pattern SOURCES (jSKJY) CASE-SENSITIVELY
- * (review-debt #175 item 3): the patterns are built from manifest paths and
- * declared files, which carry the checkout's exact case. The old `i` flag let
- * a case-differing sibling package (`packages/Alpha/x` matching
- * `^packages/alpha/`) stage outside its scope on a case-sensitive checkout.
- * Exported as the case-sensitivity seam; a non-compiling source throws and
- * the caller folds it into a `failed` result.
- */
-export function compileStagePathPatterns(patterns: readonly string[]): RegExp[] {
-  return patterns.map((source) => new RegExp(source));
-}
-
-/** Typed result of the staged-path policy, never inferred from message text. */
-export type StagePathGateResult =
-  | { kind: 'clean'; paths: []; message: null }
-  | { kind: 'protected'; paths: string[]; message: string }
-  | { kind: 'propose-only'; paths: string[]; message: string }
-  | { kind: 'scope'; paths: string[]; message: string }
-  | { kind: 'infra'; paths: []; message: string };
-
-/**
- * Apply the production staged-path policy to already-enumerated paths. The
- * unit op and tamper corpus call this same decision function.
- */
-export function classifyStagePaths(
-  staged: readonly string[],
-  allowlist?: { patterns: string[] },
-  proposeOnly = false,
-): StagePathGateResult {
-  const protectedPaths = staged.filter(isProtectedStagePath);
-  if (protectedPaths.length > 0) {
-    return {
-      kind: 'protected',
-      paths: protectedPaths,
-      message: `sweep.unit: protected path(s) changed by a worker — ${protectedPaths.join(', ')} — tests, setup, runner/measurement config, lockfiles, automation, snapshots, and repository policy require needs-human review`,
-    };
-  }
-  if (proposeOnly && staged.length > 0) {
-    return {
-      kind: 'propose-only',
-      paths: [...staged],
-      message: `sweep.unit: propose-only worker produced ${String(staged.length)} staged path(s) — ${staged.join(', ')}; nothing will be probed, committed, or pushed without human review`,
-    };
-  }
-  if (allowlist === undefined) return { kind: 'clean', paths: [], message: null };
-  let compiled: RegExp[];
-  try {
-    compiled = compileStagePathPatterns(allowlist.patterns);
-  } catch (err) {
-    return {
-      kind: 'infra',
-      paths: [],
-      message: `invalid stage-path allowlist pattern — ${messageOf(err)}`,
-    };
-  }
-  const offenders = staged.filter((path) => !compiled.some((regex) => regex.test(path)));
-  return offenders.length > 0
-    ? {
-        kind: 'scope',
-        paths: offenders,
-        message:
-          `staged path(s) outside the allowlist [${allowlist.patterns.join(', ')}] — ` +
-          `the worker cannot commit outside its scope: ${offenders.join(', ')}`,
-      }
-    : { kind: 'clean', paths: [], message: null };
-}
-
-/**
  * Enumerate the complete staged set and apply {@link classifyStagePaths}.
  * Both paths of every rename/copy and every deletion are included.
  */
@@ -1369,28 +1416,6 @@ async function enforceStagePathAllowlist(
 }
 
 /**
- * The staged paths of one `diff --cached --name-status -z` capture: records
- * are `<status> NUL <path> [NUL <path2>]` — an R/C (rename/copy) status
- * carries the OLD then the NEW path, and BOTH are scope-checked (the source
- * is the production code a rename deletes); every other status carries one.
- */
-function stagedPathsOf(capture: string): string[] {
-  const tokens = capture.split('\0').filter((token) => token !== '');
-  const paths: string[] = [];
-  for (let index = 0; index < tokens.length;) {
-    const status = tokens[index] as string;
-    index += 1;
-    const pathCount = /^[RC]/.test(status) ? 2 : 1;
-    for (let n = 0; n < pathCount; n += 1) {
-      const path = tokens[index];
-      if (path !== undefined) paths.push(path);
-      index += 1;
-    }
-  }
-  return paths;
-}
-
-/**
  * Commit the ALREADY-STAGED set; skipped honestly when nothing is staged
  * (the fixer no-oped — an idempotent re-run).
  */
@@ -1399,6 +1424,7 @@ async function commitStaged(
   unit: WorkUnit,
   worktree: SweepWorkspace,
   expectedTreeSha?: string,
+  message?: string,
 ): Promise<{ committed: boolean; fault: string | null }> {
   if (expectedTreeSha === undefined) {
     return {
@@ -1429,7 +1455,7 @@ async function commitStaged(
     'commit',
     '--no-verify',
     '-m',
-    `fix(${unit.package}): apply ${unit.fixer} sweep fix`,
+    message ?? `fix(${unit.package}): apply ${unit.fixer} sweep fix`,
   ]);
   if (committed.code !== 0) {
     return {
@@ -1521,6 +1547,8 @@ export interface SweepUnitDriverConfig {
 
 /** The JSON-serializable probe binding of a dispatch input. */
 export interface SweepUnitCheckConfig {
+  /** Repository-relative working directory, resolved anew in every checkout. */
+  cwd?: string;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
   /** The check command (executed with cwd = the unit's worktree). */
@@ -1541,6 +1569,7 @@ export interface SweepUnitCheckConfig {
  * `failed` names the field.
  */
 export interface SweepUnitDispatchInput {
+  taskLoop?: TaskLoopConfig;
   repoRoot: string;
   /** Defaults to `<repo-parent>/worktrees/cq`, outside the repository. */
   worktreesDir?: string;
@@ -1729,6 +1758,9 @@ export function bindingsFromDispatch(
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
+  const checkCwd = input.check.cwd ?? '.';
+  if (isAbsolute(checkCwd) || win32.isAbsolute(checkCwd) || checkCwd.split(/[\\/]/).includes('..'))
+    throw new Error('sweep.unit: check.cwd must remain inside the unit workspace');
   const budgetFault = fixerBudgetFault(input.driver.budget);
   if (budgetFault !== null) {
     throw new Error(`sweep.unit: driver.budget is required and enforceable — ${budgetFault}`);
@@ -1736,6 +1768,40 @@ export function bindingsFromDispatch(
   // The factory resolves BEFORE any effect is constructed: an unresolvable
   // binding (unknown provider, no lane bound for the role) is a
   // configuration refusal, not a half-bound sweep.
+  const scanner =
+    input.taskLoop === undefined
+      ? undefined
+      : composeScanners(
+          makeGitleaksDefaultsScanner(makeSubprocessDevEffects(input.repoRoot)),
+          ...(input.taskLoop.denylistPatternsFile === undefined
+            ? []
+            : [makeRepoDiffScanner(input.repoRoot, input.taskLoop.denylistPatternsFile)]),
+        );
+  const scanPrompt =
+    scanner === undefined
+      ? undefined
+      : async (
+          text: string,
+          contents: readonly { text: string; path?: string }[] = [],
+        ): Promise<void> => {
+          const components = [
+            { component: 'worker-request', text, path: 'worker-request.json' },
+            ...contents.map((content, index) => ({
+              component: `worker-content-${String(index)}`,
+              text: content.text,
+              path: content.path ?? 'worker-request.json',
+            })),
+          ];
+          const scans = await scanner(components);
+          if (
+            scans.length !== components.length ||
+            components.some(
+              (component) => !scans.some((scan) => scan.component === component.component),
+            ) ||
+            scans.some((scan) => scan.hits.length > 0)
+          )
+            throw new Error('worker upload refused by denylist scan');
+        };
   const resolved = drivers.resolve({
     role: 'fixer',
     modelSpec: { provider: input.driver.provider, model: input.driver.model },
@@ -1768,6 +1834,39 @@ export function bindingsFromDispatch(
   // model assertion is the factory's hook, §2.6).
   return {
     repoRoot: input.repoRoot,
+    ...(input.taskLoop === undefined
+      ? {}
+      : {
+          taskLoop: input.taskLoop,
+          ...(scanPrompt === undefined ? {} : { scanPrompt }),
+          taskWorker: (_task, related) =>
+            drivers.resolve({
+              role: 'fixer',
+              ...(scanPrompt === undefined ? {} : { beforeRequest: scanPrompt }),
+              modelSpec: resolved.modelSpec,
+              harness: {
+                ...defaultHarnessConfig,
+                tools: {
+                  ...defaultHarnessConfig.tools,
+                  run: {
+                    ...defaultHarnessConfig.tools.run,
+                    commandPatterns: [
+                      're:^' +
+                        [related.command, ...related.args]
+                          .map((arg) =>
+                            /^[A-Za-z0-9_./:=@%+,-]+$/.test(arg)
+                              ? arg
+                              : "'" + arg.replaceAll("'", "'\"'\"'") + "'",
+                          )
+                          .join(' ')
+                          .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+                        '$',
+                    ],
+                  },
+                },
+              },
+            }),
+        }),
     worktreesDir,
     ...(input.install === undefined
       ? {}
@@ -1815,7 +1914,7 @@ export function bindingsFromDispatch(
       // item 7): `$&`, `` $` `` and `$'` in a package name would otherwise be
       // reinterpreted as replacement tokens.
       args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
-      cwd: worktreePath,
+      cwd: resolve(worktreePath, input.check?.cwd ?? '.'),
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
     driver: resolved.driver,
@@ -1971,7 +2070,12 @@ async function verifyScannedTip(
       `sweep.unit ${unit.package}: git diff HEAD^..HEAD name-status failed — ${committedPaths.stderr.trim()}`,
     );
   }
-  const protectedPaths = stagedPathsOf(committedPaths.stdout).filter(isProtectedStagePath);
+  const protectedPaths = classifyStagePaths(
+    stagedPathsOf(committedPaths.stdout),
+    undefined,
+    false,
+    bindings.taskLoop === undefined || bindings.taskLoop.protectTests === true,
+  ).paths;
   if (protectedPaths.length > 0) {
     return {
       kind: 'protected',
