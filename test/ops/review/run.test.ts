@@ -47,6 +47,90 @@ function scriptedDrivers(onRun?: (input: { prompt: string }) => void) {
 }
 
 describe('review.run', () => {
+  it('requires a readable cq.json before starting a review', async () => {
+    const repo = await makeTestRepo();
+    try {
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+      })({ repoRoot: repo.root });
+      expect(result).toEqual({ status: 'needs-human', reason: 'review.run: cq.json is required' });
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('maps an unresolvable target to needs-human before starting a reviewer', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+      })({ repoRoot: repo.root, target: 'missing-target' });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') expect(result.reason).toContain('origin/missing-target');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('normalizes a successful CodeRabbit-only cycle and persists its finding', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          review: { reviewers: ['coderabbit'] },
+        }),
+      );
+      repo.commitAll('configure CodeRabbit-only review');
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: 0,
+              stdout:
+                `${JSON.stringify({ type: 'finding', severity: 'major', fileName: 'src/a.ts', comment: 'seeded CodeRabbit finding' })}\n` +
+                `${JSON.stringify({ type: 'complete', status: 'review_completed' })}\n`,
+              stderr: '',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.sources).toEqual([
+        expect.objectContaining({ kind: 'coderabbit', status: 'terminal' }),
+      ]);
+      expect(result.value.findings).toEqual([
+        expect.objectContaining({
+          source: 'coderabbit',
+          severity: 'major',
+          file: 'src/a.ts',
+          text: 'seeded CodeRabbit finding',
+          status: 'open',
+        }),
+      ]);
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('dispatches the fresh unauthenticated-CodeRabbit fixture through the CLI', async () => {
     const repo = await makeTestRepo();
     const opsRoot = await mkdtemp(join(tmpdir(), 'cq-review-cli-ops-'));
@@ -462,6 +546,81 @@ describe('review.run', () => {
         status: 'blocked',
         reason: 'cq.json roles.reviewer is required for an agent review',
       });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('persists an agent source blocked by the required token budget', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      repo.commitAll('configure agent review without a token budget');
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain('not every configured reviewer');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const stored = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; reason?: string }[];
+      };
+      const agent = stored.sources.find((source) => source.kind === 'agent');
+      expect(agent?.status).toBe('blocked');
+      expect(agent?.reason).toContain('Agentic runs require budgets.run.maxTokens');
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('records a blocked agent source when git cannot list the review diff', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const effects = repoEffects(repo, (command, args) =>
+        command === 'git' && args[0] === 'diff' && args.includes('--name-only')
+          ? { exitCode: 2, stdout: '', stderr: 'diff unavailable', timedOut: false }
+          : undefined,
+      );
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain('not every configured reviewer');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const stored = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; reason?: string }[];
+      };
+      expect(stored.sources).toContainEqual(
+        expect.objectContaining({
+          kind: 'agent',
+          status: 'blocked',
+          reason: 'could not list review diff paths (exit 2)',
+        }),
+      );
     } finally {
       await repo.cleanup();
     }
