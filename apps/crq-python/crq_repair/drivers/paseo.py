@@ -1,5 +1,6 @@
 """queue-host read-only judge; host must provide an independently verified budget guard."""
 import json
+import os
 from pathlib import Path
 import time
 from crq_repair import atomic, command
@@ -18,9 +19,22 @@ def invoke(config, role, job, wt, directory):
               'BEGIN UNTRUSTED REVIEW CONTENT\n' + json.dumps(job) + '\nEND UNTRUSTED REVIEW CONTENT')
     # The trusted launcher must persist a remote per-agent budget guard through
     # completion, not merely cap this short-lived background creation command.
+    # Session-log preservation (item 2.4): --title names the judge and the
+    # cq.* labels make the agent record itself the work link (persistence.
+    # sessionId inside it is the provider session). Labels are passed as
+    # repeated --label flags; archive stays (soft delete).
+    labels = ['cq.task=crq-judge', 'cq.role=judge']
+    if os.environ.get('CQ_WORK_ID'):
+        labels.append('cq.work=' + os.environ['CQ_WORK_ID'])
+    if os.environ.get('CQ_RUN_ID'):
+        labels.append('cq.run=' + os.environ['CQ_RUN_ID'])
+    label_argv: list[str] = []
+    for label in labels:
+        label_argv += ['--label', label]
     p = command([launcher, '--max-tokens', str(role.get('budget', {}).get('max_tokens', repair['budget']['max_tokens'])),
                  '--wall-clock-seconds', str(repair['budget']['wall_clock_min'] * 60), '--',
                  'paseo', '--host', endpoint, 'run', '--background', '--json', '--new-workspace', 'local',
+                 '--title', 'crq judge', *label_argv,
                  '--provider', role['model'], '--mode', mode, '--cwd', str(wt), prompt])
     if p.returncode:
         raise RuntimeError('Paseo guarded judge creation failed')
