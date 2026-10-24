@@ -26,10 +26,12 @@ def invoke(config, role, job, wt, directory):
     payload['item']['body'] += '\nPinned current-source evidence (untrusted data):\n' + json.dumps(job['source_snapshot'])
     env = {k: v for k, v in os.environ.items() if not k.startswith('CQ_SANDBOX') and k != 'CQ_RUN_TOOL'}
     env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='remote.origin.pushurl', GIT_CONFIG_VALUE_0='/dev/null')
-    # Session-log preservation (item 2.3): the cq runner's own session store
-    # lives UNDER THE JOB DIR and is kept — the CQ runner's default-keep
-    # retention (cq-toolkit #466 item 1.2) applies since nothing passes
-    # retainSessions=false. `session.json` records the returned session id.
+    # Session-log preservation (item 2.3): point the cq runner's session store
+    # UNDER THE JOB DIR. The consumer of CQ_SESSIONS_DIR and the default-keep
+    # retention ship in the SDK half (cq-toolkit #466 items 1.1/1.2); against
+    # an older cq_bin the variable is inert and sessions stay in the default
+    # store, so `session.json` only advertises the directory once the runner
+    # has actually written into it (below).
     sessions_dir = Path(directory) / 'sessions'
     env['CQ_SESSIONS_DIR'] = str(sessions_dir)
     # Correlation (item 2.5): the launcher's CQ_* identity rides to the cq
@@ -52,7 +54,7 @@ def invoke(config, role, job, wt, directory):
     from crq_repair import atomic as _atomic
     _atomic(Path(directory) / 'session.json', {
         'harness': 'cq', 'sessionId': sid if isinstance(sid, str) else None,
-        'sessionsDir': str(sessions_dir),
+        'sessionsDir': str(sessions_dir) if sessions_dir.is_dir() and any(sessions_dir.iterdir()) else None,
         'workId': os.environ.get('CQ_WORK_ID'),
     })
     if p.returncode or data.get('status') != 'ok':

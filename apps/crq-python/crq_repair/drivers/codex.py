@@ -18,47 +18,62 @@ from crq_repair import atomic
 
 
 def _stream_codex(argv, cwd, env, timeout, log_path):
-    """Run one codex exec with stdout tee'd to `log_path` DURING the run.
+    """Run one codex exec with stdout/stderr tee'd to `log_path` DURING the run.
 
     Returns (returncode, collected_stdout_lines, stderr_text, timed_out).
-    Lines are flushed as they arrive: a wall-clock kill keeps every event
-    emitted before it. The kill targets ONLY this child's own process group.
+    Both pipes are drained by daemon threads so the wall-clock deadline is
+    enforced on the main thread even while the child holds stdout open and
+    silent. Lines are flushed as they arrive: a wall-clock kill keeps every
+    event emitted before it. The kill targets ONLY this child's own process
+    group. Decoding is UTF-8 with replacement so a stray byte can never
+    raise inside a pump and strand the child.
     """
     timed_out = False
     lines: list[str] = []
-    with open(log_path, 'w') as log:
+    err_lines: list[str] = []
+    lock = threading.Lock()
+    with open(log_path, 'w', encoding='utf-8') as log:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True,
+                                   encoding='utf-8', errors='replace',
                                    start_new_session=True)
 
-        def pump_err():
-            assert process.stderr is not None
-            for raw in process.stderr:
-                log.write(raw)
-            log.flush()
+        def pump(stream, sink):
+            for raw in stream:
+                with lock:
+                    log.write(raw)
+                    log.flush()
+                sink.append(raw)
 
-        err_thread = threading.Thread(target=pump_err, daemon=True)
-        err_thread.start()
-        assert process.stdout is not None
-        try:
-            for raw in process.stdout:
-                log.write(raw)
-                log.flush()
-                lines.append(raw)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        threads = [threading.Thread(target=pump, args=(process.stdout, lines), daemon=True),
+                   threading.Thread(target=pump, args=(process.stderr, err_lines), daemon=True)]
+        for t in threads:
+            t.start()
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            os.killpg(process.pid, 15)  # SIGTERM, this group only
+            try:
+                os.killpg(process.pid, 15)  # SIGTERM, this group only
+            except ProcessLookupError:
+                pass
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, 9)  # SIGKILL
+                try:
+                    os.killpg(process.pid, 9)  # SIGKILL
+                except ProcessLookupError:
+                    pass
                 process.wait()
-        err_thread.join(timeout=5)
-    return process.returncode, lines, '', timed_out
+        # A grandchild that escaped the group could still hold a pipe open;
+        # bounded joins keep the caller from blocking on it.
+        for t, stream in zip(threads, (process.stdout, process.stderr)):
+            t.join(timeout=5)
+            if not t.is_alive():
+                stream.close()
+        with lock:
+            out, err = list(lines), ''.join(err_lines)
+    return process.returncode, out, err, timed_out
 
 
 def _thread_id(lines):
@@ -114,11 +129,9 @@ def invoke(config, role, job, wt, directory, judge=False):
             '--skip-git-repo-check', '-m', role['model'],
             '--output-schema', str(schema_path), '-o', str(output), '--json', prompt]
     log_path = directory / 'driver.log'
-    p_rc, out_lines, _, timed_out = _stream_codex(argv, wt, env,
-                                                  config['repair']['budget']['wall_clock_min'] * 60,
-                                                  log_path)
+    p_rc, out_lines, stderr_text, timed_out = _stream_codex(
+        argv, wt, env, config['repair']['budget']['wall_clock_min'] * 60, log_path)
     stdout_text = ''.join(out_lines)
-    stderr_text = ''
     # The thread/session link (item 2.2) — written even on failure, BEFORE
     # any verdict return: the session exists as soon as the stream says so.
     tid = _thread_id(out_lines)
