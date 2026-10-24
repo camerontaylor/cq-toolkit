@@ -390,6 +390,12 @@ export interface ReviewLoopOpts {
    * the default view would spawn a real worker.
    */
   driverRegistryView?: OpRegistryView;
+  /** Explicit engine-only opt-in: file-disjoint jobs, staging/validation/commits owned by the injected op. */
+  engineOwnedConcurrency?: number;
+  /** Legacy loop publishes by default; composition callers can require explicit opt-in. */
+  publish?: boolean;
+  /** Parent cancellation also withholds publication and forge mutations. */
+  signal?: AbortSignal;
   /** Classify tuning (R3 data). Default: defaultClassifyConfig. */
   classifyConfig?: ClassifyConfig;
   /** Batch planning config. Default: defaultPlanBatchConfig (isolated, I6). */
@@ -1031,19 +1037,18 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
   for (const entry of correlated) {
-    const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
-    if (dispatched.has(replyActionId)) {
-      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${entry.source.roundFingerprint}`;
-      if (entry.source.kind === 'thread' && !dispatched.has(resolveActionId)) {
-        carriedResolves.push({
-          kind: 'resolve_thread',
-          actionId: resolveActionId,
-          threadId: entry.source.itemId,
-        });
-      }
+    if (
+      entry.source.kind !== 'thread' &&
+      dispatched.has(
+        `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`,
+      )
+    ) {
       skipped.push({ id: entry.source.itemId, reason: 'already-answered-this-round' });
       continue;
     }
+    // A journaled reply alone is not authorization to resolve or skip. The
+    // authenticated current-head/round settle gate above is the only carry
+    // path. Missing/deleted/stale replies are checked again (#363).
     sources.set(`fix-${fixInputs.length + 1}`, entry.source);
     fixInputs.push({
       repo: `${opts.owner}/${opts.repo}`,
@@ -1064,9 +1069,58 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // item must not orphan the others' replies). No resume in v1: journalDir
   // is an audit trail only.
   const plan = buildReviewLoopPlan(fixInputs);
-  const view = opts.driverRegistryView ?? (await centralRegistryView());
+  if (opts.engineOwnedConcurrency !== undefined) {
+    if (!Number.isSafeInteger(opts.engineOwnedConcurrency) || opts.engineOwnedConcurrency < 1)
+      throw new Error('engineOwnedConcurrency must be positive');
+    const priorByFile = new Map<string, string>();
+    let barrier: string[] = [];
+    for (const job of plan.jobs) {
+      const input = job.input as FixReviewItemInput;
+      const file = input.item.path;
+      job.dependsOn = [
+        ...barrier,
+        ...(file && priorByFile.has(file) ? [priorByFile.get(file)!] : []),
+      ];
+      if (file) priorByFile.set(file, job.id);
+      else {
+        job.dependsOn = plan.jobs.slice(0, plan.jobs.indexOf(job)).map((prior) => prior.id);
+        barrier = [job.id];
+      }
+    }
+  }
+  const underlyingView = opts.driverRegistryView ?? (await centralRegistryView());
+  const executionHeads = new Map<string, string | null>();
+  const view: OpRegistryView = {
+    get(name) {
+      const entry = underlyingView.get(name);
+      if (entry === undefined || name !== 'review.fixItem') return entry;
+      return {
+        ...entry,
+        importer: async (...args) => {
+          const op = await entry.importer(...args);
+          return async (raw) => {
+            const input = raw as FixReviewItemInput;
+            const observed = await opts.git([
+              '-C',
+              worktree.path,
+              'rev-parse',
+              '--verify',
+              'HEAD^{commit}',
+            ]);
+            executionHeads.set(
+              input.item.id,
+              observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
+                ? observed.stdout.trim()
+                : null,
+            );
+            return op(raw);
+          };
+        },
+      };
+    },
+  };
   const runOptions: RunOptions = {
-    concurrency: 1,
+    concurrency: opts.engineOwnedConcurrency ?? 1,
     stopOnError: false,
     ...(opts.runOptions?.journalDir !== undefined
       ? { journalDir: opts.runOptions.journalDir }
@@ -1097,6 +1151,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // through the evidence folds and (W2.3) reservation capacity.
       return await runPlan(plan, runOptions, view, {
         governor,
+        ...(opts.signal ? { signal: opts.signal } : {}),
         allowAdvisory: opts.allowAdvisoryBudget === true,
         ...(opts.allowAdvisoryBudget === true
           ? { allowAdvisoryProvenance: 'product' as const }
@@ -1313,7 +1368,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   if (dirtyWorktree) {
     reasons.push('dirty-worktree');
   }
-  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree && !headUnreadable;
+  if (opts.signal?.aborted) reasons.push('parent cancelled; publication and replies withheld');
+  if (opts.publish === false && commits.length > 0)
+    reasons.push('verified commits retained locally; publication requires --push');
+  const publishable =
+    opts.publish !== false &&
+    !opts.signal?.aborted &&
+    allRowsOk &&
+    !unreportedCommit &&
+    !dirtyWorktree &&
+    !headUnreadable;
   if (commits.length > 0 && publishable) {
     const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
@@ -1392,7 +1456,9 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // unchanged row never claims a head a sibling's later commit produced:
     // the next run then sees another head and re-opens the thread once.
     const answeredHead =
-      value.changed && value.commits.length > 0 ? headAfter.stdout.trim() : checkedOutHead;
+      value.changed && value.commits.length > 0
+        ? headAfter.stdout.trim()
+        : (executionHeads.get(source.itemId) ?? null);
     const stampThread =
       source.kind === 'thread'
         ? state.threads.find((candidate) => candidate.id === source.itemId)
@@ -1510,7 +1576,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Zero actions → nothing to run: a re-run no-op stays a true no-op (no
   // push, no log writes).
   let reply: ReplyAndResolveResult | undefined;
-  if (actions.length > 0) {
+  if (actions.length > 0 && !opts.signal?.aborted && opts.publish !== false) {
     reply = await replyAndResolve(actions, {
       owner: opts.owner,
       repo: opts.repo,

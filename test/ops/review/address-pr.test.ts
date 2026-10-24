@@ -1,0 +1,328 @@
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, test } from 'vitest';
+import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
+import type { DriverFactory } from '../../../src/driver/factory.js';
+import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
+
+const initial = 'a'.repeat(40),
+  fixed = 'b'.repeat(40);
+const ok = (value: unknown): GhResult => ({
+  code: 0,
+  stdout: typeof value === 'string' ? value : JSON.stringify(value),
+  stderr: '',
+});
+/** Phase-one orchestration world: no git process, provider package, credentials or forge network. */
+async function world(human = false) {
+  const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
+  const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
+  await mkdir(worktree, { recursive: true });
+  let head = initial,
+    remote = initial;
+  const resolved = new Set<string>();
+  const actions: string[] = [];
+  const files = ['src/a.ts', 'src/b.ts'];
+  await mkdir(join(worktree, 'src'), { recursive: true });
+  for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
+  const initialTree = new Map(files.map((file) => [file, 'BAD\n']));
+  const trees = new Map<string, Map<string, string>>([[initial, new Map(initialTree)]]);
+  const heads = new Map<string, string>([[worktree, initial]]);
+  const indices = new Map<string, Map<string, string>>([[worktree, new Map(initialTree)]]);
+  const treeHash = (tree: Map<string, string>) =>
+    createHash('sha1')
+      .update(JSON.stringify([...tree].sort()))
+      .digest('hex');
+  const commits = new Map<string, { parent: string; message: string; tree: string }>();
+  const threads = ['T1', ...(human ? ['T2'] : [])].map((id, i) => ({
+    id,
+    isResolved: false,
+    isOutdated: false,
+    path: `src/${i ? 'b' : 'a'}.ts`,
+    line: 1,
+    comments: {
+      nodes: [
+        {
+          databaseId: i + 101,
+          author: { login: 'reviewer' },
+          body: `Fix ${id}`,
+          createdAt: new Date(Date.now() - 60000).toISOString(),
+        },
+      ],
+    },
+  }));
+  const flag = (args: readonly string[], key: string) =>
+    args.find((a) => a.startsWith(`${key}=`))?.slice(key.length + 1) ?? '';
+  const gh: GhFn = async (args) => {
+    if (args[0] === 'repo') return ok({ nameWithOwner: 'octo/widget' });
+    if (args[0] === 'pr')
+      return ok({
+        headRefName: 'feature',
+        headRepositoryOwner: { login: 'octo' },
+        headRepository: { name: 'widget' },
+      });
+    if (args.includes('user')) return ok('responder');
+    const endpoint = args.find((a) => a.startsWith('repos/')) ?? '';
+    if (args.includes('graphql')) {
+      const query = flag(args, 'query');
+      if (query.includes('resolveReviewThread')) {
+        const id = flag(args, 'threadId');
+        if (remote !== fixed) throw new Error('resolve before verified publication');
+        resolved.add(id);
+        actions.push(`resolve:${id}`);
+        return ok({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } });
+      }
+      return ok({
+        data: {
+          repository: {
+            pullRequest: {
+              author: { login: 'prauthor' },
+              headRefName: 'feature',
+              headRefOid: remote,
+              reviewThreads: {
+                nodes: threads.map((t) => ({ ...t, isResolved: resolved.has(t.id) })),
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+              reviews: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+          },
+        },
+      });
+    }
+    if (args.includes('POST')) {
+      if (endpoint.endsWith('requested_reviewers')) actions.push('rerequest');
+      else {
+        if (remote !== fixed) throw new Error('reply before verified publication');
+        actions.push('reply');
+      }
+      return ok({ id: 1001 });
+    }
+    if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remote } });
+    if (endpoint.includes('/comments') || endpoint.includes('/reviews?')) return ok([]);
+    return { code: 1, stdout: '', stderr: `unhandled forge: ${args.join(' ')}` };
+  };
+  const git: GhFn = async (args) => {
+    const cwd = args[0] === '-C' ? args[1]! : root;
+    const a = args[0] === '-C' ? args.slice(2) : args;
+    const localHead = heads.get(cwd) ?? head;
+    const tree = trees.get(localHead) ?? initialTree;
+    const index = indices.get(cwd) ?? new Map(tree);
+    const changed: string[] = [];
+    for (const file of files) {
+      let text = '';
+      try {
+        text = await readFile(join(cwd, file), 'utf8');
+      } catch {
+        /* Absent paths are dirty in this in-memory git model. */
+      }
+      if (text !== (a.includes('HEAD') ? tree : index).get(file)) changed.push(file);
+    }
+    if (a[0] === 'worktree' && a[1] === 'add') {
+      const dest = a[3]!,
+        parent = a[4]!;
+      await mkdir(join(dest, 'src'), { recursive: true });
+      for (const [file, text] of trees.get(parent) ?? []) await writeFile(join(dest, file), text);
+      heads.set(dest, parent);
+      indices.set(dest, new Map(trees.get(parent)));
+      return ok('');
+    }
+    if (a[0] === 'worktree' && a[1] === 'remove') {
+      heads.delete(a[3]!);
+      indices.delete(a[3]!);
+      await rm(a[3]!, { recursive: true, force: true });
+      return ok('');
+    }
+    if (a[0] === 'ls-files') return ok('');
+    if (a[0] === 'add') {
+      for (const file of a.slice(a.indexOf('--') + 1))
+        index.set(file, await readFile(join(cwd, file), 'utf8'));
+      indices.set(cwd, index);
+      return ok('');
+    }
+    if (a[0] === 'write-tree') return ok(treeHash(index));
+    if (a[0] === 'stash') return ok('');
+    if (a[0] === 'restore') {
+      for (const file of a.slice(a.indexOf('--') + 1))
+        await writeFile(join(cwd, file), tree.get(file)!);
+      indices.set(cwd, new Map(tree));
+      return ok('');
+    }
+    if (a[0] === 'commit') {
+      const sha = fixed;
+      commits.set(sha, { parent: localHead, message: a[2]!, tree: treeHash(index) });
+      trees.set(sha, new Map(index));
+      heads.set(cwd, sha);
+      head = sha;
+      return ok('');
+    }
+    if (a[0] === 'diff' && a[1] !== '--quiet') {
+      const indexed = [...index]
+        .filter(([file, text]) => text !== tree.get(file))
+        .map(([file]) => file);
+      if (a.includes('--name-only'))
+        return ok((a.includes('--cached') ? indexed : changed).join('\n'));
+      return ok(
+        indexed
+          .map(
+            (file) =>
+              `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-BAD\n+GOOD\n`,
+          )
+          .join(''),
+      );
+    }
+    if (a[0] === 'fetch') return ok('');
+    if (a[0] === 'worktree' && a[1] === 'list')
+      return ok(`worktree ${worktree}\nHEAD ${head}\nbranch refs/heads/cq-review/pr-7\n\n`);
+    if (a[0] === 'rev-parse') {
+      if (a[1] === '--absolute-git-dir') return ok(join(root, 'git'));
+      if (a[1] === '--abbrev-ref') return ok('cq-review/pr-7');
+      if (a[1] === '--verify') {
+        const sha = a[2]!.replace('HEAD', head).replace(/\^\{commit\}$/, '');
+        return sha === initial || commits.has(sha)
+          ? ok(sha)
+          : { code: 1, stdout: '', stderr: 'unknown commit' };
+      }
+      if (a[1]?.endsWith('^{tree}'))
+        return ok(commits.get(a[1].slice(0, -7))?.tree ?? treeHash(tree));
+      if (a[1]?.endsWith('^')) return ok(commits.get(a[1].slice(0, -1))?.parent ?? initial);
+      return ok(a[1]?.startsWith('refs/cq-review/') ? remote : localHead);
+    }
+    if (a[0] === 'status') return ok('');
+    if (a[0] === 'rev-list') return ok(a[1] === `${initial}..HEAD` && head !== initial ? head : '');
+    if (a[0] === 'merge-base') {
+      const from = a[2],
+        to = a[3] === 'HEAD' ? head : a[3];
+      return {
+        code: from === to || commits.get(to!)?.parent === from ? 0 : 1,
+        stdout: '',
+        stderr: '',
+      };
+    }
+    if (a[0] === 'log') return ok(commits.get(a[3]!)?.message ?? '');
+    if (a[0] === 'diff' && a[1] === '--quiet') return { code: 1, stdout: '', stderr: '' };
+    if (a[0] === 'push') {
+      remote = head;
+      actions.push('push');
+      return ok('');
+    }
+    return { code: 1, stdout: '', stderr: `unhandled git: ${args.join(' ')}` };
+  };
+  const drivers: DriverFactory = {
+    resolve: ({ modelSpec }) => ({
+      lane: 'ai-sdk',
+      modelSpec,
+      driver: {
+        run: async (input) => {
+          if (input.outputSchema?.name === 'review.address.closure/v1')
+            return {
+              stopReason: 'complete',
+              structuredOutput: { closed: true, reason: 'candidate closed' },
+              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          const deferred = human && input.prompt.includes('"id":"T2"');
+          if (!deferred && !input.prompt.startsWith('related-check feedback'))
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+          return {
+            stopReason: 'complete',
+            structuredOutput: {
+              disposition: deferred ? 'deferred' : 'fixed',
+              reason: deferred ? 'human' : 'fixed',
+              evidence: deferred ? [{ path: 'src/b.ts', line: 1 }] : [],
+            },
+            usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          };
+        },
+      },
+    }),
+  };
+  const role = { provider: 'fixture', model: 'scripted' };
+  const op = makeReviewAddress({
+    git,
+    gh,
+    drivers,
+    config: {
+      schemaVersion: 2,
+      checks: [
+        {
+          adapter: 'tsc-lines',
+          command: { command: process.execPath, args: ['-e', 'process.exitCode=0'] },
+        },
+      ],
+      roles: { worker: role, reviewer: role },
+      budgets: { run: { maxTokens: 1000 } },
+      review: { rounds: 1, reviewers: ['agent'] },
+      escalation: { workerAttempts: 1, rescueBase: 0 },
+    },
+    disposition: async () => ({ status: 'ok', value: {} }),
+    review: async () => ({
+      status: 'ok',
+      value: {
+        schemaVersion: 1,
+        branch: 'cq-review/pr-7',
+        head,
+        sources: [{ kind: 'agent', status: 'terminal' }],
+        findings: [],
+      },
+    }),
+    workerFactory: (deps) =>
+      makeAddressWorker({
+        ...deps,
+        scanner: async (components) =>
+          components.map((c) => ({ component: c.component, hits: [] })),
+      }),
+  });
+  return {
+    root,
+    actions,
+    resolved,
+    run: (push = true) =>
+      op({ repoRoot: root, source: 'pr:7', push, journalDir: join(root, 'journal') }),
+    cleanup: () => rm(root, { recursive: true, force: true }),
+  };
+}
+describe('review.address PR phase-one orchestration', () => {
+  test('verified publication precedes reply/resolve; clean re-review re-requests once', async () => {
+    const w = await world();
+    try {
+      const result = await w.run();
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(w.actions[0]).toBe('push');
+      expect(w.actions.filter((a) => a !== 'push')).toEqual(['reply', 'resolve:T1', 'rerequest']);
+      if (result.status === 'ok') {
+        expect(result.value.fixesPerRun).toBe(1);
+        expect(result.value.openBlocking).toEqual([]);
+      }
+    } finally {
+      await w.cleanup();
+    }
+  });
+  test('a human sibling stays open while the verified sibling publishes and resolves', async () => {
+    const w = await world(true);
+    try {
+      const result = await w.run();
+      expect(result.status, JSON.stringify(result)).toBe('needs-human');
+      expect(w.resolved.has('T1')).toBe(true);
+      expect(w.resolved.has('T2')).toBe(false);
+      expect(w.actions).not.toContain('rerequest');
+      expect(result.report?.fixesPerRun).toBe(1);
+      expect(result.report?.openBlocking).toMatchObject([{ id: 'T2', status: 'deferred' }]);
+    } finally {
+      await w.cleanup();
+    }
+  });
+  test('publication opt-out keeps verified local work and makes no forge mutations', async () => {
+    const w = await world();
+    try {
+      const result = await w.run(false);
+      expect(result.status).toBe('needs-human');
+      expect(w.actions).toEqual([]);
+      expect(result.report?.fixesPerRun).toBe(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+});

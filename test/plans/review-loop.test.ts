@@ -159,6 +159,7 @@ interface LoopWorld {
    * resolvePrWorktree and the state fetch. Overrides worktreeFollowsOrigin.
    */
   worktreeHead?: string;
+  executionHead?: string;
   /** The sha the ADVANCED worktree HEAD reports (default: the 4444 filler). */
   worktreeAdvancesTo?: string;
   /**
@@ -418,6 +419,10 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     // The per-item resolve gate's mechanical checks (finding 2): a sha is
     // verifiable exactly when the world knows it.
     if (rest[0] === 'rev-parse' && rest[1] === '--verify') {
+      if (rest[2] === 'HEAD^{commit}')
+        return ok(
+          `${world.executionHead ?? world.worktreeHead ?? (world.worktreeFollowsOrigin ? world.sha : SHA)}\n`,
+        );
       const sha = (rest[2] ?? '').replace(/\^\{commit\}$/, '');
       if (world.knownShas.includes(sha)) {
         return ok(`${sha}\n`);
@@ -659,6 +664,7 @@ const runLoop = async (
   const worktreePath = join(scratch, 'pr-7-pr-7-fix');
   const ghLog = o.ghLog ?? [];
   const gitLog = o.gitLog ?? [];
+  world.executionHead ??= world.worktreeHead ?? (world.worktreeFollowsOrigin ? world.sha : SHA);
   const driver: Driver = {
     run:
       o.driverRun ??
@@ -668,6 +674,11 @@ const runLoop = async (
         if (next === undefined) {
           throw new Error('scripted driver: no scripted result left');
         }
+        if (
+          world.worktreeAdvancesAt !== undefined &&
+          String(next.structuredOutput).includes('"disposition":"fixed"')
+        )
+          world.executionHead = world.worktreeAdvancesTo ?? SHA;
         return next;
       }),
   };
@@ -2053,76 +2064,41 @@ describe('round-versioned dispatch keys (slice 9 item 3)', () => {
     expect(roundTwoReply).not.toBe(roundOneReply);
     expect(roundTwoReply).toMatch(/^review-loop:7:reply:T1-[0-9a-f]{8}$/);
 
-    // Exact re-run of round two: the round-versioned ids are already
-    // dispatched — the loop skips the item before building fix jobs.
+    // A local receipt is not authenticated current-head evidence. The fake
+    // forge deliberately omits both posted replies, so recheck instead of
+    // treating the journal as proof that the feedback was answered.
     const invocations: OpInvocation[] = [];
-    const run3 = await runLoop(world2, {
-      driverResults: [],
-      invocations,
-      dispatchLogPath,
-    });
-    expect(run3.outcome.plan.jobs).toEqual([]);
-    expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
-    expect(invocations).toHaveLength(0);
+    const run3 = await runLoop(world2, { driverResults: [], invocations, dispatchLogPath });
+    expect(run3.outcome.status).toBe('needs-human');
+    expect(run3.outcome.plan.jobs).toHaveLength(1);
+    expect(invocations).toHaveLength(1);
     expect(run3.outcome.actionsPosted).toBe(0);
-    expect(run3.outcome.reply).toBeUndefined();
   });
 });
 
-describe('pending-resolve carry (codex P2)', () => {
-  test('reply posted + resolve pending → the next run carries ONLY the resolve (no re-fix, no re-reply); then a full no-op', async () => {
+describe('pending-resolve journal-only refusal (#363)', () => {
+  test('a recorded reply missing from the fetched forge state must recheck, never carry its resolve', async () => {
     const scratch = await mkdtemp(join(tmpdir(), 'cq-review-carry-'));
     scratchDirs.push(scratch);
     const dispatchLogPath = join(scratch, 'dispatch.jsonl');
     const world = defaultWorld();
-    world.resolveReviewThreadFails = true; // run 1: the reply posts; the resolve fails
-    const invocations1: OpInvocation[] = [];
+    world.resolveReviewThreadFails = true;
     const run1 = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
-      invocations: invocations1,
       dispatchLogPath,
     });
-    // Run 1: the reply recorded; the resolve FAILED and stays unrecorded —
-    // the old skip-strategy would never retry it.
     expect(run1.outcome.status).toBe('needs-human');
-    expect(
-      run1.outcome.reasons.some((reason) => reason.includes('dispatch failed (resolve_thread')),
-    ).toBe(true);
-    expect(run1.outcome.actionsPosted).toBe(1);
     expect(run1.outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
-    expect(invocations1).toHaveLength(1);
-
-    // Run 2 (same feedback): the reply is dispatched, the resolve is not —
-    // carry ONLY the resolve: no fix job (the driver is never called), no
-    // re-reply, and the item is skipped with its reason.
     world.resolveReviewThreadFails = false;
-    const invocations2: OpInvocation[] = [];
-    const run2 = await runLoop(world, {
-      driverResults: [],
-      invocations: invocations2,
-      dispatchLogPath,
-    });
-    expect(run2.outcome.status).toBe('ok');
-    expect(run2.outcome.reasons).toEqual([]);
-    expect(run2.outcome.plan.jobs).toEqual([]);
-    expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
-    expect(invocations2).toHaveLength(0);
-    expect(run2.outcome.actionsPosted).toBe(1);
-    expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
-
-    // Run 3: BOTH round actions dispatched → a full no-op.
-    const invocations3: OpInvocation[] = [];
-    const run3 = await runLoop(world, {
-      driverResults: [],
-      invocations: invocations3,
-      dispatchLogPath,
-    });
-    expect(run3.outcome.status).toBe('ok');
-    expect(run3.outcome.plan.jobs).toEqual([]);
-    expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
-    expect(invocations3).toHaveLength(0);
-    expect(run3.outcome.actionsPosted).toBe(0);
-    expect(run3.outcome.reply).toBeUndefined();
+    const invocations: OpInvocation[] = [];
+    const run2 = await runLoop(world, { driverResults: [], invocations, dispatchLogPath });
+    expect(run2.outcome.status).toBe('needs-human');
+    expect(run2.outcome.plan.jobs).toHaveLength(1);
+    expect(invocations).toHaveLength(1);
+    expect(run2.outcome.actionsPosted).toBe(0);
+    expect(run2.ghLog.some((args) => args.some((arg) => arg.includes('mutation Resolve')))).toBe(
+      false,
+    );
   });
 });
 
@@ -2940,6 +2916,30 @@ describe('thread settle gate (PR #336 incident)', () => {
     const bodies = postedBodies(ghLog);
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).toContain('Guarded the abort.');
+  });
+
+  test('#362 a later unchanged worker can cite the already committed sibling it actually observed', async () => {
+    const world = publishedWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T3', 'src/c.ts', 9, 103),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T1 in src/a.ts' };
+    world.filesAt = { [SHA]: { ...DEFAULT_WORLD_FILES, 'src/new.ts': 5 } };
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(true, 'Added sibling evidence.', [NEW_SHA])),
+        completeWorker(fixLine(false, DISPOSITION, [], [{ path: 'src/new.ts', line: 1 }])),
+      ],
+      ghLog,
+    });
+    expect(outcome.status).toBe('ok');
+    const bodies = postedBodies(ghLog);
+    expect(bodies).toHaveLength(2);
+    expect(bodies.find((body) => body.includes(DISPOSITION))).toContain(
+      `<!-- cq-review-loop-head:${SHA} round:`,
+    );
   });
 
   test('a verified fix whose resolve failed: the settled rerun carries ONLY the resolve (own identity), then a full no-op', async () => {

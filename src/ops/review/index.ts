@@ -75,6 +75,15 @@ export type {
   FixableReviewItem,
   FixReviewItemInput,
   FixReviewItemResult,
+  FindingReviewItemInput,
+  ReviewFixInput,
 } from './fixReviewItem.js';
 export { makeFixReviewItem } from './fixReviewItem.js';
 export { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
+export { makeReviewAddress, addressBatches } from './address.js';
+export type {
+  ReviewAddressInput,
+  ReviewAddressReport,
+  ReviewAddressResult,
+  ReviewAddressDeps,
+} from './address.js';

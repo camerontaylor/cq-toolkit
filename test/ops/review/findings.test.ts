@@ -189,3 +189,17 @@ describe('review findings records', () => {
     );
   });
 });
+
+it('deferred major findings remain blocking for every shared readiness consumer', () => {
+  const r = record('agent', 'terminal', [
+    {
+      id: 'deferred',
+      source: 'agent',
+      severity: 'major',
+      text: 'known accepted defect',
+      status: 'deferred',
+      reason: 'follow-up',
+    },
+  ]);
+  expect(openBlocking(r, ['critical', 'major']).map((finding) => finding.id)).toEqual(['deferred']);
+});

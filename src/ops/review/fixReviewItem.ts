@@ -104,6 +104,7 @@ import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
 import type { ThreadComment } from './threads.js';
+import type { Finding } from './findings.js';
 
 /**
  * The one review item a fixer worker fixes. Plain JSON, built from the
@@ -137,7 +138,7 @@ export interface FixReviewItemInput {
   /** Repository as "owner/name"; omitted → the prompt omits the repository line. */
   repo?: string;
   /** The pull request number the item was filed on. */
-  pr: number;
+  pr?: number;
   /** The single review item to fix. */
   item: FixableReviewItem;
   /**
@@ -162,6 +163,28 @@ export interface FixReviewItemInput {
   promptOverride?: string;
   /** Budget caps for the invocation; passed through verbatim (default {}). */
   budget?: Budget;
+}
+
+/** Additive local finding variant; legacy thread callers retain their shape. */
+export type FindingReviewItemInput = Omit<FixReviewItemInput, 'item'> & {
+  item: { kind: 'finding'; finding: Finding };
+};
+export type ReviewFixInput = Omit<FixReviewItemInput, 'item'> & {
+  item: FixReviewItemInput['item'] | FindingReviewItemInput['item'];
+};
+export function normalizeReviewFixInput(input: ReviewFixInput): FixReviewItemInput {
+  if (!('kind' in input.item)) return input as FixReviewItemInput;
+  const finding = input.item.finding;
+  return {
+    ...input,
+    item: {
+      id: finding.id,
+      path: finding.file ?? null,
+      line: finding.line ?? null,
+      body: finding.text,
+      comments: [],
+    },
+  };
 }
 
 /**
@@ -406,7 +429,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   if (input.repo !== undefined) {
     lines.push(`Repository: ${input.repo}`);
   }
-  lines.push(`Pull request: #${input.pr}`);
+  if (input.pr !== undefined) lines.push(`Pull request: #${input.pr}`);
   // id/path are FETCHED strings composed OUTSIDE the untrusted-content
   // fences — strip line breaks and defang fence lines so neither can forge
   // a fence or smuggle a second line into the composed context (round-3
@@ -657,8 +680,9 @@ export function makeFixReviewItem(deps: {
    * explicit debugging opt-out (round-3 item 14).
    */
   retainSessions?: boolean;
-}): Op<FixReviewItemInput, FixReviewItemResult> {
-  return async (input: FixReviewItemInput) => {
+}): Op<ReviewFixInput, FixReviewItemResult> {
+  return async (raw: ReviewFixInput) => {
+    const input = normalizeReviewFixInput(raw);
     const harness = input.harness ?? defaultHarnessConfig;
     // RESOLVE ONCE, BEFORE ANY COMPOSED CONTEXT IS SENT (ADR-0002 §2.5):
     // role + provider → the constructed, served-model-wrapped lane. The

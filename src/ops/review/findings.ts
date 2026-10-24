@@ -126,6 +126,8 @@ export function openBlocking(
 ): Finding[] {
   const blocking = new Set(severities.map((severity) => severity.toLowerCase()));
   return record.findings.filter(
-    (finding) => finding.status === 'open' && blocking.has(finding.severity.toLowerCase()),
+    (finding) =>
+      (finding.status === 'open' || finding.status === 'deferred') &&
+      blocking.has(finding.severity.toLowerCase()),
   );
 }

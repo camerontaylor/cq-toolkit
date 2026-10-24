@@ -30,6 +30,9 @@ export interface ReviewRunInput {
   uncommitted?: boolean;
   target?: string;
   base?: string;
+  maxTokens?: number;
+  wallMs?: number;
+  reviewers?: ('agent' | 'coderabbit')[];
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
@@ -79,7 +82,11 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
     } catch {
       /* fallback is descriptive only */
     }
-    const policy = resolveCqConfigDefaults(parsedConfig.config, { packageName });
+    const policy = resolveCqConfigDefaults(parsedConfig.config, {
+      packageName,
+      ...(input.maxTokens === undefined ? {} : { maxTokens: input.maxTokens }),
+      ...(input.reviewers === undefined ? {} : { review: { reviewers: input.reviewers } }),
+    });
     const target = input.target ?? 'merge-queue';
     const read = await readWorkState(effects, {
       target,
@@ -297,7 +304,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   .join('\n'),
                 role,
                 maxTokens: policy.budgets.run.maxTokens!,
-                wallMs: policy.budgets.run.wallMs,
+                wallMs: Math.min(policy.budgets.run.wallMs, input.wallMs ?? Infinity),
                 severityMap: policy.review.agentSeverityMap,
               });
               const blockedReason =
