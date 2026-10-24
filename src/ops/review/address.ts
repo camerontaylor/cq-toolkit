@@ -280,6 +280,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           throw new Error(`git ${args[0]} failed: ${result.stderr.slice(0, 500)}`);
         return result.stdout.trim();
       };
+      const branchName = async (root: string) => {
+        const ref = await gitText(root, ['symbolic-ref', '--quiet', 'HEAD']);
+        if (!ref.startsWith('refs/heads/') || ref.length === 'refs/heads/'.length)
+          throw new Error('worker HEAD does not name a local branch ref');
+        return ref.slice('refs/heads/'.length);
+      };
       const bindWorker = (root: string) =>
         (worker ??= (deps.workerFactory ?? makeAddressWorker)({
           repoRoot: root,
@@ -318,8 +324,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         await gitText(workerRoot, ['merge-base', '--is-ancestor', publishedBase, 'HEAD']);
         if (await gitText(workerRoot, ['status', '--porcelain', '--untracked-files=no']))
           throw new Error('worker tree/index is dirty; verified commits retained');
-        const branch =
-          publishBranch ?? (await gitText(workerRoot, ['symbolic-ref', '--short', 'HEAD']));
+        const branch = publishBranch ?? (await branchName(workerRoot));
         if (parent?.aborted) throw new Error('parent cancelled');
         await gitText(workerRoot, ['push', publishRemote, `HEAD:refs/heads/${branch}`]);
         publishedBase = await gitText(workerRoot, ['rev-parse', 'HEAD']);
@@ -552,6 +557,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 text: discussionText(item.item.body, item.item.comments),
                 status: 'open',
               };
+              if ((await branchName(root)) !== item.worktree.branch)
+                throw new Error('worker execution branch changed');
               await admitRecord(root, {
                 schemaVersion: 1,
                 branch: item.worktree.branch,
@@ -656,6 +663,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             )
               reviewers.add(thread.authorLogin);
           }
+          if ((await branchName(root)) !== loop.worktree.branch)
+            return await finish('needs-human', 'PR worker branch changed');
           const threads: FindingsRecord = {
             schemaVersion: 1,
             branch: loop.worktree.branch,
@@ -733,7 +742,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           continue;
         }
         if (!previous) {
-          const branch = await gitText(root, ['symbolic-ref', '--short', 'HEAD']);
+          const branch = await branchName(root);
           let record = deps.initialRecord;
           if (!record) {
             let path = input.record;
@@ -783,7 +792,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (refreshed.status !== 'ok')
           return await finish('needs-human', `re-review: ${issue(refreshed)}`);
         if (
-          refreshed.value.branch !== (await gitText(root, ['symbolic-ref', '--short', 'HEAD'])) ||
+          refreshed.value.branch !== (await branchName(root)) ||
           refreshed.value.head !== (await gitText(root, ['rev-parse', 'HEAD']))
         )
           return await finish('needs-human', 're-review identity changed');

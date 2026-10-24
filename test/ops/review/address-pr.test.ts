@@ -173,6 +173,7 @@ async function world(
       await rm(a[3]!, { recursive: true, force: true });
       return ok('');
     }
+    if (a[0] === 'symbolic-ref') return ok('refs/heads/cq-review/pr-7');
     if (a[0] === 'ls-files') return ok('');
     if (a[0] === 'add') {
       for (const file of a.slice(a.indexOf('--') + 1))
