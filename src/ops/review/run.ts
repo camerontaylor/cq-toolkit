@@ -326,13 +326,17 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   diff: components
                     .map((component) => `--- ${component.path} ---\n${component.text}`)
                     .join('\n'),
+                  components,
+                  base: input.uncommitted ? state.head : state.base,
+                  scope: input.uncommitted ? 'uncommitted' : 'full',
+                  scanSecrets: scanner,
                   role,
                   maxTokens: policy.budgets.run.maxTokens!,
                   wallMs: Math.max(1, remainingWallMs()),
                   ...(deadline.signal ? { signal: deadline.signal } : {}),
                   severityMap: policy.review.agentSeverityMap,
                 });
-                const blockedReason =
+                let blockedReason =
                   agent.status === 'needs-human'
                     ? agent.reason
                     : agent.status === 'failed'
@@ -340,14 +344,17 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                       : agent.status === 'ok'
                         ? undefined
                         : `agent review did not complete (${agent.status})`;
+                if ((await driftSince(effects, state)).length > 0)
+                  blockedReason = 'repository state changed during agent review';
                 const at = effects.nowIso();
-                const agentFindings = agent.status === 'ok' ? agent.value.findings : [];
+                const report = agent.status === 'ok' ? agent.value : agent.report;
+                const agentFindings = report?.findings ?? [];
                 let logPath: string;
                 try {
                   logPath = await effects.writeReviewLog(
                     state.branch,
                     `agent-${Date.now()}`,
-                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\n`,
+                    `agent reviewer: reviewer\nhead: ${state.head}\ncompletion: ${blockedReason === undefined ? 'terminal' : `blocked — ${blockedReason}`}\nfindings: ${agentFindings.length}\ncoverage: ${JSON.stringify(report?.coverage)}\nusage: ${report?.usage ?? 0}\n`,
                   );
                 } catch (error) {
                   return {
@@ -398,21 +405,35 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                     detail: `review.run: agent review attempt was dispatched but its dev ledger outcome is uncertain — ${error instanceof Error ? error.message : String(error)}`,
                   };
                 }
-                if (agent.status === 'ok') {
+                if (agent.status === 'ok' && blockedReason === undefined) {
                   records.push({
                     schemaVersion: 1,
                     branch: state.branch,
                     head: state.head,
-                    sources: [{ kind: 'agent', status: 'terminal', cycleId }],
+                    sources: [
+                      {
+                        kind: 'agent',
+                        status: 'terminal',
+                        cycleId,
+                        coverage: agent.value.coverage,
+                      },
+                    ],
                     findings: agent.value.findings.map((finding, index) => ({
                       ...finding,
                       id: `${cycleId}#f${String(index + 1)}`,
                     })),
                   });
                 } else {
-                  records.push(
-                    blocked('agent', blockedReason ?? 'agent review did not complete', cycleId),
+                  const partial = blocked(
+                    'agent',
+                    blockedReason ?? 'agent review did not complete',
+                    cycleId,
                   );
+                  if (report) {
+                    partial.findings = report.findings;
+                    partial.sources[0]!.coverage = report.coverage;
+                  }
+                  records.push(partial);
                 }
               }
             }

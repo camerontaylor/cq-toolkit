@@ -37,7 +37,7 @@
 // invocation `cq dev.review --action=enroll …`).
 import type { Op, OpResult } from '../../kernel/types.js';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import type { Finding } from '../review/findings.js';
+import type { AgentReviewReport } from '../review/agentReviewer.js';
 import { HARDENED_DIFF_FLAGS } from '../../shared/gitHarden.js';
 import {
   CODERABBIT_REVIEWER,
@@ -116,7 +116,16 @@ export interface DevReviewDeps {
     branch: string;
     role: string;
     diff: string;
-  }) => Promise<OpResult<{ findings: Finding[]; usage: number }>>;
+    components: readonly ScanComponentInput[];
+    base: string;
+    scope: 'full' | 'uncommitted';
+  }) => Promise<
+    OpResult<{
+      findings: AgentReviewReport['findings'];
+      usage: number;
+      coverage?: AgentReviewReport['coverage'];
+    }> & { report?: AgentReviewReport }
+  >;
   /**
    * The author-admission transport (admission actions). When omitted, the
    * admission actions report the configuration gap.
@@ -270,6 +279,9 @@ function makeReviewCycle(
             branch: state.branch,
             diff: collected.components.map((component) => component.text).join('\n'),
             role,
+            components: collected.components,
+            base: scope === 'uncommitted' ? state.head : state.base,
+            scope,
           });
           await refuseDrift('during the agent review run');
           const completion: DevReviewCompletion =
@@ -284,7 +296,8 @@ function makeReviewCycle(
                         ? result.error
                         : result.status,
                 };
-          const findings = result.status === 'ok' ? result.value.findings : [];
+          const report = result.status === 'ok' ? result.value : result.report;
+          const findings = report?.findings ?? [];
           const logPath = await effects.writeReviewLog(
             state.branch,
             `${Date.now()}`,
@@ -297,6 +310,8 @@ function makeReviewCycle(
               `scope: ${scope}`,
               `completion: ${completion.kind}`,
               `findings: ${String(findings.length)}`,
+              `coverage: ${JSON.stringify(report?.coverage)}`,
+              `usage: ${report?.usage ?? 0}`,
               `at: ${at}`,
               '',
             ].join('\n'),

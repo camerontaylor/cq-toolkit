@@ -205,12 +205,17 @@ describe('dev.review cycle', () => {
   test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
     const effects = repoEffects(repo);
     const run = vi.fn(
-      async (invocation: { toolPolicy: { mode?: string }; outputSchema?: unknown }) => {
+      async (invocation: {
+        prompt: string;
+        toolPolicy: { mode?: string };
+        outputSchema?: unknown;
+      }) => {
         expect(invocation.toolPolicy.mode).toBe('none');
         expect(invocation.outputSchema).toBeDefined();
         return {
           stopReason: 'complete' as const,
           structuredOutput: {
+            receipt: /receipt: ([a-f0-9]+)/.exec(invocation.prompt)?.[1],
             findings: [
               {
                 file: 'src/a.ts',
@@ -239,6 +244,7 @@ describe('dev.review cycle', () => {
       runAgentReviewer: (input) =>
         runAgentReviewer(drivers, {
           ...input,
+          scanSecrets: stubScanner(),
           role: { provider: 'scripted', model: 'reviewer' },
           maxTokens: 500,
           wallMs: 1000,

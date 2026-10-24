@@ -1,3 +1,6 @@
+import { defaultHarnessConfig } from '../../harness/config.js';
+import type { DiffSecretScanner, ScanComponentInput } from '../dev/denylist.js';
+import { partitionReview, type ReviewCoverage } from './internal/reviewPartitions.js';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
@@ -22,13 +25,16 @@ const OutputSchema = z
     ),
   })
   .strict();
-const outputSchema = toOutputSchema('review.agent/v1', OutputSchema);
 
 export interface AgentReviewerInput {
   repoRoot: string;
   head: string;
   branch: string;
   diff: string;
+  components?: readonly ScanComponentInput[];
+  base?: string;
+  scope?: 'full' | 'uncommitted';
+  scanSecrets: DiffSecretScanner;
   role: { provider: string; model: string };
   maxTokens: number;
   wallMs: number;
@@ -37,15 +43,39 @@ export interface AgentReviewerInput {
 }
 
 /** Read-only structured review through the configured reviewer role. */
-export async function runAgentReviewer(
+async function runPartition(
   drivers: DriverFactory,
-  input: AgentReviewerInput,
+  input: AgentReviewerInput & {
+    receipt: string;
+    onUsage: (usage: number) => void;
+    onRequest: (serializedChars: number, decodedChars: number) => void;
+  },
 ): Promise<OpResult<{ findings: Finding[]; usage: number }>> {
   if (input.signal?.aborted || currentJobContext()?.signal.aborted)
     return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
   let resolved: ReturnType<DriverFactory['resolve']>;
   try {
-    resolved = drivers.resolve({ role: 'reviewer', modelSpec: input.role });
+    resolved = drivers.resolve({
+      role: 'reviewer',
+      modelSpec: input.role,
+      harness: defaultHarnessConfig,
+      beforeRequest: async (text, contents = []) => {
+        input.signal?.throwIfAborted();
+        input.onRequest(
+          text.length,
+          contents.reduce((total, content) => total + content.text.length, 0),
+        );
+        await scanComplete(input.scanSecrets, [
+          { component: 'request', path: 'review-request.json', text },
+          ...contents.map((content, index) => ({
+            component: `request-content-${index}`,
+            path: content.path ?? 'review-request.json',
+            text: content.text,
+          })),
+        ]);
+        input.signal?.throwIfAborted();
+      },
+    });
   } catch (error) {
     return {
       status: 'needs-human',
@@ -53,13 +83,16 @@ export async function runAgentReviewer(
     };
   }
   const invocation: OpInvocation = {
-    prompt: `Review the supplied repository diff for actionable defects. Do not propose speculative style changes. Return only structured findings with repository-relative file, line, concise rule, severity (high, medium, or low), and evidence-based text.\n\n${input.diff}`,
+    prompt: input.diff,
     modelSpec: resolved.modelSpec,
     toolPolicy: { mode: 'none', allow: [] },
     sandboxPolicy: { level: 'read-only' },
     workspace: { path: resolve(input.repoRoot) },
     budget: { maxTokens: input.maxTokens },
-    outputSchema,
+    outputSchema: toOutputSchema(
+      'review.agent/v2',
+      OutputSchema.extend({ receipt: z.literal(input.receipt) }),
+    ),
   };
   let result: Awaited<ReturnType<typeof resolved.driver.run>>;
   const controller = new AbortController();
@@ -108,18 +141,32 @@ export async function runAgentReviewer(
     usage: result.usage,
     ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
   });
+  input.onUsage(
+    result.usage.input +
+      result.usage.output +
+      result.usage.cacheRead +
+      result.usage.cacheWrite +
+      (result.usage.reasoning ?? 0),
+  );
   if (result.stopReason !== 'complete') {
     return result.stopReason === 'budget'
       ? { status: 'budget-exhausted' }
       : { status: 'needs-human', reason: `agent review did not complete (${result.stopReason})` };
   }
-  const parsed = OutputSchema.safeParse(result.structuredOutput);
+  const parsed = OutputSchema.extend({ receipt: z.literal(input.receipt) }).safeParse(
+    result.structuredOutput,
+  );
   if (!parsed.success)
     return { status: 'failed', error: 'agent review returned invalid structured output' };
   return {
     status: 'ok',
     value: {
-      usage: result.usage.input + result.usage.output,
+      usage:
+        result.usage.input +
+        result.usage.output +
+        result.usage.cacheRead +
+        result.usage.cacheWrite +
+        (result.usage.reasoning ?? 0),
       findings: parsed.data.findings.map((item, index) => ({
         id: `agent-${index + 1}`,
         source: 'agent',
@@ -132,4 +179,131 @@ export async function runAgentReviewer(
       })),
     },
   };
+}
+
+export interface AgentReviewReport {
+  findings: Finding[];
+  usage: number;
+  coverage: ReviewCoverage;
+}
+export type AgentReviewResult = OpResult<AgentReviewReport> & { report?: AgentReviewReport };
+
+async function scanComplete(
+  scanner: DiffSecretScanner,
+  components: readonly ScanComponentInput[],
+): Promise<void> {
+  const verdicts = await scanner(components);
+  if (
+    verdicts.length !== components.length ||
+    new Set(verdicts.map((v) => v.component)).size !== components.length ||
+    components.some((c) => !verdicts.some((v) => v.component === c.component)) ||
+    verdicts.some((v) => v.hits.length > 0)
+  )
+    throw new Error(
+      'agent review upload refused: protected content or incomplete scanner verdicts',
+    );
+}
+
+/** Complete, bounded read-only review; every validated partition consumes the same budgets. */
+export async function runAgentReviewer(
+  drivers: DriverFactory,
+  input: AgentReviewerInput,
+): Promise<AgentReviewResult> {
+  const signals = [input.signal, currentJobContext()?.signal].filter(
+    (s): s is AbortSignal => s !== undefined,
+  );
+  if (signals.some((s) => s.aborted))
+    return { status: 'needs-human', reason: 'agent review cancelled before dispatch' };
+  const controller = new AbortController();
+  const parent = AbortSignal.any(signals);
+  const relay = () => controller.abort(parent.reason);
+  parent.addEventListener('abort', relay, { once: true });
+  const deadline = Date.now() + input.wallMs;
+  const ensureActive = () => {
+    controller.signal.throwIfAborted();
+    if (Date.now() >= deadline) throw new Error('agent review wall budget exhausted');
+  };
+  let report: AgentReviewReport | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cancelled: (() => void) | undefined;
+  try {
+    const work = async (): Promise<AgentReviewResult> => {
+      const originals = input.components ?? [
+        { component: 'diff', path: 'review.diff', text: input.diff },
+      ];
+      const components = (
+        originals.length
+          ? originals
+          : [{ component: 'empty-comparison', path: 'review.diff', text: '' }]
+      ).map((component) => Object.freeze({ ...component }));
+      if (new Set(components.map((c) => c.component)).size !== components.length)
+        throw new Error('agent review component identities must be unique');
+      const plan = partitionReview({
+        head: input.head,
+        base: input.base ?? input.head,
+        scope: input.scope ?? 'full',
+        components,
+      });
+      report = { findings: [], usage: 0, coverage: plan.coverage };
+      if (plan.partitions.length === 0) throw new Error('agent review has no coverage partitions');
+      await scanComplete(input.scanSecrets, components);
+      for (const [index, part] of plan.partitions.entries()) {
+        ensureActive();
+        if (report.usage >= input.maxTokens) return { status: 'budget-exhausted', report };
+        await scanComplete(input.scanSecrets, [
+          { component: 'partition', path: 'review-request.txt', text: part.prompt },
+        ]);
+        ensureActive();
+        const result = await runPartition(drivers, {
+          ...input,
+          components,
+          diff: part.prompt,
+          receipt: part.receipt,
+          signal: controller.signal,
+          maxTokens: input.maxTokens - report.usage,
+          wallMs: Math.max(1, deadline - Date.now()),
+          onUsage: (usage) => {
+            report!.usage += usage;
+          },
+          onRequest: (serializedChars, decodedChars) => {
+            report!.coverage.partitions[index]!.requests.push({ serializedChars, decodedChars });
+          },
+        });
+        ensureActive();
+        if (result.status !== 'ok') return { ...result, report };
+        for (const finding of result.value.findings) {
+          const same = (other: Finding) =>
+            other.file === finding.file &&
+            other.line === finding.line &&
+            other.rule === finding.rule &&
+            other.text === finding.text &&
+            other.severity === finding.severity;
+          if (!report.findings.some(same))
+            report.findings.push({ ...finding, id: `agent-${index + 1}-${finding.id}` });
+        }
+        report.coverage.partitions[index]!.complete = true;
+        if (report.usage > input.maxTokens) return { status: 'budget-exhausted', report };
+      }
+      return { status: 'ok', value: report };
+    };
+    const stopped = new Promise<never>((_resolve, reject) => {
+      cancelled = () => reject(new Error('agent review cancelled or wall budget exhausted'));
+      controller.signal.addEventListener('abort', cancelled, { once: true });
+      timer = setTimeout(
+        () => controller.abort(new Error('agent review wall budget exhausted')),
+        Math.max(0, input.wallMs),
+      );
+    });
+    return await Promise.race([work(), stopped]);
+  } catch (error) {
+    return {
+      status: 'needs-human',
+      reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}`,
+      ...(report === undefined ? {} : { report }),
+    };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    parent.removeEventListener('abort', relay);
+    if (cancelled !== undefined) controller.signal.removeEventListener('abort', cancelled);
+  }
 }
