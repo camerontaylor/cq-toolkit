@@ -9,7 +9,7 @@ import type { SweepWorkspace } from '../../adapters/git/worktreeFor.js';
 import type { CheckCommand, FailureSet } from '../gates/checkRunner.js';
 import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
 import { validateFix, type ValidationVerdict } from '../fix/validate.js';
-import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
+import { classifyStagePaths, stagedPathsOf, type StagePathGateResult } from './stagePaths.js';
 import {
   tasksFromFailures,
   staticTasksFromFailures,
@@ -631,14 +631,37 @@ async function runTaskLoopInner(
         }
         if (config.pushFailed && row.failedAttempt !== undefined) {
           try {
-            await scanFailedAttempt(git, bindings, parent, row.failedAttempt.sha);
+            const uploadGate = await scanFailedAttempt(
+              git,
+              bindings,
+              parent,
+              row.failedAttempt.sha,
+              config.protectTests ?? false,
+            );
             if (bindings.cancelled?.() || currentJobContext()?.signal.aborted)
               throw new Error('parent job cancelled before failed-attempt publication');
             const unsafeRefusal = row.validation?.gates.some(
               (gate) =>
                 ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
             );
-            if (!unsafeRefusal) {
+            if (uploadGate.kind !== 'clean') {
+              const detail = uploadGate.message;
+              row.validation = {
+                verdict: 'needs-human',
+                gates: [
+                  ...(row.validation?.gates ?? []),
+                  { gate: 'paths', verdict: 'needs-human', wallMs: 0, detail },
+                ],
+              };
+              row.outcome = 'escalated-to-human';
+              row.reason = `${row.reason ?? 'failed attempt'}; ${detail}`;
+              const recordedRound = row.rounds?.at(-1);
+              if (recordedRound?.failedAttempt?.branch === row.failedAttempt.branch) {
+                recordedRound.reason = row.reason;
+                recordedRound.outcome = row.outcome;
+                recordedRound.validation = row.validation;
+              }
+            } else if (!unsafeRefusal) {
               await git([
                 'push',
                 'origin',
@@ -727,11 +750,36 @@ async function scanFailedAttempt(
   bindings: SweepUnitBindings,
   parent: string,
   sha: string,
-): Promise<void> {
+  protectTests: boolean,
+): Promise<StagePathGateResult> {
   if (bindings.scanPrompt === undefined)
     throw new Error('failed-attempt publication requires the configured denylist scanner');
   const contents = await failedAttemptContents(git, parent, sha);
   await bindings.scanPrompt(`Failed-attempt commit ${sha} publication scan`, contents);
+  const paths = await failedAttemptPaths(git, parent, sha);
+  return classifyStagePaths(
+    paths,
+    bindings.stagePathAllowlist,
+    bindings.proposeOnly === true,
+    protectTests,
+  );
+}
+
+async function failedAttemptPaths(
+  git: (args: string[]) => Promise<string>,
+  parent: string,
+  sha: string,
+): Promise<string[]> {
+  const capture = await git([
+    'diff',
+    ...SWEEP_DIFF_FLAGS,
+    '--name-status',
+    '-z',
+    parent,
+    sha,
+    '--',
+  ]);
+  return stagedPathsOf(capture);
 }
 
 async function failedAttemptFeedback(

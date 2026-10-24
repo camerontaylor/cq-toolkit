@@ -97,6 +97,7 @@ function scripted(
     | 'fail-b-safe-change'
     | 'none'
     | 'private-change'
+    | 'throw-after-protected'
     | 'throw-after-secret'
     | 'safe-change'
     | 'scan-fault' = 'fix',
@@ -137,6 +138,10 @@ function scripted(
               'DO_NOT_UPLOAD synthetic early failure\n',
             );
             throw new Error('scripted worker failure after edit');
+          }
+          if (mode === 'throw-after-protected') {
+            await writeFile(join(invocation.workspace.path, 'package.json'), '{"name":"edited"}\n');
+            throw new Error('scripted worker failure after protected edit');
           }
           if (mode === 'safe-change' || mode === 'fail-b-safe-change')
             await writeFile(
@@ -637,6 +642,33 @@ test('pushFailed scans edits captured by an early worker failure before path cla
     expect(failed.reason).toContain('failed-attempt publication refused');
     expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:public-note.txt`)).toContain(
       'DO_NOT_UPLOAD',
+    );
+    expect(
+      await git(
+        f.repo,
+        'ls-remote',
+        '--heads',
+        'origin',
+        `refs/heads/${failed.failedAttempt!.branch}`,
+      ),
+    ).toBe('');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+test('pushFailed applies protected-path policy after an early worker failure', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('throw-after-protected') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(result.status).toBe('needs-human');
+    expect(failed.reason).toContain('protected path(s) changed by a worker');
+    expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:package.json`)).toContain(
+      '"name":"edited"',
     );
     expect(
       await git(
