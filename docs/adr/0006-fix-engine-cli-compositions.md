@@ -1,7 +1,7 @@
 # ADR-0006 — Fix engine and address-review as CLI compositions
 
 - **Status:** accepted by the owner on 2026-10-24 (approval of `plans/cq-next-step-slice-plan.md` and `specs/cq-next-step-slice-spec.md` in the toolkit-research workspace)
-- **Complements:** ADR-0003 (governed runner) and ADR-0005 (architecture revision); amends the kernel freeze rule only in the sense ADR-0005 already allows
+- **Complements:** ADR-0003 (governed runner) and ADR-0005 (architecture revision)
 
 ## Context
 
@@ -15,8 +15,8 @@ built:
   expressed as a plan.
 - The 2026-10-23 clarification rejected an attended `analyze.*` loop as the vehicle, and
   the attended authority stays the only auto-apply path.
-- The kernel is retry-free (I8), a freeze ADR-0005 amended but did not lift; a new kernel
-  retry facility would reintroduce the governing-kernel coupling ADR-0005 removed.
+- The kernel is retry-free (I8); the plan layer, not the kernel, decides retries, so a new
+  kernel retry facility would put governing-loop policy back inside the kernel.
 
 ## Decision
 
@@ -32,8 +32,8 @@ layer. The kernel stays retry-free. Validation is one shared module. Policy come
   attended authority.
 - **Configurable plan subcommands** — impossible without an op owning phase B; the plan
   schema is frozen.
-- **A new kernel retry facility** — violates I8 and the kernel freeze amended by
-  ADR-0005.
+- **A new kernel retry facility** — violates I8: the kernel stays retry-free and retries
+  belong to the plan layer.
 
 ## Why chosen
 
