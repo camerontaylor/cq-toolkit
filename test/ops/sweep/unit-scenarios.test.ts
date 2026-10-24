@@ -116,6 +116,8 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     }
     if (args.includes('write-tree')) return ok(`${TREE}\n`);
     if (args.includes('commit-tree')) return ok(`${PROBE_COMMIT}\n`);
+    if (args.includes('cat-file') && args.includes('-s')) return ok('4\n');
+    if (args.includes('show')) return ok('safe');
     if (args.includes('commit')) {
       commits += 1;
       parent = head;
@@ -202,6 +204,27 @@ async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {})
 }
 
 describe('sweep unit in-process scenarios', () => {
+  test('parent cancellation during failed-attempt scan blocks off-machine publication', async () => {
+    const world = await makeWorld([
+      { failing: true, message: 'baseline' },
+      { failing: true, message: 'related failure' },
+    ]);
+    const cancelled = { value: false };
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        cancelled: () => cancelled.value,
+        scanPrompt: async (text) => {
+          if (text.startsWith('Failed-attempt commit ')) cancelled.value = true;
+        },
+      });
+      expect(result.status).toBe('ok');
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('regression fails before commit and preserves its own dirty worktree for salvage', async () => {
     const world = await makeWorld([
       { failing: true, message: 'baseline' },

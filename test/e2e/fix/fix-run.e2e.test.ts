@@ -91,7 +91,15 @@ process.exitCode = failed ? 1 : 0;
   return { root, repo, origin, journalDir: join(root, 'journal') };
 }
 function scripted(
-  mode: 'fix' | 'fail-b' | 'none' | 'private-change' | 'safe-change' | 'scan-fault' = 'fix',
+  mode:
+    | 'fix'
+    | 'fail-b'
+    | 'fail-b-safe-change'
+    | 'none'
+    | 'private-change'
+    | 'throw-after-secret'
+    | 'safe-change'
+    | 'scan-fault' = 'fix',
 ): DriverFactory {
   return {
     resolve: ({ modelSpec }) => ({
@@ -104,7 +112,10 @@ function scripted(
           const line = invocation.prompt.split('\n').find((line) => line.startsWith('Task: '));
           const task = JSON.parse(line?.slice(6) ?? '{}') as { files: string[] };
           for (const file of task.files)
-            if (mode === 'fix' || (mode === 'fail-b' && !file.includes('b.test'))) {
+            if (
+              mode === 'fix' ||
+              ((mode === 'fail-b' || mode === 'fail-b-safe-change') && !file.includes('b.test'))
+            ) {
               await writeFile(
                 join(invocation.workspace.path, file),
                 'module.exports = { actual: 1, expected: 1 };\n',
@@ -120,7 +131,14 @@ function scripted(
               join(invocation.workspace.path, '.env.config'),
               'SCANNER_FAULT=synthetic\n',
             );
-          if (mode === 'safe-change')
+          if (mode === 'throw-after-secret') {
+            await writeFile(
+              join(invocation.workspace.path, 'public-note.txt'),
+              'DO_NOT_UPLOAD synthetic early failure\n',
+            );
+            throw new Error('scripted worker failure after edit');
+          }
+          if (mode === 'safe-change' || mode === 'fail-b-safe-change')
             await writeFile(
               join(invocation.workspace.path, 'public-note.txt'),
               'safe public content\n',
@@ -606,6 +624,33 @@ test('pushFailed keeps a failed branch local when its upload scan faults', async
     await rm(f.root, { recursive: true, force: true });
   }
 });
+test('pushFailed scans edits captured by an early worker failure before path classification', async () => {
+  const f = await fixture();
+  try {
+    const result = await makeFixRun({ drivers: scripted('throw-after-secret') })({
+      ...input(f),
+      pushFailed: true,
+    });
+    const report = reportOf(result);
+    const failed = report.tasks.find((task) => task.failedAttempt !== undefined)!;
+    expect(result.status).toBe('needs-human');
+    expect(failed.reason).toContain('failed-attempt publication refused');
+    expect(await git(f.repo, 'show', `${failed.failedAttempt!.sha}:public-note.txt`)).toContain(
+      'DO_NOT_UPLOAD',
+    );
+    expect(
+      await git(
+        f.repo,
+        'ls-remote',
+        '--heads',
+        'origin',
+        `refs/heads/${failed.failedAttempt!.branch}`,
+      ),
+    ).toBe('');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 test('pushFailed publishes a clean public failed-attempt change', async () => {
   const f = await fixture();
   try {
@@ -786,12 +831,20 @@ test.each([false, true])(
   },
 );
 
-test('PR body carries an Unfixed section for tasks with local failed-attempt evidence', async () => {
+test('PR body links pushed failed-attempt evidence in its Unfixed section', async () => {
   const f = await fixture();
   let packageBody = '';
   try {
+    await git(f.repo, 'remote', 'set-url', 'origin', 'https://github.com/example/scratch.git');
+    await git(f.repo, 'remote', 'set-url', '--push', 'origin', f.origin);
+    await git(
+      f.repo,
+      'config',
+      `url.${f.origin}.insteadOf`,
+      'https://github.com/example/scratch.git',
+    );
     const result = await makeFixRun({
-      drivers: scripted('fail-b'),
+      drivers: scripted('fail-b-safe-change'),
       registry: {
         get: (name) => {
           if (!['pr.ensureTrackerBranch', 'pr.assemblePrs'].includes(name)) return undefined;
@@ -809,12 +862,13 @@ test('PR body carries an Unfixed section for tasks with local failed-attempt evi
           } as unknown as OpRegistryEntry<never, never>;
         },
       },
-    })({ ...input(f), pr: true });
+    })({ ...input(f), pr: true, pushFailed: true });
 
     expect(result.status, JSON.stringify(result)).toBe('needs-human');
     expect(packageBody).toContain('## Unfixed (1)');
     expect(packageBody).toContain('`cases/b.test.cjs`');
-    expect(packageBody).toContain('local branch `cq/fixture/failed/');
+    expect(packageBody).toContain('[compare](https://github.com/example/scratch/compare/');
+    expect(packageBody).toContain('...cq/fixture/failed/');
     expect(packageBody).toContain('validation refused task');
   } finally {
     await rm(f.root, { recursive: true, force: true });

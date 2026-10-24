@@ -151,3 +151,44 @@ test('failed-attempt tree failures stop before creating any refs', async () => {
   ).rejects.toThrow('could not write failed-attempt tree');
   expect(calls).toEqual([['write-tree']]);
 });
+
+test('failed refs bound flattened components and use the repository object-id width', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cq-task-evidence-sha256-'));
+  const git = (cwd: string) => async (args: string[]) =>
+    (await exec('git', ['-C', cwd, ...args])).stdout.trim();
+  try {
+    await git(root)(['init', '--object-format=sha256', '-b', 'main']);
+    await git(root)(['config', 'user.name', 'Fixture']);
+    await git(root)(['config', 'user.email', 'fixture@invalid']);
+    await writeFile(join(root, 'file.ts'), 'base');
+    await git(root)(['add', 'file.ts']);
+    await git(root)(['commit', '-m', 'base']);
+    const parent = await git(root)(['rev-parse', 'HEAD']);
+    await writeFile(join(root, 'file.ts'), 'changed');
+    await git(root)(['add', 'file.ts']);
+    const attempt = await commitFailedAttempt(git(root), {
+      runPrefix: 'run',
+      kind: 'kind-'.repeat(40),
+      slug: 'slug-'.repeat(40),
+      task: 'nested/path-'.repeat(40),
+      parent,
+      firstAttempt: 1,
+      tier: 'worker',
+      model: { provider: 'fixture', model: 'scripted' },
+      gate: 'related',
+      outcome: 'unfixed',
+      reason: 'check rejected the edit',
+      pushFailed: false,
+    });
+    expect(attempt.sha).toHaveLength(64);
+    const segments = attempt.branch.split('/');
+    expect(
+      segments
+        .filter((segment) => segment !== 'failed' && !/^a\d+$/.test(segment))
+        .every((segment) => segment.length <= 80),
+    ).toBe(true);
+    expect(await git(root)(['rev-parse', `refs/heads/${attempt.branch}`])).toBe(attempt.sha);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

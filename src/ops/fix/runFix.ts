@@ -79,7 +79,7 @@ const execFileAsync = promisify(execFile);
 async function githubCompareBase(repoRoot: string, base: string): Promise<string | undefined> {
   try {
     const [{ stdout: remote }, { stdout: revision }] = await Promise.all([
-      execFileAsync('git', ['-C', repoRoot, 'remote', 'get-url', 'origin'], {
+      execFileAsync('git', ['-C', repoRoot, 'config', '--get', 'remote.origin.url'], {
         timeout: 5_000,
         maxBuffer: 16 * 1024,
       }),

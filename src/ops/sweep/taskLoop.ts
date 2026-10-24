@@ -1,5 +1,6 @@
 import type { EscalationDecision } from '../fix/escalation.js';
 import { unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -631,6 +632,8 @@ async function runTaskLoopInner(
         if (config.pushFailed && row.failedAttempt !== undefined) {
           try {
             await scanFailedAttempt(git, bindings, parent, row.failedAttempt.sha);
+            if (bindings.cancelled?.() || currentJobContext()?.signal.aborted)
+              throw new Error('parent job cancelled before failed-attempt publication');
             const unsafeRefusal = row.validation?.gates.some(
               (gate) =>
                 ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
@@ -809,13 +812,21 @@ export async function commitFailedAttempt(
   git: (args: string[]) => Promise<string>,
   input: FailedAttemptInput,
 ): Promise<FailedAttempt> {
-  const taskSlug = input.task.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (!taskSlug) throw new Error('failed attempt identity has an empty task segment');
+  const component = (raw: string): string => {
+    const normalized = raw.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!normalized) throw new Error('failed attempt identity has an empty branch segment');
+    if (normalized.length <= 80) return normalized;
+    const suffix = createHash('sha256').update(raw).digest('hex').slice(0, 12);
+    return `${normalized.slice(0, 67)}-${suffix}`;
+  };
+  const kind = component(input.kind);
+  const slug = component(input.slug);
+  const taskSlug = component(input.task);
   const tree = await git(['write-tree']);
   if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new Error('could not write failed-attempt tree');
   let attempt = Math.max(1, input.firstAttempt);
   for (;;) {
-    const branch = `${input.runPrefix}/failed/${input.kind}/${input.slug}/${taskSlug}/a${String(attempt)}`;
+    const branch = `${input.runPrefix}/failed/${kind}/${slug}/${taskSlug}/a${String(attempt)}`;
     const reasonLine = input.reason.replace(/[\r\n]+/g, ' ').trim() || 'task attempt refused';
     const taskLine = input.task.replace(/[\r\n]+/g, ' ');
     const subject = `cq-failed(${input.outcome}): ${taskLine}${input.pushFailed ? ' [skip ci]' : ''}`;
@@ -834,12 +845,7 @@ export async function commitFailedAttempt(
     ]);
     if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error('could not create failed-attempt commit');
     try {
-      await git([
-        'update-ref',
-        `refs/heads/${branch}`,
-        sha,
-        '0000000000000000000000000000000000000000',
-      ]);
+      await git(['update-ref', `refs/heads/${branch}`, sha, '0'.repeat(tree.length)]);
       return { branch, sha };
     } catch (error) {
       try {
