@@ -291,6 +291,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "protectTests": {
           "type": "boolean"
         },
+        "pushFailed": {
+          "type": "boolean"
+        },
         "relatedArgs": {
           "items": {
             "type": "string"

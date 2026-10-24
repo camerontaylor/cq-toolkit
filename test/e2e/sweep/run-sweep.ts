@@ -38,6 +38,7 @@ import type {
 } from '../../../src/kernel/types.js';
 import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
 import { makeAssemblePrs } from '../../../src/ops/pr/assemblePrs.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import type {
   AssemblePrsInput,
   PrCreateRequest,
@@ -46,6 +47,9 @@ import type {
   PrReadinessSnapshot,
   PrSearchResult,
 } from '../../../src/ops/pr/assemblePrs.js';
+
+const cleanPrPublicationScanner: DiffSecretScanner = (components) =>
+  components.map(({ component }) => ({ component, hits: [] }));
 import { AssemblePrsInputSchema } from '../../../src/ops/pr/registry.js';
 import { list } from '../../../src/registry/index.js';
 import {
@@ -334,7 +338,8 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
         name: 'pr.assemblePrs',
         inputSchema: AssemblePrsInputSchema,
         importer: async () =>
-          (async (input: AssemblePrsInput) => makeAssemblePrs(opts.gh)(input)) as Op<
+          (async (input: AssemblePrsInput) =>
+            makeAssemblePrs(opts.gh, undefined, cleanPrPublicationScanner)(input)) as Op<
             unknown,
             unknown
           >,

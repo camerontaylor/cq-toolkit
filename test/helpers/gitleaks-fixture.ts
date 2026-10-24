@@ -15,7 +15,11 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
 const report = args[args.indexOf('--report-path') + 1];
 if (!args.includes('detect') || !args.includes('--no-git') || !report) process.exit(2);
 fs.writeFileSync(report, '[]');
-process.exitCode = Number(process.env.CQ_TEST_GITLEAKS_EXIT ?? 0);
+const failOn = process.env.CQ_TEST_GITLEAKS_FAIL_ON;
+const matched = failOn && fs.readdirSync(args[args.indexOf('--source') + 1])
+  .filter(name => name.startsWith('component-'))
+  .some(name => fs.readFileSync(require('node:path').join(args[args.indexOf('--source') + 1], name), 'utf8').includes(failOn));
+process.exitCode = matched ? 2 : Number(process.env.CQ_TEST_GITLEAKS_EXIT ?? 0);
 `,
   );
   await chmod(join(root, 'gitleaks'), 0o755);
