@@ -26,6 +26,11 @@
       "model": "deepseek-v4.1-flash"
     }
   },
+  "budgets": {
+    "run": { "maxTokens": 5000000, "wallMs": 14400000 },
+    "unit": { "wallMs": 3600000 },
+    "step": { "wallMs": 1200000 }
+  },
   "review": {
     "reviewers": ["coderabbit", "agent"],
     "denylistPatternsFile": "policy/denylist/patterns.yml"

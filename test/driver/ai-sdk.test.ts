@@ -29,6 +29,7 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
   DEFAULT_MAX_STEPS,
+  parseReplyJson,
   serializeRequestForScan,
   DEFAULT_STEP_TIMEOUT_MS,
   classifyRunFailure,
@@ -741,6 +742,64 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('prompted-schema providers never send response_format: the schema rides the prompt and the reply text is validated (dogfood C, 2026-10-25)', async () => {
+    const formats: unknown[] = [];
+    const contracts: boolean[] = [];
+    let toolFree = 0;
+    const gateway = new MockLanguageModelV4({
+      modelId: 'deepseek-v4.1-flash',
+      doGenerate: async (options) => {
+        formats.push(options.responseFormat);
+        contracts.push(JSON.stringify(options.prompt).includes('JSON Schema'));
+        if (options.tools !== undefined && options.tools.length > 0 && formats.length === 1) {
+          return toolCallResult('read', { path: 'absent.txt' });
+        }
+        toolFree += 1;
+        return toolFree === 1
+          ? textResult('Done.\n```json\n{"fixed":"yes"}\n```')
+          : textResult('```json\n{"fixed":true,"notes":"ok"}\n```');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-prompted-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { 'opencode-go': () => gateway, mock: () => gateway },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const schema = toOutputSchema(
+        'test/prompted/v1',
+        z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+      );
+      const result = await driver.run(
+        invocation({
+          modelSpec: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          outputSchema: schema,
+        }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      // tool step, schema-invalid final text, one tool-free repair
+      expect(formats).toHaveLength(3);
+      expect(formats.every((format) => format === undefined)).toBe(true);
+      expect(contracts.every(Boolean)).toBe(true);
+      // CONTROL: a native-schema provider still sends the json response format.
+      formats.length = 0;
+      toolFree = 1;
+      await driver.run(invocation({ outputSchema: schema }));
+      expect(formats[0]).toMatchObject({ type: 'json' });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('parseReplyJson accepts bare, fenced and embedded objects and refuses prose', () => {
+    expect(parseReplyJson('{"a":1}')).toEqual({ a: 1 });
+    expect(parseReplyJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+    expect(parseReplyJson('Result: {"a":{"b":2}} done')).toEqual({ a: { b: 2 } });
+    expect(() => parseReplyJson('no json here')).toThrow();
+  });
+
   test('a missing structured object is repaired ONCE, then settles error/output-invalid (#203, W3.4)', async () => {
     let calls = 0;
     const alwaysToolCalls = new MockLanguageModelV4({
@@ -770,8 +829,8 @@ describe('ai-sdk driver specifics (mock model)', () => {
           ),
         }),
       );
-      // ONE bounded repair attempt after the miss: 8 tool-loop steps + the
-      // single repair step.
+      // ONE bounded repair attempt after the miss: DEFAULT_MAX_STEPS
+      // tool-loop steps + the single repair step.
       expect(calls).toBe(DEFAULT_MAX_STEPS + 1);
       expect(result.stopReason).toBe('error');
       // ADR-0002 §2.3: the uniform miss verdict — output-invalid, rejection
@@ -785,9 +844,14 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(result.error).toContain('repair');
       // never a model score: no fabricated structuredOutput on an error verdict.
       expect(result.structuredOutput).toBeUndefined();
-      // The usage covers BOTH calls: 8 tool-loop steps + 1 repair step,
-      // each folding {100 in, 12 out, 15 cacheRead, 5 cacheWrite}.
-      expect(result.usage).toEqual({ input: 900, output: 108, cacheRead: 135, cacheWrite: 45 });
+      // The usage covers BOTH calls: DEFAULT_MAX_STEPS tool-loop steps +
+      // 1 repair step, each folding {100 in, 12 out, 15 cacheRead, 5 cacheWrite}.
+      expect(result.usage).toEqual({
+        input: 100 * (DEFAULT_MAX_STEPS + 1),
+        output: 12 * (DEFAULT_MAX_STEPS + 1),
+        cacheRead: 15 * (DEFAULT_MAX_STEPS + 1),
+        cacheWrite: 5 * (DEFAULT_MAX_STEPS + 1),
+      });
       expect(result.costUSD).toBeUndefined(); // never fabricated on a non-complete run
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -825,15 +889,15 @@ describe('ai-sdk driver specifics (mock model)', () => {
         'test/repair-budget/v1',
         z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
       );
-      // 8 main steps end on the step cap (8 × 132 total tokens incl. cache
-      // = 1056, under the 1100 cap — the loop ends on max-steps, so the
-      // REPAIR fires), then the repair pushes the accumulated fold to
-      // 9 × 132 = 1188 ≥ 1100: the repair's success is an honest 'budget'
+      // DEFAULT_MAX_STEPS main steps end on the step cap (each 132 total
+      // tokens incl. cache, under the cap — the loop ends on max-steps, so
+      // the REPAIR fires), then the repair pushes the accumulated fold one
+      // step past the cap: the repair's success is an honest 'budget'
       // verdict — the payload does not ride it, the spend evidence does.
       const budgeted = await driver.run(
         invocation({
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
-          budget: { maxTokens: 1100 },
+          budget: { maxTokens: 132 * DEFAULT_MAX_STEPS + 66 },
           outputSchema: schema,
         }),
       );
@@ -841,7 +905,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
       expect(budgeted.stopReason).toBe('budget');
       expect(budgeted.structuredOutput).toBeUndefined();
       expect(budgeted.errorClass).toBeUndefined(); // a cap is not a failure
-      expect(budgeted.usage).toEqual({ input: 900, output: 108, cacheRead: 135, cacheWrite: 45 });
+      expect(budgeted.usage).toEqual({
+        input: 100 * (DEFAULT_MAX_STEPS + 1),
+        output: 12 * (DEFAULT_MAX_STEPS + 1),
+        cacheRead: 15 * (DEFAULT_MAX_STEPS + 1),
+        cacheWrite: 5 * (DEFAULT_MAX_STEPS + 1),
+      });
       // CONTROL: the same successful repair under a cap it never reaches →
       // complete WITH the payload. toolFreeCalls resets too — the control
       // must follow the SAME invalid-final-step path (miss → repair →
@@ -855,13 +924,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const completed = await free.run(
         invocation({
           toolPolicy: { allow: ['read'], mode: 'allowlist' },
-          budget: { maxTokens: 5000 },
+          budget: { maxTokens: 132 * (DEFAULT_MAX_STEPS + 1) * 4 },
           outputSchema: schema,
         }),
       );
       expect(completed.stopReason).toBe('complete');
       expect(completed.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
-      // The repair really fired: 8 loop steps + 1 repair step.
+      // The repair really fired: DEFAULT_MAX_STEPS loop steps + 1 repair step.
       expect(calls).toBe(DEFAULT_MAX_STEPS + 1);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -1680,7 +1749,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       await driver.run(invocation({ budget: { maxTokens: 500 } }));
       stopWhen = lastGenerateTextArgs().stopWhen;
       expect(stopWhen as unknown[]).toHaveLength(2);
-      expect(DEFAULT_MAX_STEPS).toBe(8); // the documented tool-loop default
+      expect(DEFAULT_MAX_STEPS).toBe(40); // the documented tool-loop default
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

@@ -89,3 +89,40 @@ the first validation, exercise a simulated exhausted retry seam without minute
 sleeps, and verify queued cancellation/budget cleanup and exact commit scope.
 This direct repair is not a positive dogfood fix and does not change either
 recorded zero-fix result.
+
+## Owner budget change (2026-10-25)
+
+The owner retired the 60000-token, 20-minute, one-round limits used by attempts A
+and B: budgets are runaway guards, not bounds on good-faith work. `cq.json` now
+carries `budgets.run.maxTokens=5000000` and `budgets.run.wallMs=14400000`; unit
+(1 h) and step (20 min) wall budgets are unchanged and rounds stay at the default 3.
+The ai-sdk tool loop's step cap rises from 8 to 40 for the same reason.
+
+## S6 attempt C — PR #466
+
+Run on triton from dist at `47d8e987a8613b11c7d19ed1ae2bbe0edabf8b67` against
+PR #466, whose nine unresolved Codex/CodeRabbit threads are genuine and unseeded.
+
+```sh
+node dist/cli.js review.address --repoRoot=<checkout> --source=pr:466 --maxTokens=5000000 --wallMs=14400000 --rounds=3 --journalDir=<local-state>/cq-toolkit/dogfood/s6-pr466-20261025-c --push
+```
+
+Observed CLI exit: **3**, `needs-human`. `fixesPerRun`: **0**. Reported usage:
+input **856108**, output **130255**, cache read **1344512**; wall **1137863 ms**;
+21 attempts across 12 findings. The PR head was unchanged. The final re-review
+refused upload on a positive denylist scan (fail-closed, as designed).
+
+Driver-level probes of the same worker request isolated two transport defects:
+
+- The OpenCode Go gateway answers HTTP 400 (body `{"model":"deepseek-v4.1-flash"}`)
+  to any `response_format: json_schema` request, with or without tools; `json_object`
+  and plain requests succeed. Every rescue edit therefore ended `worker stopped: error`.
+- The Z.ai provider drops the schema with a warning, so GLM answered without tool
+  calls and its JSON did not match `review.address.outcome/v1`.
+
+Repair: providers `opencode-go` and `zai` (and the `ai-sdk` alias) now receive the
+schema as a trailing user turn; the reply text is parsed and judged by the same
+shared validator, including the one bounded repair. Other providers keep the native
+structured transport. The worker edit prompt now states that a fix must be applied
+with the edit tool. After the repair, the identical probe completed with a real
+one-file edit on both roles (DeepSeek 55 s, GLM 171 s). This is not a dogfood fix.

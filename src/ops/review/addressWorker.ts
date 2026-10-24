@@ -712,7 +712,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 'edit',
                 observedHead,
                 root,
-                `${next.decision.reason}\nAddress only ${file}. Never stage or commit, run commands, or edit any other path. Return fixed, rejected or deferred with a concrete reason and code evidence.\nRound ${round}. Finding: ${JSON.stringify(finding)}\nPrevious: ${reason}`,
+                `${next.decision.reason}\nAddress only ${file}. Read it with the read tool first; to fix the finding, apply the change to ${file} with the edit tool before you answer. Never stage or commit, run commands, or edit any other path. Return fixed only after a successful edit; otherwise return rejected or deferred with a concrete reason and code evidence.\nRound ${round}. Finding: ${JSON.stringify(finding)}\nPrevious: ${reason}`,
                 role,
                 true,
                 prior,
