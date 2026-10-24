@@ -55,8 +55,12 @@ on:
 permissions:
   contents: read
 
+# Every merge-queue push is a promotion subject that needs its own verdict,
+# so a merge-queue push run is keyed by its SHA and never superseded: a
+# cancelled measurement concludes 'cancelled' and becomes a failure verdict
+# the gate refuses on. PR and other branch runs still supersede by ref.
 concurrency:
-  group: ratchet-${{ github.event_name }}-${{ github.ref }}
+  group: ratchet-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'push' && github.ref == 'refs/heads/merge-queue' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: true
 
 # pnpm-workspace.yaml's global virtual store is a local-worktree speedup
