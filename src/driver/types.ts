@@ -167,6 +167,30 @@ export interface OpInvocation {
   outputSchema?: OutputSchema;
   /** Workspace binding (ADR-0002 §2.4). Absent → I6 fresh temp workspace, unchanged. */
   workspace?: WorkspaceBinding;
+  /**
+   * Session-log correlation (preservation plan items 1.3–1.5, 2026-10-24):
+   * the work-unit identity this invocation serves. The governed runner
+   * mints it per job attempt; ops pass it through to the invocation so the
+   * lane (a) stamps `CQ_WORK_ID`/`CQ_RUN_ID` into the child env next to
+   * the per-Route overrides, and (b) links the session it records.
+   * Optional and plain data — absent on every pre-existing invocation, and
+   * an un-governed caller omits it without consequence.
+   */
+  correlation?: WorkCorrelation;
+}
+
+/**
+ * The work-unit link carried by an invocation (plan §3.1): which unit of
+ * work, what role it plays, under which run. Plain data; the runner mints
+ * `workId`, the op names `role`. `task` is the human-readable op/PR label
+ * when the caller knows one.
+ */
+export interface WorkCorrelation {
+  workId: string;
+  role?: string;
+  task?: string;
+  runId?: string;
+  parentWorkId?: string;
 }
 
 /**
@@ -283,6 +307,21 @@ export interface WorkerResult {
    */
   costBasis?: 'modeled' | 'billed';
   sessionId?: string;
+  /**
+   * The HARNESS-NATIVE session id the substrate reported (Claude Code's
+   * `session_id`, the ACP session handle), when the lane observed one —
+   * session-log preservation item 1.5. Distinct from `sessionId` (OUR
+   * store id): this is the resume handle and the key of the vendor's own
+   * transcript. Optional; a lane that cannot observe it reports nothing.
+   */
+  nativeSessionId?: string;
+  /**
+   * The vendor transcript path the native session id implies, when known
+   * (Claude Code: `~/.claude/projects/<encoded-cwd>/<id>.jsonl`). The
+   * ARCHIVER and the ingest join read this; we never rewrite the file
+   * (feature R4). Optional.
+   */
+  nativeSessionPath?: string;
   denials: ToolDenial[];
   /**
    * Underlying failure cause, when the driver caught one. Present only on a

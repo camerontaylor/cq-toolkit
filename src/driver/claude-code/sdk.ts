@@ -102,9 +102,8 @@
 // else Σ assistant-frame usage; provenance + resume markers ride the
 // narration. `reasoning` is deliberately NOT set (thinkingTokens are
 // already inside output_tokens — a separate field would double-count).
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { defaultHarnessConfig } from '../../harness/config.js';
+import { defaultSessionsDir } from '../sessions-dir.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import {
   HARNESS_MCP_SERVER_NAME,
@@ -217,7 +216,7 @@ export interface SdkTransportOptions {
   routingTable?: RoutingTable;
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
-  /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
+  /** Sessions directory for the backing SessionStore. Default: the shared durable sessions dir (`defaultSessionsDir()` — item 1.1). */
   sessionsDir?: string;
   /** Additional host env names exposed to the SDK child and harness run commands. */
   envAllowlist?: readonly string[];
@@ -754,10 +753,9 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** Default sessions dir (sibling of the harness temp-workspace root). */
-export function defaultSessionsDir(): string {
-  return join(tmpdir(), 'cq-harness', 'sessions');
-}
+// The shared default (item 1.1): one helper, durable XDG state location.
+// (Imported above; re-exported so existing importers keep their path.)
+export { defaultSessionsDir };
 
 /**
  * Production loader: the lazy dynamic import of the optional peer. The

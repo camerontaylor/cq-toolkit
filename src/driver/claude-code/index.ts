@@ -72,7 +72,7 @@ export interface ClaudeCodeDriverOptions {
   // --- shared knobs ---
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
   routingTable?: RoutingTable;
-  /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
+  /** Sessions directory for the backing SessionStore. Default: the shared durable sessions dir (`defaultSessionsDir()` — item 1.1). */
   sessionsDir?: string;
   /** Harness config — the tool surface + the temp-workspace root. Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
