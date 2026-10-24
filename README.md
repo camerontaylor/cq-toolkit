@@ -84,6 +84,7 @@ so review the file like code.
 the version. Migration validates the result and replaces the file atomically; running
 `--migrate` on a valid v2 file is a no-op. Reading v1 otherwise fails with the migration hint. `--force` regenerates
 checks from detection; `--migrate` upgrades the existing file.
+Policy options cannot accompany `--migrate`; a usage error names any supplied policy keys.
 
 The v2 config also accepts `packages` (`name`, `path`), check `kind` (`tests` or `static`),
 check `relatedArgs`, `roles` (`worker`, `rescue`, `reviewer`, each with `provider` and
@@ -109,10 +110,11 @@ per-package rescue cap 10. There is no token budget default:
 `budgets.run.maxTokens` when absent. Bulk query defaults are computed by the forge consumer
 from the current user and repository at run time.
 
-This repository's root config declares the actual compiler and Vitest checks as argv.
+This repository's root config declares the compiler check as argv.
 Lint is omitted: Oxlint 1.83 has no ESLint-format output; an `oxlint-json` adapter is a follow-up.
+Tests are omitted until a config check can honour the `test:narrow` host-wide lock and file selection.
 Consequently `cq analyze` / `analyze.run --dir=.`
-here runs those configured checks; local development still follows `pnpm test:narrow`
+here runs the compiler; local development still follows `pnpm test:narrow`
 and the focused-check policy below. The root role choices are experiment configuration,
 with no token budget baked in.
 

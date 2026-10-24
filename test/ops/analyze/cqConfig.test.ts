@@ -141,17 +141,14 @@ describe('cq.json v2', () => {
     }
   });
 
-  test('toolkit root config is valid and keeps CodeRabbit first', () => {
+  test('toolkit root config keeps CodeRabbit first and only runs the compiler', () => {
     const result = parseCqConfig(
       readFileSync(new URL('../../../cq.json', import.meta.url), 'utf8'),
     );
     expect(result.ok, JSON.stringify(result)).toBe(true);
     if (result.ok) {
       expect(result.config.review?.reviewers?.[0]).toBe('coderabbit');
-      expect(result.config.checks.map(({ adapter }) => adapter)).toEqual([
-        'tsc-lines',
-        'vitest-json',
-      ]);
+      expect(result.config.checks.map(({ adapter }) => adapter)).toEqual(['tsc-lines']);
     }
   });
 });

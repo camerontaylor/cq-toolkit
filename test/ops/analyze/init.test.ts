@@ -156,7 +156,7 @@ describe('analyze.init migration', () => {
       { adapter: 'tsc-lines', command: { command: 'custom-tsc', args: [], timeoutMs: 1234 } },
     ];
     const dir = project({ 'cq.json': JSON.stringify({ schemaVersion: 1, checks }) });
-    const result = await init(AnalyzeInitInputSchema.parse({ dir, migrate: true }));
+    const result = await init(AnalyzeInitInputSchema.parse({ dir, migrate: true, force: false }));
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
     const expected = { schemaVersion: 2, checks };
@@ -186,6 +186,38 @@ describe('analyze.init migration', () => {
     expect(statSync(join(dir, 'cq.json')).mtimeMs).toBe(before.mtimeMs);
     expect(readdirSync(dir)).toEqual(['cq.json']);
   });
+
+  test.each([1, 2])(
+    '--migrate rejects supplied policy keys before changing v%s',
+    async (schemaVersion) => {
+      const text = JSON.stringify({
+        schemaVersion,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'custom-tsc', args: [] } }],
+      });
+      const dir = project({ 'cq.json': text });
+      const result = await init(
+        AnalyzeInitInputSchema.parse({
+          dir,
+          migrate: true,
+          force: false,
+          packages: [{ name: 'fixture', path: '.' }],
+          roles: { worker: { provider: 'fixture', model: 'fixture' } },
+          budgets: { run: { maxTokens: 1234 } },
+          review: { rounds: 2 },
+          escalation: { workerAttempts: 3 },
+        }),
+      );
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toContain('usage error: --migrate');
+        expect(result.error).toContain(
+          'policy options: budgets, escalation, packages, review, roles',
+        );
+      }
+      expect(readFileSync(join(dir, 'cq.json'), 'utf8')).toBe(text);
+      expect(readdirSync(dir)).toEqual(['cq.json']);
+    },
+  );
 
   test.each(['{', '{"schemaVersion":1,"checks":[]}', '{"schemaVersion":2,"checks":[]}'])(
     'invalid input is not modified (%s)',

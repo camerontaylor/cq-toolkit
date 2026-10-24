@@ -10,16 +10,6 @@
         "cwd": "."
       },
       "relatedArgs": ["--noEmit", "-p", "tsconfig.json", "--pretty", "false"]
-    },
-    {
-      "adapter": "vitest-json",
-      "kind": "tests",
-      "command": {
-        "command": "node_modules/.bin/vitest",
-        "args": ["run", "--reporter=json"],
-        "cwd": "."
-      },
-      "relatedArgs": ["run", "--reporter=json", "{files}"]
     }
   ],
   "roles": {

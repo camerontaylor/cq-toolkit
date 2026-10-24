@@ -126,6 +126,14 @@ export function detectChecks(dir: string): { checks: CheckRunnerInput[]; detecte
 /** Build the `analyze.init` op (file-system backed; no injected seams needed). */
 export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
   return async (input) => {
+    const { dir: _dir, force: _force, migrate: _migrate, ...options } = input;
+    const policyKeys = Object.keys(options).sort();
+    if (input.migrate === true && policyKeys.length > 0) {
+      return {
+        status: 'failed',
+        error: `analyze.init: usage error: --migrate cannot be combined with policy options: ${policyKeys.join(', ')}`,
+      };
+    }
     let isDir = false;
     try {
       isDir = statSync(input.dir).isDirectory();
@@ -205,7 +213,6 @@ export function makeAnalyzeInit(): Op<AnalyzeInitInput, AnalyzeInitReport> {
         error: `analyze.init: no supported check detected in '${input.dir}' (looked for tsconfig.json and an ESLint config) — write ${CQ_CONFIG_FILE} by hand: { "schemaVersion": 2, "checks": [ { "adapter": "tsc-lines" | "eslint-json" | "vitest-json", "command": { "command": "...", "args": [...], "cwd": "." } } ] }`,
       };
     }
-    const { dir: _dir, force: _force, migrate: _migrate, ...options } = input;
     const config: CqConfig = { ...options, schemaVersion: CQ_CONFIG_SCHEMA_VERSION, checks };
     const valid = CqConfigSchema.safeParse(config);
     if (!valid.success)
