@@ -297,6 +297,13 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           },
           "type": "array"
         },
+        "source": {
+          "enum": [
+            "tests",
+            "static"
+          ],
+          "type": "string"
+        },
         "wallMs": {
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991,

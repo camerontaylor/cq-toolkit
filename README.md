@@ -95,6 +95,21 @@ check `relatedArgs`, `roles` (`worker`, `rescue`, `reviewer`, each with `provide
 standalone `{files}` argument expands into individual file arguments; omitted means append
 files to the configured command's args. The command executable stays the same.
 
+`cq fix.run --source=static` groups diagnostics by repository-relative file and rule.
+`--checks=tsc` selects a configured adapter family; `--checks='["tsc","eslint"]'`
+selects several. Aliases are `tsc`, `eslint`, and `vitest`; unknown or unavailable
+aliases refuse. Omit `--checks` to select every check of the requested source.
+Static ESLint requires an explicit `relatedArgs` template with standalone `{files}`
+before any worker runs. For `eslint . --format=json`, use
+`["{files}","--format=json"]`; for `node scripts/lint.cjs .`, use
+`["scripts/lint.cjs","{files}"]`. The replacement must name only task files,
+while broader validation retains the full configured argv. Existing config remains
+parseable without the template; invoking static ESLint reports an actionable refusal.
+Static tsc always runs the full project check, allowing existing sibling clusters
+while requiring the assigned cluster to disappear and failure fingerprints to improve.
+When final related and broader commands are identical, both gates share one fresh
+base-owned staged-tree probe. The stateless feedback invocation still runs per task.
+
 `analyze.init` writes only the version and detected checks unless optional fields are
 explicitly supplied as flags (for example `--budgets='{"run":{"maxTokens":100000}}'`).
 No model is selected by the generated starter config. New agentic compositions use the
