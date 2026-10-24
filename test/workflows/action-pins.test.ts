@@ -220,9 +220,10 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(text).not.toContain("cron: '*/15 * * * 0,6'");
     expect(text).not.toContain('outside the scheduled automation window');
     expect(text).not.toContain('date -u +%u');
-    // BOTH provider keys ride the loop step; each provider reads its own.
+    // Both provider keys and the configured Go route ride the loop step.
     expect(text).toContain('ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}');
-    expect(text).toContain('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}');
+    expect(text).toContain('OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}');
+    expect(text).toContain('OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}');
     // The fail-closed assert asks the toolkit WHICH key this clock needs and
     // requires exactly that one — no window arithmetic in YAML.
     expect(text).toContain('node dist/selfhost/self-review-loop.js --print-driver-key-env');
@@ -258,8 +259,8 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     // the drivers read), so an adopter's run refused to start. Pin every
     // declaration NAME (fixed: what the drivers read) to its adopter secret
     // placeholder, and pin each template to its instantiation. The review
-    // loop now exports BOTH provider keys and its run step requires the one
-    // the toolkit's peak-aware resolution selects (via
+    // loop exports both provider key names and the Go base URL; its run step
+    // requires the key selected by the toolkit's peak-aware resolution (via
     // --print-driver-key-env), so both names must be declared.
     const declaredNames = (text: string): string[] =>
       [...text.matchAll(/^ {10}([A-Z][A-Z0-9_]*_API_KEY):/gm)].map((match) => String(match[1]));
@@ -270,17 +271,21 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     const instantiatedText = readFileSync(join(WORKFLOWS_DIR, 'self-review-loop.yml'), 'utf8');
     expect(declaredNames(templateText), 'template driver env declarations').toEqual([
       'ZAI_API_KEY',
-      'DEEPSEEK_API_KEY',
+      'OPENCODE_GO_API_KEY',
     ]);
     expect(declaredNames(instantiatedText), 'instantiated driver env declarations').toEqual([
       'ZAI_API_KEY',
-      'DEEPSEEK_API_KEY',
+      'OPENCODE_GO_API_KEY',
     ]);
     // Each NAME pairs with the adopter's secret placeholder, verbatim.
     expect(templateText).toContain('ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}');
-    expect(templateText).toContain('DEEPSEEK_API_KEY: ${{ secrets.{{SELFHOST_PEAK_DRIVER_KEY}} }}');
+    expect(templateText).toContain(
+      'OPENCODE_GO_API_KEY: ${{ secrets.{{SELFHOST_PEAK_DRIVER_KEY}} }}',
+    );
+    expect(templateText).toContain('OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}');
     expect(instantiatedText).toContain('ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}');
-    expect(instantiatedText).toContain('DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}');
+    expect(instantiatedText).toContain('OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}');
+    expect(instantiatedText).toContain('OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}');
     // The disabled conflict stage (self-merge-prs) declares no driver key.
     expect(
       declaredNames(

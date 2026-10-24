@@ -16,8 +16,12 @@
 //   - The served-model alias row for this handle is CONFIG-OWNED data,
 //     keyed `aliases['ai-sdk']['opencode-go']`, and provider-scoped: a row
 //     declared for this handle never admits another provider's mismatch.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { AiSdkDriver } from '../../src/driver/ai-sdk/index.js';
+import { SessionStore } from '../../src/harness/session.js';
 import { servedModelCheck } from '../../src/driver/served-model.js';
 import type { ServedModelPolicy } from '../../src/driver/served-model.js';
 import { DispatchError, errorClassOf } from '../../src/driver/errors.js';
@@ -25,17 +29,26 @@ import type { OpInvocation, WorkerResult } from '../../src/driver/types.js';
 
 const handle = vi.hoisted(() => ({
   controller: new AbortController(),
-  factoryCalls: [] as Array<{ apiKey: string; baseURL: string }>,
+  abortDuringResolution: true,
+  factoryCalls: [] as Array<{
+    apiKey: string;
+    baseURL: string;
+    headers: { 'x-opencode-session': string };
+  }>,
   chatModelIds: [] as string[],
 }));
 
 vi.mock('@ai-sdk/openai', () => ({
-  createOpenAI: (settings: { apiKey: string; baseURL: string }) => {
+  createOpenAI: (settings: {
+    apiKey: string;
+    baseURL: string;
+    headers: { 'x-opencode-session': string };
+  }) => {
     handle.factoryCalls.push(settings);
     // Abort DURING provider resolution: the driver's late governed-
     // cancellation recheck then returns before any session store, so this
     // suite proves the factory wiring with zero wire traffic.
-    handle.controller.abort();
+    if (handle.abortDuringResolution) handle.controller.abort();
     return {
       chat: (modelId: string) => {
         handle.chatModelIds.push(modelId);
@@ -125,9 +138,14 @@ describe('the opencode-go provider handle (default registry)', () => {
       // UNCHANGED (no default route, no rewriting), and the requested id is
       // exactly ModelSpec.model — the chat-completions handle aliases
       // nothing.
-      expect(handle.factoryCalls).toEqual([
-        { apiKey: 'offline-handle-key', baseURL: 'https://go-wire.invalid/v1' },
-      ]);
+      expect(handle.factoryCalls).toHaveLength(1);
+      expect(handle.factoryCalls[0]).toMatchObject({
+        apiKey: 'offline-handle-key',
+        baseURL: 'https://go-wire.invalid/v1',
+      });
+      expect(handle.factoryCalls[0]?.headers['x-opencode-session']).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
       expect(handle.chatModelIds).toEqual(['config-owned-model-id']);
       // The abort fired inside the mock, so the LATE governed-cancellation
       // recheck settled the run before any session state: zero usage, no
@@ -136,6 +154,45 @@ describe('the opencode-go provider handle (default registry)', () => {
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.sessionId).toBeUndefined();
     } finally {
+      restoreEnv(saved);
+    }
+  });
+
+  test('a resumed driver session reuses its session id for OpenCode Go routing', async () => {
+    const saved = takeEnv();
+    handle.factoryCalls.length = 0;
+    handle.controller = new AbortController();
+    try {
+      process.env.OPENCODE_GO_API_KEY = 'offline-handle-key';
+      process.env.OPENCODE_GO_BASE_URL = 'https://go-wire.invalid/v1';
+      await new AiSdkDriver().run(
+        { ...invocation('config-owned-model-id'), sessionRef: 'ses-existing-session' },
+        { signal: handle.controller.signal },
+      );
+      expect(handle.factoryCalls[0]?.headers['x-opencode-session']).toBe('ses-existing-session');
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+
+  test('a fresh driver session persists the same id sent for OpenCode Go routing', async () => {
+    const saved = takeEnv();
+    const sessionsDir = mkdtempSync(join(tmpdir(), 'cq-opencode-go-session-'));
+    const create = vi.spyOn(SessionStore.prototype, 'create');
+    handle.factoryCalls.length = 0;
+    handle.abortDuringResolution = false;
+    try {
+      process.env.OPENCODE_GO_API_KEY = 'offline-handle-key';
+      process.env.OPENCODE_GO_BASE_URL = 'https://go-wire.invalid/v1';
+      await new AiSdkDriver({ sessionsDir }).run(invocation('config-owned-model-id'));
+
+      const requestSessionId = handle.factoryCalls[0]?.headers['x-opencode-session'];
+      expect(requestSessionId).toBeDefined();
+      expect(create).toHaveBeenCalledWith(expect.any(String), requestSessionId);
+    } finally {
+      create.mockRestore();
+      handle.abortDuringResolution = true;
+      rmSync(sessionsDir, { recursive: true, force: true });
       restoreEnv(saved);
     }
   });

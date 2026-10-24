@@ -83,7 +83,7 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     }).toThrow();
   });
 
-  test('the recorded values: weekday 06:00–10:00 UTC and the same driver as off-peak', () => {
+  test('the recorded values: weekday 06:00–10:00 UTC and the configured Go peak driver', () => {
     expect(SelfhostPeak.window).toEqual({
       utcWeekdays: [1, 2, 3, 4, 5],
       startMinute: 360,
@@ -93,13 +93,10 @@ describe('SelfhostPeak + the peak-aware driver resolution', () => {
     // scheduled run, so a sweep starting at 05:41 cannot dispatch Z.ai GLM
     // work inside the ~3× peak quota window.
     expect(SelfhostPeak.headroomMinutes).toBe(20);
-    // The SERVED id the DeepSeek endpoint echoes; requesting the
-    // `deepseek-chat` alias is served AS `deepseek-flash` and would trip the
-    // served-model identity guard.
-    // Owner ruling 2026-10-16: the peak driver IS the off-peak driver (Z.ai
-    // GLM capacity is ample); the window machinery is unchanged.
-    expect(SelfhostPeak.driver).toEqual(SelfhostDefaults.driver);
-    expect(SelfhostPeak.driver).toEqual({ provider: 'zai', model: 'glm-5.3-flash' });
+    expect(SelfhostPeak.driver).toEqual({
+      provider: 'opencode-go',
+      model: 'deepseek-v4.1-flash',
+    });
   });
 
   test('isSelfhostPeak: inclusive start, exclusive end, weekdays only (UTC)', () => {

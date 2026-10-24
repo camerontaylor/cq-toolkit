@@ -160,8 +160,9 @@ export class SessionStore {
    * not be world-readable: the store dir is created 0o700 and the file
    * 0o600 (mode applies at CREATION; the process umask still masks it).
    */
-  async create(workspace: string): Promise<SessionRecord> {
-    const sessionId = `ses-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+  async create(workspace: string, requestedSessionId?: string): Promise<SessionRecord> {
+    const sessionId =
+      requestedSessionId ?? `ses-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
     assertSafeSessionId(sessionId);
     const createdAt = new Date().toISOString();
     // Validate BEFORE writing: the file only ever contains lines that parse.

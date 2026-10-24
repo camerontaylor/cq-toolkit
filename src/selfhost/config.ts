@@ -156,11 +156,8 @@ export interface SelfhostPeakConfig {
  * The frozen peak switch. The window is the Z.ai GLM Coding Plan's peak
  * hours — 14:00–18:00 Asia/Singapore on weekdays, when quota consumption
  * multiplies (~3×) — written in UTC because every consumer reads a UTC
- * clock: **06:00–10:00 UTC, Monday–Friday**. The peak driver is DeepSeek's
- * served flash model: `deepseek-flash` is the id the endpoint ECHOES back
- * (a `deepseek-chat` request is served as `deepseek-flash` and would fail
- * the served-model identity guard), and the `deepseek` provider factory
- * reads `DEEPSEEK_API_KEY` from the environment at dispatch time.
+ * clock: **06:00–10:00 UTC, Monday–Friday**. The peak driver uses the
+ * configured OpenCode Go route and its `OPENCODE_GO_API_KEY` credential.
  *
  * IMMUTABLE BY CONSTRUCTION (deepFreeze), like every other shared default:
  * a nested write throws instead of silently re-pointing a live run's model.
@@ -176,12 +173,11 @@ export const SelfhostPeak: SelfhostPeakConfig = deepFreeze({
   // 05:40 inclusive). 20 minutes covers the privileged job's 15-minute
   // `timeout-minutes` with the documented bound's margin.
   headroomMinutes: 20,
-  // DEFAULT only: the peak driver is configuration (`CQ_SELFHOST_PEAK_DRIVER`,
-  // see resolveSelfhostDrivers). Owner ruling 2026-10-16: by default the peak
-  // window keeps the same driver as the rest of the day (Z.ai GLM capacity is
-  // ample for this repository's own loop); the window, the pre-peak headroom
-  // and the single-clock-read semantics are unchanged.
-  driver: SelfhostDefaults.driver,
+  // DEFAULT only: the peak driver remains configurable through
+  // `CQ_SELFHOST_PEAK_DRIVER` (see resolveSelfhostDrivers). The former
+  // direct DeepSeek binding depended on a credential removed from repo
+  // secrets.
+  driver: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' },
 });
 
 /**

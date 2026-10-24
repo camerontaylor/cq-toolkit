@@ -22,8 +22,8 @@
 //   - the DRIVER is peak-aware (owner directive 2026-10-12): the run's
 //     start stamp decides the model ONCE via resolveSelfhostDriver — the
 //     frozen off-peak default (zai/glm-5.3-flash) outside the Z.ai GLM
-//     peak, the peak driver (deepseek/deepseek-flash) inside the documented
-//     06:00–10:00 UTC Mon–Fri window OR its reserved pre-peak headroom
+//     peak, the peak driver (opencode-go/deepseek-v4.1-flash) inside the
+//     documented 06:00–10:00 UTC Mon–Fri window OR its reserved pre-peak headroom
 //     (05:40–06:00: a run starting there could still be executing when the
 //     peak opens, so it must not dispatch Z.ai GLM into it). The workflow
 //     pins that instant once per step (CQ_SELFHOST_NOW_MS) so the separate

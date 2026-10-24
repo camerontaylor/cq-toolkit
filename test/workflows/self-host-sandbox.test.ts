@@ -9,7 +9,7 @@ const MINT_PIN = 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996
 describe('shipped self-host sandbox job boundary', () => {
   it.each([
     ['template', TEMPLATE, '{{SELFHOST_DRIVER_KEY}}', '{{SELFHOST_PEAK_DRIVER_KEY}}'],
-    ['instantiated', INSTANTIATED, 'Z_AI_API_KEY', 'DEEPSEEK_API_KEY'],
+    ['instantiated', INSTANTIATED, 'Z_AI_API_KEY', 'OPENCODE_GO_API_KEY'],
   ])(
     'keeps the token-bearing privileged job separate in the %s',
     (_name, path, driverKey, peakDriverKey) => {
@@ -35,7 +35,8 @@ describe('shipped self-host sandbox job boundary', () => {
       // BOTH provider keys ride the loop step (off-peak + peak); each
       // provider factory reads its own at dispatch time.
       expect(privileged).toContain(`ZAI_API_KEY: \${{ secrets.${driverKey} }}`);
-      expect(privileged).toContain(`DEEPSEEK_API_KEY: \${{ secrets.${peakDriverKey} }}`);
+      expect(privileged).toContain(`OPENCODE_GO_API_KEY: \${{ secrets.${peakDriverKey} }}`);
+      expect(privileged).toContain('OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL }}');
       expect(privileged).toContain("if: github.ref == 'refs/heads/main'");
       expect(privileged).toContain('needs: self-review-worker');
       expect(privileged).toContain('timeout-minutes: 15');
