@@ -50,6 +50,52 @@ describe('runAgentReviewer', () => {
     if (result.status === 'ok') expect(result.value.findings[0]?.severity).toBe('major');
   });
 
+  it('uses the minor fallback for unmapped severities and omits absent location fields', async () => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => ({
+            stopReason: 'complete' as const,
+            structuredOutput: {
+              findings: [{ severity: 'low', text: 'Evidence without a location' }],
+            },
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+          })),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 1000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: {
+        findings: [
+          {
+            severity: 'minor',
+            text: 'Evidence without a location',
+            status: 'open',
+          },
+        ],
+      },
+    });
+    if (result.status === 'ok') {
+      expect(result.value.findings[0]).not.toHaveProperty('file');
+      expect(result.value.findings[0]).not.toHaveProperty('line');
+      expect(result.value.findings[0]).not.toHaveProperty('rule');
+    }
+  });
+
   it('reports driver usage and cost to the active governor before mapping the result', async () => {
     const drivers = {
       resolve: vi.fn(() => ({
@@ -138,6 +184,32 @@ describe('runAgentReviewer', () => {
     expect(result).toEqual({
       status: 'needs-human',
       reason: 'agent review did not run: provider unavailable',
+    });
+  });
+
+  it('normalizes a non-Error driver rejection', async () => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => Promise.reject('scripted rejection')),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 1000,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result).toEqual({
+      status: 'needs-human',
+      reason: 'agent review did not run: scripted rejection',
     });
   });
 

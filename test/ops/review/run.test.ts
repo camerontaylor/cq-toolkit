@@ -405,6 +405,91 @@ describe('review.run', () => {
     }
   });
 
+  it('refuses reviewer dispatch when the denylist scan finds protected content', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({
+            component: component.component,
+            hits: [{ ruleId: 'fixture-secret', lines: [1] }],
+          })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') expect(result.reason).toContain('protected content');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('records a blocked source when cq.json requests an agent without a reviewer role', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['agent'] },
+        }),
+      );
+      repo.commitAll('configure agent review without a role');
+      const drivers = scriptedDrivers();
+      const result = await makeReviewRun({
+        drivers,
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human')
+        expect(result.reason).toContain('not every configured reviewer');
+      expect(drivers.resolve).not.toHaveBeenCalled();
+      const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+      const [recordFile] = await readdir(folder);
+      const stored = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
+        sources: { kind: string; status: string; reason?: string }[];
+      };
+      expect(stored.sources).toContainEqual({
+        kind: 'agent',
+        status: 'blocked',
+        reason: 'cq.json roles.reviewer is required for an agent review',
+      });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('returns indeterminate when the dispatched agent review log cannot be written', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      const effects = repoEffects(repo, () => undefined, {
+        writeReviewLog: async () => {
+          throw new Error('log disk full');
+        },
+      });
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') expect(result.detail).toContain('log disk full');
+      expect(effects.openLedger('feature/x').load().records).toEqual([]);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('returns indeterminate when the dev ledger mutation fails after the agent review', async () => {
     const repo = await makeTestRepo();
     try {
