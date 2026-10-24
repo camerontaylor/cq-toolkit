@@ -92,6 +92,29 @@ describe('dev.check', () => {
     expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
   });
 
+  test('fresh adopter scans the archived tree portably without a toolkit denylist script', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: [] } }],
+      }),
+    );
+    await repo.write('src/checked.ts', 'export const checked = true;\n');
+    repo.commitAll('configure fresh adopter');
+    const effects = effectsFor((command) => (command === 'fake-check' ? 'ok' : undefined));
+    const seen: string[] = [];
+    const result = await makeDevCheck(effects, async (components) => {
+      seen.push(...components.map(({ path, text }) => `${path}:${text}`));
+      return components.map(({ component }) => ({ component, hits: [] }));
+    })({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(seen).toContain('src/checked.ts:export const checked = true;\n');
+    expect(effects.calls.some((call) => call.command === 'node')).toBe(false);
+    expect(effects.calls.some((call) => call.command === 'gitleaks')).toBe(false);
+  });
+
   test('preserves absolute configured check working directories', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(
@@ -129,6 +152,16 @@ describe('dev.check', () => {
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
     if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+    expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
+  });
+
+  test('refuses malformed cq.json for cq-toolkit too', async () => {
+    await repo.write('package.json', JSON.stringify({ name: '@camerontaylor/cq-toolkit' }));
+    await repo.write('cq.json', JSON.stringify({ schemaVersion: 1, checks: [] }));
+    repo.commitAll('malformed toolkit config');
+    const effects = effectsFor();
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
     expect(effects.calls.filter((call) => call.command === 'pnpm')).toEqual([]);
   });
 

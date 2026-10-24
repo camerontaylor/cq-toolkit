@@ -400,6 +400,11 @@ export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
   .object({
     repoRoot: z.string().min(1),
     uncommitted: z.boolean().exactOptional(),
+    target: z.string().min(1).exactOptional(),
+    base: z
+      .string()
+      .regex(/^[0-9a-fA-F]{7,64}$/)
+      .exactOptional(),
   })
   .strict();
 

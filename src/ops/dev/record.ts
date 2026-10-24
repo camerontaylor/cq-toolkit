@@ -519,6 +519,8 @@ export interface AssembleReadinessInput {
   untracked: readonly string[];
   /** Severities a disposition must close; defaults to {@link DEFAULT_BLOCKING_SEVERITIES}. */
   blockingSeverities?: readonly string[];
+  /** Configured reviewer families (`agent` admits `agent:<role>` ledger identities). */
+  configuredReviewers?: readonly string[];
   /** ISO-8601 timestamp for the assembled record. */
   nowIso: string;
 }
@@ -549,6 +551,10 @@ export function assembleReadiness(
 ): { ready: true; record: DevReadinessRecord } | { ready: false; gaps: ReadinessGap[] } {
   const gaps: ReadinessGap[] = [];
   const { identity, ledger } = input;
+  const configuredReviewers = new Set(input.configuredReviewers ?? ['coderabbit', 'agent']);
+  const isConfigured = (reviewer: string) =>
+    configuredReviewers.has(reviewer) ||
+    (reviewer.startsWith('agent:') && configuredReviewers.has('agent'));
 
   // Only a FULL-scope terminal cycle satisfies readiness: an
   // uncommitted-scope cycle never covered the committed part of the
@@ -556,7 +562,10 @@ export function assembleReadiness(
   // fabricate readiness.
   const terminalCycles = ledger.records.filter(
     (record): record is DevCycleRecord =>
-      record.kind === 'cycle' && record.scope === 'full' && record.completion.kind === 'terminal',
+      record.kind === 'cycle' &&
+      record.scope === 'full' &&
+      record.completion.kind === 'terminal' &&
+      isConfigured(record.reviewer),
   );
   const cycle = terminalCycles[terminalCycles.length - 1];
   if (cycle === undefined) {
@@ -597,7 +606,8 @@ export function assembleReadiness(
       if (record.kind === 'disposition') closed.set(record.findingId, record.action);
     }
     const adjudicable = ledger.records.filter(
-      (record): record is DevCycleRecord => record.kind === 'cycle',
+      (record): record is DevCycleRecord =>
+        record.kind === 'cycle' && isConfigured(record.reviewer),
     );
     const open: string[] = [];
     for (const entry of adjudicable) {
@@ -624,7 +634,7 @@ export function assembleReadiness(
   // recent review evidence is a failure — readiness never silently leans on
   // an older terminal cycle past a blocked attempt.
   const allCycles = ledger.records.filter(
-    (record): record is DevCycleRecord => record.kind === 'cycle',
+    (record): record is DevCycleRecord => record.kind === 'cycle' && isConfigured(record.reviewer),
   );
   const latestAttempt = allCycles[allCycles.length - 1];
   if (latestAttempt !== undefined && latestAttempt.completion.kind === 'blocked') {

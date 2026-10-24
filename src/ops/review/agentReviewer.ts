@@ -31,6 +31,7 @@ export interface AgentReviewerInput {
   diff: string;
   role: { provider: string; model: string };
   maxTokens: number;
+  wallMs: number;
   severityMap: { high: string; medium: string; low?: string };
 }
 
@@ -58,13 +59,44 @@ export async function runAgentReviewer(
     outputSchema,
   };
   let result: Awaited<ReturnType<typeof resolved.driver.run>>;
+  const controller = new AbortController();
+  const parentSignal = currentJobContext()?.signal;
+  const relayAbort = () => controller.abort(parentSignal?.reason);
+  const rejectCancelled = () => new Error('agent review cancelled by parent job');
+  let cancelReview: (() => void) | undefined;
+  if (parentSignal?.aborted) relayAbort();
+  else parentSignal?.addEventListener('abort', relayAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    result = await resolved.driver.run(invocation, { signal: currentJobContext()?.signal });
+    const timed = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort(
+          new Error(`agent review exceeded ${String(input.wallMs)}ms wall deadline`),
+        );
+        reject(new Error(`agent review exceeded ${String(input.wallMs)}ms wall deadline`));
+      }, input.wallMs);
+    });
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      if (parentSignal?.aborted) reject(rejectCancelled());
+      else if (parentSignal !== undefined) {
+        cancelReview = () => reject(rejectCancelled());
+        parentSignal.addEventListener('abort', cancelReview, { once: true });
+      }
+    });
+    result = await Promise.race([
+      resolved.driver.run(invocation, { signal: controller.signal }),
+      timed,
+      cancelled,
+    ]);
   } catch (error) {
     return {
       status: 'needs-human',
       reason: `agent review did not run: ${error instanceof Error ? error.message : String(error)}`,
     };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    parentSignal?.removeEventListener('abort', relayAbort);
+    if (cancelReview !== undefined) parentSignal?.removeEventListener('abort', cancelReview);
   }
   if (result.stopReason !== 'complete') {
     return result.stopReason === 'budget'

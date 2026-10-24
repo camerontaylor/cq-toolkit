@@ -28,9 +28,10 @@
 // green returns the report. The gates run in the live worktree; the record
 // is bound to the identity read before them (author tier, strategy §2.4).
 import { isAbsolute, join, resolve } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile, readlink } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
+import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
 import type { CommandResult, DevEffects } from './effects.js';
 import { faultText, guardDevOp } from './effects.js';
 import type { DevCheckGate, DevCheckRecord, DevLoadStamp } from './record.js';
@@ -168,7 +169,47 @@ async function runGate(
  * construction, and a newly staged file is included. Any step failing
  * faults the gate (never a silently green scan).
  */
-async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
+async function treeComponents(tree: string): Promise<ScanComponentInput[]> {
+  const components: ScanComponentInput[] = [];
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const absolute = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolute, path);
+      } else if (entry.isFile()) {
+        components.push({
+          component: `tracked:${path}`,
+          path,
+          text: await readFile(absolute, 'utf8'),
+        });
+      } else if (entry.isSymbolicLink()) {
+        components.push({ component: `tracked:${path}`, path, text: await readlink(absolute) });
+      } else {
+        throw new Error(`denylist: unsupported tracked tree entry '${path}'`);
+      }
+    }
+  };
+  await visit(tree, '');
+  return components;
+}
+
+function scanVerdict(scans: readonly ComponentScan[], startedAt: number): DevCheckGate {
+  const hits = scans.flatMap((scan) =>
+    scan.hits.map((hit) => `${scan.component}:${hit.ruleId}:${hit.lines.join(',')}`),
+  );
+  return {
+    name: 'denylist-scan',
+    status: hits.length === 0 ? 'pass' : 'fail',
+    durationMs: Date.now() - startedAt,
+    evidence: hits.length === 0 ? 'tracked tree clean' : `secret findings: ${hits.join('; ')}`,
+  };
+}
+
+async function denylistGate(
+  effects: DevEffects,
+  scanSecrets?: DiffSecretScanner,
+): Promise<DevCheckGate> {
   const startedAt = Date.now();
   let scratch: string | undefined;
   try {
@@ -195,6 +236,9 @@ async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
       await git(effects, ['-C', tree, 'apply', '--whitespace=nowarn', '--allow-empty', workPatch]),
       'apply the staged+unstaged patch over the archived tree',
     );
+    if (scanSecrets !== undefined) {
+      return scanVerdict(await scanSecrets(await treeComponents(tree)), startedAt);
+    }
     const result = await effects.runCommand('node', [join(tree, 'scripts', 'denylist-scan')], {
       timeoutMs: DENYLIST_TIMEOUT_MS,
     });
@@ -216,7 +260,10 @@ async function denylistGate(effects: DevEffects): Promise<DevCheckGate> {
  * identity (pin the immutable base), run the gates in sequence, persist the
  * record, and return ok/failed per the verdict.
  */
-export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckReport> {
+export function makeDevCheck(
+  effects: DevEffects,
+  scanSecrets?: DiffSecretScanner,
+): Op<DevCheckInput, DevCheckReport> {
   return guardDevOp('dev.check', DevCheckInputSchema, async (input) => {
     const fault = input.range === undefined ? null : rangeFault(input.range);
     if (fault !== null) return { status: 'failed', error: `dev.check: ${fault}` };
@@ -278,13 +325,15 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
       /* absent package metadata retains the legacy gate set */
     }
     const config = configText === null ? null : parseCqConfig(configText, input.repoRoot);
-    if (config?.ok === false && packageName !== '@camerontaylor/cq-toolkit') {
+    if (config?.ok === false) {
       return { status: 'needs-human', reason: `dev.check: cq.json — ${config.reason}` };
     }
     // Owner decision 12: configured checks are authoritative for adopters.
     // cq-toolkit keeps the legacy set until #411 adds its test check.
     const configuredChecks =
-      config?.ok === true && packageName !== '@camerontaylor/cq-toolkit'
+      config?.ok === true &&
+      config.config.checks.length > 0 &&
+      packageName !== '@camerontaylor/cq-toolkit'
         ? config.config.checks
         : null;
     if (configuredChecks !== null) {
@@ -358,7 +407,7 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
       );
     }
 
-    gates.push(await denylistGate(effects));
+    gates.push(await denylistGate(effects, configuredChecks === null ? undefined : scanSecrets));
 
     const committedLeg = [state.base, state.head];
     for (const [name, args] of [

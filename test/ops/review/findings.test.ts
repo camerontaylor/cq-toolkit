@@ -66,6 +66,36 @@ describe('review findings records', () => {
     ).toHaveLength(1);
   });
 
+  it('merges duplicate findings conservatively so closed/minor copies cannot hide open/major', () => {
+    const openMajor = record('agent', 'terminal', [
+      {
+        id: 'a',
+        source: 'agent',
+        file: 'src/a.ts',
+        line: 9,
+        rule: 'unsafe',
+        severity: 'major',
+        text: 'open issue',
+        status: 'open',
+      },
+    ]);
+    const rejectedMinor = record('coderabbit', 'terminal', [
+      {
+        id: 'b',
+        source: 'coderabbit',
+        file: 'src/a.ts',
+        line: 9,
+        rule: 'unsafe',
+        severity: 'minor',
+        text: 'dismissed copy',
+        status: 'rejected',
+      },
+    ]);
+    const combined = merge([rejectedMinor, openMajor]);
+    expect(combined.findings[0]).toMatchObject({ severity: 'major', status: 'open' });
+    expect(openBlocking(combined)).toHaveLength(1);
+  });
+
   it('rejects records for different branch or head', () => {
     expect(() =>
       merge([record('agent', 'terminal'), { ...record('coderabbit', 'terminal'), head: 'other' }]),

@@ -156,10 +156,47 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       import('./check.js').then(
         (m) =>
-          (async (input: DevCheckInput) =>
-            m.makeDevCheck((await import('./effects.js')).makeSubprocessDevEffects(input.repoRoot))(
-              input,
-            )) as Op<unknown, unknown>,
+          (async (input: DevCheckInput) => {
+            const [effects, denylist, cqConfig, fs] = await Promise.all([
+              import('./effects.js'),
+              import('./denylist.js'),
+              import('../analyze/cqConfig.js'),
+              import('node:fs/promises'),
+            ]);
+            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
+            const configText = await fs
+              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
+              .catch(() => null);
+            const packageText = await fs
+              .readFile(`${input.repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = '';
+            try {
+              const data: unknown = JSON.parse(packageText);
+              if (
+                typeof data === 'object' &&
+                data !== null &&
+                'name' in data &&
+                typeof data.name === 'string'
+              )
+                packageName = data.name;
+            } catch {
+              /* malformed package metadata retains legacy behavior */
+            }
+            let scanSecrets;
+            if (configText !== null && packageName !== '@camerontaylor/cq-toolkit') {
+              const parsed = cqConfig.parseCqConfig(configText, input.repoRoot);
+              if (parsed.ok && parsed.config.checks.length > 0) {
+                scanSecrets = denylist.makePortableReviewScanner(
+                  input.repoRoot,
+                  dev,
+                  configText,
+                  packageName,
+                );
+              }
+            }
+            return m.makeDevCheck(dev, scanSecrets)(input);
+          }) as Op<unknown, unknown>,
       ),
   },
   {
@@ -197,13 +234,32 @@ export const registry: OpRegistryEntry[] = [
             if (m.isAdmissionInput(input)) return admission.envAuthorAdmission(input);
             const { repoRoot } = input as DevCycleInput;
             const dev = effects.makeSubprocessDevEffects(repoRoot);
-            // THE PRE-UPLOAD NET IS TWO-LAYERED: gitleaks DEFAULT rules AND
-            // the repo's project denylist classes — either firing refuses
-            // the upload (the protected scripts/denylist-scan is untouched;
-            // this binds its rule FILE read-only).
-            const scanSecrets = denylist.composeScanners(
-              denylist.makeGitleaksDefaultsScanner(dev),
-              denylist.makeRepoDiffScanner(repoRoot),
+            // Portable default: gitleaks' built-in rules apply everywhere.
+            // A repo-specific scanner is added only when cq.json configures
+            // its optional patterns file; missing toolkit policy is never a
+            // prerequisite for an adopter review.
+            const configText = await fs.readFile(`${repoRoot}/cq.json`, 'utf8').catch(() => null);
+            const packageText = await fs
+              .readFile(`${repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = 'repository';
+            try {
+              const data: unknown = JSON.parse(packageText);
+              if (
+                typeof data === 'object' &&
+                data !== null &&
+                'name' in data &&
+                typeof data.name === 'string'
+              )
+                packageName = data.name;
+            } catch {
+              /* descriptive fallback only */
+            }
+            const scanSecrets = denylist.makePortableReviewScanner(
+              repoRoot,
+              dev,
+              configText,
+              packageName,
             );
             const drivers = driverFactory.createDriverFactory();
             return m.makeDevReview({
@@ -255,6 +311,7 @@ export const registry: OpRegistryEntry[] = [
                   ...reviewInput,
                   role: roleSpec,
                   maxTokens: policy.budgets.run.maxTokens!,
+                  wallMs: policy.budgets.run.wallMs,
                   severityMap: policy.review.agentSeverityMap,
                 });
               },

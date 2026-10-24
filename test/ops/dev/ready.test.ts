@@ -53,6 +53,39 @@ describe('dev.ready', () => {
       expect(result.value).toMatchObject({ cycleId: 'c002-bbbbbbbb', reviewer: 'agent:reviewer' });
   });
 
+  test('an unconfigured reviewer terminal cycle cannot satisfy readiness', async () => {
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+        review: { reviewers: ['coderabbit'] },
+      }),
+    );
+    repo.commitAll('configure CodeRabbit only');
+    const state = await seed(repo);
+    const ledgerStore = repoEffects(repo).openLedger(state.branch);
+    const ledger = ledgerStore.load();
+    ledgerStore.save({
+      ...ledger,
+      records: ledger.records.map((record) =>
+        record.kind === 'cycle' ? { ...record, reviewer: 'agent:reviewer' } : record,
+      ),
+    });
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
+  });
+
+  test('malformed cq.json refuses readiness', async () => {
+    await repo.write('cq.json', '{ invalid');
+    repo.commitAll('malformed config');
+    await seed(repo);
+    const result = await makeDevReady(repoEffects(repo))({ repoRoot: repo.root });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('cq.json');
+  });
+
   test('an edit after the records makes both stale; every gap lands in one reason', async () => {
     await seed(repo);
     await repo.write('src/a.ts', 'export const a = 2;\n');

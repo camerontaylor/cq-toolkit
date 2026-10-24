@@ -42,6 +42,47 @@ function key(finding: Finding): string {
     : `id\0${finding.id}`;
 }
 
+const severityRank: Record<string, number> = {
+  critical: 6,
+  blocker: 6,
+  high: 5,
+  major: 4,
+  moderate: 3,
+  medium: 3,
+  minor: 2,
+  low: 1,
+  info: 0,
+};
+
+function mergeFinding(previous: Finding, next: Finding): Finding {
+  const severity =
+    (severityRank[next.severity.toLowerCase()] ?? -1) >
+    (severityRank[previous.severity.toLowerCase()] ?? -1)
+      ? next.severity
+      : previous.severity;
+  const status =
+    previous.status === 'open' || next.status === 'open'
+      ? 'open'
+      : previous.status === 'deferred' || next.status === 'deferred'
+        ? 'deferred'
+        : previous.status === 'rejected' || next.status === 'rejected'
+          ? 'rejected'
+          : 'fixed';
+  return {
+    ...previous,
+    ...(previous.file === undefined && next.file !== undefined ? { file: next.file } : {}),
+    ...(previous.line === undefined && next.line !== undefined ? { line: next.line } : {}),
+    ...(previous.rule === undefined && next.rule !== undefined ? { rule: next.rule } : {}),
+    severity,
+    status,
+    source: [...new Set(`${previous.source},${next.source}`.split(','))].join(','),
+    ...(previous.reason === undefined && next.reason !== undefined ? { reason: next.reason } : {}),
+    ...(previous.evidence === undefined && next.evidence !== undefined
+      ? { evidence: next.evidence }
+      : {}),
+  };
+}
+
 /** Merge source records deterministically, retaining the first id and unioning source labels. */
 export function merge(records: readonly FindingsRecord[]): FindingsRecord {
   const first = records[0];
@@ -57,11 +98,7 @@ export function merge(records: readonly FindingsRecord[]): FindingsRecord {
       const id = key(finding),
         previous = findings.get(id);
       if (previous === undefined) findings.set(id, finding);
-      else
-        findings.set(id, {
-          ...previous,
-          source: [...new Set(`${previous.source},${finding.source}`.split(','))].join(','),
-        });
+      else findings.set(id, mergeFinding(previous, finding));
     }
   }
   return {

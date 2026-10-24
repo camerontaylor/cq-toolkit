@@ -21,6 +21,8 @@ import { FindingsRecordSchema, merge, type FindingsRecord, type ReviewSource } f
 export interface ReviewRunInput {
   repoRoot: string;
   uncommitted?: boolean;
+  target?: string;
+  base?: string;
 }
 export interface ReviewRunDeps {
   drivers: DriverFactory;
@@ -71,7 +73,11 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
       /* fallback is descriptive only */
     }
     const policy = resolveCqConfigDefaults(parsedConfig.config, { packageName });
-    const read = await readWorkState(effects, { target: 'merge-queue' });
+    const target = input.target ?? 'merge-queue';
+    const read = await readWorkState(effects, {
+      target,
+      ...(input.base ? { base: input.base } : {}),
+    });
     if (!read.ok) return { status: 'needs-human', reason: `review.run: ${read.reason}` };
     const { state } = read;
     const scanner =
@@ -89,6 +95,8 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
       const result = await makeDevReview({ effects, scanSecrets: scanner })({
         repoRoot: input.repoRoot,
         reviewer: 'coderabbit',
+        target,
+        ...(input.base ? { base: input.base } : {}),
         ...(input.uncommitted === undefined ? {} : { uncommitted: input.uncommitted }),
       });
       if (result.status === 'ok') {
@@ -203,7 +211,10 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                 reason:
                   'review.run: denylist scan found protected content; refusing reviewer upload',
               };
-            const current = await readWorkState(effects, { target: 'merge-queue' });
+            const current = await readWorkState(effects, {
+              target,
+              ...(input.base ? { base: input.base } : {}),
+            });
             if (
               !current.ok ||
               current.state.base !== state.base ||
@@ -231,6 +242,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                   .join('\n'),
                 role,
                 maxTokens: policy.budgets.run.maxTokens!,
+                wallMs: policy.budgets.run.wallMs,
                 severityMap: policy.review.agentSeverityMap,
               });
               if (agent.status === 'ok') {
@@ -258,7 +270,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
                       cycleId,
                       reviewer: 'agent:reviewer',
                       scope: input.uncommitted ? ('uncommitted' as const) : ('full' as const),
-                      target: 'merge-queue',
+                      target,
                       base: state.base,
                       head: state.head,
                       dirtySha256: state.dirtySha256,
@@ -353,6 +365,13 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
       return {
         status: 'indeterminate',
         detail: `review.run: findings record write outcome is uncertain at '${path}' — ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (!record.sources.some((source) => source.status === 'terminal')) {
+      return {
+        status: 'needs-human',
+        reason:
+          'review.run: no configured reviewer completed a terminal cycle; the blocked findings record was persisted',
       };
     }
     return { status: 'ok', value: record };

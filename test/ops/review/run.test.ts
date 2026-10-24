@@ -151,6 +151,29 @@ describe('review.run', () => {
     }
   });
 
+  it('accepts an adopter target and immutable base pin consistently', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      repo.git('push', '-q', 'origin', 'origin/merge-queue:refs/heads/main');
+      repo.git('fetch', '-q', 'origin');
+      const base = repo.git('rev-parse', 'HEAD~1').trim();
+      const effects = repoEffects(repo);
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root, target: 'main', base });
+      expect(result.status).toBe('ok');
+      const ledger = effects.openLedger('feature/x').load();
+      const cycle = ledger.records.find((entry) => entry.kind === 'cycle');
+      expect(cycle).toMatchObject({ target: 'main', base, reviewer: 'agent:reviewer' });
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
   it('maps an invalid cq.json to needs-human before invoking a reviewer', async () => {
     const repo = await makeTestRepo();
     try {
@@ -280,9 +303,19 @@ describe('review.run', () => {
         scannerFactory: () => async (components) =>
           components.map((component) => ({ component: component.component, hits: [] })),
       })({ repoRoot: repo.root });
-      expect(result.status).toBe('ok');
-      if (result.status === 'ok') {
-        const agent = result.value.sources.find((source) => source.kind === 'agent');
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('no configured reviewer completed');
+        const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
+        expect(await readdir(folder)).toContain('1.json');
+      }
+      const stored = JSON.parse(
+        await readFile(join(repo.root, '.cq', 'review', 'feature%2Fx', '1.json'), 'utf8'),
+      ) as {
+        sources: { kind: string; status: string; reason?: string }[];
+      };
+      {
+        const agent = stored.sources.find((source) => source.kind === 'agent');
         expect(agent?.status).toBe('blocked');
         expect(agent?.reason?.includes('invalid structured output')).toBe(true);
       }

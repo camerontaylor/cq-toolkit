@@ -192,6 +192,7 @@ describe('dev.review cycle', () => {
           ...input,
           role: { provider: 'scripted', model: 'reviewer' },
           maxTokens: 500,
+          wallMs: 1000,
           severityMap: { high: 'major', medium: 'minor' },
         }),
     }) as Op<DevCycleInput, DevReviewReport>;

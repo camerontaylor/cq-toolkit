@@ -1,34 +1,51 @@
 # `cq review.run` fixture transcript
 
-Fixture: a fresh throwaway git repository on `feature/x`, based on a local
-`origin/merge-queue`, with a v2 `cq.json` declaring both `coderabbit` and
-`agent`, a scripted reviewer role, and a run token budget. The agent driver
-returns one seeded `major` finding at `src/a.ts:1`; its invocation is
-asserted read-only and structured in `test/ops/review/run.test.ts`.
+This is captured output from a fresh temporary git repository on `feature/x`,
+with a local bare `origin/merge-queue`, a v2 `cq.json`, and one tracked source
+change. The production CLI dispatcher and `makeReviewRun` ran against real git,
+ledger, log, and findings persistence effects. A temporary registry injected a
+scripted read-only agent driver and a clean scanner; the fixture's `coderabbit`
+command stub returned exit 1 with `not authenticated`. No provider, network, or
+credential was used.
+
+Command input was `review.run --repoRoot=<temporary repo> --json`. Captured
+stdout:
 
 ```json
 {
-  "schemaVersion": 1,
-  "branch": "feature/x",
-  "head": "<fixture head>",
-  "sources": [
-    { "kind": "coderabbit", "status": "blocked", "reason": "not authenticated" },
-    { "kind": "agent", "status": "terminal", "cycleId": "<recorded cycle>" }
-  ],
-  "findings": [
-    {
-      "id": "<recorded cycle>#f1",
-      "source": "agent",
-      "file": "src/a.ts",
-      "line": 1,
-      "rule": "fixture",
-      "severity": "major",
-      "text": "Seeded fixture finding",
-      "status": "open"
-    }
-  ]
+  "status": "ok",
+  "value": {
+    "schemaVersion": 1,
+    "branch": "feature/x",
+    "head": "1f37721da6811c6cc90b5875cc09ba1b411279d0",
+    "sources": [
+      {
+        "kind": "coderabbit",
+        "status": "blocked",
+        "reason": "dev.review: review cycle c001-1f37721d was BLOCKED (reviewer CLI exited 1 (non-zero — no review completed)) — the cycle is recorded with 0 finding(s); log: /home/ctaylor/.tmp/cq-dev-review/feature_x-217d2bf51f16e9dc-1792806161058.log"
+      },
+      {
+        "kind": "agent",
+        "status": "terminal",
+        "cycleId": "c002-1f37721d"
+      }
+    ],
+    "findings": [
+      {
+        "id": "c002-1f37721d#f1",
+        "source": "agent",
+        "file": "src/a.ts",
+        "line": 1,
+        "rule": "fixture",
+        "severity": "major",
+        "text": "Seeded fixture finding",
+        "status": "open"
+      }
+    ]
+  }
 }
 ```
 
-This transcript is driven entirely by scripted effects and a fake driver; it
-does not contact providers or invoke an authenticated CodeRabbit session.
+Observed CLI exit code: `0`. The harness then read the persisted file
+`.cq/review/feature%2Fx/1.json`; it contained one finding and source statuses
+`coderabbit:blocked, agent:terminal`.

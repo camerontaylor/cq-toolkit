@@ -25,6 +25,8 @@
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import { parseCqConfig } from '../analyze/cqConfig.js';
+import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -474,6 +476,27 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
       await effects.removeScratchDir(scratch).catch(() => undefined);
     }
   };
+}
+
+/** Portable review scanner: always gitleaks defaults, plus project rules only when configured. */
+export function makePortableReviewScanner(
+  repoRoot: string,
+  effects: GitleaksEffects,
+  configText: string | null,
+  packageName = 'repository',
+): DiffSecretScanner {
+  const defaults = makeGitleaksDefaultsScanner(effects);
+  if (configText === null) return defaults;
+  const parsed = parseCqConfig(configText, repoRoot);
+  if (!parsed.ok) {
+    return async () => {
+      throw new Error(`review config invalid: ${parsed.reason}`);
+    };
+  }
+  const policy = resolveCqConfigDefaults(parsed.config, { packageName });
+  return policy.review.denylistPatternsFile === undefined
+    ? defaults
+    : composeScanners(defaults, makeRepoDiffScanner(repoRoot, policy.review.denylistPatternsFile));
 }
 
 /**

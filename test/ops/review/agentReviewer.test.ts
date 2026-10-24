@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { resolve } from 'node:path';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
+import { runLadder } from '../../../src/kernel/governor.js';
 
 describe('runAgentReviewer', () => {
   it('uses a read-only structured invocation and applies cq.json severity mapping', async () => {
@@ -42,6 +43,7 @@ describe('runAgentReviewer', () => {
       diff: 'diff',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
+      wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result.status).toBe('ok');
@@ -61,6 +63,7 @@ describe('runAgentReviewer', () => {
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
+      wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result).toEqual({
@@ -88,6 +91,7 @@ describe('runAgentReviewer', () => {
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
+      wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result).toEqual({
@@ -122,6 +126,7 @@ describe('runAgentReviewer', () => {
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
+      wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result.status).toBe(expected);
@@ -149,11 +154,74 @@ describe('runAgentReviewer', () => {
       diff: '',
       role: { provider: 'mock', model: 'mock' },
       maxTokens: 500,
+      wallMs: 1000,
       severityMap: { high: 'major', medium: 'minor' },
     });
     expect(result).toEqual({
       status: 'failed',
       error: 'agent review returned invalid structured output',
     });
+  });
+
+  it('aborts the driver and returns needs-human at the configured wall deadline', async () => {
+    let signal: AbortSignal | undefined;
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async (_invocation: unknown, options: { signal: AbortSignal }) => {
+            signal = options.signal;
+            return new Promise<never>(() => undefined);
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const result = await runAgentReviewer(drivers, {
+      repoRoot: '/fixture',
+      branch: 'review-fixture',
+      head: 'abc123',
+      diff: '',
+      role: { provider: 'mock', model: 'mock' },
+      maxTokens: 500,
+      wallMs: 5,
+      severityMap: { high: 'major', medium: 'minor' },
+    });
+    expect(result.status).toBe('needs-human');
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('relays parent job cancellation to the driver and settles needs-human', async () => {
+    let signal: AbortSignal | undefined;
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async (_invocation: unknown, options: { signal: AbortSignal }) => {
+            signal = options.signal;
+            return new Promise<never>(() => undefined);
+          }),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const outcome = await runLadder(
+      () =>
+        runAgentReviewer(drivers, {
+          repoRoot: '/fixture',
+          branch: 'review-fixture',
+          head: 'abc123',
+          diff: '',
+          role: { provider: 'mock', model: 'mock' },
+          maxTokens: 500,
+          wallMs: 10_000,
+          severityMap: { high: 'major', medium: 'minor' },
+        }),
+      { wallClockMs: 5, abortGraceMs: 50, killGraceMs: 50 },
+      { op: 'review.run', jobKey: 'review-cancel', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    if (outcome.outcome === 'completed') expect(outcome.value.status).toBe('needs-human');
+    expect(signal?.aborted).toBe(true);
   });
 });

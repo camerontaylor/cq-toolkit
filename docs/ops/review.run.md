@@ -16,7 +16,15 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "base": {
+      "pattern": "^[0-9a-fA-F]{7,64}$",
+      "type": "string"
+    },
     "repoRoot": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "target": {
       "minLength": 1,
       "type": "string"
     },

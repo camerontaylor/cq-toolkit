@@ -156,6 +156,14 @@ describe('review family registry entries', () => {
     expect(entry.inputSchema.safeParse(input).success).toBe(false);
   });
 
+  test('review.run accepts explicit adopter target and immutable base pins', () => {
+    const schema = entryByName('review.run').inputSchema;
+    expect(
+      schema.safeParse({ repoRoot: '/repo', target: 'main', base: '1234567abcdef0' }).success,
+    ).toBe(true);
+    expect(schema.safeParse({ repoRoot: '/repo', base: 'origin/main' }).success).toBe(false);
+  });
+
   test('the classifyThreads mirror rejects an unknown key INSIDE the state too', () => {
     const entry = entryByName('review.classifyThreads');
     const state = fetchedState();

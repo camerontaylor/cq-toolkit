@@ -4,6 +4,10 @@
 // fails the library boundary BEFORE any effect (zero processes touched).
 import { describe, expect, test } from 'vitest';
 import { registry } from '../../../src/ops/dev/registry.js';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { makeTestRepo } from './repo.js';
 
 const ENTRY_NAMES = ['dev.check', 'dev.review', 'dev.disposition', 'dev.ready'];
 
@@ -24,6 +28,62 @@ function minimalInput(name: string): Record<string, unknown> {
 }
 
 describe('dev family registry entries', () => {
+  test('fresh adopter dispatch scans without the toolkit denylist script or policy file', async () => {
+    const repo = await makeTestRepo();
+    const bin = await mkdtemp(join(tmpdir(), 'cq-adopter-bin-'));
+    const priorPath = process.env['PATH'] ?? '';
+    const priorLog = process.env['CQ_NODE_LOG'];
+    const nodeLog = join(bin, 'node-calls.log');
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fresh-adopter' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'fake-check', args: [] } }],
+        }),
+      );
+      await repo.write('src/a.ts', 'export const a = true;\n');
+      repo.commitAll('fresh adopter config');
+      await writeFile(join(bin, 'fake-check'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await writeFile(
+        join(bin, 'gitleaks'),
+        '#!/usr/bin/node\nconst fs=require("node:fs"); const a=process.argv; fs.writeFileSync(a[a.indexOf("--report-path")+1],"[]");\n',
+        { mode: 0o755 },
+      );
+      await writeFile(
+        join(bin, 'node'),
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CQ_NODE_LOG"\nexec /usr/bin/node "$@"\n',
+        { mode: 0o755 },
+      );
+      process.env['PATH'] = `${bin}:${priorPath}`;
+      process.env['CQ_NODE_LOG'] = nodeLog;
+      const op = (await entryByName('dev.check').importer()) as (input: unknown) => Promise<{
+        status: string;
+        value?: { gates: { name: string; status: string }[] };
+      }>;
+      const result = await op({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      expect(result.value?.gates).toContainEqual(
+        expect.objectContaining({ name: 'denylist-scan', status: 'pass' }),
+      );
+      expect(
+        await import('node:fs/promises').then((fs) =>
+          fs.readFile(join(repo.root, 'policy/denylist/patterns.yml'), 'utf8').catch(() => ''),
+        ),
+      ).toBe('');
+      const nodeCalls = await import('node:fs/promises').then((fs) =>
+        fs.readFile(nodeLog, 'utf8').catch(() => ''),
+      );
+      expect(nodeCalls).not.toContain('scripts/denylist-scan');
+    } finally {
+      process.env['PATH'] = priorPath;
+      if (priorLog === undefined) delete process.env['CQ_NODE_LOG'];
+      else process.env['CQ_NODE_LOG'] = priorLog;
+      await repo.cleanup();
+    }
+  });
+
   test('the family carries exactly the strategy §3 lane-1 entries', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });
