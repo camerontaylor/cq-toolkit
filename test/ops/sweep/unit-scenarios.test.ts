@@ -8,7 +8,7 @@ import { describe, expect, test, vi } from 'vitest';
 import type { Driver, WorkerResult } from '../../../src/driver/types.js';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
-import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
+import { bindingsFromDispatch, makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitBindings } from '../../../src/ops/sweep/unit.js';
 import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import type { WorktreeEffects } from '../../../src/adapters/git/worktreeFor.js';
@@ -187,6 +187,7 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
     modelSpec: { model: 'fake', provider: 'test' },
     budget: { wallClockMs: 600_000, maxTokens: 1_000_000 },
     prompt: () => 'fix it',
+    scanPrompt: async () => {},
     git: world.gitFactory(),
     pushBranch: async (repoRoot, branch) => {
       world.pushCalls.push({ repoRoot, branch });
@@ -916,3 +917,67 @@ test('an unrecorded ahead commit cannot be republished on a no-task rerun', asyn
     await rm(world.root, { recursive: true, force: true });
   }
 });
+
+test.each(['missing', 'fault', 'initial-hit', 'prior-output', 'related-output'] as const)(
+  'task upload gate refuses %s without sending tainted prompts',
+  async (mode) => {
+    const world = await makeWorld([
+      { failing: true, message: mode === 'initial-hit' ? 'DO_NOT_UPLOAD' : 'failure' },
+      { failing: true, message: mode === 'related-output' ? 'DO_NOT_UPLOAD' : 'failure' },
+    ]);
+    let calls = 0;
+    try {
+      const base = world.driverFactory();
+      const bindings = bindingsOf(world, {
+        taskLoop: {},
+        scanPrompt: async (text) => {
+          if (mode === 'fault' || text.includes('DO_NOT_UPLOAD')) throw new Error('scan refused');
+        },
+        driver: {
+          run: async (...args) => {
+            calls++;
+            expect(args[0].prompt).not.toContain('DO_NOT_UPLOAD');
+            const result = await base.run(...args);
+            return mode === 'prior-output'
+              ? { ...result, structuredOutput: { summary: 'DO_NOT_UPLOAD' } }
+              : result;
+          },
+        },
+      });
+      if (mode === 'missing') delete bindings.scanPrompt;
+      const result = await makeSweepUnitOp(bindings)(UNIT);
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      expect(result.value.tasks?.[0]?.outcome).toBe('escalated-to-human');
+      expect(calls).toBe(['prior-output', 'related-output'].includes(mode) ? 1 : 0);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+
+// Direct SDK callers bypass the registry schema: refuse escaping check roots before resolving a driver.
+test.each(['/tmp/outside', '../outside', 'nested/../../outside', 'C:\\outside'])(
+  'direct dispatch refuses escaping check.cwd %s',
+  (cwd) => {
+    const resolve = vi.fn(() => {
+      throw new Error('driver must not resolve');
+    });
+    expect(() =>
+      bindingsFromDispatch(
+        {
+          repoRoot: '/repo',
+          runPrefix: 'fix',
+          base: 'HEAD',
+          package: 'alpha',
+          fixer: 'fix',
+          files: [],
+          driver: { provider: 'test', model: 'test', budget: { wallClockMs: 1000 } },
+          check: { adapter: 'vitest-json', command: 'node', args: [], cwd },
+        },
+        { resolve },
+      ),
+    ).toThrow('check.cwd must remain inside');
+    expect(resolve).not.toHaveBeenCalled();
+  },
+);

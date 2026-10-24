@@ -7,10 +7,10 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
 ```json
 {
   "status": "ok",
-  "report": {
+  "value": {
     "source": "tests",
     "runPrefix": "cq/fixture",
-    "reportPath": "<fixture>/journal/fix-run-report-e0324b80-ab3b-4790-bdc3-35354c121559.json",
+    "reportPath": "<fixture>/journal/fix-run-report-e20f78d6-ff2a-40bd-b5db-20e81b3d9fea.json",
     "verdict": "pass",
     "units": [
       {
@@ -47,7 +47,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 60,
+            "wallMs": 2,
             "reason": "initial task",
             "usage": {
               "input": 1,
@@ -65,7 +65,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 57,
+            "wallMs": 0,
             "reason": "related-check feedback",
             "usage": {
               "input": 1,
@@ -79,7 +79,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
         "outcome": "fixed",
         "branch": "cq/fixture/tests-1/scratch-repo",
         "commits": [
-          "21aa8371a55adb79bede99b542cbcf3e1da80a62"
+          "305356dd3c5cede6a3e71cd4f28c4b025e5ab6e7"
         ],
         "validation": {
           "verdict": "pass",
@@ -87,12 +87,12 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
             {
               "gate": "related",
               "verdict": "pass",
-              "wallMs": 182
+              "wallMs": 45
             },
             {
               "gate": "broader",
               "verdict": "pass",
-              "wallMs": 403
+              "wallMs": 54
             },
             {
               "gate": "paths",
@@ -153,7 +153,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 4,
+            "wallMs": 1,
             "reason": "initial task",
             "usage": {
               "input": 1,
@@ -171,7 +171,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
               "provider": "fixture",
               "model": "scripted"
             },
-            "wallMs": 8,
+            "wallMs": 1,
             "reason": "related-check feedback",
             "usage": {
               "input": 1,
@@ -185,7 +185,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
         "outcome": "fixed",
         "branch": "cq/fixture/tests-1/scratch-repo",
         "commits": [
-          "3058b4e684cadf5c6e1c5b95ffa315e5c2917853"
+          "76725c5394938bc6814962467f87834a7d945ee0"
         ],
         "validation": {
           "verdict": "pass",
@@ -193,12 +193,12 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
             {
               "gate": "related",
               "verdict": "pass",
-              "wallMs": 302
+              "wallMs": 46
             },
             {
               "gate": "broader",
               "verdict": "pass",
-              "wallMs": 232
+              "wallMs": 61
             },
             {
               "gate": "paths",
@@ -232,7 +232,7 @@ Equivalent CLI input: `cq fix.run --source=tests --selector='{"mode":"workspace-
       "cacheRead": 0,
       "cacheWrite": 0
     },
-    "wallMs": 4232
+    "wallMs": 2681
   }
 }
 ```

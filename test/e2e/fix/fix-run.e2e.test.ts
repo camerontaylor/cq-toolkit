@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { expect, test, vi } from 'vitest';
 import { z } from 'zod';
+import { createGovernor, currentJobContext } from '../../../src/kernel/governor.js';
+import { runPlan } from '../../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { makeFixRun, type FixRunReport } from '../../../src/ops/fix/runFix.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -25,6 +27,10 @@ async function fixture(budget: number | undefined = 1000) {
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
   await mkdir(join(repo, 'cases'));
+  await writeFile(
+    join(repo, 'upload-policy.yml'),
+    "rules:\n  - id: fixture-secret\n    description: fixture secret\n    regex: 'DO_NOT_UPLOAD'\n    sample: 'DO_NOT_UPLOAD'\nclean_probes:\n  - 'safe'\n",
+  );
   for (const name of ['a', 'b'])
     await writeFile(
       join(repo, 'cases', `${name}.test.cjs`),
@@ -51,6 +57,7 @@ process.exitCode = failed ? 1 : 0;
   );
   const config = {
     schemaVersion: 2,
+    review: { denylistPatternsFile: 'upload-policy.yml' },
     checks: [
       {
         kind: 'tests',
@@ -144,7 +151,7 @@ test('fresh fixture fixes both tests through real git gates without pushing', as
           JSON.stringify(
             {
               status: result.status,
-              report: {
+              value: {
                 ...report,
                 run: undefined,
                 units: report.units.map((unit) => ({
@@ -319,6 +326,134 @@ test.each([false, true])(
       expect(report.assembly?.jobs).toHaveLength(2);
       expect(report.fixesPerRun).toBe(2);
       expect(report.units[0]?.report?.pushed).toBe(true);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(['absolute', 'relative'] as const)(
+  'nested check cwd preserves repo-root task identity (%s failure names)',
+  async (names) => {
+    const f = await fixture();
+    try {
+      const pkg = join(f.repo, 'packages', 'demo');
+      await mkdir(join(pkg, 'cases'), { recursive: true });
+      await mkdir(join(pkg, 'scripts'));
+      for (const name of ['a', 'b'])
+        await writeFile(
+          join(pkg, 'cases', name + '.test.cjs'),
+          'module.exports = { actual: 1, expected: 2 };\n',
+        );
+      let script = await readFile(join(f.repo, 'scripts', 'tests.cjs'), 'utf8');
+      if (names === 'relative')
+        script = script.replace("name: require('node:path').resolve(name)", 'name');
+      await writeFile(join(pkg, 'scripts', 'tests.cjs'), script);
+      const config = JSON.parse(await readFile(join(f.repo, 'cq.json'), 'utf8')) as {
+        checks: Array<{ command: { cwd?: string } }>;
+      };
+      config.checks[0]!.command.cwd = 'packages/demo';
+      await writeFile(join(f.repo, 'cq.json'), JSON.stringify(config));
+      await git(f.repo, 'add', '-A');
+      await git(f.repo, 'commit', '-m', 'nested check');
+      const result = await makeFixRun({ drivers: scripted() })({
+        repoRoot: f.repo,
+        source: 'tests',
+        selector: { mode: 'workspace-all' },
+        journalDir: f.journalDir,
+      });
+      expect(result.status).toBe('ok');
+      const report = result.report ?? (result.status === 'ok' ? result.value : undefined);
+      expect(report?.fixesPerRun).toBe(2);
+      expect(report?.tasks.map((t) => t.task.files)).toEqual([
+        ['packages/demo/cases/a.test.cjs'],
+        ['packages/demo/cases/b.test.cjs'],
+      ]);
+      const branch = report?.tasks[0]?.branch ?? '';
+      expect(await git(f.repo, 'show', branch + ':cases/a.test.cjs')).toContain('expected: 2');
+      expect(await git(f.repo, 'show', branch + ':packages/demo/cases/a.test.cjs')).toContain(
+        'expected: 1',
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each(['active', 'entry', 'after-first'] as const)(
+  'enclosing governed cancellation (%s) retains evidence and stops publication',
+  async (mode) => {
+    const f = await fixture();
+    const controller = new AbortController();
+    let observed = false;
+    let workerCalls = 0;
+    let parentSignal: AbortSignal | undefined;
+    let result: Awaited<ReturnType<ReturnType<typeof makeFixRun>>> | undefined;
+    try {
+      const drivers: DriverFactory = {
+        resolve: ({ modelSpec }) => ({
+          modelSpec,
+          lane: 'ai-sdk',
+          driver: {
+            run: async (_request, options) => {
+              workerCalls++;
+              if (mode === 'after-first' && workerCalls <= 2)
+                return scripted()
+                  .resolve({ role: 'fixer', modelSpec })
+                  .driver.run(_request, options);
+              const signal = options?.signal;
+              if (!signal) throw new Error('missing inner worker signal');
+              expect(signal.aborted).toBe(false);
+              controller.abort();
+              observed = signal.aborted;
+              return {
+                stopReason: 'aborted',
+                denials: [],
+                usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+                wallMs: 0,
+              };
+            },
+          },
+        }),
+      };
+      const entry: OpRegistryEntry = {
+        name: 'fixture.fix',
+        inputSchema: z.object({}),
+        importer: async () => async () => {
+          parentSignal = currentJobContext()?.signal;
+          if (mode === 'entry') controller.abort();
+          result = await makeFixRun({ drivers })({
+            repoRoot: f.repo,
+            source: 'tests',
+            selector: { mode: 'workspace-all' },
+            journalDir: f.journalDir,
+            push: true,
+          });
+          // The parent op keeps its own strict result while the separate report survives.
+          return { status: 'ok', value: 'settled' };
+        },
+      };
+      await runPlan(
+        { id: 'enclosing', jobs: [{ id: 'fix', op: entry.name, input: {} }] },
+        { concurrency: 1, stopOnError: false },
+        { get: () => entry as unknown as OpRegistryEntry<never, never> },
+        {
+          governor: createGovernor({ maxTokens: 1000 }),
+          signal: controller.signal,
+          allowAdvisory: true,
+        },
+      );
+      expect(parentSignal?.aborted).toBe(true);
+      expect(observed).toBe(mode !== 'entry');
+      expect(workerCalls).toBe(mode === 'entry' ? 0 : mode === 'after-first' ? 3 : 1);
+      expect(result?.status).toBe('needs-human');
+      expect(result?.report?.tasks.flatMap((task) => task.commits)).toHaveLength(
+        mode === 'after-first' ? 1 : 0,
+      );
+      expect(await git(f.origin, 'for-each-ref', '--format=%(refname)')).toBe('');
+      expect(JSON.parse(await readFile(result?.report?.reportPath ?? '', 'utf8'))).toEqual(
+        result?.report,
+      );
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }

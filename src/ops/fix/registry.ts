@@ -23,9 +23,15 @@ export const registry: OpRegistryEntry[] = [
   {
     name: 'fix.run',
     inputSchema: FixRunInputSchema,
-    importer: async () => {
+    importer: async (wiring) => {
       const { makeFixRun } = await import('./runFix.js');
-      return async (raw) => makeFixRun()(raw as FixRunInput);
+      const { createDriverFactory } = await import('../../driver/factory.js');
+      const drivers = createDriverFactory(
+        wiring?.onDeprecatedAlias === undefined
+          ? {}
+          : { onDeprecatedAlias: wiring.onDeprecatedAlias },
+      );
+      return async (raw) => makeFixRun({ drivers })(raw as FixRunInput);
     },
   },
 ];

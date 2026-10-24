@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import type { z } from 'zod';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage } from '../../driver/types.js';
-import { createGovernor } from '../../kernel/governor.js';
+import { createGovernor, currentJobContext } from '../../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../../kernel/runner.js';
 import type { OpRegistryEntry, OpResult, RunReport } from '../../kernel/types.js';
 import { list } from '../../registry/index.js';
@@ -55,6 +55,7 @@ export interface FixRunDeps {
 export function makeFixRun(deps: FixRunDeps = {}) {
   return async (input: FixRunInput): Promise<FixRunResult> => {
     const start = Date.now();
+    const parentSignal = currentJobContext()?.signal;
     const repoRoot = resolve(input.repoRoot);
     const runPrefix = input.runPrefix ?? `cq/fix-${randomUUID()}`;
     const journalDir = resolve(
@@ -111,6 +112,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         : { status, reason: evidence, report };
     };
     try {
+      if (parentSignal?.aborted)
+        return await finish('needs-human', 'enclosing job cancelled before dispatch');
       const parsed = parseCqConfig(await readFile(resolve(repoRoot, 'cq.json'), 'utf8'), repoRoot);
       if (!parsed.ok) return await finish('needs-human', parsed.reason);
       const pkg = JSON.parse(await readFile(resolve(repoRoot, 'package.json'), 'utf8')) as {
@@ -175,6 +178,9 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         unit.check = { adapter: check.adapter, ...check.command };
         unit.taskLoop = {
           protectTests: input.protectTests ?? false,
+          ...(policy.review.denylistPatternsFile === undefined
+            ? {}
+            : { denylistPatternsFile: policy.review.denylistPatternsFile }),
           wallMs: policy.budgets.unit.wallMs,
           ...(check.relatedArgs === undefined ? {} : { relatedArgs: check.relatedArgs }),
         };
@@ -211,7 +217,14 @@ export function makeFixRun(deps: FixRunDeps = {}) {
         importer: async () => async (raw: unknown) => {
           try {
             const unit = raw as SweepUnitDispatchInput;
-            const result = await makeSweepUnitOp(bindingsFromDispatch(unit, drivers))(unit);
+            if (parentSignal?.aborted)
+              return {
+                status: 'needs-human',
+                reason: 'enclosing job cancelled before unit dispatch',
+              };
+            const bindings = bindingsFromDispatch(unit, drivers);
+            if (parentSignal !== undefined) bindings.cancelled = () => parentSignal.aborted;
+            const result = await makeSweepUnitOp(bindings)(unit);
             if (result.status === 'ok')
               collected.set(`${unit.package}\0${unit.fixer}`, result.value);
             return result;
@@ -227,6 +240,8 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             | undefined,
       };
       const abort = new AbortController();
+      const runSignal =
+        parentSignal === undefined ? abort.signal : AbortSignal.any([parentSignal, abort.signal]);
       const timer = setTimeout(() => abort.abort(), policy.budgets.run.wallMs);
       try {
         report.run = await runPlan(
@@ -235,7 +250,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
           view,
           {
             governor: createGovernor({ maxTokens, perJobWallClockMs: policy.budgets.unit.wallMs }),
-            signal: abort.signal,
+            signal: runSignal,
             allowAdvisory: true,
             allowAdvisoryProvenance: 'product',
           },
@@ -262,6 +277,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
       report.fixesPerRun = report.tasks.filter((task) => task.outcome === 'fixed').length;
       report.usage = report.run.usage ?? report.usage;
       const human =
+        parentSignal?.aborted ||
         report.run.stoppedEarly ||
         report.units.some(
           (row) =>
@@ -270,7 +286,7 @@ export function makeFixRun(deps: FixRunDeps = {}) {
             (row.result.status === 'ok' && row.result.value.budgetStopped),
         ) ||
         report.tasks.some((task) => task.outcome === 'escalated-to-human');
-      if (input.pr) {
+      if (input.pr && !parentSignal?.aborted) {
         const markers = await readCommittedMarkers(
           repoRoot,
           config.worktreesDir,
@@ -299,10 +315,23 @@ export function makeFixRun(deps: FixRunDeps = {}) {
               },
               { concurrency: 1, stopOnError: false, journalDir },
               view,
+              parentSignal === undefined
+                ? undefined
+                : {
+                    governor: createGovernor({ maxTokens }),
+                    signal: parentSignal,
+                    allowAdvisory: true,
+                  },
             );
         }
       }
-      if (human) return await finish('needs-human', 'run stopped for budget or human review');
+      if (human || parentSignal?.aborted)
+        return await finish(
+          'needs-human',
+          parentSignal?.aborted
+            ? 'enclosing job cancelled; verified commits retained without publishing'
+            : 'run stopped for budget or human review',
+        );
       if (
         report.run.jobs.some((row) => row.result.status !== 'ok') ||
         report.units.some((row) => row.report?.indeterminate) ||

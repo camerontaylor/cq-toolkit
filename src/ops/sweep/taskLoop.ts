@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { OpResult } from '../../kernel/types.js';
@@ -9,7 +9,12 @@ import type { CheckCommand, FailureSet } from '../gates/checkRunner.js';
 import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
 import { validateFix, type ValidationVerdict } from '../fix/validate.js';
 import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
-import { tasksFromFailures, relatedCheckCommand, type FixTask } from './tasks.js';
+import {
+  tasksFromFailures,
+  relatedCheckCommand,
+  normalizeFailurePaths,
+  type FixTask,
+} from './tasks.js';
 import { fixerBudgetBreach, startFixerDeadline } from './internal/fixerBudget.js';
 import type { SweepUnitBindings, SweepUnitReport, UnitProbe } from './unit.js';
 import type { WorkUnit } from './planSweep.js';
@@ -17,6 +22,7 @@ import { SWEEP_DIFF_FLAGS } from '../../shared/gitDiffFlags.js';
 
 export interface TaskLoopConfig {
   relatedArgs?: string[];
+  denylistPatternsFile?: string;
   protectTests?: boolean;
   wallMs?: number;
 }
@@ -91,6 +97,7 @@ async function runTaskLoopInner(
     return result.stdout.trim();
   };
   const check = async (command: CheckCommand): Promise<FailureSet> => {
+    if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
     const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
     if (remainingWall <= 0) {
       budgetStopped = true;
@@ -117,11 +124,16 @@ async function runTaskLoopInner(
     }
     const parsed = parseCheckOutput(adapterByName(bindings.adapter), raw);
     if (parsed.verdict !== 'parsed') throw new Error(parsed.reason);
-    return parsed.set;
+    return normalizeFailurePaths(parsed.set, worktree.path, command.cwd ?? worktree.path);
   };
   for (const task of tasks) {
     const row: FixTaskReport = { task, attempts: [], outcome: 'unfixed', branch, commits: [] };
     reports.push(row);
+    if (bindings.cancelled?.()) {
+      row.outcome = 'escalated-to-human';
+      row.reason = 'enclosing job cancelled';
+      continue;
+    }
     if (
       budgetStopped ||
       currentJobContext()?.signal.aborted ||
@@ -149,9 +161,12 @@ async function runTaskLoopInner(
     let finalTree: { final: UnitProbe; treeSha: string } | undefined;
     try {
       parent = await git(['rev-parse', 'HEAD']);
+      const fullCheck = bindings.checkCommand(unit, worktree.path);
       const related = relatedCheckCommand(
-        bindings.checkCommand(unit, worktree.path),
-        task.files,
+        fullCheck,
+        task.files.map((file) =>
+          relative(fullCheck.cwd ?? worktree.path, resolve(worktree.path, file)),
+        ),
         config.relatedArgs,
       );
       const resolved = bindings.taskWorker?.(task, related) ?? {
@@ -163,6 +178,19 @@ async function runTaskLoopInner(
         invocation: TaskAttempt['invocation'],
         text: string,
       ): Promise<WorkerResult> => {
+        try {
+          if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
+          if (bindings.scanPrompt === undefined)
+            throw new Error('worker upload scanner is required');
+          await bindings.scanPrompt(text);
+        } catch {
+          row.outcome = 'escalated-to-human';
+          throw new Error('worker upload refused: missing, failed or positive denylist scan');
+        }
+        if (bindings.cancelled?.()) {
+          row.outcome = 'escalated-to-human';
+          throw new Error('enclosing job cancelled');
+        }
         const start = Date.now();
         const remainingWall = Math.min(
           bindings.budget.wallClockMs ?? 1_200_000,
@@ -222,6 +250,10 @@ async function runTaskLoopInner(
             (worker.usage.reasoning ?? 0);
           attempt.stopReason = worker.stopReason;
           currentJobContext()?.reportResult(worker);
+          if (bindings.cancelled?.()) {
+            row.outcome = 'escalated-to-human';
+            throw new Error('enclosing job cancelled');
+          }
           if (
             deadline.expired() ||
             (bindings.budget.maxTokens !== undefined && spentTokens >= bindings.budget.maxTokens) ||
@@ -346,6 +378,10 @@ async function runTaskLoopInner(
       row.validation = validation;
       if (validation.verdict !== 'pass' || finalTree === undefined)
         throw new Error('validation refused task');
+      if (bindings.cancelled?.()) {
+        row.outcome = 'escalated-to-human';
+        throw new Error('enclosing job cancelled');
+      }
       const sha = await effects.commit(message, finalTree.treeSha);
       await effects.verify(sha, parent);
       row.commits.push(sha);
@@ -353,9 +389,13 @@ async function runTaskLoopInner(
       lastSha = sha;
       accepted = finalTree.final;
     } catch (error) {
-      if (Date.now() - unitStart >= (config.wallMs ?? 3_600_000)) budgetStopped = true;
+      if (!bindings.cancelled?.() && Date.now() - unitStart >= (config.wallMs ?? 3_600_000))
+        budgetStopped = true;
       row.reason = String(error);
-      row.outcome = row.validation?.verdict === 'needs-human' ? 'escalated-to-human' : 'unfixed';
+      row.outcome =
+        row.outcome === 'escalated-to-human' || row.validation?.verdict === 'needs-human'
+          ? 'escalated-to-human'
+          : 'unfixed';
       try {
         if (parent === undefined || (await git(['rev-parse', 'HEAD'])) !== parent) {
           row.outcome = 'escalated-to-human';
@@ -386,6 +426,7 @@ async function runTaskLoopInner(
   let pushed = false;
   if (
     bindings.pushBranch &&
+    !bindings.cancelled?.() &&
     !indeterminate &&
     !reports.some((row) => row.reason?.includes('HEAD changed'))
   ) {

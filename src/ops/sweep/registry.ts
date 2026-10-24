@@ -253,6 +253,7 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     mode: z.enum(['fix', 'prep']).exactOptional(),
     taskLoop: z
       .object({
+        denylistPatternsFile: z.string().min(1).exactOptional(),
         relatedArgs: z
           .array(z.string())
           .refine(

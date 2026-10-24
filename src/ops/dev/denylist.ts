@@ -24,7 +24,7 @@
 // matched content (inspect locally without printing secret contents).
 import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, join, win32 } from 'node:path';
+import { basename, resolve, join, win32 } from 'node:path';
 
 /** One denylist rule as parsed from the patterns file. */
 export interface DenylistRule {
@@ -486,11 +486,14 @@ export function makeGitleaksDefaultsScanner(effects: GitleaksEffects): DiffSecre
  * never runs without its secret scan; it just also never reads a file at
  * import-resolution time.
  */
-export function makeRepoDiffScanner(repoRoot: string): DiffSecretScanner {
+export function makeRepoDiffScanner(
+  repoRoot: string,
+  patternsFile = 'policy/denylist/patterns.yml',
+): DiffSecretScanner {
   let scanner: DiffSecretScanner | undefined;
   return (components) => {
     if (scanner === undefined) {
-      const patternsPath = join(repoRoot, 'policy', 'denylist', 'patterns.yml');
+      const patternsPath = resolve(repoRoot, patternsFile);
       let bytes: Buffer;
       try {
         bytes = readFileSync(patternsPath);

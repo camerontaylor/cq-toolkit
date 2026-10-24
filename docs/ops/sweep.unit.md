@@ -284,6 +284,10 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
     "taskLoop": {
       "additionalProperties": false,
       "properties": {
+        "denylistPatternsFile": {
+          "minLength": 1,
+          "type": "string"
+        },
         "protectTests": {
           "type": "boolean"
         },

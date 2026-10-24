@@ -540,3 +540,15 @@ describe('driver factory — resolved shape', () => {
     expect(resolved.driver.run).toBeTypeOf('function');
   });
 });
+
+test('a scoped request scanner refuses lanes without the pre-send hook', async () => {
+  const root = await scratch();
+  const factory = createDriverFactory(subprocessConfig(root, []));
+  expect(() =>
+    factory.resolve({
+      role: 'fixer',
+      modelSpec: { provider: 'construction', model: 'construction-model' },
+      beforeRequest: async () => {},
+    }),
+  ).toThrow('upload scanning requires the ai-sdk request gate');
+});

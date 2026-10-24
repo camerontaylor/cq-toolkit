@@ -27,6 +27,7 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
   DEFAULT_MAX_STEPS,
+  serializeRequestForScan,
   DEFAULT_STEP_TIMEOUT_MS,
   classifyRunFailure,
   providerSignalsFromError,
@@ -2348,4 +2349,83 @@ describe.skipIf(!process.env.LIVE_DRIVERS)('live ai-sdk driver (opt-in: LIVE_DRI
     },
     60_000,
   );
+});
+
+test.each(['initial', 'read', 'run'] as const)(
+  'upload gate refuses %s bytes before the next provider send',
+  async (mode) => {
+    const root = await mkdtemp(join(tmpdir(), 'aidrv-upload-'));
+    let sends = 0;
+    const scanned: string[] = [];
+    try {
+      await writeFile(join(root, 'secret.txt'), 'DO_NOT_UPLOAD');
+      const command = process.execPath + ' -e "process.stdout.write(\'DO_NOT_UPLOAD\')"';
+      const model = new MockLanguageModelV4({
+        modelId: 'mock-1',
+        doGenerate: async () => {
+          sends++;
+          return mode === 'read'
+            ? toolCallResult('read', { path: 'secret.txt' })
+            : mode === 'run'
+              ? toolCallResult('run', { command })
+              : textResult('ok');
+        },
+      });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => model },
+        sessionsDir: join(root, 'sessions'),
+        sandboxConfig: {
+          mode: 'off',
+          backend: 'auto',
+          network: 'allow',
+          runTool: 'on',
+          envPassthrough: [],
+        },
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          tools: {
+            ...defaultHarnessConfig.tools,
+            run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^.*$'] },
+          },
+        },
+        beforeRequest: async (text) => {
+          scanned.push(text);
+          if (text.includes('DO_NOT_UPLOAD')) throw new Error('upload refused');
+        },
+      });
+      const result = await driver.run(
+        invocation({
+          prompt: mode === 'initial' ? 'DO_NOT_UPLOAD' : 'safe',
+          workspace: { path: root },
+          budget: {},
+        }),
+      );
+      expect(result.stopReason).not.toBe('complete');
+      expect(sends).toBe(mode === 'initial' ? 0 : 1);
+      expect(scanned.at(-1)).toContain('DO_NOT_UPLOAD');
+      if (mode !== 'initial') expect(scanned.at(-1)).toContain('tool-result');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test('upload serialization preserves undefined slots and refuses lossy or cyclic payloads', () => {
+  expect(serializeRequestForScan({ prompt: ['safe', undefined], optional: undefined })).toBe(
+    '{"prompt":["safe","[undefined]"],"optional":"[undefined]"}',
+  );
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  for (const bad of [
+    undefined,
+    { text: NaN },
+    { text: Infinity },
+    { text: () => 'hidden' },
+    { text: Symbol('hidden') },
+    { text: 1n },
+    { text: new Map([['hidden', 'secret']]) },
+    { text: { hidden: 'secret', toJSON: () => 'safe' } },
+    cyclic,
+  ])
+    expect(() => serializeRequestForScan(bad)).toThrow();
 });

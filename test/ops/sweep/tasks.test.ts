@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { parseCLI } from 'vitest/node';
 import { relatedCheckCommand, tasksFromFailures } from '../../../src/ops/sweep/tasks.js';
 import type { CheckFailure } from '../../../src/ops/gates/checkRunner.js';
 
@@ -25,7 +26,7 @@ test('argv template replaces full args and expands files without shell interpret
     relatedCheckCommand(check, ['a space.ts', '$(literal).ts'], ['related', '{files}', '--json'])
       .args,
   ).toEqual(['related', 'a space.ts', '$(literal).ts', '--json']);
-  expect(relatedCheckCommand(check, ['-x.ts']).args).toEqual(['full', '--', '-x.ts']);
+  expect(relatedCheckCommand(check, ['-x.ts']).args).toEqual(['full', './-x.ts']);
   expect(() => relatedCheckCommand(check, ['a.ts'], ['embedded-{files}'])).toThrow('standalone');
 });
 
@@ -35,4 +36,13 @@ test('clean runs derive no tasks; an empty related argv cannot hide the required
   expect(
     relatedCheckCommand({ command: 'runner', args: [] }, [], ['{files}', '--json']).args,
   ).toEqual(['--json']);
+});
+
+test('fallback argv reaches Vitest positional filters, including flag-shaped filenames', () => {
+  const related = relatedCheckCommand({ command: 'vitest', args: ['run', '--reporter=json'] }, [
+    'chosen.test.ts',
+    '-flag.test.ts',
+  ]);
+  const parsed = parseCLI(['vitest', ...related.args]);
+  expect(parsed.filter).toEqual(['chosen.test.ts', './-flag.test.ts']);
 });

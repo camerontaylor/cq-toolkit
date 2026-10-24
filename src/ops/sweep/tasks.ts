@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve } from 'node:path';
 import type { CheckCommand, CheckFailure, FailureSet } from '../gates/checkRunner.js';
 
 /** A task owns one failing file; static clustering can supply the same shape. */
@@ -38,7 +39,25 @@ export function relatedCheckCommand(
     ...check,
     args:
       relatedArgs === undefined
-        ? [...check.args, '--', ...files]
+        ? [...check.args, ...files.map((file) => (file.startsWith('-') ? './' + file : file))]
         : relatedArgs.flatMap((arg) => (arg === '{files}' ? [...files] : [arg])),
+  };
+}
+
+/** Canonical task/fingerprint paths are relative to the checkout, never check.cwd. */
+export function normalizeFailurePaths(
+  set: FailureSet,
+  workspace: string,
+  checkCwd = workspace,
+): FailureSet {
+  return {
+    ...set,
+    failures: set.failures.map((failure) => {
+      if (failure.file === null) return failure;
+      const file = relative(workspace, resolve(checkCwd, failure.file));
+      if (file === '..' || file.startsWith('../') || isAbsolute(file))
+        throw new Error('check failure path escapes the workspace');
+      return { ...failure, file };
+    }),
   };
 }

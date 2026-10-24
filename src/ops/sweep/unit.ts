@@ -1,3 +1,10 @@
+import { normalizeFailurePaths } from './tasks.js';
+import {
+  composeScanners,
+  makeGitleaksDefaultsScanner,
+  makeRepoDiffScanner,
+} from '../dev/denylist.js';
+import { makeSubprocessDevEffects } from '../dev/effects.js';
 // Sweep lane (WS-D, goal D4) — the 'sweep.unit' op: the per-package pipeline
 // as ONE composition. A unit's stages are a DATAFLOW (worktreeFor's workspace
 // feeds the probe's cwd, the baseline FailureSet feeds the gate, the staged
@@ -41,7 +48,7 @@ import { defaultHarnessConfig } from '../../harness/config.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, resolve, win32 } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -271,6 +278,10 @@ export interface SweepUnitBindings {
   worktreeEffects?: WorktreeEffects;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
   runCheck: RunCheck;
+  /** Required by taskLoop; refuses before any provider upload. */
+  scanPrompt?: (text: string) => Promise<void>;
+  /** Explicit enclosing-job cancellation; verified commits are retained but not published. */
+  cancelled?: () => boolean;
   /** The per-package check command, resolved against the unit's worktree. */
   checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
   /**
@@ -640,6 +651,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
             throw new Error('tip moved before push');
           const fault = await recordScannedCommitSha(bindings, segments, sha);
           if (fault !== null) throw new Error(fault);
+          if (bindings.cancelled?.()) throw new Error('enclosing job cancelled before push');
           await bindings.pushBranch?.(bindings.repoRoot, segments.branch);
           const marker = await writeCommittedMarker(bindings, segments, unit);
           if (marker !== null) throw new Error(marker);
@@ -1309,19 +1321,11 @@ async function probeLeg(
     failureSet:
       bindings.taskLoop === undefined
         ? probed.value.failureSet
-        : {
-            ...probed.value.failureSet,
-            failures: probed.value.failureSet.failures.map((failure) => ({
-              ...failure,
-              file:
-                failure.file !== null && isAbsolute(failure.file)
-                  ? relative(
-                      bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
-                      failure.file,
-                    )
-                  : failure.file,
-            })),
-          },
+        : normalizeFailurePaths(
+            probed.value.failureSet,
+            worktree.path,
+            bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
+          ),
   };
   return { worktree, probe: narrowed };
 }
@@ -1751,6 +1755,9 @@ export function bindingsFromDispatch(
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
+  const checkCwd = input.check.cwd ?? '.';
+  if (isAbsolute(checkCwd) || win32.isAbsolute(checkCwd) || checkCwd.split(/[\\/]/).includes('..'))
+    throw new Error('sweep.unit: check.cwd must remain inside the unit workspace');
   const budgetFault = fixerBudgetFault(input.driver.budget);
   if (budgetFault !== null) {
     throw new Error(`sweep.unit: driver.budget is required and enforceable — ${budgetFault}`);
@@ -1758,6 +1765,27 @@ export function bindingsFromDispatch(
   // The factory resolves BEFORE any effect is constructed: an unresolvable
   // binding (unknown provider, no lane bound for the role) is a
   // configuration refusal, not a half-bound sweep.
+  const scanner =
+    input.taskLoop === undefined
+      ? undefined
+      : composeScanners(
+          makeGitleaksDefaultsScanner(makeSubprocessDevEffects(input.repoRoot)),
+          makeRepoDiffScanner(input.repoRoot, input.taskLoop.denylistPatternsFile),
+        );
+  const scanPrompt =
+    scanner === undefined
+      ? undefined
+      : async (text: string): Promise<void> => {
+          const scans = await scanner([
+            { component: 'worker-request', text, path: 'worker-request.json' },
+          ]);
+          if (
+            scans.length !== 1 ||
+            scans[0]?.component !== 'worker-request' ||
+            scans.some((scan) => scan.hits.length > 0)
+          )
+            throw new Error('worker upload refused by denylist scan');
+        };
   const resolved = drivers.resolve({
     role: 'fixer',
     modelSpec: { provider: input.driver.provider, model: input.driver.model },
@@ -1794,9 +1822,11 @@ export function bindingsFromDispatch(
       ? {}
       : {
           taskLoop: input.taskLoop,
+          ...(scanPrompt === undefined ? {} : { scanPrompt }),
           taskWorker: (_task, related) =>
             drivers.resolve({
               role: 'fixer',
+              ...(scanPrompt === undefined ? {} : { beforeRequest: scanPrompt }),
               modelSpec: resolved.modelSpec,
               harness: {
                 ...defaultHarnessConfig,
