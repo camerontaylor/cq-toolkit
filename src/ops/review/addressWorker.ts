@@ -116,6 +116,45 @@ class AddressRefusal extends Error {
   }
 }
 
+/** One scan component: `diagnostic` marks text derived from a check diagnostic. */
+type ScanContent = { text: string; path?: string; diagnostic?: boolean };
+
+/**
+ * One scan component per distinct check-diagnostic message with an
+ * attributable file: the unescaped message under its normalized
+ * repository-relative path, so a path-scoped denylist rule fires on content
+ * a whole-request (`worker-request.json`) component would miss. Paths are
+ * canonical checkout-relative names already normalized by the check runner.
+ */
+function diagnosticSources(checks: readonly FailureSet[]): ScanContent[] {
+  const rows: ScanContent[] = [];
+  for (const set of checks) {
+    for (const failure of set.failures) {
+      if (failure.file === null) continue;
+      const path = failure.file.split(/[\\/]+/).join('/');
+      if (rows.some((row) => row.path === path && row.text === failure.message)) continue;
+      rows.push({ text: failure.message, path, diagnostic: true });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Unescaped diagnostic messages that carry no attributable file: they are
+ * still scanned (under the whole-request label) but the caller must refuse
+ * the upload — provenance cannot be established for embedded source text.
+ */
+function diagnosticMessages(checks: readonly FailureSet[]): string[] {
+  const messages: string[] = [];
+  for (const set of checks) {
+    for (const failure of set.failures) {
+      if (failure.file === null && !messages.includes(failure.message))
+        messages.push(failure.message);
+    }
+  }
+  return messages;
+}
+
 /** One shared worker tree; only this engine may stage/commit, under a serial mutex. */
 export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const { policy } = deps;
@@ -196,7 +235,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     );
     return pending;
   };
-  const scan = async (text: string, contents: readonly { text: string; path?: string }[] = []) => {
+  const scan = async (text: string, contents: readonly ScanContent[] = []) => {
     const components = [
       { component: 'request', path: 'worker-request.json', text },
       ...contents.map((content, index) => ({
@@ -217,6 +256,10 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       scans.some((s) => s.hits.length > 0)
     )
       throw new AddressRefusal('upload refused: missing, failed or positive denylist scan');
+    // A diagnostic embedded in the prompt without file provenance can carry
+    // protected source text no path-scoped rule will ever see: refuse it.
+    if (contents.some((content) => content.diagnostic === true && content.path === undefined))
+      throw new AddressRefusal('upload refused: diagnostic provenance unavailable');
   };
   const safeFile = async (cwd: string, path: string) => {
     if (
@@ -303,12 +346,21 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     prior?: Awaited<ReturnType<typeof addressFailureFeedback>>,
     onDispatch?: (row: AddressAttempt) => void,
     sources: readonly { path: string; text: string }[] = [],
+    diagnostics: readonly FailureSet[] = [],
   ) => {
     stop();
     if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
     if (prior)
       prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
-    await scan(prompt, [...sources, ...(prior?.contents ?? [])]);
+    const attributed = diagnosticSources(diagnostics);
+    const unattributed = diagnosticMessages(diagnostics);
+    const scanSet = (extra: readonly { text: string; path?: string }[] = []): ScanContent[] => {
+      const set: ScanContent[] = [...extra, ...sources, ...attributed, ...(prior?.contents ?? [])];
+      if (unattributed.length)
+        set.push(...unattributed.map((message) => ({ text: message, diagnostic: true })));
+      return set;
+    };
+    await scan(prompt, scanSet());
     stop();
     let requestRefusal: AddressRefusal | undefined;
     const resolved = deps.drivers.resolve({
@@ -317,7 +369,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       beforeRequest: async (text, contents = []) => {
         try {
           stop();
-          await scan(text, [...contents, ...sources, ...(prior?.contents ?? [])]);
+          await scan(text, scanSet(contents));
           stop();
         } catch (error) {
           if (error instanceof AddressRefusal) requestRefusal = error;
@@ -785,6 +837,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   role,
                   false,
                   prior,
+                  undefined,
+                  undefined,
+                  related,
                 ),
               );
               if (feedback.disposition !== 'fixed')
