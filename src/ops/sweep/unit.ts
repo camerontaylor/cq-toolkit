@@ -42,7 +42,13 @@ export type { StagePathGateResult } from './stagePaths.js';
 import { classifyStagePaths, stagedPathsOf } from './stagePaths.js';
 import type { StagePathGateResult } from './stagePaths.js';
 import { runTaskLoop } from './taskLoop.js';
-import type { TaskLoopConfig, TaskWorker, FixTaskReport } from './taskLoop.js';
+import type {
+  TaskLoopConfig,
+  TaskWorker,
+  FixTaskReport,
+  TaskEscalation,
+  TaskRunBudget,
+} from './taskLoop.js';
 import type { FixTask } from './tasks.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -218,6 +224,8 @@ export const DEFAULT_PROTECTED_STAGE_PATTERNS = PROTECTED_STAGE_PATTERNS;
 export interface SweepUnitBindings {
   taskLoop?: TaskLoopConfig;
   taskWorker?: TaskWorker;
+  taskEscalation?: TaskEscalation;
+  taskRunBudget?: TaskRunBudget;
   deriveTasks?: (baseline: FailureSet) => FixTask[];
   /** Repository the worktrees check out from. */
   repoRoot: string;
@@ -1839,11 +1847,11 @@ export function bindingsFromDispatch(
       : {
           taskLoop: input.taskLoop,
           ...(scanPrompt === undefined ? {} : { scanPrompt }),
-          taskWorker: (_task, related) =>
+          taskWorker: (_task, related, modelSpec) =>
             drivers.resolve({
               role: 'fixer',
               ...(scanPrompt === undefined ? {} : { beforeRequest: scanPrompt }),
-              modelSpec: resolved.modelSpec,
+              modelSpec: modelSpec ?? resolved.modelSpec,
               harness: {
                 ...defaultHarnessConfig,
                 tools: {

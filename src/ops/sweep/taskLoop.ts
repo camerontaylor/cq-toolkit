@@ -1,3 +1,4 @@
+import type { EscalationDecision } from '../fix/escalation.js';
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
@@ -39,6 +40,8 @@ export interface TaskAttempt {
   wallMs: number;
   reason: string;
   stopReason?: string;
+  costUSD?: number;
+  costBasis?: WorkerResult['costBasis'];
 }
 export interface FixTaskReport {
   task: FixTask;
@@ -49,6 +52,32 @@ export interface FixTaskReport {
   validation?: ValidationVerdict;
   reason?: string;
   preservedEdits?: { ref: string; sha: string };
+  rounds?: Array<{
+    tier: 'worker' | 'rescue';
+    attempt: number;
+    reason: string;
+    validation?: ValidationVerdict;
+    preservedEdits?: { ref: string; sha: string };
+  }>;
+}
+export interface TaskEscalation {
+  rescueModel?: ModelSpec;
+  next: (
+    task: FixTask,
+    progress: {
+      workerUsed: number;
+      rescueUsed: number;
+      reason: string;
+      regression: boolean;
+      stopReason?: string;
+    },
+  ) => EscalationDecision;
+  verified: (before: FailureSet, after: FailureSet) => void;
+}
+export interface TaskRunBudget {
+  remainingTokens: () => number;
+  remainingWallMs: () => number;
+  reportResult: (worker: WorkerResult) => void;
 }
 /** Existing sweep owns detached-tree validation and verified commits. */
 export interface TaskLoopEffects {
@@ -105,7 +134,10 @@ async function runTaskLoopInner(
   };
   const check = async (command: CheckCommand): Promise<FailureSet> => {
     if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
-    const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
+    const remainingWall = Math.min(
+      (config.wallMs ?? 3_600_000) - (Date.now() - unitStart),
+      bindings.taskRunBudget?.remainingWallMs() ?? Infinity,
+    );
     if (remainingWall <= 0) {
       budgetStopped = true;
       throw new Error('unit wall budget exhausted');
@@ -133,7 +165,7 @@ async function runTaskLoopInner(
     if (parsed.verdict !== 'parsed') throw new Error(parsed.reason);
     return normalizeFailurePaths(parsed.set, worktree.path, command.cwd ?? worktree.path);
   };
-  for (const task of tasks) {
+  taskLoop: for (const task of tasks) {
     const row: FixTaskReport = { task, attempts: [], outcome: 'unfixed', branch, commits: [] };
     reports.push(row);
     if (bindings.cancelled?.()) {
@@ -160,276 +192,365 @@ async function runTaskLoopInner(
       row.reason = 'earlier verified task resolved this file or cluster';
       continue;
     }
-    let parent: string | undefined;
-    let finalTree: { final: UnitProbe; treeSha: string } | undefined;
-    try {
-      parent = await git(['rev-parse', 'HEAD']);
-      const fullCheck = bindings.checkCommand(unit, worktree.path);
-      const related = (
-        config.source === 'static'
-          ? (command: CheckCommand, files: string[], args?: string[]) =>
-              staticRelatedCheckCommand(command, bindings.adapter, files, args)
-          : relatedCheckCommand
-      )(
-        fullCheck,
-        task.files.map((file) =>
-          relative(fullCheck.cwd ?? worktree.path, resolve(worktree.path, file)),
-        ),
-        config.relatedArgs,
-      );
-      const resolved = bindings.taskWorker?.(task, related) ?? {
-        driver: bindings.driver,
-        modelSpec: bindings.modelSpec,
-      };
-      const prompt = `${bindings.prompt(unit, worktree)}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
-      const invoke = async (
-        invocation: TaskAttempt['invocation'],
-        text: string,
-      ): Promise<WorkerResult> => {
-        try {
-          if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
-          if (bindings.scanPrompt === undefined)
-            throw new Error('worker upload scanner is required');
-          await bindings.scanPrompt(text);
-        } catch {
-          row.outcome = 'escalated-to-human';
-          throw new Error('worker upload refused: missing, failed or positive denylist scan');
-        }
-        if (bindings.cancelled?.()) {
-          row.outcome = 'escalated-to-human';
-          throw new Error('enclosing job cancelled');
-        }
-        const start = Date.now();
-        const remainingWall = Math.min(
-          bindings.budget.wallClockMs ?? 1_200_000,
-          (config.wallMs ?? 3_600_000) - (start - unitStart),
+    let workerUsed = 0;
+    let rescueUsed = 0;
+    let regression = false;
+    while (true) {
+      const decision = bindings.taskEscalation?.next(task, {
+        workerUsed,
+        rescueUsed,
+        reason: row.reason ?? 'initial task',
+        regression,
+        ...(budgetStopped || bindings.cancelled?.() || currentJobContext()?.signal.aborted
+          ? {
+              stopReason: bindings.cancelled?.()
+                ? 'enclosing job cancelled'
+                : 'token or wall budget exhausted',
+            }
+          : {}),
+      }) ?? { tier: 'worker' as const, attempt: 1, reason: 'initial task' };
+      if (decision.tier === 'human') {
+        row.outcome = 'escalated-to-human';
+        row.reason = decision.reason;
+        break;
+      }
+      const tier = decision.tier;
+      if (decision.tier === 'worker') workerUsed++;
+      else rescueUsed++;
+      const priorRound = row.rounds?.at(-1);
+      delete row.validation;
+      delete row.preservedEdits;
+      let parent: string | undefined;
+      let finalTree: { final: UnitProbe; treeSha: string } | undefined;
+      try {
+        parent = await git(['rev-parse', 'HEAD']);
+        const fullCheck = bindings.checkCommand(unit, worktree.path);
+        const related = (
+          config.source === 'static'
+            ? (command: CheckCommand, files: string[], args?: string[]) =>
+                staticRelatedCheckCommand(command, bindings.adapter, files, args)
+            : relatedCheckCommand
+        )(
+          fullCheck,
+          task.files.map((file) =>
+            relative(fullCheck.cwd ?? worktree.path, resolve(worktree.path, file)),
+          ),
+          config.relatedArgs,
         );
-        const deadline = startFixerDeadline(currentJobContext()?.signal, remainingWall);
-        const attempt: TaskAttempt = {
-          tier: 'worker',
-          attempt: 1,
-          invocation,
-          model: resolved.modelSpec,
-          wallMs: 0,
-          reason: invocation === 'edit' ? 'initial task' : 'related-check feedback',
+        const resolved = bindings.taskWorker?.(
+          task,
+          related,
+          decision.tier === 'rescue' ? bindings.taskEscalation?.rescueModel : undefined,
+        ) ?? {
+          driver: bindings.driver,
+          modelSpec: bindings.modelSpec,
         };
-        row.attempts.push(attempt);
-        try {
-          const worker = await resolved.driver.run(
-            {
-              prompt: text,
-              modelSpec: resolved.modelSpec,
-              workspace: { path: worktree.path },
-              budget: { ...bindings.budget, wallClockMs: remainingWall },
-              toolPolicy: {
-                allow:
-                  bindings.toolPolicy?.mode === 'none'
-                    ? []
-                    : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
-                        (tool) =>
-                          ['read', 'edit', 'run'].includes(tool) &&
-                          (tool !== 'run' || bindings.taskWorker !== undefined),
-                      ),
-                mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
-              },
-              sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
-              outputSchema: {
-                name: 'fix.task/v1',
-                schema: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    outcome: { enum: ['broken-test', 'code-bug', 'todo'] },
-                    summary: { type: 'string' },
-                    confidence: { type: 'number', minimum: 0, maximum: 1 },
-                  },
-                  required: ['outcome', 'summary', 'confidence'],
-                },
-              },
-            },
-            { signal: deadline.signal },
-          );
-          attempt.usage = worker.usage;
-          spentTokens +=
-            worker.usage.input +
-            worker.usage.output +
-            worker.usage.cacheRead +
-            worker.usage.cacheWrite +
-            (worker.usage.reasoning ?? 0);
-          attempt.stopReason = worker.stopReason;
-          currentJobContext()?.reportResult(worker);
+        const prompt = `${bindings.prompt(unit, worktree)}\nTier: ${decision.tier}; attempt: ${decision.attempt}; reason: ${decision.reason}\nPrevious attempt: ${JSON.stringify(priorRound ?? null)}\nTask: ${JSON.stringify(task)}\nRelated argv: ${JSON.stringify([related.command, ...related.args])}\nDo not stage or commit. Return outcome (broken-test, code-bug, todo), summary and confidence (0 to 1) as structured output.`;
+        const invoke = async (
+          invocation: TaskAttempt['invocation'],
+          text: string,
+        ): Promise<WorkerResult> => {
+          try {
+            if (bindings.cancelled?.()) throw new Error('enclosing job cancelled');
+            if (bindings.scanPrompt === undefined)
+              throw new Error('worker upload scanner is required');
+            await bindings.scanPrompt(text);
+          } catch {
+            row.outcome = 'escalated-to-human';
+            throw new Error('worker upload refused: missing, failed or positive denylist scan');
+          }
           if (bindings.cancelled?.()) {
             row.outcome = 'escalated-to-human';
             throw new Error('enclosing job cancelled');
           }
-          if (
-            deadline.expired() ||
-            (bindings.budget.maxTokens !== undefined && spentTokens >= bindings.budget.maxTokens) ||
-            fixerBudgetBreach(bindings.budget, worker) !== undefined ||
-            worker.stopReason === 'budget' ||
-            currentJobContext()?.signal.aborted
-          ) {
+          const start = Date.now();
+          const remainingWall = Math.min(
+            bindings.budget.wallClockMs ?? 1_200_000,
+            (config.wallMs ?? 3_600_000) - (start - unitStart),
+            bindings.taskRunBudget?.remainingWallMs() ?? Infinity,
+          );
+          const remainingTokens = Math.min(
+            bindings.budget.maxTokens === undefined
+              ? Infinity
+              : bindings.budget.maxTokens - spentTokens,
+            bindings.taskRunBudget?.remainingTokens() ?? Infinity,
+          );
+          if (remainingWall <= 0 || remainingTokens <= 0) {
             budgetStopped = true;
             throw new Error('token or wall budget exhausted');
           }
-          if (worker.stopReason !== 'complete')
-            throw new Error(`worker stopped: ${worker.stopReason}`);
-          return worker;
-        } finally {
-          attempt.wallMs = Date.now() - start;
-          deadline.dispose();
-        }
-      };
-      const first = await invoke('edit', prompt);
-      // Stage and classify BEFORE executing any check on worker-controlled bytes.
-      if ((await git(['rev-parse', 'HEAD'])) !== parent)
-        throw new Error('worker moved HEAD; unscanned self-commit');
-      await git(['add', '-A', '--', '.']);
-      const earlyPaths = stagedPathsOf(
-        await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
-      );
-      const earlyGate = classifyStagePaths(
-        earlyPaths,
-        bindings.stagePathAllowlist,
-        false,
-        config.protectTests ?? false,
-      );
-      if (earlyGate.kind !== 'clean') {
-        const verdict = earlyGate.kind === 'protected' ? 'needs-human' : 'fail';
-        row.validation = {
-          verdict,
-          gates: [{ gate: 'paths', verdict, wallMs: 0, detail: earlyGate.message }],
+          const deadline = startFixerDeadline(currentJobContext()?.signal, remainingWall);
+          const attempt: TaskAttempt = {
+            tier,
+            attempt: decision.attempt,
+            invocation,
+            model: resolved.modelSpec,
+            wallMs: 0,
+            reason: invocation === 'edit' ? decision.reason : 'related-check feedback',
+          };
+          row.attempts.push(attempt);
+          try {
+            const worker = await resolved.driver.run(
+              {
+                prompt: text,
+                modelSpec: resolved.modelSpec,
+                workspace: { path: worktree.path },
+                budget: {
+                  ...bindings.budget,
+                  ...(Number.isFinite(remainingTokens) ? { maxTokens: remainingTokens } : {}),
+                  wallClockMs: remainingWall,
+                },
+                toolPolicy: {
+                  allow:
+                    bindings.toolPolicy?.mode === 'none'
+                      ? []
+                      : (bindings.toolPolicy?.allow ?? ['read', 'edit', 'run']).filter(
+                          (tool) =>
+                            ['read', 'edit', 'run'].includes(tool) &&
+                            (tool !== 'run' || bindings.taskWorker !== undefined),
+                        ),
+                  mode: bindings.toolPolicy?.mode === 'none' ? 'none' : 'allowlist',
+                },
+                sandboxPolicy: bindings.sandboxPolicy ?? { level: 'workspace-write' },
+                outputSchema: {
+                  name: 'fix.task/v1',
+                  schema: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      outcome: { enum: ['broken-test', 'code-bug', 'todo'] },
+                      summary: { type: 'string' },
+                      confidence: { type: 'number', minimum: 0, maximum: 1 },
+                    },
+                    required: ['outcome', 'summary', 'confidence'],
+                  },
+                },
+              },
+              { signal: deadline.signal },
+            );
+            attempt.usage = worker.usage;
+            if (worker.costUSD !== undefined) attempt.costUSD = worker.costUSD;
+            if (worker.costBasis !== undefined) attempt.costBasis = worker.costBasis;
+            bindings.taskRunBudget?.reportResult(worker);
+            spentTokens +=
+              worker.usage.input +
+              worker.usage.output +
+              worker.usage.cacheRead +
+              worker.usage.cacheWrite +
+              (worker.usage.reasoning ?? 0);
+            attempt.stopReason = worker.stopReason;
+            currentJobContext()?.reportResult(worker);
+            if (bindings.cancelled?.()) {
+              row.outcome = 'escalated-to-human';
+              throw new Error('enclosing job cancelled');
+            }
+            if (
+              deadline.expired() ||
+              (bindings.taskRunBudget?.remainingTokens() ?? Infinity) <= 0 ||
+              (bindings.taskRunBudget?.remainingWallMs() ?? Infinity) <= 0 ||
+              (bindings.budget.maxTokens !== undefined &&
+                spentTokens >= bindings.budget.maxTokens) ||
+              fixerBudgetBreach(bindings.budget, worker) !== undefined ||
+              worker.stopReason === 'budget' ||
+              currentJobContext()?.signal.aborted
+            ) {
+              budgetStopped = true;
+              throw new Error('token or wall budget exhausted');
+            }
+            if (worker.stopReason !== 'complete')
+              throw new Error(`worker stopped: ${worker.stopReason}`);
+            return worker;
+          } finally {
+            attempt.wallMs = Date.now() - start;
+            deadline.dispose();
+          }
         };
-        throw new Error(earlyGate.message);
-      }
-      const feedback = await check(related);
-      const second = await invoke(
-        'feedback',
-        `${prompt}\nPrior output: ${JSON.stringify(first.structuredOutput)}\nRelated check: ${JSON.stringify(feedback)}\nUse this feedback to finish the task.`,
-      );
-      if ((await git(['rev-parse', 'HEAD'])) !== parent)
-        throw new Error('worker moved HEAD; unscanned self-commit');
-      await git(['add', '-A', '--', '.']);
-      const paths = stagedPathsOf(
-        await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
-      );
-      // Refuse protected evidence before executing checks from a mutable tree.
-      const pathGate = classifyStagePaths(
-        paths,
-        bindings.stagePathAllowlist,
-        bindings.proposeOnly,
-        config.protectTests ?? false,
-      );
-      if (pathGate.kind !== 'clean') {
-        row.validation = {
-          verdict: pathGate.kind === 'scope' || pathGate.kind === 'infra' ? 'fail' : 'needs-human',
-          gates: [
-            {
-              gate: 'paths',
-              verdict:
-                pathGate.kind === 'scope' || pathGate.kind === 'infra' ? 'fail' : 'needs-human',
-              wallMs: 0,
-              detail: pathGate.message ?? 'path refusal',
-            },
-          ],
+        const first = await invoke('edit', prompt);
+        // Stage and classify BEFORE executing any check on worker-controlled bytes.
+        if ((await git(['rev-parse', 'HEAD'])) !== parent)
+          throw new Error('worker moved HEAD; unscanned self-commit');
+        await git(['add', '-A', '--', '.']);
+        const earlyPaths = stagedPathsOf(
+          await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
+        );
+        const earlyGate = classifyStagePaths(
+          earlyPaths,
+          bindings.stagePathAllowlist,
+          false,
+          config.protectTests ?? false,
+        );
+        if (earlyGate.kind !== 'clean') {
+          const verdict = earlyGate.kind === 'protected' ? 'needs-human' : 'fail';
+          row.validation = {
+            verdict,
+            gates: [{ gate: 'paths', verdict, wallMs: 0, detail: earlyGate.message }],
+          };
+          throw new Error(earlyGate.message);
+        }
+        const feedback = await check(related);
+        const second = await invoke(
+          'feedback',
+          `${prompt}\nPrior output: ${JSON.stringify(first.structuredOutput)}\nRelated check: ${JSON.stringify(feedback)}\nUse this feedback to finish the task.`,
+        );
+        if ((await git(['rev-parse', 'HEAD'])) !== parent)
+          throw new Error('worker moved HEAD; unscanned self-commit');
+        await git(['add', '-A', '--', '.']);
+        const paths = stagedPathsOf(
+          await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--name-status', '-z']),
+        );
+        // Refuse protected evidence before executing checks from a mutable tree.
+        const pathGate = classifyStagePaths(
+          paths,
+          bindings.stagePathAllowlist,
+          bindings.proposeOnly,
+          config.protectTests ?? false,
+        );
+        if (pathGate.kind !== 'clean') {
+          row.validation = {
+            verdict:
+              pathGate.kind === 'scope' || pathGate.kind === 'infra' ? 'fail' : 'needs-human',
+            gates: [
+              {
+                gate: 'paths',
+                verdict:
+                  pathGate.kind === 'scope' || pathGate.kind === 'infra' ? 'fail' : 'needs-human',
+                wallMs: 0,
+                detail: pathGate.message ?? 'path refusal',
+              },
+            ],
+          };
+          if (bindings.proposeOnly) {
+            row.outcome = 'escalated-to-human';
+            row.reason = pathGate.message ?? 'propose-only';
+            row.preservedEdits = await preserveTaskEdits(git, branch);
+            continue taskLoop;
+          }
+          throw new Error(pathGate.message ?? 'path refusal');
+        }
+        const output = second.structuredOutput as
+          | { outcome?: unknown; summary?: unknown; confidence?: unknown }
+          | undefined;
+        if (
+          !output ||
+          !['broken-test', 'code-bug', 'todo'].includes(String(output.outcome)) ||
+          typeof output.summary !== 'string' ||
+          typeof output.confidence !== 'number' ||
+          !Number.isFinite(output.confidence) ||
+          output.confidence < 0 ||
+          output.confidence > 1
+        )
+          throw new Error('worker returned no valid outcome');
+        const subject =
+          output.outcome === 'broken-test'
+            ? 'fix(test)'
+            : output.outcome === 'todo'
+              ? 'chore(test)'
+              : `fix(${unit.package})`;
+        const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
+        const identical =
+          config.source === 'static' && JSON.stringify(related) === JSON.stringify(fullCheck);
+        const broader = async () => {
+          if (parent === undefined) throw new Error('missing task parent');
+          const remainingWall = Math.min(
+            (config.wallMs ?? 3_600_000) - (Date.now() - unitStart),
+            bindings.taskRunBudget?.remainingWallMs() ?? Infinity,
+          );
+          if (remainingWall <= 0) {
+            budgetStopped = true;
+            throw new Error('unit wall budget exhausted');
+          }
+          finalTree = await effects.broader(parent, remainingWall);
+          return finalTree.final.failureSet;
         };
-        if (bindings.proposeOnly) {
+        const validation = await validateFix({
+          baseline: accepted.failureSet,
+          related: identical ? broader : () => check(related),
+          broader,
+          ...(config.source !== 'static'
+            ? {}
+            : {
+                relatedAccepts: (set: FailureSet) =>
+                  set.exitCode !== null &&
+                  (set.exitCode === 0 || set.failures.length > 0) &&
+                  !taskHasFailures(task, set, 'static'),
+                reuseRelatedForBroader: identical,
+              }),
+          stagedPaths: paths,
+          diff: await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']),
+          message,
+          requireProgress: true,
+          protectTests: config.protectTests ?? false,
+          ...(bindings.stagePathAllowlist === undefined
+            ? {}
+            : { allowlist: bindings.stagePathAllowlist }),
+        });
+        row.validation = validation;
+        if (validation.verdict !== 'pass' || finalTree === undefined)
+          throw new Error('validation refused task');
+        if (bindings.cancelled?.()) {
           row.outcome = 'escalated-to-human';
-          row.reason = pathGate.message ?? 'propose-only';
-          row.preservedEdits = await preserveTaskEdits(git, branch);
-          continue;
+          throw new Error('enclosing job cancelled');
         }
-        throw new Error(pathGate.message ?? 'path refusal');
-      }
-      const output = second.structuredOutput as
-        | { outcome?: unknown; summary?: unknown; confidence?: unknown }
-        | undefined;
-      if (
-        !output ||
-        !['broken-test', 'code-bug', 'todo'].includes(String(output.outcome)) ||
-        typeof output.summary !== 'string' ||
-        typeof output.confidence !== 'number' ||
-        !Number.isFinite(output.confidence) ||
-        output.confidence < 0 ||
-        output.confidence > 1
-      )
-        throw new Error('worker returned no valid outcome');
-      const subject =
-        output.outcome === 'broken-test'
-          ? 'fix(test)'
-          : output.outcome === 'todo'
-            ? 'chore(test)'
-            : `fix(${unit.package})`;
-      const message = `${subject}: ${output.outcome === 'todo' ? 'todo ' : ''}${output.summary.replace(/[\r\n]/g, ' ')}\n\nConfidence: ${String(output.confidence)}\nTested: configured related and broader checks\nOutcome: ${String(output.outcome)}`;
-      const identical =
-        config.source === 'static' && JSON.stringify(related) === JSON.stringify(fullCheck);
-      const broader = async () => {
-        if (parent === undefined) throw new Error('missing task parent');
-        const remainingWall = (config.wallMs ?? 3_600_000) - (Date.now() - unitStart);
-        if (remainingWall <= 0) {
-          budgetStopped = true;
-          throw new Error('unit wall budget exhausted');
-        }
-        finalTree = await effects.broader(parent, remainingWall);
-        return finalTree.final.failureSet;
-      };
-      const validation = await validateFix({
-        baseline: accepted.failureSet,
-        related: identical ? broader : () => check(related),
-        broader,
-        ...(config.source !== 'static'
-          ? {}
-          : {
-              relatedAccepts: (set: FailureSet) =>
-                set.exitCode !== null &&
-                (set.exitCode === 0 || set.failures.length > 0) &&
-                !taskHasFailures(task, set, 'static'),
-              reuseRelatedForBroader: identical,
-            }),
-        stagedPaths: paths,
-        diff: await git(['diff', '--cached', ...SWEEP_DIFF_FLAGS, '--']),
-        message,
-        requireProgress: true,
-        protectTests: config.protectTests ?? false,
-        ...(bindings.stagePathAllowlist === undefined
-          ? {}
-          : { allowlist: bindings.stagePathAllowlist }),
-      });
-      row.validation = validation;
-      if (validation.verdict !== 'pass' || finalTree === undefined)
-        throw new Error('validation refused task');
-      if (bindings.cancelled?.()) {
-        row.outcome = 'escalated-to-human';
-        throw new Error('enclosing job cancelled');
-      }
-      const sha = await effects.commit(message, finalTree.treeSha);
-      await effects.verify(sha, parent);
-      row.commits.push(sha);
-      row.outcome = 'fixed';
-      lastSha = sha;
-      accepted = finalTree.final;
-    } catch (error) {
-      if (!bindings.cancelled?.() && Date.now() - unitStart >= (config.wallMs ?? 3_600_000))
-        budgetStopped = true;
-      row.reason = String(error);
-      row.outcome =
-        row.outcome === 'escalated-to-human' || row.validation?.verdict === 'needs-human'
-          ? 'escalated-to-human'
-          : 'unfixed';
-      try {
-        if (parent === undefined || (await git(['rev-parse', 'HEAD'])) !== parent) {
-          row.outcome = 'escalated-to-human';
-          row.reason += '; HEAD changed; remaining tasks stopped for human review';
-          break;
-        }
-        if (await git(['status', '--porcelain'])) {
-          row.preservedEdits = await preserveTaskEdits(git, branch);
-        }
-      } catch (cleanupError) {
-        indeterminate = `failed-task evidence cleanup failed: ${String(cleanupError)}`;
-        row.reason += `; ${indeterminate}`;
-        row.outcome = 'escalated-to-human';
+        const sha = await effects.commit(message, finalTree.treeSha);
+        await effects.verify(sha, parent);
+        row.commits.push(sha);
+        row.outcome = 'fixed';
+        delete row.reason;
+        lastSha = sha;
+        bindings.taskEscalation?.verified(accepted.failureSet, finalTree.final.failureSet);
+        accepted = finalTree.final;
+        (row.rounds ??= []).push({
+          tier,
+          attempt: decision.attempt,
+          reason: decision.reason,
+          validation,
+        });
         break;
+      } catch (error) {
+        if (!bindings.cancelled?.() && Date.now() - unitStart >= (config.wallMs ?? 3_600_000))
+          budgetStopped = true;
+        row.reason = String(error);
+        row.outcome =
+          row.outcome === 'escalated-to-human' || row.validation?.verdict === 'needs-human'
+            ? 'escalated-to-human'
+            : 'unfixed';
+        try {
+          if (parent === undefined || (await git(['rev-parse', 'HEAD'])) !== parent) {
+            row.outcome = 'escalated-to-human';
+            row.reason += '; HEAD changed; remaining tasks stopped for human review';
+            break taskLoop;
+          }
+          if (await git(['status', '--porcelain'])) {
+            row.preservedEdits = await preserveTaskEdits(git, branch);
+          }
+        } catch (cleanupError) {
+          indeterminate = `failed-task evidence cleanup failed: ${String(cleanupError)}`;
+          row.reason += `; ${indeterminate}`;
+          row.outcome = 'escalated-to-human';
+          break taskLoop;
+        }
+        (row.rounds ??= []).push({
+          tier,
+          attempt: decision.attempt,
+          reason: row.reason ?? 'attempt failed',
+          ...(row.validation === undefined ? {} : { validation: row.validation }),
+          ...(row.preservedEdits === undefined ? {} : { preservedEdits: row.preservedEdits }),
+        });
+        regression =
+          row.validation?.gates.some(
+            (gate) => gate.gate === 'broader' && gate.verdict === 'fail',
+          ) ?? false;
+        const unsafe = row.validation?.gates.some(
+          (gate) => ['paths', 'tamper', 'commit'].includes(gate.gate) && gate.verdict !== 'pass',
+        );
+        if (unsafe && bindings.taskEscalation) row.outcome = 'escalated-to-human';
+        if (
+          !bindings.taskEscalation ||
+          row.outcome === 'escalated-to-human' ||
+          unsafe ||
+          budgetStopped
+        )
+          break;
       }
     }
   }
@@ -483,6 +604,7 @@ async function runTaskLoopInner(
 export type TaskWorker = (
   task: FixTask,
   related: CheckCommand,
+  modelSpec?: ModelSpec,
 ) => { driver: Driver; modelSpec: ModelSpec };
 
 /** No refs/stash mutation: sibling worktrees retain independent evidence refs. */

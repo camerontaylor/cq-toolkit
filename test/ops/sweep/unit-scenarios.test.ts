@@ -981,3 +981,73 @@ test.each(['/tmp/outside', '../outside', 'nested/../../outside', 'C:\\outside'])
     expect(resolve).not.toHaveBeenCalled();
   },
 );
+
+test.each(['tokens', 'wall'] as const)(
+  'shared run %s exhaustion refuses a new provider dispatch',
+  async (cap) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    let calls = 0;
+    try {
+      const result = await runUnit(world, {
+        taskLoop: {},
+        taskRunBudget: {
+          remainingTokens: () => (cap === 'tokens' ? 0 : 100),
+          remainingWallMs: () => (cap === 'wall' ? 0 : 60_000),
+          reportResult: () => {
+            throw new Error('must not report an undispatched call');
+          },
+        },
+        driver: {
+          run: async () => {
+            calls++;
+            throw new Error('must not dispatch');
+          },
+        },
+      });
+      expect(calls).toBe(0);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.budgetStopped).toBe(true);
+        expect(result.value.tasks?.[0]?.attempts).toEqual([]);
+        expect(result.value.tasks?.[0]?.commits).toEqual([]);
+      }
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  },
+);
+test('task invocation cost preserves its basis and shared accounting observes both stateless calls', async () => {
+  const world = await makeWorld([{ failing: true }, { failing: false }]);
+  const accounted: WorkerResult[] = [];
+  try {
+    const result = await runUnit(world, {
+      taskLoop: {},
+      taskRunBudget: {
+        remainingTokens: () => 100,
+        remainingWallMs: () => 60_000,
+        reportResult: (worker) => accounted.push(worker),
+      },
+      driver: {
+        run: async () => ({
+          stopReason: 'complete',
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+          costUSD: 0.002,
+          costBasis: 'modeled',
+          denials: [],
+          structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+        }),
+      },
+    });
+    expect(result.status).toBe('ok');
+    expect(accounted).toHaveLength(2);
+    if (result.status === 'ok') {
+      expect(result.value.tasks?.[0]?.attempts.map((a) => [a.costUSD, a.costBasis])).toEqual([
+        [0.002, 'modeled'],
+        [0.002, 'modeled'],
+      ]);
+      expect(result.value.tasks?.[0]?.rounds?.[0]?.validation?.verdict).toBe('pass');
+    }
+  } finally {
+    await rm(world.root, { recursive: true, force: true });
+  }
+});
