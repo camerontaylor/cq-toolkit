@@ -140,12 +140,16 @@ Observed CLI exit: **3**, `needs-human` (token budget exhausted). `fixesPerRun`:
 **1**. Verified commit `8f78ca91e82cfe170ccc3be35a04830f8d2cb26b` closes the genuine
 Codex finding `PRRT_kwDOUY73E86v3_v3` in `src/driver/factory.ts`: unspecified request
 retention now falls back to the configured `sessionLogs.retention`. The engine
-committed it after related and broader checks and published it to PR #466 (remote
-head `8f78ca91`). Its thread reply was withheld because sibling rows failed.
+committed it after its related and broader checks (this repository configures tsc
+only). The inner review loop withheld publication because a sibling row failed. After
+the budget stop, `review.address`'s exit publication (`publishOnExit`, exact verified
+range) pushed it to PR #466: remote head `8f78ca91`, 12 s after the loop finished. The
+thread reply and resolve stayed withheld, and the report's finding row still reads
+open; that inconsistency is tracked in #469.
 
 Reported usage: input **686278**, output **159796**, cache read **4179705**; wall
 **2367799 ms**; 16 attempts. Cache reads count toward the run token budget and
-were most of the 5000000 total, so six later findings stopped at the budget. The
+were most of the 5000000 total, so seven later fix jobs stopped at the budget. The
 run budget is therefore raised to **25000000** tokens; it remains a runaway guard.
 Two findings were deferred as multi-file work, two were cancelled with the run, and
 the open human-decision thread stays open.
