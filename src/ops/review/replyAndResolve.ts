@@ -155,6 +155,8 @@ export interface ReplyAndResolveOpts {
   dispatchLog: DispatchLog;
   /** The injected clock for DispatchRecord.at — never Date.now. */
   nowMs: number;
+  /** Stop starting mutations after cancellation; always record mutations already landed. */
+  signal?: AbortSignal;
 }
 
 /** The dispatch outcome. `posted` non-empty always implies `pushed` true. */
@@ -311,6 +313,7 @@ export async function replyAndResolve(
   // caller's only diagnostic.
   if (opts.push != null) {
     try {
+      if (opts.signal?.aborted) throw new Error('parent cancelled; push withheld');
       const pushResult = await opts.push.run(opts.push.args);
       if (pushResult.code !== 0) {
         return {
@@ -358,6 +361,7 @@ export async function replyAndResolve(
    * loop stays total and the push-failure rule covers spawn-level failures. */
   const runGh = async (args: string[]): Promise<GhResult> => {
     try {
+      if (opts.signal?.aborted) throw new Error('parent cancelled; mutation withheld');
       return await opts.run(args);
     } catch (err) {
       return { code: 1, stdout: '', stderr: String(err) };

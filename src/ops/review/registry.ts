@@ -1,4 +1,4 @@
-// Review family registry. Companion modules: './findings.js' and './agentReviewer.js'.
+// Review family registry. Companion modules: './findings.js' and './agentReviewer.js' and './addressWorker.js'.
 // It also carries the S5 portable findings producer alongside review-loop ops.
 // Existing E4 slices 1 + 1b entries
 // (`review.fixItem`, `review.fetchReviewState`, `review.classifyThreads`,
@@ -63,13 +63,15 @@ import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { messageOf } from '../../shared/messageOf.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { ClassifiedItem, Classification } from './classifyThreads.js';
-import type { FixableReviewItem, FixReviewItemInput } from './fixReviewItem.js';
+import type { FixableReviewItem, ReviewFixInput } from './fixReviewItem.js';
 import type { FetchedReviewState } from '../../adapters/forge-github/fetchReviewState.js';
 import type { PlanBatchConfig } from './planReviewBatch.js';
 import type { ReviewAction } from './replyAndResolve.js';
 import type { RestComment, ReviewSummary, ReviewThread, ThreadComment } from './threads.js';
 import type { PrSnapshot } from '../../adapters/forge-github/snapshotPrState.js';
 import type { ReviewRunInput } from './run.js';
+import type { ReviewAddressInput } from './address.js';
+import { FindingSchema } from './findings.js';
 
 // ---------------------------------------------------------------------------
 // Adapter helpers — the one fold every library op rides (module doc)
@@ -399,6 +401,12 @@ export const VerifyReviewOutcomeOpInputSchema = z
 export const ReviewRunInputSchema: z.ZodType<ReviewRunInput> = z
   .object({
     repoRoot: z.string().min(1),
+    maxTokens: z.number().int().positive().exactOptional(),
+    wallMs: z.number().int().positive().exactOptional(),
+    reviewers: z
+      .array(z.enum(['agent', 'coderabbit']))
+      .min(1)
+      .exactOptional(),
     uncommitted: z.boolean().exactOptional(),
     target: z.string().min(1).exactOptional(),
     base: z
@@ -465,11 +473,14 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
  * boundary is earlier and clearer). Strict throughout: an unknown key (a
  * typo'd field) must fail loudly, never be silently stripped.
  */
-export const FixReviewItemInputSchema: z.ZodType<FixReviewItemInput> = z
+export const FixReviewItemInputSchema: z.ZodType<ReviewFixInput> = z
   .object({
     repo: z.string().min(1).exactOptional(),
-    pr: z.number().int().positive(),
-    item: FixableReviewItemSchema,
+    pr: z.number().int().positive().exactOptional(),
+    item: z.union([
+      FixableReviewItemSchema,
+      z.object({ kind: z.literal('finding'), finding: FindingSchema }).strict(),
+    ]),
     worktree: z.object({ path: z.string().min(1), branch: z.string().min(1) }).strict(),
     driver: z.object({ model: z.string().min(1), provider: z.string().min(1) }).strict(),
     harness: HarnessConfigSchema.exactOptional(),
@@ -514,7 +525,31 @@ export const FixReviewItemInputSchema: z.ZodType<FixReviewItemInput> = z
 // ---------------------------------------------------------------------------
 
 /** Review family op registry (E4: the full fetch → classify → plan → fix → reply/resolve → verify loop). */
+export const ReviewAddressInputSchema: z.ZodType<ReviewAddressInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    source: z.string().regex(/^(local|pr:[1-9]\d*)$/),
+    record: z.string().min(1).exactOptional(),
+    target: z.string().min(1).exactOptional(),
+    base: z.string().min(1).exactOptional(),
+    maxTokens: z.number().int().positive().exactOptional(),
+    wallMs: z.number().int().positive().exactOptional(),
+    rounds: z.number().int().positive().exactOptional(),
+    concurrency: z.number().int().positive().exactOptional(),
+    journalDir: z.string().min(1).exactOptional(),
+    push: z.boolean().exactOptional(),
+  })
+  .strict();
+
 export const registry: OpRegistryEntry[] = [
+  {
+    name: 'review.address',
+    inputSchema: ReviewAddressInputSchema,
+    importer: async () => {
+      const { makeReviewAddress } = await import('./address.js');
+      return makeReviewAddress() as Op<unknown, unknown>;
+    },
+  },
   {
     name: 'review.run',
     inputSchema: ReviewRunInputSchema,

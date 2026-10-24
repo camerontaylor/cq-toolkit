@@ -49,7 +49,7 @@ const GATE_OUTPUT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 export type RunCommand = (
   command: string,
   args: readonly string[],
-  opts: { timeoutMs: number; cwd?: string },
+  opts: { timeoutMs: number; cwd?: string; signal?: AbortSignal },
 ) => Promise<CommandResult>;
 
 /** The injected effects seam of the dev family. */
@@ -63,9 +63,10 @@ export interface DevEffects {
   /**
    * Hold the HOST review lock across `fn` — the scarce CLI-review quota is
    * serialized host-wide. A caller whose acquire retries run out REJECTS
-   * (never runs unlocked).
+   * (never runs unlocked). An optional signal stops queued admission;
+   * acquired sections still release their lock before settling.
    */
-  withHostLock<T>(fn: () => T | Promise<T>): Promise<T>;
+  withHostLock<T>(fn: () => T | Promise<T>, signal?: AbortSignal): Promise<T>;
   /**
    * Save one review's raw log OUTSIDE the repository; resolves with the
    * absolute log path recorded in the cycle.
@@ -171,7 +172,16 @@ function ensurePrivateLogDir(dir: string): void {
 export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
   const runCommand: RunCommand = (command, args, opts) =>
     new Promise<CommandResult>((resolvePromise, reject) => {
-      execFile(
+      if (opts.signal?.aborted) {
+        resolvePromise({
+          exitCode: null,
+          stdout: '',
+          stderr: `command cancelled before dispatch: ${faultText(opts.signal.reason)}`,
+          timedOut: false,
+        });
+        return;
+      }
+      const child = execFile(
         command,
         command === 'git' ? [...GIT_HARDEN, ...args] : [...args],
         {
@@ -179,6 +189,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
           env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
           maxBuffer: GATE_OUTPUT_MAX_BUFFER_BYTES,
           timeout: opts.timeoutMs,
+          ...(opts.signal ? { signal: opts.signal } : {}),
           killSignal: 'SIGKILL',
         },
         (error, stdout, stderr) => {
@@ -189,16 +200,19 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
           const code = (error as { code?: unknown }).code;
           if (
             !error.message.includes('maxBuffer') &&
-            (typeof code === 'number' || error.killed === true)
+            (typeof code === 'number' || error.killed === true || code === 'ABORT_ERR')
           ) {
             // The command RAN and exited non-zero (or was killed on
             // timeout): a verdict the caller classifies, not a fault.
-            resolvePromise({
+            const settled = {
               exitCode: typeof code === 'number' ? code : null,
               stdout,
               stderr,
-              timedOut: error.killed === true,
-            });
+              timedOut: error.killed === true && code !== 'ABORT_ERR',
+            };
+            if (code === 'ABORT_ERR' && child.exitCode === null && child.signalCode === null)
+              child.once('close', () => resolvePromise(settled));
+            else resolvePromise(settled);
             return;
           }
           reject(mapSpawnFault(command, error, opts.timeoutMs));
@@ -217,7 +231,7 @@ export function makeSubprocessDevEffects(repoRoot: string): DevEffects {
       load1: loadavg()[0] ?? 0,
       at: new Date().toISOString(),
     }),
-    withHostLock: (fn) => mutex.withLock(fn),
+    withHostLock: (fn, signal) => mutex.withLock(fn, signal),
     writeReviewLog: async (branch, cycleStamp, content) => {
       // Owner-only dir and file: the log carries raw diff content.
       const dir = reviewLogDir();

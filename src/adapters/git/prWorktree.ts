@@ -260,6 +260,25 @@ export interface PrWorktreeOpts {
   nowMs: number;
   /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
   worktreeRoot?: string;
+  /**
+   * Invoked only when THIS call itself created the per-PR worktree (never on
+   * reuse/restore), after the registry records it. The engine-verified
+   * creation signal lets callers rotate per-checkout state that describes
+   * the previous checkout instance; a callback failure fails the resolution.
+   */
+  onCreated?: (info: { path: string; branch: string; head: string }) => Promise<void> | void;
+  /**
+   * Invoked before the non-forced removal of a stale checkout at a new head,
+   * with its verified branch/HEAD. Returning true means the caller has
+   * cleared exactly the engine-owned obstructions it can attest (and nothing
+   * else), so the removal may retry once; false or a throw keeps the strict
+   * refusal. The resolver itself never deletes worktree content.
+   */
+  onStaleRefresh?: (info: {
+    path: string;
+    branch: string;
+    head: string;
+  }) => Promise<boolean> | boolean;
 }
 
 /** Branch-name characters allowed to survive into a directory name. */
@@ -595,7 +614,20 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
         );
       }
       const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
-      const remove = await opts.run(removeArgs);
+      let remove = await opts.run(removeArgs);
+      if (remove.code !== 0 && opts.onStaleRefresh) {
+        // One caller-attested cleanup chance before the strict refusal: the
+        // callback decides, the resolver still verifies with a NON-forced
+        // remove — never --force, never a widened deletable set. The info
+        // names the refresh context this resolution verified: the fetched
+        // head and the review branch the replacement checkout will sit at.
+        const cleared = await opts.onStaleRefresh({
+          path: candidate.path,
+          branch: reviewBranch,
+          head: expectedSha,
+        });
+        if (cleared === true) remove = await opts.run(removeArgs);
+      }
       if (remove.code !== 0) {
         throw gitFail(
           `worktree remove ${candidate.path} failed (a dirty stale tree cannot be refreshed away — resolve it by hand)`,
@@ -641,6 +673,7 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
     // (the update is a per-key load-merge-save: concurrent resolves for other
     // PRs never lose their entries to this write).
     await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
+    await opts.onCreated?.({ path: wtPath, branch: reviewBranch, head: expectedSha });
     return { path: wtPath, reused: false, branch: reviewBranch, foreign };
   });
 }
