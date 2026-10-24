@@ -147,7 +147,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     const result = await deps.git(['-C', cwd, ...args]);
     if (result.code !== 0)
       throw new Error(`git ${args[0]} refused: ${result.stderr.slice(0, 500)}`);
-    return args.includes('-z') ? result.stdout : result.stdout.trim();
+    // Content is scanned with path-scoped, whitespace-sensitive rules. Only
+    // metadata outputs (object IDs, sizes and command receipts) are normalized.
+    return args.includes('-z') || args[0] === 'show' || args[0] === 'diff'
+      ? result.stdout
+      : result.stdout.trim();
   };
   const stop = () => {
     if (fatal) throw new AddressRefusal(fatal, true);

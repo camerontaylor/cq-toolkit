@@ -8,7 +8,7 @@ import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaul
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { OpInvocation } from '../../../src/driver/types.js';
-import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
+import { makeRepoDiffScanner, type DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
@@ -352,6 +352,68 @@ describe('review.address failed-attempt branches', () => {
       await f.cleanup();
     }
   });
+  test.each(['clean', 'tainted'] as const)(
+    '%s immutable leaf whitespace reaches the configured path policy before rescue',
+    async (mode) => {
+      const leaf = mode === 'tainted' ? ' PRIVATE\n' : ' PUBLIC\n';
+      const scans: Array<Array<{ text: string; path?: string }>> = [];
+      let configured: DiffSecretScanner;
+      let rescueCalls = 0;
+      const f = await fixture(
+        async (input) => {
+          if (input.modelSpec.model === 'worker') {
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), leaf);
+            throw new Error('retain whitespace');
+          }
+          rescueCalls++;
+          if (input.outputSchema?.name === 'review.address.closure/v1')
+            return { closed: true, reason: 'rescued' };
+          if (!input.prompt.startsWith('related-check feedback'))
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+          return { disposition: 'fixed', reason: 'rescued', evidence: [] };
+        },
+        '',
+        {
+          rescueBase: 1,
+          providerRequest: true,
+          configure: (config) => {
+            config.review!.denylistPatternsFile = 'patterns.yml';
+          },
+          scanner: async (components) => {
+            if (components.some((part) => part.path === '.git/cq-failed-commit-message'))
+              scans.push([...components]);
+            return configured(components);
+          },
+        },
+      );
+      try {
+        await f.repo.write(
+          'patterns.yml',
+          "rules:\n  - id: private-leaf\n    description: anchored whitespace\n    regex: '^ PRIVATE'\n    path: '^src/a\\.ts$'\n    sample: ' PRIVATE'\nclean_probes:\n  - ' PUBLIC'\n",
+        );
+        f.repo.commitAll('configured leaf policy');
+        configured = makeRepoDiffScanner(f.repo.root, 'patterns.yml');
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.finding.status, result.reason).toBe(
+          mode === 'tainted' ? 'deferred' : 'fixed',
+        );
+        expect(rescueCalls).toBe(mode === 'tainted' ? 0 : 3);
+        expect(scans).toHaveLength(mode === 'tainted' ? 1 : 4);
+        for (const scan of scans) {
+          expect(
+            scan
+              .filter((part) => part.path === 'src/a.ts')
+              .slice(-2)
+              .map((part) => part.text),
+          ).toEqual(['BAD\n', leaf]);
+        }
+        expect(f.repo.git('show', `${result.failedAttempts![0]!.sha}:src/a.ts`)).toBe(leaf);
+        if (mode === 'tainted') expect(result.reason).toMatch(/upload/);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test.each(['clean', 'positive', 'feedback-positive', 'missing', 'fault'] as const)(
     '%s immutable feedback is scanned before rescue edit and feedback',
     async (mode) => {
@@ -400,8 +462,8 @@ describe('review.address failed-attempt branches', () => {
         expect(result.failedAttempts!.length).toBeGreaterThan(0);
         expect(scans.length).toBeGreaterThan(0);
         for (const scan of scans) {
-          expect(scan.some((part) => part.text === 'BAD')).toBe(true);
-          expect(scan.some((part) => part.text === 'RETAINED PARTIAL')).toBe(true);
+          expect(scan.some((part) => part.text === 'BAD\n')).toBe(true);
+          expect(scan.some((part) => part.text === 'RETAINED PARTIAL\n')).toBe(true);
           expect(
             scan.some(
               (part) =>

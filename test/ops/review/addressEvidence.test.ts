@@ -18,7 +18,9 @@ describe('review.address immutable failure feedback guards', () => {
       const git = async (args: string[]) => {
         const result = await run(args);
         if (result.code !== 0) throw new Error(result.stderr);
-        return args.includes('-z') ? result.stdout : result.stdout.trim();
+        return args.includes('-z') || args[0] === 'show' || args[0] === 'diff'
+          ? result.stdout
+          : result.stdout.trim();
       };
       try {
         const parent = await git(['rev-parse', 'HEAD']);

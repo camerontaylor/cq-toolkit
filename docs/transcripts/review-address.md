@@ -302,3 +302,41 @@ The two final batches cover 371 distinct tests (the two process-inventory
 controls appear in both). Static exited 0 with zero type errors against baseline
 zero; formatting and Knip exited 0; generated-doc verification exited 0 with
 54 op docs current. No baseline or policy changes.
+
+## Immutable rescue leaf whitespace correction (#455)
+
+Independent source review of `282f48b6` identified loss of leading/trailing
+whitespace in the production Git wrapper before immutable failed-attempt leaves
+reached the upload scanner. The real repository scanner with path
+`^src/a\.ts$` and regex `^ PRIVATE` missed ` PRIVATE\n` after trimming;
+the rescue driver ran and incorrectly returned fixed. A clean control observed
+`BAD`/`PUBLIC` instead of the original `BAD\n`/` PUBLIC\n`. The fixture
+policy is committed before admission so the unknown-file guard does not mask
+this boundary. Both controls fail on unchanged source:
+
+```text
+test:narrow result="fail" exit=1 files=2 projects="pure,process" tests="72/74" failed=2 skipped=0 wait="0.0s" duration="41.0s" nice=5 load="3.3" uptime="544210s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/addressWorker.test.ts"
+```
+
+The Git wrapper now retains raw `show` and diff output, including leading
+whitespace and trailing newlines; object IDs, sizes and command receipts remain
+normalized. Existing immutable-feedback expectations now require newlines. The
+clean production-worker control asserts both exact leaf texts at all four
+rescue edit/feedback invocation/provider scans; the positive policy control
+refuses before any rescue driver call. Existing binary, cap, provenance,
+parentage and path refusal controls remain:
+
+```text
+test:narrow result="pass" exit=0 files=3 projects="pure,process" tests="81/81" failed=0 skipped=0 wait="0.0s" duration="49.1s" nice=5 load="4.1" uptime="544272s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/addressEvidence.test.ts,test/ops/review/addressWorker.test.ts"
+```
+
+Static exited 0 (zero type errors, baseline zero), formatting exited 0, and
+Knip exited 0. No baseline, shared API or policy change. This source correction
+requires independent exact-head review and CI; live-positive acceptance and
+#438 remain separate. No CodeRabbit or live run was repeated.
+
+PR adapter/local report regression checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=5 projects="pure,process" tests="84/84" failed=0 skipped=0 wait="0.0s" duration="37.1s" nice=5 load="4.1" uptime="544345s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts"
+```

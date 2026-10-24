@@ -71,6 +71,8 @@ explicit `review.denylistPatternsFile` adds repository rules. Missing or
 failed scanners refuse uploads. Before rescue, the owned file must be clean.
 The prior immutable parent-to-attempt patch, both file contents, commit metadata
 and report provenance are scanned before both the edit and feedback requests.
+Immutable file contents retain leading whitespace and trailing newlines so
+path-scoped repository rules see the original text.
 Moved branch tips, unexpected parentage, unowned paths, oversized or binary
 feedback refuse rescue.
 
