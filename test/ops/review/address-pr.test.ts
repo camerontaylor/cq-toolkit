@@ -23,6 +23,7 @@ async function world(
     fileless?: 'first' | 'last';
     bot?: boolean;
     discussion?: boolean;
+    reviewOutcome?: 'failed' | 'wrong-head' | 'open-finding';
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
@@ -299,16 +300,35 @@ async function world(
       escalation: { workerAttempts: 1, rescueBase: 0 },
     },
     disposition: async () => ({ status: 'ok', value: {} }),
-    review: async () => ({
-      status: 'ok',
-      value: {
-        schemaVersion: 1,
-        branch: 'cq-review/pr-7',
-        head,
-        sources: [{ kind: 'agent', status: 'terminal' }],
-        findings: [],
-      },
-    }),
+    review: async () =>
+      options.reviewOutcome === 'failed'
+        ? {
+            status: 'failed',
+            error: 'scripted reviewer could not complete',
+          }
+        : {
+            status: 'ok',
+            value: {
+              schemaVersion: 1,
+              branch: 'cq-review/pr-7',
+              head: options.reviewOutcome === 'wrong-head' ? initial : head,
+              sources: [{ kind: 'agent', status: 'terminal' }],
+              findings:
+                options.reviewOutcome === 'open-finding'
+                  ? [
+                      {
+                        id: 'agent-follow-up',
+                        source: 'agent',
+                        file: 'src/a.ts',
+                        line: 1,
+                        text: 'The assigned fix still needs a correction',
+                        severity: 'major',
+                        status: 'open',
+                      },
+                    ]
+                  : [],
+            },
+          },
     workerFactory: (deps) =>
       makeAddressWorker({
         ...deps,
@@ -327,6 +347,28 @@ async function world(
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test.each(['failed', 'wrong-head', 'open-finding'] as const)(
+    'verified PR work is retained but fresh %s re-review cannot announce clean',
+    async (reviewOutcome) => {
+      const w = await world(false, { reviewOutcome });
+      try {
+        const result = await w.run();
+        expect(result.status).toBe('needs-human');
+        const report = result.status === 'ok' ? result.value : result.report!;
+        expect(report.fixesPerRun).toBe(1);
+        expect(w.actions).toContain('push');
+        expect(w.actions).not.toContain('rerequest');
+        expect(report.reasons.join(' ')).toMatch(/PR re-review|round cap/);
+        if (reviewOutcome === 'open-finding') {
+          expect(w.prompts.some((p) => p.includes('agent-follow-up'))).toBe(true);
+          expect(report.openBlocking.some((f) => f.id === 'agent-follow-up')).toBe(true);
+        }
+        expect(JSON.parse(await readFile(report.reportPath, 'utf8'))).toEqual(report);
+      } finally {
+        await w.cleanup();
+      }
+    },
+  );
   test('current follow-up discussion reaches edit, mandatory feedback and candidate closure', async () => {
     const w = await world(false, { discussion: true });
     try {

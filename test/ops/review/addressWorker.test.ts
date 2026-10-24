@@ -8,6 +8,7 @@ import { resolveCqConfigDefaults } from '../../../src/ops/analyze/cqConfigDefaul
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { OpInvocation } from '../../../src/driver/types.js';
+import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
 import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
@@ -33,9 +34,13 @@ async function fixture(
     rescueBase?: number;
     aliasRoot?: boolean;
     installedDependencies?: 'matching' | 'mismatched';
-    firstStopReason?: 'budget' | 'aborted';
+    firstStopReason?: 'budget' | 'aborted' | 'error';
+    costUSD?: number;
     remainingWallMs?: () => number;
     unitWallMs?: number;
+    configure?: (config: CqConfig) => void;
+    scanner?: DiffSecretScanner;
+    providerRequest?: boolean;
   } = {},
 ) {
   const repo = await makeTestRepo();
@@ -101,6 +106,10 @@ async function fixture(
       driver: {
         run: async (input) => {
           calls++;
+          if (options.providerRequest)
+            await request.beforeRequest?.('synthetic request', [
+              { text: 'synthetic tool output', path: 'src/a.ts' },
+            ]);
           const output = handler
             ? await handler(input)
             : await (async () => {
@@ -123,12 +132,14 @@ async function fixture(
             stopReason: calls === 1 ? (options.firstStopReason ?? 'complete') : 'complete',
             structuredOutput: output,
             usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+            ...(options.costUSD === undefined ? {} : { costUSD: options.costUSD }),
             denials: [],
           };
         },
       },
     }),
   };
+  options.configure?.(config);
   const engine = makeAddressWorker({
     git: makeGhRunner({ bin: 'git', cwd: repo.root }),
     drivers,
@@ -142,10 +153,12 @@ async function fixture(
     account: (r) => {
       spent += r.usage.input + r.usage.output;
     },
-    scanner: async (components) => {
-      if (options.scannerFails) throw new Error('scanner unavailable');
-      return components.map((c) => ({ component: c.component, hits: [] }));
-    },
+    scanner:
+      options.scanner ??
+      (async (components) => {
+        if (options.scannerFails) throw new Error('scanner unavailable');
+        return components.map((c) => ({ component: c.component, hits: [] }));
+      }),
     ...(options.parentSignal ? { parentSignal: options.parentSignal } : {}),
   });
   return {
@@ -162,6 +175,168 @@ async function fixture(
 }
 
 describe('review.address candidate isolation', () => {
+  test.each(['tracked', 'untracked'] as const)(
+    'pre-existing %s edits are never adopted as worker output or erased',
+    async (mode) => {
+      const f = await fixture();
+      const path = mode === 'tracked' ? 'src/a.ts' : 'src/owner.ts';
+      try {
+        await f.repo.write(path, 'OWNER CONTENT\n');
+        const refused = await f.engine.fix(finding(), 1);
+        expect(refused.finding.status).toBe('deferred');
+        expect(refused.reason).toMatch(/clean tracked worker tree|no unknown worker files/);
+        expect(f.calls()).toBe(0);
+        expect(f.attempts).toEqual([]);
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        expect(await readFile(join(f.repo.root, path), 'utf8')).toBe('OWNER CONTENT\n');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a provider error can reach rescue with paid attempt cost retained', async () => {
+    const f = await fixture(
+      async (input) => {
+        if (input.outputSchema?.name === 'review.address.closure/v1')
+          return { closed: true, reason: 'rescued candidate closed' };
+        if (!input.prompt.startsWith('related-check feedback'))
+          await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+        return { disposition: 'fixed', reason: 'edited candidate', evidence: [] };
+      },
+      '',
+      {
+        firstStopReason: 'error',
+        rescueBase: 1,
+        costUSD: 0.01,
+      },
+    );
+    try {
+      const fixed = await f.engine.fix(finding(), 1);
+      expect(fixed.finding.status, fixed.reason).toBe('fixed');
+      expect(f.attempts.map((a) => a.tier)).toEqual(['worker', 'rescue', 'rescue', 'reviewer']);
+      expect(f.attempts.every((a) => a.costUSD === 0.01)).toBe(true);
+      expect(f.attempts[0]?.evidenceSha).toBeTruthy();
+      expect(f.attempts[1]?.reason).toMatch(/worker stopped: error/);
+      expect(f.repo.git('show', '--format=', '--name-only', fixed.commit!).trim()).toBe('src/a.ts');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each(['positive', 'missing', 'fault'] as const)(
+    'a %s tool-result scan refuses provider send and preserves sibling eligibility',
+    async (mode) => {
+      let providerSends = 0;
+      let blocked = false;
+      const f = await fixture(
+        async (input) => {
+          providerSends++;
+          if (input.outputSchema?.name === 'review.address.closure/v1')
+            return { closed: true, reason: 'verified sibling' };
+          if (!input.prompt.startsWith('related-check feedback'))
+            await writeFile(join(input.workspace!.path, 'src/b.ts'), 'GOOD\n');
+          return { disposition: 'fixed', reason: 'sibling fixed', evidence: [] };
+        },
+        '',
+        {
+          providerRequest: true,
+          scanner: async (components) => {
+            const tool = components.find((c) => c.text === 'synthetic tool output');
+            if (tool && !blocked) {
+              blocked = true;
+              if (mode === 'fault') throw new Error('tool scanner unavailable');
+              if (mode === 'missing') return [];
+              return components.map((c) => ({
+                component: c.component,
+                hits: c === tool ? [{ ruleId: 'synthetic-policy', lines: [1] }] : [],
+              }));
+            }
+            return components.map((c) => ({ component: c.component, hits: [] }));
+          },
+        },
+      );
+      try {
+        const refused = await f.engine.fix(finding(), 1);
+        expect(refused.finding.status).toBe('deferred');
+        expect(refused.reason).toMatch(/upload refused|upload scanner failed/);
+        expect(providerSends).toBe(0);
+        expect(f.attempts).toHaveLength(1);
+        expect(refused.commit).toBeUndefined();
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+        expect(sibling.finding.status, sibling.reason).toBe('fixed');
+        expect(providerSends).toBe(3);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    'missing-evidence',
+    'missing-line',
+    'edited-disposition',
+    'missing-reviewer',
+  ] as const)('a rejection cannot close without engine-verifiable evidence: %s', async (mode) => {
+    const f = await fixture(
+      async (input) => {
+        if (mode === 'edited-disposition')
+          await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL\n');
+        return {
+          disposition: 'rejected',
+          reason: 'model asserts false positive',
+          evidence:
+            mode === 'missing-evidence'
+              ? []
+              : [{ path: 'src/a.ts', line: mode === 'missing-line' ? 1000 : 1 }],
+        };
+      },
+      '',
+      {
+        configure: (config) => {
+          if (mode === 'missing-reviewer') delete config.roles!.reviewer;
+        },
+      },
+    );
+    try {
+      const refused = await f.engine.fix(finding(), 1);
+      expect(refused.finding.status).toBe('deferred');
+      expect(refused.reason).toMatch(
+        /execution-head evidence|missing at execution head|accompanied by edits|roles.reviewer required/,
+      );
+      expect(f.calls()).toBe(1);
+      expect(refused.commit).toBeUndefined();
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each(['reviewer', 'check-cwd', 'check-spawn'] as const)(
+    'a changed candidate cannot commit with unavailable trusted validation: %s',
+    async (mode) => {
+      const f = await fixture(undefined, '', {
+        configure: (config) => {
+          if (mode === 'reviewer') delete config.roles!.reviewer;
+          if (mode === 'check-cwd') config.checks[0]!.command.cwd = '..';
+          if (mode === 'check-spawn')
+            config.checks[0]!.command.command = join(tmpdir(), 'cq-missing-executable', 'check');
+        },
+      });
+      try {
+        const refused = await f.engine.fix(finding(), 1);
+        expect(refused.finding.status).toBe('deferred');
+        expect(refused.reason).toMatch(
+          /roles.reviewer required|check.cwd escapes|configured check was/,
+        );
+        expect(f.calls()).toBe(mode === 'reviewer' ? 2 : 1);
+        expect(refused.commit).toBeUndefined();
+        expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+        expect(f.attempts.some((a) => a.evidenceSha)).toBe(true);
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test.each(['matching', 'mismatched'] as const)(
     'fresh worker tree reuses installed caller dependencies only with matching metadata: %s',
     async (installedDependencies) => {

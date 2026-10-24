@@ -81,6 +81,73 @@ const reportOf = (
 ): ReviewAddressReport => (result.status === 'ok' ? result.value : result.report!);
 
 describe('review.address composition', () => {
+  test.each([true, false])(
+    'portable cq.json parsing gates clean record acceptance: valid=%s',
+    async (valid) => {
+      const f = await fixture([]);
+      try {
+        await f.repo.write(
+          'cq.json',
+          valid ? JSON.stringify(config) : '{"schemaVersion":2,"checks":"invalid"}',
+        );
+        f.repo.commitAll('fixture configuration');
+        const deps = { ...f.deps, initialRecord: f.record() };
+        delete deps.config;
+        const result = await makeReviewAddress(deps)(f.input);
+        expect(result.status).toBe(valid ? 'ok' : 'needs-human');
+        expect(f.calls).toEqual([]);
+        expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+          reportOf(result),
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('paid reasoning tokens stop sibling dispatch and survive the budget refusal report', async () => {
+    const f = await fixture([finding('a'), finding('b')]);
+    try {
+      const attempted: string[] = [];
+      const result = await makeReviewAddress({
+        ...f.deps,
+        workerFactory: (deps) => ({
+          escalation: createEscalationState,
+          fix: async (item) => {
+            attempted.push(item.id);
+            deps.account({
+              stopReason: 'complete',
+              usage: { input: 5, output: 3, cacheRead: 0, cacheWrite: 0, reasoning: 2 },
+              costUSD: 0.25,
+              denials: [],
+            });
+            return {
+              finding: { ...item, status: 'deferred', reason: 'needs owner' },
+              observedHead: f.record().head,
+              reason: 'needs owner',
+              validation: [],
+            };
+          },
+        }),
+      })({ ...f.input, maxTokens: 10, concurrency: 1 });
+      expect(result.status).toBe('needs-human');
+      expect(attempted).toEqual(['a']);
+      expect(f.calls).not.toContain('review');
+      expect(reportOf(result).usage).toEqual({
+        input: 5,
+        output: 3,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: 2,
+      });
+      expect(reportOf(result).costUSD).toBe(0.25);
+      expect(reportOf(result).reasons.join(' ')).toMatch(/budget/);
+      expect(JSON.parse(await readFile(reportOf(result).reportPath, 'utf8'))).toEqual(
+        reportOf(result),
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('waves bound concurrency, serialize aliases and put unanchored findings alone', () => {
     const unanchored = { ...finding('unknown'), file: undefined };
     expect(
