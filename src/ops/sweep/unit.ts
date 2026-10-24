@@ -1,3 +1,10 @@
+import { normalizeFailurePaths } from './tasks.js';
+import {
+  composeScanners,
+  makeGitleaksDefaultsScanner,
+  makeRepoDiffScanner,
+} from '../dev/denylist.js';
+import { makeSubprocessDevEffects } from '../dev/effects.js';
 // Sweep lane (WS-D, goal D4) — the 'sweep.unit' op: the per-package pipeline
 // as ONE composition. A unit's stages are a DATAFLOW (worktreeFor's workspace
 // feeds the probe's cwd, the baseline FailureSet feeds the gate, the staged
@@ -41,7 +48,7 @@ import { defaultHarnessConfig } from '../../harness/config.js';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, resolve, win32 } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import type { DriverFactory } from '../../driver/factory.js';
 import { currentJobContext } from '../../kernel/governor.js';
@@ -271,6 +278,13 @@ export interface SweepUnitBindings {
   worktreeEffects?: WorktreeEffects;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
   runCheck: RunCheck;
+  /** Required by taskLoop; refuses before any provider upload. */
+  scanPrompt?: (
+    text: string,
+    contents?: readonly { text: string; path?: string }[],
+  ) => Promise<void>;
+  /** Explicit enclosing-job cancellation; verified commits are retained but not published. */
+  cancelled?: () => boolean;
   /** The per-package check command, resolved against the unit's worktree. */
   checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
   /**
@@ -355,6 +369,7 @@ export interface UnitProbe {
 export interface SweepUnitReport {
   tasks?: FixTaskReport[];
   budgetStopped?: boolean;
+  indeterminate?: string;
   package: string;
   fixer: string;
   /** The worktree the unit ran in (create or I7 reuse). */
@@ -569,9 +584,18 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
 
     if (bindings.taskLoop !== undefined) {
       return runTaskLoop(bindings, unit, worktree, baseline, segments.branch, {
-        broader: async (parent) => {
+        broader: async (parent, remainingWallMs) => {
+          const expiresAt = Date.now() + remainingWallMs;
+          const boundedProbe = makeBaselineProbe(async (command) => {
+            const remaining = expiresAt - Date.now();
+            if (remaining <= 0) throw new Error('unit wall budget exhausted before broader check');
+            return bindings.runCheck({
+              ...command,
+              timeoutMs: Math.min(command.timeoutMs ?? 600_000, remaining),
+            });
+          });
           const result = await withBaseOwnedFinalTree(bindings, unit, worktree, parent, (clean) =>
-            probeLeg(probe, bindings, unit, worktreeFor, 'final', clean),
+            probeLeg(boundedProbe, bindings, unit, worktreeFor, 'final', clean),
           );
           if (result.fault !== null || result.probe === undefined || result.treeSha === undefined) {
             throw new Error(result.fault ?? 'final probe returned no evidence');
@@ -590,12 +614,47 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
           const fault = await verifyScannedTip(bindings, unit, worktree.path, sha, parent);
           if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
         },
+        pendingPublish: async () => {
+          const counted = await bindings.git([
+            '-C',
+            worktree.path,
+            'rev-list',
+            '--count',
+            `${bindings.base}..HEAD`,
+          ]);
+          if (counted.code !== 0 || !/^\d+$/.test(counted.stdout.trim()))
+            throw new Error('cannot read pending commit count');
+          const ahead = Number(counted.stdout.trim()) > 0;
+          if (bindings.runStateDir === undefined) {
+            if (ahead) throw new Error('pending publish requires explicit runStateDir');
+            return undefined;
+          }
+          const sha = await readScannedCommitSha(bindings, segments);
+          // A relative base such as HEAD follows the reused branch tip. The
+          // trusted scanned record still identifies a previous failed publish.
+          if (sha === null) {
+            if (ahead) throw new Error('pending publish has no verified scanned commit');
+            return undefined;
+          }
+          const parent = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD^']);
+          if (parent.code !== 0) throw new Error('cannot read pending commit parent');
+          const fault = await verifyScannedTip(
+            bindings,
+            unit,
+            worktree.path,
+            sha,
+            parent.stdout.trim(),
+          );
+          if (fault !== null) throw new Error(typeof fault === 'string' ? fault : fault.message);
+          return sha;
+        },
         publish: async (sha) => {
           const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
           if (head.code !== 0 || head.stdout.trim() !== sha)
             throw new Error('tip moved before push');
           const fault = await recordScannedCommitSha(bindings, segments, sha);
           if (fault !== null) throw new Error(fault);
+          if (bindings.cancelled?.()) throw new Error('enclosing job cancelled before push');
           await bindings.pushBranch?.(bindings.repoRoot, segments.branch);
           const marker = await writeCommittedMarker(bindings, segments, unit);
           if (marker !== null) throw new Error(marker);
@@ -1265,16 +1324,11 @@ async function probeLeg(
     failureSet:
       bindings.taskLoop === undefined
         ? probed.value.failureSet
-        : {
-            ...probed.value.failureSet,
-            failures: probed.value.failureSet.failures.map((failure) => ({
-              ...failure,
-              file:
-                failure.file !== null && isAbsolute(failure.file)
-                  ? relative(worktree.path, failure.file)
-                  : failure.file,
-            })),
-          },
+        : normalizeFailurePaths(
+            probed.value.failureSet,
+            worktree.path,
+            bindings.checkCommand(unit, worktree.path).cwd ?? worktree.path,
+          ),
   };
   return { worktree, probe: narrowed };
 }
@@ -1493,6 +1547,8 @@ export interface SweepUnitDriverConfig {
 
 /** The JSON-serializable probe binding of a dispatch input. */
 export interface SweepUnitCheckConfig {
+  /** Repository-relative working directory, resolved anew in every checkout. */
+  cwd?: string;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
   /** The check command (executed with cwd = the unit's worktree). */
@@ -1702,6 +1758,9 @@ export function bindingsFromDispatch(
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
+  const checkCwd = input.check.cwd ?? '.';
+  if (isAbsolute(checkCwd) || win32.isAbsolute(checkCwd) || checkCwd.split(/[\\/]/).includes('..'))
+    throw new Error('sweep.unit: check.cwd must remain inside the unit workspace');
   const budgetFault = fixerBudgetFault(input.driver.budget);
   if (budgetFault !== null) {
     throw new Error(`sweep.unit: driver.budget is required and enforceable — ${budgetFault}`);
@@ -1709,6 +1768,40 @@ export function bindingsFromDispatch(
   // The factory resolves BEFORE any effect is constructed: an unresolvable
   // binding (unknown provider, no lane bound for the role) is a
   // configuration refusal, not a half-bound sweep.
+  const scanner =
+    input.taskLoop === undefined
+      ? undefined
+      : composeScanners(
+          makeGitleaksDefaultsScanner(makeSubprocessDevEffects(input.repoRoot)),
+          ...(input.taskLoop.denylistPatternsFile === undefined
+            ? []
+            : [makeRepoDiffScanner(input.repoRoot, input.taskLoop.denylistPatternsFile)]),
+        );
+  const scanPrompt =
+    scanner === undefined
+      ? undefined
+      : async (
+          text: string,
+          contents: readonly { text: string; path?: string }[] = [],
+        ): Promise<void> => {
+          const components = [
+            { component: 'worker-request', text, path: 'worker-request.json' },
+            ...contents.map((content, index) => ({
+              component: `worker-content-${String(index)}`,
+              text: content.text,
+              path: content.path ?? 'worker-request.json',
+            })),
+          ];
+          const scans = await scanner(components);
+          if (
+            scans.length !== components.length ||
+            components.some(
+              (component) => !scans.some((scan) => scan.component === component.component),
+            ) ||
+            scans.some((scan) => scan.hits.length > 0)
+          )
+            throw new Error('worker upload refused by denylist scan');
+        };
   const resolved = drivers.resolve({
     role: 'fixer',
     modelSpec: { provider: input.driver.provider, model: input.driver.model },
@@ -1745,9 +1838,11 @@ export function bindingsFromDispatch(
       ? {}
       : {
           taskLoop: input.taskLoop,
+          ...(scanPrompt === undefined ? {} : { scanPrompt }),
           taskWorker: (_task, related) =>
             drivers.resolve({
               role: 'fixer',
+              ...(scanPrompt === undefined ? {} : { beforeRequest: scanPrompt }),
               modelSpec: resolved.modelSpec,
               harness: {
                 ...defaultHarnessConfig,
@@ -1819,7 +1914,7 @@ export function bindingsFromDispatch(
       // item 7): `$&`, `` $` `` and `$'` in a package name would otherwise be
       // reinterpreted as replacement tokens.
       args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
-      cwd: worktreePath,
+      cwd: resolve(worktreePath, input.check?.cwd ?? '.'),
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
     driver: resolved.driver,
