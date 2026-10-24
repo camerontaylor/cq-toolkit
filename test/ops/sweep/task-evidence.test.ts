@@ -152,6 +152,38 @@ test('failed-attempt tree failures stop before creating any refs', async () => {
   expect(calls).toEqual([['write-tree']]);
 });
 
+test('failed ref update errors propagate when verification cannot find a collision', async () => {
+  const updateError = new Error('update-ref permission denied');
+  const calls: string[][] = [];
+  await expect(
+    commitFailedAttempt(
+      async (args) => {
+        calls.push(args);
+        if (args[0] === 'write-tree') return 'a'.repeat(40);
+        if (args.includes('commit-tree')) return 'b'.repeat(40);
+        if (args[0] === 'update-ref') throw updateError;
+        if (args[0] === 'rev-parse') throw new Error('branch does not exist');
+        throw new Error(`unexpected git call: ${args.join(' ')}`);
+      },
+      {
+        runPrefix: 'run',
+        kind: 'tests',
+        slug: 'pkg',
+        task: 'file.ts',
+        parent: 'c'.repeat(40),
+        firstAttempt: 1,
+        tier: 'worker',
+        model: { provider: 'fixture', model: 'scripted' },
+        gate: 'related',
+        outcome: 'unfixed',
+        reason: 'related check rejected the edit',
+        pushFailed: false,
+      },
+    ),
+  ).rejects.toBe(updateError);
+  expect(calls.map((args) => args[0])).toEqual(['write-tree', '-c', 'update-ref', 'rev-parse']);
+});
+
 test('failed refs bound flattened components and use the repository object-id width', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cq-task-evidence-sha256-'));
   const git = (cwd: string) => async (args: string[]) =>

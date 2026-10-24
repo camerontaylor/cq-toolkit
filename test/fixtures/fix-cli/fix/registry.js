@@ -47,10 +47,9 @@ const drivers = {
           if (modelSpec.model === 'worker-tainted')
             await writeFile(join(invocation.workspace.path, 'public-note.txt'), 'DO_NOT_UPLOAD\n');
         }
-        if (
-          modelSpec.model === 'rescue-fixes' &&
-          invocation.prompt.includes('Prior failed-attempt patch')
-        ) {
+        if (modelSpec.model === 'rescue-fixes') {
+          if (!invocation.prompt.includes('Prior failed-attempt patch'))
+            throw new Error('rescue prompt omitted prior failed-attempt patch feedback');
           if (!invocation.prompt.includes('expected: 3'))
             throw new Error('rescue prompt omitted prior failed-attempt source patch');
         }
