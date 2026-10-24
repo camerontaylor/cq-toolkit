@@ -608,9 +608,19 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             return withBookkeepingAccess(root, async () => {
               await persistedBookkeeping?.prepare(root);
               const effects = makeSubprocessDevEffects(root);
+              // ADMISSION PIN DECISION: admission pins to the invocation's
+              // engine-captured base. Admission guards the head/branch
+              // identity of the SAME comparison the invocation reviews; a
+              // live-base drift mid-invocation would silently move the
+              // admitted cycle's base field. The pin (like an explicit base)
+              // is schema-validated hex from this engine's own capture.
               const read = await readWorkState(effects, {
                 target: input.target ?? 'merge-queue',
-                ...(input.base ? { base: input.base } : {}),
+                ...(input.base
+                  ? { base: input.base }
+                  : reviewedBasePinned
+                    ? { base: await reviewedBasePinned() }
+                    : {}),
               });
               if (!read.ok) throw new Error(read.reason);
               const state = read.state;
@@ -786,6 +796,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
           let dispatchLogPath: string | undefined;
           let bookkeepingReceiptPath: string | undefined;
           let pendingRerequestPath: string | undefined;
+          // The invocation-pinned PR comparison base (engine-captured against
+          // the resolved worktree HEAD; undefined when an explicit base was
+          // given or the source is local). Its provider resolves lazily after
+          // the PR worktree exists.
+          let pinnedBase: string | undefined;
+          let reviewedBasePinned: (() => Promise<string>) | undefined;
           const reviewers = new Set<string>();
           if (input.source !== 'local') {
             const pr = Number(input.source.slice(3));
@@ -876,27 +892,34 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             reviewedBase = read.state.base;
           }
           if (input.source !== 'local' && !input.base) {
-            // Pin the engine-captured comparison base for this invocation:
-            // every admission and re-review below must review the SAME diff
-            // even if the live target advances mid-run (a stacked parent
-            // landing would otherwise shrink the round-over-round comparison).
-            // Explicit-base invocations keep passing their own base through.
-            // The read rides THIS invocation's own injected git transport, so
-            // fakes answer it exactly like every other PR-path git read.
-            const target = input.target ?? 'merge-queue';
-            const result = await git([
-              'merge-base',
-              '--end-of-options',
-              `origin/${target}`,
-              'HEAD',
-            ]);
-            const base = result.stdout.trim();
-            if (result.code !== 0 || !base)
-              return await finish(
-                'needs-human',
-                `cannot pin the merge-base: 'origin/${target}' did not resolve — fetch the target and re-run`,
-              );
-            reviewedBase = base;
+            // Pin the PR comparison base ONCE per invocation, computed against
+            // the RESOLVED PR worktree HEAD (not the caller checkout, whose
+            // HEAD may differ from the PR head on real runs). The capture is
+            // lazy: it runs at the first consumer after resolvePrWorktree has
+            // produced the per-PR checkout, and rides this invocation's own
+            // injected git transport so fakes answer it like every other
+            // PR-path git read. Explicit-base invocations keep passing their
+            // own base through.
+            reviewedBasePinned = async () => {
+              if (pinnedBase === undefined) {
+                const target = input.target ?? 'merge-queue';
+                const result = await git([
+                  '-C',
+                  workerRoot,
+                  'merge-base',
+                  '--end-of-options',
+                  `origin/${target}`,
+                  'HEAD',
+                ]);
+                const base = result.stdout.trim();
+                if (result.code !== 0 || !base)
+                  throw new Error(
+                    `cannot pin the merge-base: 'origin/${target}' did not resolve — fetch the target and re-run`,
+                  );
+                pinnedBase = base;
+              }
+              return pinnedBase;
+            };
           }
           for (let round = 1; round <= policy.review.rounds; round++) {
             const stopped = stop();
@@ -1166,7 +1189,11 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               const agent = await review({
                 repoRoot: root,
                 target: input.target ?? 'merge-queue',
-                ...(input.base ? { base: input.base } : {}),
+                ...(input.base
+                  ? { base: input.base }
+                  : reviewedBasePinned
+                    ? { base: await reviewedBasePinned() }
+                    : {}),
                 maxTokens: Math.max(1, remainingTokens()),
                 wallMs: Math.max(1, remainingWallMs()),
                 reviewers: ['agent'],

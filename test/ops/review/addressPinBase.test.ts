@@ -1,12 +1,13 @@
-// The PR review base must be pinned per invocation (#v5F9N). With
-// source=pr:... and no explicit base, every re-review re-resolves the
-// merge-base against the live target, so if the target advances during
-// addressing (a stacked parent lands), successive rounds review DIFFERENT
-// comparisons and the run can report clean against a smaller diff than it
-// started with. The engine must capture the immutable base at the initial
-// PR checkout and pass it to every admission and re-review in that
-// invocation, mirroring the local path's reviewedBase behavior.
-import { execFileSync } from 'node:child_process';
+// The PR review base must be pinned per invocation and actually consumed
+// (#v5F9N). With source=pr:... and no explicit base, the engine captures the
+// merge-base once from the resolved PR worktree; every admission and
+// re-review in the invocation must review that SAME comparison even if the
+// live target advances between rounds. This fixture advances the target
+// MID-INVOCATION (between round 1 and round 2 of one rounds:2 run) and
+// asserts the discriminating leg: the round-2 re-review must carry the
+// original comparison's GOOD diff leg. Under live-target behavior the
+// advanced target collapses the round-2 merge-base onto the round-1 fix, so
+// the re-review is dispatched over an empty comparison instead.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,9 +35,9 @@ afterEach(async () => {
   await rm(scanner.root, { recursive: true, force: true });
 });
 
-test('the PR review base stays pinned while the target advances mid-run', async () => {
+test('the round-2 re-review keeps the invocation-pinned comparison when the target advances mid-run', async () => {
   const repo = await makeTestRepo();
-  const journal = await mkdtemp(join(tmpdir(), 'cq-address-pin-base-'));
+  const journal = await mkdtemp(join(tmpdir(), 'cq-address-pin-rework-'));
   const role = { provider: 'scripted', model: 'worker' };
   try {
     await repo.write('src/a.ts', 'export const a = "BAD";\n');
@@ -64,31 +65,9 @@ test('the PR review base stays pinned while the target advances mid-run', async 
       stdout: typeof value === 'string' ? value : JSON.stringify(value),
       stderr: '',
     });
-    const remoteHead = () =>
-      repo.git('ls-remote', 'origin', 'refs/heads/feature/x').split(/\s+/)[0]!;
-    let workerRoot = repo.root;
-    const advancePrHead = () =>
-      repo.git('-C', workerRoot, 'push', '-q', 'origin', 'HEAD:refs/pull/7/head');
-    const bare = join(repo.root, '..', 'origin.git');
-    // The stacked parent lands: the target advances to a commit whose parent
-    // chain CONTAINS the current PR head, so the live merge-base collapses to
-    // the fix commit and the naive round-2 comparison becomes empty.
-    const advanceTargetOverHead = () => {
-      const previous = remoteHead();
-      const tree = execFileSync('git', ['--git-dir', bare, 'rev-parse', `${previous}^{tree}`], {
-        encoding: 'utf8',
-      }).trim();
-      const created = execFileSync(
-        'git',
-        ['--git-dir', bare, 'commit-tree', tree, '-p', previous, '-m', 'stacked parent lands'],
-        { encoding: 'utf8', env: process.env },
-      ).trim();
-      execFileSync('git', ['--git-dir', bare, 'update-ref', 'refs/heads/merge-queue', created]);
-      return created;
-    };
+    let secondThread = false;
     const resolvedThreads = new Set<string>();
     const replies: Array<{ id: number; in_reply_to_id: number; body: string }> = [];
-    let secondThread = false;
     const threads = () => [
       {
         id: 'T1',
@@ -129,7 +108,7 @@ test('the PR review base stays pinned while the target advances mid-run', async 
           ]
         : []),
     ];
-    const gh: GhFn = async (args) => {
+    const forge: GhFn = async (args) => {
       if (args[0] === 'repo') return ok({ nameWithOwner: 'octo/widget' });
       if (args[0] === 'pr')
         return ok({
@@ -154,7 +133,7 @@ test('the PR review base stays pinned while the target advances mid-run', async 
               pullRequest: {
                 author: { login: 'author' },
                 headRefName: 'feature/x',
-                headRefOid: remoteHead(),
+                headRefOid: repo.git('ls-remote', 'origin', 'refs/pull/7/head').split(/\s+/)[0]!,
                 reviewThreads: {
                   nodes: threads(),
                   pageInfo: { hasNextPage: false, endCursor: null },
@@ -165,7 +144,10 @@ test('the PR review base stays pinned while the target advances mid-run', async 
           },
         });
       const endpoint = args.find((arg) => arg.startsWith('repos/')) ?? '';
-      if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remoteHead() } });
+      if (endpoint === 'repos/octo/widget/pulls/7')
+        return ok({
+          head: { sha: repo.git('ls-remote', 'origin', 'refs/pull/7/head').split(/\s+/)[0]! },
+        });
       if (endpoint.includes('/pulls/7/comments'))
         return ok([
           ...threads().flatMap((thread) =>
@@ -186,10 +168,9 @@ test('the PR review base stays pinned while the target advances mid-run', async 
       throw new Error(`unexpected fake forge command: ${args.join(' ')}`);
     };
     const usage = { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 };
-    // The re-review's comparison is observable in the agent prompt: it embeds
-    // the reviewed diff legs (one per changed file). The test swaps the
-    // capture target per invocation.
-    let capture: string[] | undefined;
+    // Every review.agent/v2 prompt embeds its comparison partition; the
+    // round-2 re-review's content is the discriminator under test.
+    const prompts: string[] = [];
     const drivers: DriverFactory = {
       resolve: (request) => ({
         lane: 'ai-sdk',
@@ -197,7 +178,29 @@ test('the PR review base stays pinned while the target advances mid-run', async 
         driver: {
           run: async (input) => {
             if (input.outputSchema?.name === 'review.agent/v2') {
-              capture?.push(input.prompt);
+              // Round 1's re-review (seed leg -BAD +GOOD) reports the new
+              // thread's change as a finding, which keeps the run in round
+              // 2; round 2's re-review (over the T2 fix) returns clean.
+              // Everything else returns no findings. Only non-seeded agent
+              // prompts are captured (the re-review comparisons under test).
+              if (input.prompt.includes('-export const a = "BAD"'))
+                return {
+                  stopReason: 'complete' as const,
+                  structuredOutput: {
+                    receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
+                    findings: [
+                      {
+                        file: 'src/a.ts',
+                        line: 1,
+                        severity: 'high' as const,
+                        text: 'Also replace GOOD with BEST',
+                      },
+                    ],
+                  },
+                  usage,
+                  denials: [],
+                };
+              prompts.push(input.prompt);
               return {
                 stopReason: 'complete' as const,
                 structuredOutput: {
@@ -216,7 +219,6 @@ test('the PR review base stays pinned while the target advances mid-run', async 
                 denials: [],
               };
             if (!input.prompt.startsWith('related-check feedback')) {
-              workerRoot = input.workspace!.path;
               const content = input.prompt.includes('BEST') ? 'BEST' : 'GOOD';
               await writeFile(
                 join(input.workspace!.path, 'src/a.ts'),
@@ -233,6 +235,15 @@ test('the PR review base stays pinned while the target advances mid-run', async 
         },
       }),
     };
+    // GraphQL timeline per invocation: (1) round-1 loop fetchReviewState,
+    // (2) round-1 composition fetchReviewState, (3) round-2 loop
+    // fetchReviewState, (4) round-2 composition fetchReviewState. The flip
+    // fires at (3): round 2's worktree reuse has already completed (the PR
+    // head ref never moves, so the unpushed-work guard never trips), and T2
+    // plus the advanced target become visible from round 2's threads read
+    // onward — the re-review after the T2 fix is the discriminator.
+    let graphqlCalls = 0;
+    let flipped = false;
     const realGit = makeGhRunner({ bin: 'git', cwd: repo.root });
     const git: GhFn = async (args) =>
       realGit(
@@ -242,42 +253,56 @@ test('the PR review base stays pinned while the target advances mid-run', async 
             : arg,
         ),
       );
-    const invoke = () =>
-      makeReviewAddress({ gh, drivers, git })({
-        repoRoot: repo.root,
-        source: 'pr:7',
-        journalDir: journal,
-        rounds: 2,
-        push: true,
-      });
-
-    // Run 1: fix T1, publish, resolve. Round 1's comparison covers the seed.
-    const first = await invoke();
-    expect(first.status, JSON.stringify(first.report?.reasons)).toBe('ok');
-    expect(workerRoot).not.toBe(repo.root);
-
-    // The stacked parent lands mid-addressing; a second thread arrives, so
-    // the next invocation runs a second round against the advanced target.
-    // The published fix was already pushed to the PR head; then the target
-    // advances to a commit whose parent chain CONTAINS that fix, so the live
-    // merge-base collapses onto the fix commit and the naive round-2
-    // comparison becomes empty.
-    advancePrHead();
-    advanceTargetOverHead();
-    secondThread = true;
-    capture = [];
-    const second = await invoke();
-    expect(second.status, JSON.stringify(second.report?.reasons)).toBe('ok');
-    // The round-2 re-review must still review the SAME comparison this
-    // invocation started with (the engine-captured base), not the shrunken
-    // live merge-base against the advanced target: the reviewed diff must
-    // carry the fix's src/a.ts leg, not an empty comparison.
-    expect(capture!.length, 'run-2 re-review prompts').toBeGreaterThan(0);
+    const gh: GhFn = async (args) => {
+      if (args.includes('graphql')) {
+        graphqlCalls++;
+        if (graphqlCalls === 3 && !flipped) {
+          flipped = true;
+          secondThread = true;
+          // A stacked parent lands between the rounds: the bare target moves
+          // to a commit whose parent chain contains the round-1 fix (built
+          // in the shared work repo, which holds the worker's objects), and
+          // the shared remote-tracking ref is refreshed — exactly what a
+          // real landing leaves behind for round 2's re-review.
+          const published = repo
+            .git('ls-remote', 'origin', 'refs/heads/feature/x')
+            .split(/\s+/)[0]!;
+          const tree = repo.git('rev-parse', `${published}^{tree}`).trim();
+          const stacked = repo
+            .git('commit-tree', tree, '-p', published, '-m', 'stacked parent lands')
+            .trim();
+          repo.git('push', '-q', 'origin', `${stacked}:refs/heads/merge-queue`);
+          repo.git('update-ref', 'refs/remotes/origin/merge-queue', stacked);
+          // The loop's stage-5 publish already pushed the fix to feature/x;
+          // GitHub keeps refs/pull/7/head tracking it, so round 2's
+          // resolution fetch sees the published head and reuses the tree.
+          repo.git('push', '-q', 'origin', `${published}:refs/pull/7/head`);
+        }
+      }
+      return forge(args);
+    };
+    const result = await makeReviewAddress({ gh, drivers, git })({
+      repoRoot: repo.root,
+      source: 'pr:7',
+      journalDir: journal,
+      rounds: 2,
+      push: true,
+    });
+    expect(result.status, JSON.stringify(result.report?.reasons)).toBe('ok');
+    expect(flipped, 'the flip fired before round 2').toBe(true);
+    expect(prompts.length, 'both rounds dispatched re-review partitions').toBeGreaterThan(0);
+    // DISCRIMINATING: comparison legs render base→HEAD. The invocation's pin
+    // is the original seed, so round 2's leg is -BAD +BEST. If the live
+    // (advanced) target leaked in, round 2's merge-base collapses onto the
+    // round-1 fix and its leg becomes -GOOD +BEST — the -GOOD leg is the
+    // leak signature and must never reach a reviewer.
     expect(
-      capture!.some(
-        (prompt) => prompt.includes('src/a.ts') && prompt.includes('export const a = "BEST"'),
-      ),
-      `round-2 comparisons: ${JSON.stringify(capture!.map((prompt) => prompt.length))}`,
+      prompts.some((prompt) => prompt.includes('-export const a = "GOOD"')),
+      `live base leaked into a re-review comparison (${prompts.length} partitions)`,
+    ).toBe(false);
+    expect(
+      prompts.some((prompt) => prompt.includes('+export const a = "BEST"')),
+      'the round-2 re-review must cover the T2 change',
     ).toBe(true);
   } finally {
     await repo.cleanup();
