@@ -79,9 +79,7 @@ describe('dev.check', () => {
       }),
     );
     repo.commitAll('configure portable check');
-    const effects = effectsFor((command) =>
-      command === 'fake-check' ? 'configured check passed' : undefined,
-    );
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
     const originalRunCommand = effects.runCommand;
     let configuredCwd: string | undefined;
     let configuredTimeout: number | undefined;
@@ -102,6 +100,49 @@ describe('dev.check', () => {
     expect(configuredTimeout).toBe(12_345);
   });
 
+  test.each([
+    ['malformed JSON', 'not json'],
+    [
+      'a failing assertion behind exit zero',
+      JSON.stringify({
+        success: false,
+        numTotalTests: 1,
+        testResults: [
+          {
+            name: 'src/a.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'fails', failureMessages: ['bad'] }],
+          },
+        ],
+      }),
+    ],
+  ])(
+    'rejects %s from an adopter JSON check even when the process exits zero',
+    async (_label, stdout) => {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'vitest-json', command: { command: 'fake-check', args: [] } }],
+        }),
+      );
+      repo.commitAll('configure JSON check');
+      const effects = effectsFor((command) =>
+        command === 'fake-check' ? { exitCode: 0, stdout, stderr: '', timedOut: false } : undefined,
+      );
+      const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+      expect(result.status).toBe('failed');
+      const record = effects
+        .openLedger('feature/x')
+        .load()
+        .records.find((entry) => entry.kind === 'check');
+      expect(record?.kind === 'check' && record.gates[0]).toMatchObject({
+        name: 'cq.json:1:vitest-json',
+        status: 'fail',
+      });
+    },
+  );
+
   test('fresh adopter scans the archived tree portably without a toolkit denylist script', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write(
@@ -113,7 +154,7 @@ describe('dev.check', () => {
     );
     await repo.write('src/checked.ts', 'export const checked = true;\n');
     repo.commitAll('configure fresh adopter');
-    const effects = effectsFor((command) => (command === 'fake-check' ? 'ok' : undefined));
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
     const seen: string[] = [];
     const result = await makeDevCheck(effects, async (components) => {
       seen.push(...components.map(({ path, text }) => `${path}:${text}`));
@@ -140,9 +181,7 @@ describe('dev.check', () => {
       }),
     );
     repo.commitAll('configure absolute check directory');
-    const effects = effectsFor((command) =>
-      command === 'fake-check' ? 'configured check passed' : undefined,
-    );
+    const effects = effectsFor((command) => (command === 'fake-check' ? '' : undefined));
     let configuredCwd: string | undefined;
     const originalRunCommand = effects.runCommand;
     effects.runCommand = async (command, args, options) => {

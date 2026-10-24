@@ -198,6 +198,11 @@ function makeReviewCycle(
 
     const collected = await collectScanComponents(effects, state, scope);
     if (!collected.ok) return needsHuman(`review refused — ${collected.reason}`);
+    if (isAgent && collected.excludedPaths.length > 0) {
+      return needsHuman(
+        `agent review refused — changed file(s) excluded from the pre-upload scan cannot be included safely: ${collected.excludedPaths.join(', ')}`,
+      );
+    }
     if (collected.paths === 0) {
       return needsHuman(
         'no diff to review — the selected scope is empty (stage or commit the work first, or pass the right scope)',
@@ -418,7 +423,8 @@ async function collectScanComponents(
   state: WorkState,
   scope: 'full' | 'uncommitted',
 ): Promise<
-  { ok: true; components: ScanComponentInput[]; paths: number } | { ok: false; reason: string }
+  | { ok: true; components: ScanComponentInput[]; paths: number; excludedPaths: string[] }
+  | { ok: false; reason: string }
 > {
   const legs: { name: string; args: string[] }[] = [
     ...(scope === 'full' ? [{ name: 'committed', args: [state.base, state.head] }] : []),
@@ -426,6 +432,7 @@ async function collectScanComponents(
     { name: 'unstaged', args: [] },
   ];
   const components: ScanComponentInput[] = [];
+  const excludedPaths: string[] = [];
   let paths = 0;
   for (const leg of legs) {
     const names = zList(
@@ -436,7 +443,10 @@ async function collectScanComponents(
     );
     paths += names.length;
     for (const path of names) {
-      if (path === PATTERNS_FILE) continue;
+      if (path === PATTERNS_FILE) {
+        excludedPaths.push(path);
+        continue;
+      }
       const text = gitStdout(
         await git(effects, ['diff', ...HARDENED_DIFF_FLAGS, ...leg.args, '--', path]),
         `diff (${leg.name}) -- ${path}`,
@@ -461,7 +471,7 @@ async function collectScanComponents(
     }
     components.push({ component: `untracked:${path}`, text: file.text, path });
   }
-  return { ok: true, components, paths };
+  return { ok: true, components, paths, excludedPaths };
 }
 
 /** Run one reviewer invocation; a spawn fault becomes a synthetic killed result. */

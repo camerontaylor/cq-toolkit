@@ -153,6 +153,27 @@ describe('dev.review pre-upload project scan fails closed', () => {
 });
 
 describe('dev.review cycle', () => {
+  test('refuses agent cycles when a changed policy file is excluded from the upload scan', async () => {
+    await repo.write('policy/denylist/patterns.yml', 'rules: []\n');
+    repo.commitAll('change scanner policy');
+    const effects = repoEffects(repo);
+    const runAgentReviewer = vi.fn(async () => ({
+      status: 'ok' as const,
+      value: { findings: [], usage: 1 },
+    }));
+    const op = makeDevReview({
+      effects,
+      scanSecrets: stubScanner(),
+      runAgentReviewer,
+    }) as Op<DevCycleInput, DevReviewReport>;
+    const result = await op({ repoRoot: repo.root, reviewer: 'agent:reviewer' });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human')
+      expect(result.reason).toContain('excluded from the pre-upload scan');
+    expect(runAgentReviewer).not.toHaveBeenCalled();
+    expect(effects.openLedger('feature/x').load().records).toEqual([]);
+  });
+
   test('agent:reviewer runs the scripted read-only reviewer and records a terminal ledger cycle', async () => {
     const effects = repoEffects(repo);
     const run = vi.fn(

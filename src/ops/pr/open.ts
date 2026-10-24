@@ -29,12 +29,16 @@
 // verification (strategy §2.4; verification is green required CI at the
 // exact head plus the reviewer bots' PR review).
 import type { Op } from '../../kernel/types.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { DevEffects } from '../dev/effects.js';
 import { faultText, guardDevOp } from '../dev/effects.js';
 import type { DevCheckGate, DevLedgerFile, DevReadinessRecord } from '../dev/record.js';
 import { AUTHOR_EVIDENCE_CAVEAT, DEFAULT_DEV_TARGET } from '../dev/record.js';
 import { readReadiness } from '../dev/ready.js';
 import { CLEAN_TREE, git, gitStdout } from '../dev/internal/workState.js';
+import { parseCqConfig } from '../analyze/cqConfig.js';
+import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import { composeSection, mdSafe } from './assemblePrs.js';
 import type { PrEffects } from './assemblePrs.js';
 import { PrOpenInputSchema } from './registry.js';
@@ -160,7 +164,35 @@ export function renderDispositionsComment(ledger: DevLedgerFile): string {
 export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOpenReport> {
   return guardDevOp('pr.open', PrOpenInputSchema, async (input) => {
     const target = input.target ?? DEFAULT_DEV_TARGET;
-    const ready = await readReadiness(dev, 'pr.open', target);
+    const configText = await readFile(join(input.repoRoot, 'cq.json'), 'utf8').catch(() => null);
+    let policy: { reviewers: readonly string[]; blockingSeverities: readonly string[] } | undefined;
+    if (configText !== null) {
+      const parsed = parseCqConfig(configText, input.repoRoot);
+      if (!parsed.ok)
+        return { status: 'needs-human', reason: `pr.open: cq.json — ${parsed.reason}` };
+      const packageText = await readFile(join(input.repoRoot, 'package.json'), 'utf8').catch(
+        () => '{}',
+      );
+      let packageName = 'repository';
+      try {
+        const value: unknown = JSON.parse(packageText);
+        if (
+          typeof value === 'object' &&
+          value !== null &&
+          'name' in value &&
+          typeof value.name === 'string'
+        )
+          packageName = value.name;
+      } catch {
+        /* descriptive fallback only */
+      }
+      const configured = resolveCqConfigDefaults(parsed.config, { packageName });
+      policy = {
+        reviewers: configured.review.reviewers,
+        blockingSeverities: configured.review.blockingSeverities,
+      };
+    }
+    const ready = await readReadiness(dev, 'pr.open', target, policy);
     if (!ready.ok) return ready.result;
     const { state, ledger, record } = ready.read;
     const { branch, head } = state;

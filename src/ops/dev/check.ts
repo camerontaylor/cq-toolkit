@@ -30,6 +30,8 @@
 import { isAbsolute, join, resolve } from 'node:path';
 import { readdir, readFile, readlink } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
+import { adapterByName, parseCheckOutput } from '../gates/checkRunner.js';
+import type { AdapterName } from '../gates/checkRunner.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import type { ComponentScan, DiffSecretScanner, ScanComponentInput } from './denylist.js';
 import type { CommandResult, DevEffects } from './effects.js';
@@ -135,6 +137,7 @@ async function runGate(
   args: readonly string[],
   timeoutMs: number,
   cwd?: string,
+  adapter?: AdapterName,
 ): Promise<DevCheckGate> {
   const startedAt = Date.now();
   try {
@@ -143,14 +146,36 @@ async function runGate(
       resolvedCwd !== undefined && !isAbsolute(command) && /[\\/]/.test(command)
         ? resolve(resolvedCwd, command)
         : command;
-    return classifyGate(
-      name,
-      await effects.runCommand(resolvedExe, args, {
-        timeoutMs,
-        ...(resolvedCwd === undefined ? {} : { cwd: resolvedCwd }),
-      }),
-      startedAt,
-    );
+    const result = await effects.runCommand(resolvedExe, args, {
+      timeoutMs,
+      ...(resolvedCwd === undefined ? {} : { cwd: resolvedCwd }),
+    });
+    if (adapter !== undefined) {
+      const parsed = parseCheckOutput(adapterByName(adapter), {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+      });
+      if (parsed.verdict === 'indeterminate') {
+        return {
+          name,
+          status: 'fail',
+          ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+          durationMs: Date.now() - startedAt,
+          evidence: `no trustworthy adapter result — ${parsed.reason}; ${evidenceTail(result)}`,
+        };
+      }
+      if (parsed.set.failures.length > 0) {
+        return {
+          name,
+          status: 'fail',
+          ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+          durationMs: Date.now() - startedAt,
+          evidence: `${String(parsed.set.failures.length)} failure(s) reported by ${adapter}; ${evidenceTail(result)}`,
+        };
+      }
+    }
+    return classifyGate(name, result, startedAt);
   } catch (err) {
     return {
       name,
@@ -346,6 +371,7 @@ export function makeDevCheck(
             check.command.args,
             check.command.timeoutMs ?? STATIC_GATE_TIMEOUT_MS,
             resolve(input.repoRoot, check.command.cwd ?? '.'),
+            check.adapter,
           ),
         );
       }
