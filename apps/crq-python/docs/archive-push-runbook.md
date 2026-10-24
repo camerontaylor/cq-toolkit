@@ -2,10 +2,12 @@
 
 **Owner executes this.** The code ships in this branch; nothing here is
 installed by a PR, and no unit is created on any host by an agent (hard
-limit, 2026-10-24). Runs as the locked `crq` account on ceres with a
-write-only credential to the dedicated archive bucket
-(`session-log-archive` on the SeaweedFS S3, `ceres.wedrifid.dev:8333` —
-bucket creation is also owner-side, see the Phase 4.1 runbook).
+limit, 2026-10-24). Runs as the locked `crq` account on the queue host
+with a write-only credential to the dedicated archive bucket
+(`session-log-archive` on the SeaweedFS S3 — endpoint and credential are
+in the deploy `.env` under the telemetry SeaweedFS deploy directory,
+never committed; bucket creation is also owner-side, see the Phase 4.1
+runbook in the agents repo `docs/session-archive-runbook.md`).
 
 ## What is pushed
 
@@ -25,9 +27,10 @@ Append-only: `rclone copy` (never `sync`/`--delete`), under `nice`/`ionice`.
    back or delete (SeaweedFS IAM is coarse; if write-only is not
    expressible, a dedicated key whose scope is this bucket is the
    acceptable floor).
-2. `rclone` on ceres with a remote named `session-archive` pointing at
-   `http://ceres.wedrifid.dev:8333` and the crq-scoped key in the rclone
-   config readable ONLY by the `crq` account.
+2. `rclone` on the queue host with a remote named `session-archive`
+   pointing at the SeaweedFS S3 endpoint (deploy `.env`, never committed)
+   and the crq-scoped key in the rclone config readable ONLY by the `crq`
+   account.
 
 ## Unit (owner installs; content ships here for review)
 
@@ -61,7 +64,7 @@ RandomizedDelaySec=300
 WantedBy=timers.target
 ```
 
-Enable (owner, on ceres, as an admin with sudo to `crq`):
+Enable (owner, on the queue host, as an admin with sudo to `crq`):
 
 ```sh
 sudo -u crq systemctl --user daemon-reload
