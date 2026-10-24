@@ -153,7 +153,7 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
             try {
               patch = await effects.runCommand(
                 'git',
-                ['diff', '--no-ext-diff', '--no-textconv', '--binary', comparison, '--', path],
+                ['diff', '--no-ext-diff', '--no-textconv', '--text', comparison, '--', path],
                 { timeoutMs: 60_000 },
               );
             } catch (error) {

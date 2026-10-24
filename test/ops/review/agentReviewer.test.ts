@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { resolve } from 'node:path';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { runAgentReviewer } from '../../../src/ops/review/agentReviewer.js';
 
@@ -8,10 +9,12 @@ describe('runAgentReviewer', () => {
       async (invocation: {
         toolPolicy: { mode?: string };
         sandboxPolicy: { level: string };
+        workspace: { path: string };
         outputSchema?: unknown;
       }) => {
         expect(invocation.toolPolicy).toEqual({ mode: 'none', allow: [] });
         expect(invocation.sandboxPolicy.level).toBe('read-only');
+        expect(invocation.workspace.path).toBe(resolve('.'));
         expect(invocation.outputSchema).toBeDefined();
         return {
           stopReason: 'complete' as const,
@@ -33,7 +36,7 @@ describe('runAgentReviewer', () => {
       })),
     } as unknown as DriverFactory;
     const result = await runAgentReviewer(drivers, {
-      repoRoot: '/fixture',
+      repoRoot: '.',
       branch: 'review-fixture',
       head: 'abc123',
       diff: 'diff',

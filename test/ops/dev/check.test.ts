@@ -92,6 +92,35 @@ describe('dev.check', () => {
     expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
   });
 
+  test('preserves absolute configured check working directories', async () => {
+    await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
+    await repo.write(
+      'cq.json',
+      JSON.stringify({
+        schemaVersion: 2,
+        checks: [
+          {
+            adapter: 'tsc-lines',
+            command: { command: 'fake-check', args: [], cwd: '/external/check' },
+          },
+        ],
+      }),
+    );
+    repo.commitAll('configure absolute check directory');
+    const effects = effectsFor((command) =>
+      command === 'fake-check' ? 'configured check passed' : undefined,
+    );
+    let configuredCwd: string | undefined;
+    const originalRunCommand = effects.runCommand;
+    effects.runCommand = async (command, args, options) => {
+      if (command === 'fake-check') configuredCwd = options.cwd;
+      return originalRunCommand(command, args, options);
+    };
+    const result = await makeDevCheck(effects)({ repoRoot: repo.root });
+    expect(result.status).toBe('ok');
+    expect(configuredCwd).toBe('/external/check');
+  });
+
   test('refuses malformed adopter cq.json instead of falling back to legacy gates', async () => {
     await repo.write('package.json', JSON.stringify({ name: 'fixture-adopter' }));
     await repo.write('cq.json', JSON.stringify({ schemaVersion: 1, checks: [] }));

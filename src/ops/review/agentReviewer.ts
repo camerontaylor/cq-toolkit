@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import { toOutputSchema } from '../../driver/common/structured.js';
 import type { DriverFactory } from '../../driver/factory.js';
@@ -52,7 +53,7 @@ export async function runAgentReviewer(
     modelSpec: resolved.modelSpec,
     toolPolicy: { mode: 'none', allow: [] },
     sandboxPolicy: { level: 'read-only' },
-    workspace: { path: input.repoRoot },
+    workspace: { path: resolve(input.repoRoot) },
     budget: { maxTokens: input.maxTokens },
     outputSchema,
   };

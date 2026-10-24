@@ -296,7 +296,7 @@ export function makeDevCheck(effects: DevEffects): Op<DevCheckInput, DevCheckRep
             check.command.command,
             check.command.args,
             STATIC_GATE_TIMEOUT_MS,
-            join(input.repoRoot, check.command.cwd ?? '.'),
+            resolve(input.repoRoot, check.command.cwd ?? '.'),
           ),
         );
       }

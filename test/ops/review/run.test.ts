@@ -340,7 +340,35 @@ describe('review.run', () => {
         (call) => call.command === 'git' && call.args[0] === 'diff',
       );
       expect(diffCalls.every((call) => call.args.includes('--no-textconv'))).toBe(true);
+      const patchCalls = diffCalls.filter((call) =>
+        ['src/staged.ts', 'src/a.ts'].includes(call.args.at(-1) ?? ''),
+      );
+      expect(patchCalls.every((call) => call.args.includes('--text'))).toBe(true);
+      expect(patchCalls.every((call) => !call.args.includes('--binary'))).toBe(true);
       expect(diffCalls.some((call) => call.args.includes('HEAD'))).toBe(true);
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('exposes binary tracked file text to the fail-closed pre-upload scanner', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await configureAgentRepo(repo);
+      await repo.write('src/payload.bin', 'baseline\0safe\n');
+      repo.commitAll('add binary base content');
+      await repo.write('src/payload.bin', 'changed\0portkey-secret-fixture\n');
+      const scanned: string[] = [];
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => repoEffects(repo),
+        scannerFactory: () => async (components) => {
+          scanned.push(...components.map((component) => component.text));
+          return components.map((component) => ({ component: component.component, hits: [] }));
+        },
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      expect(scanned.some((text) => text.includes('portkey-secret-fixture'))).toBe(true);
     } finally {
       await repo.cleanup();
     }
