@@ -1820,7 +1820,9 @@ describe('governed journal v2 + resume', () => {
         ctx?.reportSession?.({ driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'n-1' });
         // A malformed report is dropped, never journalled.
         ctx?.reportSession?.({ driver: 'ai-sdk', sessionId: '' });
-        return { status: 'ok', value: 'done' };
+        // The result-derived link (driver 'unknown', no native id) for the
+        // SAME session merges with the reported one — no metadata lost.
+        return { status: 'ok', value: { sessionId: 'store-1' } };
       };
       const plan = independentPlan('plan-gov-session-links', 1, 'linked');
       const report1 = await runPlan(

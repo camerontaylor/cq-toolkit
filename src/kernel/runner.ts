@@ -295,7 +295,14 @@ export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | 
   if (typeof value !== 'object' || value === null) return undefined;
   const sessionId = (value as { sessionId?: unknown }).sessionId;
   if (typeof sessionId !== 'string' || sessionId === '') return undefined;
-  return [{ driver: 'unknown', sessionId }];
+  const nativeSessionId = (value as { nativeSessionId?: unknown }).nativeSessionId;
+  return [
+    {
+      driver: 'unknown',
+      sessionId,
+      ...(typeof nativeSessionId === 'string' && nativeSessionId !== '' ? { nativeSessionId } : {}),
+    },
+  ];
 }
 
 /**
@@ -316,19 +323,30 @@ function validSessionLink(link: unknown): JobSessionLink | undefined {
   };
 }
 
-/** Result-derived links first, then reported ones; first occurrence of a sessionId wins. */
+/**
+ * Result-derived links first, then reported ones, one entry per sessionId
+ * (first-seen order). A later link for the same session fills fields the
+ * earlier one lacks — a known `driver` replaces 'unknown', and a missing
+ * nativeSessionId/path is taken — so no metadata is lost to the dedupe.
+ */
 function mergeSessionLinks(
   fromResult: JobSessionLink[] | undefined,
   reported: readonly JobSessionLink[],
 ): JobSessionLink[] | undefined {
-  const seen = new Set<string>();
-  const merged: JobSessionLink[] = [];
+  const bySession = new Map<string, JobSessionLink>();
   for (const link of [...(fromResult ?? []), ...reported]) {
-    if (seen.has(link.sessionId)) continue;
-    seen.add(link.sessionId);
-    merged.push(link);
+    const prior = bySession.get(link.sessionId);
+    if (prior === undefined) {
+      bySession.set(link.sessionId, { ...link });
+      continue;
+    }
+    if (prior.driver === 'unknown' && link.driver !== 'unknown') prior.driver = link.driver;
+    if (prior.nativeSessionId === undefined && link.nativeSessionId !== undefined) {
+      prior.nativeSessionId = link.nativeSessionId;
+    }
+    if (prior.path === undefined && link.path !== undefined) prior.path = link.path;
   }
-  return merged.length > 0 ? merged : undefined;
+  return bySession.size > 0 ? [...bySession.values()] : undefined;
 }
 
 /**

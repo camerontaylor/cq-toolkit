@@ -149,6 +149,9 @@ describe('1.3 job-finished correlation fields', () => {
     expect(sessionsOfResult({ status: 'ok', value: { sessionId: 's1' } })).toEqual([
       { driver: 'unknown', sessionId: 's1' },
     ]);
+    expect(
+      sessionsOfResult({ status: 'ok', value: { sessionId: 's2', nativeSessionId: 'n2' } }),
+    ).toEqual([{ driver: 'unknown', sessionId: 's2', nativeSessionId: 'n2' }]);
     expect(sessionsOfResult({ status: 'ok', value: { nope: true } })).toBeUndefined();
     expect(sessionsOfResult({ status: 'failed', error: 'x' })).toBeUndefined();
   });
