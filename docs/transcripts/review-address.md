@@ -402,3 +402,67 @@ cross-checked. Fresh independent exact-head review and CI remain required.
 Positive live measured-fix acceptance remains unmet, #438 is being implemented
 in a separate lane, and no third live or CodeRabbit run was performed. No
 whole-PR acceptance marker or merge is claimed.
+
+## Combined bounded-review integration (#438)
+
+Reviewed address head `1c5092e306aeba3c75c100c8ade6e729fad85f1a` receives a normal
+cherry-pick of independently reviewed `1b9878f95fb94421b77362cbe7c5131de39ba169`
+(parent `de1e45e2`), producing `9a5bf24332a39c52839e25ecfe1220065d61d66b`.
+The stable patch ID is identical (`25e87f3c0dcac37af1a3442a0d90dd3af31efde7`).
+All twelve non-README lane files match the reviewed lane bytes; all eleven
+non-README address files match reviewed address bytes. README contains both
+sections, with the address text preserved and the lane section appended.
+There were no conflicts or production resolution edits.
+
+Shared interface changes from the integrated lane: optional source coverage
+manifests and reviewer output schema `review.agent/v2`, including an exact
+partition receipt. Complete original components are scanned before lossless
+partitioning; every serialized request and decoded leaf still passes the
+production gate. Partitions share cancellation, wall and token budgets.
+Partial coverage persists and cannot establish complete review.
+
+Combined reviewer/registry checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=9 projects="pure,process" tests="217/217" failed=0 skipped=0 wait="0.0s" duration="65.6s" nice=5 load="2.8" uptime="547179s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/dev/registry.test.ts,test/ops/dev/review.test.ts,test/ops/review/agentReviewer-partitions.test.ts,test/ops/review/agentReviewer.test.ts,test/ops/review/findings.test.ts,test/ops/review/registry.test.ts,test/ops/review/run.test.ts"
+```
+
+The first lifecycle checkpoint failed 23/290 cases because scripted reviewers
+still returned v1 output without receipts. Updating only fixtures exposed six
+remaining stale assumptions (single reviewer call, fixed total usage, and an
+old source-drift result). The second checkpoint was 284/290. Neither failure
+is passing evidence. Real local/PR/CLI fixtures now return exact v2 receipts;
+usage is accounted for every dispatch, rounds count distinct reviewed heads,
+and clean-record consumer tests require no further provider dispatch. The
+mutation control reads the actual persisted blocked source, restores the file,
+and confirms it still cannot authorize clean acceptance. Non-tampered real-PR
+cases require at least one actual reviewer dispatch. Production gates were not
+relaxed to satisfy fixture expectations.
+
+A separate read-only inspection of the complete base `f83d18f3` to integration
+`9a5bf243` comparison measured 59 components, 526691 characters / 526939 UTF-8
+bytes and 71 partitions. All 71 actual AiSdkDriver requests were intercepted
+and unconditionally stopped before send; an inert provider recorded zero sends.
+Original-path, partition, serialized-request and decoded-leaf production scans
+reported zero hits. Maximum composed system prompt was 20000 characters;
+maximum serialized request was 42147 characters. Aggregate serialized text was
+1347827 characters. This proves prompt-cap fit at that snapshot, not token
+feasibility or reviewer completeness. The unchanged 60000-token/20-minute/one-round
+live limits require a separately approved feasible target; no third live run,
+provider dispatch or additional author CodeRabbit cycle occurred.
+
+Final repaired fixture checkpoint (the unchanged worker, evidence, plan and PR
+orchestration files passed in the preceding 284/290 checkpoint):
+
+```text
+test:narrow result="pass" exit=0 files=4 projects="pure,process,integration" tests="40/40" failed=0 skipped=0 wait="0.0s" duration="96.0s" nice=5 load="8.2" uptime="547773s" source="explicit" ran="test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts"
+```
+
+Static, formatting and Knip exit 0 after fixture updates, with zero TypeScript
+errors against baseline zero. Generated-doc verification exits 0 (54 current).
+The complete final feedback sweep found 23 resolved threads, no outer or nested
+remaining pages, and all 51 REST inline comments represented in the thread set;
+39 review summaries and six top-level comments were checked. No new applicable
+finding was outstanding at that snapshot. These focused checks do not establish
+whole-PR acceptance. Combined exact-head independent review, fresh required CI
+and positive measured live acceptance remain separate gates. No merge is claimed.

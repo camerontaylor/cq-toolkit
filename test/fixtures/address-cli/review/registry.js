@@ -12,8 +12,9 @@ const drivers = {
         const path = join(input.workspace.path, 'src/a.ts');
         const text = await readFile(path, 'utf8');
         let structuredOutput;
-        if (input.outputSchema.name === 'review.agent/v1') {
+        if (input.outputSchema.name === 'review.agent/v2') {
           structuredOutput = {
+            receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
             findings: text.includes('BAD')
               ? [{ file: 'src/a.ts', line: 1, severity: 'high', text: 'Replace BAD with GOOD' }]
               : [],

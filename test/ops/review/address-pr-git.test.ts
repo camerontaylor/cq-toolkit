@@ -209,11 +209,14 @@ test.each([
               const schema = input.outputSchema!.name;
               invocations.push(schema);
               let output: unknown;
-              if (schema === 'review.agent/v1') {
+              if (schema === 'review.agent/v2') {
                 expect(await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8')).toContain(
                   'GOOD',
                 );
-                output = { findings: [] };
+                output = {
+                  receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
+                  findings: [],
+                };
               } else if (schema === 'review.address.closure/v1') {
                 if (earlyTamper) {
                   const path = devLedgerPath(workerRoot, 'cq-review/pr-7');
@@ -392,16 +395,17 @@ test.each([
             action: 'fixed',
           }),
         );
+      if (!tampered)
+        expect(invocations.filter((name) => name === 'review.agent/v2').length).toBeGreaterThan(0);
       if (siblings) {
         expect(invocations.filter((name) => name === 'review.address.outcome/v1')).toHaveLength(4);
         expect(invocations.filter((name) => name === 'review.address.closure/v1')).toHaveLength(2);
-        expect(invocations.filter((name) => name === 'review.agent/v1')).toHaveLength(1);
       } else
         expect(invocations).toEqual([
           'review.address.outcome/v1',
           'review.address.outcome/v1',
           'review.address.closure/v1',
-          ...(tampered ? [] : ['review.agent/v1']),
+          ...(tampered ? [] : invocations.filter((name) => name === 'review.agent/v2')),
         ]);
       // The real adapter, not the test, creates both colliding refs.
       expect(repo.git('-C', workerRoot, 'symbolic-ref', '--short', 'HEAD').trim()).toBe(

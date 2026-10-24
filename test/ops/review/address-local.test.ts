@@ -6,7 +6,11 @@ import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/re
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
-import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.js';
+import {
+  FindingsRecordSchema,
+  type Finding,
+  type FindingsRecord,
+} from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
@@ -76,8 +80,9 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
           models.push(input.modelSpec.model);
           let structuredOutput: unknown;
           const content = await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8');
-          if (input.outputSchema?.name === 'review.agent/v1')
+          if (input.outputSchema?.name === 'review.agent/v2')
             structuredOutput = {
+              receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
               findings: content.includes('BAD')
                 ? [{ file: 'src/a.ts', line: 1, severity: 'high', text: finding.text }]
                 : [],
@@ -194,7 +199,13 @@ describe('review.address local full cycle', () => {
         'feedback',
         'closure',
       ]);
-      expect(result.value.usage).toEqual({ input: 8, output: 4, cacheRead: 0, cacheWrite: 0 });
+      expect(result.value.usage).toEqual({
+        input: 2 * f.models.length,
+        output: f.models.length,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      expect(f.models.filter((model) => model === 'reviewer').length).toBeGreaterThan(0);
       expect((await scanner.calls()).length).toBeGreaterThan(3);
       const ledger = makeSubprocessDevEffects(f.repo.root).openLedger('feature/x').load();
       expect(
@@ -290,7 +301,7 @@ test.each([
       lane: 'ai-sdk',
       modelSpec: request.modelSpec,
       driver: {
-        run: async () => {
+        run: async (input) => {
           calls++;
           if (mode === 'dirty-restored' || mode === 'staged-restored')
             expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('GOOD');
@@ -298,7 +309,10 @@ test.each([
             await f.repo.write('src/a.ts', 'export const a = "GOOD";\n');
           return {
             stopReason: 'complete',
-            structuredOutput: { findings: [] },
+            structuredOutput: {
+              receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
+              findings: [],
+            },
             usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
             denials: [],
           };
@@ -321,17 +335,34 @@ test.each([
       ...(narrow ? { base: head } : {}),
       ...(mode === 'uncommitted' ? { uncommitted: true } : {}),
     });
-    expect(produced.status).toBe('ok');
-    if (produced.status !== 'ok') return;
-    expect(produced.value.findings).toEqual([]);
+    expect(produced.status).toBe(mode === 'mutated-during-review' ? 'needs-human' : 'ok');
+    const record = FindingsRecordSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(f.repo.root, '.cq/review', encodeURIComponent(f.record.branch), '1.json'),
+          'utf8',
+        ),
+      ),
+    );
+    if (mode === 'mutated-during-review')
+      expect(record.sources).toContainEqual(
+        expect.objectContaining({
+          kind: 'agent',
+          status: 'blocked',
+          reason: 'repository state changed during agent review',
+        }),
+      );
+    expect(record.findings).toEqual([]);
+    const reviewerCalls = calls;
+    expect(reviewerCalls).toBeGreaterThan(0);
     if (dirty || mode === 'mutated-during-review' || mode === 'untracked-restored') {
-      expect(produced.value.reviewed).toBeUndefined();
+      expect(record.reviewed).toBeUndefined();
       f.repo.git('restore', '--source=HEAD', '--staged', '--worktree', '--', 'src/a.ts');
       if (mode === 'untracked-restored') await rm(join(f.repo.root, 'src/new.ts'));
       expect(f.repo.git('status', '--porcelain')).toBe('');
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('BAD');
     }
-    const result = await makeReviewAddress({ drivers, initialRecord: produced.value })({
+    const result = await makeReviewAddress({ drivers, initialRecord: record })({
       repoRoot: f.repo.root,
       source: 'local',
       journalDir: f.journalDir,
@@ -340,9 +371,11 @@ test.each([
     expect(result.status).toBe(
       mode === 'full' || mode === 'matching-narrow-base' ? 'ok' : 'needs-human',
     );
-    expect(calls).toBe(1);
+    expect(calls).toBe(reviewerCalls);
     if (result.status !== 'ok')
-      expect(result.report!.reasons.join(' ')).toContain('reviewed base/scope');
+      expect(result.report!.reasons.join(' ')).toContain(
+        mode === 'mutated-during-review' ? 'review source incomplete' : 'reviewed base/scope',
+      );
   } finally {
     await f.cleanup();
   }
@@ -434,6 +467,7 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
     f.repo.commitAll('adopted repository');
     const record = { ...f.record, head: f.repo.git('rev-parse', 'HEAD').trim() };
     let reviews = 0;
+    const reviewedHeads = new Set<string>();
     const drivers: DriverFactory = {
       resolve(request) {
         const resolved = f.drivers.resolve(request);
@@ -442,13 +476,19 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
           driver: {
             ...resolved.driver,
             run: async (input) => {
-              if (input.outputSchema?.name === 'review.agent/v1') {
-                reviews++;
+              if (input.outputSchema?.name === 'review.agent/v2') {
+                const reviewHead = /"head":"([a-f0-9]{40,64})"/.exec(input.prompt)?.[1];
+                expect(reviewHead).toBeDefined();
+                if (!reviewedHeads.has(reviewHead!)) {
+                  reviewedHeads.add(reviewHead!);
+                  reviews++;
+                }
                 return {
                   stopReason: 'complete',
                   usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
                   denials: [],
                   structuredOutput: {
+                    receipt: /receipt: ([a-f0-9]{64})/.exec(input.prompt)?.[1],
                     findings:
                       reviews === 1
                         ? [
