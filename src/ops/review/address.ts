@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile, realpath, lstat } from 'node:fs/promises';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  writeFile,
+  realpath,
+  lstat,
+  rename,
+  unlink,
+} from 'node:fs/promises';
 import { resolve, join, posix, relative } from 'node:path';
 import { createDriverFactory, type DriverFactory } from '../../driver/factory.js';
 import type { Usage, WorkerResult } from '../../driver/types.js';
@@ -775,6 +784,8 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               }
             | undefined;
           let dispatchLogPath: string | undefined;
+          let bookkeepingReceiptPath: string | undefined;
+          let pendingRerequestPath: string | undefined;
           const reviewers = new Set<string>();
           if (input.source !== 'local') {
             const pr = Number(input.source.slice(3));
@@ -847,8 +858,10 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const receiptDir = resolve(root, commonDir, 'cq-review-address', namespace);
             await mkdir(receiptDir, { recursive: true });
             dispatchLogPath = resolve(receiptDir, 'dispatch.jsonl');
+            bookkeepingReceiptPath = resolve(await realpath(receiptDir), 'bookkeeping.json');
+            pendingRerequestPath = resolve(await realpath(receiptDir), 'pending-rerequests.json');
             persistedBookkeeping = makeAddressBookkeepingReceipt({
-              path: resolve(await realpath(receiptDir), 'bookkeeping.json'),
+              path: bookkeepingReceiptPath,
               identity: namespace,
               fingerprints: bookkeeping,
               git: gitText,
@@ -1020,6 +1033,31 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 )
                   reviewers.add(thread.authorLogin);
               }
+              if (pendingRerequestPath) {
+                // Re-request attempts are recovered across runs: merge the
+                // persisted names from a failed attempt into this round's
+                // scan and repersist the union before any dispatch. The store
+                // clears only after a successful re-request below.
+                try {
+                  const parsed: unknown = JSON.parse(await readFile(pendingRerequestPath, 'utf8'));
+                  if (Array.isArray(parsed))
+                    for (const name of parsed)
+                      if (typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(name))
+                        reviewers.add(name);
+                } catch (error) {
+                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                }
+                if (reviewers.size) {
+                  await writeFile(
+                    `${pendingRerequestPath}.tmp`,
+                    `${JSON.stringify([...reviewers].sort())}\n`,
+                    {
+                      mode: 0o600,
+                    },
+                  );
+                  await rename(`${pendingRerequestPath}.tmp`, pendingRerequestPath);
+                }
+              }
               if ((await branchName(root)) !== loop.worktree.branch)
                 return await finish('needs-human', 'PR worker branch changed');
               const currentHead = await gitText(root, ['rev-parse', 'HEAD']);
@@ -1102,7 +1140,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 isComplete(previous, ['agent', 'pr-threads'])
               ) {
                 if (stop()) return await finish('needs-human', stop());
-                if (reviewers.size)
+                if (reviewers.size) {
                   await requestReviewers({
                     owner: meta.owner,
                     repo: meta.repo,
@@ -1110,6 +1148,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                     reviewers: [...reviewers],
                     run: gh,
                   });
+                  // Dispatch succeeded: the persisted recovery store is done.
+                  if (pendingRerequestPath)
+                    await unlink(pendingRerequestPath).catch((error) => {
+                      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                    });
+                }
                 return await finish('ok');
               }
               // Local agent findings share the same engine and round cap as forge threads.
