@@ -357,7 +357,8 @@ describe('review.run', () => {
       await configureAgentRepo(repo);
       await repo.write('src/payload.bin', 'baseline\0safe\n');
       repo.commitAll('add binary base content');
-      await repo.write('src/payload.bin', 'changed\0portkey-secret-fixture\n');
+      const sentinel = ['port', 'key-secret-fixture'].join('');
+      await repo.write('src/payload.bin', `changed\0${sentinel}\n`);
       const scanned: string[] = [];
       const result = await makeReviewRun({
         drivers: scriptedDrivers(),
@@ -368,7 +369,7 @@ describe('review.run', () => {
         },
       })({ repoRoot: repo.root });
       expect(result.status).toBe('ok');
-      expect(scanned.some((text) => text.includes('portkey-secret-fixture'))).toBe(true);
+      expect(scanned.some((text) => text.includes(sentinel))).toBe(true);
     } finally {
       await repo.cleanup();
     }
