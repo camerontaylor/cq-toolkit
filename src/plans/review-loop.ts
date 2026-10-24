@@ -73,6 +73,7 @@
 // comes from a registry so the governed runner dispatches it exactly like
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
+import { posix } from 'node:path';
 import type { Budget, ModelSpec, Usage } from '../driver/types.js';
 import { deepFreeze } from '../shared/deepFreeze.js';
 import type { HarnessConfig } from '../harness/config.js';
@@ -1064,30 +1065,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     });
   }
 
-  // (4) The governed fix run. concurrency is FORCED to 1 (the shared
-  // per-PR-worktree sequencing contract) and stopOnError is false (one bad
-  // item must not orphan the others' replies). No resume in v1: journalDir
-  // is an audit trail only.
+  // (4) Legacy workers remain serial. Engine-owned workers may overlap
+  // disjoint files; ordering waits for settlement, never dependency success.
+  // stopOnError remains false so one human item cannot orphan its siblings.
   const plan = buildReviewLoopPlan(fixInputs);
   if (opts.engineOwnedConcurrency !== undefined) {
     if (!Number.isSafeInteger(opts.engineOwnedConcurrency) || opts.engineOwnedConcurrency < 1)
       throw new Error('engineOwnedConcurrency must be positive');
-    const priorByFile = new Map<string, string>();
-    let barrier: string[] = [];
-    for (const job of plan.jobs) {
-      const input = job.input as FixReviewItemInput;
-      const file = input.item.path;
-      job.dependsOn = [
-        ...barrier,
-        ...(file && priorByFile.has(file) ? [priorByFile.get(file)!] : []),
-      ];
-      if (file) priorByFile.set(file, job.id);
-      else {
-        job.dependsOn = plan.jobs.slice(0, plan.jobs.indexOf(job)).map((prior) => prior.id);
-        barrier = [job.id];
-      }
-    }
   }
+  const pending = new Set<Promise<void>>();
+  const priorByFile = new Map<string, Promise<void>>();
+  let barrier = Promise.resolve();
   const underlyingView = opts.driverRegistryView ?? (await centralRegistryView());
   const executionHeads = new Map<string, string | null>();
   const view: OpRegistryView = {
@@ -1100,20 +1088,41 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           const op = await entry.importer(...args);
           return async (raw) => {
             const input = raw as FixReviewItemInput;
-            const observed = await opts.git([
-              '-C',
-              worktree.path,
-              'rev-parse',
-              '--verify',
-              'HEAD^{commit}',
-            ]);
-            executionHeads.set(
-              input.item.id,
-              observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
-                ? observed.stdout.trim()
-                : null,
-            );
-            return op(raw);
+            let release = () => {};
+            let settled: Promise<void> | undefined;
+            let file: string | undefined;
+            let waits: Promise<void>[] = [];
+            if (opts.engineOwnedConcurrency !== undefined) {
+              file = input.item.path ? posix.normalize(input.item.path) : undefined;
+              waits = file ? [barrier, priorByFile.get(file) ?? Promise.resolve()] : [...pending];
+              settled = new Promise<void>((resolve) => {
+                release = resolve;
+              });
+              pending.add(settled);
+              if (file) priorByFile.set(file, settled);
+              else barrier = settled;
+            }
+            try {
+              await Promise.all(waits);
+              const observed = await opts.git([
+                '-C',
+                worktree.path,
+                'rev-parse',
+                '--verify',
+                'HEAD^{commit}',
+              ]);
+              executionHeads.set(
+                input.item.id,
+                observed.code === 0 && COMMIT_SHA_RE.test(observed.stdout.trim())
+                  ? observed.stdout.trim()
+                  : null,
+              );
+              return await op(raw);
+            } finally {
+              release();
+              if (settled) pending.delete(settled);
+              if (file && priorByFile.get(file) === settled) priorByFile.delete(file);
+            }
           };
         },
       };

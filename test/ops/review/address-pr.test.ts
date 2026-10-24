@@ -16,7 +16,15 @@ const ok = (value: unknown): GhResult => ({
   stderr: '',
 });
 /** Phase-one orchestration world: no git process, provider package, credentials or forge network. */
-async function world(human = false) {
+async function world(
+  human = false,
+  options: {
+    sameFile?: boolean;
+    fileless?: 'first' | 'last';
+    bot?: boolean;
+    discussion?: boolean;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'cq-address-memory-'));
   const worktree = join(root, 'git', 'cq-review-worktrees', 'worker');
   await mkdir(worktree, { recursive: true });
@@ -24,6 +32,7 @@ async function world(human = false) {
     remote = initial;
   const resolved = new Set<string>();
   const actions: string[] = [];
+  const prompts: string[] = [];
   const files = ['src/a.ts', 'src/b.ts'];
   await mkdir(join(worktree, 'src'), { recursive: true });
   for (const file of files) await writeFile(join(worktree, file), 'BAD\n');
@@ -36,17 +45,26 @@ async function world(human = false) {
       .update(JSON.stringify([...tree].sort()))
       .digest('hex');
   const commits = new Map<string, { parent: string; message: string; tree: string }>();
-  const threads = ['T1', ...(human ? ['T2'] : [])].map((id, i) => ({
+  const order =
+    options.sameFile || options.fileless === 'first'
+      ? ['T2', 'T1']
+      : ['T1', ...(human ? ['T2'] : [])];
+  const threads = order.map((id, i) => ({
     id,
     isResolved: false,
     isOutdated: false,
-    path: `src/${i ? 'b' : 'a'}.ts`,
+    path:
+      options.fileless && id === 'T2'
+        ? null
+        : `src/${!options.sameFile && id === 'T2' ? 'b' : 'a'}.ts`,
     line: 1,
     comments: {
       nodes: [
         {
           databaseId: i + 101,
-          author: { login: 'reviewer' },
+          author: options.bot
+            ? { login: 'reviewer[bot]', __typename: 'Bot' }
+            : { login: 'reviewer', __typename: 'User' },
           body: `Fix ${id}`,
           createdAt: new Date(Date.now() - 60000).toISOString(),
         },
@@ -100,6 +118,27 @@ async function world(human = false) {
       return ok({ id: 1001 });
     }
     if (endpoint === 'repos/octo/widget/pulls/7') return ok({ head: { sha: remote } });
+    if (options.discussion && endpoint.includes('/pulls/7/comments'))
+      return ok([
+        {
+          id: 101,
+          in_reply_to_id: null,
+          body: 'Fix T1',
+          path: 'src/a.ts',
+          line: 1,
+          user: { login: 'reviewer' },
+          created_at: new Date(Date.now() - 60000).toISOString(),
+        },
+        {
+          id: 201,
+          in_reply_to_id: 101,
+          body: 'FOLLOWUP-REQUIREMENT: the correction must preserve GOOD.',
+          path: 'src/a.ts',
+          line: 1,
+          user: { login: 'reviewer' },
+          created_at: new Date(Date.now() - 30000).toISOString(),
+        },
+      ]);
     if (endpoint.includes('/comments') || endpoint.includes('/reviews?')) return ok([]);
     return { code: 1, stdout: '', stderr: `unhandled forge: ${args.join(' ')}` };
   };
@@ -215,6 +254,7 @@ async function world(human = false) {
       modelSpec,
       driver: {
         run: async (input) => {
+          prompts.push(input.prompt);
           if (input.outputSchema?.name === 'review.address.closure/v1')
             return {
               stopReason: 'complete',
@@ -278,6 +318,7 @@ async function world(human = false) {
   return {
     root,
     actions,
+    prompts,
     resolved,
     run: (push = true) =>
       op({ repoRoot: root, source: 'pr:7', push, journalDir: join(root, 'journal') }),
@@ -285,6 +326,67 @@ async function world(human = false) {
   };
 }
 describe('review.address PR phase-one orchestration', () => {
+  test('current follow-up discussion reaches edit, mandatory feedback and candidate closure', async () => {
+    const w = await world(false, { discussion: true });
+    try {
+      const result = await w.run();
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(w.prompts).toHaveLength(3);
+      for (const prompt of w.prompts) {
+        expect(prompt).toContain('FOLLOWUP-REQUIREMENT');
+        expect(prompt).toContain('reviewer');
+      }
+      expect(w.resolved.has('T1')).toBe(true);
+    } finally {
+      await w.cleanup();
+    }
+  });
+  test.each(['same-file', 'fileless-first', 'fileless-last'] as const)(
+    'human settlement preserves successful sibling dispatch and publication: %s',
+    async (kind) => {
+      const w = await world(
+        true,
+        kind === 'same-file'
+          ? { sameFile: true }
+          : { fileless: kind === 'fileless-first' ? 'first' : 'last' },
+      );
+      try {
+        const result = await w.run();
+        expect(result.status, JSON.stringify(result)).toBe('needs-human');
+        expect(result.report?.fixesPerRun).toBe(1);
+        expect(result.report?.fixes.map((fix) => fix.finding.id)).toEqual(
+          kind === 'fileless-last' ? ['T1', 'T2'] : ['T2', 'T1'],
+        );
+        expect(result.report?.fixes.some((fix) => fix.finding.id === 'T1' && fix.commit)).toBe(
+          true,
+        );
+        expect(w.resolved.has('T1')).toBe(true);
+        expect(w.resolved.has('T2')).toBe(false);
+        expect(w.actions.indexOf('push')).toBeLessThan(w.actions.indexOf('resolve:T1'));
+        expect(result.report?.openBlocking).toMatchObject([{ id: 'T2', status: 'deferred' }]);
+        expect(
+          result.report?.rounds[0]?.run?.jobs.every((row) => row.result.status !== 'failed'),
+        ).toBe(true);
+      } finally {
+        await w.cleanup();
+      }
+    },
+  );
+  test('resolved bot source retains advisory evidence without an unsupported API request', async () => {
+    const w = await world(false, { bot: true });
+    try {
+      const result = await w.run();
+      expect(result.status, JSON.stringify(result)).toBe('ok');
+      expect(w.resolved.has('T1')).toBe(true);
+      expect(w.actions).not.toContain('rerequest');
+      if (result.status === 'ok')
+        expect(result.value.reasons).toContainEqual(
+          expect.stringContaining('no bot re-request performed'),
+        );
+    } finally {
+      await w.cleanup();
+    }
+  });
   test('verified publication precedes reply/resolve; clean re-review re-requests once', async () => {
     const w = await world();
     try {

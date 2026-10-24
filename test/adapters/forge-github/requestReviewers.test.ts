@@ -14,7 +14,7 @@ test('clean-run re-request deduplicates identities and performs no empty request
   };
   await requestReviewers({ ...input, reviewers: [] });
   expect(calls).toEqual([]);
-  await requestReviewers({ ...input, reviewers: ['alice', 'alice', 'reviewer[bot]'] });
+  await requestReviewers({ ...input, reviewers: ['alice', 'alice', 'bob'] });
   expect(calls).toEqual([
     [
       'api',
@@ -24,7 +24,7 @@ test('clean-run re-request deduplicates identities and performs no empty request
       '-f',
       'reviewers[]=alice',
       '-f',
-      'reviewers[]=reviewer[bot]',
+      'reviewers[]=bob',
     ],
   ]);
 });
@@ -45,6 +45,7 @@ test('unsafe identity and forge failures refuse instead of reporting a clean re-
     { pr: 0 },
     { reviewers: ['-bot'] },
     { reviewers: ['x\nPOST'] },
+    { reviewers: ['alice', 'reviewer[bot]'] },
   ])
     await expect(requestReviewers({ ...input, ...invalid })).rejects.toThrow('invalid');
   expect(calls).toBe(0);

@@ -25,6 +25,11 @@ mandatory read-only feedback, broader regression checks, protected-path and
 tamper checks, commit-message checks and reviewer closure all inspect that
 candidate. The final commit must match its gated tree and parent. A
 sibling's uncommitted bytes cannot supply check or closure evidence.
+Fresh PR candidates may reuse the caller checkout's installed dependencies
+when package manifests and lockfiles match; otherwise install dependencies
+in the PR worktree before retrying. Dependency provisioning never runs an
+install command on a worker's behalf. Canonical repository aliases retain
+the same file identity; outside symlinks remain refused.
 Rejected/deferred code citations are verified at the worker's observed
 execution head, even when a sibling commits later.
 
@@ -33,7 +38,9 @@ attempts, then bounded rescue, then human. An affirmative broader
 regression routes directly to rescue. Human escalation preserves successful
 sibling commits. Failed owned edits are restored after evidence is pinned
 under a unique `refs/cq/review-address/` ref; the shared stash ref is unused.
-Unknown edits and unexpected index or HEAD changes fail closed.
+Unknown edits and unexpected index or HEAD changes fail closed. Retry and
+shared-tree stops use engine-owned refusal, cancellation and budget evidence;
+model-written reason prose cannot stop a sibling or bypass rescue.
 
 Every provider request is scanned before sending, including decoded tool
 output and read-path provenance. Gitleaks defaults always apply; an
@@ -54,5 +61,8 @@ PR replies and thread resolution use the current authenticated identity,
 fresh head/round proof and verified publication. A journal receipt without
 the fetched authenticated reply cannot authorize a carry-forward resolve.
 Unchanged rejections can post evidence but never resolve a thread. Once
-clean, resolved thread authors are re-requested once. Forge failures retain
-the report and return needs-human.
+clean, resolved human thread authors are re-requested once. Bot authors are
+excluded from the human reviewer API and recorded as an advisory skipped
+re-request; the report never claims a bot re-request succeeded. Forge
+failures retain the report and return needs-human. Current thread replies
+are included in both worker and candidate closure review inputs.

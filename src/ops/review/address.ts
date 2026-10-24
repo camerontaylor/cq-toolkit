@@ -118,12 +118,20 @@ const issue = (result: OpResult<unknown>) =>
         ? result.detail
         : result.status;
 const identity = (f: Finding) => JSON.stringify([f.file, f.line, f.rule, f.text]);
+const discussionText = (
+  body: string,
+  comments: readonly { authorLogin: string | null; body: string; createdAt: string | null }[],
+) =>
+  comments.length
+    ? `${body}\n\nFollow-up discussion (chronological):\n${comments.map((comment) => `Author: ${comment.authorLogin ?? 'unknown'}; at: ${comment.createdAt ?? 'unknown'}\n${comment.body}`).join('\n\n')}`
+    : body;
 
 /** SDK-first fix/disposition/re-review composition; kernel dispatch itself remains retry-free. */
 export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
   return async (input: ReviewAddressInput): Promise<ReviewAddressResult> => {
     const start = Date.now();
-    const parent = currentJobContext()?.signal;
+    const enclosingContext = currentJobContext();
+    const parent = enclosingContext?.signal;
     const journalDir = resolve(
       input.journalDir ?? resolve(input.repoRoot, '..', '.cq-address-runs', randomUUID()),
     );
@@ -223,11 +231,16 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         if (result.costUSD !== undefined) report.costUSD = (report.costUSD ?? 0) + result.costUSD;
         if (result.usage.reasoning !== undefined)
           report.usage.reasoning = (report.usage.reasoning ?? 0) + result.usage.reasoning;
-        if (governed)
-          currentJobContext()?.reportResult({
+        if (governed) {
+          const context = currentJobContext();
+          const measurement = {
             usage: result.usage,
             ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
-          });
+          };
+          context?.reportResult(measurement);
+          if (enclosingContext && enclosingContext !== context)
+            enclosingContext.reportResult(measurement);
+        }
       };
       await mkdir(journalDir, { recursive: true });
       const drivers = deps.drivers ?? createDriverFactory();
@@ -270,6 +283,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       const bindWorker = (root: string) =>
         (worker ??= (deps.workerFactory ?? makeAddressWorker)({
           repoRoot: root,
+          dependencyRoot: input.repoRoot,
           journalDir,
           policy,
           git,
@@ -535,7 +549,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 ...(item.item.path ? { file: item.item.path } : {}),
                 ...(item.item.line && item.item.line > 0 ? { line: item.item.line } : {}),
                 severity: 'major',
-                text: item.item.body,
+                text: discussionText(item.item.body, item.item.comments),
                 status: 'open',
               };
               await admitRecord(root, {
@@ -621,14 +635,27 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             gh,
           );
           if (fetched.truncated) return await finish('needs-human', 'PR review source truncated');
-          for (const thread of fetched.threads)
+          for (const thread of fetched.threads) {
             if (
               thread.isResolved &&
               fixesById.get(thread.id)?.commit &&
               thread.authorLogin &&
+              (thread.authorType === 'Bot' || thread.authorLogin.endsWith('[bot]'))
+            ) {
+              const reason = `advisory: bot reviewer ${thread.authorLogin} cannot be re-requested through the human reviewer API; no bot re-request performed`;
+              if (!report.reasons.includes(reason)) report.reasons.push(reason);
+              continue;
+            }
+            if (
+              thread.isResolved &&
+              fixesById.get(thread.id)?.commit &&
+              thread.authorLogin &&
+              thread.authorType !== 'Bot' &&
+              !thread.authorLogin.endsWith('[bot]') &&
               thread.authorLogin !== meta.login
             )
               reviewers.add(thread.authorLogin);
+          }
           const threads: FindingsRecord = {
             schemaVersion: 1,
             branch: loop.worktree.branch,
@@ -646,7 +673,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                 source: 'pr-threads',
                 ...(thread.path ? { file: thread.path } : {}),
                 ...(thread.line && thread.line > 0 ? { line: thread.line } : {}),
-                text: thread.body,
+                text: discussionText(thread.body, thread.replies),
                 severity: 'major',
                 status:
                   loop.status === 'ok' && fixesById.get(thread.id)?.finding.status === 'rejected'

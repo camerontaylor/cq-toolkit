@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -30,6 +30,9 @@ async function fixture(
     maxTokens?: number;
     workerAttempts?: number;
     rescueBase?: number;
+    aliasRoot?: boolean;
+    installedDependencies?: 'matching' | 'mismatched';
+    firstStopReason?: 'budget' | 'aborted';
   } = {},
 ) {
   const repo = await makeTestRepo();
@@ -41,13 +44,36 @@ async function fixture(
   repo.commitAll('fixture');
   const initial = repo.git('rev-parse', 'HEAD').trim();
   const journal = await mkdtemp(join(tmpdir(), 'cq-address-test-'));
+  const alias = join(journal, 'repo-alias');
+  if (options.aliasRoot) await symlink(repo.root, alias, 'dir');
+  const dependencyRoot = join(journal, 'installed-caller');
+  if (options.installedDependencies) {
+    await mkdir(join(dependencyRoot, 'node_modules'), { recursive: true });
+    await repo.write('package.json', '{"name":"fixture"}\n');
+    await repo.write('pnpm-lock.yaml', 'lockfileVersion: 9\n');
+    await writeFile(
+      join(dependencyRoot, 'package.json'),
+      options.installedDependencies === 'matching'
+        ? '{"name":"fixture"}\n'
+        : '{"name":"different"}\n',
+    );
+    await writeFile(join(dependencyRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+    await writeFile(join(dependencyRoot, 'node_modules/check.cjs'), 'process.exitCode = 0;\n');
+    repo.commitAll('dependency metadata');
+  }
   const attempts: AddressAttempt[] = [];
   let spent = 0,
     calls = 0;
   const config: CqConfig = {
     schemaVersion: 2,
     checks: [
-      { adapter: 'tsc-lines', command: { command: process.execPath, args: ['scripts/check.cjs'] } },
+      {
+        adapter: 'tsc-lines',
+        command: {
+          command: process.execPath,
+          args: [options.installedDependencies ? 'node_modules/check.cjs' : 'scripts/check.cjs'],
+        },
+      },
     ],
     roles: {
       worker: role,
@@ -90,7 +116,7 @@ async function fixture(
                 return { disposition: 'fixed', reason: 'fixed', evidence: [] };
               })();
           return {
-            stopReason: 'complete',
+            stopReason: calls === 1 ? (options.firstStopReason ?? 'complete') : 'complete',
             structuredOutput: output,
             usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
             denials: [],
@@ -102,7 +128,8 @@ async function fixture(
   const engine = makeAddressWorker({
     git: makeGhRunner({ bin: 'git', cwd: repo.root }),
     drivers,
-    repoRoot: repo.root,
+    repoRoot: options.aliasRoot ? alias : repo.root,
+    ...(options.installedDependencies ? { dependencyRoot } : {}),
     journalDir: journal,
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
@@ -131,6 +158,59 @@ async function fixture(
 }
 
 describe('review.address candidate isolation', () => {
+  test.each(['matching', 'mismatched'] as const)(
+    'fresh worker tree reuses installed caller dependencies only with matching metadata: %s',
+    async (installedDependencies) => {
+      const f = await fixture(undefined, '', { installedDependencies });
+      try {
+        const result = await f.engine.fix(finding(), 1);
+        if (installedDependencies === 'matching') {
+          expect(result.commit, result.reason).toBeTruthy();
+          expect(result.validation.every((gate) => gate.verdict === 'pass')).toBe(true);
+        } else {
+          expect(result.commit).toBeUndefined();
+          expect(result.reason).toContain('manifests/locks differ');
+          expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([false, true])(
+    'canonical and aliased roots preserve task identity (alias=%s)',
+    async (aliasRoot) => {
+      const f = await fixture(undefined, '', { aliasRoot });
+      try {
+        const result = await f.engine.fix(finding('src/./a.ts'), 1);
+        expect(result.commit, result.reason).toBeTruthy();
+        expect(result.finding.file).toBe('src/a.ts');
+        expect(f.calls()).toBe(3);
+        expect(f.repo.git('show', '--format=', '--name-only', 'HEAD').trim()).toBe('src/a.ts');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('outside symlink and missing files refuse before worker dispatch even through an aliased root', async () => {
+    const f = await fixture(undefined, '', { aliasRoot: true });
+    const outside = await mkdtemp(join(tmpdir(), 'cq-address-outside-'));
+    try {
+      await writeFile(join(outside, 'private.ts'), 'PRIVATE\n');
+      await symlink(join(outside, 'private.ts'), join(f.repo.root, 'src/outside.ts'));
+      for (const file of ['src/outside.ts', 'src/missing.ts']) {
+        const result = await f.engine.fix(finding(file), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.finding.status).toBe('deferred');
+      }
+      expect(f.calls()).toBe(0);
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(await readFile(join(outside, 'private.ts'), 'utf8')).toBe('PRIVATE\n');
+    } finally {
+      await f.cleanup();
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
   test('commits only a staged candidate that passed mandatory feedback, broader and closure gates', async () => {
     const f = await fixture();
     try {
@@ -337,6 +417,82 @@ describe('review.address candidate isolation', () => {
       await f.cleanup();
     }
   });
+  test.each(['budget', 'aborted'] as const)(
+    'engine-observed driver %s stops this unit without rescue and retains paid usage/evidence',
+    async (stopReason) => {
+      const f = await fixture(undefined, '', {
+        workerAttempts: 2,
+        rescueBase: 1,
+        firstStopReason: stopReason,
+      });
+      try {
+        const fix = await f.engine.fix(finding(), 1);
+        expect(fix.finding.status).toBe('deferred');
+        expect(fix.reason).toBe(`worker stopped: ${stopReason}`);
+        expect(f.calls()).toBe(1);
+        expect(f.attempts[0]?.usage).toEqual({ input: 2, output: 1, cacheRead: 0, cacheWrite: 0 });
+        expect(f.attempts[0]?.evidenceRef).toBeTruthy();
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+        const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+        expect(sibling.finding.status, sibling.reason).toBe('fixed');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test.each([
+    ['feedback', 'array index still off by one'],
+    ['closure', 'array index still off by one'],
+    ['feedback', 'budget calculation needs another correction'],
+    ['closure', 'cancel button still uses the wrong handler'],
+    ['edit', 'upload budget calculation needs correction'],
+  ] as const)(
+    'benign %s prose reaches rescue and does not stop siblings: %s',
+    async (phase, reason) => {
+      let rejectClosure = phase === 'closure';
+      let rejectEdit = phase === 'edit';
+      const f = await fixture(
+        async (input) => {
+          const file = input.prompt.includes('src/b.ts') ? 'src/b.ts' : 'src/a.ts';
+          const firstWorker = input.modelSpec.model === 'worker' && file === 'src/a.ts';
+          if (input.outputSchema?.name === 'review.address.closure/v1') {
+            if (rejectClosure) {
+              rejectClosure = false;
+              return { closed: false, reason };
+            }
+            return { closed: true, reason: 'verified fix' };
+          }
+          if (rejectEdit && firstWorker) {
+            rejectEdit = false;
+            throw new Error(reason);
+          }
+          const feedback = input.prompt.startsWith('related-check feedback');
+          if (!feedback) await writeFile(join(input.workspace!.path, file), 'GOOD\n');
+          return {
+            disposition: feedback && firstWorker && phase === 'feedback' ? 'deferred' : 'fixed',
+            reason,
+            evidence: [],
+          };
+        },
+        '',
+        { workerAttempts: 1, rescueBase: 1 },
+      );
+      try {
+        const first = await f.engine.fix(finding(), 1);
+        expect(first.finding.status, first.reason).toBe('fixed');
+        expect(
+          f.attempts
+            .filter((a) => a.finding === 'src/a.ts' && a.invocation === 'edit')
+            .map((a) => a.tier),
+        ).toEqual(['worker', 'rescue']);
+        const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+        expect(sibling.finding.status, sibling.reason).toBe('fixed');
+        expect(sibling.commit).toBeTruthy();
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
   test('a candidate reviewer mutation refuses the commit and retains the worker evidence', async () => {
     const f = await fixture(async (input) => {
       if (input.outputSchema?.name === 'review.address.closure/v1') {
@@ -351,6 +507,11 @@ describe('review.address candidate isolation', () => {
       const fix = await f.engine.fix(finding(), 1);
       expect(fix.commit).toBeUndefined();
       expect(fix.reason).toContain('mutated');
+      const calls = f.calls();
+      const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+      expect(sibling.reason).toContain('mutated');
+      expect(sibling.commit).toBeUndefined();
+      expect(f.calls()).toBe(calls);
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
     } finally {
@@ -393,6 +554,9 @@ describe('review.address candidate isolation', () => {
     try {
       const fix = await f.engine.fix(finding(), 1);
       expect(fix.reason).toContain('cancelled');
+      expect(f.calls()).toBe(1);
+      const sibling = await f.engine.fix(finding('src/b.ts'), 1);
+      expect(sibling.reason).toContain('cancelled');
       expect(f.calls()).toBe(1);
       expect(fix.validation).toEqual([]);
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);

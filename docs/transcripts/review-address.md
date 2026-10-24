@@ -43,6 +43,14 @@ tests hold a sibling edit uncommitted while related checks and reviewer
 closure run; neither gate can borrow that content. Legacy review-loop tests
 pin both execution orders for unchanged evidence and refuse journal-only
 resolve carry when the authenticated reply is absent.
+The follow-up checkpoint also spawns the successful local CLI through a
+symlink alias to the repository root, and tests canonical task identity,
+outside-symlink refusal, fresh-checkout dependency reuse, nested governor
+accounting, follow-up discussion, and same-file/fileless human settlement
+without blocking a verified sibling's publication. Benign feedback/closure
+prose mentioning an index, budget, cancel or upload reaches rescue and leaves
+sibling work eligible; actual driver stops, parent cancellation and candidate
+mutation still refuse and retain evidence.
 
 Live dogfood is recorded separately in `dogfood-log.md`. `dev.cycle` is
 sequenced after S6 and is unavailable for this slice's initial exercise.

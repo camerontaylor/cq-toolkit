@@ -16,7 +16,7 @@ export async function requestReviewers(input: {
   )
     throw new Error('invalid review request repository/PR');
   const reviewers = [...new Set(input.reviewers)];
-  if (reviewers.some((login) => !/^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$/.test(login)))
+  if (reviewers.some((login) => !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(login)))
     throw new Error('invalid reviewer login');
   if (!reviewers.length) return;
   const result = await input.run([

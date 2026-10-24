@@ -46,6 +46,7 @@ interface LooseResult {
 
 /** The review producer plus six loop entries, in registry order. */
 const ENTRY_NAMES = [
+  'review.address',
   'review.run',
   'review.fixItem',
   'review.fetchReviewState',
@@ -100,6 +101,7 @@ const snapshot = (): Record<string, unknown> => ({
 
 /** One minimal valid input per entry (kept loose — mutation tests widen it). */
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'review.address': () => ({ repoRoot: '/tmp/cq-review-fixture', source: 'local' }),
   'review.run': () => ({ repoRoot: '/tmp/cq-review-fixture' }),
   'review.fixItem': () => ({
     pr: 1,

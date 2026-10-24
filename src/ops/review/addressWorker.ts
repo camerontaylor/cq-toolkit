@@ -74,6 +74,8 @@ export interface AddressWorkerDeps {
   git: GhFn;
   drivers: DriverFactory;
   repoRoot: string;
+  /** Installed caller checkout; reused only when package manifests/locks match the worker tree. */
+  dependencyRoot?: string;
   journalDir: string;
   policy: EffectiveCqPolicy;
   attempts: AddressAttempt[];
@@ -82,6 +84,16 @@ export interface AddressWorkerDeps {
   account(result: WorkerResult): void;
   scanner?: DiffSecretScanner;
   parentSignal?: AbortSignal;
+}
+
+/** Only engine observations may stop retries or invalidate the shared worker tree. */
+class AddressRefusal extends Error {
+  constructor(
+    message: string,
+    readonly fatal = false,
+  ) {
+    super(message);
+  }
 }
 
 /** One shared worker tree; only this engine may stage/commit, under a serial mutex. */
@@ -112,11 +124,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     return result.stdout.trim();
   };
   const stop = () => {
-    if (fatal) throw new Error(fatal);
+    if (fatal) throw new AddressRefusal(fatal, true);
     if (deps.parentSignal?.aborted || currentJobContext()?.signal?.aborted)
-      throw new Error('parent cancelled');
+      throw new AddressRefusal('parent cancelled');
     if (deps.remainingTokens() <= 0 || deps.remainingWallMs() <= 0)
-      throw new Error('token or wall budget exhausted');
+      throw new AddressRefusal('token or wall budget exhausted');
   };
   const scan = async (text: string, contents: readonly { text: string; path?: string }[] = []) => {
     const components = [
@@ -127,13 +139,18 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         text: content.text,
       })),
     ];
-    const scans = await scanner(components);
+    let scans: Awaited<ReturnType<DiffSecretScanner>>;
+    try {
+      scans = await scanner(components);
+    } catch (error) {
+      throw new AddressRefusal(`upload scanner failed: ${String(error)}`);
+    }
     if (
       scans.length !== components.length ||
       components.some((component) => !scans.some((s) => s.component === component.component)) ||
       scans.some((s) => s.hits.length > 0)
     )
-      throw new Error('upload refused: missing, failed or positive denylist scan');
+      throw new AddressRefusal('upload refused: missing, failed or positive denylist scan');
   };
   const safeFile = async (cwd: string, path: string) => {
     if (
@@ -157,7 +174,46 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       (await lstat(full)).isSymbolicLink()
     )
       throw new Error('finding path escapes workspace or is a symlink');
-    return full;
+    return canonical;
+  };
+  const dependencyDirectory = async () => {
+    const installed = async (cwd: string) => {
+      try {
+        return await realpath(resolve(cwd, 'node_modules'));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+    };
+    const local = await installed(root);
+    if (local || deps.dependencyRoot === undefined || resolve(deps.dependencyRoot) === root)
+      return local;
+    const caller = await installed(deps.dependencyRoot);
+    if (!caller) return undefined;
+    const manifest = async (cwd: string, path: string) => {
+      try {
+        return await readFile(resolve(cwd, path), 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw error;
+      }
+    };
+    for (const path of [
+      'package.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'package-lock.json',
+      'npm-shrinkwrap.json',
+      'yarn.lock',
+      'bun.lock',
+      'bun.lockb',
+    ]) {
+      if ((await manifest(root, path)) !== (await manifest(deps.dependencyRoot, path)))
+        throw new Error(
+          'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
+        );
+    }
+    return caller;
   };
   const invoke = async (
     finding: Finding,
@@ -171,16 +227,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     editable: boolean,
   ) => {
     stop();
-    if (remainingUnit(finding) <= 0) throw new Error('unit wall budget exhausted');
+    if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
     await scan(prompt);
     stop();
+    let requestRefusal: AddressRefusal | undefined;
     const resolved = deps.drivers.resolve({
       role: tier === 'reviewer' ? 'reviewer' : 'fixer',
       modelSpec: role,
       beforeRequest: async (...args) => {
-        stop();
-        await scan(...args);
-        stop();
+        try {
+          stop();
+          await scan(...args);
+          stop();
+        } catch (error) {
+          if (error instanceof AddressRefusal) requestRefusal = error;
+          throw error;
+        }
       },
       harness: {
         ...defaultHarnessConfig,
@@ -240,10 +302,17 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       deps.account(result);
       row.usage = result.usage;
       if (result.costUSD !== undefined) row.costUSD = result.costUSD;
+      if (requestRefusal) throw requestRefusal;
       stop();
-      if (deadline.expired()) throw new Error('step wall budget exhausted');
-      if (result.stopReason !== 'complete') throw new Error(`worker stopped: ${result.stopReason}`);
+      if (deadline.expired()) throw new AddressRefusal('step wall budget exhausted');
+      if (result.stopReason !== 'complete') {
+        if (result.stopReason === 'budget' || result.stopReason === 'aborted')
+          throw new AddressRefusal(`worker stopped: ${result.stopReason}`);
+        throw new Error(`worker stopped: ${result.stopReason}`);
+      }
       return result.structuredOutput;
+    } catch (error) {
+      throw requestRefusal ?? error;
     } finally {
       row.wallMs = Date.now() - start;
       deadline.dispose();
@@ -253,7 +322,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     const results: FailureSet[] = [];
     for (const check of policy.checks) {
       stop();
-      if (remainingUnit(finding) <= 0) throw new Error('unit wall budget exhausted');
+      if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
       const checkRoot = resolve(cwd, check.command.cwd ?? '.');
       const rel = relative(await realpath(cwd), await realpath(checkRoot));
       if (rel === '..' || rel.startsWith('../') || isAbsolute(rel))
@@ -382,7 +451,8 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           const role = tier === 'worker' ? policy.roles.worker : policy.roles.rescue;
           if (!role) return failed(`roles.${tier} is required`);
           observedHead = await git(root, ['rev-parse', 'HEAD']);
-          if (!verifiedHeads.has(observedHead)) throw new Error('unexpected worker execution head');
+          if (!verifiedHeads.has(observedHead))
+            throw new AddressRefusal('unexpected worker execution head', true);
           touched = true;
           let output: z.infer<typeof OutcomeSchema>;
           try {
@@ -402,17 +472,22 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           } catch (error) {
             reason = error instanceof Error ? error.message : String(error);
             await restore();
-            if (/upload|scan|cancel|budget|denylis/i.test(reason)) return failed(reason);
+            if (error instanceof AddressRefusal) {
+              if (error.fatal) fatal = reason;
+              return failed(reason);
+            }
             continue;
           }
+          let refusal: AddressRefusal | undefined;
           const accepted = await mutex
             .withLock(async (): Promise<AddressFix | undefined> => {
               stop();
               const parent = await git(root, ['rev-parse', 'HEAD']);
               if (!verifiedHeads.has(parent))
-                throw new Error('verified parent changed outside engine');
+                throw new AddressRefusal('verified parent changed outside engine', true);
               const index = await git(root, ['diff', '--cached', '--name-only']);
-              if (index) throw new Error('worker changed the index; engine refuses staging');
+              if (index)
+                throw new AddressRefusal('worker changed the index; engine refuses staging', true);
               const changes = (await git(root, ['diff', '--name-only', 'HEAD']))
                 .split('\n')
                 .filter(Boolean);
@@ -420,12 +495,12 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 .split('\n')
                 .filter((p) => p && !p.startsWith('.cq/'));
               if ([...changes, ...untracked].some((p) => !active.has(p)))
-                throw new Error('unknown or out-of-scope worker edits');
+                throw new AddressRefusal('unknown or out-of-scope worker edits', true);
               if (
                 classifyStagePaths([...changes, ...untracked], undefined, false, false).kind !==
                 'clean'
               )
-                throw new Error('protected worker edits');
+                throw new AddressRefusal('protected worker edits', true);
               const candidate = resolve(deps.journalDir, `candidate-${randomUUID()}`);
               await git(root, [
                 'worktree',
@@ -438,16 +513,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 // Reuse installed dependencies as a trusted local runtime input.
                 // Workers cannot edit this path; the candidate still owns all
                 // tracked source/config and has no sibling uncommitted edits.
-                try {
-                  await lstat(resolve(root, 'node_modules'));
-                  await symlink(
-                    resolve(root, 'node_modules'),
-                    resolve(candidate, 'node_modules'),
-                    'dir',
-                  );
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-                }
+                const dependencies = await dependencyDirectory();
+                if (dependencies)
+                  await symlink(dependencies, resolve(candidate, 'node_modules'), 'dir');
                 const baseline =
                   output.disposition === 'fixed' ? await runChecks(candidate, finding, false) : [];
 
@@ -577,25 +645,25 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                     .filter((path) => path && path !== 'node_modules')
                     .join('\n')
                 )
-                  throw new Error('check or feedback mutated candidate');
+                  throw new AddressRefusal('check or feedback mutated candidate', true);
                 if ((await git(root, ['rev-parse', 'HEAD'])) !== parent)
-                  throw new Error('verified parent changed during candidate gates');
+                  throw new AddressRefusal('verified parent changed during candidate gates', true);
                 if (!(await readFile(await safeFile(root, file))).equals(content))
-                  throw new Error('worker file changed after candidate snapshot');
+                  throw new AddressRefusal('worker file changed after candidate snapshot', true);
                 await git(root, ['add', '--', file]);
                 if (
                   (await git(root, ['diff', '--cached', '--name-only']))
                     .split('\n')
                     .some((p) => p !== file)
                 )
-                  throw new Error('staging absorbed sibling paths');
+                  throw new AddressRefusal('staging absorbed sibling paths', true);
                 await git(root, ['commit', '-m', message]);
                 const commit = await git(root, ['rev-parse', 'HEAD']);
                 if (
                   (await git(root, ['rev-parse', `${commit}^`])) !== parent ||
                   (await git(root, ['rev-parse', `${commit}^{tree}`])) !== tree
                 )
-                  throw new Error('commit does not match gated parent/tree');
+                  throw new AddressRefusal('commit does not match gated parent/tree', true);
                 verifiedHeads.add(commit);
                 touched = false;
                 for (let i = 0; i < baseline.length; i++)
@@ -618,25 +686,19 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
             })
             .catch(async (error: unknown) => {
               reason = error instanceof Error ? error.message : String(error);
-              if (
-                /protected|out-of-scope|index|parent changed|mutated|staging absorbed|commit does not|unexpected/.test(
-                  reason,
-                )
-              )
-                fatal = reason;
+              if (error instanceof AddressRefusal) {
+                refusal = error;
+                if (error.fatal) fatal = reason;
+              }
               await restore();
               return undefined;
             });
           if (accepted) return accepted;
-          if (
-            /protected|out-of-scope|index|parent changed|mutated|staging absorbed|commit does not|upload|cancel|budget/.test(
-              reason,
-            )
-          )
-            return failed(reason);
+          if (refusal) return failed(reason);
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
+        if (error instanceof AddressRefusal && error.fatal) fatal = reason;
         try {
           await restore();
         } catch (restoreError) {

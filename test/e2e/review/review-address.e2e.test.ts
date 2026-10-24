@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +100,23 @@ async function run(f: Awaited<ReturnType<typeof fixture>>) {
     return { code: result.code, stdout: result.stdout, stderr: result.stderr };
   }
 }
+test('spawned local CLI fixes through an aliased repository root', async () => {
+  const f = await fixture();
+  try {
+    const alias = join(f.root, 'repo-alias');
+    await symlink(f.repo, alias, 'dir');
+    const result = await run({ ...f, repo: alias });
+    expect(result.code, result.stdout).toBe(0);
+    const report = (JSON.parse(result.stdout) as { value: ReviewAddressReport }).value;
+    expect(report.fixesPerRun).toBe(1);
+    expect(report.openBlocking).toEqual([]);
+    expect(report.fixes[0]?.finding.file).toBe('src/a.ts');
+    expect(await git(f.repo, 'show', '--format=', '--name-only', 'HEAD')).toBe('src/a.ts');
+    expect((await scanner.calls()).length).toBeGreaterThan(3);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
 test.each([
   { model: 'scripted', tokens: 1000, code: 0 },
   { model: 'defer', tokens: 1000, code: 3 },

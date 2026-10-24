@@ -9,6 +9,10 @@ import type { Finding, FindingsRecord } from '../../../src/ops/review/findings.j
 import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
+import { runPlan } from '../../../src/kernel/runner.js';
+import { createGovernor } from '../../../src/kernel/governor.js';
+import type { OpRegistryEntry } from '../../../src/kernel/types.js';
+import { z } from 'zod';
 
 let scanner: Awaited<ReturnType<typeof makeGitleaksFixture>>;
 beforeEach(async () => {
@@ -125,6 +129,52 @@ async function fixture(mode: 'fix' | 'defer' | 'rescue' = 'fix', maxTokens = 100
   };
 }
 describe('review.address local full cycle', () => {
+  test('nested worker, feedback, closure and re-review usage reach the enclosing budget exactly once', async () => {
+    const f = await fixture();
+    let next = 0;
+    try {
+      const run = await runPlan(
+        {
+          id: 'outer-address',
+          jobs: [
+            {
+              id: 'address',
+              op: 'review.address',
+              input: { repoRoot: f.repo.root, source: 'local', journalDir: f.journalDir },
+            },
+            { id: 'later', op: 'probe', input: {} },
+          ],
+        },
+        { concurrency: 1, stopOnError: false, maxTokens: 10 },
+        {
+          get: (name) =>
+            ({
+              name,
+              inputSchema: z.unknown(),
+              importer: async () =>
+                name === 'review.address'
+                  ? f.op
+                  : async () => {
+                      next++;
+                      return { status: 'ok', value: {} };
+                    },
+            }) as unknown as OpRegistryEntry<never, never>,
+        },
+        {
+          governor: createGovernor({ maxTokens: 10 }),
+          allowAdvisory: true,
+          allowAdvisoryProvenance: 'product',
+        },
+      );
+      expect(run.usage).toEqual({ input: 8, output: 4, cacheRead: 0, cacheWrite: 0 });
+      expect(run.jobs[0]?.usage).toEqual(run.usage);
+      expect(next).toBe(0);
+      expect(run.jobs[1]?.result.status).toBe('budget-exhausted');
+      expect(f.models).toEqual(['worker', 'worker', 'reviewer', 'reviewer']);
+    } finally {
+      await f.cleanup();
+    }
+  });
   test('fixture findings become a gated commit, dev disposition, actual review.run and clean report', async () => {
     const f = await fixture();
     try {
