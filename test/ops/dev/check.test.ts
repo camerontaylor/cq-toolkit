@@ -68,7 +68,12 @@ describe('dev.check', () => {
         checks: [
           {
             adapter: 'tsc-lines',
-            command: { command: 'fake-check', args: ['--strict'], cwd: 'packages/app' },
+            command: {
+              command: 'fake-check',
+              args: ['--strict'],
+              cwd: 'packages/app',
+              timeoutMs: 12_345,
+            },
           },
         ],
       }),
@@ -79,8 +84,12 @@ describe('dev.check', () => {
     );
     const originalRunCommand = effects.runCommand;
     let configuredCwd: string | undefined;
+    let configuredTimeout: number | undefined;
     effects.runCommand = async (command, args, options) => {
-      if (command === 'fake-check') configuredCwd = options.cwd;
+      if (command === 'fake-check') {
+        configuredCwd = options.cwd;
+        configuredTimeout = options.timeoutMs;
+      }
       return originalRunCommand(command, args, options);
     };
     const result = await makeDevCheck(effects)({ repoRoot: repo.root });
@@ -90,6 +99,7 @@ describe('dev.check', () => {
     expect(result.value.gates.map((gate) => gate.name)).not.toContain('check:static');
     expect(effects.calls).toContainEqual({ command: 'fake-check', args: ['--strict'] });
     expect(configuredCwd).toBe(join(repo.root, 'packages/app'));
+    expect(configuredTimeout).toBe(12_345);
   });
 
   test('fresh adopter scans the archived tree portably without a toolkit denylist script', async () => {

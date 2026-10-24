@@ -110,13 +110,107 @@ describe('review.run', () => {
       const folder = join(repo.root, '.cq', 'review', 'feature%2Fx');
       const [recordFile] = await readdir(folder);
       const persisted = JSON.parse(await readFile(join(folder, recordFile ?? ''), 'utf8')) as {
-        sources: { cycleId?: string }[];
+        sources: { kind: string; cycleId?: string }[];
         findings: { id: string }[];
       };
       expect(persisted.findings).toHaveLength(1);
       expect(persisted.findings[0]?.id).toBe(
-        `${persisted.sources.find((source) => source.cycleId)?.cycleId}#f1`,
+        `${persisted.sources.find((source) => source.kind === 'agent')?.cycleId}#f1`,
       );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('keeps findings from a blocked CodeRabbit cycle in the portable record', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['coderabbit', 'agent'] },
+        }),
+      );
+      repo.commitAll('fixture blocked CodeRabbit review');
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? {
+              exitCode: 1,
+              stdout: `${JSON.stringify({ type: 'finding', severity: 'critical', fileName: 'src/a.ts', comment: 'partial critical evidence' })}\n`,
+              stderr: 'review interrupted',
+              timedOut: false,
+            }
+          : undefined,
+      );
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const source = result.value.sources.find((item) => item.kind === 'coderabbit');
+      expect(source).toMatchObject({ kind: 'coderabbit', status: 'blocked' });
+      expect(source?.cycleId).toMatch(/^c001-/);
+      expect(result.value.findings).toContainEqual(
+        expect.objectContaining({
+          id: `${source?.cycleId}#f1`,
+          source: 'coderabbit',
+          severity: 'critical',
+          file: 'src/a.ts',
+          text: 'partial critical evidence',
+          status: 'open',
+        }),
+      );
+    } finally {
+      await repo.cleanup();
+    }
+  });
+
+  it('reports uncertainty when a blocked cycle ledger cannot be read back', async () => {
+    const repo = await makeTestRepo();
+    try {
+      await repo.write('package.json', JSON.stringify({ name: 'fixture-review' }));
+      await repo.write(
+        'cq.json',
+        JSON.stringify({
+          schemaVersion: 2,
+          checks: [{ adapter: 'tsc-lines', command: { command: 'tsc', args: [] } }],
+          roles: { reviewer: { provider: 'mock', model: 'mock' } },
+          budgets: { run: { maxTokens: 500 } },
+          review: { reviewers: ['coderabbit', 'agent'] },
+        }),
+      );
+      repo.commitAll('fixture blocked CodeRabbit review');
+      const effects = repoEffects(repo, (command) =>
+        command === 'coderabbit'
+          ? { exitCode: 1, stdout: '', stderr: 'not authenticated', timedOut: false }
+          : undefined,
+      );
+      const openLedger = effects.openLedger.bind(effects);
+      effects.openLedger = (branch) => {
+        const ledger = openLedger(branch);
+        return {
+          ...ledger,
+          load: () => {
+            throw new Error('ledger read fault');
+          },
+        };
+      };
+      const result = await makeReviewRun({
+        drivers: scriptedDrivers(),
+        effectsFactory: () => effects,
+        scannerFactory: () => async (components) =>
+          components.map((component) => ({ component: component.component, hits: [] })),
+      })({ repoRoot: repo.root });
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') expect(result.detail).toContain('ledger read fault');
     } finally {
       await repo.cleanup();
     }

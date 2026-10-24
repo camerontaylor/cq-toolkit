@@ -50,6 +50,47 @@ describe('runAgentReviewer', () => {
     if (result.status === 'ok') expect(result.value.findings[0]?.severity).toBe('major');
   });
 
+  it('reports driver usage and cost to the active governor before mapping the result', async () => {
+    const drivers = {
+      resolve: vi.fn(() => ({
+        driver: {
+          run: vi.fn(async () => ({
+            stopReason: 'complete' as const,
+            structuredOutput: { findings: [] },
+            usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 0 },
+            costUSD: 0.012,
+            denials: [],
+          })),
+        },
+        lane: 'ai-sdk',
+        modelSpec: { provider: 'mock', model: 'mock' },
+      })),
+    } as unknown as DriverFactory;
+    const reports: { usage?: unknown; costUSD?: number }[] = [];
+    await runLadder(
+      () =>
+        runAgentReviewer(drivers, {
+          repoRoot: '/fixture',
+          branch: 'review-fixture',
+          head: 'abc123',
+          diff: '',
+          role: { provider: 'mock', model: 'mock' },
+          maxTokens: 500,
+          wallMs: 1000,
+          severityMap: { high: 'major', medium: 'minor' },
+        }),
+      { wallClockMs: 1000 },
+      { op: 'review.run', jobKey: 'review-spend', attempt: 1 },
+      { onResult: (value) => reports.push(value) },
+    );
+    expect(reports).toEqual([
+      {
+        usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 0 },
+        costUSD: 0.012,
+      },
+    ]);
+  });
+
   it('maps a reviewer dispatch error to needs-human', async () => {
     const drivers = {
       resolve: vi.fn(() => {

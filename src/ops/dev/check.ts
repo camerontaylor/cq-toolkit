@@ -344,7 +344,7 @@ export function makeDevCheck(
             `cq.json:${String(index + 1)}:${check.adapter}`,
             check.command.command,
             check.command.args,
-            STATIC_GATE_TIMEOUT_MS,
+            check.command.timeoutMs ?? STATIC_GATE_TIMEOUT_MS,
             resolve(input.repoRoot, check.command.cwd ?? '.'),
           ),
         );

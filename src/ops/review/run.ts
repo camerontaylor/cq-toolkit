@@ -8,7 +8,7 @@ import { makeDevReview } from '../dev/review.js';
 import { makeSubprocessDevEffects } from '../dev/effects.js';
 import type { DevEffects } from '../dev/effects.js';
 import type { DiffSecretScanner } from '../dev/denylist.js';
-import { DEV_LEDGER_VERSION } from '../dev/record.js';
+import { DEV_LEDGER_VERSION, type DevCycleRecord } from '../dev/record.js';
 import {
   makeGitleaksDefaultsScanner,
   makeRepoDiffScanner,
@@ -119,15 +119,57 @@ export function makeReviewRun(deps: ReviewRunDeps): Op<ReviewRunInput, FindingsR
           })),
         });
       } else {
+        const reason =
+          result.status === 'needs-human'
+            ? result.reason
+            : result.status === 'failed'
+              ? result.error
+              : result.status === 'indeterminate'
+                ? result.detail
+                : `CodeRabbit cycle did not produce a terminal record (${result.status})`;
+        const cycleId = /review cycle (c\d+-[a-f0-9]+)/.exec(reason)?.[1];
+        let cycle: DevCycleRecord | undefined;
+        if (cycleId !== undefined) {
+          try {
+            cycle = effects
+              .openLedger(state.branch)
+              .load()
+              .records.find(
+                (entry): entry is DevCycleRecord =>
+                  entry.kind === 'cycle' &&
+                  entry.cycleId === cycleId &&
+                  entry.reviewer === 'coderabbit',
+              );
+          } catch (error) {
+            return {
+              status: 'indeterminate',
+              detail: `review.run: blocked CodeRabbit cycle ${cycleId} was recorded but its findings could not be read — ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+        }
         records.push({
-          ...blocked(
-            'coderabbit',
-            result.status === 'needs-human'
-              ? result.reason
-              : 'CodeRabbit cycle did not produce a terminal record',
-          ),
+          schemaVersion: 1,
           branch: state.branch,
           head: state.head,
+          sources: [
+            {
+              kind: 'coderabbit',
+              status: 'blocked',
+              reason,
+              ...(cycle?.kind === 'cycle' ? { cycleId: cycle.cycleId } : {}),
+            },
+          ],
+          findings:
+            cycle?.kind === 'cycle'
+              ? cycle.findings.map((item) => ({
+                  id: item.id,
+                  source: 'coderabbit',
+                  ...(item.fileName ? { file: item.fileName } : {}),
+                  severity: item.severity,
+                  text: item.excerpt ?? '',
+                  status: 'open' as const,
+                }))
+              : [],
         });
       }
     }

@@ -98,6 +98,10 @@ export async function runAgentReviewer(
     parentSignal?.removeEventListener('abort', relayAbort);
     if (cancelReview !== undefined) parentSignal?.removeEventListener('abort', cancelReview);
   }
+  currentJobContext()?.reportResult({
+    usage: result.usage,
+    ...(result.costUSD === undefined ? {} : { costUSD: result.costUSD }),
+  });
   if (result.stopReason !== 'complete') {
     return result.stopReason === 'budget'
       ? { status: 'budget-exhausted' }
