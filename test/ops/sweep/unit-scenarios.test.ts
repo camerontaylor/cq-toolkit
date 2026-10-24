@@ -199,8 +199,12 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
   };
 }
 
-async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}) {
-  return makeSweepUnitOp(bindingsOf(world, extra))(UNIT);
+async function runUnit(
+  world: FakeWorld,
+  extra: Partial<SweepUnitBindings> = {},
+  unit: WorkUnit = UNIT,
+) {
+  return makeSweepUnitOp(bindingsOf(world, extra))(unit);
 }
 
 describe('sweep unit in-process scenarios', () => {
@@ -519,6 +523,113 @@ describe('sweep unit fixer budget enforcement', () => {
 });
 
 describe('optional per-task loop', () => {
+  test.each([
+    {
+      gate: 'tamper',
+      pkg: 'alpha',
+      diff: 'diff --git a/suite.test.js b/suite.test.js\n+++ b/suite.test.js\n@@ -0,0 +1 @@\n+test.skip("bad", () => {});\n',
+    },
+    { gate: 'commit', pkg: 'alpha)invalid', diff: undefined },
+  ] as const)('records the $gate failed-attempt gate', async ({ gate, pkg, diff }) => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    const underlying = world.gitFactory();
+    try {
+      const result = await runUnit(
+        world,
+        {
+          taskLoop: {},
+          driver: {
+            run: async () => ({
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+              structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+            }),
+          },
+          git: async (args) =>
+            diff !== undefined &&
+            args.includes('diff') &&
+            args.includes('--cached') &&
+            !args.includes('--name-status')
+              ? { code: 0, stdout: diff, stderr: '' }
+              : underlying(args),
+        },
+        { ...UNIT, package: pkg },
+      );
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.tasks?.[0]?.rounds?.[0]).toMatchObject({ gate });
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('binary failed-attempt content stays local and never reaches the scanner', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('show') && args.some((arg) => arg.includes(':src/a.js'))
+            ? { code: 0, stdout: 'binary\0content', stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('failed-attempt scan refuses file content over its cap before scanning or pushing', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: true }]);
+    const underlying = world.gitFactory();
+    const scanPrompt = vi.fn(async (_text: string) => {});
+    try {
+      const result = await runUnit(world, {
+        taskLoop: { pushFailed: true },
+        driver: {
+          run: async () => ({
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            denials: [],
+            stopReason: 'complete',
+            structuredOutput: { outcome: 'code-bug', summary: 'repair source', confidence: 0.9 },
+          }),
+        },
+        scanPrompt,
+        git: async (args) =>
+          args.includes('cat-file') && args.includes('-s') && args.at(-1)?.endsWith(':src/a.js')
+            ? { code: 0, stdout: String(4 * 1024 * 1024 + 1), stderr: '' }
+            : underlying(args),
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok')
+        expect(result.value.indeterminate).toContain('failed-attempt publication refused');
+      expect(
+        scanPrompt.mock.calls.some(([text]) => text.startsWith('Failed-attempt commit ')),
+      ).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('push'))).toBe(false);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
   test('cleanup and publish failures retain task evidence as indeterminate unit reports', async () => {
     for (const fault of ['cleanup', 'publish']) {
       const world = await makeWorld([{ failing: true }, { failing: false }]);

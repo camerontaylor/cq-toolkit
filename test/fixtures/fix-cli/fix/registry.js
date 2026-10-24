@@ -1,6 +1,7 @@
 // Fixture injection only; all fix planning, validation, git and CLI behavior is production.
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { FixRunInputSchema } from '../../../../dist/ops/fix/registry.js';
 import { makeFixRun } from '../../../../dist/ops/fix/runFix.js';
 const drivers = {
@@ -17,6 +18,21 @@ const drivers = {
           modelSpec.model === 'rescue-fixes' ||
           (modelSpec.model === 'worker-fixes-b' &&
             task.files.every((file) => file.includes('b.test')));
+        if (
+          modelSpec.model === 'rescue-fixes' &&
+          !invocation.prompt.includes('\nPrior output:') &&
+          process.env.CQ_FIX_ASSERT_RESCUE_BASELINE === '1'
+        ) {
+          for (const file of task.files) {
+            const actual = await readFile(join(invocation.workspace.path, file), 'utf8');
+            const head = execFileSync('git', ['show', `HEAD:${file}`], {
+              cwd: invocation.workspace.path,
+              encoding: 'utf8',
+            });
+            if (actual !== head)
+              throw new Error(`rescue workspace differs from the pre-attempt HEAD for ${file}`);
+          }
+        }
         for (const file of edits ? task.files : []) {
           const path = join(invocation.workspace.path, file);
           if (file.endsWith('.ts')) {

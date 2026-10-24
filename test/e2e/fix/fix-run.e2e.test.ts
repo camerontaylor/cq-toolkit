@@ -1165,7 +1165,10 @@ test.each([
     let exit = 0;
     try {
       ({ stdout } = await exec(process.execPath, argv, {
-        env: scrubbedGitEnv(),
+        env: {
+          ...scrubbedGitEnv(),
+          ...(mode === 'rescue-success' ? { CQ_FIX_ASSERT_RESCUE_BASELINE: '1' } : {}),
+        },
         timeout: 30_000,
       }));
     } catch (error) {
