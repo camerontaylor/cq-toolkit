@@ -274,9 +274,9 @@ describe('fixReviewItem factory request', () => {
   });
 
   test.each([
-    ['retainSessions absent', undefined, 'reap-on-settle'],
-    ['retainSessions false', false, 'reap-on-settle'],
+    ['retainSessions absent', undefined, 'keep'],
     ['retainSessions true', true, 'keep'],
+    ['retainSessions false', false, 'reap-on-settle'],
   ])('%s → sessionRetention %s', async (_name, retainSessions, expected) => {
     const { op, requests } = scriptedOp([completeWorker(UNCHANGED)], retainSessions);
     await op(baseInput());
@@ -504,6 +504,37 @@ describe('fixReviewItem stop reasons', () => {
     // WorkerResult fold would see nothing — the job-context report is the
     // spend evidence (usage and cost together, once).
     expect(reported).toEqual([{ usage, costUSD: 0.07 }]);
+  });
+
+  test('the worker session is reported to the job context and the correlation forwarded (session-log 1.3/1.5)', async () => {
+    const { op, invocations } = scriptedOp([
+      completeWorker(
+        { changed: true, summary: 'fixed', commits: ['a'.repeat(40)] },
+        { sessionId: 'store-1', nativeSessionId: 'native-1' },
+      ),
+    ]);
+    const sessions: unknown[] = [];
+    const outcome = await runLadder(
+      () => op(baseInput()),
+      {},
+      {
+        op: 'review.fixItem',
+        jobKey: 'j1',
+        attempt: 1,
+        correlation: { workId: 'run:j1:1', runId: 'run', role: 'review.fixItem' },
+      },
+      { onSession: (link) => sessions.push(link) },
+    );
+    expect(outcome.outcome).toBe('completed');
+    // The mapped value drops sessionId, so the job-context report is the link.
+    expect(sessions).toEqual([
+      { driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'native-1' },
+    ]);
+    expect(invocations[0]?.correlation).toEqual({
+      workId: 'run:j1:1',
+      runId: 'run',
+      role: 'review.fixItem',
+    });
   });
 
   test('a driver throw with the governed signal aborted → indeterminate (the ladder cancellation, #191 r2)', async () => {

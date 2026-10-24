@@ -56,12 +56,31 @@ import { z } from 'zod';
  * One conversation turn, in OUR vocabulary: who spoke (`role`), the text
  * (`content`), the tool that produced it when role is 'tool' (`toolName`),
  * and an ISO-8601 timestamp (`at`).
+ *
+ * Session-log preservation item 1.7 (2026-10-24): the two optional
+ * fidelity fields an ai-sdk turn may carry — `usage` (the turn's observed
+ * token counts, so the store answers "what did this turn cost" without a
+ * journal join) and `toolCalls` (the assistant's REQUESTED tool calls of
+ * that step, JSON-encoded; the role-'tool' lines that follow remain the
+ * RESULTS). Both absent on every pre-existing line; the schema stays
+ * strict, so old readers reject only these NEW keys — there are none in
+ * old files.
  */
 export const SessionMessageSchema = z
   .object({
     role: z.enum(['user', 'assistant', 'tool']),
     content: z.string(),
     toolName: z.string().optional(),
+    usage: z
+      .object({
+        input: z.number().int().nonnegative(),
+        output: z.number().int().nonnegative(),
+        cacheRead: z.number().int().nonnegative(),
+        cacheWrite: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
+    toolCalls: z.string().optional(),
     at: z.string(),
   })
   .strict();

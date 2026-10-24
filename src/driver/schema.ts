@@ -34,6 +34,7 @@ import type {
   Usage,
   WorkerErrorClass,
   WorkerResult,
+  WorkCorrelation,
   WorkspaceBinding,
 } from './types.js';
 
@@ -136,6 +137,19 @@ export const WorkspaceBindingSchema: z.ZodType<WorkspaceBinding> = z
   })
   .strict();
 
+// Session-log correlation (preservation plan items 1.3–1.5): mirror of the
+// WorkCorrelation interface so a correlated invocation round-trips through
+// the strict OpInvocation mirror.
+const WorkCorrelationSchema: z.ZodType<WorkCorrelation> = z
+  .object({
+    workId: z.string(),
+    role: z.string().exactOptional(),
+    task: z.string().exactOptional(),
+    runId: z.string().exactOptional(),
+    parentWorkId: z.string().exactOptional(),
+  })
+  .strict();
+
 export const OpInvocationSchema: z.ZodType<OpInvocation> = z
   .object({
     prompt: z.string(),
@@ -146,6 +160,7 @@ export const OpInvocationSchema: z.ZodType<OpInvocation> = z
     budget: BudgetSchema,
     outputSchema: OutputSchemaSchema.exactOptional(),
     workspace: WorkspaceBindingSchema.exactOptional(),
+    correlation: WorkCorrelationSchema.exactOptional(),
   })
   .strict();
 
@@ -207,6 +222,12 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     costUSD: z.number().exactOptional(),
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),
+    // Session-log preservation item 1.5: the harness-native session id and
+    // its expected transcript path, when the lane observed them. Optional —
+    // absent on every pre-existing result; mirror stays permissive-by-key,
+    // strict-by-shape like the rest of the object.
+    nativeSessionId: z.string().min(1).exactOptional(),
+    nativeSessionPath: z.string().min(1).exactOptional(),
     denials: z.array(ToolDenialSchema),
     // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
     error: z.string().min(1).max(513).exactOptional(),

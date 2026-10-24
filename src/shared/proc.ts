@@ -143,6 +143,18 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   'XDG_CACHE_HOME',
   'XDG_DATA_HOME',
   'XDG_STATE_HOME',
+  // Session-log correlation (preservation plan item 1.4, 2026-10-24): the
+  // work-unit identity the runner (or a Paseo lane) mints before dispatch.
+  // NON-SECRET by construction — an opaque id, a role/task label, a run id —
+  // and the whole point is that EVERY child harness inherits them so the
+  // session it writes can be linked back to the work. `CQ_SESSIONS_DIR`
+  // rides too: the lanes' shared durable default (item 1.1).
+  'CQ_WORK_ID',
+  'CQ_PARENT_WORK_ID',
+  'CQ_ROLE',
+  'CQ_TASK',
+  'CQ_RUN_ID',
+  'CQ_SESSIONS_DIR',
   // Network egress + TLS trust config (issue #183 r1): a routed CLI on a
   // proxied or TLS-inspecting host cannot reach its endpoint without these.
   // The CA vars are non-secret paths. NOTE the proxy vars MAY embed egress
@@ -257,6 +269,12 @@ export interface SpawnOptions {
    * never for secrets a Route can inject explicitly.
    */
   envAllowlist?: readonly string[];
+  /**
+   * Names REMOVED from the composed child env, after inheritance and
+   * overrides. Session-log correlation uses it so a correlated invocation's
+   * absent CQ_* fields do not inherit stale (allowlisted) parent values.
+   */
+  envRemove?: readonly string[];
   /** When set, written to the child's stdin and the pipe closed (prompt piping). */
   stdin?: string;
   /**
@@ -425,6 +443,15 @@ function createCollector(
  * group — so `kill` can take descendants down with it (header; Windows
  * limitation recorded there).
  */
+/** Delete `names` from a composed child env (in place; no-op when absent). */
+function withoutNames(
+  env: Record<string, string>,
+  names: readonly string[] | undefined,
+): Record<string, string> {
+  for (const name of names ?? []) delete env[name];
+  return env;
+}
+
 export function spawnManaged(opts: SpawnOptions): ManagedChild {
   const stdoutListeners: Array<(line: string) => void> = [];
   const stderrListeners: Array<(line: string) => void> = [];
@@ -444,7 +471,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     ...(POSIX ? { detached: true } : {}),
     // DEFAULT-DENY child env (issue #183): only the allowlisted parent names
     // are inherited; the explicit per-Route overrides always ride on top.
-    env: buildChildEnv(process.env, opts.env, opts.envAllowlist),
+    env: withoutNames(buildChildEnv(process.env, opts.env, opts.envAllowlist), opts.envRemove),
   });
 
   activeChildren.add(child);

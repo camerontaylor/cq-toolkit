@@ -400,6 +400,28 @@ export const JobFinishedJournalEventSchema = z
     // W2.3 (reservation-era runs): the job's reservation-side charge — the
     // ledger truth that includes a full reservation charge behind an abort.
     charged: z.number().nonnegative().exactOptional(),
+    // Session-log preservation (plan item 1.3, journal v2 additive fields,
+    // 2026-10-24): the correlation facts. ABSENT on every pre-existing
+    // line (optional here ⇒ old v1/v2 readers ignore them; old STRICT
+    // readers that reject unknown keys are the annex §4 fail-closed case —
+    // none ship in-repo). `workId` mints the work-unit identity, `role`
+    // names the lane's function, `sessions` links every driver session the
+    // job produced: our store id, the harness-native id when one was
+    // observed (item 1.5), and the store file's expected path.
+    workId: z.string().min(1).exactOptional(),
+    role: z.string().min(1).exactOptional(),
+    sessions: z
+      .array(
+        z
+          .object({
+            driver: z.string(),
+            sessionId: z.string().min(1),
+            nativeSessionId: z.string().min(1).exactOptional(),
+            path: z.string().min(1).exactOptional(),
+          })
+          .strict(),
+      )
+      .exactOptional(),
   })
   .strict();
 

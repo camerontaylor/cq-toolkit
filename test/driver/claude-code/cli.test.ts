@@ -1920,6 +1920,7 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
       const marker = 'cq-env-leak-marker-7f3a';
       const savedMarker = process.env.CQ_ENV_LEAK_MARKER;
       const savedGh = process.env.GH_TOKEN;
+      const savedTask = process.env.CQ_TASK;
       // GLOBAL process.env mutation, deliberately: the real spawnManaged path
       // reads the LIVE parent env, so withholding can only be proven against
       // it. Restored in finally; this file's tests run sequentially (no
@@ -1982,7 +1983,26 @@ describe('claude-code driver, CLI transport specifics (fake agent CLI)', () => {
         const frozenEnv = probeEnvOf(await narrationOf(store, frozen.sessionId as string));
         expect(frozenEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
         expect(frozenEnv['GH_TOKEN']).toBeUndefined(); // pushed AFTER construction — not honored
+
+        // Session-log correlation: the invocation's work id reaches the
+        // child, and an absent field REMOVES a stale allowlisted parent
+        // value at the spawn boundary (CQ_TASK is on the default allowlist).
+        process.env.CQ_TASK = 'stale-outer-task';
+        const correlated = await new ClaudeCodeDriver(probeOptions).run(
+          invocation({
+            prompt: 'correlation probe run',
+            toolPolicy: EMPTY_SURFACE,
+            correlation: { workId: 'w-probe', role: 'fixer' },
+          }),
+        );
+        expect(correlated.stopReason).toBe('complete');
+        const correlatedEnv = probeEnvOf(await narrationOf(store, correlated.sessionId as string));
+        expect(correlatedEnv['CQ_WORK_ID']).toBe('w-probe');
+        expect(correlatedEnv['CQ_ROLE']).toBe('fixer');
+        expect(correlatedEnv['CQ_TASK']).toBeUndefined();
       } finally {
+        if (savedTask === undefined) delete process.env.CQ_TASK;
+        else process.env.CQ_TASK = savedTask;
         if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
         else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
         if (savedGh === undefined) delete process.env.GH_TOKEN;

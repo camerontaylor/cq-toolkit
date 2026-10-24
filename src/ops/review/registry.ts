@@ -579,8 +579,10 @@ export const registry: OpRegistryEntry[] = [
     // the input's harness rides the DriverRequest (toolPolicyFor reduces
     // it to tool NAMES; command/path restrictions cannot ride the frozen
     // OpInvocation, Codex P1), the input's worktree rides the invocation
-    // as its workspace binding, and reap-on-settle per the op's retention
-    // flag (the default). The FACTORY owns the served-model assertion —
+    // as its workspace binding, and session-retention 'keep' per the op's
+    // retention flag (default-keep since the session-log preservation
+    // plan, item 1.2; 'reap-on-settle' is the explicit false opt-out).
+    // The FACTORY owns the served-model assertion —
     // no lane class is constructed here, statically or dynamically.
     //
     // P1 PLAN-DATA NOTE (the composition review needs this): three

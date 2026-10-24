@@ -33,11 +33,12 @@
 // registry.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Usage, WorkerResult } from '../driver/types.js';
+import type { Usage, WorkCorrelation, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import { prepareProcessSignalCleanup } from '../shared/process-signals.js';
 import type {
   GovernanceOptIn,
+  JobSessionLink,
   JournalEvent,
   Limits,
   OpResult,
@@ -241,6 +242,14 @@ export interface LadderContextInfo {
   jobKey: string;
   /** 1-based dispatch ordinal for this jobKey — JobStartedJournalEvent.attempt semantics. */
   attempt: number;
+  /**
+   * Session-log correlation (preservation plan items 1.3/1.4, 2026-10-24):
+   * the work-unit id the RUNNER minted for this attempt, present only
+   * under a governed dispatch. An op forwards it onto its driver
+   * invocation's `correlation` so the lane stamps the child's CQ_* env;
+   * optional — tests and direct ladder callers omit it.
+   */
+  correlation?: WorkCorrelation;
 }
 
 /**
@@ -280,6 +289,14 @@ export interface JobGovernance {
    * here XOR return it in the WorkerResult-shaped value.
    */
   reportResult(result: { usage?: Usage; costUSD?: number }): void;
+  /**
+   * Session-log correlation (items 1.3/1.5): report a driver session this
+   * invocation produced, for ops that map the WorkerResult into their OWN
+   * value shape (review.fixItem) and so hide its `sessionId` from the
+   * completion-time `sessions` derivation. The runner links it on the
+   * job-finished event. Optional: hand-built contexts may omit it.
+   */
+  reportSession?(link: JobSessionLink): void;
   readonly info: Readonly<LadderContextInfo & { wallClockMs?: number }>;
 }
 
@@ -363,6 +380,7 @@ export function runLadder<T>(
      */
     onRung?: (marker: LadderRungMarker) => void;
     onResult?: (result: { usage?: Usage; costUSD?: number }) => void;
+    onSession?: (link: JobSessionLink) => void;
   },
 ): Promise<LadderOutcome<T>> {
   validateLadderSpec(spec);
@@ -401,6 +419,7 @@ export function runLadder<T>(
       port = p;
     },
     reportResult: (result) => opts?.onResult?.(result),
+    reportSession: (link) => opts?.onSession?.(link),
     info: {
       ...info,
       ...(wallClockMs !== undefined ? { wallClockMs } : {}),

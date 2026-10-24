@@ -505,6 +505,37 @@ describe('driver factory — knobs reach the constructed lane', () => {
     ).resolves.toBeDefined();
   });
 
+  test('sessionLogs.dir beats the factory-level sessionsDir for both the store and the reap (session-log 1.6)', async () => {
+    stubKey();
+    const dir = await scratch();
+    const logsDir = join(dir, 'archive-sessions');
+    const factory = createDriverFactory({
+      ...subprocessConfig(dir, []),
+      sessionLogs: { dir: logsDir },
+    });
+    const keep = await factory
+      .resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+      })
+      .driver.run(invocation());
+    expect(keep.stopReason).toBe('complete');
+    await expect(new SessionStore(logsDir).load(keep.sessionId as string)).resolves.toBeDefined();
+    // The reap wrapper resolves the SAME dir: a reaped record leaves no file there.
+    const reaped = await factory
+      .resolve({
+        role: 'fixer',
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+        sessionRetention: 'reap-on-settle',
+      })
+      .driver.run(invocation());
+    expect(reaped.stopReason).toBe('complete');
+    expect(reaped.sessionId).toBeDefined();
+    await expect(
+      new SessionStore(logsDir).load(reaped.sessionId as string),
+    ).resolves.toBeUndefined();
+  });
+
   test('config.pricing reaches the lane (cost derived off the observed served id)', async () => {
     stubKey();
     const dir = await scratch();

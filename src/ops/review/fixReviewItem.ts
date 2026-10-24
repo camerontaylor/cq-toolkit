@@ -52,10 +52,11 @@
 // error), and the governed signal rides RunOptions (§2.1). The invocation's
 // modelSpec is the FACTORY-NORMALISED spec — a deprecated provider alias
 // never reaches a lane or a journal. Session records a workspace-bound run
-// creates are reaped once the run settles (DriverRequest
-// sessionRetention 'reap-on-settle', the op's `retainSessions` dep) unless
-// retention was explicitly requested — the audit trail for a loop run is
-// the run JOURNAL, not raw session files (round-3 item 14).
+// creates are KEPT by default (sessionRetention 'keep' — session-log
+// preservation plan item 1.2 flipped `retainSessions` to default-true on
+// 2026-10-24, superseding round-3 item 14); a caller with a retention
+// policy opts out explicitly with `retainSessions: false`. The run JOURNAL
+// stays the verdict record; the session file now survives beside it.
 //
 // STOP-REASON → OpResult MAPPING (mechanical, total):
 //   'complete' + parseable structured output (an object with EXACTLY the
@@ -98,6 +99,7 @@ import type {
   ToolDenial,
   ToolPolicy,
   Usage,
+  WorkCorrelation,
   WorkerResult,
 } from '../../driver/types.js';
 import type { Op } from '../../kernel/types.js';
@@ -105,6 +107,18 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { defaultFixPrompt } from './prompts/defaultFixPrompt.js';
 import type { ThreadComment } from './threads.js';
 import type { Finding } from './findings.js';
+
+/**
+ * Session-log correlation (preservation plan items 1.3–1.5): the
+ * invocation fragment carrying the governed job's work identity, or `{}`
+ * outside a governed dispatch (exactOptionalPropertyTypes-safe spread).
+ */
+function correlationInvocation(): { correlation?: WorkCorrelation } {
+  const info = currentJobContext()?.info;
+  const correlation = info?.correlation;
+  if (correlation === undefined) return {};
+  return { correlation: { ...correlation, role: correlation.role ?? 'fixer' } };
+}
 
 /**
  * The one review item a fixer worker fixes. Plain JSON, built from the
@@ -675,11 +689,15 @@ export function makeFixReviewItem(deps: {
    */
   drivers: DriverFactory;
   /**
-   * Keep the fresh session record a workspace-bound run created (default
-   * FALSE: it is reaped once the run settles, whatever the verdict —
-   * DriverRequest sessionRetention 'reap-on-settle'). The audit trail for
-   * a loop run is the run JOURNAL, not raw session files; retention is an
-   * explicit debugging opt-out (round-3 item 14).
+   * Keep the fresh session record a workspace-bound run created. Default
+   * TRUE (session-log preservation, plan item 1.2 / feature R2): the
+   * session file is evidence and the default location is now durable
+   * (item 1.1), so the store keeps it. Reaping is an explicit opt-out —
+   * `retainSessions: false` maps to DriverRequest sessionRetention
+   * 'reap-on-settle' for callers with a retention policy. (Was FALSE until
+   * 2026-10-24: the default dir was tmpfs and the run JOURNAL was deemed
+   * the only audit trail — round-3 item 14. The journal still carries the
+   * verdict; the session file now survives beside it.)
    */
   retainSessions?: boolean;
 }): Op<ReviewFixInput, FixReviewItemResult> {
@@ -701,7 +719,7 @@ export function makeFixReviewItem(deps: {
         role: 'fixer',
         modelSpec: input.driver,
         harness,
-        sessionRetention: deps.retainSessions === true ? 'keep' : 'reap-on-settle',
+        sessionRetention: deps.retainSessions === false ? 'reap-on-settle' : 'keep',
       });
     } catch (err) {
       // A THROWN resolve() with the governor's signal already aborted is
@@ -740,6 +758,11 @@ export function makeFixReviewItem(deps: {
       workspace: { path: input.worktree.path },
       outputSchema: FIX_CONTRACT_OUTPUT_SCHEMA,
       budget: input.budget ?? {},
+      // Session-log correlation (items 1.3–1.5): forward the runner's
+      // minted work identity onto the invocation so the lane stamps the
+      // child's CQ_* env. Absent outside a governed dispatch — the
+      // un-governed op behaves exactly as before.
+      ...correlationInvocation(),
     };
     let worker: WorkerResult;
     try {
@@ -774,6 +797,19 @@ export function makeFixReviewItem(deps: {
     // observeResult) exactly as the fold would. Reported for EVERY stop
     // reason (a failed/aborted worker still spent), before the mapping
     // below. Outside a governed invocation there is no context — a no-op.
+    // SESSION LINK (session-log preservation items 1.3/1.5): the mapping
+    // below drops `worker.sessionId`, so the runner's result-derived
+    // `job-finished.sessions` cannot see it — report it through the job
+    // context instead (a no-op outside a governed dispatch).
+    if (worker.sessionId !== undefined && worker.sessionId !== '') {
+      currentJobContext()?.reportSession?.({
+        driver: resolved.lane,
+        sessionId: worker.sessionId,
+        ...(worker.nativeSessionId !== undefined
+          ? { nativeSessionId: worker.nativeSessionId }
+          : {}),
+      });
+    }
     currentJobContext()?.reportResult({
       usage: worker.usage,
       ...(worker.costUSD !== undefined ? { costUSD: worker.costUSD } : {}),

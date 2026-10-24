@@ -170,10 +170,11 @@ import { classifyDispatch } from './lanes.js';
 import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultArtifactSchema } from './schema.js';
 import { assertJsonLossless } from '../shared/jsonLossless.js';
-import type { Usage } from '../driver/types.js';
+import type { Usage, WorkCorrelation } from '../driver/types.js';
 import type {
   JobFinishedJournalEvent,
   JobOutcome,
+  JobSessionLink,
   JobState,
   JournalEvent,
   Op,
@@ -275,6 +276,77 @@ function stateFromResult(result: OpResult<unknown>): JobState {
     case 'indeterminate':
       return 'failed';
   }
+}
+
+/**
+ * Session-log correlation (preservation plan item 1.3/1.5): the driver
+ * sessions an op result carries, derived defensively like
+ * `workerResultOfValue` — only an ok result whose value carries a
+ * non-empty string `sessionId` yields a link; anything else (ops that map
+ * the driver result into their own value shape, or a failed verdict)
+ * yields undefined, never a fabricated session. `driver` is 'unknown'
+ * here BY DESIGN and callers must not guess: the schema's `driver` field
+ * is required, and the runner does not know which lane served the job —
+ * the journal reader joins that from the op registry.
+ */
+export function sessionsOfResult(result: OpResult<unknown>): JobSessionLink[] | undefined {
+  if (result.status !== 'ok') return undefined;
+  const value = result.value;
+  if (typeof value !== 'object' || value === null) return undefined;
+  const sessionId = (value as { sessionId?: unknown }).sessionId;
+  if (typeof sessionId !== 'string' || sessionId === '') return undefined;
+  const nativeSessionId = (value as { nativeSessionId?: unknown }).nativeSessionId;
+  return [
+    {
+      driver: 'unknown',
+      sessionId,
+      ...(typeof nativeSessionId === 'string' && nativeSessionId !== '' ? { nativeSessionId } : {}),
+    },
+  ];
+}
+
+/**
+ * Defensive copy of an op-reported session link (raw op data, like the
+ * reportResult evidence): non-empty strings only, so a malformed report is
+ * dropped instead of failing the journal's strict `sessions[]` schema.
+ */
+function validSessionLink(link: unknown): JobSessionLink | undefined {
+  if (typeof link !== 'object' || link === null) return undefined;
+  const raw = link as Record<string, unknown>;
+  const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v !== '';
+  if (!nonEmpty(raw['sessionId'])) return undefined;
+  return {
+    driver: typeof raw['driver'] === 'string' ? raw['driver'] : 'unknown',
+    sessionId: raw['sessionId'],
+    ...(nonEmpty(raw['nativeSessionId']) ? { nativeSessionId: raw['nativeSessionId'] } : {}),
+    ...(nonEmpty(raw['path']) ? { path: raw['path'] } : {}),
+  };
+}
+
+/**
+ * Result-derived links first, then reported ones, one entry per sessionId
+ * (first-seen order). A later link for the same session fills fields the
+ * earlier one lacks — a known `driver` replaces 'unknown', and a missing
+ * nativeSessionId/path is taken — so no metadata is lost to the dedupe.
+ */
+function mergeSessionLinks(
+  fromResult: JobSessionLink[] | undefined,
+  reported: readonly JobSessionLink[],
+): JobSessionLink[] | undefined {
+  const bySession = new Map<string, JobSessionLink>();
+  for (const link of [...(fromResult ?? []), ...reported]) {
+    const prior = bySession.get(link.sessionId);
+    if (prior === undefined) {
+      bySession.set(link.sessionId, { ...link });
+      continue;
+    }
+    if (prior.driver === 'unknown' && link.driver !== 'unknown') prior.driver = link.driver;
+    if (prior.nativeSessionId === undefined && link.nativeSessionId !== undefined) {
+      prior.nativeSessionId = link.nativeSessionId;
+    }
+    if (prior.path === undefined && link.path !== undefined) prior.path = link.path;
+  }
+  return bySession.size > 0 ? [...bySession.values()] : undefined;
 }
 
 /**
@@ -987,6 +1059,13 @@ async function runPlanUnderLease(
     // Governed honest-stop provenance: the runner KNOWS which jobs it
     // admitted this run — attribution needs no marker strings.
     const admittedJobIds = new Set<string>();
+    // Session-log correlation (preservation plan items 1.3/1.4): the
+    // work-unit id minted per governed job attempt, keyed by job id. Read
+    // back at the job-finished emit and exposed to ops through the job
+    // context's info (below), so an op forwards it to its driver
+    // invocation without the runner mutating process.env (concurrent jobs
+    // in a wave must not cross-stain each other's children).
+    const correlationByJob = new Map<string, WorkCorrelation>();
 
     // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
     // not failed. This is a PREDICATE, not a run-start snapshot: the trip
@@ -1182,6 +1261,17 @@ async function runPlanUnderLease(
         attempt: admission.attempt,
       });
 
+      // Session-log correlation (preservation plan items 1.3/1.4, 2026-10-24):
+      // mint the work-unit id for THIS job attempt. It rides the
+      // job-finished event below and reaches OPS through the governed job
+      // context (`ctx.info.correlation`), so an op passes it onto its
+      // driver invocation (the lane stamps CQ_* into the child env there —
+      // per-job, never a process.env mutation). Deliberately NOT a
+      // process.env write: concurrent jobs in a wave would cross-stain
+      // each other's children.
+      const workId = `${runId}:${job.id}:${admission.attempt}`;
+      correlationByJob.set(job.id, { workId, runId, role: job.op });
+
       // Per-job ledger sums: everything this invocation's evidence folds
       // actually charged — streamed (reportResult) plus the returned
       // WorkerResult fold, each exactly once (the flags mirror the
@@ -1189,6 +1279,11 @@ async function runPlanUnderLease(
       let jobUsage: Usage | undefined;
       let jobCostUSD: number | undefined;
       let reportedUsage = false;
+      // Session-log correlation (items 1.3/1.5): driver sessions an op
+      // reported through the job context (reportSession) — the ops that
+      // map the WorkerResult into their own value shape hide its sessionId
+      // from sessionsOfResult. Merged into job-finished.sessions below.
+      const reportedSessions: JobSessionLink[] = [];
       let reportedCost = false;
       const foldIntoJobSums = (
         evidence: { usage?: Usage; costUSD?: number },
@@ -1378,7 +1473,7 @@ async function runPlanUnderLease(
       // in-flight op sees the abort through currentJobContext().signal. The
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
-        const ladderOutcome = await runLadder(
+        const ladderOutcome = await runLadder<OpResult<unknown>>(
           (context) => {
             dispatchSignal = context.signal;
             dispatchUnknown = false;
@@ -1392,7 +1487,21 @@ async function runPlanUnderLease(
             );
           },
           governor.ladderSpec,
-          { op: job.op, jobKey: job.id, attempt },
+          // LadderContextInfo (with the minted correlation when the job was
+          // admitted). The conditional-spread form keeps exactOptionalPropertyTypes
+          // happy; the ternary's result type has correlation present XOR absent.
+          correlationByJob.get(job.id) !== undefined
+            ? {
+                op: job.op,
+                jobKey: job.id,
+                attempt,
+                // Session-log correlation (items 1.3/1.4): the work id
+                // minted at admission reaches the op through the job
+                // context, so it can forward it onto its driver invocation
+                // (the lane turns it into the child's CQ_* env).
+                correlation: correlationByJob.get(job.id) as WorkCorrelation,
+              }
+            : { op: job.op, jobKey: job.id, attempt },
           {
             // ONE time source: the governor's own clock timestamps the
             // ladder AND every recorded event — an override here would
@@ -1404,6 +1513,11 @@ async function runPlanUnderLease(
               // Keep the marker identity: async delivery failures arrive
               // after onRung and must remain visible in the recorded event.
               governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
+            },
+            onSession: (link) => {
+              if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
+              const sanitized = validSessionLink(link);
+              if (sanitized !== undefined) reportedSessions.push(sanitized);
             },
             onResult: (evidence) => {
               if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
@@ -1565,6 +1679,13 @@ async function runPlanUnderLease(
       }
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
+      // Session-log correlation (items 1.3/1.5): the minted work id and
+      // role ride the finish event; the sessions list merges the op
+      // result's WorkerResult-shaped value (OUR store id only — the native
+      // id is not visible there) with the links the op reported through
+      // the job context (reportSession — those may carry nativeSessionId).
+      const correlation = correlationByJob.get(job.id);
+      const jobSessions = mergeSessionLinks(sessionsOfResult(result), reportedSessions);
       await emit({
         type: 'job-finished',
         runId,
@@ -1573,6 +1694,9 @@ async function runPlanUnderLease(
         opId: job.op,
         inputsHash: job.inputsHash,
         result,
+        ...(correlation !== undefined ? { workId: correlation.workId } : {}),
+        ...(correlation !== undefined ? { role: correlation.role } : {}),
+        ...(jobSessions !== undefined ? { sessions: jobSessions } : {}),
         ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
         ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
         ...(settledCharge !== undefined ? { charged: settledCharge.charged } : {}),
@@ -1635,6 +1759,12 @@ async function runPlanUnderLease(
               opId: prior.opId,
               inputsHash: prior.inputsHash,
               result: prior.result,
+              // Session-log correlation (items 1.3/1.5): the re-attested
+              // finish keeps the prior attempt's work-to-session links, so
+              // a resumed run's journal stays self-contained for them too.
+              ...(prior.workId !== undefined ? { workId: prior.workId } : {}),
+              ...(prior.role !== undefined ? { role: prior.role } : {}),
+              ...(prior.sessions !== undefined ? { sessions: prior.sessions } : {}),
               ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
               ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
             });

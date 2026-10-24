@@ -1809,6 +1809,53 @@ describe('governed journal v2 + resume', () => {
   );
 
   test(
+    'job-finished links op-reported sessions + workId/role, and replay re-attestation keeps them (session-log 1.3/1.5)',
+    async () => {
+      const calls: string[] = [];
+      const seenWorkIds: (string | undefined)[] = [];
+      const linked = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push((raw as { jobId: string }).jobId);
+        const ctx = currentJobContext();
+        seenWorkIds.push(ctx?.info.correlation?.workId);
+        ctx?.reportSession?.({ driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'n-1' });
+        // A malformed report is dropped, never journalled.
+        ctx?.reportSession?.({ driver: 'ai-sdk', sessionId: '' });
+        // The result-derived link (driver 'unknown', no native id) for the
+        // SAME session merges with the reported one — no metadata lost.
+        return { status: 'ok', value: { sessionId: 'store-1' } };
+      };
+      const plan = independentPlan('plan-gov-session-links', 1, 'linked');
+      const report1 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('linked', linked)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      const expectedLinks = {
+        jobId: 'j1',
+        workId: `${report1.runId}:j1:1`,
+        role: 'linked',
+        sessions: [{ driver: 'ai-sdk', sessionId: 'store-1', nativeSessionId: 'n-1' }],
+      };
+      expect(seenWorkIds).toEqual([`${report1.runId}:j1:1`]);
+      const events1 = await openRunLog(dir).read(report1.runId);
+      expect(jobFinishes(events1)).toMatchObject([expectedLinks]);
+      expect(jobFinishes(events1)[0]?.sessions).toHaveLength(1);
+
+      const report2 = await runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('linked', linked)),
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+      );
+      expect(calls).toEqual(['j1']); // the resume replay-skipped
+      const events2 = await openRunLog(dir).read(report2.runId);
+      expect(jobFinishes(events2)).toMatchObject([expectedLinks]);
+    },
+    journalEnclosure(2),
+  );
+
+  test(
     'a claim tombstone beyond the highest folded seq refuses the fold — a deleted run file cannot silently lower the seed (composition H2)',
     async () => {
       const plan: Plan = {

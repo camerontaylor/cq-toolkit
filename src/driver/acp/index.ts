@@ -255,7 +255,6 @@
 // 0 would be a fabricated fact). The vendor's own cost figures
 // (usage_update's cost object) are dropped with the frame that carries
 // them (DD-9): a vendor-reported cost would bypass the derived-only rule.
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
@@ -315,6 +314,8 @@ import {
   terminateAcpProcess,
 } from './process.js';
 import type { AcpExitInfo, AcpGraceLadderOptions, AcpSpawnFn } from './process.js';
+import { defaultSessionsDir } from '../sessions-dir.js';
+import { applyCorrelationEnv } from '../correlation-env.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -376,7 +377,7 @@ export interface AcpDriverOptions {
   modelEnv?: string;
   /** Root under which fresh temp workspaces are created. Default: the harness default (os.tmpdir()/cq-harness). */
   workspaceRoot?: string;
-  /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
+  /** Sessions directory for the backing SessionStore. Default: the shared durable sessions dir (`defaultSessionsDir()` — item 1.1). */
   sessionsDir?: string;
   /**
    * Price-lookup override for the derived-only costUSD rule (default:
@@ -855,6 +856,9 @@ export class AcpDriver implements Driver {
       }
     }
     const childEnv = buildChildEnv(process.env, undefined, extraNames);
+    // Session-log correlation (items 1.3–1.5): the invocation's work
+    // identity rides the agent's env, as on the claude-code transports.
+    applyCorrelationEnv(childEnv, opInvocation.correlation);
     if (this.modelEnv !== undefined) {
       childEnv[this.modelEnv] = modelSpec.model;
     }
@@ -1864,11 +1868,6 @@ export class AcpDriver implements Driver {
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-/** Default sessions dir (sibling of the harness temp-workspace root). */
-function defaultSessionsDir(): string {
-  return join(tmpdir(), 'cq-harness', 'sessions');
 }
 
 /**
