@@ -12,6 +12,7 @@ import {
   makeDevCycle,
   renderFindingsSection,
 } from '../../../src/ops/dev/cycle.js';
+import { DEV_READINESS_GAPS_SECTION_MARKER } from '../../../src/ops/pr/open.js';
 import type { DevCheckReport } from '../../../src/ops/dev/check.js';
 import type { DevEffects } from '../../../src/ops/dev/effects.js';
 import type { WorkState } from '../../../src/ops/dev/internal/workState.js';
@@ -21,7 +22,7 @@ import type { PrOpenInput, PrOpenReport } from '../../../src/ops/pr/open.js';
 import type { ReviewAddressInput, ReviewAddressReport } from '../../../src/ops/review/address.js';
 import type { FindingsRecord } from '../../../src/ops/review/findings.js';
 import type { ReviewRunInput } from '../../../src/ops/review/run.js';
-import { cycleRecord, checkRecord } from './fakes.js';
+import { cycleRecord, checkRecord, dispositionRecord } from './fakes.js';
 import { DEV_LEDGER_VERSION as seedLedgerVersion } from '../../../src/ops/dev/record.js';
 import { makeTestRepo, repoEffects, seed, type TestRepo } from './repo.js';
 
@@ -171,13 +172,31 @@ function openFake(calls: PrOpenInput[], number = 42, ready = true): OpenLeg {
 const okPush: GitLeg = async () => ({ code: 0, stdout: '', stderr: '' });
 
 /** A gh fake with a get/edit body pair for the findings-section compose. */
-function ghFake() {
+function ghFake(
+  existingBody = '<!-- cq:dev-readiness-gaps -->\nDRAFT SECTION\n<!-- /cq:dev-readiness-gaps -->',
+) {
   const bodies: string[] = [];
+  let currentBody = existingBody;
   const gh = {
-    getPrBody: async () =>
-      '<!-- cq:dev-readiness-gaps -->\nDRAFT SECTION\n<!-- /cq:dev-readiness-gaps -->',
+    getPrBody: async () => currentBody,
     editPrBody: async (_number: number, body: string) => {
       bodies.push(body);
+      currentBody = body;
+    },
+    searchPrByHead: async () => null,
+    createPr: async (request: {
+      head: string;
+      base: string;
+      title: string;
+      body: string;
+      draft: boolean;
+    }) => {
+      currentBody = request.body;
+      return { number: 43, url: 'https://example.invalid/pull/43' };
+    },
+    comment: async () => undefined,
+    getPrReadiness: async () => {
+      throw new Error('not used by dev.cycle');
     },
   };
   return { gh: gh as unknown as PrEffects, bodies };
@@ -245,19 +264,68 @@ describe('dev.cycle', () => {
     expect(pushCalls).toBe(0);
   });
 
-  test('the round cap: pushed branch, DRAFT with the gaps and findings sections, needs-human with the follow-up command', async () => {
+  test('the round cap: pushed branch, DRAFT with the gaps, dispositions AND findings sections, needs-human with the follow-up command', async () => {
     const state = await seed(repo);
+    repo.git('push', '-q', 'origin', 'feature/x');
     await seedReadyLedger(state);
+    // The address round dispositioned one earlier finding and one BLOCKING
+    // finding stays open (the round cap's whole point): the seeded terminal
+    // cycle gains a blocking finding with NO disposition, so readiness
+    // reports open-blocking-findings and pr.open takes the NOT-READY path —
+    // whose managed section carries the dispositions (here, the one the
+    // address round recorded for an earlier minor finding).
+    await repoEffects(repo)
+      .openLedger(state.branch)
+      .mutate((ledger) => ({
+        ledger: {
+          version: ledger.version,
+          branch: ledger.branch,
+          records: [
+            ...ledger.records.map((record) =>
+              record.kind === 'cycle'
+                ? {
+                    ...record,
+                    findings: [
+                      ...record.findings,
+                      {
+                        id: 'c001-aaaaaaaa#f1',
+                        severity: 'major' as const,
+                        fileName: 'src/a.ts',
+                        excerpt: 'Replace BAD with GOOD',
+                      },
+                    ],
+                  }
+                : record,
+            ),
+            dispositionRecord({
+              findingId: 'c004-aaaaaaaa#f9',
+              action: 'deferred',
+              why: 'owner decision needed',
+            }),
+          ],
+        },
+        value: undefined,
+      }));
+    // The REAL pr.open over the gh fake (no injected open): the draft body
+    // is pr.open's own gaps+dispositions section, and dev.cycle composes
+    // the findings section onto it — the full three-section contract.
     const { gh, bodies } = ghFake();
     const opens: PrOpenInput[] = [];
+    const { makePrOpen } = await import('../../../src/ops/pr/open.js');
     const op = makeDevCycle({
       effects: effects(),
       check: greenCheck(),
       review: cleanReview(state),
       address: roundCapAddress(state),
-      open: openFake(opens, 43, false),
+      open: ((input: PrOpenInput) => {
+        opens.push(input);
+        return makePrOpen(effects(), gh)(input);
+      }) as never,
       gh,
-      git: async () => ({ code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' }),
+      git: async (args) =>
+        args.includes('push')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 0, stdout: `${state.head}\trefs/heads/feature/x\n`, stderr: '' },
     });
     const result = await op({ repoRoot: repo.root });
     expect(result.status).toBe('needs-human');
@@ -270,14 +338,24 @@ describe('dev.cycle', () => {
     expect(opens).toEqual([
       { repoRoot: repo.root, target: 'merge-queue', draft: true, draftWhenNotReady: true },
     ]);
-    // The findings section was composed onto the draft's body after creation.
+    // The findings section was composed onto the draft's REAL body after
+    // creation — the three spec sections, in one body.
     expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain(DEV_READINESS_GAPS_SECTION_MARKER);
+    expect(bodies[0]).toContain('NOT READY');
+    // Section 2: the dispositions, inside the managed gaps span.
+    expect(bodies[0]).toContain('finding dispositions: 1');
+    expect(bodies[0]).toContain('`c004-aaaaaaaa#f9` — **deferred**: owner decision needed');
+    // Section 3: the findings + attempt log, composed by dev.cycle.
     expect(bodies[0]).toContain(DEV_FINDINGS_SECTION_MARKER);
     expect(bodies[0]).toContain('<!-- /cq:dev-findings -->');
-    expect(bodies[0]).toContain('DRAFT SECTION');
     expect(bodies[0]).toContain('c001-aaaaaaaa#f1');
     expect(bodies[0]).toContain('worker/edit #1');
     expect(bodies[0]).toContain('scripted');
+    const body0: string = bodies[0] ?? '';
+    expect(body0.indexOf(DEV_FINDINGS_SECTION_MARKER)).toBeGreaterThan(
+      body0.indexOf('finding dispositions'),
+    );
   });
 
   test('a red FIRST check stops verbatim before any review leg', async () => {

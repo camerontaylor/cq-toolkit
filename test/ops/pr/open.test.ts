@@ -266,7 +266,67 @@ describe('pr.open', () => {
     expect(create.body).toContain('NOT READY');
     expect(create.body).toContain('terminal-review-cycle');
     expect(create.body).toContain('green-check');
+    // The round-cap body's SECOND spec section: dispositions (here, the
+    // explicit none-note — the fresh branch has none yet).
+    expect(create.body).toContain('finding dispositions: 0');
+    expect(create.body).toContain('(none recorded)');
     expect(create.body).not.toContain(DEV_READINESS_SECTION_MARKER);
+  });
+
+  test('an ADOPTED not-ready re-run refreshes the gaps AND dispositions sections in place', async () => {
+    // First pass: open the not-ready draft.
+    const first = ghFake();
+    const opened = await makePrOpen(
+      effects(),
+      first.gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(opened.status).toBe('ok');
+    if (opened.status !== 'ok') return;
+    // Dispositions land in the ledger AFTER the draft exists. The seed
+    // REPLACES the (empty) ledger with a terminal cycle + green check at
+    // the same identity, so on the re-read the branch IS ready — the
+    // adopt path runs the standard readiness section, which carries the
+    // dispositions (the one-time comment never duplicated them). The
+    // section refreshes in place inside its span; the gaps section of the
+    // first draft stays as history prose.
+    await seed(repo, () => [
+      dispositionRecord({
+        findingId: 'c005-aaaaaaaa#f1',
+        action: 'deferred',
+        why: 'owner decision needed',
+      }),
+    ]);
+    // Second pass: same branch, the OPEN PR is adopted and its managed
+    // section refreshed in place — the dispositions appear inside the
+    // refreshed span, nothing duplicates, and the one-time comment stays a
+    // creation-time artifact.
+    const second = ghFake({ number: 41 });
+    const adopted = await makePrOpen(
+      effects(),
+      second.gh,
+    )({
+      repoRoot: repo.root,
+    });
+    expect(adopted.status).toBe('ok');
+    if (adopted.status !== 'ok') return;
+    expect(adopted.value.ready).toBe(true);
+    const edit = second.calls.find((call) => call.effect === 'editPrBody');
+    const body = String(edit?.args[1]);
+    // The READY section carries the dispositions inside its managed span
+    // (its own details block) — refreshed in place, no duplicate comment.
+    expect(body).toContain('dispositions recorded: 1');
+    expect(body).toContain('`c005-aaaaaaaa#f1` — **deferred**: owner decision needed');
+    expect(body.match(/c005-aaaaaaaa#f1/g)?.length).toBe(1);
+    expect(body).toContain(DEV_READINESS_SECTION_MARKER);
+    expect(second.calls.map((call) => call.effect)).toEqual([
+      'searchPrByHead',
+      'getPrBody',
+      'editPrBody',
+    ]);
   });
 
   test('draftWhenNotReady never has an effect without draft:true (a not-ready branch is still refused)', async () => {
@@ -420,7 +480,7 @@ describe('the NOT-READY gaps section renderer', () => {
   ];
 
   test('the section renders start and end markers and every gap verbatim', () => {
-    const section = renderReadinessGapsSection(state, 'merge-queue', gaps);
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
     expect(section.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
     expect(section).toContain('<!-- /cq:dev-readiness-gaps -->');
     expect(section).toContain(
@@ -429,11 +489,51 @@ describe('the NOT-READY gaps section renderer', () => {
     expect(section).toContain('blocking gaps: 2');
   });
 
-  test('pipes and angle brackets in gap details cannot fabricate table or markup syntax', () => {
-    const section = renderReadinessGapsSection(state, 'merge-queue', [
-      { field: 'a|b', detail: '<script>x</script>' },
-    ]);
+  test('the branch ledger dispositions render inside the managed span (the round-cap body lists them)', () => {
+    const section = renderReadinessGapsSection(
+      state,
+      ledgerWith(
+        [
+          dispositionRecord({
+            findingId: 'c000-aaaaaaaa#f1',
+            action: 'rejected',
+            why: 'false positive: x',
+          }),
+          dispositionRecord({
+            findingId: 'c000-aaaaaaaa#f2',
+            action: 'fixed',
+            why: 'addressed in the diff',
+          }),
+        ],
+        BRANCH,
+      ),
+      'merge-queue',
+      gaps,
+    );
+    expect(section).toContain('finding dispositions: 2');
+    expect(section).toContain('`c000-aaaaaaaa#f1` — **rejected**: false positive: x');
+    expect(section).toContain('`c000-aaaaaaaa#f2` — **fixed**: addressed in the diff');
+    // Inside the span: an adopted re-run replaces, never duplicates.
+    expect(section.indexOf('finding dispositions')).toBeLessThan(
+      section.indexOf('<!-- /cq:dev-readiness-gaps -->'),
+    );
+  });
+
+  test('an empty disposition list renders the explicit none-note', () => {
+    const section = renderReadinessGapsSection(state, ledgerWith([], BRANCH), 'merge-queue', gaps);
+    expect(section).toContain('finding dispositions: 0');
+    expect(section).toContain('(none recorded)');
+  });
+
+  test('pipes and angle brackets in gap details and disposition reasons cannot fabricate table or markup syntax', () => {
+    const section = renderReadinessGapsSection(
+      state,
+      ledgerWith([dispositionRecord({ why: 'a|b <script>x</script>' })], BRANCH),
+      'merge-queue',
+      [{ field: 'a|b', detail: '<script>y</script>' }],
+    );
     expect(section).toContain('**a\\|b**:');
+    expect(section).toContain('a\\|b scriptx/script');
     expect(section).not.toContain('<script>');
   });
 });

@@ -154,15 +154,20 @@ export const DEV_READINESS_GAPS_SECTION_MARKER = '<!-- cq:dev-readiness-gaps -->
 
 /**
  * The not-ready gaps rendered as the managed body section of a DRAFT PR:
- * every gap verbatim (field + detail), marked NOT READY. The gaps are the
- * machine-checkable state a follow-up cycle clears — they are never
- * soft-pedalled into prose.
+ * every gap verbatim (field + detail), marked NOT READY, WITH the branch
+ * ledger's dispositions folded in (the spec's round-cap body lists the
+ * readiness record, the dispositions AND the open findings — the findings
+ * section is dev.cycle's own). The dispositions live INSIDE the managed
+ * span (the READY section's rule): an adopted re-run refreshes them in
+ * place, so they never depend on the one creation-time comment.
  */
 export function renderReadinessGapsSection(
   state: { branch: string; head: string; base: string },
+  ledger: DevLedgerFile,
   target: string,
   gaps: readonly { field: string; detail: string }[],
 ): string {
+  const dispositions = ledger.records.filter((entry) => entry.kind === 'disposition');
   const lines: string[] = [
     DEV_READINESS_GAPS_SECTION_MARKER,
     '<!-- cq-toolkit dev readiness gaps (generated from the branch dev-record; updated in place, never duplicated) -->',
@@ -177,6 +182,13 @@ export function renderReadinessGapsSection(
   ];
   for (const gap of gaps) {
     lines.push(`- **${mdLine(gap.field)}**: ${mdLine(gap.detail)}`);
+  }
+  lines.push('', `- finding dispositions: ${String(dispositions.length)}`);
+  if (dispositions.length === 0) {
+    lines.push('  - (none recorded)');
+  }
+  for (const entry of dispositions) {
+    lines.push(`  - \`${mdLine(entry.findingId)}\` — **${entry.action}**: ${mdLine(entry.why)}`);
   }
   lines.push('', '<!-- /cq:dev-readiness-gaps -->');
   return lines.join('\n');
@@ -315,6 +327,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
           )
         : renderReadinessGapsSection(
             { branch: state.branch, head: state.head, base: state.base },
+            ledger,
             target,
             gaps!,
           );
