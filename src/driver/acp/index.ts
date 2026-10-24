@@ -315,6 +315,7 @@ import {
 } from './process.js';
 import type { AcpExitInfo, AcpGraceLadderOptions, AcpSpawnFn } from './process.js';
 import { defaultSessionsDir } from '../sessions-dir.js';
+import { applyCorrelationEnv } from '../correlation-env.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -855,6 +856,9 @@ export class AcpDriver implements Driver {
       }
     }
     const childEnv = buildChildEnv(process.env, undefined, extraNames);
+    // Session-log correlation (items 1.3–1.5): the invocation's work
+    // identity rides the agent's env, as on the claude-code transports.
+    applyCorrelationEnv(childEnv, opInvocation.correlation);
     if (this.modelEnv !== undefined) {
       childEnv[this.modelEnv] = modelSpec.model;
     }

@@ -23,6 +23,7 @@ import {
 import { JobFinishedJournalEventSchema } from '../../src/kernel/schema.js';
 import { OpInvocationSchema, WorkerResultSchema } from '../../src/driver/schema.js';
 import { defaultSessionsDir } from '../../src/driver/sessions-dir.js';
+import { applyCorrelationEnv } from '../../src/driver/correlation-env.js';
 import { sessionsOfResult } from '../../src/kernel/runner.js';
 
 describe('1.1 defaultSessionsDir', () => {
@@ -83,6 +84,19 @@ describe('1.3 OpInvocation correlation mirror', () => {
 });
 
 describe('1.4 CQ_* correlation env', () => {
+  test('applyCorrelationEnv stamps the correlation and clears stale inherited fields', () => {
+    const env: Record<string, string> = {
+      PATH: '/bin',
+      CQ_WORK_ID: 'outer',
+      CQ_ROLE: 'outer-role',
+      CQ_TASK: 'outer-task',
+    };
+    applyCorrelationEnv(env, { workId: 'w1', runId: 'r1' });
+    expect(env).toEqual({ PATH: '/bin', CQ_WORK_ID: 'w1', CQ_RUN_ID: 'r1' });
+    const untouched = { CQ_ROLE: 'kept' };
+    expect(applyCorrelationEnv(untouched, undefined)).toEqual({ CQ_ROLE: 'kept' });
+  });
+
   test('the correlation names are allowlisted and inherited', () => {
     for (const name of [
       'CQ_WORK_ID',

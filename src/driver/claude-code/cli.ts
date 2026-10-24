@@ -178,6 +178,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultSessionsDir } from '../sessions-dir.js';
+import { applyCorrelationEnv } from '../correlation-env.js';
 import { rm, writeFile } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
@@ -403,20 +404,9 @@ export class ClaudeCodeCliTransport implements Driver {
     const route = resolveRoute(modelSpec, this.routingTable); // unknown provider → the config throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
     // Session-log correlation (preservation plan items 1.3–1.5): the
-    // invocation's work identity rides the child env so the harness (and
-    // anything IT spawns) can link its transcript back to the work. The
-    // names are on DEFAULT_CHILD_ENV_ALLOWLIST for transitive spawns;
-    // here they are composed as explicit overrides, which always win.
-    const correlation = opInvocation.correlation;
-    if (correlation !== undefined) {
-      childEnv['CQ_WORK_ID'] = correlation.workId;
-      if (correlation.role !== undefined) childEnv['CQ_ROLE'] = correlation.role;
-      if (correlation.task !== undefined) childEnv['CQ_TASK'] = correlation.task;
-      if (correlation.runId !== undefined) childEnv['CQ_RUN_ID'] = correlation.runId;
-      if (correlation.parentWorkId !== undefined) {
-        childEnv['CQ_PARENT_WORK_ID'] = correlation.parentWorkId;
-      }
-    }
+    // invocation's work identity rides the child env as explicit overrides
+    // (shared with the SDK and ACP transports — ../correlation-env.ts).
+    applyCorrelationEnv(childEnv, opInvocation.correlation);
     if (
       budget.maxTokens !== undefined &&
       (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)

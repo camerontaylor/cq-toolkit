@@ -150,6 +150,7 @@ import type { RoutingTable } from './routing.js';
 import { buildChildEnv } from '../../shared/proc.js';
 import { abortRootFollowing } from './process.js';
 import { readCliSessionId, writeCliSessionId, SDK_NARRATION_TOOL } from './sessions.js';
+import { applyCorrelationEnv } from '../correlation-env.js';
 import {
   frameCarriesRefusal,
   isAbortShaped,
@@ -425,14 +426,19 @@ export class ClaudeCodeSdkTransport implements Driver {
       // The SDK child receives only allowlisted host names plus its route
       // credentials. Harness run children receive the manifest's allowlist
       // without these SDK-only credential overrides.
-      env: buildChildEnv(
-        process.env,
-        {
-          ANTHROPIC_BASE_URL: route.baseUrl,
-          ANTHROPIC_AUTH_TOKEN: keyValue,
-          ANTHROPIC_API_KEY: keyValue,
-        },
-        this.envAllowlist,
+      // Session-log correlation (items 1.3–1.5): the invocation's work
+      // identity rides the child env, as on the CLI transport.
+      env: applyCorrelationEnv(
+        buildChildEnv(
+          process.env,
+          {
+            ANTHROPIC_BASE_URL: route.baseUrl,
+            ANTHROPIC_AUTH_TOKEN: keyValue,
+            ANTHROPIC_API_KEY: keyValue,
+          },
+          this.envAllowlist,
+        ),
+        opInvocation.correlation,
       ),
       systemPrompt: systemPreamble(this.harnessConfig.promptBudget.maxSystemPromptChars),
       ...(surface !== undefined
