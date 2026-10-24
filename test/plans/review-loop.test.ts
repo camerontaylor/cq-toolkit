@@ -48,7 +48,7 @@ import type { GovernanceOptIn, OpRegistryEntry } from '../../src/kernel/types.js
 import type { Plan } from '../../src/kernel/types.js';
 import type { ClassifiedItem } from '../../src/ops/review/classifyThreads.js';
 import type { FetchedReviewState } from '../../src/adapters/forge-github/fetchReviewState.js';
-import { makeFixReviewItem } from '../../src/ops/review/fixReviewItem.js';
+import { makeFixReviewItem, type FixReviewItemInput } from '../../src/ops/review/fixReviewItem.js';
 import { FixReviewItemInputSchema } from '../../src/ops/review/registry.js';
 import type { GhFn, GhResult } from '../../src/adapters/forge-github/gh.js';
 import type { PlannedBatch } from '../../src/ops/review/planReviewBatch.js';
@@ -655,6 +655,7 @@ const runLoop = async (
     onSpend?: (usd: number) => void;
     /** The loop's own identity (the settle gate's resolve-carry authorization). */
     responderLogin?: string;
+    engineObservedHead?: string;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -694,12 +695,19 @@ const runLoop = async (
         ? ({
             name: 'review.fixItem',
             inputSchema: FixReviewItemInputSchema,
-            importer: async () =>
-              makeFixReviewItem({
+            importer: async () => {
+              const op = makeFixReviewItem({
                 drivers: {
                   resolve: (req) => ({ driver, lane: 'ai-sdk', modelSpec: req.modelSpec }),
                 },
-              }),
+              });
+              return async (input: FixReviewItemInput) => {
+                const result = await op(input);
+                return result.status === 'ok' && o.engineObservedHead !== undefined
+                  ? { ...result, value: { ...result.value, observedHead: o.engineObservedHead } }
+                  : result;
+              };
+            },
           } as unknown as OpRegistryEntry<never, never>)
         : undefined,
   };
@@ -718,6 +726,7 @@ const runLoop = async (
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
+    ...(o.engineObservedHead !== undefined ? { engineOwnedConcurrency: 1 } : {}),
     // The A12c escape is EXPLICIT and defaults OFF (r1 M4): these tests
     // exercise dispatched fix runs, so they opt in — the shipped sweep does
     // the same (unattended by design), and the journal records
@@ -2864,6 +2873,21 @@ describe('thread settle gate (PR #336 incident)', () => {
     expect(postedBodies(ghLog)[0]).toContain(`<!-- cq-review-loop-head:${SHA} round:`);
   });
 
+  test.each(['malformed', 'unrelated'] as const)(
+    'engine rejection identity refuses %s head metadata before forge dispatch',
+    async (mode) => {
+      const ghLog: string[][] = [];
+      const { outcome } = await runLoop(publishedWorld(), {
+        engineObservedHead: mode === 'malformed' ? 'not-a-commit' : 'f'.repeat(40),
+        driverResults: [completeWorker(fixLine(false, DISPOSITION, []))],
+        ghLog,
+      });
+      expect(outcome.status).toBe('needs-human');
+      expect(postedBodies(ghLog)).toEqual([]);
+      expect(ghLog.filter(isGhMutation)).toEqual([]);
+      expect(outcome.reasons.join(' ')).toMatch(/engine execution head/);
+    },
+  );
   test('an unchanged row beside a sibling that committed is stamped with the head it INSPECTED, not the pushed one', async () => {
     const world = publishedWorld();
     world.threads = [

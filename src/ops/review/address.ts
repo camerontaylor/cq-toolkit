@@ -837,6 +837,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                       status: 'ok',
                       value: {
                         disposition: 'unchanged_with_reason',
+                        observedHead: fix.observedHead,
                         changed: false,
                         summary: fix.reason,
                         commits: [],
@@ -847,6 +848,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
                   if (!fix.commit)
                     return { status: 'needs-human', reason: `${NO_OUTCOME_REASON}: ${fix.reason}` };
                   const value: FixReviewItemResult = {
+                    observedHead: fix.observedHead,
                     disposition: 'fixed',
                     changed: true,
                     summary: fix.reason,

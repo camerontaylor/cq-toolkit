@@ -340,3 +340,65 @@ PR adapter/local report regression checkpoint:
 ```text
 test:narrow result="pass" exit=0 files=5 projects="pure,process" tests="84/84" failed=0 skipped=0 wait="0.0s" duration="37.1s" nice=5 load="4.1" uptime="544345s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-local.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts"
 ```
+
+## Late execution identity, literal path and dependency isolation repairs (#456–458)
+
+The three late threads on independently reviewed `de1e45e2` exposed distinct
+boundaries that earlier controls did not cover. Before changing source, the
+new real-Git controls failed exactly four cases: a rejection admitted after a
+verified sibling commit lost its current-head citation/reply; caller and worker
+workspace dependency links incorrectly supplied check evidence; and failure of
+an owned `:(exclude)never.ts` restored a sibling's active edit. The complete
+unchanged-source checkpoint was:
+
+```text
+test:narrow result="fail" exit=1 files=3 projects="pure,process" tests="90/94" failed=4 skipped=0 wait="0.0s" duration="89.2s" nice=5 load="5.9" uptime="545731s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/addressWorker.test.ts"
+```
+
+The PR adapter now returns the engine's actual `observedHead` for successful and
+rejected results. The loop consumes this optional metadata only with its
+engine-owned concurrency adapter, checks the early-to-actual-to-current ancestry,
+and uses the actual head for citation validation and reply stamps. Malformed or
+unrelated identities refuse before forge mutation. This is an additive
+`FixReviewItemResult` interface change; the vendor output schema remains strict
+and does not accept that field. Existing non-engine defaults remain covered.
+
+Every owned-file Git operation now passes the shared `GIT_HARDEN` prefix,
+including `--literal-pathspecs`. Concurrent failure retains only the magic-named
+owned leaf in its ordinary failed-attempt branch, restores only that leaf, and
+preserves the held sibling edit. A successful magic-filename case also verifies
+single-file commit content and a clean shared index.
+
+Candidate dependency reuse now inspects the physical installed tree and its
+transitive links. Links into known caller/worker source or another checkout's
+source refuse before any baseline/related check starts, even with matching
+manifests. This includes a linked installed root. Ordinary package stores and
+cycles remain supported. The traversal checks cancellation/unit budget and
+refuses more than 20,000 entries; large or inaccessible trees therefore require
+isolated installed dependencies. It does not install packages or rebind source
+links. Existing execution/mutation parallelism and cancellation-independent
+cleanup remain in place.
+
+One broader checkpoint initially failed 17 PR orchestration fixtures because
+their Git fake rejected the new global hardening prefix before worker execution.
+The fake now recognizes the exact shared prefix; the real-Git controls remain
+separate. The initial test typing error was also corrected without baseline
+changes. These intermediate failures are not counted as passing evidence.
+
+Final repaired checkpoint:
+
+```text
+test:narrow result="pass" exit=0 files=7 projects="pure,process" tests="264/264" failed=0 skipped=0 wait="12.9s" duration="159.6s" nice=5 load="10.9" uptime="546226s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/addressDependencies.test.ts,test/ops/review/addressWorker.test.ts,test/plans/review-loop.test.ts"
+
+```
+
+The separate local report and SDK adapter cases also passed in the broader
+checkpoint. Static exited 0 with zero errors against baseline zero; formatting,
+Knip and generated-doc verification exited 0 (54 op docs current). No baseline,
+frozen schema or policy changes. The complete feedback sweep found 23 threads,
+including only these three applicable unresolved threads before fixed-SHA replies;
+all nested thread pages were complete, with REST inline/review/top-level channels
+cross-checked. Fresh independent exact-head review and CI remain required.
+Positive live measured-fix acceptance remains unmet, #438 is being implemented
+in a separate lane, and no third live or CodeRabbit run was performed. No
+whole-PR acceptance marker or merge is claimed.

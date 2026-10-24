@@ -200,6 +200,8 @@ export function normalizeReviewFixInput(input: ReviewFixInput): FixReviewItemInp
  * undefined).
  */
 export interface FixReviewItemResult {
+  /** Engine-owned execution identity; never accepted from vendor output. */
+  observedHead?: string;
   /** The worker's outcome: only these two dispositions are ok (THE FIX OUTCOME CONTRACT). */
   disposition: 'fixed' | 'unchanged_with_reason';
   /** True exactly when the disposition is `fixed` (kept for v1 consumers such as crq). */

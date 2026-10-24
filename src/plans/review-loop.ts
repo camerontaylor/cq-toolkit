@@ -1127,7 +1127,38 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
                   ? observed.stdout.trim()
                   : null,
               );
-              return await op(raw);
+              const result = await op(raw);
+              if (opts.engineOwnedConcurrency !== undefined && result.status === 'ok') {
+                const actual = (result.value as FixReviewItemResult).observedHead;
+                if (actual !== undefined) {
+                  const early = executionHeads.get(input.item.id);
+                  if (!COMMIT_SHA_RE.test(actual) || !early)
+                    return { status: 'needs-human', reason: 'engine execution head unavailable' };
+                  // An admission wait may cross verified sibling commits. The
+                  // actual identity must remain inside the observed ancestry;
+                  // it cannot borrow an unrelated tree for a rejection citation.
+                  for (const [parent, child] of [
+                    [early, actual],
+                    [actual, 'HEAD'],
+                  ]) {
+                    const proof = await opts.git([
+                      '-C',
+                      worktree.path,
+                      'merge-base',
+                      '--is-ancestor',
+                      parent!,
+                      child!,
+                    ]);
+                    if (proof.code !== 0)
+                      return {
+                        status: 'needs-human',
+                        reason: 'engine execution head ancestry changed',
+                      };
+                  }
+                  executionHeads.set(input.item.id, actual);
+                }
+              }
+              return result;
             } finally {
               release();
               if (settled) pending.delete(settled);

@@ -34,6 +34,7 @@ async function fixture(
     rescueBase?: number;
     aliasRoot?: boolean;
     installedDependencies?: 'matching' | 'mismatched';
+    workspaceDependency?: 'caller' | 'worker';
     firstStopReason?: 'budget' | 'aborted' | 'error';
     costUSD?: number;
     remainingWallMs?: () => number;
@@ -61,6 +62,7 @@ async function fixture(
   const alias = join(journal, 'repo-alias');
   if (options.aliasRoot) await symlink(repo.root, alias, 'dir');
   const dependencyRoot = join(journal, 'installed-caller');
+  const dependencyCheckMarker = join(journal, 'workspace-check-ran');
   if (options.installedDependencies) {
     await mkdir(join(dependencyRoot, 'node_modules'), { recursive: true });
     await repo.write('package.json', '{"name":"fixture"}\n');
@@ -74,6 +76,21 @@ async function fixture(
     await writeFile(join(dependencyRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
     await writeFile(join(dependencyRoot, 'node_modules/check.cjs'), 'process.exitCode = 0;\n');
     repo.commitAll('dependency metadata');
+  }
+  if (options.workspaceDependency) {
+    await repo.write('packages/lib/index.js', "module.exports = 'PARENT';\n");
+    await repo.write('.gitignore', 'node_modules/\n');
+    repo.commitAll('workspace package parent');
+    const installedRoot = options.workspaceDependency === 'caller' ? dependencyRoot : repo.root;
+    await mkdir(join(installedRoot, 'node_modules'), { recursive: true });
+    await mkdir(join(installedRoot, 'packages/lib'), { recursive: true });
+    if (options.workspaceDependency === 'caller')
+      await writeFile(join(installedRoot, 'packages/lib/index.js'), "module.exports = 'CALLER';\n");
+    await symlink('../packages/lib', join(installedRoot, 'node_modules/linked-lib'), 'dir');
+    await writeFile(
+      join(installedRoot, 'node_modules/check.cjs'),
+      `require('node:fs').writeFileSync(${JSON.stringify(dependencyCheckMarker)}, 'ran'); if(require('linked-lib') !== '${options.workspaceDependency === 'caller' ? 'CALLER' : 'PARENT'}') process.exitCode=1;\n`,
+    );
   }
   const attempts: AddressAttempt[] = [];
   let spent = 0,
@@ -184,6 +201,7 @@ async function fixture(
     initial,
     calls: () => calls,
     identityRequests: () => identityRequests,
+    dependencyCheckMarker,
     cleanup: async () => {
       await repo.cleanup();
       await rm(journal, { recursive: true, force: true });
@@ -821,6 +839,65 @@ describe('review.address candidate isolation', () => {
       }
     },
   );
+  test.each(['caller', 'worker'] as const)(
+    'candidate refuses workspace links into %s source before check execution',
+    async (workspaceDependency) => {
+      const f = await fixture(undefined, '', {
+        installedDependencies: 'matching',
+        workspaceDependency,
+      });
+      try {
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.commit).toBeUndefined();
+        expect(result.finding.status).toBe('deferred');
+        expect(result.reason).toMatch(/dependency.*checkout source/);
+        await expect(readFile(f.dependencyCheckMarker)).rejects.toThrow(/ENOENT/);
+        expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('literal magic filename failure preserves an active sibling edit and captures only its own leaf', async () => {
+    const file = ':(exclude)never.ts';
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const f = await fixture(async (input) => {
+      if (input.prompt.includes('"file":"src/b.ts"')) {
+        await writeFile(join(input.workspace!.path, 'src/b.ts'), 'SIBLING\n');
+        entered();
+        await held;
+        return { disposition: 'deferred', reason: 'held sibling', evidence: [] };
+      }
+      await writeFile(join(input.workspace!.path, file), 'OWN PARTIAL\n');
+      throw new Error('owned failure');
+    });
+    let sibling: ReturnType<typeof f.engine.fix> | undefined;
+    try {
+      await f.repo.write(file, 'OWN PARENT\n');
+      f.repo.commitAll('literal magic filename');
+      sibling = f.engine.fix(finding('src/b.ts'), 1);
+      await ready;
+      const result = await f.engine.fix(finding(file), 1);
+      expect(await readFile(join(f.repo.root, 'src/b.ts'), 'utf8')).toBe('SIBLING\n');
+      expect(await readFile(join(f.repo.root, file), 'utf8')).toBe('OWN PARENT\n');
+      const failed = result.failedAttempts![0]!;
+      expect(f.repo.git('show', `${failed.sha}:${file}`)).toBe('OWN PARTIAL\n');
+      expect(
+        f.repo.git('--literal-pathspecs', 'diff', '--name-only', failed.parent, failed.sha),
+      ).toBe(`${file}\n`);
+    } finally {
+      release();
+      await sibling;
+      await f.cleanup();
+    }
+  });
   test.each(['matching', 'mismatched'] as const)(
     'fresh worker tree reuses installed caller dependencies only with matching metadata: %s',
     async (installedDependencies) => {
@@ -1436,6 +1513,7 @@ test.each(['index', 'worker-snapshot', 'parent'] as const)(
 );
 
 test.each([
+  ':(exclude)never.ts',
   'src/café.ts',
   'src/space name.ts',
   'src/line\nbreak.ts',

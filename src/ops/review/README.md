@@ -36,14 +36,19 @@ tamper checks, commit-message checks and reviewer closure all inspect that
 candidate. The final commit must match its gated tree and parent. A
 sibling's uncommitted bytes cannot supply check or closure evidence.
 Fresh PR candidates may reuse the caller checkout's installed dependencies
-when package manifests and lockfiles match; otherwise install dependencies
-in the PR worktree before retrying. Dependency provisioning never runs an
+when package manifests and lockfiles match. Reuse inspects installed dependency
+links, including transitive links, and refuses links into caller, worker or other
+checkout source. Ordinary installed package stores remain reusable. Inspection
+checks cancellation and the unit budget, and refuses trees above 20,000 entries;
+otherwise install isolated dependencies in the PR worktree before retrying. Dependency provisioning never runs an
 install command on a worker's behalf. Canonical repository aliases retain
 the same file identity; outside symlinks remain refused.
 Rejected/deferred code citations are verified at the worker's observed
-execution head, even when a sibling commits later. Git path lists use NUL
-delimiters, retaining Unicode, whitespace, newlines and quotes as literal
-filenames. Parent cancellation reaches baseline, related and broader check
+execution head, even when admission waits across a sibling commit. The engine
+returns that identity to the loop, which verifies its ancestry before validating
+citations or stamping replies. Git operations use literal pathspecs and path lists
+use NUL delimiters, retaining pathspec-like names, Unicode, whitespace, newlines
+and quotes as literal filenames. Parent cancellation reaches baseline, related and broader check
 subprocesses; the engine awaits child termination before candidate cleanup,
 restoration or releasing its serial validation boundary.
 

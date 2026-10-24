@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { GIT_HARDEN } from '../../shared/gitHarden.js';
+import { assertAddressDependenciesIsolated } from './internal/addressDependencies.js';
 import { readFile, writeFile, lstat, realpath, symlink } from 'node:fs/promises';
 import { relative, resolve, isAbsolute } from 'node:path';
 import { z } from 'zod';
@@ -144,7 +146,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
         : [makeRepoDiffScanner(root, policy.review.denylistPatternsFile)]),
     );
   const git = async (cwd: string, args: string[]) => {
-    const result = await deps.git(['-C', cwd, ...args]);
+    const result = await deps.git(['-C', cwd, ...GIT_HARDEN, ...args]);
     if (result.code !== 0)
       throw new Error(`git ${args[0]} refused: ${result.stderr.slice(0, 500)}`);
     // Content is scanned with path-scoped, whitespace-sensitive rules. Only
@@ -225,7 +227,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       throw new Error('finding path escapes workspace or is a symlink');
     return canonical;
   };
-  const dependencyDirectory = async () => {
+  const dependencyDirectory = async (admit: () => void) => {
     const installed = async (cwd: string) => {
       try {
         return await realpath(resolve(cwd, 'node_modules'));
@@ -235,8 +237,16 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       }
     };
     const local = await installed(root);
-    if (local || deps.dependencyRoot === undefined || resolve(deps.dependencyRoot) === root)
+    if (local) {
+      await assertAddressDependenciesIsolated(
+        local,
+        [root, ...(deps.dependencyRoot ? [deps.dependencyRoot] : [])],
+        admit,
+      );
       return local;
+    }
+    if (deps.dependencyRoot === undefined || resolve(deps.dependencyRoot) === root)
+      return undefined;
     const caller = await installed(deps.dependencyRoot);
     if (!caller) return undefined;
     const manifest = async (cwd: string, path: string) => {
@@ -262,6 +272,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           'installed dependency root manifests/locks differ; install dependencies in the PR worktree',
         );
     }
+    await assertAddressDependenciesIsolated(caller, [root, deps.dependencyRoot], admit);
     return caller;
   };
   const invoke = async (
@@ -675,7 +686,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
               // Reuse installed dependencies as a trusted local runtime input.
               // Workers cannot edit this path; the candidate still owns all
               // tracked source/config and has no sibling uncommitted edits.
-              const dependencies = await dependencyDirectory();
+              const dependencies = await dependencyDirectory(admitMutation);
               if (dependencies)
                 await symlink(dependencies, resolve(candidate, 'node_modules'), 'dir');
               const baseline =

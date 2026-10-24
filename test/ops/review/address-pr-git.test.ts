@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
 import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -43,6 +44,7 @@ test.each([
   'local-only',
   'publish',
   'publish-siblings',
+  'publish-rejection',
   'caller-file',
   'caller-cq',
   'caller-index',
@@ -51,7 +53,8 @@ test.each([
 ] as const)(
   'real PR adapter without cq ignore preserves admission and publication hygiene: %s',
   async (mode) => {
-    const siblings = mode === 'publish-siblings';
+    const rejection = mode === 'publish-rejection';
+    const siblings = mode === 'publish-siblings' || rejection;
     const publish = mode === 'publish' || siblings;
     const earlyTamper = mode === 'bookkeeping-before-disposition';
     const tampered = mode === 'bookkeeping-tamper' || earlyTamper;
@@ -189,6 +192,14 @@ test.each([
       const editGate = new Promise<void>((resolve) => {
         releaseEdits = resolve;
       });
+      let rejectionQueued!: () => void;
+      const queued = new Promise<void>((resolve) => {
+        rejectionQueued = resolve;
+      });
+      let firstVerified!: () => void;
+      const verified = new Promise<void>((resolve) => {
+        firstVerified = resolve;
+      });
       const drivers: DriverFactory = {
         resolve: (request) => ({
           lane: 'ai-sdk',
@@ -213,7 +224,19 @@ test.each([
                 if (!input.prompt.startsWith('related-check feedback')) {
                   workerRoot = input.workspace!.path;
                   const file = input.prompt.includes('"file":"src/b.ts"') ? 'src/b.ts' : 'src/a.ts';
-                  if (siblings) {
+                  if (rejection && file === 'src/b.ts')
+                    return {
+                      stopReason: 'complete',
+                      structuredOutput: {
+                        disposition: 'rejected',
+                        reason: 'sibling supplied current proof',
+                        evidence: [{ path: 'src/a.ts', line: 2 }],
+                      },
+                      usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+                      denials: [],
+                    };
+                  if (rejection) await queued;
+                  if (siblings && !rejection) {
                     editing++;
                     enteredEdits++;
                     maximumEditing = Math.max(maximumEditing, editing);
@@ -234,7 +257,7 @@ test.each([
                   }
                   await writeFile(
                     join(workerRoot, file),
-                    `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "GOOD";\n`,
+                    `export const ${file === 'src/a.ts' ? 'a' : 'b'} = "GOOD";\n${rejection ? '// introduced citation\n' : ''}`,
                   );
                   if (siblings) editing--;
                 }
@@ -287,7 +310,30 @@ test.each([
           ),
         );
       };
-      const result = await makeReviewAddress({ gh, drivers, git })({
+      const result = await makeReviewAddress({
+        gh,
+        drivers,
+        git,
+        ...(rejection
+          ? {
+              workerFactory: (deps) => {
+                const worker = makeAddressWorker(deps);
+                return {
+                  ...worker,
+                  fix: async (finding, round) => {
+                    if (finding.file === 'src/b.ts') {
+                      rejectionQueued();
+                      await verified;
+                    }
+                    const fix = await worker.fix(finding, round);
+                    if (finding.file === 'src/a.ts') firstVerified();
+                    return fix;
+                  },
+                };
+              },
+            }
+          : {}),
+      })({
         repoRoot: repo.root,
         source: 'pr:7',
         journalDir: journal,
@@ -295,6 +341,18 @@ test.each([
         push: mode !== 'local-only',
       });
       const report = result.status === 'ok' ? result.value : result.report!;
+      if (rejection) {
+        expect(report.fixesPerRun, JSON.stringify(report.reasons)).toBe(1);
+        const fixed = report.fixes.find((fix) => fix.commit)!;
+        const rejected = report.fixes.find((fix) => fix.finding.status === 'rejected')!;
+        expect(rejected.observedHead).toBe(fixed.commit);
+        const reply = replies.find((row) => row.in_reply_to_id === 102);
+        expect(reply, JSON.stringify(report.reasons)).toBeDefined();
+        expect(reply!.body).toContain(`<!-- cq-review-loop-head:${fixed.commit} round:`);
+        expect(resolvedThreads.has('T2')).toBe(false);
+        expect(remoteHead()).toBe(fixed.commit);
+        return;
+      }
       if (earlyTamper) {
         expect(remoteHead(), 'tampered ledger must never authorize a push').toBe(initial);
         expect(actions).toEqual([]);

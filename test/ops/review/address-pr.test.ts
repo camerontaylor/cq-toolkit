@@ -7,6 +7,7 @@ import { makeReviewAddress } from '../../../src/ops/review/address.js';
 import type { GhFn, GhResult } from '../../../src/adapters/forge-github/gh.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import { makeAddressWorker } from '../../../src/ops/review/addressWorker.js';
+import { GIT_HARDEN } from '../../../src/shared/gitHarden.js';
 
 const initial = 'a'.repeat(40),
   fixed = 'b'.repeat(40);
@@ -181,7 +182,9 @@ async function world(
   };
   const git: GhFn = async (args) => {
     const cwd = args[0] === '-C' ? args[1]! : root;
-    const a = args[0] === '-C' ? args.slice(2) : args;
+    const scoped = args[0] === '-C' ? args.slice(2) : args;
+    const hardened = GIT_HARDEN.every((arg, i) => scoped[i] === arg);
+    const a = hardened ? scoped.slice(GIT_HARDEN.length) : scoped;
     const localHead = heads.get(cwd) ?? head;
     const tree = trees.get(localHead) ?? initialTree;
     const index = indices.get(cwd) ?? new Map(tree);
