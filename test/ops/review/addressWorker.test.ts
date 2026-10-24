@@ -9,7 +9,7 @@ import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
 import type { OpInvocation } from '../../../src/driver/types.js';
 import type { DiffSecretScanner } from '../../../src/ops/dev/denylist.js';
-import { makeGhRunner } from '../../../src/adapters/forge-github/gh.js';
+import { makeGhRunner, type GhFn } from '../../../src/adapters/forge-github/gh.js';
 import type { Finding } from '../../../src/ops/review/findings.js';
 import { makeTestRepo } from '../dev/repo.js';
 
@@ -42,9 +42,14 @@ async function fixture(
     scanner?: DiffSecretScanner;
     providerRequest?: boolean;
     indexIdentityUnavailable?: boolean;
+    gitHook?: (args: string[], run: GhFn) => ReturnType<GhFn>;
+    runPrefix?: string;
+    objectFormat?: 'sha256';
   } = {},
 ) {
-  const repo = await makeTestRepo();
+  const repo = await makeTestRepo(
+    options.objectFormat ? { objectFormat: options.objectFormat } : {},
+  );
   repo.git('config', 'user.name', 'Test');
   repo.git('config', 'user.email', 'test@example.invalid');
   await repo.write('src/a.ts', 'BAD\n');
@@ -150,7 +155,7 @@ async function fixture(
         if (options.indexIdentityUnavailable)
           return { code: 1, stdout: '', stderr: 'identity unavailable' };
       }
-      return git(args);
+      return options.gitHook ? options.gitHook(args, git) : git(args);
     },
     drivers,
     repoRoot: options.aliasRoot ? alias : repo.root,
@@ -158,6 +163,7 @@ async function fixture(
     journalDir: journal,
     policy: resolveCqConfigDefaults(config, { packageName: 'fixture' }),
     attempts,
+    ...(options.runPrefix ? { runPrefix: options.runPrefix } : {}),
     remainingTokens: () => config.budgets!.run!.maxTokens! - spent,
     remainingWallMs: options.remainingWallMs ?? (() => 20000),
     account: (r) => {
@@ -184,6 +190,368 @@ async function fixture(
     },
   };
 }
+
+describe('review.address failed-attempt branches', () => {
+  test('SHA256 failure branches are ordinary single-parent commits with create-only identity', async () => {
+    const f = await fixture(
+      async (input) => {
+        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'SHA256 PARTIAL\n');
+        throw new Error('partial failure');
+      },
+      '',
+      { objectFormat: 'sha256' },
+    );
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      const retained = result.failedAttempts![0]!;
+      expect(retained.sha).toMatch(/^[a-f0-9]{64}$/);
+      expect(f.repo.git('rev-parse', retained.branch).trim()).toBe(retained.sha);
+      expect(f.repo.git('rev-list', '--parents', '-n', '1', retained.sha).trim()).toBe(
+        `${retained.sha} ${f.initial}`,
+      );
+      expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('SHA256 PARTIAL\n');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('collision exhaustion is bounded and preserves unarchived owned bytes', async () => {
+    let collisions = 0;
+    const f = await fixture(
+      async (input) => {
+        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'UNCAPTURED\n');
+        throw new Error('failure');
+      },
+      '',
+      {
+        gitHook: async (args, run) => {
+          if (args.includes('update-ref') && args.some((arg) => arg.includes('/failed/'))) {
+            collisions++;
+            return { code: 1, stdout: '', stderr: 'reference already exists' };
+          }
+          if (
+            args.includes('rev-parse') &&
+            args.some((arg) => arg.startsWith('refs/heads/cq-address/'))
+          )
+            return run(['rev-parse', 'HEAD']);
+          return run(args);
+        },
+      },
+    );
+    try {
+      const result = await f.engine.fix(finding(), 1);
+      expect(result.finding.status).toBe('deferred');
+      expect(result.reason).toContain('collision limit');
+      expect(collisions).toBe(32);
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('UNCAPTURED\n');
+      expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
+      expect(f.repo.git('worktree', 'list', '--porcelain')).not.toContain('candidate-');
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  test('failed capture owns only its assigned file while a concurrent sibling remains dirty', async () => {
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>((r) => {
+      entered = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const f = await fixture(async (input) => {
+      const file = input.prompt.includes('Address only src/b.ts') ? 'src/b.ts' : 'src/a.ts';
+      if (file === 'src/b.ts') {
+        await writeFile(join(input.workspace!.path, file), 'SIBLING DIRTY\n');
+        entered();
+        await gate;
+        throw new Error('sibling failed');
+      }
+      await writeFile(join(input.workspace!.path, file), 'OWNED PARTIAL\n');
+      throw new Error('owned failed');
+    });
+    let sibling: ReturnType<typeof f.engine.fix> | undefined;
+    try {
+      sibling = f.engine.fix(finding('src/b.ts'), 1);
+      await held;
+      const failed = await f.engine.fix(finding(), 1);
+      const retained = failed.failedAttempts![0]!;
+      expect(retained.executionHead).toBe(f.initial);
+      expect(retained.parent).toBe(f.initial);
+      expect(retained.tier).toBe('worker');
+      expect(f.repo.git('rev-parse', retained.branch).trim()).toBe(retained.sha);
+      expect(f.repo.git('rev-list', '--parents', '-n', '1', retained.sha).trim()).toBe(
+        `${retained.sha} ${f.initial}`,
+      );
+      expect(f.repo.git('diff', '--name-only', retained.parent, retained.sha).trim()).toBe(
+        'src/a.ts',
+      );
+      expect(f.repo.git('show', `${retained.sha}:src/a.ts`)).toBe('OWNED PARTIAL\n');
+      expect(f.repo.git('show', `${retained.sha}:src/b.ts`)).toBe('BAD\n');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+      expect(await readFile(join(f.repo.root, 'src/b.ts'), 'utf8')).toBe('SIBLING DIRTY\n');
+      expect(f.repo.git('show', '-s', '--format=%an <%ae>%n%B', retained.sha)).toContain(
+        'CQ fix engine <cq-fix-engine@invalid>',
+      );
+      expect(f.repo.git('show', '-s', '--format=%B', retained.sha)).toContain('Cq-Tier: worker');
+      expect(JSON.parse(failed.finding.evidence!)).toEqual(retained);
+      expect(f.attempts[1]!.failedAttempt).toEqual(retained);
+      expect(f.repo.git('for-each-ref', '--format=%(refname)', 'refs/stash', 'refs/cq')).toBe('');
+      release();
+      const other = await sibling;
+      expect(other.failedAttempts![0]!.sha).not.toBe(retained.sha);
+      expect(
+        f.repo
+          .git(
+            'diff',
+            '--name-only',
+            other.failedAttempts![0]!.parent,
+            other.failedAttempts![0]!.sha,
+          )
+          .trim(),
+      ).toBe('src/b.ts');
+    } finally {
+      release();
+      await sibling;
+      await f.cleanup();
+    }
+  });
+  test('collisions preserve existing branches and worker/rescue history continues ordinals', async () => {
+    const f = await fixture(
+      async (input) => {
+        await writeFile(
+          join(input.workspace!.path, 'src/a.ts'),
+          `${input.modelSpec.model} PARTIAL\n`,
+        );
+        throw new Error('provider failed');
+      },
+      '',
+      { workerAttempts: 2, rescueBase: 1, runPrefix: 'cq-address/collision' },
+    );
+    try {
+      const collision = 'cq-address/collision/failed/review/fixture/src-a-ts/a1';
+      f.repo.git('update-ref', `refs/heads/${collision}`, f.initial);
+      const failed = await f.engine.fix(finding(), 1);
+      expect(failed.failedAttempts?.map((row) => [row.ordinal, row.tier])).toEqual([
+        [2, 'worker'],
+        [3, 'worker'],
+        [4, 'rescue'],
+      ]);
+      expect(f.repo.git('rev-parse', collision).trim()).toBe(f.initial);
+      for (const row of failed.failedAttempts!) {
+        expect(f.repo.git('rev-parse', row.branch).trim()).toBe(row.sha);
+        expect(f.repo.git('show', '-s', '--format=%B', row.sha)).toContain(
+          `Cq-Attempt: ${row.ordinal}`,
+        );
+        expect(f.repo.git('rev-parse', `${row.sha}^`).trim()).toBe(f.initial);
+      }
+      expect(f.attempts.map((row) => row.failedAttempt?.sha)).toEqual(
+        failed.failedAttempts!.map((row) => row.sha),
+      );
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test.each(['clean', 'positive', 'feedback-positive', 'missing', 'fault'] as const)(
+    '%s immutable feedback is scanned before rescue edit and feedback',
+    async (mode) => {
+      const scans: Array<Array<{ text: string; path?: string }>> = [];
+      const prompts: string[] = [];
+      const f = await fixture(
+        async (input) => {
+          if (input.modelSpec.model === 'worker') {
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'RETAINED PARTIAL\n');
+            throw new Error('worker failure provenance');
+          }
+          if (input.outputSchema?.name === 'review.address.closure/v1')
+            return { closed: true, reason: 'rescued' };
+          prompts.push(input.prompt);
+          if (!input.prompt.startsWith('related-check feedback')) {
+            expect(await readFile(join(input.workspace!.path, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'GOOD\n');
+          }
+          return { disposition: 'fixed', reason: 'rescued', evidence: [] };
+        },
+        '',
+        {
+          rescueBase: 1,
+          providerRequest: true,
+          scanner: async (components) => {
+            if (components.some((part) => part.text.includes('Cq-Tier: worker'))) {
+              scans.push([...components]);
+              if (mode === 'fault') throw new Error('feedback scanner unavailable');
+              if (mode === 'missing') return [];
+              if (
+                mode === 'positive' ||
+                (mode === 'feedback-positive' &&
+                  components[0]!.text.startsWith('related-check feedback'))
+              )
+                return components.map((part) => ({
+                  component: part.component,
+                  hits: [{ ruleId: 'tainted', lines: [1] }],
+                }));
+            }
+            return components.map((part) => ({ component: part.component, hits: [] }));
+          },
+        },
+      );
+      try {
+        const result = await f.engine.fix(finding(), 1);
+        expect(result.failedAttempts!.length).toBeGreaterThan(0);
+        expect(scans.length).toBeGreaterThan(0);
+        for (const scan of scans) {
+          expect(scan.some((part) => part.text === 'BAD')).toBe(true);
+          expect(scan.some((part) => part.text === 'RETAINED PARTIAL')).toBe(true);
+          expect(
+            scan.some(
+              (part) =>
+                part.path === '.git/cq-failed-commit-message' &&
+                part.text.includes('worker failure provenance'),
+            ),
+          ).toBe(true);
+        }
+        if (mode === 'clean') {
+          expect(result.finding.status, result.reason).toBe('fixed');
+          expect(prompts).toHaveLength(2);
+          expect(prompts.every((prompt) => prompt.includes('+RETAINED PARTIAL'))).toBe(true);
+          // Both invocation-boundary scans and provider-boundary scans include immutable contents.
+          expect(scans).toHaveLength(4);
+        } else {
+          expect(result.finding.status).toBe('deferred');
+          expect(prompts).toHaveLength(mode === 'feedback-positive' ? 1 : 0);
+          expect(f.calls()).toBe(mode === 'feedback-positive' ? 2 : 1);
+          expect(result.reason).toMatch(/upload/);
+          expect(result.failedAttempts).toHaveLength(mode === 'feedback-positive' ? 2 : 1);
+          expect(
+            f.attempts
+              .filter((row) => row.invocation === 'edit')
+              .map((row) => row.failedAttempt?.sha),
+          ).toEqual(result.failedAttempts!.map((row) => row.sha));
+        }
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  test('a failed sibling uses the verified parent but retains its earlier dispatch head', async () => {
+    let bothEdited!: () => void, releaseFailure!: () => void;
+    let edits = 0;
+    const ready = new Promise<void>((r) => {
+      bothEdited = r;
+    });
+    const failGate = new Promise<void>((r) => {
+      releaseFailure = r;
+    });
+    const f = await fixture(async (input) => {
+      if (input.outputSchema?.name === 'review.address.closure/v1')
+        return { closed: true, reason: 'closed' };
+      if (input.prompt.startsWith('related-check feedback'))
+        return { disposition: 'fixed', reason: 'feedback', evidence: [] };
+      const file = input.prompt.includes('Address only src/b.ts') ? 'src/b.ts' : 'src/a.ts';
+      await writeFile(
+        join(input.workspace!.path, file),
+        file === 'src/a.ts' ? 'GOOD\n' : 'FAILED SIBLING\n',
+      );
+      if (++edits === 2) bothEdited();
+      await ready;
+      if (file === 'src/b.ts') {
+        await failGate;
+        throw new Error('sibling failure');
+      }
+      return { disposition: 'fixed', reason: 'edited', evidence: [] };
+    });
+    let a: ReturnType<typeof f.engine.fix> | undefined,
+      b: ReturnType<typeof f.engine.fix> | undefined;
+    try {
+      a = f.engine.fix(finding(), 1);
+      b = f.engine.fix(finding('src/b.ts'), 1);
+      const fixed = await a;
+      expect(fixed.finding.status, fixed.reason).toBe('fixed');
+      releaseFailure();
+      const failed = await b;
+      const retained = failed.failedAttempts![0]!;
+      expect(retained.executionHead).toBe(f.initial);
+      expect(retained.parent).toBe(fixed.commit);
+      expect(f.repo.git('show', `${retained.sha}:src/a.ts`)).toBe('GOOD\n');
+      expect(f.repo.git('diff', '--name-only', retained.parent, retained.sha).trim()).toBe(
+        'src/b.ts',
+      );
+    } finally {
+      releaseFailure();
+      await Promise.allSettled([a, b]);
+      await f.cleanup();
+    }
+  });
+  test('a moved failed branch refuses rescue feedback without losing its recorded SHA', async () => {
+    const f = await fixture(
+      async (input) => {
+        await writeFile(join(input.workspace!.path, 'src/a.ts'), 'PARTIAL\n');
+        throw new Error('provider failure');
+      },
+      '',
+      {
+        rescueBase: 1,
+        gitHook: async (args, run) => {
+          const ref = args.find((arg) => arg.startsWith('refs/heads/cq-address/'));
+          if (args.includes('rev-parse') && args.includes('--verify') && ref)
+            await run(['update-ref', ref, 'HEAD']);
+          return run(args);
+        },
+      },
+    );
+    try {
+      const failed = await f.engine.fix(finding(), 1);
+      expect(failed.reason).toContain('no longer matches');
+      expect(f.calls()).toBe(1);
+      expect(failed.failedAttempts).toHaveLength(1);
+      expect(f.repo.git('show', `${failed.failedAttempts![0]!.sha}:src/a.ts`)).toBe('PARTIAL\n');
+      expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
+    } finally {
+      await f.cleanup();
+    }
+  });
+  test('execution admission waits for sibling commit verification and registration', async () => {
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>((r) => {
+      entered = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let heldOnce = false;
+    const f = await fixture(undefined, '', {
+      gitHook: async (args, run) => {
+        if (!heldOnce && args.at(-2) === 'rev-parse' && args.at(-1)?.endsWith('^')) {
+          heldOnce = true;
+          entered();
+          await gate;
+        }
+        return run(args);
+      },
+    });
+    let first: ReturnType<typeof f.engine.fix> | undefined,
+      second: ReturnType<typeof f.engine.fix> | undefined;
+    try {
+      first = f.engine.fix(finding(), 1);
+      await held;
+      const unregistered = f.repo.git('rev-parse', 'HEAD').trim();
+      expect(unregistered).not.toBe(f.initial);
+      second = f.engine.fix(finding('src/b.ts'), 1);
+      await new Promise<void>((r) => setTimeout(r, 30));
+      expect(f.attempts.some((row) => row.finding === 'src/b.ts')).toBe(false);
+      release();
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.finding.status, a.reason).toBe('fixed');
+      expect(b.finding.status, b.reason).toBe('fixed');
+      expect(b.observedHead).toBe(a.commit);
+      expect(f.repo.git('rev-parse', `${b.commit}^`).trim()).toBe(a.commit);
+    } finally {
+      release();
+      await Promise.allSettled([first, second]);
+      await f.cleanup();
+    }
+  });
+});
 
 describe('review.address candidate isolation', () => {
   test.each(['unused', 'unanchored', 'unsafe'] as const)(
@@ -269,7 +637,7 @@ describe('review.address candidate isolation', () => {
       expect(fixed.finding.status, fixed.reason).toBe('fixed');
       expect(f.attempts.map((a) => a.tier)).toEqual(['worker', 'rescue', 'rescue', 'reviewer']);
       expect(f.attempts.every((a) => a.costUSD === 0.01)).toBe(true);
-      expect(f.attempts[0]?.evidenceSha).toBeTruthy();
+      expect(f.attempts[0]?.failedAttempt?.sha).toBeTruthy();
       expect(f.attempts[1]?.reason).toMatch(/worker stopped: error/);
       expect(f.repo.git('show', '--format=', '--name-only', fixed.commit!).trim()).toBe('src/a.ts');
     } finally {
@@ -385,7 +753,7 @@ describe('review.address candidate isolation', () => {
         expect(refused.commit).toBeUndefined();
         expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-        expect(f.attempts.some((a) => a.evidenceSha)).toBe(true);
+        expect(f.attempts.some((a) => a.failedAttempt?.sha)).toBe(true);
       } finally {
         await f.cleanup();
       }
@@ -475,8 +843,10 @@ describe('review.address candidate isolation', () => {
       expect(fix.finding.status).toBe('deferred');
       expect(fix.reason).toContain('provider failed');
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
-      expect(f.attempts[0]?.evidenceRef).toMatch(/^refs\/cq\/review-address\//);
-      expect(f.repo.git('show', `${f.attempts[0]!.evidenceSha}:src/a.ts`)).toContain('PARTIAL');
+      expect(f.attempts[0]?.failedAttempt?.branch).toMatch(/^cq-address\/[^/]+\/failed\/review\//);
+      expect(f.repo.git('show', `${f.attempts[0]!.failedAttempt?.sha}:src/a.ts`)).toContain(
+        'PARTIAL',
+      );
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
     } finally {
       await f.cleanup();
@@ -642,7 +1012,7 @@ describe('review.address candidate isolation', () => {
       ]);
       expect(
         f.attempts.some(
-          (a) => a.tier === 'worker' && a.evidenceRef?.startsWith('refs/cq/review-address/'),
+          (a) => a.tier === 'worker' && a.failedAttempt?.branch?.startsWith('cq-address/'),
         ),
       ).toBe(true);
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('GOOD SAFE\n');
@@ -664,7 +1034,7 @@ describe('review.address candidate isolation', () => {
         expect(fix.reason).toBe(`worker stopped: ${stopReason}`);
         expect(f.calls()).toBe(1);
         expect(f.attempts[0]?.usage).toEqual({ input: 2, output: 1, cacheRead: 0, cacheWrite: 0 });
-        expect(f.attempts[0]?.evidenceRef).toBeTruthy();
+        expect(f.attempts[0]?.failedAttempt?.branch).toBeTruthy();
         expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
         const sibling = await f.engine.fix(finding('src/b.ts'), 1);
         expect(sibling.finding.status, sibling.reason).toBe('fixed');
@@ -793,7 +1163,7 @@ describe('review.address candidate isolation', () => {
       expect(f.calls()).toBe(1);
       expect(fix.validation).toEqual([]);
       expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
-      expect(f.attempts[0]?.evidenceRef).toBeTruthy();
+      expect(f.attempts[0]?.failedAttempt?.branch).toBeTruthy();
       expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('BAD\n');
     } finally {
       await f.cleanup();
@@ -810,6 +1180,11 @@ describe('review.address candidate isolation', () => {
       });
       const gate = new Promise<void>((resolve) => {
         release = resolve;
+      });
+      let edits = 0,
+        bothEdited!: () => void;
+      const editsReady = new Promise<void>((r) => {
+        bothEdited = r;
       });
       let holding = 0,
         maximum = 0,
@@ -847,6 +1222,9 @@ describe('review.address candidate isolation', () => {
           } else {
             const file = input.prompt.includes('Address only src/b.ts') ? 'src/b.ts' : 'src/a.ts';
             await writeFile(join(input.workspace!.path, file), 'GOOD\n');
+            if (++edits === 2) bothEdited();
+            await editsReady;
+            if (file === 'src/b.ts') await firstHeld;
           }
           return { disposition: 'fixed', reason: 'candidate fixed', evidence: [] };
         },
@@ -857,8 +1235,8 @@ describe('review.address candidate isolation', () => {
       let second: ReturnType<typeof f.engine.fix> | undefined;
       try {
         first = f.engine.fix(finding(), 1);
-        await firstHeld;
         second = f.engine.fix(finding('src/b.ts'), 1);
+        await firstHeld;
         await vi.waitFor(() =>
           expect(
             f.attempts.find((row) => row.finding === 'src/b.ts' && row.invocation === 'edit')
@@ -903,7 +1281,9 @@ describe('review.address candidate isolation', () => {
           expect(f.repo.git('rev-parse', 'HEAD').trim()).toBe(f.initial);
           for (const file of ['src/a.ts', 'src/b.ts']) {
             expect(await readFile(join(f.repo.root, file), 'utf8')).toBe('BAD\n');
-            expect(f.attempts.some((row) => row.finding === file && row.evidenceSha)).toBe(true);
+            expect(f.attempts.some((row) => row.finding === file && row.failedAttempt?.sha)).toBe(
+              true,
+            );
           }
         }
       } finally {

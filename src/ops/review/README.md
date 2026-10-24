@@ -50,8 +50,17 @@ restoration or releasing its serial validation boundary.
 The engine uses the shared escalation allocator: configured worker
 attempts, then bounded rescue, then human. An affirmative broader
 regression routes directly to rescue. Human escalation preserves successful
-sibling commits. Failed owned edits are restored after evidence is pinned
-under a unique `refs/cq/review-address/` ref; the shared stash ref is unused.
+sibling commits. Failed attempts are retained as ordinary single-parent commits on
+local `cq-address/<run-id>/failed/review/<package>/<finding>/a<n>` branches.
+Capture copies only the assigned file into an isolated candidate based on the
+latest verified parent; a sibling's dirty bytes and index entries are excluded.
+The immutable parent and the earlier per-dispatch execution head are reported
+separately. Create-only references preserve occupied ordinals; worker and rescue
+history continues the sequence, with bounded collision retries and SHA-256 support.
+After capture the engine restores only the assigned file. Cleanup remains serial
+and cancellation-independent. It never stages the entire shared checkout or uses
+stash refs. Failed branches stay local, including when `--push` publishes successful
+verified commits; review.address has no failed-branch publication option.
 Unknown edits and unexpected index or HEAD changes fail closed. Retry and
 shared-tree stops use engine-owned refusal, cancellation and budget evidence;
 model-written reason prose cannot stop a sibling or bypass rescue.
@@ -59,7 +68,11 @@ model-written reason prose cannot stop a sibling or bypass rescue.
 Every provider request is scanned before sending, including decoded tool
 output and read-path provenance. Gitleaks defaults always apply; an
 explicit `review.denylistPatternsFile` adds repository rules. Missing or
-failed scanners refuse uploads.
+failed scanners refuse uploads. Before rescue, the owned file must be clean.
+The prior immutable parent-to-attempt patch, both file contents, commit metadata
+and report provenance are scanned before both the edit and feedback requests.
+Moved branch tips, unexpected parentage, unowned paths, oversized or binary
+feedback refuse rescue.
 
 Dispositions use `dev.disposition`. Deferred blocking findings remain open,
 including when later reviewers omit them. A fresh open finding cannot be
@@ -69,7 +82,10 @@ human stops return exit 3 with a report. Invalid CLI input returns the I1
 input error. The full report is written to the journal directory on every
 op exit, with usage, attempts, model identities, reasons, gates, evidence,
 open findings and distinct verified commit count (`fixesPerRun`). Unknown
-USD prices remain absent.
+USD prices remain absent. `failed[]` lists retained branch/SHA pointers, finding,
+unit, tier/model, ordinal, outcome, gate, reason, parent and execution head. Each
+editing attempt and fix retains its failure history; unresolved findings carry
+an evidence pointer. Cancelled exits still write retained pointers to the report.
 
 PR replies and thread resolution use the current authenticated identity,
 fresh head/round proof and verified publication. Successful dispatch receipts
@@ -86,14 +102,20 @@ clean, resolved human thread authors are re-requested once. Bot authors are
 excluded from the human reviewer API and recorded as an advisory skipped
 re-request; the report never claims a bot re-request succeeded. Forge
 failures retain the report and return needs-human. Current thread replies
-are included in both worker and candidate closure review inputs.
+are included in both worker and candidate closure review inputs. The shared
+dispatcher's optional `signal` stops each new push, reply or resolution after
+cancellation, including while waiting for its dispatch-log lock. In-flight
+successful responses still receive durable receipts for safe replay; callers
+without a signal retain existing behavior.
 
 Addressing owns a canonical Git common-directory lock from admission through
 worker edits, cleanup and publication. A second invocation refuses immediately
 and writes its own needs-human report without entering the worker tree. Linked
 worktrees share this conservative exclusion domain; disjoint workers within one
 invocation retain configured parallelism. Index mutations use a separate stable
-canonical checkout lock and the existing in-process FIFO. The optional Git mutex
+canonical checkout lock and the existing in-process FIFO. Execution-head
+admission joins that FIFO, so a sibling commit cannot be observed before its
+parent/tree verification and registration complete. The optional Git mutex
 `failFast` setting changes ownership admission only; default waiter, stale-lock
 recovery, heartbeat, cancellation and release behavior remain intact.
 

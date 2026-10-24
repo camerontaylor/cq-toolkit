@@ -1611,6 +1611,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),
       nowMs: opts.nowMs,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     for (const failure of reply.failed) {
       reasons.push(
@@ -1630,6 +1631,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     }
   }
 
+  if (opts.signal?.aborted && !reasons.some((reason) => reason.includes('parent cancelled')))
+    reasons.push('parent cancelled; remaining publication and replies withheld');
   // (8) The verdict: clean stages → ok; anything recorded → needs-human.
   return {
     status: reasons.length === 0 ? 'ok' : 'needs-human',

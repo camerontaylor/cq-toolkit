@@ -648,6 +648,9 @@ const runLoop = async (
     governanceOptIn?: GovernanceOptIn[];
     /** Full driver.run override (the wall-clock test's cooperating wedge). */
     driverRun?: Driver['run'];
+    signal?: AbortSignal;
+    gitHook?: (args: string[], run: GhFn) => ReturnType<GhFn>;
+    ghHook?: (args: string[], run: GhFn) => ReturnType<GhFn>;
     /** Propagated-spend observer (review-debt #186). */
     onSpend?: (usd: number) => void;
     /** The loop's own identity (the settle gate's resolve-carry authorization). */
@@ -700,6 +703,8 @@ const runLoop = async (
           } as unknown as OpRegistryEntry<never, never>)
         : undefined,
   };
+  const gitRunner = fakeGit(world, gitLog, worktreePath);
+  const ghRunner = fakeGh(world, ghLog);
   const outcome = await runReviewLoop({
     owner: COORDS.owner,
     repo: COORDS.repo,
@@ -707,8 +712,9 @@ const runLoop = async (
     headRefName: HEAD_REF,
     ...(o.headRepo !== undefined ? { headRepo: o.headRepo } : {}),
     repoRoot: '/fake/repo',
-    gh: fakeGh(world, ghLog),
-    git: fakeGit(world, gitLog, worktreePath),
+    gh: o.ghHook ? (args) => o.ghHook!(args, ghRunner) : ghRunner,
+    git: o.gitHook ? (args) => o.gitHook!(args, gitRunner) : gitRunner,
+    ...(o.signal ? { signal: o.signal } : {}),
     registry: memoryRegistry(),
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
@@ -3300,4 +3306,65 @@ describe('independent PR343 c05577 outcome regressions', () => {
     expect(outcome.actionsPosted).toBe(1);
     expect(outcome.status).toBe('ok');
   });
+});
+
+describe('parent cancellation during publication and replies', () => {
+  test.each(['initial-push', 'reply'] as const)(
+    'held %s cannot dispatch remaining forge mutations',
+    async (heldAt) => {
+      const world = defaultWorld();
+      world.threads.push(actionableThread('T3', 'src/b.ts', 1, 103));
+      const parent = new AbortController();
+      let release!: () => void, entered!: () => void;
+      const held = new Promise<void>((r) => {
+        entered = r;
+      });
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let heldOnce = false;
+      const ghLog: string[][] = [];
+      const pending = runLoop(world, {
+        signal: parent.signal,
+        ghLog,
+        driverResults: [
+          completeWorker(fixLine(true, 'fixed held cancellation', [NEW_SHA])),
+          completeWorker(fixLine(true, 'fixed held cancellation', [NEW_SHA])),
+        ],
+        gitHook: async (args, run) => {
+          const result = await run(args);
+          if (heldAt === 'initial-push' && args[2] === 'push' && !heldOnce) {
+            heldOnce = true;
+            entered();
+            await gate;
+          }
+          return result;
+        },
+        ghHook: async (args, run) => {
+          const result = await run(args);
+          if (heldAt === 'reply' && isGhMutation(args) && !heldOnce) {
+            heldOnce = true;
+            entered();
+            await gate;
+          }
+          return result;
+        },
+      });
+      await held;
+      parent.abort();
+      const landed = ghLog.filter(isGhMutation).length;
+      release();
+      const { outcome } = await pending;
+      expect(outcome.status).toBe('needs-human');
+      expect(outcome.reasons.join(' ')).toContain('parent cancelled');
+      expect(ghLog.filter(isGhMutation)).toHaveLength(landed);
+      expect(landed).toBe(heldAt === 'reply' ? 1 : 0);
+      expect(outcome.reply?.posted.filter((row) => row.kind === 'review_reply').length ?? 0).toBe(
+        landed,
+      );
+      expect(outcome.reply?.posted.some((row) => row.kind === 'resolve_thread') ?? false).toBe(
+        false,
+      );
+    },
+  );
 });

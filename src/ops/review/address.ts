@@ -30,6 +30,7 @@ import {
   type AddressFix,
   type AddressWorker,
 } from './addressWorker.js';
+import type { AddressFailedAttempt } from './internal/addressEvidence.js';
 import { FixReviewItemInputSchema } from './registry.js';
 import {
   NO_OUTCOME_REASON,
@@ -62,6 +63,7 @@ export interface ReviewAddressReport {
   openBlocking: Finding[];
   fixes: AddressFix[];
   attempts: AddressAttempt[];
+  failed: AddressFailedAttempt[];
   fixesPerRun: number;
   usage: Usage;
   costUSD?: number;
@@ -144,6 +146,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
       openBlocking: [],
       fixes: [],
       attempts: [],
+      failed: [],
       fixesPerRun: 0,
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       wallMs: 0,
@@ -186,6 +189,14 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
         reason = stopped;
         report.reasons.push(stopped);
       }
+      // Jobs cancelled by the enclosing runner still retain independently
+      // recorded branch pointers, even when their result/disposition is absent.
+      report.findings = report.findings.map((finding) => {
+        const failed = report.failed.findLast((row) => row.finding === finding.id);
+        return failed && (finding.status === 'open' || finding.status === 'deferred')
+          ? { ...finding, evidence: JSON.stringify(failed) }
+          : finding;
+      });
       report.wallMs = Date.now() - start;
       report.fixesPerRun = new Set(
         report.fixes.flatMap((fix) => (fix.commit ? [fix.commit] : [])),
@@ -434,6 +445,7 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
               git,
               drivers,
               attempts: report.attempts,
+              failedAttempts: report.failed,
               isBookkeepingPath: (path) =>
                 withBookkeepingAccess(root, () => untrackedAllowed(root, path)),
               remainingTokens,
@@ -663,7 +675,12 @@ export function makeReviewAddress(deps: ReviewAddressDeps = {}) {
             const findings = record.findings.map((finding) => {
               const prior = dispositions.get(identity(finding));
               return prior?.status === 'deferred'
-                ? { ...finding, status: prior.status, reason: prior.reason ?? '' }
+                ? {
+                    ...finding,
+                    status: prior.status,
+                    reason: prior.reason ?? '',
+                    ...(prior.evidence ? { evidence: prior.evidence } : {}),
+                  }
                 : finding;
             });
             for (const prior of dispositions.values())

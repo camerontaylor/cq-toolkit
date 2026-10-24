@@ -228,3 +228,77 @@ numeric evidence remain CI's responsibility. No new live or CodeRabbit run was
 made. Positive live measured-fix acceptance, #438 and settled #440 failed-branch
 API reconciliation remain outstanding; this repair does not claim whole-PR
 acceptance or authorize merging.
+
+2026-10-24 settled #440 adaptation and late #453/#454 controls
+
+Merged #440's settled helper/API from queue merge f83d18f3 in clean merge
+commit dd63a9fd. S6 reuses commitFailedAttempt only in a detached candidate
+based on a verified parent, with its own index and only the assigned file.
+It does not reuse the unit caller's whole-tree staging/restoration. Ordinary
+local failed branches replace legacy stash evidence refs. Actual single-parent
+commits carry the settled trailers; create-only collision retries stop at 32,
+worker/rescue ordinals continue, and SHA-256 repositories are exercised. The
+per-dispatch execution head remains distinct from the current verified parent.
+
+Real-Git rendezvous controls hold sibling dirty bytes while failure capture
+runs: only the owned path differs in the retained commit, the sibling stays
+dirty, and its own later attempt retains a separate branch. Another control
+lets a sibling commit before failure capture and asserts the later verified
+parent alongside the earlier execution head. Rescue starts with a clean owned
+file and receives the immutable prior patch. Both edit and mandatory feedback
+scan its patch, parent/failed contents, commit metadata and report provenance;
+positive/missing/fault scans, moved refs, unexpected parentage/unowned paths,
+binary/invalid text and size caps refuse upload. A refused pre-dispatch scan
+does not overwrite the earlier editing attempt's pointer. Reports, attempt
+rows and finding evidence retain branch/SHA history on failed/cancelled exits.
+A successful --push run publishes verified commits while its failed branches
+remain absent from the fixture's bare origin. Cancellation/budget cleanup
+stays in the FIFO and checkout lock without cancellation admission.
+
+#453 serializes execution-head admission with commit verification/registration.
+The causal test holds the new commit between HEAD movement and registration;
+a sibling waits then dispatches successfully. #454 adds optional signal to
+ReplyAndResolveOpts and passes it through review-loop. Each new push/forge
+mutation checks cancellation, including after dispatch-log waits. In-flight
+landed responses still record durable receipts; replay skips those receipts.
+No-signal behavior is unchanged. Held initial push/reply/resolve/log-lock and
+composed-loop controls prove no hidden subsequent resolution after cancellation.
+
+Causal before control: temporarily removed only the admission synchronization
+and per-mutation cancellation checks, preserving the evidence adaptation; then
+restored the exact guarded source bytes. Six expected controls failed (one
+admission, four dispatcher timings, one composed held reply):
+
+```text
+test:narrow result="fail" exit=1 files=4 projects="pure,process" tests="231/237" failed=6 skipped=0 wait="0.0s" duration="29.1s" nice=5 load="0.0" uptime="543401s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/replyAndResolve.test.ts,test/plans/review-loop.test.ts"
+```
+
+Guarded focused checkpoint (includes local report/cancellation and rescue
+controls in addition to the three causal files):
+
+```text
+test:narrow result="pass" exit=0 files=5 projects="pure,process" tests="254/254" failed=0 skipped=0 wait="0.0s" duration="57.5s" nice=5 load="0.2" uptime="543451s" source="explicit" ran="test/driver/process-inventory.test.ts,test/ops/review/address-local.test.ts,test/ops/review/addressWorker.test.ts,test/ops/review/replyAndResolve.test.ts,test/plans/review-loop.test.ts"
+```
+
+The PR orchestration fake also needed immutable execution-head file reads for
+its human citation; the original fake silently fell into provider-failure
+cleanup. It now serves that Git boundary and requires the actual human reason.
+The real-Git fixtures, CLI and immutable-feedback guard tests are separate.
+
+No CodeRabbit or live run was repeated. The earlier 223d macOS CI completed
+successfully, as reported by the chancellor. This adaptation needs independent
+exact-head review and fresh required CI; hermetic checks do not satisfy positive
+live measured-fix acceptance. #438 remains separate and no whole-PR PASS or
+merge is claimed.
+
+Remaining PR adapter/CLI/registry/feedback-guard checkpoint after the
+phase-one fixture correction:
+
+```text
+test:narrow result="pass" exit=0 files=8 projects="pure,process,integration" tests="119/119" failed=0 skipped=0 wait="0.0s" duration="56.1s" nice=5 load="1.2" uptime="543692s" source="explicit" ran="test/cli/registry.test.ts,test/driver/process-inventory.test.ts,test/e2e/review/review-address.e2e.test.ts,test/ops/review/address-pr-git.test.ts,test/ops/review/address-pr.test.ts,test/ops/review/address.test.ts,test/ops/review/addressEvidence.test.ts,test/ops/sweep/gitMutex.test.ts"
+```
+
+The two final batches cover 371 distinct tests (the two process-inventory
+controls appear in both). Static exited 0 with zero type errors against baseline
+zero; formatting and Knip exited 0; generated-doc verification exited 0 with
+54 op docs current. No baseline or policy changes.

@@ -218,6 +218,13 @@ async function world(
       indices.set(cwd, index);
       return ok('');
     }
+    if (a[0] === 'show' && a[1]?.includes(':')) {
+      const separator = a[1].indexOf(':');
+      const text = trees.get(a[1].slice(0, separator))?.get(a[1].slice(separator + 1));
+      return text === undefined
+        ? { code: 1, stdout: '', stderr: 'missing citation at execution head' }
+        : ok(text);
+    }
     if (a[0] === 'write-tree') return ok(treeHash(index));
     if (a[0] === 'stash') return ok('');
     if (a[0] === 'restore') {
@@ -469,7 +476,13 @@ describe('review.address PR phase-one orchestration', () => {
         expect(w.resolved.has('T1')).toBe(true);
         expect(w.resolved.has('T2')).toBe(false);
         expect(w.actions.indexOf('push')).toBeLessThan(w.actions.indexOf('resolve:T1'));
-        expect(result.report?.openBlocking).toMatchObject([{ id: 'T2', status: 'deferred' }]);
+        expect(result.report?.openBlocking).toMatchObject([
+          {
+            id: 'T2',
+            status: 'deferred',
+            reason: kind === 'same-file' ? 'human' : 'unanchored finding needs human scope',
+          },
+        ]);
         expect(
           result.report?.rounds[0]?.run?.jobs.every((row) => row.result.status !== 'failed'),
         ).toBe(true);

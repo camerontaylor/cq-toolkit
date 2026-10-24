@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { makeReviewAddress } from '../../../src/ops/review/address.js';
+import { makeReviewAddress, type ReviewAddressReport } from '../../../src/ops/review/address.js';
 import { makeReviewRun } from '../../../src/ops/review/run.js';
 import type { CqConfig } from '../../../src/ops/analyze/cqConfig.js';
 import type { DriverFactory } from '../../../src/driver/factory.js';
@@ -11,7 +11,7 @@ import { makeTestRepo } from '../dev/repo.js';
 import { makeGitleaksFixture } from '../../helpers/gitleaks-fixture.js';
 import { makeSubprocessDevEffects } from '../../../src/ops/dev/effects.js';
 import { runPlan } from '../../../src/kernel/runner.js';
-import { createGovernor } from '../../../src/kernel/governor.js';
+import { createGovernor, runLadder } from '../../../src/kernel/governor.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 import { z } from 'zod';
 
@@ -218,6 +218,7 @@ describe('review.address local full cycle', () => {
         repoRoot: f.repo.root,
         source: 'local',
         journalDir: f.journalDir,
+        push: true,
       });
       expect(result.status, JSON.stringify(result)).toBe('ok');
       if (result.status !== 'ok') return;
@@ -226,8 +227,28 @@ describe('review.address local full cycle', () => {
           .filter((attempt) => attempt.invocation === 'edit')
           .map((attempt) => attempt.tier),
       ).toEqual(['worker', 'worker', 'rescue']);
+      expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
+      expect(f.repo.git('ls-remote', '--heads', 'origin', 'feature/x')).toContain(
+        result.value.fixes[0]!.commit,
+      );
       expect(result.value.escalation?.perRunUsed).toBe(1);
       expect(result.value.fixesPerRun).toBe(1);
+      expect(result.value.failed.map((row) => [row.ordinal, row.tier])).toEqual([
+        [1, 'worker'],
+        [2, 'worker'],
+      ]);
+      expect(result.value.fixes[0]!.failedAttempts).toEqual(result.value.failed);
+      for (const row of result.value.failed) {
+        expect(f.repo.git('rev-parse', row.branch).trim()).toBe(row.sha);
+        expect(f.repo.git('rev-parse', `${row.sha}^`).trim()).toBe(row.parent);
+      }
+      const journal = JSON.parse(
+        await readFile(result.value.reportPath, 'utf8'),
+      ) as ReviewAddressReport;
+      expect(journal.failed).toEqual(result.value.failed);
+      expect(
+        journal.attempts.filter((row) => row.failedAttempt).map((row) => row.failedAttempt),
+      ).toEqual(journal.failed);
     } finally {
       await f.cleanup();
     }
@@ -473,6 +494,62 @@ test('adopted no-ignore repository can re-review ledger revisions and commit a s
     expect(reviews).toBe(2);
     expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toContain('FINAL');
     expect(f.repo.git('status', '--porcelain')).toContain('.cq/');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cancelled edit reports an ordinary local branch and finding pointer without publication', async () => {
+  const f = await fixture();
+  const parent = new AbortController();
+  const drivers: DriverFactory = {
+    resolve: (request) => {
+      const resolved = f.drivers.resolve(request);
+      return {
+        ...resolved,
+        driver: {
+          run: async (input) => {
+            await writeFile(join(input.workspace!.path, 'src/a.ts'), 'CANCELLED PARTIAL\n');
+            parent.abort();
+            return {
+              stopReason: 'aborted',
+              usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            };
+          },
+        },
+      };
+    },
+  };
+  try {
+    const governed = await runLadder(
+      () =>
+        makeReviewAddress({ drivers, initialRecord: f.record })({
+          repoRoot: f.repo.root,
+          source: 'local',
+          journalDir: f.journalDir,
+          push: true,
+        }),
+      {},
+      { op: 'review.address', jobKey: 'cancelled-address', attempt: 1 },
+      { signal: parent.signal },
+    );
+    expect(governed.outcome).toBe('completed');
+    if (governed.outcome !== 'completed') return;
+    const result = governed.value;
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'ok') return;
+    const report = result.report!;
+    expect(report.failed).toHaveLength(1);
+    const retained = report.failed[0]!;
+    expect(retained.gate).toBe('budget');
+    expect(f.repo.git('show', `${retained.branch}:src/a.ts`)).toBe('CANCELLED PARTIAL\n');
+    expect(JSON.parse(report.findings[0]!.evidence!)).toEqual(retained);
+    expect(
+      (JSON.parse(await readFile(report.reportPath, 'utf8')) as ReviewAddressReport).failed,
+    ).toEqual(report.failed);
+    expect(await readFile(join(f.repo.root, 'src/a.ts'), 'utf8')).toBe('export const a = "BAD";\n');
+    expect(f.repo.git('ls-remote', '--heads', 'origin', 'cq-address/*')).toBe('');
   } finally {
     await f.cleanup();
   }

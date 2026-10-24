@@ -35,6 +35,12 @@ import {
   type EscalationState,
 } from '../fix/escalation.js';
 import type { Finding } from './findings.js';
+import {
+  pinAddressFailure,
+  addressFailureFeedback,
+  type AddressFailedAttempt,
+} from './internal/addressEvidence.js';
+import type { FailedAttemptGate } from '../sweep/taskLoop.js';
 
 const OutcomeSchema = z
   .object({
@@ -56,8 +62,7 @@ export interface AddressAttempt {
   usage?: Usage;
   costUSD?: number;
   validation?: ValidationVerdict[];
-  evidenceRef?: string;
-  evidenceSha?: string;
+  failedAttempt?: AddressFailedAttempt;
 }
 export interface AddressFix {
   finding: Finding;
@@ -66,6 +71,7 @@ export interface AddressFix {
   evidence?: Array<{ path: string; line: number }>;
   reason: string;
   validation: ValidationVerdict[];
+  failedAttempts?: AddressFailedAttempt[];
 }
 export interface AddressWorker {
   fix(finding: Finding, round: number): Promise<AddressFix>;
@@ -80,6 +86,9 @@ export interface AddressWorkerDeps {
   journalDir: string;
   policy: EffectiveCqPolicy;
   attempts: AddressAttempt[];
+  /** Run-wide history survives rejected/cancelled jobs, independently of their result. */
+  failedAttempts?: AddressFailedAttempt[];
+  runPrefix?: string;
   remainingTokens(): number;
   remainingWallMs(): number;
   account(result: WorkerResult): void;
@@ -104,6 +113,9 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
   const { policy } = deps;
   let state = createEscalationState();
   const root = resolve(deps.repoRoot);
+  const runPrefix = deps.runPrefix ?? `cq-address/${randomUUID()}`;
+  const failures = deps.failedAttempts ?? [];
+  const ordinals = new Map<string, number>();
   // Resolve identity only inside an awaited mutation. Unused or early-refused
   // workers must not leave rejected setup promises racing checkout cleanup.
   let mutex: Promise<ReturnType<typeof makeGitMutex>> | undefined;
@@ -258,19 +270,23 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     prompt: string,
     role: ModelSpec,
     editable: boolean,
+    prior?: Awaited<ReturnType<typeof addressFailureFeedback>>,
+    onDispatch?: (row: AddressAttempt) => void,
   ) => {
     stop();
     if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
-    await scan(prompt);
+    if (prior)
+      prompt += `\nPrior failed-attempt patch (engine-owned feedback; do not repeat rejected changes):\n${prior.patch}`;
+    await scan(prompt, prior?.contents);
     stop();
     let requestRefusal: AddressRefusal | undefined;
     const resolved = deps.drivers.resolve({
       role: tier === 'reviewer' ? 'reviewer' : 'fixer',
       modelSpec: role,
-      beforeRequest: async (...args) => {
+      beforeRequest: async (text, contents = []) => {
         try {
           stop();
-          await scan(...args);
+          await scan(text, [...contents, ...(prior?.contents ?? [])]);
           stop();
         } catch (error) {
           if (error instanceof AddressRefusal) requestRefusal = error;
@@ -301,6 +317,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       wallMs: 0,
     };
     deps.attempts.push(row);
+    onDispatch?.(row);
     const start = Date.now();
     const signals = [deps.parentSignal, currentJobContext()?.signal].filter(
       (signal): signal is AbortSignal => signal !== undefined,
@@ -401,12 +418,19 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
     escalation: () => state,
     async fix(finding, round) {
       let observedHead = '';
+      const history: AddressFailedAttempt[] = [];
       const validations: ValidationVerdict[] = [];
       const failed = (reason: string): AddressFix => ({
-        finding: { ...finding, status: 'deferred', reason },
+        finding: {
+          ...finding,
+          status: 'deferred',
+          reason,
+          ...(history.length ? { evidence: JSON.stringify(history.at(-1)) } : {}),
+        },
         observedHead,
         reason,
         validation: validations,
+        failedAttempts: history,
       });
       let file = finding.file;
       if (!file) return failed('unanchored finding needs human scope');
@@ -421,6 +445,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       const unitStart = Date.now();
       unitDeadlines.set(finding.id, unitStart + policy.budgets.unit.wallMs);
       let touched = false;
+      let editingRow: AddressAttempt | undefined;
+      let restoreRefused = false;
+      let dispatch:
+        | { tier: 'worker' | 'rescue'; role: ModelSpec; ordinal: number; slug: string }
+        | undefined;
       const admitMutation = () => {
         stop();
         if (remainingUnit(finding) <= 0) throw new AddressRefusal('unit wall budget exhausted');
@@ -428,25 +457,80 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
       const restore = async () =>
         withMutation(async () => {
           if (!touched) return;
+          if (restoreRefused)
+            throw new Error('prior evidence restore refused; caller bytes retained');
           const head = await git(root, ['rev-parse', 'HEAD']);
           if (!verifiedHeads.has(head))
             throw new Error('unexpected HEAD movement; evidence left intact');
           const indexed = zList(await git(root, ['diff', '--cached', '--name-only', '-z']));
           if (indexed.some((path) => path !== file))
             fatal = 'worker changed the index outside its scope';
-          await git(root, ['add', '--', file]);
-          const sha = await git(root, ['stash', 'create']);
-          if (sha) {
-            const ref = `refs/cq/review-address/${randomUUID()}`;
-            await git(root, ['update-ref', ref, sha]);
-            const row = [...deps.attempts].reverse().find((entry) => entry.finding === finding.id);
-            if (row) {
-              row.evidenceRef = ref;
-              row.evidenceSha = sha;
-            }
+          if (!dispatch) throw new Error('failed attempt has no dispatch identity');
+          const content = await readFile(await safeFile(root, file));
+          const candidate = resolve(deps.journalDir, `failed-candidate-${randomUUID()}`);
+          await git(root, ['worktree', 'add', '--detach', candidate, head]);
+          try {
+            await writeFile(await safeFile(candidate, file), content);
+            await git(candidate, ['add', '--', file]);
+            const lastGate = validations
+              .at(-1)
+              ?.gates.find((gate) => gate.verdict !== 'pass')?.gate;
+            const gate: FailedAttemptGate = /budget|cancel|aborted/.test(reason)
+              ? 'budget'
+              : fatal || /index|HEAD|snapshot|mutated/.test(reason)
+                ? 'tamper'
+                : /scope|protected/.test(reason)
+                  ? 'path-policy'
+                  : lastGate === 'paths'
+                    ? 'path-policy'
+                    : (lastGate ?? 'none');
+            const outcome = gate === 'budget' || fatal ? 'escalated-to-human' : 'unfixed';
+            const pinned = await pinAddressFailure((args) => git(candidate, args), {
+              runPrefix,
+              kind: 'review',
+              slug: dispatch.slug,
+              task: finding.id,
+              parent: head,
+              firstAttempt: dispatch.ordinal,
+              tier: dispatch.tier,
+              model: dispatch.role,
+              gate,
+              outcome,
+              reason,
+              pushFailed: false,
+            });
+            const ordinal = Number(pinned.branch.slice(pinned.branch.lastIndexOf('/a') + 2));
+            const retained: AddressFailedAttempt = {
+              ...pinned,
+              finding: finding.id,
+              unit: `review/${dispatch.slug}`,
+              outcome,
+              model: dispatch.role,
+              file,
+              parent: head,
+              executionHead: observedHead,
+              ordinal,
+              tier: dispatch.tier,
+              gate,
+              reason,
+            };
+            history.push(retained);
+            failures.push(retained);
+            ordinals.set(finding.id, ordinal);
+            if (editingRow) editingRow.failedAttempt = retained;
+            if (
+              (await git(root, ['rev-parse', 'HEAD'])) !== head ||
+              !(await readFile(await safeFile(root, file))).equals(content)
+            )
+              throw new Error('failed-attempt source changed before owned restore');
+            await git(root, ['restore', `--source=${head}`, '--staged', '--worktree', '--', file]);
+          } finally {
+            await git(root, ['worktree', 'remove', '--force', candidate]);
           }
-          await git(root, ['restore', '--source=HEAD', '--staged', '--worktree', '--', file]);
           touched = false;
+        }).catch((error: unknown) => {
+          restoreRefused = true;
+          throw error;
         });
       let workerUsed = 0,
         rescueUsed = 0,
@@ -500,10 +584,29 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           else rescueUsed++;
           const role = tier === 'worker' ? policy.roles.worker : policy.roles.rescue;
           if (!role) return failed(`roles.${tier} is required`);
-          observedHead = await git(root, ['rev-parse', 'HEAD']);
-          if (!verifiedHeads.has(observedHead))
-            throw new AddressRefusal('unexpected worker execution head', true);
-          touched = true;
+          observedHead = await withMutation(async () => {
+            const head = await git(root, ['rev-parse', 'HEAD']);
+            if (!verifiedHeads.has(head))
+              throw new AddressRefusal('unexpected worker execution head', true);
+            return head;
+          }, admitMutation);
+          let prior: Awaited<ReturnType<typeof addressFailureFeedback>> | undefined;
+          if (tier === 'rescue' && history.length) {
+            prior = await withMutation(async () => {
+              if (
+                (await git(root, ['diff', '--name-only', '-z', 'HEAD', '--', file])) ||
+                (await git(root, ['diff', '--cached', '--name-only', '-z', '--', file]))
+              )
+                throw new AddressRefusal('owned file is dirty before rescue feedback', true);
+              return addressFailureFeedback((args) => git(root, args), history.at(-1)!);
+            }, admitMutation);
+          }
+          dispatch = {
+            tier,
+            role,
+            ordinal: (ordinals.get(finding.id) ?? 0) + 1,
+            slug: packageName,
+          };
           let output: z.infer<typeof OutcomeSchema>;
           try {
             output = OutcomeSchema.parse(
@@ -517,6 +620,11 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 `${next.decision.reason}\nAddress only ${file}. Never stage or commit, run commands, or edit any other path. Return fixed, rejected or deferred with a concrete reason and code evidence.\nRound ${round}. Finding: ${JSON.stringify(finding)}\nPrevious: ${reason}`,
                 role,
                 true,
+                prior,
+                (row) => {
+                  touched = true;
+                  editingRow = row;
+                },
               ),
             );
           } catch (error) {
@@ -622,6 +730,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   evidence: output.evidence,
                   reason: output.reason,
                   validation: [],
+                  failedAttempts: history,
                 };
               }
               if (!diff) throw new Error('fixed claim has no candidate edit');
@@ -637,6 +746,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                   `related-check feedback\nConfirm this candidate fix for ${JSON.stringify(finding)}. Candidate tree ${tree}, parent ${parent}. Checks: ${JSON.stringify(related)}. Read only; return fixed only if the finding is addressed.`,
                   role,
                   false,
+                  prior,
                 ),
               );
               if (feedback.disposition !== 'fixed')
@@ -726,6 +836,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
                 commit,
                 reason: closure.reason,
                 validation: gates,
+                failedAttempts: history,
               };
             } finally {
               await git(root, ['worktree', 'remove', '--force', candidate]);
@@ -743,7 +854,7 @@ export function makeAddressWorker(deps: AddressWorkerDeps): AddressWorker {
           if (refusal) return failed(reason);
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
+        reason = error instanceof Error ? error.message : String(error);
         if (error instanceof AddressRefusal && error.fatal) fatal = reason;
         try {
           await restore();
