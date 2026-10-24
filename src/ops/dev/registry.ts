@@ -29,6 +29,7 @@ import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { CODERABBIT_REVIEWER } from './coderabbit.js';
 import type { DevCheckInput } from './check.js';
+import type { DevCycleCompositionInput } from './cycle.js';
 import type { DevDispositionInput } from './disposition.js';
 import type { DevIdentity } from './record.js';
 import type { DevReadyInput } from './ready.js';
@@ -128,6 +129,16 @@ export const DevReadyInputSchema: z.ZodType<DevReadyInput> = z
   .object({
     repoRoot: z.string().min(1),
     target: z.string().min(1).exactOptional(),
+  })
+  .strict();
+
+/** The pre-PR composition's input: the whole cycle runs in one repo. */
+export const DevCycleCompositionInputSchema: z.ZodType<DevCycleCompositionInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    target: z.string().min(1).exactOptional(),
+    push: z.boolean().exactOptional(),
+    title: z.string().min(1).exactOptional(),
   })
   .strict();
 
@@ -352,6 +363,62 @@ export const registry: OpRegistryEntry[] = [
             m.makeDevReady((await import('./effects.js')).makeSubprocessDevEffects(input.repoRoot))(
               input,
             )) as Op<unknown, unknown>,
+      ),
+  },
+  {
+    name: 'dev.cycle',
+    inputSchema: DevCycleCompositionInputSchema,
+    // The composition binds the production legs AT DISPATCH from the
+    // dispatched repoRoot: subprocess dev effects, the gh effects for the
+    // publication leg, the real git transport for the verified push, and
+    // the driver factory the review/address legs resolve roles through.
+    // Every construction is inert (closure-only; processes spawn only when
+    // an effect is CALLED), so resolving the entry never touches env, the
+    // network, or the filesystem.
+    importer: () =>
+      Promise.all([
+        import('./cycle.js'),
+        import('./effects.js'),
+        import('../../adapters/forge-github/ghEffects.js'),
+        import('../dev/denylist.js'),
+        import('node:fs/promises'),
+      ]).then(
+        ([m, effects, ghEffects, denylist, fs]) =>
+          (async (input: DevCycleCompositionInput) => {
+            const dev = effects.makeSubprocessDevEffects(input.repoRoot);
+            // The secret scanner the check leg binds: the SAME two-layer
+            // portable composition the dev.check entry carries (gitleaks
+            // defaults; the repo's optional cq.json patterns file rides
+            // makePortableReviewScanner).
+            const configText = await fs
+              .readFile(`${input.repoRoot}/cq.json`, 'utf8')
+              .catch(() => null);
+            const packageText = await fs
+              .readFile(`${input.repoRoot}/package.json`, 'utf8')
+              .catch(() => '{}');
+            let packageName = 'repository';
+            try {
+              const data: unknown = JSON.parse(packageText);
+              if (
+                typeof data === 'object' &&
+                data !== null &&
+                'name' in data &&
+                typeof data.name === 'string'
+              )
+                packageName = data.name;
+            } catch {
+              /* descriptive fallback only */
+            }
+            const scanSecrets =
+              configText !== null && packageName !== '@camerontaylor/cq-toolkit'
+                ? denylist.makePortableReviewScanner(input.repoRoot, dev, configText, packageName)
+                : undefined;
+            return m.makeDevCycle({
+              effects: dev,
+              gh: ghEffects.makeSubprocessPrEffects(input.repoRoot),
+              ...(scanSecrets === undefined ? {} : { scanSecrets }),
+            })(input);
+          }) as Op<unknown, unknown>,
       ),
   },
 ];

@@ -94,6 +94,7 @@ export const PrOpenInputSchema: z.ZodType<PrOpenInput> = z
     target: z.string().min(1).exactOptional(),
     title: z.string().min(1).exactOptional(),
     draft: z.boolean().exactOptional(),
+    draftWhenNotReady: z.boolean().exactOptional(),
   })
   .strict();
 

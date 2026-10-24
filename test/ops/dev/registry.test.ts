@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestRepo } from './repo.js';
 
-const ENTRY_NAMES = ['dev.check', 'dev.review', 'dev.disposition', 'dev.ready'];
+const ENTRY_NAMES = ['dev.check', 'dev.review', 'dev.disposition', 'dev.ready', 'dev.cycle'];
 
 const entryByName = (name: string) => {
   const entry = registry.find((candidate) => candidate.name === name);
@@ -133,6 +133,15 @@ describe('dev family registry entries', () => {
     expect(
       schema.safeParse({ ...minimalInput('dev.disposition'), action: 'ignored' }).success,
     ).toBe(false);
+  });
+
+  test('dev.cycle: the push flag is a boolean and the title is non-empty when present', () => {
+    const schema = entryByName('dev.cycle').inputSchema;
+    expect(schema.safeParse({ repoRoot: '/repo', push: false, title: 'feat: x' }).success).toBe(
+      true,
+    );
+    expect(schema.safeParse({ repoRoot: '/repo', push: 'yes' }).success).toBe(false);
+    expect(schema.safeParse({ repoRoot: '/repo', title: '' }).success).toBe(false);
   });
 
   test.each(ENTRY_NAMES)(

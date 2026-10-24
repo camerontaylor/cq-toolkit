@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { DEV_LEDGER_VERSION, type DevLedgerFile } from '../../../src/ops/dev/record.js';
 import type { PrEffects } from '../../../src/ops/pr/assemblePrs.js';
 import {
+  DEV_READINESS_GAPS_SECTION_MARKER,
   DEV_READINESS_SECTION_MARKER,
   makePrOpen,
   renderDispositionsComment,
+  renderReadinessGapsSection,
   renderReadinessSection,
 } from '../../../src/ops/pr/open.js';
 import {
@@ -146,6 +148,7 @@ describe('pr.open', () => {
         head: state.head,
         branch: 'feature/x',
         evidenceClass: 'author',
+        ready: true,
       },
     });
     const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
@@ -239,6 +242,90 @@ describe('pr.open', () => {
     });
   });
 
+  test('draftWhenNotReady (with draft): a not-ready branch opens the DRAFT with the gaps section, ready:false', async () => {
+    // No seed: the fresh branch has no terminal cycle and no check, so the
+    // gaps are real and the flag must publish them instead of refusing.
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.ready).toBe(false);
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      draft: boolean;
+      body: string;
+    };
+    expect(create.draft).toBe(true);
+    expect(create.body.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
+    expect(create.body).toContain('NOT READY');
+    expect(create.body).toContain('terminal-review-cycle');
+    expect(create.body).toContain('green-check');
+    expect(create.body).not.toContain(DEV_READINESS_SECTION_MARKER);
+  });
+
+  test('draftWhenNotReady never has an effect without draft:true (a not-ready branch is still refused)', async () => {
+    // No seed: the fresh branch is not ready, and without draft:true the
+    // flag must change nothing — the refusal names the gaps.
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') expect(result.reason).toContain('terminal-review-cycle');
+    expect(calls).toEqual([]);
+  });
+
+  test('a ready branch under draftWhenNotReady passes its explicit draft through, ready:true', async () => {
+    await ready();
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.ready).toBe(true);
+    const create = calls.find((call) => call.effect === 'createPr')?.args[0] as {
+      draft: boolean;
+      body: string;
+    };
+    // A ready branch under the flag: the explicit draft passes through
+    // (the caller asked for one), and the body is the standard readiness
+    // section — never the NOT-READY gaps.
+    expect(create.draft).toBe(true);
+    expect(create.body.startsWith(DEV_READINESS_SECTION_MARKER)).toBe(true);
+  });
+
+  test('an unreadable state under draftWhenNotReady is a refusal, never a draft', async () => {
+    await seed(repo);
+    repo.git('checkout', '-q', '--detach', 'HEAD');
+    const { gh, calls } = ghFake();
+    const result = await makePrOpen(
+      effects(),
+      gh,
+    )({
+      repoRoot: repo.root,
+      draft: true,
+      draftWhenNotReady: true,
+    });
+    expect(result.status).toBe('needs-human');
+    expect(calls).toEqual([]);
+  });
+
   test('a schema-bypassing input fails before any effect', async () => {
     const dev = makeFakeEffects();
     const { gh, calls } = ghFake();
@@ -322,5 +409,31 @@ describe('the readiness section markdown escaping', () => {
     const section = renderReadinessSection(baseRecord, ledger, []);
     expect(section).not.toContain('<script>');
     expect(section).toContain('scriptalert(1)/script');
+  });
+});
+
+describe('the NOT-READY gaps section renderer', () => {
+  const state = { branch: BRANCH, head: HEAD, base: BASE };
+  const gaps = [
+    { field: 'terminal-review-cycle', detail: 'no terminal full-scope review cycle recorded' },
+    { field: 'open-blocking-findings', detail: 'open blocking findings: c001|x (major)' },
+  ];
+
+  test('the section renders start and end markers and every gap verbatim', () => {
+    const section = renderReadinessGapsSection(state, 'merge-queue', gaps);
+    expect(section.startsWith(DEV_READINESS_GAPS_SECTION_MARKER)).toBe(true);
+    expect(section).toContain('<!-- /cq:dev-readiness-gaps -->');
+    expect(section).toContain(
+      '**terminal-review-cycle**: no terminal full-scope review cycle recorded',
+    );
+    expect(section).toContain('blocking gaps: 2');
+  });
+
+  test('pipes and angle brackets in gap details cannot fabricate table or markup syntax', () => {
+    const section = renderReadinessGapsSection(state, 'merge-queue', [
+      { field: 'a|b', detail: '<script>x</script>' },
+    ]);
+    expect(section).toContain('**a\\|b**:');
+    expect(section).not.toContain('<script>');
   });
 });

@@ -33,9 +33,14 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DevEffects } from '../dev/effects.js';
 import { faultText, guardDevOp } from '../dev/effects.js';
-import type { DevCheckGate, DevLedgerFile, DevReadinessRecord } from '../dev/record.js';
+import type {
+  DevCheckGate,
+  DevCheckRecord,
+  DevLedgerFile,
+  DevReadinessRecord,
+} from '../dev/record.js';
 import { AUTHOR_EVIDENCE_CAVEAT, DEFAULT_DEV_TARGET } from '../dev/record.js';
-import { readReadiness } from '../dev/ready.js';
+import { readReadinessWithGaps, type ReadinessGap } from '../dev/ready.js';
 import { CLEAN_TREE, git, gitStdout } from '../dev/internal/workState.js';
 import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
@@ -53,6 +58,14 @@ export interface PrOpenInput {
   title?: string;
   /** Open as a draft; default false (a ready record is a real submission). */
   draft?: boolean;
+  /**
+   * With `draft: true`: a not-ready branch opens the DRAFT carrying a
+   * NOT-READY gaps section instead of refusing (the composition's round-cap
+   * path — the branch is published with its honest state, never bypassed);
+   * default false (a not-ready branch is a needs-human refusal naming the
+   * gaps). Never has any effect without `draft: true`.
+   */
+  draftWhenNotReady?: boolean;
 }
 
 /** The pr.open report — the op's ok value. */
@@ -67,6 +80,8 @@ export interface PrOpenReport {
   branch: string;
   /** Always 'author': the rendered body is author evidence by construction. */
   evidenceClass: 'author';
+  /** true when the PR carries a READY author-tier record; false = a DRAFT carrying the gaps. */
+  ready: boolean;
 }
 
 /** The managed body section's START marker. */
@@ -134,6 +149,39 @@ export function renderReadinessSection(
   return lines.join('\n');
 }
 
+/** The NOT-READY draft's managed body section: the readiness gaps, verbatim. */
+export const DEV_READINESS_GAPS_SECTION_MARKER = '<!-- cq:dev-readiness-gaps -->';
+
+/**
+ * The not-ready gaps rendered as the managed body section of a DRAFT PR:
+ * every gap verbatim (field + detail), marked NOT READY. The gaps are the
+ * machine-checkable state a follow-up cycle clears — they are never
+ * soft-pedalled into prose.
+ */
+export function renderReadinessGapsSection(
+  state: { branch: string; head: string; base: string },
+  target: string,
+  gaps: readonly { field: string; detail: string }[],
+): string {
+  const lines: string[] = [
+    DEV_READINESS_GAPS_SECTION_MARKER,
+    '<!-- cq-toolkit dev readiness gaps (generated from the branch dev-record; updated in place, never duplicated) -->',
+    '## Dev readiness — NOT READY (author evidence)',
+    '',
+    `> ${mdLine(AUTHOR_EVIDENCE_CAVEAT)}`,
+    '',
+    `- target: \`${mdLine(target)}\``,
+    `- base: \`${mdLine(state.base)}\` (merge-base pin) · head: \`${mdLine(state.head)}\` · branch: \`${mdLine(state.branch)}\``,
+    `- blocking gaps: ${String(gaps.length)}`,
+    '',
+  ];
+  for (const gap of gaps) {
+    lines.push(`- **${mdLine(gap.field)}**: ${mdLine(gap.detail)}`);
+  }
+  lines.push('', '<!-- /cq:dev-readiness-gaps -->');
+  return lines.join('\n');
+}
+
 /** The dispositions rendered as the PR-comment body. */
 export function renderDispositionsComment(ledger: DevLedgerFile): string {
   const dispositions = ledger.records.filter((entry) => entry.kind === 'disposition');
@@ -192,9 +240,23 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         blockingSeverities: configured.review.blockingSeverities,
       };
     }
-    const ready = await readReadiness(dev, 'pr.open', target, policy);
-    if (!ready.ok) return ready.result;
-    const { state, ledger, record } = ready.read;
+    const draftFallback = input.draft === true && input.draftWhenNotReady === true;
+    const readyRead = await readReadinessWithGaps(dev, 'pr.open', target, policy);
+    if (!readyRead.ok) {
+      // The composition's round-cap path: a not-ready branch still publishes,
+      // as a DRAFT whose managed section carries the gaps verbatim. Any other
+      // case (the default posture, or an unreadable state — a detached head,
+      // a corrupt ledger) is a refusal naming the gaps, never a draft.
+      if (!draftFallback || readyRead.gaps === undefined)
+        return { status: 'needs-human', reason: readyRead.reason };
+    }
+    const { state, ledger } = readyRead.ok
+      ? readyRead.read
+      : // The draft fallback's read: the same state and ledger the gaps were
+        // assembled from (the WITH-GAPS read carries them whenever the gaps
+        // list exists — the guard above refuses the unreadable case).
+        { state: readyRead.state!, ledger: readyRead.ledger! };
+    const gaps: readonly ReadinessGap[] | undefined = readyRead.ok ? undefined : readyRead.gaps;
     const { branch, head } = state;
 
     if (state.dirtySha256 !== CLEAN_TREE) {
@@ -236,15 +298,26 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
     }
 
     // The body: the managed readiness section (with the gates of the check
-    // the record rests on) composed over any existing body.
-    const check = ledger.records.find(
-      (entry) => entry.kind === 'check' && entry.checkId === record.checkId,
-    );
-    const section = renderReadinessSection(
-      record,
-      ledger,
-      check?.kind === 'check' ? check.gates : [],
-    );
+    // the record rests on) composed over any existing body — or, on the
+    // not-ready draft path, the NOT-READY gaps section. The two sections
+    // carry distinct markers, so a draft later re-opened ready by a follow-up
+    // cycle keeps the retired gaps history in the body while the ready
+    // section refreshes in place.
+    const section =
+      readyRead.ok === true
+        ? renderReadinessSection(
+            readyRead.read.record,
+            ledger,
+            ledger.records.find(
+              (entry): entry is DevCheckRecord =>
+                entry.kind === 'check' && entry.checkId === readyRead.read.record.checkId,
+            )?.gates ?? [],
+          )
+        : renderReadinessGapsSection(
+            { branch: state.branch, head: state.head, base: state.base },
+            target,
+            gaps!,
+          );
 
     // Adopt-or-create: an OPEN same-repo PR for this head+base is refreshed
     // in place (never a second PR); a closed/merged or fork PR is refused.
@@ -269,6 +342,10 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
           base: target,
           title,
           body: section,
+          // The round-cap draft: the flag pair only arms the MECHANISM —
+          // an explicit `draft` still passes through, and a READY branch
+          // under draftWhenNotReady is a real submission. Only the
+          // not-ready gaps path forces true.
           draft: input.draft === true,
         }));
         created = true;
@@ -301,6 +378,7 @@ export function makePrOpen(dev: DevEffects, gh: PrEffects): Op<PrOpenInput, PrOp
         head,
         branch,
         evidenceClass: 'author',
+        ready: gaps === undefined,
       },
     };
   });

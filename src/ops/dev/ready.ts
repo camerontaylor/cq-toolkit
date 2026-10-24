@@ -17,7 +17,7 @@ import { parseCqConfig } from '../analyze/cqConfig.js';
 import { resolveCqConfigDefaults } from '../analyze/cqConfigDefaults.js';
 import type { DevEffects } from './effects.js';
 import { guardDevOp } from './effects.js';
-import type { DevLedgerFile, DevReadinessRecord } from './record.js';
+import type { DevLedgerFile, DevReadinessRecord, ReadinessGap } from './record.js';
 import { DEFAULT_DEV_TARGET, assembleReadiness } from './record.js';
 import { DevReadyInputSchema } from './registry.js';
 import { readWorkState, type WorkState } from './internal/workState.js';
@@ -36,6 +36,7 @@ export interface ReadinessRead {
   ledger: DevLedgerFile;
   record: DevReadinessRecord;
 }
+export type { ReadinessGap } from './record.js';
 
 /**
  * Read the CURRENT state, load the branch ledger, and assemble readiness —
@@ -48,9 +49,37 @@ export async function readReadiness(
   target: string,
   policy?: { reviewers: readonly string[]; blockingSeverities: readonly string[] },
 ): Promise<{ ok: true; read: ReadinessRead } | { ok: false; result: OpResult<never> }> {
+  const read = await readReadinessWithGaps(effects, name, target, policy);
+  if (!read.ok) return { ok: false, result: { status: 'needs-human', reason: read.reason } };
+  return read;
+}
+
+/**
+ * The same assembly with the gaps RECOVERABLE: a not-ready branch resolves
+ * with its gap list verbatim instead of a flattened string, so a composition
+ * can render the gaps as a draft PR's honest state (dev.cycle) without
+ * re-parsing the needs-human reason. `read.ok` is true only when ready.
+ */
+export async function readReadinessWithGaps(
+  effects: DevEffects,
+  name: string,
+  target: string,
+  policy?: { reviewers: readonly string[]; blockingSeverities: readonly string[] },
+): Promise<
+  | { ok: true; read: ReadinessRead }
+  | {
+      ok: false;
+      reason: string;
+      /** Present only when the gaps are a readiness verdict (a readable state). */
+      gaps?: readonly ReadinessGap[];
+      /** The state the gaps were assembled from (set whenever `gaps` is). */
+      state?: WorkState;
+      /** The branch ledger the gaps were assembled from (set whenever `gaps` is). */
+      ledger?: DevLedgerFile;
+    }
+> {
   const read = await readWorkState(effects, { target });
-  if (!read.ok)
-    return { ok: false, result: { status: 'needs-human', reason: `${name}: ${read.reason}` } };
+  if (!read.ok) return { ok: false, reason: `${name}: ${read.reason}` };
   const { state } = read;
   // A malformed ledger throws; the op boundary names it.
   const ledger = effects.openLedger(state.branch).load();
@@ -68,12 +97,12 @@ export async function readReadiness(
   if (!assembled.ready) {
     return {
       ok: false,
-      result: {
-        status: 'needs-human',
-        reason: `${name}: NOT READY — ${String(assembled.gaps.length)} gap(s): ${assembled.gaps
-          .map((gap) => `${gap.field}: ${gap.detail}`)
-          .join(' | ')}`,
-      },
+      reason: `${name}: NOT READY — ${String(assembled.gaps.length)} gap(s): ${assembled.gaps
+        .map((gap) => `${gap.field}: ${gap.detail}`)
+        .join(' | ')}`,
+      gaps: assembled.gaps,
+      state,
+      ledger,
     };
   }
   return { ok: true, read: { state, ledger, record: assembled.record } };
